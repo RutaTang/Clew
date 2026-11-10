@@ -47,6 +47,11 @@ jobs:
           INSTALLED: ${{ steps.toolchain.outputs.name }}
         run: scripts/check-toolchain.sh "$INSTALLED"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # rust-cache empties target/'s other folders, the downloaded
+      # sherpa-onnx libraries among them (see the script).
+      - name: Forget emptied downloads
+        shell: bash
+        run: scripts/forget-emptied-downloads.sh
       - name: Build (workspace, all targets)
         run: cargo build --workspace --all-targets --locked
       # Every test removes what it created, a failing one included: the suite
@@ -133,6 +138,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: desktop
+      # rust-cache empties target/'s other folders, the downloaded
+      # sherpa-onnx libraries among them (see the script).
+      - name: Forget emptied downloads
+        shell: bash
+        run: scripts/forget-emptied-downloads.sh
       # cpal reads ALSA's headers on Linux; Windows needs nothing beyond the
       # runner's MSVC and CMake.
       - name: Install ALSA headers
@@ -236,6 +246,11 @@ jobs:
           INSTALLED: ${{ steps.toolchain.outputs.name }}
         run: scripts/check-toolchain.sh "$INSTALLED"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # rust-cache empties target/'s other folders, the downloaded
+      # sherpa-onnx libraries among them (see the script).
+      - name: Forget emptied downloads
+        shell: bash
+        run: scripts/forget-emptied-downloads.sh
       # A hard gate, and a stable one: the toolchain is pinned, so a new
       # clippy lint arrives only with a deliberate toolchain bump. The lints
       # that caught real defects here (unused results, large Err variants,

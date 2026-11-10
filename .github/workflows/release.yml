@@ -113,6 +113,11 @@ jobs:
           INSTALLED: ${{ steps.toolchain.outputs.name }}
         run: scripts/check-toolchain.sh "$INSTALLED"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # rust-cache empties target/'s other folders, the downloaded
+      # sherpa-onnx libraries among them (see the script).
+      - name: Forget emptied downloads
+        shell: bash
+        run: scripts/forget-emptied-downloads.sh
       - name: Tag, crate version and protocol agree
         id: check
         run: |
@@ -214,6 +219,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: desktop
+      # rust-cache empties target/'s other folders, the downloaded
+      # sherpa-onnx libraries among them (see the script).
+      - name: Forget emptied downloads
+        shell: bash
+        run: scripts/forget-emptied-downloads.sh
       - name: Install ALSA headers
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
