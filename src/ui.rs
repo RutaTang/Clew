@@ -590,30 +590,33 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // The divider says where the pointer is in the window; the sidebar is
     // inside its frame.
     let frame = app.window_frame;
-    // Its divider lies over the sidebar's right padding, where nothing is
-    // drawn, as the design's sidebar runs on to the sheet; the sidebar's
-    // edge follows the divider's middle.
     let left: Element<'_, Message> = if app.show_left_sidebar {
+        sidebar(app)
+    } else {
+        slot()
+    };
+    // The sidebar's divider lies just past its edge, over the sheet's own,
+    // in a layer of its own: not over the sidebar's padding, where its lists'
+    // scrollbars run, nor drawn over the sheet's shadow at rest. The
+    // sidebar's edge follows the divider's middle less half its width: the
+    // edge is the divider's near side.
+    let grip: Element<'_, Message> = if app.show_left_sidebar {
         let half = crate::resize::THICKNESS / 2.0;
-        stack![
-            sidebar(app),
-            container(
-                crate::resize::Divider::vertical(move |v| {
-                    Message::Window(WindowMsg::ResizeSidebar(v - frame + half))
-                })
-                .panel(crate::resize::Panel::Before),
-            )
-            .width(Length::Fixed(app.sidebar_width))
-            .height(Fill)
-            .align_x(iced::alignment::Horizontal::Right),
+        row![
+            space().width(Length::Fixed(app.sidebar_width)),
+            crate::resize::Divider::vertical(move |v| {
+                Message::Window(WindowMsg::ResizeSidebar(v - frame - half))
+            })
+            .panel(crate::resize::Panel::Before),
         ]
+        .height(Fill)
         .into()
     } else {
         slot()
     };
     // The sidebar on the chrome, the code's sheet raised beside it, and the
-    // tool strip down the right edge.
-    let main = row![left, sheet(app), tool_strip(app)].height(Fill);
+    // tool strip down the right edge; over them, the sidebar's divider.
+    let main = stack![row![left, sheet(app), tool_strip(app)].height(Fill), grip,].height(Fill);
     // A slim "update available" / download-progress banner sits between the
     // toolbar and the content, reading as an extension of the toolbar chrome.
     let banner = update_banner(app).unwrap_or_else(slot);

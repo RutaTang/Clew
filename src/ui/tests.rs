@@ -12719,3 +12719,149 @@ fn the_more_views_menu_lists_the_views_off_the_strip() {
     assert!(row.x + row.width <= app.sidebar_width, "{row:?}");
     assert!(row.y > super::toolbar::TOOLBAR_H + 30.0, "{row:?}");
 }
+
+/// The window drawn at `size` with the pointer at `at` (moved there first),
+/// as RGBA, and the messages the move gave.
+fn window_with_pointer(
+    app: &App,
+    size: iced::Size,
+    at: Option<iced::Point>,
+    then: &[Event],
+) -> (Vec<u8>, Vec<Message>) {
+    use iced::advanced::renderer::Headless as _;
+    let cursor = at.map_or(mouse::Cursor::Unavailable, mouse::Cursor::Available);
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(crate::ui::view(app), size, Cache::default(), &mut renderer);
+    let mut events = vec![Event::Window(window::Event::RedrawRequested(
+        std::time::Instant::now(),
+    ))];
+    if let Some(p) = at {
+        events.push(Event::Mouse(mouse::Event::CursorMoved { position: p }));
+    }
+    events.extend_from_slice(then);
+    let mut messages = Vec::new();
+    let _ = ui.update(
+        &events,
+        cursor,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut messages,
+    );
+    ui.draw(
+        &mut renderer,
+        &crate::theme::app_theme(),
+        &iced::advanced::renderer::Style {
+            text_color: iced::Color::BLACK,
+        },
+        cursor,
+    );
+    let rgba = renderer.screenshot(
+        iced::Size::new(size.width as u32, size.height as u32),
+        1.0,
+        iced::Color::TRANSPARENT,
+    );
+    (rgba, messages)
+}
+
+/// A reader with the sidebar open beside the sheet, in a window of `size`.
+fn sidebar_app(size: iced::Size) -> App {
+    let mut app = reader_app();
+    let _ = app.on_window_resized(size);
+    app.show_left_sidebar = true;
+    app
+}
+
+/// The sheet's shadow fades out into the sidebar as it does along its other
+/// edges, getting no darker away from the sheet: the sidebar's divider,
+/// painted in the sidebar's colour at rest, stopped it short a few pixels
+/// out, leaving a dark line down the sidebar's edge.
+#[test]
+fn the_sheets_shadow_fades_into_the_sidebar_without_a_line() {
+    let size = iced::Size::new(1000.0, 640.0);
+    let app = sidebar_app(size);
+    let (rgba, _) = window_with_pointer(&app, size, None, &[]);
+    let w = size.width as usize;
+    let light = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        u32::from(rgba[i]) + u32::from(rgba[i + 1]) + u32::from(rgba[i + 2])
+    };
+    // The sheet's border: the first pixel past the sidebar's that is not
+    // the chrome's.
+    let edge = (app.sidebar_width + app.window_frame) as usize;
+    for y in [250, 400, 550] {
+        // Walking out from the sheet into the empty sidebar, each pixel is
+        // as light as the one before it or lighter.
+        let row: Vec<u32> = (edge - 30..edge).rev().map(|x| light(x, y)).collect();
+        assert!(
+            row.windows(2).all(|p| p[1] >= p[0]),
+            "y = {y}: going out from the sheet: {row:?}"
+        );
+    }
+}
+
+/// The sidebar's lists keep their scrollbar: with the pointer over a long
+/// file tree its scroller shows down the sidebar's edge, where the divider
+/// lay over it and hid it.
+#[test]
+fn the_file_trees_scrollbar_shows_beside_the_sidebars_divider() {
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: Vec::new(),
+        files: (0..80).map(|i| format!("file_{i:02}.rs")).collect(),
+    };
+    let w = size.width as usize;
+    let edge = (app.sidebar_width + app.window_frame) as usize;
+    let lightest = |rgba: &[u8]| {
+        (edge - crate::ui::SCROLLBAR_W as usize..edge)
+            .flat_map(|x| (150..600).map(move |y| (x, y)))
+            .map(|(x, y)| u32::from(rgba[(y * w + x) * 4]))
+            .max()
+            .unwrap()
+    };
+    let (away, _) = window_with_pointer(&app, size, None, &[]);
+    let over = iced::Point::new(app.window_frame + 120.0, 300.0);
+    let (hovered, _) = window_with_pointer(&app, size, Some(over), &[]);
+    // Unseen at rest; seen, well over the chrome, under the pointer.
+    assert!(lightest(&away) < 30, "{}", lightest(&away));
+    assert!(
+        lightest(&hovered) > lightest(&away) + 15,
+        "{}",
+        lightest(&hovered)
+    );
+}
+
+/// Dragging the divider beside the sidebar makes the sidebar reach the
+/// pointer, less half the divider: grabbed by its middle, it stays put.
+#[test]
+fn dragging_the_sidebars_divider_moves_its_edge_with_the_pointer() {
+    let size = iced::Size::new(1000.0, 640.0);
+    let app = sidebar_app(size);
+    let half = crate::resize::THICKNESS / 2.0;
+    let grab = iced::Point::new(app.window_frame + app.sidebar_width + half, 300.0);
+    let to = iced::Point::new(grab.x + 40.0, 300.0);
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(crate::ui::view(&app), size, Cache::default(), &mut renderer);
+    let mut messages = Vec::new();
+    for (at, event) in [
+        (grab, mouse::Event::CursorMoved { position: grab }),
+        (grab, mouse::Event::ButtonPressed(mouse::Button::Left)),
+        (to, mouse::Event::CursorMoved { position: to }),
+    ] {
+        let _ = ui.update(
+            &[Event::Mouse(event)],
+            mouse::Cursor::Available(at),
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+    }
+    let widths: Vec<f32> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::Window(WindowMsg::ResizeSidebar(x)) => Some(*x),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(widths, [app.sidebar_width + 40.0]);
+}
