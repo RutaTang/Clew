@@ -159,6 +159,7 @@ pub(crate) fn weak_home(app: &App) -> Element<'_, Message> {
     ))
     .size(ts::SMALL)
     .color(theme::dim());
+    rows.push(super::askfloat::pill_foot());
     container(
         column![
             header,

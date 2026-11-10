@@ -197,6 +197,7 @@ impl App {
         self.debug.session = Some(DebugSession {
             client: None,
             status: DebugStatus::Launching,
+            exit_code: None,
             thread_id: None,
             frames: Vec::new(),
             scopes: Vec::new(),
@@ -1522,6 +1523,7 @@ impl App {
                     format!("{}\n", tr!("Process exited with code {code}", code = code)),
                 );
                 session.status = DebugStatus::Terminated;
+                session.exit_code = Some(code);
                 session.current = None;
                 // The program is gone: an inspection still loading for the last
                 // stop must not resurrect a location in a dead process.
@@ -2654,6 +2656,7 @@ mod tests {
         DebugSession {
             client: None,
             status: DebugStatus::Running,
+            exit_code: None,
             thread_id: None,
             frames: Vec::new(),
             scopes: Vec::new(),

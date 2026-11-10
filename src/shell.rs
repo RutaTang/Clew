@@ -3901,6 +3901,7 @@ mod tests {
         DebugSession {
             client: None,
             status: DebugStatus::Running,
+            exit_code: None,
             thread_id: None,
             frames: Vec::new(),
             scopes: Vec::new(),

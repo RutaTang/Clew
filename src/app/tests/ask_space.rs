@@ -198,6 +198,7 @@ fn ask_without_vector_retrieval_keeps_live_grounding_across_space_changes() {
             app.debug.session = Some(DebugSession {
                 client: None,
                 status: DebugStatus::Stopped,
+                exit_code: None,
                 thread_id: Some(1),
                 frames: vec![dap::StackFrame {
                     id: 7,

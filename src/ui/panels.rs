@@ -86,13 +86,26 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     let Some(session) = app.debug.session.as_ref() else {
         return space().into();
     };
-    let (status_txt, status_color) = match session.status {
-        DebugStatus::Launching => (tr!("launching…"), theme::dim()),
-        DebugStatus::Running => (tr!("running"), theme::success()),
-        DebugStatus::Stopped => (tr!("stopped"), theme::warning()),
-        DebugStatus::Terminated => (tr!("terminated"), theme::dim()),
+    // A plain run (Run, not Debug) never stops: no stack, no variables, no
+    // watches, nothing to step — its output, and how it ended.
+    let plain = app.debug.no_debug;
+    let (status_txt, status_color) = match (session.status, session.exit_code) {
+        (DebugStatus::Launching, _) => (tr!("launching…").to_string(), theme::dim()),
+        (DebugStatus::Running, _) => (tr!("running").to_string(), theme::success()),
+        (DebugStatus::Stopped, _) => (tr!("stopped").to_string(), theme::warning()),
+        (DebugStatus::Terminated, Some(code)) => (
+            tr!("exited with code {code}", code = code).to_string(),
+            if code == 0 {
+                theme::dim()
+            } else {
+                theme::danger()
+            },
+        ),
+        (DebugStatus::Terminated, None) if plain => (tr!("finished").to_string(), theme::dim()),
+        (DebugStatus::Terminated, None) => (tr!("terminated").to_string(), theme::dim()),
     };
     let stopped = session.status == DebugStatus::Stopped;
+    let ended = session.status == DebugStatus::Terminated;
 
     let ctrl = |label: &'static str, msg: Message, enabled: bool| {
         let mut b = button(text(label).size(ts::BODY).wrapping(Wrapping::None))
@@ -103,35 +116,40 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         }
         b
     };
-    let controls = row![
-        ctrl(
-            tr!("▶ Continue"),
-            Message::Debug(DebugMsg::Control(DebugCmd::Continue)),
-            stopped
-        ),
-        ctrl(
-            tr!("⤼ Over"),
-            Message::Debug(DebugMsg::Control(DebugCmd::StepOver)),
-            stopped
-        ),
-        ctrl(
-            tr!("⤓ In"),
-            Message::Debug(DebugMsg::Control(DebugCmd::StepIn)),
-            stopped
-        ),
-        ctrl(
-            tr!("⤒ Out"),
-            Message::Debug(DebugMsg::Control(DebugCmd::StepOut)),
-            stopped
-        ),
-        ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), true),
-    ]
+    let stop = ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), !ended);
+    let controls = if plain {
+        row![stop]
+    } else {
+        row![
+            ctrl(
+                tr!("▶ Continue"),
+                Message::Debug(DebugMsg::Control(DebugCmd::Continue)),
+                stopped
+            ),
+            ctrl(
+                tr!("⤼ Over"),
+                Message::Debug(DebugMsg::Control(DebugCmd::StepOver)),
+                stopped
+            ),
+            ctrl(
+                tr!("⤓ In"),
+                Message::Debug(DebugMsg::Control(DebugCmd::StepIn)),
+                stopped
+            ),
+            ctrl(
+                tr!("⤒ Out"),
+                Message::Debug(DebugMsg::Control(DebugCmd::StepOut)),
+                stopped
+            ),
+            stop,
+        ]
+    }
     .spacing(4);
     // The controls whole at the right; what is said before them takes the
     // room left, cut short where a language's words need more.
     let said = container(
         row![
-            text(tr!("Debug"))
+            text(if plain { tr!("Run") } else { tr!("Debug") })
                 .size(ts::BASE)
                 .color(theme::fg())
                 .wrapping(Wrapping::None),
@@ -221,11 +239,14 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         } else {
             theme::fg()
         };
+        // In the code's font, so a program's columns line up, and wrapped:
+        // a long line was cut at the column's edge.
         out_rows.push(
             text(txt.trim_end_matches('\n').to_string())
                 .size(ts::SMALL)
+                .font(crate::fonts::CODE)
                 .color(color)
-                .wrapping(Wrapping::None)
+                .wrapping(Wrapping::WordOrGlyph)
                 .into(),
         );
     }
@@ -278,12 +299,18 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         );
     }
 
-    let panels = row![
-        debug_col(stack_rows),
-        debug_col(var_rows),
-        debug_col(watch_rows),
-        debug_col(out_rows)
-    ]
+    // The output takes the room a run's lines need: half the panel beside
+    // the debugger's three columns, all of it for a plain run.
+    let panels = if plain {
+        row![debug_col(out_rows)]
+    } else {
+        row![
+            debug_col(stack_rows),
+            debug_col(var_rows),
+            debug_col(watch_rows),
+            container(debug_col(out_rows)).width(Length::FillPortion(3)),
+        ]
+    }
     .spacing(6)
     .height(Fill);
 

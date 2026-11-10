@@ -523,6 +523,7 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         );
     }
 
+    blocks.push(super::askfloat::pill_foot());
     // From its top for each item picked (`fresh`), not where the last was
     // scrolled to.
     let body = crate::ui::fresh::fresh_for(
@@ -588,6 +589,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
             items.push(map);
         }
         items.extend(render_prepared(app, &app.proj.overview.prepared));
+        items.push(super::askfloat::pill_foot());
         return container(
             column![
                 header,
@@ -1014,7 +1016,7 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         files,
         // Room under the last row clear of the Ask pill floating at the
         // window's foot, which covered it.
-        space().height(super::askfloat::PILL_H + super::askfloat::ASK_MARGIN),
+        super::askfloat::pill_foot(),
     ]
     .spacing(8)
     .width(Fill)
@@ -1191,6 +1193,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         );
     }
 
+    items.push(super::askfloat::pill_foot());
     container(
         column![
             header,

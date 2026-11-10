@@ -5544,6 +5544,7 @@ fn debug_variables_open_into_their_children_for_the_stop() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: Some(1),
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -5602,6 +5603,7 @@ fn a_finished_run_is_no_longer_said_to_be_running() {
     let session = || DebugSession {
         client: None,
         status: DebugStatus::Running,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -5655,6 +5657,7 @@ fn stale_debug_events_are_dropped() {
     let session = || DebugSession {
         client: None,
         status: DebugStatus::Running,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -7277,6 +7280,7 @@ fn a_failed_debug_run_stops_what_it_started() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Running,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -7313,6 +7317,7 @@ fn debug_starts_again_after_the_program_ended() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Terminated,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -7334,6 +7339,7 @@ fn debug_starts_again_after_the_program_ended() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Running,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -7358,6 +7364,7 @@ fn debug_stop_while_launching_cancels_the_startup() {
     app.debug.session = Some(DebugSession {
         client: None, // still Launching: nothing to disconnect
         status: DebugStatus::Launching,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -19793,6 +19800,7 @@ fn the_debuggers_state_reaches_a_prompt_as_data() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: Some(1),
         frames: vec![crate::dap::StackFrame {
             id: 1,
@@ -19864,6 +19872,7 @@ fn a_debug_runs_stops_are_traced_and_walked() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: Some(1),
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -21333,6 +21342,7 @@ fn a_watch_is_removed_by_identity_from_both_lists() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -26682,6 +26692,7 @@ fn paused_session_with_fake_adapter(
     app.debug.session = Some(DebugSession {
         client: Some(client),
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: Some(1),
         frames: vec![crate::dap::StackFrame {
             id: 7,
@@ -26981,6 +26992,7 @@ fn js_debug_run(app: &mut App, parent: crate::dap::DapClient) -> u64 {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Launching,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -27041,6 +27053,7 @@ fn js_debug_child_sessions_are_kept_apart() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Launching,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -27528,6 +27541,7 @@ fn a_js_debug_child_session_ends_with_its_run() {
     app.debug.session = Some(DebugSession {
         client: Some(parent),
         status: DebugStatus::Running,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -27622,6 +27636,7 @@ fn a_js_debug_child_session_reports_its_failure_and_brings_its_promise() {
         app.debug.session = Some(DebugSession {
             client: Some(parent),
             status: DebugStatus::Running,
+            exit_code: None,
             thread_id: None,
             frames: Vec::new(),
             scopes: Vec::new(),
@@ -27809,6 +27824,7 @@ fn a_tcp_adapters_announced_address_is_kept_whole() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Launching,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),

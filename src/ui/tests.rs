@@ -2518,6 +2518,43 @@ fn the_context_menu_has_each_languages_own_rows() {
     );
 }
 
+/// A page over the code, scrolled to its end, has nothing under the Ask
+/// pill floating at the window's foot: its last row stands clear of it
+/// (the weak spots here; the glossary, the overview and a docs page alike).
+#[test]
+fn a_pages_last_row_scrolls_clear_of_the_ask_pill() {
+    use clew_core::weakspots::{Reason, Spot};
+    let mut app = reader_app();
+    app.proj.weak.showing = true;
+    app.proj.weak.files = 40;
+    app.proj.weak.spots = Some(std::sync::Arc::new(
+        (0..40)
+            .map(|i| Spot {
+                rel: format!("src/f{i:02}.rs"),
+                name: format!("spot{i:02}"),
+                line: 1,
+                end_line: 90,
+                score: 40 - i,
+                reasons: vec![Reason::Long(87)],
+            })
+            .collect(),
+    ));
+    let pill = super::askfloat::ask_corner_rect(&app);
+    let mut sim = sim_of(&app);
+    sim.point_at(Point::new(WINDOW.width / 2.0, WINDOW.height / 2.0));
+    let _ = sim.simulate([Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Pixels {
+            x: 0.0,
+            y: -20_000.0,
+        },
+    })]);
+    let last = text_at(&mut sim, |t| t == "spot39", 0).expect("the last row");
+    assert!(
+        last.y + last.height <= pill.y,
+        "{last:?} under the pill at {pill:?}"
+    );
+}
+
 /// The weak spots page says what it is, then each spot: its name, where
 /// it is, why it is listed; the row opens its code, Ask why asks.
 #[test]
@@ -5952,6 +5989,7 @@ fn paused_debug_session() -> crate::DebugSession {
     crate::DebugSession {
         client: None,
         status: crate::DebugStatus::Stopped,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -7461,6 +7499,64 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
 /// offers the walkthrough, the WALK tab offers it too, a `@trace` scope has a
 /// label, and the calls overlay lists the functions the run stopped in with
 /// their counts.
+/// A plain run's panel is its output and how it ended: titled Run, its exit
+/// code said, no stack, variables or watches, nothing to step, and Stop
+/// gone quiet once the program is. A debug run keeps its columns, and its
+/// Stop goes quiet too when it ends.
+#[test]
+fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let session = |status, exit_code| crate::DebugSession {
+        client: None,
+        status,
+        exit_code,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: vec![("stdout".into(), "Sencha    37.50\n".into())],
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    };
+    let stops = |app: &App| {
+        let mut sim = sim_elem(super::debug_panel(app));
+        let _ = sim.click("■ Stop");
+        sent_by(sim)
+            .into_iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::Stop)))
+    };
+    app.debug.no_debug = true;
+    app.debug.session = Some(session(crate::DebugStatus::Running, None));
+    {
+        let mut sim = sim_elem(super::debug_panel(&app));
+        assert!(shows(&mut sim, "Run"));
+        assert!(shows(&mut sim, "Sencha    37.50"));
+        assert!(!shows(&mut sim, "CALL STACK"));
+        assert!(!shows(&mut sim, "▶ Continue"));
+    }
+    assert!(stops(&app), "a running program can be stopped");
+    app.debug.session = Some(session(crate::DebugStatus::Terminated, Some(0)));
+    {
+        let mut sim = sim_elem(super::debug_panel(&app));
+        assert!(shows(&mut sim, "exited with code 0"));
+        assert!(!shows(&mut sim, "terminated"));
+    }
+    assert!(!stops(&app), "nothing is left to stop");
+    app.debug.no_debug = false;
+    app.debug.session = Some(session(crate::DebugStatus::Terminated, None));
+    {
+        let mut sim = sim_elem(super::debug_panel(&app));
+        assert!(shows(&mut sim, "Debug"));
+        assert!(shows(&mut sim, "terminated"));
+        assert!(shows(&mut sim, "CALL STACK"));
+    }
+    assert!(!stops(&app));
+}
+
 #[test]
 fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph() {
     let mut app = reader_app();
@@ -7474,6 +7570,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     app.debug.session = Some(crate::DebugSession {
         client: None,
         status: crate::DebugStatus::Terminated,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -12052,32 +12149,36 @@ fn the_app_menu_keeps_its_tools_apart_and_shows_it_scrolls() {
     assert!(!drawn(crate::theme::overlay_scrollbar(&theme, rest)));
 }
 
-/// L23: the status bar's place — "Local · Up to date" — opens Connect, and
-/// says so before the pointer rests on it: a chevron after it, as the
-/// target picker has, a click on which opens Connect too.
+/// L23: the status bar's place — "Local" — opens Connect, and says so
+/// before the pointer rests on it: a chevron after it, as the target picker
+/// has, a click on which opens Connect too. The scan's state stands apart,
+/// after the button: "Local · Up to date ⌄" read as a branch's sync, and a
+/// click on it opened Connect.
 #[test]
 fn the_status_bars_place_shows_it_opens_something() {
     let app = reader_app();
     let mut sim = sim_of(&app);
-    let place = text_at(&mut sim, |t| t.starts_with("Local · "), 0).expect("the place");
-    // Past the room its words have — as wide as the widest of its states
-    // — where only the chevron is.
-    let states = [
-        "Local · Scanning…",
-        "Local · Indexing…",
-        "Local · Up to date",
-    ];
-    let room = super::steady::widest(&states, super::ts::SMALL, crate::fonts::UI);
-    let at = Point::new(place.x + room + 12.0, place.center_y());
-    let mut sim = sim_of(&app);
-    sim.point_at(at);
-    let _ = sim.simulate(iced_test::simulator::click());
-    let sent = sent_by(sim);
+    let place = text_at(&mut sim, |t| t == "Local", 0).expect("the place");
+    let state = text_at(&mut sim, |t| t == "Up to date", 0).expect("the scan's state");
+    let opens = |at: Point| {
+        let mut sim = sim_of(&app);
+        sim.point_at(at);
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Connect(ConnectMsg::Open)))
+    };
+    // Past the place's words, where only the chevron is.
+    let room = super::steady::widest(&["Local"], super::ts::SMALL, crate::fonts::UI);
     assert!(
-        sent.iter()
-            .any(|m| matches!(m, Message::Connect(ConnectMsg::Open))),
-        "nothing past its words: {sent:?}"
+        opens(Point::new(place.x + room + 12.0, place.center_y())),
+        "nothing past its words"
     );
+    assert!(
+        state.x > place.x + room + 12.0,
+        "the state is after the chevron"
+    );
+    assert!(!opens(state.center()), "the scan's state is no connection");
 }
 
 /// What Clew says with a name in it — "Connecting to `prod`…", the MCP
@@ -12324,7 +12425,7 @@ fn the_reading_guide_is_a_tree_in_the_walkthroughs_view() {
     let mut app = reader_app();
     app.sidebar = crate::SidebarTab::Walk;
     app.show_left_sidebar = true;
-    let label = "\u{2691} Where to start reading";
+    let label = "Where to start reading";
     let write = click(sim_elem(super::walk_tab(&app)), label);
     assert!(
         write

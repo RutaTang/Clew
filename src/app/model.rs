@@ -733,6 +733,8 @@ pub struct DebugSession {
     /// The adapter handle (None between StartDebug and the adapter being ready).
     pub client: Option<dap::DapClient>,
     pub status: DebugStatus,
+    /// The code the program exited with, once it has.
+    pub exit_code: Option<i64>,
     pub thread_id: Option<i64>,
     /// The call stack at the current stop (top frame first).
     pub frames: Vec<dap::StackFrame>,

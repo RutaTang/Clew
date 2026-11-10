@@ -142,31 +142,25 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             border: iced::border::rounded(3),
             ..container::Style::default()
         });
-    // Scanning, indexing, up to date: in a slot as wide as the widest of
-    // them, so what Clew says beside it stays where it is.
-    let said_place = match sync_state(app) {
-        Some(state) => format!("{place} · {state}"),
-        None => place.clone(),
+    // Where the code is read from, alone in the button that opens Connect:
+    // the scan's state beside it read as the place's — "Local · Up to
+    // date ⌄" as a branch's sync with its remote.
+    let place_text = text(place.clone()).size(ts::SMALL).color(if remote {
+        theme::accent()
+    } else {
+        theme::fg_muted()
+    });
+    // Scanning, indexing, up to date: after the button, in a slot as wide
+    // as the widest of them, so what Clew says beside it stays where it is.
+    let sync: Element<'_, Message> = match sync_state(app) {
+        Some(state) => super::steady::slot(
+            status_text(state),
+            state,
+            &[tr!("Scanning…"), tr!("Indexing…"), tr!("Up to date")],
+            ts::SMALL,
+        ),
+        None => space().width(0).into(),
     };
-    let every_state: Vec<String> = [tr!("Scanning…"), tr!("Indexing…"), tr!("Up to date")]
-        .into_iter()
-        .map(|state| format!("{place} · {state}"))
-        .collect();
-    let every_state: Vec<&str> = every_state.iter().map(String::as_str).collect();
-    let place_text = super::steady::slot(
-        text(said_place.clone()).size(ts::SMALL).color(if remote {
-            theme::accent()
-        } else {
-            theme::fg_muted()
-        }),
-        &said_place,
-        if app.proj.project.is_some() {
-            &every_state
-        } else {
-            &[]
-        },
-        ts::SMALL,
-    );
     // A chevron after it, as the target picker has: it opens something —
     // Connect — which nothing said until the pointer rested on it (L23).
     let opens = glyph::icon(Glyph::ChevronDown, theme::dim(), 11.0);
@@ -207,7 +201,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     .width(Fill)
     .height(Length::Fixed(STATUS_LINE_H));
     let mut bar = row![
-        row![conn_indicator, said_row]
+        row![conn_indicator, sync, said_row]
             .spacing(STATUS_GAP - 8.0)
             .align_y(iced::Center)
             .width(Fill)

@@ -1187,6 +1187,7 @@ fn the_debugger_is_driven_by_voice() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: Some(1),
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -1378,6 +1379,7 @@ fn every_command_runs_when_its_name_is_said() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: Some(1),
         frames: Vec::new(),
         scopes: Vec::new(),

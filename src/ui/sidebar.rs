@@ -306,47 +306,37 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
         Message::Walk(WalkMsg::Generate(guide.to_string()))
     };
     let mut actions = column![
-        button(text(format!("\u{2691} {}", tr!("Where to start reading"))).size(ts::SMALL))
-            .style(theme::toolbar_button)
-            .padding([4, 10])
-            .width(Fill)
-            .on_press_maybe(
-                (app.proj.walk.generating.as_deref() != Some(guide))
-                    .then(|| super::heard::said(tr!("Where to start reading"), guide_msg))
-            ),
-        button(text(format!("\u{2387} {}", tr!("Review branch changes"))).size(ts::SMALL))
-            .style(theme::toolbar_button)
-            .padding([4, 10])
-            .width(Fill)
-            .on_press(super::heard::said(
-                tr!("Review branch changes"),
-                Message::Walk(WalkMsg::GenerateDiff)
-            )),
+        walk_action(
+            Glyph::Compass,
+            tr!("Where to start reading").to_string(),
+            None,
+            tr!("The AI writes a tour of where to start, what to read next, and where to end"),
+            (app.proj.walk.generating.as_deref() != Some(guide)).then_some(guide_msg),
+        ),
+        walk_action(
+            Glyph::Diff,
+            tr!("Review branch changes").to_string(),
+            None,
+            tr!("The AI writes a tour of this branch's changes"),
+            Some(Message::Walk(WalkMsg::GenerateDiff)),
+        ),
     ]
     .spacing(4);
     // The last debug run, once it stopped somewhere: a tour of the path it
     // actually took.
     if !app.debug.trace.is_empty() {
-        actions = actions.push(
-            button(
-                text(format!(
-                    "\u{25B6} {}",
-                    trn!(
-                        "Walk the last run (1 stop)",
-                        "Walk the last run ({n} stops)",
-                        app.debug.trace.len()
-                    )
-                ))
-                .size(ts::SMALL),
+        actions = actions.push(walk_action(
+            Glyph::Play,
+            trn!(
+                "Walk the last run (1 stop)",
+                "Walk the last run ({n} stops)",
+                app.debug.trace.len()
             )
-            .style(theme::toolbar_button)
-            .padding([4, 10])
-            .width(Fill)
-            .on_press(super::heard::said(
-                tr!("Walk the last run"),
-                Message::Walk(WalkMsg::GenerateTrace),
-            )),
-        );
+            .to_string(),
+            Some(tr!("Walk the last run").to_string()),
+            tr!("The AI writes a tour of the path the last run took"),
+            Some(Message::Walk(WalkMsg::GenerateTrace)),
+        ));
     }
     let review = container(actions).padding(Padding {
         top: 0.0,
@@ -2160,4 +2150,30 @@ pub(crate) fn source_chip<'a>(node: &crate::explain::Node) -> Element<'a, Messag
         .padding([1, 6])
         .on_press(Message::Semantic(SemanticMsg::OpenNode(node.clone())))
         .into()
+}
+
+/// A quick action of the Walkthroughs tab: its icon and words (`spoken`,
+/// when a voice says it otherwise), and on the pointer what it does — each
+/// has the AI write a tour, which a plain button did not say.
+fn walk_action<'a>(
+    glyph: Glyph,
+    label: String,
+    spoken: Option<String>,
+    does: impl Into<String>,
+    press: Option<Message>,
+) -> Element<'a, Message> {
+    let press = press.map(|msg| super::heard::said(spoken.as_deref().unwrap_or(&label), msg));
+    let face = row![
+        crate::glyph::icon(glyph, theme::fg_muted(), 13.0),
+        text(label).size(ts::SMALL),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    let control = button(face)
+        .style(theme::toolbar_button)
+        .padding([4, 10])
+        .width(Fill)
+        .on_press_maybe(press);
+    let does: String = does.into();
+    super::toolbar::tip_at(control, does, None, iced::widget::tooltip::Position::Bottom)
 }

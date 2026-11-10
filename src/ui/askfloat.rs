@@ -36,6 +36,14 @@ pub(crate) const ASK_LARGE_SHARE: f32 = 0.72;
 /// Height of the pill Ask hides to.
 pub(crate) const PILL_H: f32 = 40.0;
 
+/// Room under the last row of a page over the code (the glossary, the
+/// statistics, the overview, a docs page, the weak spots), clear of the
+/// pill floating at the window's foot: scrolled to its end, nothing of the
+/// page is under the pill.
+pub(crate) fn pill_foot<'a, M: 'a>() -> Element<'a, M> {
+    space().height(PILL_H + ASK_MARGIN).into()
+}
+
 /// Where the open Ask window is drawn, in window coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AskPlace {
