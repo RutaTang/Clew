@@ -36,6 +36,9 @@ struct Voice {
     stopped: Mutex<Vec<&'static str>>,
     /// Parts it gives a sentence in: whole until a test says otherwise.
     parts: Mutex<usize>,
+    /// What each part given was answered — whether more was wanted —, in
+    /// turn: it gives no more of a sentence once told no.
+    answered: Mutex<Vec<bool>>,
 }
 
 impl Synthesizer for Voice {
@@ -47,7 +50,7 @@ impl Synthesizer for Voice {
         lang: &str,
         voice: i32,
         speed: f32,
-        part: &mut dyn FnMut(Vec<f32>, u32),
+        part: &mut dyn FnMut(Vec<f32>, u32) -> bool,
     ) -> Result<(), SayError> {
         if let Some(e) = self.fail.lock().unwrap().take() {
             return Err(e);
@@ -73,10 +76,17 @@ impl Synthesizer for Voice {
                 let turn = self.said.lock().unwrap().len();
                 samples.fill(turn as f32 / 10.0);
                 for piece in samples.chunks(samples.len().div_ceil(parts)) {
-                    part(piece.to_vec(), rate);
+                    let more = part(piece.to_vec(), rate);
+                    self.answered.lock().unwrap().push(more);
+                    if !more {
+                        break;
+                    }
                 }
             }
-            _ => part(samples, rate),
+            _ => {
+                let more = part(samples, rate);
+                self.answered.lock().unwrap().push(more);
+            }
         }
         Ok(())
     }
@@ -463,13 +473,18 @@ fn speech_stops_when_the_reader_asks() {
     let _ = app.update(Message::Ask(AskMsg::Clear));
     assert!(!app.voice.speech.is_speaking());
     // A sentence made after a stop is dropped when it comes: nothing plays.
+    // Nor is it made on: the voice is told at its first part, and makes
+    // no more of it — the next sentence waited for all of it.
+    *voice.parts.lock().unwrap() = 3;
+    voice.answered.lock().unwrap().clear();
     asked(&mut app, 7, true);
     let task = app.on_ask_delta(7, "The total adds every price. Then".into());
     let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
     let before = voice.texts().len();
     settle(&mut app, task);
-    assert_eq!(voice.texts().len(), before + 1, "it was made");
-    assert!(!app.voice.speech.is_speaking(), "but not played");
+    assert_eq!(voice.texts().len(), before + 1, "it was begun");
+    assert_eq!(*voice.answered.lock().unwrap(), [false], "and given up");
+    assert!(!app.voice.speech.is_speaking(), "nothing played");
 }
 
 /// Not to be talked over, the microphone, on, opens once Clew has said

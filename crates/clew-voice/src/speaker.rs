@@ -149,14 +149,16 @@ impl Speaker {
 
     /// `text` said in `lang` by voice `voice` at `speed`, given to `part` as
     /// it comes — whole, or a part at a time from a voice that streams: one
-    /// channel, at [`Speaker::rate`].
+    /// channel, at [`Speaker::rate`]. `part` answers whether more is wanted:
+    /// `false` (what is being said was stopped) ends the sentence there, and
+    /// the voice is told to stop making it.
     pub fn say(
         &mut self,
         text: &str,
         lang: &str,
         voice: i32,
         speed: f32,
-        part: &mut dyn FnMut(Vec<f32>),
+        part: &mut dyn FnMut(Vec<f32>) -> bool,
     ) -> Result<(), SayError> {
         self.next += 1;
         let id = self.next;
@@ -170,8 +172,14 @@ impl Speaker {
             match self.answers.recv_timeout(SAY_TIMEOUT) {
                 Ok(Ok(Answer::Audio { id: got, pcm, more })) if got == id => {
                     let samples = decode(&pcm).map_err(SayError::Voice)?;
-                    if !samples.is_empty() {
-                        part(samples);
+                    // Not wanted any more (it was stopped): the voice is
+                    // told to stop making it, and what it sends of it yet
+                    // is passed over as an earlier request's — the next
+                    // sentence waits for none of it.
+                    if !samples.is_empty() && !part(samples) {
+                        let cancel = serde_json::json!({"cancel": {"id": id}});
+                        let _ = writeln!(self.stdin, "{cancel}").and_then(|()| self.stdin.flush());
+                        return Ok(());
                     }
                     if !more {
                         return Ok(());
@@ -255,7 +263,7 @@ impl Speakers {
         lang: &str,
         voice: i32,
         speed: f32,
-        part: &mut dyn FnMut(Vec<f32>, u32),
+        part: &mut dyn FnMut(Vec<f32>, u32) -> bool,
     ) -> Result<(), SayError> {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         let reuse = running
@@ -350,6 +358,7 @@ mod tests {
         speakers.say(model, dir, text, lang, voice, speed, &mut |part, rate| {
             all.0.extend(part);
             all.1 = rate;
+            true
         })?;
         Ok(all)
     }
@@ -450,12 +459,59 @@ mod tests {
         speakers
             .say(model, &dir, "Hello.", "en", 0, 1.0, &mut |part, rate| {
                 parts.push((part, rate));
+                true
             })
             .unwrap();
         assert_eq!(parts, [(vec![0.5], 24_000), (vec![-0.5], 24_000)]);
         let err = said(&speakers, model, &dir, "Again.", "en", 0, 1.0).unwrap_err();
         assert!(matches!(err, SayError::Voice(_)), "{err}");
         assert!(!speakers.loaded(), "a voice that failed is let go");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A sentence stopped part way (`part` answers `false`): the voice is
+    /// told to stop making it, nothing more of it is given, and the next
+    /// sentence is said — its own, not the rest of the stopped one.
+    #[cfg(unix)]
+    #[test]
+    fn a_sentence_stopped_part_way_is_given_up_and_the_voice_told() {
+        use std::os::unix::fs::PermissionsExt;
+        let model = &crate::speech::VOICE_MODELS[0];
+        let dir = model_dir("cancel", model);
+        let program = dir.join("clew-speak");
+        let heard = dir.join("heard");
+        // Each request written down; the first sentence's three parts, the
+        // second's one.
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n\
+                 echo '{{\"ready\":{{\"rate\":24000,\"voices\":8}}}}'\n\
+                 while read -r line; do\n\
+                   echo \"$line\" >> '{}'\n\
+                   case \"$line\" in\n\
+                     *'\"id\":1,'*) for i in 1 2 3; do echo '{{\"audio\":{{\"id\":1,\"pcm\":\"AEA=\",\"more\":true}}}}'; done; echo '{{\"audio\":{{\"id\":1,\"pcm\":\"\"}}}}' ;;\n\
+                     *'\"id\":2,'*) echo '{{\"audio\":{{\"id\":2,\"pcm\":\"AMA=\"}}}}' ;;\n\
+                   esac\n\
+                 done\n",
+                heard.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let speakers = Speakers::new(program);
+        let mut parts = 0;
+        speakers
+            .say(model, &dir, "Hello.", "en", 0, 1.0, &mut |_, _| {
+                parts += 1;
+                false
+            })
+            .unwrap();
+        assert_eq!(parts, 1, "nothing more once stopped");
+        let (next, _) = said(&speakers, model, &dir, "Next.", "en", 0, 1.0).unwrap();
+        assert_eq!(next, [-0.5], "the next sentence's own");
+        let heard = std::fs::read_to_string(&heard).unwrap();
+        assert!(heard.contains(r#"{"cancel":{"id":1}}"#), "{heard}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

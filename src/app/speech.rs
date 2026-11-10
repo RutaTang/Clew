@@ -181,7 +181,7 @@ pub(crate) trait Synthesizer: Send + Sync {
         lang: &str,
         voice: i32,
         speed: f32,
-        part: &mut dyn FnMut(Vec<f32>, u32),
+        part: &mut dyn FnMut(Vec<f32>, u32) -> bool,
     ) -> Result<(), SayError>;
     /// Let `model` go, if it is loaded, and do `work` — remove its files —
     /// with nothing said meanwhile: what would be is said once `work` is
@@ -203,7 +203,7 @@ impl Synthesizer for System {
         lang: &str,
         voice: i32,
         speed: f32,
-        part: &mut dyn FnMut(Vec<f32>, u32),
+        part: &mut dyn FnMut(Vec<f32>, u32) -> bool,
     ) -> Result<(), SayError> {
         match &self.speakers {
             Some(speakers) => speakers.say(model, dir, text, lang, voice, speed, part),
@@ -290,6 +290,10 @@ pub(crate) struct Speech {
     /// Bumped by every stop: what was being made before it is dropped when
     /// it comes.
     round: u64,
+    /// [`Self::round`], as the sentence being made off the UI thread reads
+    /// it: a sentence made for a round gone stops at its next part, and the
+    /// voice with it — what was asked next waited for it to be made whole.
+    current: Arc<std::sync::atomic::AtomicU64>,
     /// The output, while Clew speaks.
     output: Option<Box<dyn Playing>>,
     /// Since when nothing has been left to play, nor to make.
@@ -337,6 +341,7 @@ impl Speech {
             queue: VecDeque::new(),
             making: false,
             round: 0,
+            current: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             output: None,
             quiet_since: None,
             level: 0.0,
@@ -430,6 +435,8 @@ impl Speech {
         self.queue.clear();
         self.making = false;
         self.round += 1;
+        self.current
+            .store(self.round, std::sync::atomic::Ordering::Relaxed);
         if let Some(output) = self.output.take() {
             close_later(output);
         }
@@ -825,6 +832,7 @@ impl App {
             self.voice.speech.made_with.insert(model.id);
             self.voice.speech.quiet_since = None;
             let round = self.voice.speech.round;
+            let current = self.voice.speech.current.clone();
             // Made off the UI thread, each part sent as it comes: a voice
             // that streams is heard while the rest is still being made.
             let stream = iced::stream::channel(
@@ -855,6 +863,10 @@ impl App {
                             voice,
                             speed,
                             &mut |samples, rate| {
+                                // Stopped since it began: no more of it.
+                                if current.load(std::sync::atomic::Ordering::Relaxed) != round {
+                                    return false;
+                                }
                                 let opened = take_opened(&mut device_rate);
                                 let to = device_rate.unwrap_or(rate);
                                 // One resampler for all the parts: they join as
@@ -872,6 +884,7 @@ impl App {
                                     opened,
                                     last: false,
                                 }));
+                                true
                             },
                         );
                         let opened = take_opened(&mut device_rate);

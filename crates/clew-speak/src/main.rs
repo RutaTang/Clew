@@ -37,6 +37,11 @@
 //! A request that cannot be met is answered `{"failed":{"id":1,"error":…}}`;
 //! a model that cannot be loaded, `{"error":…}` before it exits. It exits
 //! when stdin closes.
+//!
+//! What is no longer wanted — the reader stopped it — is said
+//! `{"cancel":{"id":1}}`: a voice that streams stops making that sentence
+//! at its next part (answered `failed`), and one not yet begun is passed
+//! over. The next sentence waits for none of it.
 
 mod embed;
 mod graph;
@@ -103,6 +108,58 @@ fn one() -> f32 {
 #[serde(rename_all = "lowercase")]
 enum Request {
     Say(Say),
+    /// The sentence `id` is no longer wanted.
+    Cancel {
+        id: u64,
+    },
+}
+
+/// What stdin says, read on a thread of its own so a sentence being made
+/// hears a `cancel` for it: requests waiting their turn, in order.
+struct Inbox {
+    lines: std::sync::mpsc::Receiver<String>,
+    /// Requests read while a sentence was being made, not yet answered.
+    waiting: std::collections::VecDeque<String>,
+    /// Sentences cancelled before they were begun.
+    cancelled: std::collections::HashSet<u64>,
+}
+
+impl Inbox {
+    fn new(lines: std::sync::mpsc::Receiver<String>) -> Inbox {
+        Inbox {
+            lines,
+            waiting: std::collections::VecDeque::new(),
+            cancelled: std::collections::HashSet::new(),
+        }
+    }
+
+    /// The next request's line: one read while a sentence was being made,
+    /// else the next to come. `None` once stdin has closed.
+    fn next(&mut self) -> Option<String> {
+        self.waiting.pop_front().or_else(|| self.lines.recv().ok())
+    }
+
+    /// Whether the sentence `id`, being made, has been cancelled: what has
+    /// come meanwhile is read, a cancel kept, anything else kept for its
+    /// turn.
+    fn cancelled(&mut self, id: u64) -> bool {
+        while let Ok(line) = self.lines.try_recv() {
+            match serde_json::from_str::<Request>(&line) {
+                Ok(Request::Cancel { id: gone }) => {
+                    self.cancelled.insert(gone);
+                }
+                _ => self.waiting.push_back(line),
+            }
+        }
+        self.cancelled.contains(&id)
+    }
+
+    /// Whether the sentence `id`, about to be begun, was cancelled already;
+    /// forgotten after this.
+    fn take_cancelled(&mut self, id: u64) -> bool {
+        self.cancelled(id);
+        self.cancelled.remove(&id)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -181,13 +238,27 @@ fn main() {
     if send(&mut out, &Answer::Ready { rate, voices }).is_err() {
         return;
     }
-    for line in std::io::stdin().lock().lines() {
-        let Ok(line) = line else { break };
+    let (sender, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut inbox = Inbox::new(lines);
+    while let Some(line) = inbox.next() {
         if line.trim().is_empty() {
             continue;
         }
         let say = match serde_json::from_str::<Request>(&line) {
             Ok(Request::Say(say)) => say,
+            // For a sentence already made, or not yet begun.
+            Ok(Request::Cancel { id }) => {
+                inbox.cancelled.insert(id);
+                continue;
+            }
             Err(e) => {
                 if send(&mut out, &Answer::Error(format!("not a request: {e}"))).is_err() {
                     break;
@@ -196,6 +267,16 @@ fn main() {
             }
         };
         let id = say.id;
+        if inbox.take_cancelled(id) {
+            let answer = Answer::Failed {
+                id,
+                error: "cancelled".into(),
+            };
+            if send(&mut out, &answer).is_err() {
+                break;
+            }
+            continue;
+        }
         let answer = match &mut voice {
             Voice::Sherpa(tts) => match speak(tts, family, &say) {
                 Ok(samples) => Answer::Audio {
@@ -214,6 +295,9 @@ fn main() {
                     say.voice,
                     say.speed,
                     &mut |samples| {
+                        if inbox.cancelled(id) {
+                            return Err("cancelled".to_string());
+                        }
                         let part = Answer::Audio {
                             id,
                             pcm: pcm16(samples),
@@ -228,6 +312,7 @@ fn main() {
                 if gone {
                     break;
                 }
+                inbox.cancelled.remove(&id);
                 match said {
                     Ok(()) => Answer::Audio {
                         id,
@@ -360,12 +445,42 @@ mod tests {
 
     use super::*;
 
+    /// While a sentence is made, a cancel for it is heard and kept; any
+    /// other request read meanwhile waits its turn, in order; and a sentence
+    /// cancelled before it began is passed over once.
+    #[test]
+    fn the_inbox_hears_a_cancel_and_keeps_the_rest_in_order() {
+        let (send, lines) = std::sync::mpsc::channel();
+        let mut inbox = Inbox::new(lines);
+        send.send(r#"{"say":{"id":2,"text":"Next."}}"#.to_string())
+            .unwrap();
+        assert!(!inbox.cancelled(1));
+        send.send(r#"{"cancel":{"id":1}}"#.to_string()).unwrap();
+        send.send(r#"{"cancel":{"id":3}}"#.to_string()).unwrap();
+        send.send(r#"{"say":{"id":3,"text":"Gone."}}"#.to_string())
+            .unwrap();
+        assert!(inbox.cancelled(1), "the sentence being made");
+        assert!(inbox.next().unwrap().contains(r#""id":2"#), "in its turn");
+        assert!(inbox.next().unwrap().contains(r#""id":3"#));
+        assert!(inbox.take_cancelled(3), "cancelled before it began");
+        assert!(!inbox.take_cancelled(3), "once");
+        drop(send);
+        assert!(inbox.next().is_none(), "stdin closed");
+        let Request::Cancel { id } = serde_json::from_str(r#"{"cancel":{"id":7}}"#).unwrap() else {
+            panic!("a cancel");
+        };
+        assert_eq!(id, 7);
+    }
+
     /// A request reads as the client writes it; what is left out is the
     /// model's own.
     #[test]
     fn requests_and_answers_read_as_written() {
-        let Request::Say(say) =
-            serde_json::from_str(r#"{"say":{"id":3,"text":"Hi.","lang":"ko"}}"#).unwrap();
+        let Ok(Request::Say(say)) =
+            serde_json::from_str(r#"{"say":{"id":3,"text":"Hi.","lang":"ko"}}"#)
+        else {
+            panic!("a say");
+        };
         assert_eq!((say.id, say.voice, say.speed), (3, 0, 1.0));
         assert_eq!(say.lang.as_deref(), Some("ko"));
         assert_eq!(
