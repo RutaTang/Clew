@@ -793,7 +793,7 @@ pub(crate) fn explain_children(
 /// borrows nothing from it: a `format!`ed label may be a temporary.
 pub(crate) fn section_header<'a>(label: &str) -> Element<'a, Message> {
     container(
-        text(label.to_uppercase())
+        text(crate::i18n::caps(label))
             .size(ts::CAPTION)
             .color(theme::fg_muted()),
     )

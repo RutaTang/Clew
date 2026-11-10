@@ -359,6 +359,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             bottom: 20.0,
             left: 24.0,
         }))
+        .id(crate::ui::settings_scroll_id())
         .direction(thin_scroll())
         .style(theme::overlay_scrollbar)
         .height(Fill),

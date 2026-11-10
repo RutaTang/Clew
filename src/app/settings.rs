@@ -560,14 +560,23 @@ impl App {
             SettingsMsg::OpenAt(page) => {
                 self.settings.page = page;
                 let opened = self.on_open_settings();
-                Task::batch([opened, self.sync_server_listing()])
+                Task::batch([opened, self.sync_server_listing(), settings_to_top()])
             }
             SettingsMsg::Page(page) => {
+                let other = self.settings.page != page;
                 self.settings.page = page;
                 // A shortcut half rebound stays with the page it was on.
                 self.rebinding = None;
                 self.keymap_notice = None;
-                self.sync_server_listing()
+                // Another page opens at its top: the scroll is one for
+                // every page, and kept where the last page was left — the
+                // Integrations page opened half way down, mid-form.
+                let top = if other {
+                    settings_to_top()
+                } else {
+                    Task::none()
+                };
+                Task::batch([self.sync_server_listing(), top])
             }
             SettingsMsg::Close => self.close_settings(),
             SettingsMsg::Discard => {
@@ -873,4 +882,12 @@ mod tests {
             "the user's bytes are theirs to fix"
         );
     }
+}
+
+/// The Settings page's scroll back at its top.
+fn settings_to_top() -> Task<Message> {
+    iced::widget::operation::scroll_to(
+        crate::ui::settings_scroll_id(),
+        iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+    )
 }

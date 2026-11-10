@@ -1278,6 +1278,53 @@ fn settings_shows_one_page_at_a_time() {
     assert!(shows(&mut sim, "Commands"));
 }
 
+/// Each Settings page opens at its top: the pages share one scroll, and
+/// the Integrations page opened where the Voice page was left — at its
+/// foot, mid-form. The page shown again, it stays where it is.
+#[test]
+fn another_settings_page_opens_at_its_top() {
+    use crate::SettingsPage;
+    use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, scroll_to};
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        SettingsPage::Voice,
+    )));
+    let mut renderer = renderer();
+    let offset = |ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>,
+                  renderer: &iced::Renderer| {
+        let mut probe = ScrollProbe {
+            target: super::settings_scroll_id(),
+            found: None,
+        };
+        ui.operate(renderer, &mut black_box(&mut probe));
+        probe.found.expect("the Settings page's scroll").y
+    };
+    let mut ui = UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
+    let end = AbsoluteOffset {
+        x: Some(0.0),
+        y: Some(f32::MAX),
+    };
+    let _ = run_operation::<()>(
+        &mut ui,
+        &renderer,
+        scroll_to(super::settings_scroll_id(), end),
+    );
+    assert!(offset(&mut ui, &renderer) > 0.0, "the Voice page scrolls");
+    let mut cache = ui.into_cache();
+    for (page, top) in [
+        (SettingsPage::Voice, false),
+        (SettingsPage::Integrations, true),
+    ] {
+        let task = app.update(Message::Settings(crate::SettingsMsg::Page(page)));
+        let mut ui = UserInterface::build(super::view(&app), WINDOW, cache, &mut renderer);
+        for op in widget_ops(task) {
+            let _ = run_operation::<()>(&mut ui, &renderer, op);
+        }
+        assert_eq!(offset(&mut ui, &renderer) == 0.0, top, "{page:?}");
+        cache = ui.into_cache();
+    }
+}
+
 /// A16 / E2-6: Enter in a field of the Settings or Connect form submits it,
 /// like the button: Save, and Connect.
 #[test]
@@ -7172,6 +7219,45 @@ def main(rule):
         .map(|&(id, _)| format!("{}@{}", g.node(id).name, g.node(id).line))
         .collect();
     assert_eq!(uncalled, ["__init__@21", "main@27", "unused@24"]);
+}
+
+/// A project graph's English is said in the reader's language — its
+/// words, and the shapes that hold a name — while code stays code; and a
+/// section's heading is in capitals only in a language that has them.
+#[test]
+fn a_project_graphs_words_are_translated() {
+    use crate::i18n::{Lang, with_lang};
+    with_lang(Lang::Zh, || {
+        assert_eq!(super::map_text("inherits"), "继承");
+        assert_eq!(super::map_text("handled by"), "处理函数");
+        assert_eq!(super::map_text("base 2"), "基类 2");
+        assert_eq!(
+            super::map_text("MRO: D → B → object"),
+            "方法解析顺序：D → B → object"
+        );
+        assert_eq!(
+            super::map_text("id serial · primary key → users"),
+            "id serial · 主键 → users"
+        );
+        assert_eq!(super::map_text("1 lemmas"), "1 条引理");
+        assert_eq!(super::map_text("pub use"), "pub use");
+        assert_eq!(super::map_text("gen_server:call"), "gen_server:call");
+        assert_eq!(
+            crate::i18n::caps("入口点（main、路由）"),
+            "入口点（main、路由）"
+        );
+    });
+    with_lang(Lang::En, || {
+        assert_eq!(super::map_text("inherits"), "inherits");
+        assert_eq!(super::map_text("base 2"), "base 2");
+        assert_eq!(
+            crate::i18n::caps("Entry points (main)"),
+            "ENTRY POINTS (MAIN)"
+        );
+    });
+    with_lang(Lang::Fr, || {
+        assert_eq!(super::map_text("delegate to profile"), "délègue à profile");
+    });
 }
 
 /// The Maps overlay's list: the map's counts and its line on how to read

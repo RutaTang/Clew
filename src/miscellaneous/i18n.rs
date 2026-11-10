@@ -231,6 +231,17 @@ thread_local! {
 }
 
 /// The language spoken now.
+/// `label` in capitals, as a section's heading is written — in a language
+/// written in capitals and small letters. Chinese, Japanese and Korean have
+/// none: capitals there only shout the Latin words among them (`main` as
+/// `MAIN`).
+pub fn caps(label: &str) -> String {
+    match current() {
+        Lang::En | Lang::Fr => label.to_uppercase(),
+        Lang::Zh | Lang::Ja | Lang::Ko => label.to_string(),
+    }
+}
+
 pub fn current() -> Lang {
     OVERRIDE
         .with(Cell::get)
@@ -2091,6 +2102,20 @@ mod tests {
         }
         out.push_str(rest);
         out
+    }
+
+    /// Labels that sit side by side say different things in every
+    /// language: the sheet header's Explain button and its Explanations tab
+    /// were one word in Chinese, Japanese and Korean (解释 · 解释).
+    #[test]
+    fn side_by_side_labels_differ_in_every_language() {
+        for lang in Lang::ALL {
+            with_lang(lang, || {
+                for (a, b) in [("Explain", "Explanations")] {
+                    assert_ne!(lookup(a), lookup(b), "{lang:?}: {a} / {b}");
+                }
+            });
+        }
     }
 
     /// No catalog keeps text the program no longer shows.

@@ -2705,6 +2705,78 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// A project graph's English — an edge's label, a line of a node's detail,
+/// as `clew_core::maps` writes them — in the reader's language: a phrase
+/// the catalogs know (`extern_text::MAP_WORDS`), or one of the shapes below
+/// around a name. Code (`pub use`, `select`, `gen_server:call`) and names
+/// stay as written.
+pub(crate) fn map_text(english: &str) -> String {
+    let said = crate::i18n::lookup(english);
+    if said != english {
+        return said.to_string();
+    }
+    let number = |s: &str| s.parse::<usize>().ok();
+    if let Some(n) = english.strip_prefix("base ").and_then(number) {
+        return tr!("base {n}", n = n).to_string();
+    }
+    if let Some(n) = english.strip_suffix(" lemmas").and_then(number) {
+        return trn!("1 lemma", "{n} lemmas", n).to_string();
+    }
+    if let Some(order) = english.strip_prefix("MRO: ") {
+        return tr!("MRO: {order}", order = order).to_string();
+    }
+    if let Some(scope) = english.strip_prefix("scope: ") {
+        return tr!("scope: {scope}", scope = scope).to_string();
+    }
+    if let Some(props) = english.strip_prefix("props: ") {
+        return tr!("props: {props}", props = props).to_string();
+    }
+    if let Some(sources) = english.strip_prefix("reads ") {
+        return tr!("reads {sources}", sources = sources).to_string();
+    }
+    if let Some(kind) = english.strip_prefix("supervisor · ") {
+        return tr!("supervisor · {kind}", kind = kind).to_string();
+    }
+    if let Some(name) = english.strip_prefix("alias of ") {
+        return tr!("alias of {name}", name = name).to_string();
+    }
+    if let Some(target) = english.strip_prefix("delegate to ") {
+        return tr!("delegate to {target}", target = target).to_string();
+    }
+    if let Some(module) = english.strip_prefix("imports ") {
+        return tr!("imports {module}", module = module).to_string();
+    }
+    if let Some(lifetime) = english
+        .strip_prefix("resolves to (")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        return tr!("resolves to ({lifetime})", lifetime = lifetime).to_string();
+    }
+    if let Some((what, line)) = english.rsplit_once(" made at line ")
+        && let Some(line) = number(line)
+    {
+        return tr!("{what} made at line {line}", what = what, line = line).to_string();
+    }
+    if let Some((project, system)) = english
+        .strip_prefix("pulls in ")
+        .and_then(|rest| rest.strip_suffix(" system headers"))
+        .and_then(|rest| rest.split_once(" project files and "))
+        && let (Some(project), Some(system)) = (number(project), number(system))
+    {
+        return tr!(
+            "pulls in {project} project files and {system} system headers",
+            project = project,
+            system = system
+        )
+        .to_string();
+    }
+    // A column's line: `id serial · primary key → users`.
+    match english.split_once(" · primary key") {
+        Some((column, rest)) => format!("{column} · {}{rest}", tr!("primary key")),
+        None => english.to_string(),
+    }
+}
+
 /// The type map's list: how many types and relations, then the types most
 /// others name, the base types with the most subtypes, the types naming the
 /// most others, and the most changed files. Each type row opens its
@@ -2964,7 +3036,7 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
                 .detail
                 .lines()
                 .take(12)
-                .map(|l| format!("  {l}"))
+                .map(|l| format!("  {}", map_text(l)))
                 .collect();
             if n.detail.lines().count() > 12 {
                 lines.push("  …".into());
@@ -2973,7 +3045,7 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
                 let target = &map.nodes[*to].label;
                 lines.push(match label.is_empty() {
                     true => format!("  → {target}"),
-                    false => format!("  → {target} ({label})"),
+                    false => format!("  → {target} ({})", map_text(label)),
                 });
             }
             if !lines.is_empty() {

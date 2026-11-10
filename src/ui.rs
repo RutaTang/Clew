@@ -309,6 +309,11 @@ pub fn outline_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("outline-list")
 }
 
+/// The Settings page's scroll: each page opens at its top.
+pub fn settings_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("settings-page")
+}
+
 pub fn bp_condition_input_id() -> iced::widget::Id {
     iced::widget::Id::new("bp-condition-input")
 }
