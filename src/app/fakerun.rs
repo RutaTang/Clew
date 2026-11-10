@@ -387,7 +387,10 @@ impl App {
         let Some(working) = self.proj.fake.working.take() else {
             return Task::none();
         };
-        let parsed = answer.and_then(|text| fr::parse(&text, |file| self.fake_resolve(file)));
+        // A file is looked for, and counted on disk, once however many
+        // steps it has: on this thread, as the answer comes.
+        let resolve = once_per_file(|file| self.fake_resolve(file));
+        let parsed = answer.and_then(|text| fr::parse(&text, resolve));
         match parsed {
             Ok(trace) if !working.debug => {
                 // A fake run lands on its end: what it returns, what it
@@ -820,6 +823,25 @@ fn parse_suggestion(text: &str, n: usize) -> Result<Vec<String>, String> {
 /// How many lines the file at `path` has (at least 1), read whole — `None`
 /// for one that cannot be read, or too large to be a source file worth
 /// reading here.
+/// `resolve`, asked once for each file: the steps of a trace — up to
+/// [`fr::MAX_STEPS`] — mostly name the same few, and resolving one reads it
+/// whole off the disk.
+fn once_per_file<'a>(
+    resolve: impl Fn(&str) -> Option<(String, usize)> + 'a,
+) -> impl Fn(&str) -> Option<(String, usize)> + 'a {
+    let known = std::cell::RefCell::new(
+        std::collections::HashMap::<String, Option<(String, usize)>>::new(),
+    );
+    move |file| {
+        if let Some(known) = known.borrow().get(file) {
+            return known.clone();
+        }
+        let found = resolve(file);
+        known.borrow_mut().insert(file.to_string(), found.clone());
+        found
+    }
+}
+
 fn lines_on_disk(path: &std::path::Path) -> Option<usize> {
     const MAX_BYTES: u64 = 8 * 1024 * 1024;
     if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
@@ -834,6 +856,35 @@ fn lines_on_disk(path: &std::path::Path) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A trace whose steps keep to a few files has each looked for once,
+    /// not once a step.
+    #[test]
+    fn a_file_is_resolved_once_however_many_steps_name_it() {
+        let asked = std::cell::Cell::new(0);
+        let resolve = once_per_file(|file: &str| {
+            asked.set(asked.get() + 1);
+            (file != "gone.py").then(|| (file.to_string(), 40))
+        });
+        let steps: Vec<String> = (0..fr::MAX_STEPS)
+            .map(|i| {
+                let file = ["a.py", "b.py", "gone.py"][i % 3];
+                format!(
+                    "{{\"file\": \"{file}\", \"line\": {}, \"note\": \"\"}}",
+                    i % 40 + 1
+                )
+            })
+            .collect();
+        let answer = format!("{{\"steps\": [{}]}}", steps.join(","));
+        let trace = fr::parse(&answer, resolve).expect("a trace");
+        assert_eq!(asked.get(), 3, "once for each file, the missing one too");
+        assert_eq!(
+            trace.dropped,
+            fr::MAX_STEPS / 3,
+            "a missing file's steps still left out"
+        );
+        assert_eq!(trace.steps.len(), fr::MAX_STEPS - fr::MAX_STEPS / 3);
+    }
 
     /// A suggestion gives one value per field, strings as themselves and
     /// anything else as its JSON; too few are padded, too many cut.
