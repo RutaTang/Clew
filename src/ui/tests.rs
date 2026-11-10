@@ -13250,6 +13250,155 @@ fn jump_codes_go_on_every_control_and_a_code_presses_it() {
     assert!(crate::ui::jump::dealt(app.main_window).is_empty());
 }
 
+/// Tab, no field holding the keys, puts the keyboard's ring on the first
+/// control on screen and moves it from control to control in the order
+/// they are drawn — Shift-Tab back, from the first to the last — and Enter
+/// presses the one it is on as a click does, the ring staying. Esc puts it
+/// away and does nothing else; another key puts it away and does what it
+/// does; a field holding the keys keeps Tab for the fields.
+#[test]
+fn tab_rings_each_control_in_turn_and_enter_presses_it() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = reader_app();
+    let none = keyboard::Modifiers::empty();
+    let shift = keyboard::Modifiers::SHIFT;
+    let drawn = |app: &App| {
+        draw_window(app);
+        crate::ui::jump::ring_drawn(app.main_window).expect("the ring drawn")
+    };
+    // A field holds the keys: Tab is the fields', as before.
+    let _ = app.update(Message::Window(WindowMsg::TabPressed {
+        forward: true,
+        field: true,
+    }));
+    assert_eq!(app.ring, None);
+    // None does: the ring, on the first control.
+    app.code_focused = true;
+    let _ = app.update(Message::Window(WindowMsg::TabPressed {
+        forward: true,
+        field: false,
+    }));
+    assert!(!app.code_focused, "the keys are the ring's");
+    let (at, count) = drawn(&app);
+    assert_eq!(at, 0);
+    assert!(count > 10, "{count} controls");
+    type_key(&mut app, Key::Named(Named::Tab), none);
+    assert_eq!(drawn(&app).0, 1);
+    type_key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert_eq!(drawn(&app).0, 2, "the arrows move it too");
+    // Two before the window is drawn again: the second goes on from the
+    // first.
+    type_key(&mut app, Key::Named(Named::Tab), shift);
+    type_key(&mut app, Key::Named(Named::ArrowUp), none);
+    assert_eq!(drawn(&app).0, 0);
+    // Back from the first: the last.
+    type_key(&mut app, Key::Named(Named::Tab), shift);
+    assert_eq!(drawn(&app).0, count - 1);
+    // On to the strip's Weak Spots, and Enter presses it.
+    for _ in 0..count {
+        if matches!(
+            crate::ui::jump::ring_press(app.main_window, app.ring.unwrap()),
+            Some(Message::Weak(crate::WeakMsg::Show))
+        ) {
+            break;
+        }
+        type_key(&mut app, Key::Named(Named::Tab), none);
+        draw_window(&app);
+    }
+    type_key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.proj.weak.showing, "pressed");
+    assert!(app.ring.is_some(), "the ring stays");
+    // Esc puts the ring away, and only that.
+    type_key(&mut app, Key::Named(Named::Escape), none);
+    assert_eq!(app.ring, None);
+    assert!(app.proj.weak.showing, "the page stays");
+    // Shift-Tab first: the last control, once the controls are counted.
+    let _ = app.update(Message::Window(WindowMsg::TabPressed {
+        forward: false,
+        field: false,
+    }));
+    draw_window(&app);
+    let (at, count) = drawn(&app);
+    assert_eq!(at, count - 1);
+    // Another key puts it away and does what it does.
+    type_key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(app.ring, None);
+}
+
+/// Tab asks first whether a field holds the keys: a text field does; the
+/// Files view's tree, whose keys are its rows', does not — nor nothing.
+#[test]
+fn tab_knows_whether_a_field_holds_the_keys() {
+    let mut renderer = renderer();
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    let mut ui = UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
+    let held = |ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>| {
+        run_operation(ui, &renderer, super::field_focused_operation())
+    };
+    assert_eq!(held(&mut ui), Some(false), "nothing holds the keys");
+    for (id, field) in [
+        (super::file_filter_id(), true),
+        (super::files_tree_keys_id(), false),
+    ] {
+        let _ = run_operation(
+            &mut ui,
+            &renderer,
+            iced::advanced::widget::operation::focusable::focus::<()>(id.clone()),
+        );
+        assert_eq!(
+            run_operation(&mut ui, &renderer, find_focused()),
+            Some(id.clone()),
+            "precondition"
+        );
+        assert_eq!(held(&mut ui), Some(field), "{id:?}");
+    }
+}
+
+/// A dialog come up over the window takes the ring as it takes the keys:
+/// on its first control, drawn again and again, and walking its own.
+#[test]
+fn a_dialog_come_up_takes_the_ring_to_its_first_control() {
+    let mut app = reader_app();
+    app.ring = Some(5);
+    draw_window(&app);
+    let (at, window_count) = crate::ui::jump::ring_drawn(app.main_window).expect("drawn");
+    assert_eq!(at, 5);
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    for _ in 0..3 {
+        draw_window(&app);
+        let (at, count) = crate::ui::jump::ring_drawn(app.main_window).expect("drawn");
+        assert_eq!(at, 0, "on the dialog's first, every time it is drawn");
+        assert_ne!(count, window_count, "the dialog's own controls");
+    }
+    type_key(
+        &mut app,
+        keyboard::Key::Named(keyboard::key::Named::Tab),
+        keyboard::Modifiers::empty(),
+    );
+    draw_window(&app);
+    assert_eq!(crate::ui::jump::ring_drawn(app.main_window).unwrap().0, 1);
+}
+
+/// The pointer pressed anywhere puts the keyboard's ring away.
+#[test]
+fn a_press_of_the_pointer_puts_the_ring_away() {
+    let mut app = reader_app();
+    app.ring = Some(0);
+    let mut sim = sim_of(&app);
+    sim.point_at(Point::new(WINDOW.width / 2.0, WINDOW.height / 2.0));
+    let _ = sim.simulate(iced_test::simulator::click());
+    assert!(
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::RingEnd)))
+    );
+    let _ = app.update(Message::Window(WindowMsg::RingEnd));
+    assert_eq!(app.ring, None);
+}
+
 /// Each window keeps its own codes: another window drawn after it, without
 /// codes or with its own, neither puts them away nor gives this one its.
 #[test]

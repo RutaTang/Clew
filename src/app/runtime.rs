@@ -173,6 +173,7 @@ impl App {
             selecting: false,
             code_focused: true,
             jump: None,
+            ring: None,
             region: crate::app::keys::Region::Code,
             pending_g: false,
             pending_z: false,
@@ -790,6 +791,11 @@ impl App {
                 Task::none()
             }
             WindowMsg::TreeKey(key) => self.on_tree_key(key),
+            WindowMsg::TabPressed { forward, field } => self.on_tab(forward, field),
+            WindowMsg::RingEnd => {
+                self.ring = None;
+                Task::none()
+            }
             // Enter opens what the filter found first, as a click on its row
             // would: typing a file's name and pressing Enter did nothing.
             WindowMsg::FileFilterSubmitted => {

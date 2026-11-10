@@ -596,7 +596,7 @@ pub(crate) fn escape_message(app: &App) -> Option<Message> {
 /// throwing the reader back to the top of the file.
 pub fn view(app: &App) -> Element<'_, Message> {
     // Jump mode's codes, when they are up, go on what is built now.
-    jump::begin(app.jump.is_some());
+    jump::begin(app.jump.is_some() || app.ring.is_some());
     heard::layer(heard::Layer::Window);
     // The divider says where the pointer is in the window; the sidebar is
     // inside its frame.
@@ -678,9 +678,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
         },
         stack![framed, resize_grips()],
     );
+    let up = match (&app.jump, app.ring) {
+        (Some(typed), _) => Some(jump::Up::Codes(typed)),
+        (None, Some(at)) => Some(jump::Up::Ring(at)),
+        (None, None) => None,
+    };
     jump::root(
         window,
-        app.jump.as_deref(),
+        up,
         app.ask_view == crate::AskView::Expanded,
         app.main_window,
     )

@@ -164,6 +164,31 @@ pub(crate) fn cycle_focus(forward: bool) -> Task<Message> {
     iced::advanced::widget::operate(focus_cycle(forward)).discard()
 }
 
+/// Whether a field holds the keys — a text field, not the Files view's
+/// tree, whose keys are its rows'.
+pub(crate) fn field_focused() -> Task<bool> {
+    iced::advanced::widget::operate(field_focused_operation())
+}
+
+/// The operation behind [`field_focused`].
+pub(crate) fn field_focused_operation() -> impl Operation<bool> {
+    struct Seek(bool);
+    impl Operation<bool> for Seek {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<bool>)) {
+            operate(self);
+        }
+        fn focusable(&mut self, id: Option<&Id>, _bounds: Rectangle, state: &mut dyn Focusable) {
+            if state.is_focused() && id != Some(&super::files_tree_keys_id()) {
+                self.0 = true;
+            }
+        }
+        fn finish(&self) -> Outcome<bool> {
+            Outcome::Some(self.0)
+        }
+    }
+    Seek(false)
+}
+
 /// The two-pass operation behind [`cycle_focus`], exposed for tests.
 pub(crate) fn focus_cycle(forward: bool) -> impl Operation<()> {
     struct Census {

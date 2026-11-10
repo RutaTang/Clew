@@ -1390,6 +1390,11 @@ pub struct App {
     /// Jump mode (⌘J): what has been typed of a control's code while the
     /// codes are up (`ui::jump`); `None` while they are not.
     pub jump: Option<String>,
+    /// The keyboard's ring (Tab with no field holding the keys): the
+    /// control it is asked to be on, by its place among those drawn —
+    /// from the end below 0 (`ui::jump::Up::Ring`); `None` while it is
+    /// not up.
+    pub ring: Option<isize>,
     /// The region F6 last put the keys in (`App::cycle_region`).
     pub(crate) region: crate::app::keys::Region,
     /// Pending `g` prefix for two-key motions (gg / gd / gr / gi / gy).

@@ -84,6 +84,70 @@ impl App {
         }
     }
 
+    /// Tab or Shift-Tab, a field holding the keys (`field`) or not: the
+    /// next field, as before; else the keyboard's ring, on the first
+    /// control (the last, going back), the code giving up the keys.
+    pub(crate) fn on_tab(&mut self, forward: bool, field: bool) -> Task<Message> {
+        self.code_focused = false;
+        if field {
+            return ui::cycle_focus(forward);
+        }
+        self.ring = Some(if forward { 0 } else { -1 });
+        self.pending_g = false;
+        self.pending_z = false;
+        // The Files view's tree gives up the keys too: its arrows are the
+        // ring's now.
+        operation::focus(nowhere())
+    }
+
+    /// A key while the keyboard's ring is up: Tab and the arrows move it,
+    /// Enter and Space press what it is on (as a click does, the ring
+    /// staying), Esc puts it away. Any other key puts it away and is left
+    /// to do what it does (`None`).
+    fn ring_key(
+        &mut self,
+        key: &keyboard::Key,
+        modifiers: keyboard::Modifiers,
+    ) -> Option<Task<Message>> {
+        use keyboard::Key;
+        use keyboard::key::Named;
+        let plain = !(modifiers.command() || modifiers.control() || modifiers.alt());
+        let step = match key.as_ref() {
+            Key::Named(Named::Tab) if plain => Some(!modifiers.shift()),
+            Key::Named(Named::ArrowDown | Named::ArrowRight) if plain => Some(true),
+            Key::Named(Named::ArrowUp | Named::ArrowLeft) if plain => Some(false),
+            _ => None,
+        };
+        if let Some(forward) = step {
+            // From where it is: on the first control of a layer come up on
+            // top since, if one has.
+            let asked = self.ring.unwrap_or(0);
+            let at = ui::jump::ring_on(self.main_window, asked).map_or(asked, |at| at as isize);
+            self.ring = Some(if forward { at + 1 } else { at - 1 });
+            return Some(Task::none());
+        }
+        match key.as_ref() {
+            Key::Named(Named::Enter | Named::Space) if plain => {
+                let asked = self.ring.unwrap_or(0);
+                let message = ui::jump::ring_press(self.main_window, asked)?;
+                // Where it is, so a press that changes nothing on screen
+                // leaves it there.
+                if let Some(at) = ui::jump::ring_on(self.main_window, asked) {
+                    self.ring = Some(at as isize);
+                }
+                Some(self.update(message))
+            }
+            Key::Named(Named::Escape) => {
+                self.ring = None;
+                Some(Task::none())
+            }
+            _ => {
+                self.ring = None;
+                None
+            }
+        }
+    }
+
     /// The regions F6 moves through now: the code while a file is open,
     /// the sidebar while it shows a field, and the chat.
     fn regions(&self) -> Vec<Region> {
@@ -209,6 +273,14 @@ impl App {
         if self.jump.is_some() {
             return self.jump_key(&key, modifiers);
         }
+        // The keyboard's ring is up: Tab, the arrows, Enter, Space and Esc
+        // are its (`ring_key`); any other key puts it away and does what it
+        // does.
+        if self.ring.is_some()
+            && let Some(task) = self.ring_key(&key, modifiers)
+        {
+            return task;
+        }
         // The tutorial is modal: → / Enter advance, ← goes back, Esc leaves, and
         // every other key is swallowed so nothing acts behind the overlay.
         if self.tutorial.is_some() {
@@ -249,12 +321,14 @@ impl App {
             return Task::none();
         }
         // Tab / Shift-Tab move keyboard focus between fields (inside the open
-        // modal, if any). Focus leaves the code view, so its motions stop.
+        // modal, if any) while a field holds the keys; else the keyboard's
+        // ring among the controls on screen (`WindowMsg::TabPressed`).
         if matches!(key.as_ref(), Key::Named(Named::Tab))
             && !(cmd || modifiers.alt() || modifiers.control())
         {
-            self.code_focused = false;
-            return ui::cycle_focus(!modifiers.shift());
+            let forward = !modifiers.shift();
+            return ui::field_focused()
+                .map(move |field| Message::Window(WindowMsg::TabPressed { forward, field }));
         }
         // F6 / Shift-F6 move the keys between the window's regions — the
         // code, the sidebar's field, the chat — but not out of a dialog

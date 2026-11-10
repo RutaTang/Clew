@@ -2216,6 +2216,15 @@ pub enum WindowMsg {
     /// ↓ in the Files view's filter, while it has the keyboard: the
     /// keyboard goes down to the tree (`ui::escape_clears`).
     FileFilterDown,
+    /// Tab or Shift-Tab (`forward` or not), once it is known whether a
+    /// field holds the keys (`field`): it moves among the fields, else the
+    /// keyboard's ring among the controls (`ui::jump`).
+    TabPressed {
+        forward: bool,
+        field: bool,
+    },
+    /// The pointer pressed: the keyboard's ring is put away.
+    RingEnd,
     /// A key the Files view's tree took, while it has the keyboard
     /// (`ui::tree_keys`).
     TreeKey(TreeKey),
@@ -3061,6 +3070,8 @@ impl WindowMsg {
             | WindowMsg::FileFilterSubmitted
             | WindowMsg::FileFilterEscaped
             | WindowMsg::FileFilterDown
+            | WindowMsg::TabPressed { .. }
+            | WindowMsg::RingEnd
             | WindowMsg::TreeKey(..)
             | WindowMsg::TreeFocused(..)
             | WindowMsg::ToggleMaximize
