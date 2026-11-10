@@ -198,7 +198,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::BigPicture,
             tr!("Its data and its API"),
-            tr!("Project Maps reads the tables in schema.sql and the routes in api.py from the code, and draws them."),
+            tr!("Project Graphs reads the tables in schema.sql and the routes in api.py from the code, and draws them."),
             Anchor::Strip(StripTool::ProjectMaps),
         ),
         TutStep::new(
@@ -279,13 +279,13 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::Follow,
             tr!("The call graph"),
-            tr!("Every function's calls across the project, as one map you can move around."),
+            tr!("Every function's calls across the project, as one graph you can move around."),
             Anchor::Strip(StripTool::CallGraph),
         ),
         TutStep::new(
             C::Follow,
             tr!("Types and their kinds"),
-            tr!("The Type Map shows Discount and the two kinds of it the shop has: MemberDiscount and BulkDiscount."),
+            tr!("The Type Graph shows Discount and the two kinds of it the shop has: MemberDiscount and BulkDiscount."),
             Anchor::Strip(StripTool::TypeMap),
         ),
         TutStep::new(

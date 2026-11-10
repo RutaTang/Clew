@@ -1589,7 +1589,7 @@ pub enum TextRole {
     Reading,
     /// Emphasized lines: dialog headlines, the finder input.
     Emphasis,
-    /// Sub-headings inside a page (a doc member, "Module map").
+    /// Sub-headings inside a page (a doc member, "Module graph").
     Subtitle,
     /// Modal and card titles.
     Title,

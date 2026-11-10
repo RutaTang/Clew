@@ -1740,7 +1740,7 @@ fn the_overview_map_has_no_caption() {
     for graph_3d in [false, true] {
         app.graph_3d = graph_3d;
         let mut sim = sim_of(&app);
-        assert!(shows(&mut sim, "Module map"), "3D {graph_3d}: no map");
+        assert!(shows(&mut sim, "Module graph"), "3D {graph_3d}: no map");
         assert!(
             text_at(
                 &mut sim,
@@ -6729,7 +6729,7 @@ fn the_maps_header_says_its_views_in_words() {
         )
     };
     let mut sim = sim_elem(header(&app));
-    for said in ["2D", "3D", "Map", "List"] {
+    for said in ["2D", "3D", "Graph", "List"] {
         assert!(shows(&mut sim, said), "{said}");
     }
     drop(sim);
@@ -6739,7 +6739,10 @@ fn the_maps_header_says_its_views_in_words() {
         click(sim_elem(header(&app)), "3D").as_slice(),
         [Message::Graph(crate::GraphMsg::Toggle3D)]
     ));
-    assert!(click(sim_elem(header(&app)), "Map").is_empty(), "in effect");
+    assert!(
+        click(sim_elem(header(&app)), "Graph").is_empty(),
+        "in effect"
+    );
     assert!(matches!(
         click(sim_elem(header(&app)), "List").as_slice(),
         [Message::Graph(crate::GraphMsg::OverlayViewToggle)]
@@ -7103,13 +7106,13 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
     let mut app = reader_app();
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let mut sim = sim_elem(super::project_maps_body(&app));
-    assert!(shows(&mut sim, "No maps for this project."));
+    assert!(shows(&mut sim, "No graphs for this project."));
     drop(sim);
     app.proj.maps_error = Some("the host refused".into());
     let mut sim = sim_elem(super::project_maps_body(&app));
     assert!(shows(
         &mut sim,
-        "Couldn't read the project's maps: the host refused"
+        "Couldn't read the project's graphs: the host refused"
     ));
     drop(sim);
     app.proj.maps_error = None;
@@ -11286,7 +11289,7 @@ fn a_map_with_no_project_says_why() {
     let calls = crate::Overlay::ProjectCalls;
     assert!(shows(
         &mut sim_elem(super::project_graph_modal(&app, calls)),
-        "Open a project to see its map"
+        "Open a project to see its graph"
     ));
     let sent = click(
         sim_elem(super::project_graph_modal(&app, calls)),
@@ -11858,7 +11861,7 @@ fn the_app_menu_keeps_its_tools_apart_and_shows_it_scrolls() {
     // Time Travel).
     for tool in [
         "Call Graph",
-        "Project Maps",
+        "Project Graphs",
         "Explain All",
         "Start Debugging",
     ] {

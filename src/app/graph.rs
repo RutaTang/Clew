@@ -654,7 +654,7 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || input.lay_out())
                     .await
-                    .map_err(|_| tr!("laying out the map failed unexpectedly").to_string())
+                    .map_err(|_| tr!("laying out the graph failed unexpectedly").to_string())
             },
             move |layout| {
                 Message::Graph(GraphMsg::GraphLaidOut {
@@ -690,7 +690,7 @@ impl App {
                 self.proj.graph_layout_rev = ui::next_layout_rev();
             }
             // What the map showed stays; the next change lays it out again.
-            Err(e) => self.status = tr!("Couldn't lay out the map: {error}", error = e),
+            Err(e) => self.status = tr!("Couldn't lay out the graph: {error}", error = e),
         }
         Task::none()
     }
@@ -1403,7 +1403,9 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || clew_core::maps::build(&root, &files))
                     .await
-                    .map_err(|_| tr!("reading the project's maps failed unexpectedly").to_string())
+                    .map_err(|_| {
+                        tr!("reading the project's graphs failed unexpectedly").to_string()
+                    })
             },
             move |maps| {
                 Message::Graph(GraphMsg::MapsBuilt {

@@ -18314,7 +18314,7 @@ fn a_landing_lays_the_open_map_out_off_the_update_loop() {
         Overlay::ProjectImports,
     )));
     let says = iced_test::simulator(crate::ui::graph_map_view(&app))
-        .find("Laying out the map…")
+        .find("Laying out the graph…")
         .is_ok();
     assert!(says, "the Imports map drew the Calls map's layout");
     settle_layouts(&mut app, opened);

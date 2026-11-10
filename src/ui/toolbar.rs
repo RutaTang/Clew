@@ -865,13 +865,13 @@ pub(crate) fn strip_tool(
         ),
         StripTool::TypeMap => (
             Glyph::TypeMap,
-            tr!("Type Map"),
+            tr!("Type Graph"),
             caps(Action::TypeGraph),
             Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes)),
         ),
         StripTool::ProjectMaps => (
             Glyph::ProjectMaps,
-            tr!("Project Maps"),
+            tr!("Project Graphs"),
             caps(Action::ProjectMaps),
             Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectMaps)),
         ),

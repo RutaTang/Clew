@@ -638,7 +638,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         )
     } else {
         (
-            tr!("A map of the project's parts, written from its explanations."),
+            tr!("An overview of the project's parts, written from its explanations."),
             step(
                 tr!("Generate overview"),
                 Message::Overview(OverviewMsg::Generate),
@@ -704,7 +704,7 @@ fn module_map(app: &App) -> Option<Element<'_, Message>> {
         .filter(|l| !l.nodes.is_empty())?;
     Some(
         column![
-            text(tr!("Module map"))
+            text(tr!("Module graph"))
                 .size(ts::SUBTITLE)
                 .color(theme::fg_muted()),
             container(

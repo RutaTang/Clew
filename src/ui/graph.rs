@@ -79,7 +79,7 @@ pub(crate) fn graph_modal_frame<'a>(
     if graph_mode {
         header = header.push(icon_btn(
             Glyph::Recenter,
-            tr!("Fit the map"),
+            tr!("Fit the graph"),
             Message::Graph(GraphMsg::FitView),
         ));
     }
@@ -114,7 +114,7 @@ pub(crate) fn graph_modal_frame<'a>(
     }
     header = header
         .push(pair(
-            (tr!("Map").to_string(), graph_mode),
+            (tr!("Graph").to_string(), graph_mode),
             (tr!("List").to_string(), !graph_mode),
             Message::Graph(GraphMsg::OverlayViewToggle),
         ))
@@ -154,8 +154,8 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
     let title = match overlay {
         crate::Overlay::ProjectImports => tr!("Project Import Graph"),
         crate::Overlay::ProjectCalls => tr!("Project Call Graph"),
-        crate::Overlay::ProjectTypes => tr!("Project Type Map"),
-        crate::Overlay::ProjectMaps => tr!("Project Maps"),
+        crate::Overlay::ProjectTypes => tr!("Project Type Graph"),
+        crate::Overlay::ProjectMaps => tr!("Project Graphs"),
     };
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
@@ -393,7 +393,7 @@ pub(crate) fn graph_search_field(app: &App) -> Element<'_, Message> {
         )
     };
     row![
-        text_input(tr!("Find in the map"), &app.graph_search)
+        text_input(tr!("Find in the graph"), &app.graph_search)
             .id(super::graph_search_id())
             .on_input(|q| Message::Graph(GraphMsg::Search(q)))
             .on_submit(Message::Graph(GraphMsg::SearchStep(true)))
@@ -426,14 +426,14 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     // empty — say so, rather than "Nothing to show" (which reads as "no data").
     let empty_msg = if app.proj.project.is_none() {
         // Not "Nothing to show.", which reads as a project with nothing in it.
-        tr!("Open a project to see its map")
+        tr!("Open a project to see its graph")
     } else if app.proj.project_calls.building {
         tr!("Building call graph…")
     } else if app.scanning || app.proj.indexing {
         tr!("Indexing the project…")
     } else if app.proj.graph_layout_pending {
         // Laid out off the UI thread (`App::refresh_graph_layout`).
-        tr!("Laying out the map…")
+        tr!("Laying out the graph…")
     } else {
         tr!("Nothing to show.")
     };
@@ -2723,13 +2723,13 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
         } else if never_built && !app.server.is_up() {
             (
                 tr!(
-                    "The type map is drawn from the project's API index, which Clew's server builds — and it is not running."
+                    "The type graph is drawn from the project's API index, which Clew's server builds — and it is not running."
                 ),
                 false,
             )
         } else if never_built {
             (
-                tr!("The type map is drawn from the project's API index, not built yet."),
+                tr!("The type graph is drawn from the project's API index, not built yet."),
                 true,
             )
         } else {
@@ -2874,11 +2874,11 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     };
     let Some(at) = app.selected_map_index() else {
         return hint(if let Some(e) = &app.proj.maps_error {
-            tr!("Couldn't read the project's maps: {error}", error = e)
+            tr!("Couldn't read the project's graphs: {error}", error = e)
         } else if app.proj.maps_building || app.scanning {
-            tr!("Reading the project's maps…").into()
+            tr!("Reading the project's graphs…").into()
         } else {
-            tr!("No maps for this project.").into()
+            tr!("No graphs for this project.").into()
         });
     };
     let root = app
@@ -2907,7 +2907,7 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     ];
     if let Some(e) = &app.proj.maps_error {
         rows.push(
-            text(tr!("Could not read the maps: {error}", error = e))
+            text(tr!("Could not read the graphs: {error}", error = e))
                 .size(ts::CAPTION)
                 .color(theme::warning())
                 .into(),
