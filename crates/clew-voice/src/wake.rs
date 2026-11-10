@@ -273,8 +273,36 @@ enum Answer {
 /// One `clew-speak listen`, with the model loaded.
 pub struct Spotter {
     child: Child,
-    stdin: ChildStdin,
+    /// Lines for its stdin, written by a thread of their own: a spotter
+    /// that stops reading fills the pipe, and a write to a full pipe waits —
+    /// with the spotter held, and whoever stops it waiting too (the window,
+    /// turning waiting off). Never more than [`QUEUED`] wait to be written.
+    lines: mpsc::SyncSender<String>,
     answers: mpsc::Receiver<Result<Answer, String>>,
+}
+
+/// Most lines waiting to be written to a spotter: a second and more of
+/// audio it has not taken means it has fallen behind, and is let go.
+const QUEUED: usize = 8;
+
+/// A thread writing `lines` to `stdin` as they come, each flushed; it ends
+/// when the spotter stops taking them, or is let go.
+fn writer(mut stdin: ChildStdin) -> Result<mpsc::SyncSender<String>, String> {
+    let (lines, queued) = mpsc::sync_channel::<String>(QUEUED);
+    std::thread::Builder::new()
+        .name("clew-speak-listen-in".into())
+        .spawn(move || {
+            for line in queued {
+                if writeln!(stdin, "{line}")
+                    .and_then(|()| stdin.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .map_err(|e| format!("could not start the keyword spotter: {e}"))?;
+    Ok(lines)
 }
 
 impl Spotter {
@@ -322,14 +350,24 @@ impl Spotter {
                     }
                 }
             });
-        let mut spotter = Spotter {
-            child,
-            stdin,
-            answers,
-        };
         if let Err(e) = reader {
+            let _ = child.kill();
+            let _ = child.wait();
             return Err(format!("could not start the keyword spotter: {e}"));
         }
+        let lines = match writer(stdin) {
+            Ok(lines) => lines,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
+        let mut spotter = Spotter {
+            child,
+            lines,
+            answers,
+        };
         match spotter.answers.recv_timeout(READY_TIMEOUT) {
             Ok(Ok(Answer::Ready { .. })) => Ok(spotter),
             Ok(Ok(Answer::Error(e))) | Ok(Err(e)) => Err(e),
@@ -358,9 +396,7 @@ impl Spotter {
             let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
             let audio = base64::engine::general_purpose::STANDARD.encode(bytes);
             let request = serde_json::json!({ "hear": { "audio": audio } });
-            writeln!(self.stdin, "{request}")
-                .and_then(|()| self.stdin.flush())
-                .map_err(|e| format!("the keyword spotter stopped taking audio: {e}"))?;
+            self.send(request.to_string())?;
         }
         let mut heard = false;
         loop {
@@ -379,9 +415,7 @@ impl Spotter {
     /// Let go of what it has heard so far — and of what it has said of it
     /// and is not yet read: a phrase heard before is not heard after.
     pub fn reset(&mut self) -> Result<(), String> {
-        writeln!(self.stdin, "{}", serde_json::json!({ "reset": {} }))
-            .and_then(|()| self.stdin.flush())
-            .map_err(|e| format!("the keyword spotter stopped taking audio: {e}"))?;
+        self.send(serde_json::json!({ "reset": {} }).to_string())?;
         loop {
             match self.answers.recv_timeout(RESET_TIMEOUT) {
                 Ok(Ok(Answer::Reset {})) => return Ok(()),
@@ -401,6 +435,17 @@ impl Spotter {
     fn ended(&mut self) -> bool {
         !matches!(self.child.try_wait(), Ok(None))
     }
+
+    /// `line` queued for its stdin, never waited on: a spotter that has not
+    /// taken what came before has fallen behind.
+    fn send(&self, line: String) -> Result<(), String> {
+        self.lines.try_send(line).map_err(|e| match e {
+            mpsc::TrySendError::Full(_) => "the keyword spotter fell behind".to_string(),
+            mpsc::TrySendError::Disconnected(_) => {
+                "the keyword spotter stopped taking audio".to_string()
+            }
+        })
+    }
 }
 
 impl Drop for Spotter {
@@ -414,6 +459,9 @@ impl Drop for Spotter {
 pub struct Spotters {
     program: PathBuf,
     running: Mutex<Option<(Spotter, PathBuf)>>,
+    /// Asked to stop while the spotter was in use: whoever holds it lets it
+    /// go when done ([`Spotters::stop`]).
+    stopping: AtomicBool,
 }
 
 impl Spotters {
@@ -422,6 +470,15 @@ impl Spotters {
         Self {
             program,
             running: Mutex::new(None),
+            stopping: AtomicBool::new(false),
+        }
+    }
+
+    /// Let the spotter in `running` go if a stop was asked while it was in
+    /// use.
+    fn stop_if_asked(&self, running: &mut Option<(Spotter, PathBuf)>) {
+        if self.stopping.swap(false, Ordering::Relaxed) {
+            *running = None;
         }
     }
 
@@ -446,6 +503,8 @@ impl Spotters {
         drop(gone);
         let started = Spotter::start(&self.program, dir)?;
         let mut running = self.running();
+        // A stop asked of the one before is not this one's.
+        self.stopping.store(false, Ordering::Relaxed);
         // Another loaded meanwhile: that one runs, this one ends.
         if running.is_none() {
             *running = Some((started, dir.to_path_buf()));
@@ -473,6 +532,7 @@ impl Spotters {
         if result.is_err() {
             *running = None;
         }
+        self.stop_if_asked(&mut running);
         result.map(Some)
     }
 
@@ -484,12 +544,23 @@ impl Spotters {
         {
             *running = None;
         }
+        self.stop_if_asked(&mut running);
     }
 
     /// Let the model go: what is running ends, and with it its hold on the
-    /// model's files.
+    /// model's files. Never waited on: while the spotter is in use (a piece
+    /// being handed to it, a reset waiting for its answer), whoever has it
+    /// lets it go when done — the window turning waiting off froze until
+    /// then.
     pub fn stop(&self) {
-        let gone = self.running().take();
+        let gone = match self.running.try_lock() {
+            Ok(mut running) => running.take(),
+            Err(TryLockError::Poisoned(e)) => e.into_inner().take(),
+            Err(TryLockError::WouldBlock) => {
+                self.stopping.store(true, Ordering::Relaxed);
+                None
+            }
+        };
         drop(gone);
     }
 }
@@ -684,6 +755,61 @@ mod tests {
         // Stopped, it runs no more: loaded anew when asked.
         spotters.stop();
         assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(None));
+    }
+
+    /// A spotter that takes no more audio (stuck) is never waited on: what
+    /// is handed to it is queued, and once too much is, it has fallen
+    /// behind and is let go; stopping it while it is in use waits for
+    /// nothing either — the one using it lets it go when done.
+    #[cfg(unix)]
+    #[test]
+    fn a_stuck_spotter_is_never_waited_on() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("stand-in-stuck");
+        let program = dir.join("clew-speak");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\necho '{\"ready\":{\"keywords\":1}}'\nsleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spotters = Spotters::new(program);
+        spotters.warm(&dir).unwrap();
+        let started = std::time::Instant::now();
+        // A second of audio, over and over: far more than the pipe holds.
+        let piece = vec![0.25_f32; RATE as usize];
+        let mut fell_behind = None;
+        for _ in 0..64 {
+            match spotters.hear(&dir, &piece) {
+                Ok(_) => {}
+                Err(e) => {
+                    fell_behind = Some(e);
+                    break;
+                }
+            }
+        }
+        assert!(
+            fell_behind
+                .as_deref()
+                .is_some_and(|e| e.contains("fell behind")),
+            "{fell_behind:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "never waited on"
+        );
+        assert_eq!(spotters.hear(&dir, &piece), Ok(None), "let go of");
+        // Stopped while in use: at once, and let go of by the one using it.
+        spotters.warm(&dir).unwrap();
+        let held = spotters.running();
+        let asked = std::time::Instant::now();
+        spotters.stop();
+        assert!(asked.elapsed() < Duration::from_millis(500));
+        let mut held = held;
+        spotters.stop_if_asked(&mut held);
+        assert!(held.is_none(), "let go of when done");
+        drop(held);
+        drop(dir);
     }
 
     /// What is heard goes to the spotter in pieces of a fifth of a second,
