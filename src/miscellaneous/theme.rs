@@ -473,7 +473,8 @@ const CYBERPUNK_PAL: Palette = Palette {
     fg: rgb(0xe5e0ff),
     fg_bright: rgb(0xffffff),
     fg_muted: rgb(0x8b84b8),
-    dim: rgb(0x565080),
+    // Line numbers, captions: 3.8:1 on the void, where they read at 2.6.
+    dim: rgb(0x6e67a0),
     accent: rgb(0x00f0ff),
     warn: rgb(0xff2e6c),
     border: rgb(0x05030f),
@@ -2784,6 +2785,21 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Clew's own themes write their quiet words — the line numbers, a
+    /// caption — at 3.5:1 or more on their surface: Cyberpunk's were 2.6.
+    /// (The others' are their authors'.)
+    #[test]
+    fn clews_own_themes_quiet_words_read() {
+        for theme in THEMES
+            .iter()
+            .filter(|t| matches!(t.id, "clew-dark" | "clew-light" | "cyberpunk"))
+        {
+            let p = &theme.palette;
+            let ratio = contrast(p.dim, p.bg);
+            assert!(ratio >= 3.5, "{}: dim on bg is {ratio:.2}:1", theme.id);
         }
     }
 

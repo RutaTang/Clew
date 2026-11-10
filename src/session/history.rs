@@ -101,6 +101,10 @@ pub struct Visit {
     /// The symbol name recorded at this location, if any (stable across edits).
     pub label: Option<String>,
     pub depth: usize,
+    /// How far the trail indents it: one step under each fork above it, none
+    /// for a hop that simply followed the one before — a trail of seven hops
+    /// stepped seven levels in, its names cut to nothing.
+    pub indent: usize,
     pub is_current: bool,
     /// True at a fork — this node has more than one child branch.
     pub forks: bool,
@@ -362,8 +366,8 @@ impl History {
     // Iterative, not recursive: the tree is user-shaped (and its persisted
     // form repo-shaped), so its depth must never translate into stack depth.
     fn dfs(&self, id: usize, depth: usize, collapsed: &HashSet<usize>, out: &mut Vec<Visit>) {
-        let mut stack = vec![(id, depth)];
-        while let Some((id, depth)) = stack.pop() {
+        let mut stack = vec![(id, depth, 0)];
+        while let Some((id, depth, indent)) = stack.pop() {
             let n = &self.nodes[id];
             let is_collapsed = collapsed.contains(&id);
             out.push(Visit {
@@ -371,6 +375,7 @@ impl History {
                 loc: n.loc.clone(),
                 label: n.label.clone(),
                 depth,
+                indent,
                 is_current: self.current == Some(id),
                 forks: n.children.len() > 1,
                 has_children: !n.children.is_empty(),
@@ -380,8 +385,9 @@ impl History {
                 continue;
             }
             // Reversed so the LIFO stack emits children in their real order.
+            let branch = usize::from(n.children.len() > 1);
             for &c in n.children.iter().rev() {
-                stack.push((c, depth + 1));
+                stack.push((c, depth + 1, indent + branch));
             }
         }
     }
@@ -946,6 +952,38 @@ mod tests {
     /// Push without a symbol label (most tests don't care about re-anchoring).
     fn push(h: &mut History, name: &str, line: Option<usize>) {
         h.push(loc(name, line), None);
+    }
+
+    /// A hop that followed the one before stays in line; only a fork's
+    /// branches step in: seven hops in a row stood seven levels deep.
+    #[test]
+    fn the_trail_indents_at_forks_only() {
+        let mut h = History::default();
+        for name in ["a", "b", "c", "d"] {
+            push(&mut h, name, None);
+        }
+        // Back to b, then off another way: b forks into c and e.
+        h.back();
+        h.back();
+        push(&mut h, "e", None);
+        push(&mut h, "f", None);
+        let shape: Vec<(String, usize, usize)> = h
+            .flatten()
+            .iter()
+            .map(|v| (v.loc.path.display().to_string(), v.depth, v.indent))
+            .collect();
+        let row = |name: &str, depth, indent| (name.to_string(), depth, indent);
+        assert_eq!(
+            shape,
+            [
+                row("a", 0, 0),
+                row("b", 1, 0),
+                row("c", 2, 1),
+                row("d", 3, 1),
+                row("e", 2, 1),
+                row("f", 3, 1),
+            ]
+        );
     }
 
     #[test]

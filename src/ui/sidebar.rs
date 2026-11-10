@@ -235,15 +235,16 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                 ));
             }
             container(
-                container(super::escape_clears::EscapeClears::new(
-                    field,
+                super::escape_clears::EscapeClears::new(
+                    container(field)
+                        .height(Length::Fixed(FILTER_H))
+                        // The design's 10 inside its 1 px border, which here
+                        // takes no room of its own.
+                        .padding([1, 11])
+                        .style(theme::field(!app.file_filter.is_empty())),
                     Message::Window(WindowMsg::FileFilterEscaped),
-                ))
-                .height(Length::Fixed(FILTER_H))
-                // The design's 10 inside its 1 px border, which here takes
-                // no room of its own.
-                .padding([1, 11])
-                .style(theme::field(!app.file_filter.is_empty())),
+                )
+                .ringed(9.0),
             )
             .padding(Padding {
                 top: 0.0,
@@ -1518,10 +1519,21 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for v in &visits {
-        // Indent by tree depth, but cap it: past ~8 levels a deep branch would
-        // otherwise push the node (including the current one) off the panel's
-        // right edge. Beyond the cap, depth stops adding indent.
-        let indent = (v.depth.min(8) as f32) * 14.0;
+        // Indented under each fork above it — a hop that just followed the
+        // one before stays in line — and capped: past ~8 branches a deep one
+        // would push the node off the panel's right edge.
+        let indent = (v.indent.min(8) as f32) * 14.0;
+        // What is left for its name and file after the row's indent, chevron,
+        // mark and icon: cut with an ellipsis, where they were cut bare.
+        let room = (app.sidebar_width
+            - indent
+            - CHEVRON_W
+            - 10.0
+            - 12.0
+            - 3.0 * 6.0
+            - 14.0
+            - crate::ui::SCROLLBAR_W)
+            .max(0.0);
 
         // A collapse chevron for nodes with children (forks stand out in accent);
         // leaves get a fixed-width spacer so names still line up.
@@ -1560,6 +1572,11 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         // The row is the whole width, as the file tree's are — its depth
         // indents what is in it, not the row — and the place being read is
         // the row lit as the open file is, its name in the medium weight.
+        let name_font = if v.is_current {
+            crate::fonts::UI_MEDIUM
+        } else {
+            crate::fonts::UI
+        };
         let jump = button(
             row![
                 space().width(indent),
@@ -1567,19 +1584,25 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                 marker,
                 container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12),
                 container(column![
-                    text(loc_label(&v.loc, v.label.as_deref()))
-                        .size(ts::BODY)
-                        .font(if v.is_current {
-                            crate::fonts::UI_MEDIUM
-                        } else {
-                            crate::fonts::UI
-                        })
-                        .color(theme::fg())
-                        .wrapping(Wrapping::None),
-                    text(rel_of(app, &v.loc.path))
-                        .size(ts::CAPTION)
-                        .color(theme::dim())
-                        .wrapping(Wrapping::None),
+                    text(super::steady::elide_end(
+                        &loc_label(&v.loc, v.label.as_deref()),
+                        ts::BODY,
+                        name_font,
+                        room,
+                    ))
+                    .size(ts::BODY)
+                    .font(name_font)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
+                    text(super::steady::elide_start(
+                        &rel_of(app, &v.loc.path),
+                        ts::CAPTION,
+                        crate::fonts::UI,
+                        room,
+                    ))
+                    .size(ts::CAPTION)
+                    .color(theme::dim())
+                    .wrapping(Wrapping::None),
                 ])
                 .width(Fill)
                 .clip(true),

@@ -64,9 +64,11 @@ pub(crate) fn graph_modal_frame<'a>(
     // Two choices side by side, the one in effect lit: what each is, in
     // words — shapes for 2D and the map read as ◇ and ▽.
     let pair = |a: (String, bool), b: (String, bool), msg: Message| -> Element<'a, Message> {
+        // The chosen one filled in the accent, its word in the colour made
+        // to be read on it: the ink, on a cyan accent, was white on cyan.
         let seg = |(label, on): (String, bool)| {
             button(text(label.clone()).size(ts::SMALL).color(if on {
-                theme::fg()
+                theme::on_accent()
             } else {
                 theme::fg_muted()
             }))
@@ -94,7 +96,7 @@ pub(crate) fn graph_modal_frame<'a>(
         // added after it widened the button, and moved those beside it.
         header = header.push(chrome_tip(
             button(text(tr!("Heat")).size(ts::SMALL).color(if graph_heat {
-                theme::fg()
+                theme::on_accent()
             } else {
                 theme::fg_muted()
             }))

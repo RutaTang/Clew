@@ -9250,6 +9250,72 @@ fn escape_in_the_file_filter_clears_it() {
     assert!(sent.iter().any(cleared), "{sent:?}");
 }
 
+/// The Files filter's well lights its edge while the filter has the
+/// keyboard, as every field's does: reached by F6, it showed only a caret.
+#[test]
+fn the_files_filter_lights_its_edge_while_it_has_the_keyboard() {
+    use iced::advanced::renderer::Headless as _;
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    let size = Size::new(300.0, 600.0);
+    let field = sim_elem(super::sidebar::sidebar(&app))
+        .find(super::file_filter_id())
+        .expect("the filter is on screen")
+        .bounds();
+    let accent = crate::theme::accent();
+    // How near the well's top edge, over the field's middle, comes to the
+    // accent: the least distance of any of its pixels.
+    let nearest = |focus: bool| {
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(
+            super::sidebar::sidebar(&app),
+            size,
+            Cache::default(),
+            &mut renderer,
+        );
+        if focus {
+            let _ = run_operation::<()>(
+                &mut ui,
+                &renderer,
+                iced::advanced::widget::operation::focusable::focus(super::file_filter_id()),
+            );
+        }
+        let _ = ui.update(
+            &[Event::Window(window::Event::RedrawRequested(
+                std::time::Instant::now(),
+            ))],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut Vec::new(),
+        );
+        ui.draw(
+            &mut renderer,
+            &crate::theme::app_theme(),
+            &iced::advanced::renderer::Style {
+                text_color: iced::Color::BLACK,
+            },
+            mouse::Cursor::Unavailable,
+        );
+        let rgba = renderer.screenshot(
+            iced::Size::new(size.width as u32, size.height as u32),
+            1.0,
+            iced::Color::TRANSPARENT,
+        );
+        let x = field.center_x() as usize;
+        (field.y as usize - 10..field.y as usize)
+            .map(|y| {
+                let i = (y * size.width as usize + x) * 4;
+                let d = |c: u8, a: f32| (f32::from(c) / 255.0 - a).abs();
+                d(rgba[i], accent.r) + d(rgba[i + 1], accent.g) + d(rgba[i + 2], accent.b)
+            })
+            .fold(f32::MAX, f32::min)
+    };
+    let (rest, lit) = (nearest(false), nearest(true));
+    assert!(lit + 0.2 < rest, "lit {lit:.2}, at rest {rest:.2}");
+}
+
 /// A commit's day reads as a reader says it: the month and day, and the
 /// year when it is not this one.
 #[test]
