@@ -153,10 +153,11 @@ pub(crate) fn graph_modal_frame<'a>(
 pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element<'_, Message> {
     // Its list's rows counted from 1, as voice picks them.
     super::heard::list();
+    // Titled as the strip, the menu and the command bar name what opens it.
     let title = match overlay {
-        crate::Overlay::ProjectImports => tr!("Project Import Graph"),
-        crate::Overlay::ProjectCalls => tr!("Project Call Graph"),
-        crate::Overlay::ProjectTypes => tr!("Project Type Graph"),
+        crate::Overlay::ProjectImports => tr!("Import Graph"),
+        crate::Overlay::ProjectCalls => tr!("Call Graph"),
+        crate::Overlay::ProjectTypes => tr!("Type Graph"),
         crate::Overlay::ProjectMaps => tr!("Project Graphs"),
     };
     // The call graph can be refined to exact LSP edges; show its control/status.

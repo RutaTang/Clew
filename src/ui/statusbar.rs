@@ -146,7 +146,14 @@ fn branch_item(app: &App) -> Option<Element<'_, Message>> {
             commit = super::panes::short_sha(sha)
         ),
     };
+    // Set apart from the scan's state before it: "Up to date main" read
+    // as the branch's sync with its remote.
     let shown = row![
+        container(space().width(1).height(12)).style(|_: &iced::Theme| container::Style {
+            background: Some(theme::border().into()),
+            ..container::Style::default()
+        }),
+        space().width(6),
         glyph::icon(Glyph::Branch, theme::dim(), 12.0),
         status_text(head_shown(head)),
     ]

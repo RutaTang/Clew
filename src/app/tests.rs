@@ -14726,6 +14726,43 @@ fn the_trees_keys_go_back_when_it_goes() {
     assert_eq!(app.region, crate::app::keys::Region::Code);
 }
 
+/// Opening a project in a repository reads its branch by itself: the read
+/// rides out with the opening, and its answer lands in the status bar.
+#[test]
+fn opening_a_project_reads_its_branch() {
+    let root = fixture_project("git-head-open");
+    let git = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(["-c", "user.name=clew", "-c", "user.email=clew@test"])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(done.status.success(), "git {args:?}: {done:?}");
+    };
+    git(&["init", "-q", "-b", "trunk"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "one"]);
+    let mut app = blank_app();
+    app.scanning = true;
+    app.pending_scan_root = Some(root.clone());
+    let opened = app.update(Message::Project(ProjectMsg::ScanDone {
+        stamp: app.transport_stamp(),
+        result: fs_scan::scan(root.clone()),
+        report: Default::default(),
+    }));
+    assert!(app.proj.head_loading, "asked as it opened");
+    for m in run_task(opened) {
+        if matches!(m, Message::Project(ProjectMsg::HeadRead { .. })) {
+            let _ = app.update(m);
+        }
+    }
+    assert_eq!(
+        app.proj.head,
+        Some(clew_protocol::HeadName::Branch("trunk".into()))
+    );
+}
+
 /// What HEAD is, read for the status bar as the project opens, anew when
 /// the window comes back to the front or a file changes, one read at a
 /// time; outside a repository, no branch — not the one read before.

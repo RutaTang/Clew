@@ -2581,7 +2581,7 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
     }
 
     // Read-only reading motions (not part of the customizable keymap).
-    let motions: [(&str, &str); 17] = [
+    let motions: [(&str, &str); 19] = [
         (tr!("Move left / down / up / right"), "h j k l   ← ↓ ↑ →"),
         (tr!("Word forward / back"), "w   b"),
         (tr!("Line start / end"), "0   $"),
@@ -2596,8 +2596,13 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
         (tr!("Open all folds"), "zR"),
         (tr!("Close all folds"), "zM"),
         (tr!("Time Travel: older / newer commit"), "⌘←   ⌘→"),
-        (tr!("Next / previous field"), "tab   ⇧tab"),
-        (tr!("Code / sidebar / Ask"), "F6   ⇧F6"),
+        (tr!("Next / previous control or field"), "tab   ⇧tab"),
+        (tr!("Press the control the ring is on"), "return   space"),
+        (tr!("Code / sidebar / file tree / Ask"), "F6   ⇧F6"),
+        (
+            tr!("File tree: walk it, open a folder / close it"),
+            "↑ ↓ → ←   j k l h",
+        ),
         (tr!("Close the top panel / clear selection"), "esc"),
     ];
     let vim = motions
