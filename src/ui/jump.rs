@@ -32,9 +32,14 @@ const LETTERS: &[u8] = b"asdfjklghqwertyuiopzxcvbnm";
 /// A badge's text size.
 const BADGE_SIZE: f32 = 10.0;
 
-/// How far a badge stands out over its control's top-left corner, so
-/// that a small icon under it still shows.
+/// How far a badge stands out left of its control's left edge.
 const BADGE_OUT: f32 = 4.0;
+
+/// How much of a badge's height comes down over its control: the rest
+/// stands above the control's top edge, over its padding and what is above
+/// it. Set on the corner 4 in, a badge hid the first letters of a crumb, a
+/// status bar's "Python", and the icons of the sidebar's views.
+const BADGE_OVER: f32 = 5.0;
 
 /// What the view being built marks: whether the codes are up, the layer
 /// it is in, and how many marks each layer has.
@@ -418,20 +423,27 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Mark<'_> {
     }
 }
 
+/// Where the badge of a `letters`-long code goes for the control at `at`:
+/// on its top-left corner, mostly above it — only [`BADGE_OVER`] of it
+/// down over the control — and inside `room`, what of the window is seen.
+fn badge_bounds(at: Rectangle, room: Rectangle, letters: usize) -> Rectangle {
+    let width = (letters as f32 * BADGE_SIZE * 0.62 + 6.0).round();
+    let height = (BADGE_SIZE + 4.0).round();
+    Rectangle {
+        x: (at.x - BADGE_OUT).max(room.x).round(),
+        y: (at.y + BADGE_OVER - height).max(room.y).round(),
+        width,
+        height,
+    }
+}
+
 /// A code's badge on the top-left corner of `at`, standing out over it,
 /// within `room` (what of the window is seen), the letters already typed
 /// dimmed.
 fn badge(renderer: &mut iced::Renderer, at: Rectangle, room: Rectangle, code: &str, typed: usize) {
     let palette = crate::theme::active();
-    let letters = code.chars().count() as f32;
-    let width = (letters * BADGE_SIZE * 0.62 + 6.0).round();
-    let height = (BADGE_SIZE + 4.0).round();
-    let bounds = Rectangle {
-        x: (at.x - BADGE_OUT).max(room.x).round(),
-        y: (at.y - BADGE_OUT).max(room.y).round(),
-        width,
-        height,
-    };
+    let bounds = badge_bounds(at, room, code.chars().count());
+    let height = bounds.height;
     let room = Rectangle {
         x: bounds.x - 1.0,
         y: bounds.y - 1.0,
@@ -493,6 +505,20 @@ fn badge(renderer: &mut iced::Renderer, at: Rectangle, room: Rectangle, code: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A badge comes down over its control by no more than a sliver —
+    /// most of it stands above — and stays in the window: pinned to its
+    /// top, it is as low as it must be, no lower.
+    #[test]
+    fn a_badge_stands_above_what_it_marks() {
+        let room = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let at = Rectangle::new(Point::new(100.0, 100.0), Size::new(32.0, 32.0));
+        let b = badge_bounds(at, room, 2);
+        assert!(b.y + b.height - at.y <= BADGE_OVER, "{b:?}");
+        assert!(b.x < at.x && b.y < at.y, "{b:?}");
+        let top = Rectangle::new(Point::new(100.0, 0.0), Size::new(32.0, 20.0));
+        assert_eq!(badge_bounds(top, room, 2).y, 0.0, "kept in the window");
+    }
 
     #[test]
     fn codes_are_as_short_as_tell_the_marks_apart() {

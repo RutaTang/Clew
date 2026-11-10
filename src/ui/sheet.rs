@@ -172,6 +172,37 @@ fn file_tools_short(app: &App) -> bool {
     room - TITLE_GAP / 2.0 - file_tools_w(false) < title
 }
 
+/// The open file's `folder` as the header has room to show it beside
+/// its `name` and the tools: whole, cut short from its start ("…/tests"),
+/// or not at all when even "…" has no room.
+fn folder_shown(app: &App, name: &str, folder: &str) -> String {
+    if folder.is_empty() {
+        return String::new();
+    }
+    let short = file_tools_short(app);
+    let markdown = app.active_viewer().is_some_and(|v| v.md.is_some());
+    let toggle = if markdown {
+        file_tool_w(tr!("Rendered"), false).max(file_tool_w(tr!("Source"), false)) + TITLE_SPACING
+    } else {
+        0.0
+    };
+    let room = header_right(app)
+        - HEADER_PAD_RIGHT
+        - (sheet_content_left(app) + HEADER_PAD_X)
+        - TITLE_GAP
+        - file_tools_w(short)
+        - text_width(name, ts::EMPHASIS, TITLE_FONT)
+        - TITLE_SPACING
+        - toggle;
+    if room < text_width("…", ts::BODY, crate::fonts::UI) {
+        return String::new();
+    }
+    super::steady::elide_start(folder, ts::BODY, crate::fonts::UI, room)
+}
+
+/// The room between the name, its folder and the Markdown toggle.
+const TITLE_SPACING: f32 = 8.0;
+
 /// The face of the file's name over the sheet: a title's.
 const TITLE_FONT: iced::Font = crate::fonts::titled(crate::fonts::UI_SEMIBOLD);
 /// The face of what the header's tools say: in a control.
@@ -399,6 +430,10 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     };
     let caps = |action: Action| Some(app.keymap.chord(action).caps());
     let (name, folder) = title_parts(v);
+    // The folder, in the room the name and the tools leave it — cut short
+    // with "…" where it does not fit: the row clipped it mid-word ("test"
+    // for "tests", in French, whose tools take more room).
+    let folder = folder_shown(app, &name, &folder);
     // The design sets the name and its folder a line high (`line-height:
     // 1`).
     let mut title = row![ts::set_in_line(

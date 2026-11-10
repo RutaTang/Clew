@@ -12208,6 +12208,47 @@ fn the_view_menus_inert_row_says_why() {
     assert!(!shows(&mut sim, why));
 }
 
+/// The header's folder tag is cut short with "…" where the tools leave
+/// it too little room — never clipped under them mid-word ("test" for
+/// "tests", in French, whose tools are longer).
+#[test]
+fn the_headers_folder_is_cut_with_an_ellipsis_not_clipped() {
+    use crate::i18n::{Lang, with_lang};
+    with_lang(Lang::Fr, || {
+        let mut app = reader_app();
+        app.show_left_sidebar = true;
+        app.show_right_panel = true;
+        app.proj.panes[0].as_mut().unwrap().rel = "tests/integration/test_pricing.py".into();
+        let mut cut = false;
+        for width in (760..=1280).rev().step_by(20) {
+            app.window_width = width as f32;
+            let mut sim = sim_of(&app);
+            let Some(tools) = text_at(&mut sim, |t| t == "Expliquer", 0) else {
+                continue;
+            };
+            let full = text_at(&mut sim, |t| t == "tests/integration", 0);
+            let elided = text_at(
+                &mut sim,
+                |t| {
+                    t.strip_prefix('…')
+                        .is_some_and(|rest| "tests/integration".ends_with(rest))
+                },
+                0,
+            );
+            cut |= elided.is_some();
+            let Some(folder) = full.or(elided) else {
+                continue;
+            };
+            assert!(
+                folder.x + folder.width <= tools.x,
+                "{width}: the folder {folder:?} runs under the tools at {}",
+                tools.x
+            );
+        }
+        assert!(cut, "some width cut the folder short");
+    });
+}
+
 /// A file's card has no way to a function's calls: the margin's Calls tab
 /// follows the function the caret is in, and from a file's card — a
 /// README's, a schema's — it said only to move the cursor into one.
