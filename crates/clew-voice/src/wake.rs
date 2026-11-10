@@ -552,11 +552,28 @@ mod tests {
             .collect()
     }
 
-    fn temp_dir(tag: &str) -> PathBuf {
+    /// A folder of the test's own, removed when the test is done with it —
+    /// failed or not.
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(tag: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!("clew-wake-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     /// The files it runs from are taken out of the archive, checked, and
@@ -613,7 +630,7 @@ mod tests {
     /// phrase is found a little after it is said — and a reset answered as
     /// one, after what came before it.
     #[cfg(unix)]
-    fn stand_in(tag: &str) -> PathBuf {
+    fn stand_in(tag: &str) -> (Scratch, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let dir = temp_dir(tag);
         let program = dir.join("clew-speak");
@@ -630,7 +647,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        program
+        (dir, program)
     }
 
     /// The phrase heard before a reset is not heard after it, though its
@@ -639,7 +656,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_phrase_heard_before_a_reset_is_not_heard_after() {
-        let program = stand_in("stand-in-reset");
+        let (_scratch, program) = stand_in("stand-in-reset");
         let dir = program.parent().unwrap().to_path_buf();
         let spotters = Spotters::new(program);
         assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(None), "not loaded");
