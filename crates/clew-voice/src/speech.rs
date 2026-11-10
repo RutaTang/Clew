@@ -377,7 +377,8 @@ pub fn remove(store: &Store, model: &VoiceModel) -> io::Result<()> {
 const RETIRED: &[&str] = &["kokoro-zh"];
 
 /// Remove what a voice Clew no longer offers left in `store` — a folder of
-/// its `speech/` named in [`RETIRED`] — and say how many went.
+/// its `speech/` named among the retired voices (`RETIRED`) — and say how
+/// many went.
 pub fn remove_retired(store: &Store) -> usize {
     let Ok(entries) = fs::read_dir(store.dir().join("speech")) else {
         return 0;
