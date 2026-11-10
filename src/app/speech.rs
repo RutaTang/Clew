@@ -681,8 +681,19 @@ impl App {
     /// bytes — a step's remark before its tool calls taken back out
     /// (`AskMsg::DraftEnd`): what was ready of the remark is said through,
     /// as a person finishes what they were saying, and reading goes on from
-    /// where the answer now ends.
-    pub(crate) fn answer_cut_back(&mut self, stream: u64, from: usize) -> Task<Message> {
+    /// where the answer now ends. A step asked `again` writes the same text
+    /// anew: reading keeps its place, and goes on in the new text from the
+    /// sentence the first try had come to — it was said through, then said
+    /// again from its start.
+    pub(crate) fn answer_cut_back(
+        &mut self,
+        stream: u64,
+        from: usize,
+        again: bool,
+    ) -> Task<Message> {
+        if again {
+            return Task::none();
+        }
         let Some(turn) = self.proj.ask_turns.iter().find(|t| t.stream == stream) else {
             return Task::none();
         };

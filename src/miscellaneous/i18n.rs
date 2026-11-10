@@ -2111,9 +2111,11 @@ mod tests {
     fn side_by_side_labels_differ_in_every_language() {
         for lang in Lang::ALL {
             with_lang(lang, || {
-                for (a, b) in [("Explain", "Explanations")] {
-                    assert_ne!(lookup(a), lookup(b), "{lang:?}: {a} / {b}");
-                }
+                assert_ne!(
+                    lookup("Explain"),
+                    lookup("Explanations"),
+                    "{lang:?}: Explain / Explanations"
+                );
             });
         }
     }

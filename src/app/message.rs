@@ -1276,11 +1276,13 @@ pub enum AskMsg {
         text: String,
     },
     /// The text since the last [`AskMsg::Draft`] began was the answer
-    /// (`kept`), or a remark before tool calls, taken back out of it.
+    /// (`kept`), or a remark before tool calls, taken back out of it — or
+    /// is taken back as its step is asked `again`.
     DraftEnd {
         stamp: Stamp,
         stream: u64,
         kept: bool,
+        again: bool,
     },
     /// The streamed answer on `stream` ended — finished, stopped on request,
     /// or failed. Identified like [`AskMsg::Delta`].

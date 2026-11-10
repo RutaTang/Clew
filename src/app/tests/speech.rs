@@ -333,7 +333,7 @@ fn a_steps_text_is_said_as_it_is_written() {
         settle(app, task);
     };
     let draft_end = |app: &mut App, kept: bool| {
-        let task = app.on_ask_draft_end(1, kept);
+        let task = app.on_ask_draft_end(1, kept, false);
         settle(app, task);
     };
     // A remark, then its tool calls.
@@ -367,6 +367,38 @@ fn a_steps_text_is_said_as_it_is_written() {
     );
     ended(&mut app, 1, StreamOutcome::Done);
     assert_eq!(voice.texts().last().map(String::as_str), Some("And"));
+}
+
+/// A step cut at its length is asked again, and writes the same text anew:
+/// what the first try said is not said again, nor its unfinished sentence
+/// said through — reading goes on from where the first try had come to.
+#[test]
+fn a_step_asked_again_is_not_said_twice() {
+    let (mut app, voice, _output) = speech_app("speech-again");
+    asked(&mut app, 1, true);
+    let draft = |app: &mut App, text: &str| {
+        let task = app.on_ask_draft(1, text.into());
+        settle(app, task);
+    };
+    draft(&mut app, "The total adds tax last. It rounds to");
+    assert_eq!(voice.texts(), ["The total adds tax last."]);
+    let task = app.on_ask_draft_end(1, false, true);
+    settle(&mut app, task);
+    assert_eq!(app.proj.ask_turns[0].answer_md, "", "taken back");
+    assert_eq!(
+        voice.texts(),
+        ["The total adds tax last."],
+        "nothing said through"
+    );
+    // Asked again: the same text, whole this time.
+    draft(&mut app, "The total adds tax last. It rounds to cents. And");
+    let task = app.on_ask_draft_end(1, true, false);
+    settle(&mut app, task);
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert_eq!(
+        voice.texts(),
+        ["The total adds tax last.", "It rounds to cents.", "And"]
+    );
 }
 
 /// Each sentence is said in its own language: French as French, Korean and

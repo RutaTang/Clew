@@ -909,9 +909,13 @@ impl App {
                     let _ = tx.send(AgentPiece::Draft(text));
                 }
             }
-            Event::AgentDraftEnd { stream, kept } => {
+            Event::AgentDraftEnd {
+                stream,
+                kept,
+                again,
+            } => {
                 if let Some(tx) = self.proj.link.agent_streams.get(&stream) {
-                    let _ = tx.send(AgentPiece::DraftEnd(kept));
+                    let _ = tx.send(AgentPiece::DraftEnd { kept, again });
                 }
             }
             Event::AgentDone { stream, outcome } => {

@@ -128,7 +128,11 @@ pub use payload::*;
 /// then is kept as the answer or dropped as a remark before tool calls
 /// ([`Event::AgentDraftEnd`]): an answer given in an ordinary step is shown,
 /// and said aloud, as it comes rather than once it is whole.
-pub const PROTOCOL_VERSION: u32 = 22;
+///
+/// v23: [`Event::AgentDraftEnd`] says when the step is asked `again` (cut
+/// at its length): its text comes anew, and reading it aloud goes on from
+/// where the first try had come to — it was said through, then said again.
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -1347,8 +1351,13 @@ pub enum Event {
     /// The step's text so far ([`Event::AgentDraft`]) was the answer —
     /// `kept`, and the answer goes on from it — or a remark before tool
     /// calls, to be taken back out of the answer (a notification). Also
-    /// sent, not kept, before a step is asked again.
-    AgentDraftEnd { stream: u64, kept: bool },
+    /// sent, not kept, before a step is asked `again`: the same text comes
+    /// anew, and what of it was said is not said again.
+    AgentDraftEnd {
+        stream: u64,
+        kept: bool,
+        again: bool,
+    },
     /// An agent turn ended (a notification), and how.
     AgentDone { stream: u64, outcome: StreamOutcome },
     /// A one-line notice for the status bar about the connection's background

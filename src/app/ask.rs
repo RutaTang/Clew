@@ -1111,11 +1111,12 @@ impl App {
                             }),
                             false,
                         ),
-                        AgentPiece::DraftEnd(kept) => (
+                        AgentPiece::DraftEnd { kept, again } => (
                             Message::Ask(AskMsg::DraftEnd {
                                 stamp: stamp.clone(),
                                 stream: stream_id,
                                 kept,
+                                again,
                             }),
                             false,
                         ),
@@ -1195,7 +1196,12 @@ impl App {
     /// or a remark before its tool calls: what was said of it is said
     /// through, and it is taken back out of the answer, whose tool calls
     /// show what it went on to do.
-    pub(crate) fn on_ask_draft_end(&mut self, stream: u64, kept: bool) -> Task<Message> {
+    pub(crate) fn on_ask_draft_end(
+        &mut self,
+        stream: u64,
+        kept: bool,
+        again: bool,
+    ) -> Task<Message> {
         let Some(idx) = self
             .proj
             .ask_turns
@@ -1210,7 +1216,7 @@ impl App {
         if kept {
             return Task::none();
         }
-        let said = self.answer_cut_back(stream, from);
+        let said = self.answer_cut_back(stream, from, again);
         let turn = &mut self.proj.ask_turns[idx];
         if from <= turn.answer_md.len() && turn.answer_md.is_char_boundary(from) {
             turn.answer_md.truncate(from);
@@ -1803,7 +1809,12 @@ impl App {
             } => self.on_ask_context_ready(stream, messages),
             AskMsg::Delta { stream, text, .. } => self.on_ask_delta(stream, text),
             AskMsg::Draft { stream, text, .. } => self.on_ask_draft(stream, text),
-            AskMsg::DraftEnd { stream, kept, .. } => self.on_ask_draft_end(stream, kept),
+            AskMsg::DraftEnd {
+                stream,
+                kept,
+                again,
+                ..
+            } => self.on_ask_draft_end(stream, kept, again),
             AskMsg::AgentStepped { stream, step, .. } => self.on_agent_stepped(stream, step),
             AskMsg::AgentTurnEnded {
                 stream, outcome, ..

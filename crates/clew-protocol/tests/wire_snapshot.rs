@@ -1456,6 +1456,7 @@ fn notification_samples() -> Vec<Event> {
         Event::AgentDraftEnd {
             stream: 1,
             kept: false,
+            again: true,
         },
         // ...and one on the agent's, which shares the type.
         Event::AgentDone {

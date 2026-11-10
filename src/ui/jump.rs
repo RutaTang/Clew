@@ -76,14 +76,16 @@ impl Reach {
     }
 }
 
+/// Each window's codes on screen, with what each does.
+type Dealt = HashMap<Option<window::Id>, Vec<(String, Message)>>;
+
 thread_local! {
     static BUILD: RefCell<Build> = RefCell::new(Build::default());
     static DEALING: RefCell<Option<Dealing>> = const { RefCell::new(None) };
     /// The codes on screen in each window, dealt when it was last drawn.
     /// Kept apart: another window drawn after this one, with codes or
     /// without, leaves this one's as they are.
-    static DEALT: RefCell<HashMap<Option<window::Id>, Vec<(String, Message)>>> =
-        RefCell::new(HashMap::new());
+    static DEALT: RefCell<Dealt> = RefCell::new(HashMap::new());
 }
 
 /// The view is built afresh: with the codes up (`on`) or not.

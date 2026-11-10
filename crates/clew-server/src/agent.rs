@@ -429,12 +429,12 @@ impl Turn<'_> {
                             self.keep_draft(&out.text);
                             return self.finish_answer(out, STEP_TOKENS_CEIL, false);
                         }
-                        self.end_draft(false);
+                        self.end_draft(false, false);
                         self.retry_empty(&mut empty_retried, &out)?;
                         continue;
                     }
                     // A remark before its tool calls: not the answer.
-                    self.end_draft(false);
+                    self.end_draft(false, false);
                     if out.truncated {
                         // Truncated even at the ceiling, with calls attached:
                         // their arguments may be half-written — never run them.
@@ -489,7 +489,7 @@ impl Turn<'_> {
                         // The tokens already went out as they arrived.
                         return self.finish_answer(out, ANSWER_TOKENS, true);
                     }
-                    self.end_draft(false);
+                    self.end_draft(false, false);
                     if out.calls.is_empty() {
                         self.retry_empty(&mut empty_retried, &out)?;
                         continue;
@@ -548,8 +548,8 @@ impl Turn<'_> {
             )?;
             if out.truncated && tokens < STEP_TOKENS_CEIL {
                 self.check_stop()?;
-                // Asked again: what it wrote is taken back.
-                self.end_draft(false);
+                // Asked again: what it wrote is taken back, and comes anew.
+                self.end_draft(false, true);
                 tokens = tokens.saturating_mul(2).min(STEP_TOKENS_CEIL);
                 continue;
             }
@@ -596,13 +596,14 @@ impl Turn<'_> {
     }
 
     /// What the step wrote ([`Event::AgentDraft`]) was the answer (`kept`),
-    /// or a remark before its tool calls. Nothing is said of a step that
-    /// wrote nothing.
-    fn end_draft(&self, kept: bool) {
+    /// or a remark before its tool calls — or is taken back as the step is
+    /// asked `again`. Nothing is said of a step that wrote nothing.
+    fn end_draft(&self, kept: bool, again: bool) {
         if self.drafted.replace(false) {
             (self.notify)(Event::AgentDraftEnd {
                 stream: self.stream,
                 kept,
+                again,
             });
         }
     }
@@ -611,7 +612,7 @@ impl Turn<'_> {
     /// or — an endpoint that sent none of it as it came — sent now.
     fn keep_draft(&self, text: &str) {
         if self.drafted.get() {
-            self.end_draft(true);
+            self.end_draft(true, false);
         } else {
             self.deliver(text);
         }
@@ -2891,6 +2892,9 @@ mod tests {
         remarks: Vec<String>,
         /// How many pieces of step text went out as they were written.
         drafts: usize,
+        /// How many drafts were taken back because the step was asked
+        /// again.
+        asked_again: usize,
         /// How the one `AgentDone` said the turn ended.
         done: Option<StreamOutcome>,
     }
@@ -2953,10 +2957,13 @@ mod tests {
                     outcome.drafts += 1;
                     draft.push_str(&text);
                 }
-                Event::AgentDraftEnd { kept, .. } => {
+                Event::AgentDraftEnd { kept, again, .. } => {
+                    assert!(!(kept && again), "a draft asked again is never kept");
                     let draft = std::mem::take(&mut draft);
                     if kept {
                         outcome.answer.push_str(&draft);
+                    } else if again {
+                        outcome.asked_again += 1;
                     } else {
                         outcome.remarks.push(draft);
                     }
@@ -3270,6 +3277,10 @@ mod tests {
         let provider = Provider::new((0..3 + llm::CARRY_ONS).map(|_| cut()).collect());
         let outcome = turn(&dir, &provider, Vec::new());
         assert_eq!(outcome.done, Some(StreamOutcome::Done), "{outcome:?}");
+        // Each re-ask with a bigger budget takes back what the step wrote,
+        // saying it comes again — not that it was a remark before tools.
+        assert_eq!(outcome.asked_again, 2, "{outcome:?}");
+        assert!(outcome.remarks.is_empty(), "{outcome:?}");
         assert!(outcome.answer.starts_with("It returns"));
         assert!(
             outcome.answer.ends_with(llm::TRUNCATED_NOTE),

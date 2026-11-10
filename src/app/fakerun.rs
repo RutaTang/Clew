@@ -325,7 +325,7 @@ impl App {
                             stream,
                             text,
                         },
-                        AgentPiece::DraftEnd(kept) => FakeMsg::DraftEnd {
+                        AgentPiece::DraftEnd { kept, .. } => FakeMsg::DraftEnd {
                             stamp,
                             stream,
                             kept,

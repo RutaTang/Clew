@@ -617,8 +617,12 @@ pub enum AgentPiece {
     Delta(String),
     /// Text a step is writing, as it comes (`Event::AgentDraft`).
     Draft(String),
-    /// That text was the answer (`true`), or a remark before tool calls.
-    DraftEnd(bool),
+    /// That text was the answer (`kept`), or a remark before tool calls —
+    /// or is taken back as its step is asked `again`.
+    DraftEnd {
+        kept: bool,
+        again: bool,
+    },
     /// The turn ended, and how (see [`ChatStreamPiece::Done`]).
     Done(clew_protocol::StreamOutcome),
 }

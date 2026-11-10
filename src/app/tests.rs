@@ -22354,6 +22354,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             stream: 1,
             kept: false,
+            again: false,
         }),
         Message::Ask(AskMsg::StreamEnded {
             stamp: s(),

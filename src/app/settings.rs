@@ -659,6 +659,14 @@ impl App {
     }
 }
 
+/// The Settings page's scroll back at its top.
+fn settings_to_top() -> Task<Message> {
+    iced::widget::operation::scroll_to(
+        crate::ui::settings_scroll_id(),
+        iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -882,12 +890,4 @@ mod tests {
             "the user's bytes are theirs to fix"
         );
     }
-}
-
-/// The Settings page's scroll back at its top.
-fn settings_to_top() -> Task<Message> {
-    iced::widget::operation::scroll_to(
-        crate::ui::settings_scroll_id(),
-        iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
-    )
 }
