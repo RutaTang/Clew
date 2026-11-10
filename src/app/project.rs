@@ -1021,8 +1021,10 @@ impl App {
             return self.show_explanation(node);
         }
         if !self.proj.expanded.remove(&rel) {
-            self.proj.expanded.insert(rel);
+            self.proj.expanded.insert(rel.clone());
         }
+        // The keyboard rests where the pointer last pressed.
+        self.proj.tree_cursor = Some(rel);
         Task::none()
     }
 

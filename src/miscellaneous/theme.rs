@@ -2554,6 +2554,19 @@ pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::St
     }
 }
 
+/// A row of the Files view: a [`list_row`], and, where the keyboard rests
+/// (`cursor`), the accent edge a field has while it has the keyboard.
+pub fn tree_row(selected: bool, cursor: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut style = list_row(selected)(theme, status);
+        if cursor {
+            style.border.color = with_alpha(accent(), 0.65);
+            style.border.width = 1.0;
+        }
+        style
+    }
+}
+
 /// A row of the finder and the command bar: a [`list_row`], its corners
 /// rounder.
 pub fn finder_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {

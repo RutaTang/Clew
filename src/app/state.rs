@@ -1278,6 +1278,8 @@ pub struct App {
     pub show_views_menu: bool,
     /// What the Files view is narrowed to; empty shows the whole tree.
     pub file_filter: String,
+    /// Whether the Files view's tree has the keyboard (`ui::tree_keys`).
+    pub tree_focused: bool,
     /// The customizable command keymap (loaded from the global config).
     pub keymap: keymap::Keymap,
     /// The action currently awaiting a new chord (capture mode), if any.
@@ -1956,6 +1958,10 @@ pub struct ProjectSession {
     /// What the working tree changes against HEAD, by root-relative path:
     /// the letter the Files view marks each with (`GitOp::WorkingStatus`).
     pub git_status: HashMap<String, char>,
+    /// The row of the Files view the keyboard rests on, while its tree has
+    /// the keyboard (`ui::tree_keys`); `None` rests it on the file being
+    /// read, or the first row.
+    pub tree_cursor: Option<String>,
     /// Whether the working tree may have changed since `git_status` was
     /// read: a new project, a file changed, the window back in front (a
     /// commit made elsewhere).
@@ -2381,6 +2387,7 @@ impl Default for ProjectSession {
             git_status: HashMap::new(),
             git_status_stale: true,
             git_status_loading: false,
+            tree_cursor: None,
             head: None,
             head_stale: true,
             head_loading: false,

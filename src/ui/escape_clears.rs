@@ -20,6 +20,9 @@ pub(crate) struct EscapeClears<'a, Message> {
     /// The corner radius of the edge lit while the field has the keyboard,
     /// when its content is the field's well ([`Self::ringed`]).
     ring: Option<f32>,
+    /// What ↓ sends while the field has the keyboard, if anything
+    /// ([`Self::on_down`]).
+    on_down: Option<Message>,
 }
 
 impl<'a, Message> EscapeClears<'a, Message> {
@@ -28,7 +31,15 @@ impl<'a, Message> EscapeClears<'a, Message> {
             content: content.into(),
             on_escape,
             ring: None,
+            on_down: None,
         }
+    }
+
+    /// ↓ while the field has the keyboard sends `message`, and goes no
+    /// further: the list under the field takes the keyboard from it.
+    pub(crate) fn on_down(mut self, message: Option<Message>) -> Self {
+        self.on_down = message;
+        self
     }
 
     /// Its content is the field's whole well, rounded by `radius`: its edge
@@ -171,6 +182,29 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for EscapeClea
             );
             if focused.0 {
                 shell.publish(self.on_escape.clone());
+            }
+        }
+        if let (
+            Some(down),
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(key::Named::ArrowDown),
+                modifiers,
+                ..
+            }),
+        ) = (&self.on_down, event)
+            && !(modifiers.command() || modifiers.control() || modifiers.alt())
+        {
+            let mut focused = AnyFocused(false);
+            self.content.as_widget_mut().operate(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                &mut focused,
+            );
+            if focused.0 {
+                shell.publish(down.clone());
+                shell.capture_event();
+                return;
             }
         }
         self.content.as_widget_mut().update(

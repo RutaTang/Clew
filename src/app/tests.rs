@@ -6657,6 +6657,9 @@ fn remote_project_never_touches_local_state_or_files() {
         },
     );
     assert!(app.proj.project.is_some());
+    // Nor the branch, which this stand-in server answers no more than the
+    // marks.
+    app.proj.head_stale = false;
     // The planted local .clew state was not read…
     assert!(
         app.proj.bookmarks.is_empty(),
@@ -14611,6 +14614,92 @@ fn the_files_view_learns_what_the_working_tree_changes() {
     assert!(app.sync_git_status().is_some(), "read as it shows");
 }
 
+/// The Files view's tree walked by the keyboard: ↑ ↓ from row to row, →
+/// opening a folder and stepping into it, ← closing it and stepping out,
+/// Home and End, Space showing a file with the keyboard still in the tree,
+/// Enter reading it, Esc giving the keyboard back to the code, a letter
+/// narrowing the tree — and, narrowed, ↓ from the filter resting on the
+/// first file it lists.
+#[test]
+fn the_keyboard_walks_the_files_tree() {
+    use crate::app::message::TreeKey;
+    let mut app = scanned_app("tree-keys");
+    app.show_left_sidebar = true;
+    app.sidebar = SidebarTab::Files;
+    app.proj.expanded.clear();
+    let key = |app: &mut App, k: TreeKey| {
+        let task = app.update(Message::Window(WindowMsg::TreeKey(k)));
+        for m in run_task(task) {
+            let _ = app.update(m);
+        }
+    };
+    let at = |app: &App| app.tree_cursor_rel();
+    assert_eq!(at(&app), None, "the tree does not have the keyboard");
+    app.code_focused = true;
+    let _ = app.update(Message::Window(WindowMsg::TreeFocused(true)));
+    assert!(!app.code_focused, "the keys are the tree's");
+    // No file read yet: the first row.
+    assert_eq!(at(&app).as_deref(), Some("src"));
+    key(&mut app, TreeKey::Down);
+    assert_eq!(at(&app).as_deref(), Some("notes.txt"));
+    key(&mut app, TreeKey::Down);
+    assert_eq!(at(&app).as_deref(), Some("notes.txt"), "the last row stays");
+    key(&mut app, TreeKey::Up);
+    assert_eq!(at(&app).as_deref(), Some("src"));
+    // → opens a closed folder, then steps into it.
+    key(&mut app, TreeKey::Right);
+    assert!(app.proj.expanded.contains("src"));
+    assert_eq!(at(&app).as_deref(), Some("src"));
+    key(&mut app, TreeKey::Right);
+    assert_eq!(at(&app).as_deref(), Some("src/lib.rs"));
+    // ← steps out to the folder, then closes it.
+    key(&mut app, TreeKey::Left);
+    assert_eq!(at(&app).as_deref(), Some("src"));
+    key(&mut app, TreeKey::Left);
+    assert!(!app.proj.expanded.contains("src"));
+    key(&mut app, TreeKey::Last);
+    assert_eq!(at(&app).as_deref(), Some("notes.txt"));
+    key(&mut app, TreeKey::First);
+    assert_eq!(at(&app).as_deref(), Some("src"));
+    // Enter on a folder opens it, as a click does.
+    key(&mut app, TreeKey::Open);
+    assert!(app.proj.expanded.contains("src"));
+    // Space shows a file, the keyboard staying in the tree.
+    key(&mut app, TreeKey::Down);
+    key(&mut app, TreeKey::Preview);
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.as_str()),
+        Some("src/lib.rs")
+    );
+    assert!(!app.code_focused, "still the tree's");
+    assert_eq!(at(&app).as_deref(), Some("src/lib.rs"));
+    // Enter reads a file: the keyboard goes to its code.
+    key(&mut app, TreeKey::Down);
+    key(&mut app, TreeKey::Open);
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.as_str()),
+        Some("notes.txt")
+    );
+    assert!(app.code_focused, "the code's");
+    // Esc gives the keyboard back to the code, and does nothing else.
+    let _ = app.update(Message::Window(WindowMsg::TreeFocused(true)));
+    key(&mut app, TreeKey::Leave);
+    assert!(app.code_focused);
+    assert!(app.escape_taken);
+    app.escape_taken = false;
+    // A letter narrows the tree: the filter takes it.
+    key(&mut app, TreeKey::Type('l'));
+    assert_eq!(app.file_filter, "l");
+    app.file_filter = "lib".into();
+    let _ = app.update(Message::Window(WindowMsg::FileFilterDown));
+    let _ = app.update(Message::Window(WindowMsg::TreeFocused(true)));
+    assert_eq!(
+        at(&app).as_deref(),
+        Some("src/lib.rs"),
+        "the first it lists"
+    );
+}
+
 /// What HEAD is, read for the status bar as the project opens, anew when
 /// the window comes back to the front or a file changes, one read at a
 /// time; outside a repository, no branch — not the one read before.
@@ -22048,6 +22137,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Project(ProjectMsg::GitStatusRead {
             stamp: s(),
             result: Ok(vec![("stale.rs".into(), 'M')]),
+        }),
+        Message::Project(ProjectMsg::HeadRead {
+            stamp: s(),
+            result: Ok(Some(clew_protocol::HeadName::Branch("stale".into()))),
         }),
         Message::Watch(WatchMsg::SymbolIndexDone {
             stamp: s(),

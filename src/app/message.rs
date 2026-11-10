@@ -2101,6 +2101,35 @@ pub enum UpdaterMsg {
     SetAuto(bool),
 }
 
+/// What a key does in the Files view's tree while it has the keyboard
+/// (`ui::tree_keys`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeKey {
+    /// ↑ / ↓: the row before, the row after.
+    Up,
+    Down,
+    /// ←: a folder open is closed; else to the folder holding the row.
+    Left,
+    /// →: a folder closed is opened; an open one, to its first row.
+    Right,
+    /// Home / End: the first row, the last.
+    First,
+    Last,
+    /// Page Up / Page Down: a treeful of rows up, down.
+    PageUp,
+    PageDown,
+    /// Enter: a file is opened, the keyboard going to its code; a folder
+    /// is opened or closed.
+    Open,
+    /// Space: a file is opened, the keyboard staying in the tree; a folder
+    /// is opened or closed.
+    Preview,
+    /// Esc: the keyboard goes back to the code.
+    Leave,
+    /// A letter: the filter above takes it, narrowing the tree.
+    Type(char),
+}
+
 /// The window and its chrome: controls, layout, panels, menus, the shortcuts modal.
 #[derive(Debug, Clone)]
 pub enum WindowMsg {
@@ -2184,6 +2213,14 @@ pub enum WindowMsg {
     ToggleMaximize,
     /// The reading panel's view picked.
     MarginTabPicked(MarginTab),
+    /// ↓ in the Files view's filter, while it has the keyboard: the
+    /// keyboard goes down to the tree (`ui::escape_clears`).
+    FileFilterDown,
+    /// A key the Files view's tree took, while it has the keyboard
+    /// (`ui::tree_keys`).
+    TreeKey(TreeKey),
+    /// The Files view's tree has the keyboard now, or no longer.
+    TreeFocused(bool),
     /// The Files view's tree scrolled: where it is, and how much of it
     /// shows.
     FilesTreeScrolled {
@@ -3023,6 +3060,9 @@ impl WindowMsg {
             | WindowMsg::FileFilterChanged(..)
             | WindowMsg::FileFilterSubmitted
             | WindowMsg::FileFilterEscaped
+            | WindowMsg::FileFilterDown
+            | WindowMsg::TreeKey(..)
+            | WindowMsg::TreeFocused(..)
             | WindowMsg::ToggleMaximize
             | WindowMsg::MarginTabPicked(..)
             | WindowMsg::FilesTreeScrolled { .. }

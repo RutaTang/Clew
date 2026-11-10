@@ -54,6 +54,8 @@ fn reader_app() -> App {
     });
     app.proj.panes[0] = Some(viewer);
     app.proj.active = 0;
+    // No repository at a path that is not there: no branch to read.
+    app.proj.head_stale = false;
     app.show_left_sidebar = false;
     app.show_right_panel = false;
     app.show_bottom = false;
@@ -1601,6 +1603,91 @@ fn the_files_view_marks_what_changed() {
     assert!(
         text_at(&mut sim, |t| t == "●", 1).is_none(),
         "the top holds no change"
+    );
+}
+
+/// The Files view's tree takes the keyboard as a field does: a press on it
+/// gives it the keys, and the keys that walk a tree are its moves, going no
+/// further; a press elsewhere takes the keys away, and so does the code
+/// having them (a file opened from the tree is read with `j`, as before).
+/// ↓ in the filter above goes down to it.
+#[test]
+fn the_files_tree_takes_the_keyboard_as_a_field_does() {
+    use crate::app::message::TreeKey;
+    use iced::event::Status;
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.code_focused = false;
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        files: vec!["notes.txt".into()],
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: vec![],
+                files: vec!["lib.rs".into()],
+            },
+        )],
+    };
+    let down = || Key::Named(Named::ArrowDown);
+    {
+        let mut sim = sim_of(&app);
+        assert_eq!(sim.tap_key(down()), Status::Ignored, "not the tree's yet");
+        let src = text_at(&mut sim, |t| t == "src", 0).expect("the folder's row");
+        sim.point_at(src.center());
+        let _ = sim.simulate(iced_test::simulator::click());
+        assert_eq!(sim.tap_key(down()), Status::Captured, "the tree's now");
+        assert_eq!(sim.tap_key(Key::Character("j".into())), Status::Captured);
+        // Away from the tree, the keys are no longer its.
+        // The code, in the window's middle.
+        sim.point_at(Point::new(WINDOW.width / 2.0, WINDOW.height / 2.0));
+        let _ = sim.simulate(iced_test::simulator::click());
+        assert_eq!(sim.tap_key(down()), Status::Ignored);
+        let sent = sent_by(sim);
+        let tree_keys: Vec<_> = sent
+            .iter()
+            .filter_map(|m| match m {
+                Message::Window(WindowMsg::TreeKey(k)) => Some(*k),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tree_keys, [TreeKey::Down, TreeKey::Type('j')]);
+        assert!(
+            sent.iter()
+                .any(|m| matches!(m, Message::Window(WindowMsg::TreeFocused(true))))
+        );
+        assert!(
+            sent.iter()
+                .any(|m| matches!(m, Message::Window(WindowMsg::TreeFocused(false))))
+        );
+    }
+    // The code has the keys (a file opened from the tree): the tree lets
+    // them go.
+    app.code_focused = true;
+    {
+        let mut sim = sim_of(&app);
+        let src = text_at(&mut sim, |t| t == "src", 0).expect("the folder's row");
+        sim.point_at(src.center());
+        let _ = sim.simulate(iced_test::simulator::click());
+        assert_eq!(sim.tap_key(down()), Status::Ignored, "the code's");
+    }
+    // ↓ in the filter goes down to the tree.
+    let mut sim = sim_of(&app);
+    // The filter, above the tree's first row: a row's half, the gap, the
+    // field's half.
+    let src = text_at(&mut sim, |t| t == "src", 0).expect("the folder's row");
+    sim.point_at(Point::new(
+        src.x + 10.0,
+        src.center_y() - super::TREE_ROW_H / 2.0 - 12.0 - 15.0,
+    ));
+    let _ = sim.simulate(iced_test::simulator::click());
+    assert_eq!(sim.tap_key(down()), Status::Captured);
+    assert!(
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::FileFilterDown)))
     );
 }
 
@@ -13303,6 +13390,10 @@ fn f6_moves_the_keys_between_the_regions() {
     let f6 = || keyboard::Key::Named(keyboard::key::Named::F6);
     type_key(&mut app, f6(), keyboard::Modifiers::empty());
     assert_eq!(app.region, crate::app::keys::Region::Sidebar);
+    assert!(!app.code_focused);
+    // The Files view's tree, under its filter.
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert_eq!(app.region, crate::app::keys::Region::Tree);
     assert!(!app.code_focused);
     type_key(&mut app, f6(), keyboard::Modifiers::empty());
     assert_eq!(app.region, crate::app::keys::Region::Chat);

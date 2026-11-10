@@ -12,12 +12,14 @@ pub(crate) enum Region {
     Code,
     /// The sidebar's field: the file filter, or the text search.
     Sidebar,
+    /// The Files view's tree, under its filter (`ui::tree_keys`).
+    Tree,
     /// The chat with Clew.
     Chat,
 }
 
 /// An id no field has: focusing it takes the keys from every field.
-fn nowhere() -> iced::widget::Id {
+pub(crate) fn nowhere() -> iced::widget::Id {
     iced::widget::Id::new("clew-keys-nowhere")
 }
 
@@ -92,6 +94,9 @@ impl App {
         if self.sidebar_field().is_some() {
             regions.push(Region::Sidebar);
         }
+        if self.sidebar_field().is_some() && self.sidebar == SidebarTab::Files {
+            regions.push(Region::Tree);
+        }
         regions.push(Region::Chat);
         regions
     }
@@ -114,6 +119,8 @@ impl App {
         let regions = self.regions();
         let now = if self.code_focused {
             Region::Code
+        } else if self.tree_focused {
+            Region::Tree
         } else {
             self.region
         };
@@ -134,6 +141,13 @@ impl App {
                 self.code_focused = false;
                 self.sidebar_field()
                     .map_or_else(Task::none, operation::focus)
+            }
+            Region::Tree => {
+                self.code_focused = false;
+                Task::batch([
+                    operation::focus(ui::files_tree_keys_id()),
+                    self.reveal_tree_cursor(),
+                ])
             }
             Region::Chat => {
                 self.reveal_ask();

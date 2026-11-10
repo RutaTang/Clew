@@ -4,6 +4,8 @@
 //!
 //! Its messages, [`NavMsg`], arrive through `App::update_nav`.
 
+use crate::app::keys;
+use crate::app::message::TreeKey;
 use crate::app::prelude::*;
 use crate::*;
 
@@ -1253,6 +1255,144 @@ impl App {
             },
             move |result| Message::Project(ProjectMsg::HeadRead { stamp, result }),
         ))
+    }
+}
+
+impl App {
+    /// The row the keyboard rests on in the Files view, while its tree has
+    /// the keyboard: the one it was put on, while it shows; else the file
+    /// being read; else the first.
+    pub(crate) fn tree_cursor_rel(&self) -> Option<String> {
+        if !self.tree_focused {
+            return None;
+        }
+        let rows = ui::tree_rows(self);
+        self.tree_cursor_at(&rows).map(|i| rows[i].rel.clone())
+    }
+
+    /// [`Self::tree_cursor_rel`]'s place among `rows`.
+    fn tree_cursor_at(&self, rows: &[ui::TreeRow]) -> Option<usize> {
+        let find = |rel: &str| rows.iter().position(|r| r.rel == rel);
+        self.proj
+            .tree_cursor
+            .as_deref()
+            .and_then(find)
+            .or_else(|| self.active_viewer().and_then(|v| find(&v.rel)))
+            .or((!rows.is_empty()).then_some(0))
+    }
+
+    /// How many rows of the tree show at once: what Page Up and Page Down
+    /// move by.
+    fn tree_page(&self) -> usize {
+        let (_, height) = self
+            .proj
+            .tree_scroll
+            .unwrap_or((0.0, (self.window_height - TREE_CHROME_H).max(0.0)));
+        ((height / (ui::TREE_ROW_H + ui::TREE_ROW_GAP)) as usize)
+            .saturating_sub(1)
+            .max(1)
+    }
+
+    /// The row the keyboard rests on, scrolled into view.
+    pub(crate) fn reveal_tree_cursor(&self) -> Task<Message> {
+        let rows = ui::tree_rows(self);
+        let Some(at) = self.tree_cursor_at(&rows) else {
+            return Task::none();
+        };
+        let pitch = ui::TREE_ROW_H + ui::TREE_ROW_GAP;
+        ui::reveal(
+            ui::files_tree_id(),
+            at as f32 * pitch,
+            at as f32 * pitch + ui::TREE_ROW_H,
+        )
+    }
+
+    /// A key the Files view's tree took while it has the keyboard: the
+    /// keyboard walks the tree as a pointer would, a row at a time.
+    pub(crate) fn on_tree_key(&mut self, key: TreeKey) -> Task<Message> {
+        match key {
+            TreeKey::Leave => {
+                // The Esc that leaves the tree does only that (it reaches
+                // the key handler too: `shell::forward_key`).
+                self.escape_taken = true;
+                self.code_focused = true;
+                self.region = keys::Region::Code;
+                return Task::none();
+            }
+            TreeKey::Type(c) => {
+                self.file_filter.push(c);
+                return Task::batch([
+                    iced::widget::operation::focus(ui::file_filter_id()),
+                    iced::widget::operation::move_cursor_to_end(ui::file_filter_id()),
+                ]);
+            }
+            _ => {}
+        }
+        let rows = ui::tree_rows(self);
+        let Some(at) = self.tree_cursor_at(&rows) else {
+            return Task::none();
+        };
+        let last = rows.len() - 1;
+        let row = rows[at].clone();
+        let open = row.dir && self.proj.expanded.contains(&row.rel);
+        let to = match key {
+            TreeKey::Up => at.saturating_sub(1),
+            TreeKey::Down => (at + 1).min(last),
+            TreeKey::First => 0,
+            TreeKey::Last => last,
+            TreeKey::PageUp => at.saturating_sub(self.tree_page()),
+            TreeKey::PageDown => (at + self.tree_page()).min(last),
+            // A closed folder opens; an open one steps into its first row.
+            TreeKey::Right if row.dir && !open => {
+                self.proj.expanded.insert(row.rel.clone());
+                at
+            }
+            TreeKey::Right
+                if open
+                    && rows
+                        .get(at + 1)
+                        .is_some_and(|next| next.rel.starts_with(&format!("{}/", row.rel))) =>
+            {
+                at + 1
+            }
+            // An open folder closes; anything else steps out to its folder.
+            TreeKey::Left if open => {
+                self.proj.expanded.remove(&row.rel);
+                at
+            }
+            TreeKey::Left => match row.rel.rsplit_once('/') {
+                Some((parent, _)) => rows.iter().position(|r| r.rel == parent).unwrap_or(at),
+                None => at,
+            },
+            TreeKey::Open | TreeKey::Preview if row.dir => {
+                if !self.proj.expanded.remove(&row.rel) {
+                    self.proj.expanded.insert(row.rel.clone());
+                }
+                at
+            }
+            TreeKey::Open => {
+                // Enter reads the file: the keyboard goes to its code.
+                let task = self.update(Message::Editor(EditorMsg::OpenRel {
+                    rel: row.rel.clone(),
+                    line: None,
+                }));
+                self.region = keys::Region::Code;
+                return Task::batch([task, iced::widget::operation::focus(keys::nowhere())]);
+            }
+            TreeKey::Preview => {
+                // Space shows the file, the keyboard staying in the tree.
+                let task = self.update(Message::Editor(EditorMsg::OpenRel {
+                    rel: row.rel.clone(),
+                    line: None,
+                }));
+                self.code_focused = false;
+                self.proj.tree_cursor = Some(row.rel);
+                return task;
+            }
+            _ => at,
+        };
+        self.proj.tree_cursor = Some(rows[to].rel.clone());
+        self.reveal_tree_cursor()
     }
 }
 

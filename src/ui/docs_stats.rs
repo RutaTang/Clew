@@ -256,6 +256,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         |v| Message::Docs(DocsMsg::FilterChanged(v)),
         None,
         Message::Docs(DocsMsg::FilterChanged(String::new())),
+        None,
     );
     // Each a pair whose chosen half is raised: a chip that said what was
     // on ("Files", "Public") and flipped when pressed read as two tabs

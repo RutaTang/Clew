@@ -213,6 +213,8 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                 |s| Message::Window(WindowMsg::FileFilterChanged(s)),
                 Some(Message::Window(WindowMsg::FileFilterSubmitted)),
                 Message::Window(WindowMsg::FileFilterEscaped),
+                // ↓ goes down to the tree under it.
+                Some(Message::Window(WindowMsg::FileFilterDown)),
             )
         } else {
             slot()
@@ -735,15 +737,18 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let filter = app.file_filter.trim();
+    // The row the keyboard rests on, drawn so while the tree has it.
+    let cursor = app.tree_cursor_rel();
+    let cursor = cursor.as_deref();
     if filter.is_empty() {
-        append_tree_rows(&mut rows, &project.tree, "", 0, app);
+        append_tree_rows(&mut rows, &project.tree, "", 0, app, cursor);
     } else {
-        filtered_file_rows(&mut rows, project, filter, app);
+        filtered_file_rows(&mut rows, project, filter, app, cursor);
         if rows.is_empty() {
             return empty_state(Glyph::Filter, tr!("No matching files"), "", None);
         }
     }
-    scrollable(
+    let tree = scrollable(
         container(
             Column::with_children(rows)
                 .spacing(TREE_ROW_GAP)
@@ -765,8 +770,10 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
     })
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)
-    .height(Fill)
-    .into()
+    .height(Fill);
+    super::tree_keys::TreeKeys::new(tree, super::files_tree_keys_id())
+        .release(app.code_focused)
+        .into()
 }
 
 /// What the working tree changes in the file at `rel`, as git letters it —
@@ -809,6 +816,59 @@ fn change_color(letter: char) -> iced::Color {
         'R' => theme::info(),
         _ => theme::warning(),
     }
+}
+
+/// A row of the Files view as the keyboard walks it: its path, and whether
+/// it is a folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TreeRow {
+    pub rel: String,
+    pub dir: bool,
+}
+
+/// The rows the Files view shows, in its order: the tree with its open
+/// folders' rows (as [`append_tree_rows`] lays them out), or, filtered, the
+/// files the filter lists.
+pub(crate) fn tree_rows(app: &App) -> Vec<TreeRow> {
+    let Some(project) = &app.proj.project else {
+        return Vec::new();
+    };
+    let filter = app.file_filter.trim();
+    if !filter.is_empty() {
+        return filtered_files(project, filter)
+            .map(|f| TreeRow {
+                rel: f.rel.clone(),
+                dir: false,
+            })
+            .collect();
+    }
+    fn walk(
+        node: &DirNode,
+        prefix: &str,
+        expanded: &std::collections::HashSet<String>,
+        rows: &mut Vec<TreeRow>,
+    ) {
+        for (name, child) in &node.dirs {
+            let rel = join_rel(prefix, name);
+            let open = expanded.contains(&rel);
+            rows.push(TreeRow {
+                rel: rel.clone(),
+                dir: true,
+            });
+            if open {
+                walk(child, &rel, expanded, rows);
+            }
+        }
+        for name in &node.files {
+            rows.push(TreeRow {
+                rel: join_rel(prefix, name),
+                dir: false,
+            });
+        }
+    }
+    let mut rows = Vec::new();
+    walk(&project.tree, "", &app.proj.expanded, &mut rows);
+    rows
 }
 
 /// The row `rel` is drawn at in the Files view's tree with `expanded`
@@ -873,6 +933,7 @@ fn filtered_file_rows<'a>(
     project: &'a crate::Project,
     filter: &str,
     app: &'a App,
+    cursor: Option<&str>,
 ) {
     for f in filtered_files(project, filter) {
         let (folder, name) = f.rel.rsplit_once('/').unwrap_or(("", f.rel.as_str()));
@@ -899,9 +960,10 @@ fn filtered_file_rows<'a>(
                 .spacing(6)
                 .align_y(iced::Center),
             )
-            .style(theme::list_row(is_current))
+            .style(theme::tree_row(is_current, cursor == Some(f.rel.as_str())))
             .width(Fill)
-            .padding([4, 8])
+            .height(Length::Fixed(TREE_ROW_H))
+            .padding([0, 8])
             .on_press(super::heard::row(
                 || f.rel.clone(),
                 Message::Editor(EditorMsg::OpenRel {
@@ -938,6 +1000,7 @@ pub(crate) fn append_tree_rows<'a>(
     prefix: &str,
     depth: u16,
     app: &'a App,
+    cursor: Option<&str>,
 ) {
     let indent = 6.0 + depth as f32 * 14.0;
     let pad = Padding {
@@ -980,7 +1043,7 @@ pub(crate) fn append_tree_rows<'a>(
         .align_y(iced::Center);
         rows.push(
             button(content)
-                .style(theme::list_row(false))
+                .style(theme::tree_row(false, cursor == Some(rel.as_str())))
                 .width(Fill)
                 .height(Length::Fixed(TREE_ROW_H))
                 .padding(pad)
@@ -991,7 +1054,7 @@ pub(crate) fn append_tree_rows<'a>(
                 .into(),
         );
         if expanded {
-            append_tree_rows(rows, child, &rel, depth + 1, app);
+            append_tree_rows(rows, child, &rel, depth + 1, app, cursor);
         }
     }
 
@@ -1043,9 +1106,10 @@ pub(crate) fn append_tree_rows<'a>(
         .spacing(6)
         .height(Fill)
         .align_y(iced::Center);
+        let style = theme::tree_row(is_current, cursor == Some(rel.as_str()));
         rows.push(
             button(content)
-                .style(theme::list_row(is_current))
+                .style(style)
                 .width(Fill)
                 .height(Length::Fixed(TREE_ROW_H))
                 .padding(pad)
@@ -2173,6 +2237,7 @@ pub(crate) fn filter_field<'a>(
     on_input: fn(String) -> Message,
     on_submit: Option<Message>,
     escaped: Message,
+    down: Option<Message>,
 ) -> Element<'a, Message> {
     let mut input = text_input(placeholder, value)
         .on_input(on_input)
@@ -2214,7 +2279,8 @@ pub(crate) fn filter_field<'a>(
                 .style(theme::field(!value.is_empty())),
             escaped,
         )
-        .ringed(9.0),
+        .ringed(9.0)
+        .on_down(down),
     )
     .padding(Padding {
         top: 0.0,

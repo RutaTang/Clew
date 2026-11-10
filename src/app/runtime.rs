@@ -120,6 +120,7 @@ impl App {
             show_view_menu: false,
             show_views_menu: false,
             file_filter: String::new(),
+            tree_focused: false,
             keymap: keymap::Keymap::load(),
             rebinding: None,
             keymap_notice: None,
@@ -766,6 +767,29 @@ impl App {
                 }
                 Task::none()
             }
+            // ↓ in the filter: the keyboard goes down to the tree, on its
+            // first row (filtered) or the file being read.
+            WindowMsg::FileFilterDown => {
+                self.code_focused = false;
+                if !self.file_filter.trim().is_empty() {
+                    self.proj.tree_cursor =
+                        crate::ui::tree_rows(self).first().map(|r| r.rel.clone());
+                }
+                Task::batch([
+                    iced::widget::operation::focus(crate::ui::files_tree_keys_id()),
+                    self.reveal_tree_cursor(),
+                ])
+            }
+            WindowMsg::TreeFocused(focused) => {
+                self.tree_focused = focused;
+                if focused {
+                    // The keys are the tree's now, not the code's.
+                    self.code_focused = false;
+                    self.region = crate::app::keys::Region::Tree;
+                }
+                Task::none()
+            }
+            WindowMsg::TreeKey(key) => self.on_tree_key(key),
             // Enter opens what the filter found first, as a click on its row
             // would: typing a file's name and pressing Enter did nothing.
             WindowMsg::FileFilterSubmitted => {

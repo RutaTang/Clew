@@ -27,6 +27,7 @@ mod anchored;
 mod baseline;
 mod corner_safe;
 mod escape_clears;
+mod tree_keys;
 pub(crate) use anchored::*;
 mod chrome;
 pub(crate) use chrome::*;
@@ -290,6 +291,11 @@ pub fn ask_input_id() -> iced::widget::Id {
 }
 
 /// The Files view's filter field.
+/// The Files view's tree as one stop for the keyboard (`tree_keys`).
+pub fn files_tree_keys_id() -> iced::widget::Id {
+    iced::widget::Id::new("files-tree-keys")
+}
+
 pub fn file_filter_id() -> iced::widget::Id {
     iced::widget::Id::new("file-filter")
 }
