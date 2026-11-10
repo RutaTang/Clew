@@ -22,9 +22,15 @@ use crate::theme;
 /// (the tutorial's spotlight).
 pub const THICKNESS: f32 = 8.0;
 
+/// The thickness of the strip beside the sidebar, which lies over the code
+/// sheet's edge: it ends before the gutter's marks (a breakpoint's dot
+/// starts 4.5px in), so a click on a dot never grabs the divider.
+pub const EDGE_GRIP: f32 = 4.0;
+
 pub struct Divider<'a, Message> {
     vertical: bool,
     panel: Panel,
+    thickness: f32,
     on_drag: Box<dyn Fn(f32) -> Message + 'a>,
 }
 
@@ -58,6 +64,7 @@ impl<'a, Message> Divider<'a, Message> {
         Self {
             vertical: true,
             panel: Panel::Within,
+            thickness: THICKNESS,
             on_drag: Box::new(on_drag),
         }
     }
@@ -67,6 +74,7 @@ impl<'a, Message> Divider<'a, Message> {
         Self {
             vertical: false,
             panel: Panel::Within,
+            thickness: THICKNESS,
             on_drag: Box::new(on_drag),
         }
     }
@@ -78,11 +86,17 @@ impl<'a, Message> Divider<'a, Message> {
         self
     }
 
+    /// How thick the strip is, if not [`THICKNESS`].
+    pub fn thickness(mut self, thickness: f32) -> Self {
+        self.thickness = thickness;
+        self
+    }
+
     fn lengths(&self) -> (Length, Length) {
         if self.vertical {
-            (Length::Fixed(THICKNESS), Length::Fill)
+            (Length::Fixed(self.thickness), Length::Fill)
         } else {
-            (Length::Fill, Length::Fixed(THICKNESS))
+            (Length::Fill, Length::Fixed(self.thickness))
         }
     }
 }

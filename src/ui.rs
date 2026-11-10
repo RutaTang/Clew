@@ -597,17 +597,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
     // The sidebar's divider lies just past its edge, over the sheet's own,
     // in a layer of its own: not over the sidebar's padding, where its lists'
-    // scrollbars run, nor drawn over the sheet's shadow at rest. The
-    // sidebar's edge follows the divider's middle less half its width: the
-    // edge is the divider's near side.
+    // scrollbars run, nor drawn over the sheet's shadow at rest, and thin
+    // enough to end before the gutter's breakpoint dots. The sidebar's edge
+    // follows the divider's middle less half its width: the edge is the
+    // divider's near side.
     let grip: Element<'_, Message> = if app.show_left_sidebar {
-        let half = crate::resize::THICKNESS / 2.0;
+        let half = crate::resize::EDGE_GRIP / 2.0;
         row![
             space().width(Length::Fixed(app.sidebar_width)),
             crate::resize::Divider::vertical(move |v| {
                 Message::Window(WindowMsg::ResizeSidebar(v - frame - half))
             })
-            .panel(crate::resize::Panel::Before),
+            .panel(crate::resize::Panel::Before)
+            .thickness(crate::resize::EDGE_GRIP),
         ]
         .height(Fill)
         .into()

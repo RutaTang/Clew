@@ -12879,13 +12879,51 @@ fn the_file_trees_scrollbar_shows_beside_the_sidebars_divider() {
     );
 }
 
+/// The sidebar's divider lies over the sheet's edge, but ends before the
+/// code's gutter marks: a click anywhere on a breakpoint's dot clears it,
+/// and doesn't grab the divider.
+#[test]
+fn a_click_on_a_breakpoints_dot_is_not_taken_by_the_sidebars_divider() {
+    let size = iced::Size::new(1000.0, 640.0);
+    let app = sidebar_app(size);
+    let edge = app.window_frame + app.sidebar_width;
+    // The dot starts past the sheet's 1px border and the bookmark ribbon's
+    // room, 4.5px in; its left side is the first place a click aims.
+    for x in [edge + 5.0, edge + 8.0] {
+        let at = iced::Point::new(x, 300.0);
+        let mut renderer = renderer();
+        let mut ui =
+            UserInterface::build(crate::ui::view(&app), size, Cache::default(), &mut renderer);
+        let mut messages = Vec::new();
+        for event in [
+            mouse::Event::CursorMoved { position: at },
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        ] {
+            let _ = ui.update(
+                &[Event::Mouse(event)],
+                mouse::Cursor::Available(at),
+                &mut renderer,
+                &mut clipboard::Null,
+                &mut messages,
+            );
+        }
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::Debug(DebugMsg::BreakpointToggle { .. }))),
+            "x = {x}: {messages:?}"
+        );
+    }
+}
+
 /// Dragging the divider beside the sidebar makes the sidebar reach the
 /// pointer, less half the divider: grabbed by its middle, it stays put.
 #[test]
 fn dragging_the_sidebars_divider_moves_its_edge_with_the_pointer() {
     let size = iced::Size::new(1000.0, 640.0);
     let app = sidebar_app(size);
-    let half = crate::resize::THICKNESS / 2.0;
+    let half = crate::resize::EDGE_GRIP / 2.0;
     let grab = iced::Point::new(app.window_frame + app.sidebar_width + half, 300.0);
     let to = iced::Point::new(grab.x + 40.0, 300.0);
     let mut renderer = renderer();
