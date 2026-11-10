@@ -87,7 +87,9 @@ use crate::incremental::Version;
 /// 19: Python's `from shop import payments` is recorded with the name it
 /// imports (`shop:payments`), so the edge reaches `shop/payments.py`, not
 /// `shop/__init__.py`; an older entry has only the module.
-pub(crate) const CACHE_VERSION: u32 = 19;
+/// 20: the methods read as attributes (a Python `@property`) are cached with
+/// a file's call sites ([`CachedCalls::accessed`]); an older entry has none.
+pub(crate) const CACHE_VERSION: u32 = 20;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -158,6 +160,10 @@ pub struct CachedCalls {
     /// then the class's index in `names`.
     #[serde(default)]
     pub owners: Vec<i64>,
+    /// Definition lines of the methods read as attributes, never called
+    /// (`clew_core::projectcalls::FileCalls::accessed`).
+    #[serde(default)]
+    pub accessed: Vec<usize>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -276,6 +282,7 @@ mod tests {
                 bodies: vec![3, 3, 9],
                 receivers: vec![1],
                 owners: vec![3, 1],
+                accessed: vec![3],
             }),
         }
     }

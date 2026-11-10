@@ -22859,6 +22859,7 @@ fn fill_project_session(app: &mut App) {
             declarations: HashSet::from([1]),
             bodies: HashMap::new(),
             owners: HashMap::new(),
+            accessed: HashSet::new(),
         }),
     );
     p.tracked_ignored.insert("src/lib.rs".into());

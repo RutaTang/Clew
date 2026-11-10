@@ -3036,7 +3036,8 @@ pub(crate) fn type_row(app: &App, id: usize, trailing: String) -> Element<'_, Me
 /// functions with their caller counts, and the uncalled ones with their
 /// callee counts. Test functions are left out of the uncalled list — they are
 /// always "uncalled" (the harness invokes them, not project code), so they
-/// would swamp it as false positives.
+/// would swamp it as false positives — and so is what the language reaches
+/// without a call naming it ([`Unnamed::reaches`]).
 pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph) -> CallsSummary {
     let is_test_node = |id: usize| {
         let n = g.node(id);
@@ -3059,6 +3060,7 @@ pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph
             .then_with(|| g.node(a.0).name.cmp(&g.node(b.0).name))
             .then_with(|| g.node(a.0).line.cmp(&g.node(b.0).line))
     });
+    let unnamed = Unnamed::of(app, g);
     CallsSummary {
         hubs: g
             .most_called(15)
@@ -3069,6 +3071,7 @@ pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph
             .uncalled()
             .into_iter()
             .filter(|&id| !is_test_node(id) && entry_of(id).is_none())
+            .filter(|&id| !unnamed.reaches(app, g, id))
             .map(|id| (id, g.node(id).callee_count()))
             .collect(),
         entries: entries
@@ -3076,6 +3079,79 @@ pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph
             .map(|(id, kind)| (id, kind.label()))
             .collect(),
     }
+}
+
+/// What the language reaches without a call naming it, for
+/// [`Unnamed::reaches`]: the names any call site calls, and each called
+/// method's class, by name.
+struct Unnamed<'a> {
+    called: std::collections::HashSet<&'a str>,
+    called_in: std::collections::HashMap<&'a str, Vec<&'a str>>,
+}
+
+impl<'a> Unnamed<'a> {
+    fn of(app: &'a App, g: &'a crate::projectcalls::ProjectCallGraph) -> Unnamed<'a> {
+        let called = app
+            .proj
+            .calls_by_file
+            .values()
+            .flat_map(|c| c.calls.iter().map(|site| site.callee.as_str()))
+            .collect();
+        let mut called_in: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for id in 0..g.node_count() {
+            let n = g.node(id);
+            if n.caller_count() == 0 {
+                continue;
+            }
+            if let Some(class) = owner_of(app, &n.file, n.line) {
+                called_in.entry(n.name.as_str()).or_default().push(class);
+            }
+        }
+        Unnamed { called, called_in }
+    }
+
+    /// Whether node `id` of `g`, which no call in the graph reaches, is
+    /// reached all the same, by the language rather than by a call naming it:
+    /// - a Python property, read as an attribute (`order.amount`);
+    /// - a Python special method (`__str__`, `__eq__`, `__enter__`), run by
+    ///   the operation it stands for — and an `__init__`, run when its class
+    ///   is called (`Inventory()`, `raise OutOfStock(...)`), when a call
+    ///   anywhere names the class: a language server reports no call of it;
+    /// - a method overriding one a call reaches (`rule.amount_off(...)` of a
+    ///   `Discount` runs each subclass's), when another class's method of
+    ///   the name is called.
+    fn reaches(&self, app: &App, g: &crate::projectcalls::ProjectCallGraph, id: usize) -> bool {
+        let node = g.node(id);
+        let calls = app.proj.calls_by_file.get(&node.file);
+        if calls.is_some_and(|c| c.accessed.contains(&node.line)) {
+            return true;
+        }
+        let owner = owner_of(app, &node.file, node.line);
+        let python = calls.is_some_and(|c| c.lang == crate::highlight::Lang::Python);
+        let name = node.name.as_str();
+        if python && name.len() > 4 && name.starts_with("__") && name.ends_with("__") {
+            return match owner.filter(|_| name == "__init__") {
+                Some(class) => self.called.contains(class),
+                None => true,
+            };
+        }
+        owner.is_some_and(|own| {
+            self.called_in
+                .get(name)
+                .is_some_and(|classes| classes.iter().any(|&class| class != own))
+        })
+    }
+}
+
+/// The class the method defined at `line` of `file` belongs to, as the
+/// index's call facts say.
+fn owner_of<'a>(app: &'a App, file: &std::path::Path, line: usize) -> Option<&'a str> {
+    app.proj
+        .calls_by_file
+        .get(file)
+        .and_then(|c| c.owners.get(&line))
+        .map(String::as_str)
 }
 
 /// The files the last debug run stopped in, for the map's rings; memoized

@@ -2115,9 +2115,9 @@ impl App {
         }
         // Sentence by sentence, each whole.
         let mut summary = match self.refined_languages().as_slice() {
-            [] => tr!("LSP-precise — exact caller/callee edges.").to_string(),
+            [] => tr!("LSP-precise — each call as the language server resolves it.").to_string(),
             covered => tr!(
-                "LSP-precise for {languages} — exact caller/callee edges.",
+                "LSP-precise for {languages} — each call as the language server resolves it.",
                 languages = crate::app::languages::language_names(covered)
             ),
         };

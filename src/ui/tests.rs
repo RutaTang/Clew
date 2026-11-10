@@ -7096,6 +7096,84 @@ fn the_overlays_list_the_most_changed_files_and_the_entry_points() {
     );
 }
 
+/// What the language reaches without a call naming it is not "uncalled":
+/// a property, a special method, the `__init__` of a class that is called,
+/// a subclass's override of a called method — as a language server's graph
+/// leaves them, with edges to none. A class called nowhere keeps its
+/// `__init__` listed, and a function called nowhere is listed.
+#[test]
+fn the_uncalled_list_leaves_out_what_python_reaches_by_itself() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let shop = root.join("shop.py");
+    let src = "\
+class Discount:
+    def amount_off(self, order):
+        return 0
+
+class Bulk(Discount):
+    def amount_off(self, order):
+        return 1
+
+class Inventory:
+    def __init__(self):
+        self.tins = {}
+
+    @property
+    def count(self):
+        return len(self.tins)
+
+    def __repr__(self):
+        return 'Inventory'
+
+class Ghost:
+    def __init__(self):
+        pass
+
+def unused():
+    return 1
+
+def main(rule):
+    inventory = Inventory()
+    rule.amount_off(None)
+";
+    app.proj.calls_by_file.insert(
+        shop.clone(),
+        std::sync::Arc::new(crate::projectcalls::FileCalls::read(&shop, src).unwrap()),
+    );
+    let node = |name: &str, line: usize, callers: Vec<usize>| clew_protocol::CallGraphNode {
+        name: name.into(),
+        kind: "method".into(),
+        file: "shop.py".into(),
+        line,
+        callers,
+        callees: Vec::new(),
+    };
+    let g = crate::projectcalls::ProjectCallGraph::from_wire(
+        clew_protocol::CallGraph {
+            nodes: vec![
+                node("amount_off", 2, vec![7]),
+                node("amount_off", 6, vec![]),
+                node("__init__", 10, vec![]),
+                node("count", 14, vec![]),
+                node("__repr__", 17, vec![]),
+                node("__init__", 21, vec![]),
+                node("unused", 24, vec![]),
+                node("main", 27, vec![]),
+            ],
+        },
+        |rel| root.join(rel),
+    )
+    .expect("a call graph");
+    let summary = super::calls_summary(&app, &g);
+    let uncalled: Vec<String> = summary
+        .uncalled
+        .iter()
+        .map(|&(id, _)| format!("{}@{}", g.node(id).name, g.node(id).line))
+        .collect();
+    assert_eq!(uncalled, ["__init__@21", "main@27", "unused@24"]);
+}
+
 /// The Maps overlay's list: the map's counts and its line on how to read
 /// it, its nodes by kind with their detail and their arrows, each opening
 /// where it is defined; nothing yet says so, a failed read says why; the
