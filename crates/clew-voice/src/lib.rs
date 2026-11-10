@@ -23,6 +23,7 @@ pub mod say;
 pub mod speaker;
 pub mod speech;
 pub mod turn;
+pub mod wake;
 #[cfg(test)]
 mod wav;
 pub mod whisper;

@@ -1086,6 +1086,14 @@ impl Clew {
         if self.focused == Some(id) {
             self.focused = self.windows.keys().next().copied();
         }
+        // The microphone it waited for "Hey, Clew" with is the window in
+        // front's to wait with now.
+        if app.voice.wake.is_waiting() {
+            app.stop_waiting();
+            if let Some(front) = self.focused {
+                wait_in_front(self, front);
+            }
+        }
         self.held_closes.remove(&id);
         if let Some(Close {
             pending: Pending::Asking { asked, .. },
@@ -1222,6 +1230,7 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             // Track focus so the menu / global actions hit the right window.
             if matches!(msg, Message::Window(WindowMsg::FocusChanged(true))) {
                 clew.focused = Some(id);
+                wait_in_front(clew, id);
             }
             // The window's close control and ⌘W ask the shell, which asks
             // about the edits the window would leave unsaved before it lets
@@ -1459,6 +1468,29 @@ fn adopt_keymap(clew: &mut Clew, from: window::Id) {
     crate::macos::menu::rebuild(&keymap);
 }
 
+/// The microphone waiting for "Hey, Clew" waits in the window in front:
+/// the window called is the one looked at. Not while a window listens —
+/// two would hear what is said next.
+fn wait_in_front(clew: &mut Clew, front: window::Id) {
+    if clew.windows.values().any(|app| app.voice.mic_on) {
+        return;
+    }
+    let Some(app) = clew.windows.get(&front) else {
+        return;
+    };
+    if !app.voice.prefs.wake || app.voice.wake.is_waiting() {
+        return;
+    }
+    for (id, app) in clew.windows.iter_mut() {
+        if *id != front {
+            app.stop_waiting();
+        }
+    }
+    if let Some(app) = clew.windows.get_mut(&front) {
+        app.resume_waiting();
+    }
+}
+
 /// Hand the voice settings of window `from` to every other window
 /// ([`adopt_keymap`]'s way): one model, language and choice everywhere.
 fn adopt_voice_prefs(clew: &mut Clew, from: window::Id) {
@@ -1467,7 +1499,7 @@ fn adopt_voice_prefs(clew: &mut Clew, from: window::Id) {
     };
     for (other, app) in clew.windows.iter_mut() {
         if *other != from {
-            app.voice.prefs = prefs.clone();
+            app.adopt_voice_prefs(prefs.clone());
         }
     }
 }
@@ -4277,6 +4309,85 @@ mod tests {
         assert_eq!(kept.model, "tiny.en");
         assert!(!kept.run_commands);
         assert!(!clew.windows[&acting].voice.prefs.run_commands);
+    }
+
+    /// Waiting for "Hey, Clew" follows the setting into every window — the
+    /// one that waits stops when another turns it off — and, the waiting
+    /// window closed, another window waits instead.
+    #[test]
+    fn waiting_for_hey_clew_follows_every_window() {
+        use crate::app::voice::VoiceMsg;
+        let _turn = crate::app::wake::TEST_TURN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let data = test_dir("shell-wake");
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let _env = data_dir_override(&data);
+        let mut clew = test_clew();
+        let (waits, other) = (window::Id::unique(), window::Id::unique());
+        for id in [waits, other] {
+            let mut app = blank_app();
+            app.main_window = Some(id);
+            let store = clew_voice::models::Store::new(data.join("voice"));
+            crate::app::wake::testing::ready(&mut app, store);
+            app.voice.prefs.wake = false;
+            clew.windows.insert(id, app);
+        }
+        let _ = update(
+            &mut clew,
+            Shell::Window(waits, Message::Voice(VoiceMsg::SetWake(true))),
+        );
+        assert!(clew.windows[&waits].voice.wake.is_waiting());
+        assert!(clew.windows[&other].voice.prefs.wake);
+        assert!(!clew.windows[&other].voice.wake.is_waiting(), "one waits");
+        // Talking over Clew changed in the other window: the microphone
+        // waiting is opened anew for it.
+        let id = clew.windows[&waits].voice.wake.wait().unwrap().id;
+        let _ = update(
+            &mut clew,
+            Shell::Window(other, Message::Voice(VoiceMsg::SetTalkOver(false))),
+        );
+        assert!(
+            clew.windows[&waits]
+                .voice
+                .wake
+                .wait()
+                .is_some_and(|w| w.id != id)
+        );
+        // Turned off in the other window: the one waiting stops.
+        let _ = update(
+            &mut clew,
+            Shell::Window(other, Message::Voice(VoiceMsg::SetWake(false))),
+        );
+        assert!(!clew.windows[&waits].voice.prefs.wake);
+        assert!(!clew.windows[&waits].voice.wake.is_waiting());
+        // On again, from the other window: that one waits; closed, the
+        // first waits instead.
+        let _ = update(
+            &mut clew,
+            Shell::Window(other, Message::Voice(VoiceMsg::SetWake(true))),
+        );
+        assert!(clew.windows[&other].voice.wake.is_waiting());
+        assert!(!clew.windows[&waits].voice.wake.is_waiting());
+        // The window in front waits: the one called is the one looked at —
+        // but not while a window listens.
+        let focus = |id| Shell::Window(id, Message::Window(WindowMsg::FocusChanged(true)));
+        let _ = update(&mut clew, focus(waits));
+        assert!(clew.windows[&waits].voice.wake.is_waiting());
+        assert!(!clew.windows[&other].voice.wake.is_waiting());
+        clew.windows.get_mut(&waits).unwrap().voice.mic_on = true;
+        let _ = update(&mut clew, focus(other));
+        assert!(clew.windows[&waits].voice.wake.is_waiting());
+        assert!(!clew.windows[&other].voice.wake.is_waiting());
+        clew.windows.get_mut(&waits).unwrap().voice.mic_on = false;
+        let _ = update(&mut clew, focus(other));
+        assert!(clew.windows[&other].voice.wake.is_waiting());
+        // Closed, the window in front waits instead.
+        clew.focused = Some(waits);
+        let _ = clew.close_window(other);
+        assert!(clew.windows[&waits].voice.wake.is_waiting());
+        clew.windows.get_mut(&waits).unwrap().stop_waiting();
     }
 
     /// A rebind in one window used to change that window alone: the others

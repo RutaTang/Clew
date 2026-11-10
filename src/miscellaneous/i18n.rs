@@ -1354,6 +1354,7 @@ mod tests {
             written.push(m.name.into());
             written.push(m.about.into());
         }
+        written.push(clew_voice::wake::MODEL.name.into());
         written.extend(clew_core::mcp::config::Approve::ALL.map(|a| a.label().to_string()));
         written.push(clew_core::llm::Provider::Custom.label().into());
         written.extend(

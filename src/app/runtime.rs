@@ -45,6 +45,8 @@ impl App {
         };
         // Silently check for a newer release in the background (once per process).
         let check = app.startup_update_check();
+        // Called by its name: the microphone waits for it from the start.
+        app.resume_waiting();
         (app, Task::batch([open_task, check]))
     }
 
@@ -288,6 +290,11 @@ impl App {
                 iced::time::every(crate::app::voice::LISTEN_TICK)
                     .map(|_| Message::Voice(crate::VoiceMsg::Tick)),
             );
+        }
+        // While the microphone waits for "Hey, Clew": what it hears, heard
+        // off this thread — the window hears only of the phrase.
+        if let Some(wait) = self.voice.wake.wait() {
+            subs.push(crate::app::wake::subscription(wait));
         }
         // While Clew speaks: the meter, and the moment all is said — when
         // the microphone, on, opens again.

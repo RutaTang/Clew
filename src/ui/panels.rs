@@ -1011,15 +1011,16 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         ));
     let ask_btn = super::toolbar::tip_at(ask_btn, send_tip, None, tooltip::Position::Top);
     // Or say it: the microphone, in the composer beside what is typed —
-    // lit while it is on ([`super::askfloat::voice_lit`]).
+    // lit while it is on ([`super::askfloat::voice_lit`]), in the accent
+    // while it waits for "Hey, Clew".
     let talk = super::toolbar::tip_at(
-        round(Glyph::Mic, theme::fg())
+        round(Glyph::Mic, super::askfloat::talk_tint(app, theme::fg()))
             .style(theme::round_button(false))
             .on_press(super::heard::said(
                 tr!("Talk"),
                 Message::Voice(crate::VoiceMsg::Toggle),
             )),
-        tr!("Talk"),
+        super::askfloat::talk_tip(app),
         Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
         tooltip::Position::Top,
     );

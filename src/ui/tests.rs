@@ -9551,6 +9551,71 @@ fn smart_turn_is_offered_in_voice_settings() {
     let _ = std::fs::remove_dir_all(store.dir());
 }
 
+/// Waiting for "Hey, Clew" in Voice settings: its switch, and the keyword
+/// spotter it needs — its download saying its size, once here Remove, what
+/// went wrong under it, and that it cannot run without `clew-speak`. The
+/// microphone, while it waits, is drawn in the accent, and says the phrase
+/// starts it too.
+#[test]
+fn the_wake_phrase_is_offered_in_voice_settings() {
+    use crate::VoiceMsg;
+    let _turn = crate::app::wake::TEST_TURN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut app = reader_app();
+    let dir = crate::app::tests::test_dir("ui-wake-phrase");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = clew_voice::models::Store::new(dir);
+    app.voice.store = Some(store.clone());
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(&mut sim, "Start listening when you say “Hey, Clew”"));
+    assert!(shows(
+        &mut sim,
+        "goes only to a small model on this computer"
+    ));
+    assert!(shows(&mut sim, "Keyword Spotter"));
+    assert!(matches!(
+        click(sim, "Download (33 MB)").as_slice(),
+        [Message::Voice(VoiceMsg::DownloadWake)]
+    ));
+    let wake = clew_voice::wake::dir(&store);
+    std::fs::create_dir_all(&wake).unwrap();
+    for file in clew_voice::wake::MODEL.files {
+        std::fs::File::create(wake.join(file.name))
+            .unwrap()
+            .set_len(file.bytes)
+            .unwrap();
+    }
+    app.voice.wake.error = Some("the microphone was unplugged".into());
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(&mut sim, "the microphone was unplugged"));
+    assert!(!shows(&mut sim, "Download (33 MB)"));
+    assert!(matches!(
+        click(sim, "Remove").as_slice(),
+        [Message::Voice(VoiceMsg::RemoveWake)]
+    ));
+    app.voice.wake.spotters = None;
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(
+        &mut sim,
+        "clew-speak, which runs it, is not installed beside Clew"
+    ));
+    drop(sim);
+    // Waiting: the microphone at rest says so.
+    let rest = crate::theme::fg_muted();
+    assert_eq!(super::askfloat::talk_tip(&app), "Talk");
+    assert_eq!(super::askfloat::talk_tint(&app, rest), rest);
+    crate::app::wake::testing::ready(&mut app, store.clone());
+    assert!(app.resume_waiting());
+    assert_eq!(super::askfloat::talk_tip(&app), "Talk — or say “Hey, Clew”");
+    assert_eq!(
+        super::askfloat::talk_tint(&app, rest),
+        crate::theme::accent()
+    );
+    app.stop_waiting();
+    let _ = std::fs::remove_dir_all(store.dir());
+}
+
 /// What voice could not do is said in the reader's language: on the card,
 /// on the pill, and under a model in Settings.
 #[test]

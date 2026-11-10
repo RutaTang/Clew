@@ -217,11 +217,13 @@ fn the_agent_lists_and_runs_the_windows_commands() {
 fn the_agent_asks_before_a_setting_that_listens_or_sends() {
     let (mut app, stream, mut rx) = turn_app("wt-private");
     app.asking.delay = std::time::Duration::ZERO;
+    app.voice.prefs.wake = false;
     let listening = app.voice.mic_on;
     for (call_id, title) in [
         (1, "Talk"),
         (2, "Send spoken questions to Ask right away: On"),
         (3, "Embeddings: A service"),
+        (4, "Start listening when you say “Hey, Clew”: On"),
     ] {
         let _ = call(
             &mut app,
@@ -241,17 +243,18 @@ fn the_agent_asks_before_a_setting_that_listens_or_sends() {
         assert!(card.title.contains(title), "{}", card.title);
     }
     assert_eq!(app.voice.mic_on, listening, "it changed unasked");
+    assert!(!app.voice.prefs.wake, "it changed unasked");
     // How the window looks is the agent's to change.
     let _ = call(
         &mut app,
         stream,
-        4,
+        5,
         RUN_COMMAND,
         json!({"title": "Theme: Dark"}),
     );
     assert_eq!(
         results(&mut rx),
-        [(4, "Ran “Theme: Dark”.".to_string(), false)]
+        [(5, "Ran “Theme: Dark”.".to_string(), false)]
     );
 }
 

@@ -45,6 +45,8 @@ pub(crate) const SPEECH_MODELS: &[&str] = &[
     tr_noop!("Natural speech in 31 languages, English, Korean, Japanese and French among them."),
     tr_noop!("Kokoro (Chinese)"),
     tr_noop!("Mandarin Chinese, which Supertonic does not speak."),
+    // The wake phrase's model (`wake::MODEL`).
+    tr_noop!("Keyword Spotter"),
 ];
 
 /// When an MCP server's tool asks first (clew-core's `Approve::label`).

@@ -101,6 +101,7 @@ impl PaletteCommand {
                 VoiceMsg::SetSendQuestions(_)
                     | VoiceMsg::SetRunCommands(_)
                     | VoiceMsg::SetTalkOver(_)
+                    | VoiceMsg::SetWake(_)
                     | VoiceMsg::PickModel(_)
             ) | Message::Editor(EditorMsg::RunAction(crate::keymap::Action::Voice))
                 | Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))

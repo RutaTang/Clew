@@ -36,7 +36,7 @@ Clew 的每个功能也都可以只用键盘完成（Linux 和 Windows 上 **⌘
 
 - 🗺️ **项目全貌**：从整体和宏观的视角看一个项目，能帮我们理解它总体上是什么、由怎样的架构组成、为什么这样设计。Clew 提供一个由 AI 驱动的 Architecture Overview 功能以及一个 Code Statistics 功能，帮你抓住主要架构，从总体上理解这个项目。
 - 💬 **Ask Clew**：读代码时总会冒出各种具体问题，比如「Authentication 在哪做的?」「这里为什么要这样写?」等。Clew 提供一个懂你整个项目的 AI Agent，它会结合项目内容给你有依据的回答。Ask 属于整个项目，所以它在窗口右下角（**⌘⇧A**）：平时是一个小胶囊，打开后是那里的一张卡片，不挡住它上方和左边的代码；也可以放大成居中的窗口，按 Esc 一步步退回到胶囊。窗口顶部的输入框用来搜索文件、符号，以及以 `>` 开头的命令。Agent 还能直接在窗口里动手：打开某个文件的某一行、跳到某个符号、执行命令面板里的任意命令（「给我看调用图」），有代价的命令会先征得你的同意。
-- 🎙️ **语音**：按 **⌘⇧S**（或 Ask 上的麦克风）直接说话：说一个命令（「open the call graph」「hide the minimap」「dark mode」）就会执行；问一个问题就会交给 Ask。语音识别**在你自己的电脑上**由 [whisper.cpp](https://github.com/ggml-org/whisper.cpp) 完成，你说的话不会离开这台电脑；模型在 **设置 → Voice** 中挑选并下载一次即可：Echo 自己的三个（Small、Medium、Large，即 whisper 的 `small-q5_1`、`large-v3-turbo-q5_0`、`large-v3-q5_0`），或小巧的纯英文模型，每个都会用公布的校验和核对。详见 [语音](#语音)。
+- 🎙️ **语音**：按 **⌘⇧S**（或 Ask 上的麦克风，或说“Hey, Clew”）直接说话：说一个命令（「open the call graph」「hide the minimap」「dark mode」）就会执行；问一个问题就会交给 Ask。语音识别**在你自己的电脑上**由 [whisper.cpp](https://github.com/ggml-org/whisper.cpp) 完成，你说的话不会离开这台电脑；模型在 **设置 → Voice** 中挑选并下载一次即可：Echo 自己的三个（Small、Medium、Large，即 whisper 的 `small-q5_1`、`large-v3-turbo-q5_0`、`large-v3-q5_0`），或小巧的纯英文模型，每个都会用公布的校验和核对。详见 [语音](#语音)。
 - 🕸️ **Call Graph 和 Import Graph**：想弄清模块之间谁依赖谁、函数之间谁调用谁，光读代码很难拼出全貌。Clew 把 import 关系和调用关系画成一张可旋转、自转、拖拽的实时 3D 力布局图，按语言和层级深度着色，用箭头标出依赖方向，成环处还会高亮，让代码的结构一眼可见。
 - 🧱 **项目地图（Project maps）**：一个项目怎样组织在一起，很多是用它的语言和框架自己的说法写下的，import 图和调用图都看不出来：数据库有哪些表，Web 应用有哪些路由，Spring 往哪里注入了什么，OTP 的监督树，Go 类型不声明就满足了哪些接口。Clew 从文件里读出这些，把每一种画成一张地图，每个节点都能打开它定义的地方（见[项目地图](#项目地图)）。
 - 🧭 **Walkthrough**：上手一个新项目，不管是想了解项目主要的走向和涉及的代码，还是想知道某个功能主要的走向和涉及的代码，以及从哪里入手，又该按照什么顺序读，往往并不是容易的。Clew 提供了由 AI 驱动的 Walkthrough 功能，能针对整个项目或某个具体问题，生成一条有序、锚定到代码的引导式讲解，带你一步步走过关键的文件和函数，理清阅读的主线。
@@ -87,6 +87,8 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 **说话。** 按 **⌘⇧S**（Linux 和 Windows 上是 Ctrl+Shift+S；可以改键，命令面板里叫 **Talk**）或麦克风按钮，然后说出你想做的事。你停顿下来、或再按一次快捷键时，就停止收音；按 **Esc** 取消。听到的内容要么是窗口的某个命令——按你平时的说法说即可，词序随意，带不带「open」「show」都行；有代价的命令（一次 Explain All、启动程序、打开另一个文件夹）会先问你——要么是一个问题，会交给 Ask 并立即提问（这两项都可以在 **设置 → Voice** 中关闭）。
 
 **全在本机。** 麦克风通过系统自己的音频接口读取（Core Audio、WASAPI、ALSA，PipeWire 和 PulseAudio 都支持 ALSA），音频重采样到 16 kHz、裁剪到有人声的部分，再由 whisper.cpp 在这台电脑上转成文字：Mac 上通过 Metal 用 GPU，其他平台用 CPU。不会发送任何内容；只有你选择提问的问题才会像打字提问一样发给你的语言模型。
+
+**叫它的名字。** 在 **设置 → Voice** 中打开 **说出“Hey, Clew”时开始聆听**，并在那里下载它需要的 **关键词检测器**（33 MB：k2-fsa 的流式 Zipformer，支持英文和中文，Apache-2.0，按公布的大小和 SHA-256 核对）。之后，只要麦克风没有在聆听，它就会等待——按钮以强调色显示：说“Hey, Clew”，它就开始聆听，就像按了语音快捷键一样；一口气说“Hey, Clew, open the call graph”也可以。说“再见，Clew”“Bye, Clew”或“停止聆听”，它就回到等待；三分钟没有说话也会如此。语音快捷键和麦克风按钮照常可以开关聆听。等待期间，麦克风听到的声音只交给关键词检测器——它在这台电脑上的 `clew-speak` 中运行，只认得这一句：什么都不会保存，也不会转成文字。
 
 **模型。** 使用 whisper.cpp 自己的模型，与 [Echo](https://github.com/damien-schneider/Echo) 使用的相同，只有在你点击某个模型的 **Download**（按钮上标有大小）时才会下载，并且只有与公布的文件逐字节一致才会被接受：**Small**（`small-q5_1`，190 MB，默认）、**Medium**（`large-v3-turbo-q5_0`，574 MB）和 **Large**（`large-v3-q5_0`，1081 MB）按 Echo 的方式用 SHA-256 和精确大小核对，三者都支持多语言；另有 Tiny 和 Base（英文），适合在较慢的机器上快速下命令，用 whisper.cpp 列出的 SHA-1 核对。模型保存在 Clew 的数据目录（`voice/`）中，可以在那里删除。在 macOS 上，Clew 第一次收音时，系统会询问是否允许使用麦克风。
 

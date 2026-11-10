@@ -115,6 +115,128 @@ pub(crate) fn only_yes_or_no(said: &str) -> Option<bool> {
     }
 }
 
+/// What says to stop listening, Clew waiting again for its name: the
+/// English words, and the reader's. "Bye, Clew" with its name: a "bye" said
+/// to someone else in the room is not for Clew.
+const STOP_LISTENING: &str =
+    tr_noop!("stop listening, bye clew, bye bye clew, goodbye clew, good bye clew");
+/// What Clew is called by, before what is said to it: the English words,
+/// and the reader's.
+const CALLED: &str = tr_noop!("hey, hi, hello, ok, okay");
+/// Clew's name, as it is heard: the English spellings, and the reader's.
+const NAME: &str = tr_noop!("clew, clue");
+
+/// The words of a list, each phrase's words lower-cased: the English
+/// list's, and the reader's.
+fn phrase_words(list: &'static str) -> Vec<Vec<String>> {
+    [list, crate::i18n::lookup(list)]
+        .into_iter()
+        .flat_map(|l| l.split([',', '，', '、']))
+        .map(|p| {
+            said_words(p)
+                .into_iter()
+                .map(|(_, w)| w)
+                .collect::<Vec<_>>()
+        })
+        .filter(|p: &Vec<String>| !p.is_empty())
+        .collect()
+}
+
+/// The words of `said`, lower-cased and without the marks around them,
+/// each with where it ends in `said`; Chinese, Japanese and Korean set
+/// apart from Latin letters beside them ("再见Clew").
+fn said_words(said: &str) -> Vec<(usize, String)> {
+    let cjk = |c: char| matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF);
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut last_cjk = false;
+    let mut end = 0;
+    for (i, c) in said.char_indices() {
+        let letter = c.is_alphanumeric() || c == '\'' || c == '’';
+        if (!letter || cjk(c) != last_cjk) && !word.is_empty() {
+            words.push((end, std::mem::take(&mut word)));
+        }
+        if letter {
+            if c != '\'' && c != '’' {
+                word.extend(c.to_lowercase());
+            }
+            last_cjk = cjk(c);
+            end = i + c.len_utf8();
+        }
+    }
+    if !word.is_empty() {
+        words.push((end, word));
+    }
+    words
+}
+
+/// Whether `said` is nothing but a word to stop listening: "Stop
+/// listening", "Bye, Clew", "Bye, Clew! Stop listening." — not "stop
+/// listening to the test output", which is something else.
+pub(crate) fn stops_listening(said: &str) -> bool {
+    let names: Vec<String> = phrase_words(NAME).into_iter().flatten().collect();
+    let said: Vec<String> = said_words(said)
+        .into_iter()
+        .map(|(_, w)| if names.contains(&w) { "clew".into() } else { w })
+        .collect();
+    if said.is_empty() {
+        return false;
+    }
+    let phrases: Vec<Vec<String>> = phrase_words(STOP_LISTENING)
+        .into_iter()
+        .map(|p| {
+            p.into_iter()
+                .map(|w| if names.contains(&w) { "clew".into() } else { w })
+                .collect()
+        })
+        .collect();
+    let mut made = vec![false; said.len() + 1];
+    made[0] = true;
+    for i in 0..said.len() {
+        if made[i] {
+            for p in &phrases {
+                if said[i..].starts_with(p) {
+                    made[i + p.len()] = true;
+                }
+            }
+        }
+    }
+    made[said.len()]
+}
+
+/// `said` without Clew called by its name before it: "Hey, Clew, open
+/// Settings" is "open Settings", "Clew, what does this do?" is "what does
+/// this do?" — what was said as it was said, its case and marks kept. The
+/// name alone is a call only with a mark after it, as one is written: "Clue
+/// me in" is not one.
+pub(crate) fn without_name(said: &str) -> &str {
+    let names: Vec<String> = phrase_words(NAME).into_iter().flatten().collect();
+    let called: Vec<String> = phrase_words(CALLED).into_iter().flatten().collect();
+    let mark = |c: char| {
+        matches!(
+            c,
+            ',' | '.' | '!' | '?' | ':' | ';' | '，' | '。' | '！' | '？' | '、' | '-' | '—'
+        )
+    };
+    let words = said_words(said);
+    let named = match words.as_slice() {
+        [(_, first), (end, second), ..] if called.contains(first) && names.contains(second) => {
+            Some(*end)
+        }
+        [(end, first), ..]
+            if names.contains(first)
+                && said[*end..].trim_start().chars().next().is_none_or(mark) =>
+        {
+            Some(*end)
+        }
+        _ => None,
+    };
+    match named {
+        Some(end) => said[end..].trim_start_matches(|c: char| c.is_whitespace() || mark(c)),
+        None => said,
+    }
+}
+
 /// The phrases said with a value, in the order they are tried — after the
 /// palette's titles, so that a title wins: said with its value, a phrase
 /// is no title's words (the extra word is the value), and a translation
@@ -612,6 +734,81 @@ fn squeezed(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Stop listening" and "Bye, Clew" stop it, alone or together, and
+    /// Clew heard as "Clue"; a "bye" without its name, or the words in
+    /// something else said, do not.
+    #[test]
+    fn stopping_listening_is_said() {
+        for said in [
+            "Stop listening.",
+            "Bye, Clew!",
+            "Bye, Clew! Stop listening.",
+            "goodbye clue",
+            "Bye-bye, Clew.",
+            "Good bye, Clew",
+        ] {
+            assert!(stops_listening(said), "{said}");
+        }
+        for said in [
+            "",
+            "bye",
+            "Stop listening to the test output",
+            "say bye to Clew",
+            "Clew",
+            "stop",
+        ] {
+            assert!(!stops_listening(said), "{said}");
+        }
+    }
+
+    /// The words Settings gives to stop listening stop it, in each
+    /// language, as whisper writes them.
+    #[test]
+    fn the_words_given_to_stop_listening_stop_it_in_each_language() {
+        use crate::i18n::{Lang, with_lang};
+        for (lang, said) in [
+            (Lang::Fr, ["Au revoir, Clew.", "Arrête d'écouter."]),
+            (Lang::Zh, ["再见，Clew。", "停止聆听。"]),
+            (Lang::Ja, ["バイバイ、Clew。", "聞き取りを停止。"]),
+            (Lang::Ko, ["잘 가, Clew.", "듣기 중지."]),
+        ] {
+            with_lang(lang, || {
+                for said in said {
+                    assert!(stops_listening(said), "{said}");
+                }
+                // Hey, in the reader's words, is not goodbye.
+                assert!(!stops_listening(crate::i18n::lookup(CALLED)));
+            });
+        }
+    }
+
+    /// Clew called by its name before what is said to it: the name, and
+    /// the call before it, are not what was asked.
+    #[test]
+    fn what_is_said_to_clew_is_without_its_name() {
+        assert_eq!(without_name("Hey, Clew, open Settings."), "open Settings.");
+        assert_eq!(
+            without_name("Hey Clue. What does total do?"),
+            "What does total do?"
+        );
+        assert_eq!(without_name("Clew, go to line 30"), "go to line 30");
+        assert_eq!(without_name("Hey, Clew."), "");
+        assert_eq!(without_name("okay Clew — next"), "next");
+        // Not called: left as it is.
+        assert_eq!(without_name("Hey, look at this"), "Hey, look at this");
+        assert_eq!(without_name("Open the clew file"), "Open the clew file");
+        assert_eq!(without_name("A clue is in the log"), "A clue is in the log");
+        assert_eq!(without_name("Clue me in on this"), "Clue me in on this");
+        assert_eq!(without_name("Clew!"), "");
+        // Written without a space, as Chinese is: its words apart from the
+        // name beside them.
+        let words: Vec<String> = said_words("再见Clew！")
+            .into_iter()
+            .map(|(_, w)| w)
+            .collect();
+        assert_eq!(words, ["再见", "clew"]);
+    }
 
     /// A question on screen is answered only by what is all a yes or all
     /// a no: what merely opens with one ("run the tests") is not.

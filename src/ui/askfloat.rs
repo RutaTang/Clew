@@ -205,7 +205,7 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
                 if listening {
                     crate::theme::active().on_accent
                 } else {
-                    theme::fg_muted()
+                    talk_tint(app, theme::fg_muted())
                 },
                 14.0,
             ))
@@ -232,7 +232,7 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
         if listening {
             tr!("Stop listening")
         } else {
-            tr!("Talk")
+            talk_tip(app)
         },
         Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
         tooltip::Position::Top,
@@ -1116,6 +1116,26 @@ fn phase_line(
     ]
     .spacing(8)
     .align_y(iced::Center)
+}
+
+/// The microphone at rest drawn in `tint` — in the accent while it waits
+/// for "Hey, Clew": it is on, though nothing is being listened to.
+pub(crate) fn talk_tint(app: &App, tint: iced::Color) -> iced::Color {
+    if app.voice.wake.is_waiting() {
+        theme::accent()
+    } else {
+        tint
+    }
+}
+
+/// What the microphone at rest says it does: talk — or, while it waits,
+/// that "Hey, Clew" does too.
+pub(crate) fn talk_tip(app: &App) -> &'static str {
+    if app.voice.wake.is_waiting() {
+        tr!("Talk — or say “Hey, Clew”")
+    } else {
+        tr!("Talk")
+    }
 }
 
 /// The voice key's round button, `side` across, lit in the accent while

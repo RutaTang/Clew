@@ -299,6 +299,69 @@ fn turn_rows_of(app: &App) -> Vec<Element<'_, Message>> {
     rows
 }
 
+/// Listening when called: the switch, and the keyword spotter that hears
+/// the call — at its right whether it is here — Remove — its download, or
+/// getting it; and what last went wrong with it, or with waiting.
+fn wake_rows(app: &App) -> Vec<Element<'_, Message>> {
+    let mut rows = vec![form::toggle(
+        tr!("Start listening when you say “Hey, Clew”"),
+        Some(
+            tr!(
+                "Say “Bye, Clew” or “Stop listening” to stop listening. While Clew waits, the microphone stays on, but what it hears goes only to a small model on this computer."
+            )
+            .into(),
+        ),
+        app.voice.prefs.wake,
+        |v| Message::Voice(VoiceMsg::SetWake(v)),
+    )];
+    let name = crate::i18n::lookup(clew_voice::wake::MODEL.name);
+    rows.extend(super::heard::about(name, || wake_model_rows(app)));
+    rows
+}
+
+fn wake_model_rows(app: &App) -> Vec<Element<'_, Message>> {
+    use clew_voice::wake::{self as spot, MODEL};
+    let installed = app.voice.store.as_ref().is_some_and(spot::installed);
+    let state: Element<'_, Message> = if let Some(d) = &app.voice.wake.download {
+        getting(
+            d.done,
+            d.total.unwrap_or(MODEL.bytes),
+            Message::Voice(VoiceMsg::CancelWakeDownload),
+        )
+    } else if installed {
+        form::action(tr!("Remove"), Some(Message::Voice(VoiceMsg::RemoveWake))).into()
+    } else {
+        form::action(
+            &tr!("Download ({size} MB)", size = MODEL.size_mb()),
+            Some(Message::Voice(VoiceMsg::DownloadWake)),
+        )
+        .into()
+    };
+    let about = tr!("Hears “Hey, Clew”, and nothing else.");
+    let mut rows = vec![form::item(
+        crate::i18n::lookup(MODEL.name),
+        Some(about.to_string()),
+        state,
+    )];
+    let warning = |said: String| {
+        form::plain(
+            text(said)
+                .size(ts::SMALL)
+                .color(theme::warn())
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+    };
+    if installed && app.voice.wake.spotters.is_none() {
+        rows.push(warning(
+            tr!("clew-speak, which runs it, is not installed beside Clew").into(),
+        ));
+    }
+    if let Some(e) = &app.voice.wake.error {
+        rows.push(warning(crate::i18n::message(e)));
+    }
+    rows
+}
+
 /// How Clew answers aloud: whether it does, how fast, and the models it
 /// speaks with.
 fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
@@ -374,6 +437,7 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
         app.voice.prefs.talk_over,
         |v| Message::Voice(VoiceMsg::SetTalkOver(v)),
     ));
+    listening.extend(wake_rows(app));
     listening.extend(turn_rows(app));
     // Groups, and no captions around them: the voice key is on the button
     // it starts, and where models are kept is no setting.

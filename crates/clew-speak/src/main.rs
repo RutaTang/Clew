@@ -19,15 +19,17 @@
 //! → {"audio":{"id":1,"pcm":"<base64: 16-bit little-endian samples>"}}
 //! ```
 //!
-//! It also makes embeddings (`clew-speak embed <model dir>`, [`embed`]) and
+//! It also makes embeddings (`clew-speak embed <model dir>`, [`embed`]),
 //! hears when a speaker has finished (`clew-speak turn <model file>`,
-//! [`turn`]).
+//! [`turn`]), and waits to be called (`clew-speak listen <model dir>
+//! <keyword>…`, [`listen`]).
 //!
 //! A request that cannot be met is answered `{"failed":{"id":1,"error":…}}`;
 //! a model that cannot be loaded, `{"error":…}` before it exits. It exits
 //! when stdin closes.
 
 mod embed;
+mod listen;
 mod mel;
 mod runtime;
 mod turn;
@@ -108,6 +110,14 @@ fn main() {
             std::process::exit(2);
         };
         std::process::exit(embed::run(Path::new(&dir)));
+    }
+    if first.as_deref() == Some("listen") {
+        let Some(dir) = args.next() else {
+            eprintln!("usage: clew-speak listen <model dir> <keyword>…");
+            std::process::exit(2);
+        };
+        let keywords: Vec<String> = args.map(|a| a.to_string_lossy().into_owned()).collect();
+        std::process::exit(listen::run(Path::new(&dir), &keywords));
     }
     if first.as_deref() == Some("turn") {
         let Some(file) = args.next() else {
