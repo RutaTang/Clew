@@ -355,18 +355,29 @@ impl App {
         let Some(program) = c.on_path else {
             return Task::none();
         };
+        self.use_server_program(&c.language, &program)
+    }
+
+    /// `program`, the server's own on this computer, chosen for
+    /// `language` in the project — and started, out of any slot it waited
+    /// in.
+    pub(crate) fn use_server_program(
+        &mut self,
+        language: &str,
+        program: &std::path::Path,
+    ) -> Task<Message> {
         let mut next = self.proj.lang_choices.clone();
         next.servers.get_or_insert_with(Default::default).insert(
-            c.language.clone(),
+            language.to_string(),
             clew_protocol::ServerChoice {
                 command: program.to_string_lossy().into_owned(),
                 args: None,
             },
         );
         // Out of the slot it waited in, so the choice starts it afresh.
-        self.proj.link.lsp.remove(&c.language);
+        self.proj.link.lsp.remove(language);
         let chosen = self.choose(next);
-        Task::batch([chosen, self.ensure_lsp(&c.language)])
+        Task::batch([chosen, self.ensure_lsp(language)])
     }
 
     /// Hash the repository-named `command` (with its args and init options —
@@ -1765,13 +1776,13 @@ impl App {
 /// are given (`linerpc::child_path`: on macOS, an app opened from the
 /// Finder is given the login shell's).
 #[cfg(test)]
-fn path_set_here() -> Option<std::ffi::OsString> {
+pub(crate) fn path_set_here() -> Option<std::ffi::OsString> {
     SEARCH_PATH.with(|path| path.borrow().clone())
 }
 
 /// See the test build's: none.
 #[cfg(not(test))]
-fn path_set_here() -> Option<std::ffi::OsString> {
+pub(crate) fn path_set_here() -> Option<std::ffi::OsString> {
     None
 }
 

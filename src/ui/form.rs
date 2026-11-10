@@ -138,7 +138,7 @@ pub(crate) fn field<'a>(
         container(label(name.into(), about))
             .width(LABEL_W)
             .padding(Padding {
-                top: 7.0,
+                top: VALUE_TOP,
                 ..Padding::ZERO
             }),
         container(control.into()).width(Fill),
@@ -147,6 +147,28 @@ pub(crate) fn field<'a>(
     .padding([ROW_PAD_Y - 2.0, ROW_PAD_X])
     .into()
 }
+
+/// [`field`] whose value is words, not a control: set down to the line its
+/// label is on (the label is set down to a control's text; words beside it
+/// sat 7 above).
+pub(crate) fn field_text<'a>(
+    name: impl Into<String>,
+    about: Option<String>,
+    words: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    field(
+        name,
+        about,
+        container(words.into()).padding(Padding {
+            top: VALUE_TOP,
+            ..Padding::ZERO
+        }),
+    )
+}
+
+/// How far a field's label sits below the top of its row: a control's
+/// text's place in the control.
+pub(crate) const VALUE_TOP: f32 = 7.0;
 
 /// A row of its own content, padded as the others are.
 pub(crate) fn plain<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {

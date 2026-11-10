@@ -373,7 +373,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TourStart {
     pub sample: Placed,
-    pub fetch: Vec<String>,
+    pub fetch: Vec<(String, crate::app::setup::Fetch)>,
 }
 
 /// The sheet before the tour: what it needs, one step at a time, and the
@@ -506,7 +506,7 @@ impl App {
                 .servers
                 .iter()
                 .filter(|s| s.fetch != crate::app::setup::Fetch::Nothing)
-                .map(|s| s.language.clone())
+                .map(|s| (s.language.clone(), s.fetch.clone()))
                 .collect(),
         };
         let here = self.proj.project.is_none()

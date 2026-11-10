@@ -152,7 +152,14 @@ fn opening_records_the_leave_to_build_and_queues_the_downloads() {
     assert!(trust.is_root_trusted(None, &root));
     assert!(trust.is_build_trusted(None, &root, "rust-analyzer"));
     let intent = app.pending_setup.as_ref().expect("the downloads wait");
-    assert_eq!(intent.fetch, vec!["rust".to_string()]);
+    assert_eq!(
+        intent
+            .fetch
+            .iter()
+            .map(|(l, _)| l.as_str())
+            .collect::<Vec<_>>(),
+        ["rust"]
+    );
     assert!(!intent.explain);
 }
 
@@ -310,7 +317,14 @@ fn a_first_opens_sheet_is_not_replaced_by_another() {
     // Its Open carries out what it has ticked.
     let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(asked.clone())));
     let intent = app.pending_setup.as_ref().expect("the downloads wait");
-    assert_eq!(intent.fetch, vec!["rust".to_string()]);
+    assert_eq!(
+        intent
+            .fetch
+            .iter()
+            .map(|(l, _)| l.as_str())
+            .collect::<Vec<_>>(),
+        ["rust"]
+    );
 }
 
 /// A first open's answer is for the project it opened. Another opened
@@ -602,4 +616,44 @@ fn a_build_once_allowed_is_not_offered_again() {
     let _ = app.update(Message::Project(ProjectMsg::SetUpMissing));
     assert!(clew_core::trust::Trust::load().is_build_trusted(None, &root, "rust-analyzer"));
     assert!(app.missing_setup().is_empty(), "allowed: nothing to offer");
+}
+
+/// A server whose own program is already on this computer is set up as
+/// that program — chosen for the project, nothing installed — and the sheet
+/// and the tour say so; with none on the PATH, Clew's copy is fetched as
+/// before. The tour said "pyright: install with npm" with pyright on the
+/// PATH.
+#[cfg(unix)]
+#[test]
+fn a_server_on_this_computer_is_used_not_installed_again() {
+    use crate::app::setup::{ServerLook, servers_line};
+    use std::os::unix::fs::PermissionsExt;
+    let store = test_dir("on-path-setup-store");
+    let _ = std::fs::remove_dir_all(&store);
+    let _env = data_dir_override(&store);
+    let root = test_dir("on-path-setup-project");
+    let bin = test_dir("on-path-setup-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("pyright-langserver");
+    std::fs::write(&program, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let look = |path: &std::path::Path| ServerLook {
+        path: Some(path.into()),
+        ..Default::default()
+    };
+    let python = ["python".to_string()];
+
+    let servers = look(&bin).servers_for(&root, &python);
+    assert_eq!(servers.len(), 1, "{servers:?}");
+    assert_eq!(servers[0].fetch, Fetch::OnPath(program.clone()));
+    assert_eq!(servers_line(&servers), "pyright: the one on this computer");
+
+    let empty = test_dir("on-path-setup-empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let servers = look(&empty).servers_for(&root, &python);
+    assert_eq!(
+        servers[0].fetch,
+        Fetch::Install("npm".into()),
+        "none here: Clew's copy"
+    );
 }

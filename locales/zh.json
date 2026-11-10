@@ -2645,6 +2645,7 @@
  "the node is gone: {e}": "节点已退出：{e}",
  "the note on {symbol} in {file}": "关于 {symbol} 的笔记（{file}）",
  "the offered update is no longer available": "提供的更新已不可用",
+ "the one on this computer": "本机已有的",
  "the program did not compile — see the output": "程序编译失败，请查看输出",
  "the program ended before Xdebug connected — see its output": "程序在 Xdebug 连接之前就已结束，请查看其输出",
  "the program ended before Xdebug read the command": "程序在 Xdebug 读取命令前就结束了",

@@ -2645,6 +2645,7 @@
  "the node is gone: {e}": "노드가 종료됨: {e}",
  "the note on {symbol} in {file}": "{file}의 {symbol} 메모",
  "the offered update is no longer available": "제공되던 업데이트를 더 이상 받을 수 없음",
+ "the one on this computer": "이 컴퓨터에 있는 것",
  "the program did not compile — see the output": "프로그램을 컴파일하지 못함 — 출력을 확인하세요",
  "the program ended before Xdebug connected — see its output": "Xdebug가 연결되기 전에 프로그램이 종료됨 — 출력을 확인하세요",
  "the program ended before Xdebug read the command": "Xdebug가 명령을 읽기 전에 프로그램이 끝났습니다",

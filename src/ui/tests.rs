@@ -12166,6 +12166,48 @@ fn the_view_menus_inert_row_says_why() {
     assert!(!shows(&mut sim, why));
 }
 
+/// A setting whose value is words — the interpreter in use — has them on
+/// its label's line, not 7 above it.
+#[test]
+fn a_fields_words_sit_on_its_labels_line() {
+    let mut sim = sim_elem(super::form::field_text(
+        "In use",
+        None,
+        iced::widget::text("Chosen by the language server").size(super::ts::BASE),
+    ));
+    let label = text_at(&mut sim, |t| t == "In use", 0).expect("the label");
+    let value = text_at(&mut sim, |t| t == "Chosen by the language server", 0).expect("the value");
+    assert!(
+        (label.center_y() - value.center_y()).abs() <= 1.5,
+        "label {label:?}, value {value:?}"
+    );
+}
+
+/// The find bar's ‹ and › go to the matches while there are some, and do
+/// nothing while there are none — in grey then, as they were always drawn,
+/// so that with 16 matches they looked switched off.
+#[test]
+fn the_find_bars_arrows_step_only_through_matches() {
+    let mut app = reader_app();
+    app.proj.find.open = true;
+    app.proj.find.query = "value".into();
+    let click_prev = |app: &App| {
+        let mut sim = sim_elem(super::panes::find_bar(app));
+        let count = text_at(&mut sim, |t| t.contains('/'), 0).expect("the count");
+        // Past the count's 46 and the row's 6: the first arrow.
+        let at = Point::new(count.x + 46.0 + 6.0 + 13.0, count.center_y());
+        sim.point_at(at);
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+            .into_iter()
+            .filter(|m| matches!(m, Message::Editor(EditorMsg::FindStep(_))))
+            .count()
+    };
+    assert_eq!(click_prev(&app), 0, "no match to go to");
+    app.proj.find.matches = vec![(0, 18, 23), (1, 18, 23)];
+    assert_eq!(click_prev(&app), 1, "a match to go to");
+}
+
 /// An import list's row names the file's folder; a file at the project's
 /// root has none to name, and shows none — not a stray ".".
 #[test]

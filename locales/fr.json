@@ -2645,6 +2645,7 @@
  "the node is gone: {e}": "le nœud s’est arrêté : {e}",
  "the note on {symbol} in {file}": "la note sur {symbol} dans {file}",
  "the offered update is no longer available": "la mise à jour proposée n’est plus disponible",
+ "the one on this computer": "celui de cet ordinateur",
  "the program did not compile — see the output": "la compilation du programme a échoué — consultez la sortie",
  "the program ended before Xdebug connected — see its output": "le programme s’est terminé avant la connexion de Xdebug — consultez sa sortie",
  "the program ended before Xdebug read the command": "le programme s’est terminé avant que Xdebug ne lise la commande",

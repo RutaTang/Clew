@@ -872,7 +872,7 @@ fn python_block<'a>(
         if let Some(path) = &effect.interpreter {
             in_use = in_use.push(form::path(path.clone()));
         }
-        rows.push(form::field(tr!("In use"), None, in_use));
+        rows.push(form::field_text(tr!("In use"), None, in_use));
         if let Some(bad) = &effect.unusable_choice {
             rows.push(form::plain(
                 text(tr!(

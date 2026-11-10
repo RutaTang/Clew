@@ -40,6 +40,11 @@ pub enum Fetch {
     Download,
     /// An install with a tool of the machine's (`go`, `npm`, `cargo`).
     Install(String),
+    /// Nothing fetched: the server's own program, already on this
+    /// computer, chosen for the project in place of Clew's copy — as a
+    /// first open offers it ([`crate::LspMsg::FoundOnPath`]). The tour said
+    /// "pyright: install with npm" with pyright on the PATH.
+    OnPath(PathBuf),
 }
 
 /// A language server the project needs, as the sheet lists it.
@@ -87,8 +92,8 @@ pub struct ProjectSetup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupIntent {
     pub root: PathBuf,
-    /// The languages whose servers to fetch now.
-    pub fetch: Vec<String>,
+    /// The languages whose servers to set up now, and how.
+    pub fetch: Vec<(String, Fetch)>,
     pub explain: bool,
 }
 
@@ -160,6 +165,10 @@ pub(crate) struct ServerLook {
     pub config: lsp::config::ProjectLspConfig,
     pub choices: clew_protocol::LanguageChoices,
     pub trust: clew_core::trust::Trust,
+    /// Where a server's own program is looked for: the PATH children get.
+    /// (Set here for a test, whose PATH is its thread's: the look runs on
+    /// another.)
+    pub path: Option<std::ffi::OsString>,
 }
 
 impl ServerLook {
@@ -172,10 +181,12 @@ impl ServerLook {
             .filter_map(|language| {
                 let server = self.config.resolve_with(language, &self.choices)?;
                 let fetch = match lsp::store::locate(&server) {
-                    lsp::store::Located::NeedsDownload { .. } => Fetch::Download,
-                    lsp::store::Located::NeedsInstall { install, .. } => {
-                        Fetch::Install(install.tool.to_string())
-                    }
+                    lsp::store::Located::NeedsDownload { download, .. } => self
+                        .on_path(&server.server_name, download.binary)
+                        .map_or(Fetch::Download, Fetch::OnPath),
+                    lsp::store::Located::NeedsInstall { install, .. } => self
+                        .on_path(&server.server_name, install.binary)
+                        .map_or_else(|| Fetch::Install(install.tool.to_string()), Fetch::OnPath),
                     lsp::store::Located::Unsupported(_) => return None,
                     lsp::store::Located::Ready(_) | lsp::store::Located::RepoCommand(_) => {
                         Fetch::Nothing
@@ -193,6 +204,24 @@ impl ServerLook {
             })
             .filter(SetupServer::asks)
             .collect()
+    }
+
+    /// The server `server_name`'s own program — `binary` names where it
+    /// lands in Clew's copy, its file name what it goes by on the PATH —
+    /// when this computer has one worth using, as a first open would offer
+    /// it. Not for a server Clew's own install keeps from running the
+    /// project's code ([`lsp::langenv::pins`]).
+    fn on_path(&self, server_name: &str, binary: &str) -> Option<PathBuf> {
+        if lsp::langenv::pins(server_name) {
+            return None;
+        }
+        let name = Path::new(binary).file_name()?.to_str()?;
+        let path = self
+            .path
+            .clone()
+            .unwrap_or_else(clew_core::linerpc::child_path);
+        let program = lsp::store::find_in_unresolved(&path, name)?;
+        crate::app::lsp::worth_offering(&program, &path).then_some(program)
     }
 }
 
@@ -284,6 +313,7 @@ pub(crate) fn servers_line(servers: &[SetupServer]) -> String {
                 Fetch::Nothing => {}
                 Fetch::Download => takes.push(tr!("download").into()),
                 Fetch::Install(tool) => takes.push(tr!("install with {tool}", tool = tool)),
+                Fetch::OnPath(_) => takes.push(tr!("the one on this computer").into()),
             }
             if s.builds {
                 takes.push(tr!("builds the project (runs its code)").into());
@@ -444,10 +474,10 @@ impl App {
         };
         let servers = Self::ticked_servers(&setup);
         self.allow_builds(root, &servers);
-        let fetch: Vec<String> = servers
+        let fetch: Vec<(String, Fetch)> = servers
             .iter()
             .filter(|s| s.fetch != Fetch::Nothing)
-            .map(|s| s.language.clone())
+            .map(|s| (s.language.clone(), s.fetch.clone()))
             .collect();
         let explain = setup.explain && self.llm_available;
         if !fetch.is_empty() || explain {
@@ -485,7 +515,7 @@ impl App {
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for server in servers {
             if server.fetch != Fetch::Nothing {
-                tasks.push(self.fetch_lsp(&server.language));
+                tasks.push(self.set_up_server(&server.language, &server.fetch));
             } else if matches!(
                 self.proj.link.lsp.get(&server.language),
                 Some(LspSlot::Declined(_))
@@ -519,6 +549,7 @@ impl App {
                 Default::default()
             },
             trust: self.trust.clone(),
+            path: crate::app::lsp::path_set_here(),
         }
     }
 
@@ -651,8 +682,11 @@ impl App {
         let Some(intent) = self.pending_setup.take() else {
             return Task::none();
         };
-        let mut tasks: Vec<Task<Message>> =
-            intent.fetch.iter().map(|l| self.fetch_lsp(l)).collect();
+        let mut tasks: Vec<Task<Message>> = intent
+            .fetch
+            .iter()
+            .map(|(language, fetch)| self.set_up_server(language, fetch))
+            .collect();
         if intent.explain {
             tasks.push(self.on_explain_project(false));
         }
@@ -667,6 +701,15 @@ impl App {
     /// otherwise ask for. A language whose server is in hand, on its way,
     /// running or asked about is left alone; one whose download was declined
     /// or failed is fetched: "Set Up Project…" is where it is asked for again.
+    /// Set `language`'s server up as a look at the project found it: the
+    /// program on this computer chosen for it, or Clew's copy fetched.
+    fn set_up_server(&mut self, language: &str, fetch: &Fetch) -> Task<Message> {
+        match fetch {
+            Fetch::OnPath(program) => self.use_server_program(language, program),
+            _ => self.fetch_lsp(language),
+        }
+    }
+
     pub(crate) fn fetch_lsp(&mut self, language: &str) -> Task<Message> {
         if self.connection.is_remote() || self.proj.project.is_none() {
             return Task::none();

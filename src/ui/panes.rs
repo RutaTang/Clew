@@ -765,6 +765,17 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
             .padding([6, 7])
             .on_press(msg)
     };
+    // Previous and next read as live while there is a match to go to — in
+    // the text's own colour, a size up — and as off, and are, while there
+    // is none: in the muted grey of the ×, they looked off with 16 matches.
+    let step = |g: Glyph, msg: Message| {
+        let live = !find.matches.is_empty();
+        let tint = if live { theme::fg() } else { theme::dim() };
+        button(glyph::icon(g, tint, 14.0))
+            .style(theme::toolbar_button)
+            .padding([5, 6])
+            .on_press_maybe(live.then_some(msg))
+    };
 
     // Match case, whole word, regular expression: as project search has
     // them, and as it means them — off, the case matters only once the
@@ -807,14 +818,14 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
                 crate::SearchOpt::Regex
             ),
             text(count).size(ts::SMALL).color(theme::dim()).width(46),
-            btn(
+            step(
                 Glyph::ChevronLeft,
                 super::heard::said(
                     tr!("Previous match"),
                     Message::Editor(EditorMsg::FindStep(-1))
                 )
             ),
-            btn(
+            step(
                 Glyph::ChevronRight,
                 super::heard::said(tr!("Next match"), Message::Editor(EditorMsg::FindStep(1)))
             ),

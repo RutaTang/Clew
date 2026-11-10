@@ -2645,6 +2645,7 @@
  "the node is gone: {e}": "Erlang ノードが終了しています: {e}",
  "the note on {symbol} in {file}": "{file} の {symbol} のメモ",
  "the offered update is no longer available": "提供されていたアップデートは利用できなくなりました",
+ "the one on this computer": "このコンピューターにあるもの",
  "the program did not compile — see the output": "プログラムをコンパイルできませんでした。出力を確認してください",
  "the program ended before Xdebug connected — see its output": "Xdebug が接続する前にプログラムが終了しました。出力を確認してください",
  "the program ended before Xdebug read the command": "Xdebug がコマンドを読む前にプログラムが終了しました",
