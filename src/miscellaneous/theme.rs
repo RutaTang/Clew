@@ -1544,18 +1544,23 @@ pub fn language_hue(lang: Option<&str>) -> Color {
 /// so the faint lines read against either background.
 pub fn graph_edge() -> Color {
     if is_light() {
-        rgb(0xaab0ba)
+        GRAPH_EDGE_LIGHT
     } else {
-        rgb(0x5a6272)
+        GRAPH_EDGE_DARK
     }
 }
 pub fn graph_arrow() -> Color {
     if is_light() {
-        rgb(0x878d99)
+        rgb(0x6b7280)
     } else {
         rgb(0x9098ab)
     }
 }
+
+/// A graph's edges, drawn at a third to half strength: in light, as plain
+/// against the page as in dark — a paler grey all but vanished on white.
+const GRAPH_EDGE_DARK: Color = rgb(0x5a6272);
+const GRAPH_EDGE_LIGHT: Color = rgb(0x7a8190);
 
 /// The native macOS window-control colors (close / minimize / zoom), and the
 /// gray they all take while the window is inactive. Platform constants, not
@@ -2804,6 +2809,40 @@ mod tests {
     }
 
     use super::*;
+
+    /// A graph's edges read as plainly on Clew's light page as on its dark
+    /// one, at the strengths they are drawn at.
+    #[test]
+    fn graph_edges_read_in_light_as_in_dark() {
+        let page = |id: &str| {
+            THEMES
+                .iter()
+                .find(|t| t.id == id)
+                .expect("a theme")
+                .palette
+                .bg
+        };
+        let over = |edge: Color, bg: Color, a: f32| Color {
+            r: edge.r * a + bg.r * (1.0 - a),
+            g: edge.g * a + bg.g * (1.0 - a),
+            b: edge.b * a + bg.b * (1.0 - a),
+            a: 1.0,
+        };
+        for a in [0.33, 0.5] {
+            let dark = contrast(
+                over(GRAPH_EDGE_DARK, page("clew-dark"), a),
+                page("clew-dark"),
+            );
+            let light = contrast(
+                over(GRAPH_EDGE_LIGHT, page("clew-light"), a),
+                page("clew-light"),
+            );
+            assert!(
+                light >= dark * 0.95,
+                "at {a}: light {light:.2} vs dark {dark:.2}"
+            );
+        }
+    }
 
     /// A raised surface — a tooltip, a drop-down's list, the chosen
     /// segment — is the theme's own: never brighter than the theme's

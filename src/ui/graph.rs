@@ -1708,18 +1708,14 @@ impl GraphCanvas<'_> {
             if fade <= 0.006 {
                 continue; // too deep to bother placing
             }
-            let rect_x = if side[i] >= 0.5 {
-                x - r - 3.0 - width
+            let left = side[i] >= 0.5;
+            let spot = if is_hover {
+                Some((label_rect(x, y, r, width, left), left))
             } else {
-                x + r + 3.0
+                label_spot(&placed, x, y, r, width, left, bounds.width)
             };
-            let rect = iced::Rectangle {
-                x: rect_x,
-                y: y - 6.5,
-                width,
-                height: 13.0,
-            };
-            if is_hover || !placed.iter().any(|pr| rects_overlap(*pr, rect)) {
+            if let Some((rect, left)) = spot {
+                side[i] = if left { 1.0 } else { 0.0 };
                 target[i] = fade;
                 // Only a (near) fully-shown label reserves space, so a barely
                 // there one can't hide a solid neighbour.
@@ -2012,6 +2008,44 @@ impl GraphCanvas<'_> {
             }
         }
     }
+}
+
+/// Where a label goes beside its node at `(x, y)` of radius `r`: right of
+/// it, or `left`.
+fn label_rect(x: f32, y: f32, r: f32, width: f32, left: bool) -> iced::Rectangle {
+    iced::Rectangle {
+        x: if left {
+            x - r - 3.0 - width
+        } else {
+            x + r + 3.0
+        },
+        y: y - 6.5,
+        width,
+        height: 13.0,
+    }
+}
+
+/// A free place for a node's label among those `placed`: on its side
+/// (`left` or right), else on the other where that is free and inside the
+/// frame — a label its neighbour's took the place of was hidden, and left a
+/// node unnamed with room to spare across it. `None`: no room either side.
+fn label_spot(
+    placed: &[iced::Rectangle],
+    x: f32,
+    y: f32,
+    r: f32,
+    width: f32,
+    left: bool,
+    frame_w: f32,
+) -> Option<(iced::Rectangle, bool)> {
+    let free = |rect: iced::Rectangle| !placed.iter().any(|p| rects_overlap(*p, rect));
+    let own = label_rect(x, y, r, width, left);
+    if free(own) {
+        return Some((own, left));
+    }
+    let other = label_rect(x, y, r, width, !left);
+    let inside = other.x >= 2.0 && other.x + other.width <= frame_w - 2.0;
+    (inside && free(other)).then_some((other, !left))
 }
 
 /// Axis-aligned overlap test for label decluttering.
@@ -4280,6 +4314,29 @@ mod tests {
             "only ever slowing: {turns:?}"
         );
         assert!(graph_settled(&st), "and came to rest");
+    }
+
+    /// A label whose side of its node a neighbour's label has taken goes to
+    /// the other side, when there is room there; it was hidden.
+    #[test]
+    fn a_crowded_label_takes_the_other_side_of_its_node() {
+        // A neighbour's label already right of the node.
+        let taken = [label_rect(100.0, 50.0, 5.0, 60.0, false)];
+        let (rect, left) =
+            label_spot(&taken, 100.0, 50.0, 5.0, 60.0, false, 800.0).expect("a place");
+        assert!(left, "{rect:?}");
+        assert!(rect.x + rect.width <= 100.0 - 5.0);
+        // At the frame's left edge there is no other side.
+        let near_edge = [label_rect(20.0, 50.0, 5.0, 60.0, false)];
+        assert_eq!(
+            label_spot(&near_edge, 20.0, 50.0, 5.0, 60.0, false, 800.0).map(|s| s.1),
+            None
+        );
+        // Nothing in the way: its own side.
+        assert_eq!(
+            label_spot(&[], 100.0, 50.0, 5.0, 60.0, false, 800.0).map(|s| s.1),
+            Some(false)
+        );
     }
 
     /// A label that would run off the right edge is drawn left of its node,
