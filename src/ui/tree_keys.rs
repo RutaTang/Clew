@@ -34,7 +34,8 @@ impl<'a> TreeKeys<'a> {
 
     /// The window gave the keyboard to the code — a file opened from the
     /// tree is read, `j` and `k` moving in it, as before the tree took
-    /// keys of its own — so the tree lets it go.
+    /// keys of its own — or something above the tree holds the keys (a
+    /// dialog, the tutorial): the tree lets them go.
     pub(crate) fn release(mut self, release: bool) -> Self {
         self.release = release;
         self
@@ -63,10 +64,29 @@ impl Focusable for State {
 }
 
 /// The tree move a key makes, when the tree has the keyboard: a plain key
-/// (no ⌘, Ctrl or Alt — those are the window's shortcuts).
-pub(crate) fn tree_key(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<TreeKey> {
+/// (no ⌘, Ctrl or Alt — those are the window's shortcuts). `key` is the key
+/// pressed, `typed` what it types with the modifiers held (Shift+`-` is
+/// `_`).
+pub(crate) fn tree_key(
+    key: &keyboard::Key,
+    typed: &keyboard::Key,
+    modifiers: keyboard::Modifiers,
+) -> Option<TreeKey> {
     if modifiers.command() || modifiers.control() || modifiers.alt() {
         return None;
+    }
+    // The reading keys walk the tree as they walk the code: `j` and `k`
+    // down and up, `h` out of a folder, `l` into one.
+    if !modifiers.shift()
+        && let keyboard::Key::Character(c) = key.as_ref()
+    {
+        match c {
+            "j" => return Some(TreeKey::Down),
+            "k" => return Some(TreeKey::Up),
+            "h" => return Some(TreeKey::Left),
+            "l" => return Some(TreeKey::Right),
+            _ => {}
+        }
     }
     Some(match key.as_ref() {
         keyboard::Key::Named(named) => match named {
@@ -84,9 +104,12 @@ pub(crate) fn tree_key(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> O
             _ => return None,
         },
         // A letter typed narrows the tree to the files it names: the
-        // filter above takes it, and what comes after.
-        keyboard::Key::Character(c) => {
-            let c = c.chars().next().filter(|c| !c.is_control())?;
+        // filter above takes it, and what comes after — as typed.
+        keyboard::Key::Character(_) => {
+            let keyboard::Key::Character(typed) = typed.as_ref() else {
+                return None;
+            };
+            let c = typed.chars().next().filter(|c| !c.is_control())?;
             TreeKey::Type(c)
         }
         keyboard::Key::Unidentified => return None,
@@ -185,10 +208,13 @@ impl Widget<Message, iced::Theme, iced::Renderer> for TreeKeys<'_> {
             Event::Mouse(mouse::Event::ButtonPressed(_)) => {
                 state.focused = cursor.is_over(layout.bounds());
             }
-            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
-                if state.focused =>
-            {
-                if let Some(step) = tree_key(key, *modifiers) {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                modifiers,
+                ..
+            }) if state.focused => {
+                if let Some(step) = tree_key(key, modified_key, *modifiers) {
                     // Esc gives the keyboard back, to the code.
                     if step == TreeKey::Leave {
                         state.focused = false;

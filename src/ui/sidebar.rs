@@ -213,8 +213,8 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                 |s| Message::Window(WindowMsg::FileFilterChanged(s)),
                 Some(Message::Window(WindowMsg::FileFilterSubmitted)),
                 Message::Window(WindowMsg::FileFilterEscaped),
-                // ↓ goes down to the tree under it.
-                Some(Message::Window(WindowMsg::FileFilterDown)),
+                // ↓ goes down to the tree under it — when it shows a row.
+                tree_has_rows(app).then_some(Message::Window(WindowMsg::FileFilterDown)),
             )
         } else {
             slot()
@@ -771,8 +771,11 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)
     .height(Fill);
+    // Something over the tree holding the keys takes them from it.
+    let held_above =
+        super::active_overlay(app).is_some_and(|o| o.holds_keys()) || app.tutorial.is_some();
     super::tree_keys::TreeKeys::new(tree, super::files_tree_keys_id())
-        .release(app.code_focused)
+        .release(app.code_focused || held_above)
         .into()
 }
 
@@ -869,6 +872,20 @@ pub(crate) fn tree_rows(app: &App) -> Vec<TreeRow> {
     let mut rows = Vec::new();
     walk(&project.tree, "", &app.proj.expanded, &mut rows);
     rows
+}
+
+/// Whether the Files view shows any row for the keyboard to rest on: a
+/// file the filter lists, or, unfiltered, anything in the project.
+pub(crate) fn tree_has_rows(app: &App) -> bool {
+    let Some(project) = &app.proj.project else {
+        return false;
+    };
+    let filter = app.file_filter.trim();
+    if filter.is_empty() {
+        !project.tree.dirs.is_empty() || !project.tree.files.is_empty()
+    } else {
+        filtered_files(project, filter).next().is_some()
+    }
 }
 
 /// The row `rel` is drawn at in the Files view's tree with `expanded`

@@ -1270,6 +1270,25 @@ impl App {
         self.tree_cursor_at(&rows).map(|i| rows[i].rel.clone())
     }
 
+    /// The tree no longer on screen while it had the keyboard — the sidebar
+    /// hidden, another view picked, a filter matching nothing — has it no
+    /// more, and the keys go back to the code: nothing was left holding
+    /// them, and no row was drawn as where they rest.
+    pub(crate) fn sync_tree_focus(&mut self) {
+        if !self.tree_focused {
+            return;
+        }
+        let shown = self.show_left_sidebar && self.sidebar == SidebarTab::Files;
+        if shown && ui::tree_has_rows(self) {
+            return;
+        }
+        self.tree_focused = false;
+        if self.region == keys::Region::Tree {
+            self.region = keys::Region::Code;
+            self.code_focused = true;
+        }
+    }
+
     /// [`Self::tree_cursor_rel`]'s place among `rows`.
     fn tree_cursor_at(&self, rows: &[ui::TreeRow]) -> Option<usize> {
         let find = |rel: &str| rows.iter().position(|r| r.rel == rel);
@@ -1321,6 +1340,7 @@ impl App {
             }
             TreeKey::Type(c) => {
                 self.file_filter.push(c);
+                self.region = keys::Region::Sidebar;
                 return Task::batch([
                     iced::widget::operation::focus(ui::file_filter_id()),
                     iced::widget::operation::move_cursor_to_end(ui::file_filter_id()),
@@ -1332,6 +1352,14 @@ impl App {
         let Some(at) = self.tree_cursor_at(&rows) else {
             return Task::none();
         };
+        // ↑ on the first row goes back up to the filter, as ↓ came down.
+        if key == TreeKey::Up && at == 0 {
+            self.region = keys::Region::Sidebar;
+            return Task::batch([
+                iced::widget::operation::focus(ui::file_filter_id()),
+                iced::widget::operation::move_cursor_to_end(ui::file_filter_id()),
+            ]);
+        }
         let last = rows.len() - 1;
         let row = rows[at].clone();
         let open = row.dir && self.proj.expanded.contains(&row.rel);

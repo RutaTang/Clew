@@ -1639,7 +1639,7 @@ fn the_files_tree_takes_the_keyboard_as_a_field_does() {
         sim.point_at(src.center());
         let _ = sim.simulate(iced_test::simulator::click());
         assert_eq!(sim.tap_key(down()), Status::Captured, "the tree's now");
-        assert_eq!(sim.tap_key(Key::Character("j".into())), Status::Captured);
+        assert_eq!(sim.tap_key(Key::Character("p".into())), Status::Captured);
         // Away from the tree, the keys are no longer its.
         // The code, in the window's middle.
         sim.point_at(Point::new(WINDOW.width / 2.0, WINDOW.height / 2.0));
@@ -1653,7 +1653,7 @@ fn the_files_tree_takes_the_keyboard_as_a_field_does() {
                 _ => None,
             })
             .collect();
-        assert_eq!(tree_keys, [TreeKey::Down, TreeKey::Type('j')]);
+        assert_eq!(tree_keys, [TreeKey::Down, TreeKey::Type('p')]);
         assert!(
             sent.iter()
                 .any(|m| matches!(m, Message::Window(WindowMsg::TreeFocused(true))))
@@ -1689,6 +1689,170 @@ fn the_files_tree_takes_the_keyboard_as_a_field_does() {
             .iter()
             .any(|m| matches!(m, Message::Window(WindowMsg::FileFilterDown)))
     );
+}
+
+/// `app`'s window with the widget `id` holding the keys, then `events`:
+/// how each event was taken, and what the window sent.
+fn keys_held_by(app: &App, id: Id, events: &[Event]) -> (Vec<iced::event::Status>, Vec<Message>) {
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(super::view(app), WINDOW, Cache::default(), &mut renderer);
+    let _ = run_operation(
+        &mut ui,
+        &renderer,
+        iced::advanced::widget::operation::focusable::focus::<()>(id),
+    );
+    let mut sent = Vec::new();
+    let (_, statuses) = ui.update(
+        events,
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    (statuses, sent)
+}
+
+/// A key pressed, as the window gets it: `key`, typing `typed`.
+fn press(key: keyboard::Key, typed: keyboard::Key, modifiers: keyboard::Modifiers) -> Event {
+    let text = match typed.as_ref() {
+        keyboard::Key::Character(c) => Some(c.into()),
+        _ => None,
+    };
+    Event::Keyboard(keyboard::Event::KeyPressed {
+        key,
+        modified_key: typed,
+        physical_key: keyboard::key::Physical::Unidentified(
+            keyboard::key::NativeCode::Unidentified,
+        ),
+        location: keyboard::Location::Standard,
+        modifiers,
+        text,
+        repeat: false,
+    })
+}
+
+/// A Files view with a folder and a file, for the tree's keys.
+fn tree_app() -> App {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.code_focused = false;
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        files: vec!["notes.txt".into()],
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: vec![],
+                files: vec!["lib.rs".into()],
+            },
+        )],
+    };
+    app
+}
+
+/// A dialog over the window holds the keys, though the tree had them: its
+/// keys are not the tree's — an Esc closes the dialog, a letter goes
+/// nowhere near the filter under it.
+#[test]
+fn the_tree_lets_the_keys_go_to_a_dialog_over_it() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = tree_app();
+    let none = keyboard::Modifiers::empty();
+    let down = || {
+        press(
+            Key::Named(Named::ArrowDown),
+            Key::Named(Named::ArrowDown),
+            none,
+        )
+    };
+    let (statuses, sent) = keys_held_by(&app, super::files_tree_keys_id(), &[down()]);
+    assert_eq!(
+        statuses,
+        [iced::event::Status::Captured],
+        "the tree's: {sent:?}"
+    );
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let x = press(Key::Character("x".into()), Key::Character("x".into()), none);
+    let (statuses, sent) = keys_held_by(&app, super::files_tree_keys_id(), &[down(), x]);
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::TreeKey(_)))),
+        "{sent:?}"
+    );
+    assert!(statuses.iter().all(|s| *s == iced::event::Status::Ignored));
+    // So Esc reaches the dialog, and closes it.
+    type_key(&mut app, Key::Named(Named::Escape), none);
+    assert!(!app.settings.open, "closed by the first Esc");
+}
+
+/// The tree's keys are the reading keys too — `j` `k` down and up, `h` out,
+/// `l` in — and a character typed goes to the filter as typed, Shift and
+/// all.
+#[test]
+fn the_tree_walks_by_the_reading_keys_and_types_as_typed() {
+    use crate::app::message::TreeKey;
+    use keyboard::Key;
+    let none = keyboard::Modifiers::empty();
+    let ch = |c: &str| Key::Character(c.into());
+    let key = |k: &str, typed: &str, m| super::tree_keys::tree_key(&ch(k), &ch(typed), m);
+    assert_eq!(key("j", "j", none), Some(TreeKey::Down));
+    assert_eq!(key("k", "k", none), Some(TreeKey::Up));
+    assert_eq!(key("h", "h", none), Some(TreeKey::Left));
+    assert_eq!(key("l", "l", none), Some(TreeKey::Right));
+    assert_eq!(
+        key("j", "J", keyboard::Modifiers::SHIFT),
+        Some(TreeKey::Type('J'))
+    );
+    assert_eq!(
+        key("-", "_", keyboard::Modifiers::SHIFT),
+        Some(TreeKey::Type('_')),
+        "Shift and all"
+    );
+    assert_eq!(key("p", "p", none), Some(TreeKey::Type('p')));
+    assert_eq!(
+        key("j", "j", keyboard::Modifiers::COMMAND),
+        None,
+        "a shortcut"
+    );
+}
+
+/// ↓ in a filter that lists nothing has no tree to go down to: the filter
+/// keeps the keys, and F6 passes the tree by.
+#[test]
+fn an_empty_tree_is_not_gone_down_to() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = tree_app();
+    let down = press(
+        Key::Named(Named::ArrowDown),
+        Key::Named(Named::ArrowDown),
+        keyboard::Modifiers::empty(),
+    );
+    let (_, sent) = keys_held_by(&app, super::file_filter_id(), std::slice::from_ref(&down));
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::FileFilterDown))),
+        "a tree to go to: {sent:?}"
+    );
+    app.file_filter = "zzz".into();
+    let (statuses, sent) = keys_held_by(&app, super::file_filter_id(), &[down]);
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::FileFilterDown))),
+        "{sent:?}"
+    );
+    assert_eq!(statuses, [iced::event::Status::Ignored]);
+    // F6 from the filter goes on to the chat.
+    app.region = crate::app::keys::Region::Sidebar;
+    type_key(
+        &mut app,
+        Key::Named(Named::F6),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.region, crate::app::keys::Region::Chat);
 }
 
 /// A file's row in the Files view's tree is counted as the tree lays its

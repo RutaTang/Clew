@@ -74,6 +74,8 @@ impl App {
             Some(read) => Task::batch([task, read]),
             None => task,
         };
+        // The tree's keyboard does not outlast the tree on screen.
+        self.sync_tree_focus();
         // The status bar names the branch checked out.
         let task = match self.sync_head() {
             Some(read) => Task::batch([task, read]),

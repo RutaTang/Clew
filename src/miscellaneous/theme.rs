@@ -2555,13 +2555,15 @@ pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::St
 }
 
 /// A row of the Files view: a [`list_row`], and, where the keyboard rests
-/// (`cursor`), the accent edge a field has while it has the keyboard.
+/// (`cursor`), the accent edge of the keyboard's ring.
 pub fn tree_row(selected: bool, cursor: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {
         let mut style = list_row(selected)(theme, status);
+        // The ring the keyboard's Tab draws: one mark for where the keys
+        // are, whichever way they came there.
         if cursor {
-            style.border.color = with_alpha(accent(), 0.65);
-            style.border.width = 1.0;
+            style.border.color = accent();
+            style.border.width = 2.0;
         }
         style
     }

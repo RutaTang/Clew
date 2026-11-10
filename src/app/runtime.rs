@@ -766,6 +766,10 @@ impl App {
                     self.file_filter.clear();
                     self.escape_taken = true;
                 }
+                // The field gives up the keys on Esc: they go back to the
+                // code, as Esc in the tree gives them.
+                self.code_focused = true;
+                self.region = crate::app::keys::Region::Code;
                 Task::none()
             }
             // ↓ in the filter: the keyboard goes down to the tree, on its

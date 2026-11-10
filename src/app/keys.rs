@@ -158,7 +158,10 @@ impl App {
         if self.sidebar_field().is_some() {
             regions.push(Region::Sidebar);
         }
-        if self.sidebar_field().is_some() && self.sidebar == SidebarTab::Files {
+        if self.sidebar_field().is_some()
+            && self.sidebar == SidebarTab::Files
+            && ui::tree_has_rows(self)
+        {
             regions.push(Region::Tree);
         }
         regions.push(Region::Chat);

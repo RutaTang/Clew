@@ -14700,6 +14700,32 @@ fn the_keyboard_walks_the_files_tree() {
     );
 }
 
+/// The tree's keyboard does not outlast the tree: hidden, the keys go back
+/// to the code. ↑ on the first row goes back up to the filter, and Esc in
+/// the filter gives the keys to the code.
+#[test]
+fn the_trees_keys_go_back_when_it_goes() {
+    use crate::app::message::TreeKey;
+    let mut app = scanned_app("tree-keys-gone");
+    app.show_left_sidebar = true;
+    app.sidebar = SidebarTab::Files;
+    let _ = app.update(Message::Window(WindowMsg::TreeFocused(true)));
+    assert!(!app.code_focused);
+    let _ = app.update(Message::Window(WindowMsg::ToggleLeftSidebar));
+    assert!(!app.tree_focused, "no tree, no keys of its");
+    assert!(app.code_focused, "the code's again");
+    let _ = app.update(Message::Window(WindowMsg::ToggleLeftSidebar));
+    // ↑ on the first row: the filter.
+    let _ = app.update(Message::Window(WindowMsg::TreeFocused(true)));
+    let _ = app.update(Message::Window(WindowMsg::TreeKey(TreeKey::First)));
+    let _ = app.update(Message::Window(WindowMsg::TreeKey(TreeKey::Up)));
+    assert_eq!(app.region, crate::app::keys::Region::Sidebar);
+    // Esc in the filter: the code's.
+    let _ = app.update(Message::Window(WindowMsg::FileFilterEscaped));
+    assert!(app.code_focused);
+    assert_eq!(app.region, crate::app::keys::Region::Code);
+}
+
 /// What HEAD is, read for the status bar as the project opens, anew when
 /// the window comes back to the front or a file changes, one read at a
 /// time; outside a repository, no branch — not the one read before.
