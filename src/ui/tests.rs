@@ -12166,6 +12166,50 @@ fn the_view_menus_inert_row_says_why() {
     assert!(!shows(&mut sim, why));
 }
 
+/// An import list's row names the file's folder; a file at the project's
+/// root has none to name, and shows none — not a stray ".".
+#[test]
+fn a_root_files_import_row_names_no_folder() {
+    let app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let row = |rel: &str| super::memo::RankedFile {
+        path: root.join(rel),
+        fan_in: 1,
+        fan_out: 2,
+    };
+    let mut sim = sim_elem(super::graph::import_file_row(&app, &row("main.py")));
+    assert!(shows(&mut sim, "main.py"));
+    assert!(
+        text_at(&mut sim, |t| t.trim() == ".", 0).is_none(),
+        "no folder for a root file"
+    );
+    let mut sim = sim_elem(super::graph::import_file_row(&app, &row("shop/cart.py")));
+    assert!(shows(&mut sim, "shop"), "a nested file's folder is named");
+}
+
+/// The header's file tools say what they do where the pointer rests:
+/// Explain that it asks the AI, Skim what it folds, Diff what it compares
+/// with — the names the menu gives them.
+#[test]
+fn the_file_tools_say_what_they_do() {
+    let app = reader_app();
+    for (label, says) in [
+        ("Explain", "Explain this file with AI"),
+        ("Skim", "Skim: fold every body to its signature"),
+        ("Diff", "Diff vs HEAD"),
+    ] {
+        let at = text_at(&mut sim_of(&app), |t| t == label, 0).expect(label);
+        assert!(!shows(&mut sim_of(&app), says), "{label}: said at rest");
+        super::tip::warm_now();
+        let mut sim = sim_of(&app);
+        sim.point_at(at.center());
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at.center(),
+        })]);
+        assert!(shows(&mut sim, says), "{label}");
+    }
+}
+
 /// L16: the ☰ menu keeps its tools under a Tools heading of their own,
 /// between View and Go — under View they were mixed in with zoom and
 /// split — and, when it runs past a short window, its scroller shows at
@@ -13063,6 +13107,48 @@ fn the_command_bar_lists_what_is_on_screen_for_the_reader_only() {
     let _ = app.update(Message::Nav(NavMsg::PaletteRun(hide)));
     assert!(!app.show_bottom, "the reader's does");
     assert!(!app.proj.finder.open);
+}
+
+/// A file the tree shows is listed once in the command bar — as the file —
+/// not a second time above it as a control on screen.
+#[test]
+fn a_file_on_screen_is_listed_once_in_the_command_bar() {
+    let mut app = reader_app();
+    let project = app.proj.project.as_mut().unwrap();
+    let root = project.root.clone();
+    project.tree = crate::fs_scan::DirNode {
+        dirs: vec![],
+        files: vec!["main.py".into()],
+    };
+    project.files = Arc::new(vec![crate::fs_scan::FileEntry {
+        abs: root.join("main.py"),
+        rel: "main.py".into(),
+    }]);
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    assert!(
+        crate::ui::heard::gather(&app)
+            .iter()
+            .any(|t| t.title == "main.py"),
+        "the tree's row is on screen"
+    );
+    let _ = app.update(Message::Nav(NavMsg::PaletteOpened));
+    app.proj.finder.query = "main".into();
+    app.refresh_bar();
+    let n = app.palette.len();
+    assert!(
+        !app.palette.iter().any(|c| c.title == "main.py"),
+        "not as a command"
+    );
+    let files: Vec<usize> = app
+        .proj
+        .finder
+        .results
+        .iter()
+        .filter(|&&i| i >= n)
+        .copied()
+        .collect();
+    assert_eq!(files, [n], "once, as the file");
 }
 
 /// Only what is on screen has a code: a long tree's rows scrolled away

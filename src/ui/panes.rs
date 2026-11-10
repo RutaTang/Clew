@@ -175,7 +175,7 @@ pub(crate) fn time_travel_banner<'a>(
             .into();
     };
 
-    let short: String = c.sha.chars().take(8).collect();
+    let short = short_sha(&c.sha);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1928,7 +1928,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             for c in commits {
-                let short: String = c.sha.chars().take(7).collect();
+                let short = short_sha(&c.sha);
                 rows = rows.push(
                     button(
                         column![
@@ -2272,9 +2272,24 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// A commit's id as the reader sees it: git's own seven characters, the same
+/// in Time Travel's header, its History rows and blame (the header said
+/// eight, the rows seven: one commit, two names).
+pub(crate) fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One commit has one short name: git's seven characters, wherever it
+    /// shows.
+    #[test]
+    fn a_commit_is_named_by_seven_characters() {
+        assert_eq!(short_sha("8145b2fa0c1d"), "8145b2f");
+        assert_eq!(short_sha("8145"), "8145");
+    }
 
     /// E2-10: a diff line's width counts what is drawn — tabs at the reader's
     /// tab width, CJK and emoji as two columns, combining marks as none.

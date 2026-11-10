@@ -2367,14 +2367,15 @@ impl iced::widget::canvas::Program<Message> for TrafficGlyph {
 }
 
 /// A file row in the import overlay: name + directory + fan-in/out counts.
+/// A file at the project's root has no directory to name: none is shown
+/// (it said ".", which reads as a stray mark).
 pub(crate) fn import_file_row<'a>(app: &'a App, file: &RankedFile) -> Element<'a, Message> {
     let path = file.path.as_path();
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let dir = std::path::Path::new(&rel_of(app, path))
         .parent()
         .map(|p| p.to_string_lossy().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| ".".into());
+        .unwrap_or_default();
     button(
         row![
             text(name.to_string())

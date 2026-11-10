@@ -827,13 +827,13 @@ pub(crate) fn strip_tool(
     match tool {
         StripTool::Overview => (
             Glyph::Layout,
-            tr!("Overview"),
+            tr!("Architecture Overview"),
             caps(Action::Overview),
             Message::Overview(OverviewMsg::Show),
         ),
         StripTool::Stats => (
             Glyph::Stats,
-            tr!("Stats"),
+            tr!("Code Statistics"),
             caps(Action::Stats),
             Message::Overview(OverviewMsg::ShowStats),
         ),

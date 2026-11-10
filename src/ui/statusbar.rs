@@ -235,7 +235,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         let lang = v
             .lang_key
             .and_then(crate::highlight::lang_name)
-            .unwrap_or(tr!("Plain text"));
+            .unwrap_or_else(|| untagged_kind(&v.abs));
         // Language-server status for this file's language, when relevant —
         // from the snapshot this update took (so a state clew cannot read
         // shows as a problem, not as "ready").
@@ -790,6 +790,20 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
     Some(b.into())
 }
 
+/// What a file no grammar reads is, said by its name: prose in Markdown —
+/// a README — is Markdown, not "Plain text".
+fn untagged_kind(path: &std::path::Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("md" | "markdown" | "mdx") => "Markdown",
+        Some("rst") => "reStructuredText",
+        _ => tr!("Plain text"),
+    }
+}
+
 #[cfg(test)]
 mod target_name_tests {
     use super::target_name;
@@ -810,5 +824,20 @@ mod target_name_tests {
         assert_eq!(named("Web (wasm32)"), "Web");
         let host = Target::host();
         assert!(!target_name(&host).contains('('), "{}", target_name(&host));
+    }
+}
+
+#[cfg(test)]
+mod untagged_kind_tests {
+    use super::untagged_kind;
+    use std::path::Path;
+
+    /// A README says it is Markdown; a file of no known kind is plain text.
+    #[test]
+    fn a_readme_is_markdown() {
+        assert_eq!(untagged_kind(Path::new("/p/README.md")), "Markdown");
+        assert_eq!(untagged_kind(Path::new("/p/docs/guide.MD")), "Markdown");
+        assert_eq!(untagged_kind(Path::new("/p/notes.txt")), "Plain text");
+        assert_eq!(untagged_kind(Path::new("/p/LICENSE")), "Plain text");
     }
 }

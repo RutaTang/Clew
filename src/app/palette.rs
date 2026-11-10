@@ -44,6 +44,17 @@ impl PaletteCommand {
             .unwrap_or_else(|| crate::i18n::lookup(&self.title))
     }
 
+    /// What a query is matched against: what the row says, and the other
+    /// words it goes by ([`also_called`]).
+    fn searched(&self) -> String {
+        with_aliases(self.shown(), &self.title)
+    }
+
+    /// [`Self::searched`], in English.
+    fn searched_in_english(&self) -> String {
+        with_aliases(&self.title, &self.title)
+    }
+
     /// Whether running it costs something beyond what the window shows —
     /// a paid pass over the project, the program started, stepped or ended,
     /// a breakpoint set in it, another project opened, a file written — so
@@ -235,6 +246,29 @@ impl PaletteCommand {
     }
 }
 
+/// The other words a command titled `title` goes by — a name it had, the
+/// short word people use — that a query finds it by, though its row does
+/// not show them: "map" finds Project Graphs, once Project Maps, and
+/// "stats" Code Statistics.
+fn also_called(title: &str) -> &'static str {
+    match title {
+        "Project Graphs" => "map maps schema routes",
+        "Type Graph" => "type map",
+        "Code Statistics" => "stats",
+        "Architecture Overview" => "overview",
+        "Talk" => "voice microphone listen",
+        _ => "",
+    }
+}
+
+/// `row`, and the words the command titled `title` also goes by.
+fn with_aliases(row: &str, title: &str) -> String {
+    match also_called(title) {
+        "" => row.to_string(),
+        also => format!("{row} {also}"),
+    }
+}
+
 /// What running a command does.
 #[derive(Debug, Clone)]
 pub(crate) enum PaletteAction {
@@ -287,8 +321,9 @@ impl App {
             .unwrap_or_default();
         let n = self.palette.len();
         let english = self.ranked_in_english(|finder, titles| finder.refresh_bar(titles, &files));
-        let shown: Vec<&str> = self.palette.iter().map(PaletteCommand::shown).collect();
-        self.proj.finder.refresh_bar(&shown, &files);
+        let searched: Vec<String> = self.palette.iter().map(PaletteCommand::searched).collect();
+        let searched: Vec<&str> = searched.iter().map(String::as_str).collect();
+        self.proj.finder.refresh_bar(&searched, &files);
         if let Some(english) = english {
             let results = &mut self.proj.finder.results;
             let (mut commands, files): (Vec<usize>, Vec<usize>) =
@@ -317,7 +352,12 @@ impl App {
         if crate::i18n::current() == crate::i18n::Lang::En {
             return None;
         }
-        let titles: Vec<&str> = self.palette.iter().map(|c| c.title.as_str()).collect();
+        let titles: Vec<String> = self
+            .palette
+            .iter()
+            .map(PaletteCommand::searched_in_english)
+            .collect();
+        let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
         rank(&mut self.proj.finder, &titles);
         Some(std::mem::take(&mut self.proj.finder.results))
     }
@@ -439,15 +479,20 @@ impl App {
         self.palette = self.palette_commands();
         let on_screen = self.screen_commands(&self.palette);
         self.palette.extend(on_screen);
-        let recent = self.palette_recent.clone();
-        let english =
-            self.ranked_in_english(|finder, titles| finder.refresh_commands(titles, &recent));
-        let shown: Vec<&str> = self.palette.iter().map(PaletteCommand::shown).collect();
-        let recent: Vec<String> = recent
+        // The recent commands, as the ranking finds them: by the words
+        // each is matched against, in English and as shown.
+        let recent: Vec<&PaletteCommand> = self
+            .palette_recent
             .iter()
-            .map(|t| crate::i18n::lookup(t).to_string())
+            .filter_map(|t| self.palette.iter().find(|c| &c.title == t))
             .collect();
-        self.proj.finder.refresh_commands(&shown, &recent);
+        let recent_english: Vec<String> = recent.iter().map(|c| c.searched_in_english()).collect();
+        let recent: Vec<String> = recent.iter().map(|c| c.searched()).collect();
+        let english = self
+            .ranked_in_english(|finder, titles| finder.refresh_commands(titles, &recent_english));
+        let searched: Vec<String> = self.palette.iter().map(PaletteCommand::searched).collect();
+        let searched: Vec<&str> = searched.iter().map(String::as_str).collect();
+        self.proj.finder.refresh_commands(&searched, &recent);
         if let Some(english) = english {
             let results = &mut self.proj.finder.results;
             for i in english {
@@ -468,9 +513,20 @@ impl App {
         }
         let mut seen: std::collections::HashSet<&str> =
             commands.iter().map(|c| c.title.as_str()).collect();
+        // A control named for one of the project's files — a tree row, a
+        // crumb — is that file, which the bar lists as a file: listed again
+        // as a command, it sat above itself.
+        let files: std::collections::HashSet<&str> = self
+            .proj
+            .project
+            .iter()
+            .flat_map(|p| p.files.iter())
+            .flat_map(|f| [f.rel.as_str(), f.rel.rsplit('/').next().unwrap_or(&f.rel)])
+            .collect();
         self.palette_screen
             .iter()
             .filter(|t| t.typing.is_none() && !t.title.trim().is_empty())
+            .filter(|t| !files.contains(t.title.as_str()))
             .filter(|t| seen.insert(t.title.as_str()))
             .map(|t| PaletteCommand {
                 title: t.title.clone(),

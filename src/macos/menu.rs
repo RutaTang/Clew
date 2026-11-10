@@ -358,8 +358,8 @@ fn section_frame(section: MenuSection) -> (Vec<Entry>, Vec<Entry>) {
         MenuSection::Tools => (
             Vec::new(),
             vec![
-                command(tr_noop!("Overview"), OVERVIEW),
-                command(tr_noop!("Stats"), STATS),
+                command(tr_noop!("Architecture Overview"), OVERVIEW),
+                command(tr_noop!("Code Statistics"), STATS),
             ],
         ),
         MenuSection::Go => (Vec::new(), Vec::new()),

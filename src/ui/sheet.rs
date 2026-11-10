@@ -316,6 +316,7 @@ pub(crate) fn sheet(app: &App) -> Element<'_, Message> {
 fn file_tool<'a>(
     glyph: Glyph,
     label: &'a str,
+    about: Option<&'a str>,
     on: bool,
     shortcut: Option<String>,
     msg: Message,
@@ -344,10 +345,12 @@ fn file_tool<'a>(
     .style(theme::icon_button(on))
     .padding([0.0, FILE_TOOL_PAD_X])
     .on_press(super::heard::said(label, msg));
-    // Said short, its name is in its tooltip, with its shortcut.
+    // Its tooltip says what it does (`about`) where its name alone does
+    // not, with its shortcut; said short, the tooltip is where its name is.
+    let tip = about.unwrap_or(label);
     match shortcut {
-        Some(sc) => tip_at(face, label, Some(sc), tooltip::Position::Bottom),
-        None if short => tip_at(face, label, None, tooltip::Position::Bottom),
+        Some(sc) => tip_at(face, tip, Some(sc), tooltip::Position::Bottom),
+        None if short || about.is_some() => tip_at(face, tip, None, tooltip::Position::Bottom),
         None => face.into(),
     }
 }
@@ -429,6 +432,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         title = title.push(file_tool(
             glyph,
             label,
+            None,
             false,
             None,
             Message::Editor(EditorMsg::ToggleMarkdownSource(app.proj.active)),
@@ -484,6 +488,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         file_tool(
             Glyph::TextLines,
             tr!("Explain"),
+            Some(tr!("Explain this file with AI")),
             false,
             None,
             Message::Explain(ExplainMsg::Show(crate::explain::Node::File(v.abs.clone()))),
@@ -492,6 +497,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         file_tool(
             Glyph::Skim,
             tr!("Skim"),
+            Some(tr!("Skim: fold every body to its signature")),
             v.skimmed(&app.skim_lines(&v.abs)),
             None,
             Message::Editor(EditorMsg::SkimFile),
@@ -500,6 +506,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         file_tool(
             Glyph::Diff,
             tr!("Diff"),
+            Some(tr!("Diff vs HEAD")),
             diffing,
             caps(Action::ToggleDiff),
             Message::Editor(EditorMsg::ToggleDiff),
@@ -510,6 +517,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         file_tool(
             Glyph::TimeTravel,
             tr!("Time Travel"),
+            None,
             time_travel,
             caps(Action::TimeTravel),
             if time_travel {

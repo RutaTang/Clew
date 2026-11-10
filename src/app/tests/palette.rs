@@ -59,7 +59,7 @@ fn the_palette_opens_ranks_runs_and_remembers() {
     for expected in [
         "Call Graph",
         "Go to File…",
-        "Overview",
+        "Architecture Overview",
         "Settings",
         "Sidebar: Files",
         "View: Show Minimap",
@@ -136,7 +136,11 @@ fn the_palette_opens_ranks_runs_and_remembers() {
     // Typing `>` in the file finder gives the commands.
     let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
     typed(&mut app, ">stats");
-    assert_eq!(titles(&app).first().map(String::as_str), Some("Stats"));
+    assert_eq!(
+        titles(&app).first().map(String::as_str),
+        Some("Code Statistics"),
+        "found by the word people use"
+    );
     let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
     assert!(!app.proj.finder.open);
 }
@@ -226,7 +230,12 @@ fn without_a_project_only_what_needs_none_is_listed() {
     ] {
         assert!(all.iter().any(|t| t == expected), "{expected} in {all:?}");
     }
-    for absent in ["Call Graph", "Go to File…", "Sidebar: Files", "Overview"] {
+    for absent in [
+        "Call Graph",
+        "Go to File…",
+        "Sidebar: Files",
+        "Architecture Overview",
+    ] {
         assert!(!all.iter().any(|t| t == absent), "{absent} in {all:?}");
     }
     // The window's own preference: the palette in effect is the process's,
@@ -339,4 +348,26 @@ fn the_command_bar_suggests_what_to_do_here() {
     enter(&mut app);
     assert!(!app.proj.finder.open);
     assert!(app.ask_view.is_open());
+}
+
+/// A command is found by the other words it goes by, though its row does
+/// not show them: "map" finds the two graphs once called maps — Project
+/// Graphs (Project Maps) and Type Graph (Type Map) — first, in English and
+/// in another language alike.
+#[test]
+fn a_command_is_found_by_the_words_it_also_goes_by() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = scanned_app("palette-aliases");
+    open_commands(&mut app);
+    typed(&mut app, ">map");
+    let found = titles(&app);
+    let mut first: Vec<&str> = found.iter().take(2).map(String::as_str).collect();
+    first.sort_unstable();
+    assert_eq!(first, ["Project Graphs", "Type Graph"], "{found:?}");
+    with_lang(Lang::Fr, || {
+        open_commands(&mut app);
+        typed(&mut app, ">map");
+        let found = titles(&app);
+        assert!(found.iter().any(|t| t == "Project Graphs"), "{found:?}");
+    });
 }
