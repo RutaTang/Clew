@@ -393,7 +393,8 @@ pub(crate) fn voice_called(lang: crate::i18n::Lang, name: &str) -> String {
     };
     match template {
         Some(t) => crate::i18n::format(crate::i18n::lookup_in(lang, t), &[("n", &number)]),
-        None => name.to_string(),
+        // A name of a person's as it is; a voice's description translated.
+        None => crate::i18n::lookup_in(lang, name).to_string(),
     }
 }
 

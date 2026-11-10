@@ -644,7 +644,7 @@ impl VoiceState {
             downloads: HashMap::new(),
             download_errors: HashMap::new(),
             prefs: VoicePrefs::load(),
-            store: clew_core::lsp::store::data_root().map(|d| Store::new(d.join("voice"))),
+            store: voice_store(),
             open_mic: open_system_mic,
             transcriber: ENGINE.clone(),
             fetch: fetch_over_net,
@@ -786,13 +786,16 @@ pub enum VoiceMsg {
     SetSendQuestions(bool),
     /// Let the reader talk over Clew ([`VoicePrefs::talk_over`]).
     SetTalkOver(bool),
-    /// A sentence made into speech, for the stop round it was made in — or
-    /// why it could not be.
+    /// A sentence made into speech, or a part of it, for the stop round it
+    /// was made in — or why it could not be.
     Spoken {
         round: u64,
         result: Result<crate::app::speech::Audio, clew_voice::speaker::SayError>,
         /// The output, opened meanwhile when none was open.
         opened: Option<crate::app::speech::Opened>,
+        /// All of the sentence is made: this is its end (a failure always
+        /// is).
+        last: bool,
     },
     /// While Clew speaks: the meter, and whether all is said.
     SpeakTick,
@@ -2169,4 +2172,19 @@ impl Drop for StopOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Relaxed);
     }
+}
+
+/// Where voices and models are kept, in Clew's data folder. The first time
+/// a process asks, what a voice Clew no longer offers left there is
+/// removed, off the UI thread ([`clew_voice::speech::remove_retired`]).
+fn voice_store() -> Option<Store> {
+    static RETIRED: std::sync::Once = std::sync::Once::new();
+    let store = clew_core::lsp::store::data_root().map(|d| Store::new(d.join("voice")))?;
+    RETIRED.call_once(|| {
+        let store = store.clone();
+        let _ = std::thread::Builder::new()
+            .name("clew-voice-retired".into())
+            .spawn(move || clew_voice::speech::remove_retired(&store));
+    });
+    Some(store)
 }

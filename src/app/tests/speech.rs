@@ -34,6 +34,8 @@ struct Voice {
     rate: Mutex<u32>,
     /// The models it was asked to let go of, in turn.
     stopped: Mutex<Vec<&'static str>>,
+    /// Parts it gives a sentence in: whole until a test says otherwise.
+    parts: Mutex<usize>,
 }
 
 impl Synthesizer for Voice {
@@ -45,7 +47,8 @@ impl Synthesizer for Voice {
         lang: &str,
         voice: i32,
         speed: f32,
-    ) -> Result<(Vec<f32>, u32), SayError> {
+        part: &mut dyn FnMut(Vec<f32>, u32),
+    ) -> Result<(), SayError> {
         if let Some(e) = self.fail.lock().unwrap().take() {
             return Err(e);
         }
@@ -61,7 +64,21 @@ impl Synthesizer for Voice {
             0 => 1000,
             rate => rate,
         };
-        Ok((vec![0.25; words * 100 * rate as usize / 1000], rate))
+        let mut samples = vec![0.25; words * 100 * rate as usize / 1000];
+        // In parts, as a voice that streams gives them: a sentence of more
+        // than one word in two — each sentence's samples the tenth of its
+        // turn, so what is played shows whose they are.
+        match *self.parts.lock().unwrap() {
+            parts if parts > 1 && samples.len() > 1 => {
+                let turn = self.said.lock().unwrap().len();
+                samples.fill(turn as f32 / 10.0);
+                let half = samples.len() / 2;
+                part(samples[..half].to_vec(), rate);
+                part(samples[half..].to_vec(), rate);
+            }
+            _ => part(samples, rate),
+        }
+        Ok(())
     }
     fn stop_while(&self, model: &'static VoiceModel, work: &mut dyn FnMut()) {
         self.stopped.lock().unwrap().push(model.id);
@@ -162,7 +179,7 @@ fn install(app: &App, model: &VoiceModel) {
     }
 }
 
-/// An app with a models folder of its own, Supertonic "downloaded", the
+/// An app with a models folder of its own, Qwen3-TTS "downloaded", the
 /// test's voice and output.
 fn speech_app(tag: &str) -> (App, Arc<Voice>, Arc<Mutex<OutputScript>>) {
     let mut app = scanned_app(tag);
@@ -170,7 +187,7 @@ fn speech_app(tag: &str) -> (App, Arc<Voice>, Arc<Mutex<OutputScript>>) {
     let _ = std::fs::remove_dir_all(&dir);
     app.voice.store = Some(clew_voice::models::Store::new(dir));
     app.voice.prefs = VoicePrefs::default();
-    install(&app, speech::find("supertonic-3").unwrap());
+    install(&app, speech::find("qwen3-tts").unwrap());
     let voice = Arc::new(Voice::default());
     app.voice.speech.synthesizer = voice.clone();
     app.voice.speech.stall = (
@@ -234,7 +251,7 @@ fn all_played(app: &mut App, output: &Arc<Mutex<OutputScript>>) {
 fn a_spoken_answer_is_read_aloud_as_it_comes() {
     let (mut app, voice, output) = speech_app("speech-reads");
     app.voice.prefs.speed = 1.25;
-    app.voice.prefs.voices.insert("supertonic-3".into(), 6);
+    app.voice.prefs.voices.insert("qwen3-tts".into(), 6);
     asked(&mut app, 1, true);
     delta(&mut app, 1, "`total()` adds every price.");
     assert!(voice.texts().is_empty(), "the sentence may still go on");
@@ -252,10 +269,8 @@ fn a_spoken_answer_is_read_aloud_as_it_comes() {
     );
     let said = voice.said.lock().unwrap().clone();
     assert!(
-        said.iter().all(|s| s.model == "supertonic-3"
-            && s.lang == "en"
-            && s.voice == 6
-            && s.speed == 1.25),
+        said.iter()
+            .all(|s| s.model == "qwen3-tts" && s.lang == "en" && s.voice == 6 && s.speed == 1.25),
         "{said:?}"
     );
     assert_eq!(
@@ -344,17 +359,21 @@ fn a_steps_text_is_said_as_it_is_written() {
     assert_eq!(voice.texts().last().map(String::as_str), Some("And"));
 }
 
-/// Each sentence is said in its own language: French as French, Korean by
-/// its script; Chinese by Kokoro, once it is here — until then not said,
-/// and the reader told where to get it, once.
+/// Each sentence is said in its own language: French as French, Korean and
+/// Chinese by their scripts, all by the voice that streams; Greek by
+/// Supertonic, once it is here — until then not said, and the reader told
+/// where to get it, once.
 #[test]
 fn each_sentence_is_said_in_its_language() {
+    const GREEK: &str = "Η συνάρτηση προσθέτει όλες τις τιμές.";
     let (mut app, voice, _) = speech_app("speech-languages");
     asked(&mut app, 1, true);
     delta(
         &mut app,
         1,
-        "La fonction calcule le total de chaque article. 합계를 구합니다. 计算总价。",
+        &format!(
+            "La fonction calcule le total de chaque article. 합계를 구합니다. 计算总价。 {GREEK}"
+        ),
     );
     ended(&mut app, 1, StreamOutcome::Done);
     let said = voice.said.lock().unwrap().clone();
@@ -362,24 +381,28 @@ fn each_sentence_is_said_in_its_language() {
         said.iter()
             .map(|s| (s.lang.as_str(), s.model))
             .collect::<Vec<_>>(),
-        [("fr", "supertonic-3"), ("ko", "supertonic-3")]
+        [
+            ("fr", "qwen3-tts"),
+            ("ko", "qwen3-tts"),
+            ("zh", "qwen3-tts")
+        ]
     );
-    assert!(app.status.contains("Kokoro (Chinese)"), "{}", app.status);
+    assert!(app.status.contains("Supertonic 3"), "{}", app.status);
     // Said once a window.
     app.status.clear();
     asked(&mut app, 2, true);
-    delta(&mut app, 2, "计算总价。");
+    delta(&mut app, 2, GREEK);
     ended(&mut app, 2, StreamOutcome::Done);
-    assert!(!app.status.contains("Kokoro"), "{}", app.status);
+    assert!(!app.status.contains("Supertonic"), "{}", app.status);
     // Here: said, in its own voice.
-    install(&app, speech::find("kokoro-zh").unwrap());
+    install(&app, speech::find("supertonic-3").unwrap());
     asked(&mut app, 3, true);
-    delta(&mut app, 3, "计算总价。");
+    delta(&mut app, 3, GREEK);
     ended(&mut app, 3, StreamOutcome::Done);
     let last = voice.said.lock().unwrap().last().cloned().unwrap();
     assert_eq!(
         (last.model, last.lang.as_str(), last.voice),
-        ("kokoro-zh", "zh", 47)
+        ("supertonic-3", "el", 0)
     );
 }
 
@@ -625,11 +648,11 @@ fn what_cannot_be_said_says_why() {
     // Without the voice downloaded: nothing said, and where to get it.
     let (mut app, voice, _) = speech_app("speech-none");
     let store = app.voice.store.clone().unwrap();
-    speech::remove(&store, speech::find("supertonic-3").unwrap()).unwrap();
+    speech::remove(&store, speech::find("qwen3-tts").unwrap()).unwrap();
     asked(&mut app, 1, true);
     delta(&mut app, 1, "This is. Second");
     assert!(voice.texts().is_empty());
-    assert!(app.status.contains("Supertonic 3"), "{}", app.status);
+    assert!(app.status.contains("Qwen3-TTS"), "{}", app.status);
     assert!(!app.voice.speech.is_speaking());
 }
 
@@ -639,14 +662,14 @@ fn what_cannot_be_said_says_why() {
 fn try_says_a_sample_in_the_readers_language() {
     use crate::i18n::{Lang, with_lang};
     let (mut app, voice, _) = speech_app("speech-try");
-    let task = app.update(Message::Voice(VoiceMsg::TrySpeech("supertonic-3")));
+    let task = app.update(Message::Voice(VoiceMsg::TrySpeech("qwen3-tts")));
     settle(&mut app, task);
     let said = voice.said.lock().unwrap().last().cloned().unwrap();
     assert_eq!(said.lang, "en");
     assert!(said.text.contains("Clew"), "{}", said.text);
     with_lang(Lang::Fr, || {
         let task = app.update(Message::Voice(VoiceMsg::PickSpeechVoice {
-            model: "supertonic-3",
+            model: "qwen3-tts",
             voice: 7,
         }));
         settle(&mut app, task);
@@ -657,22 +680,23 @@ fn try_says_a_sample_in_the_readers_language() {
         said.text,
         "This is how Clew sounds when it reads an answer aloud."
     );
-    // In Chinese, Supertonic says it in English; Kokoro in Chinese.
-    install(&app, speech::find("kokoro-zh").unwrap());
+    // In Chinese, Qwen3-TTS says it in Chinese; Supertonic, which speaks
+    // none of the interface's languages, in one it does.
+    install(&app, speech::find("supertonic-3").unwrap());
     with_lang(Lang::Zh, || {
+        let task = app.update(Message::Voice(VoiceMsg::TrySpeech("qwen3-tts")));
+        settle(&mut app, task);
+        let said = voice.said.lock().unwrap().last().cloned().unwrap();
+        assert_eq!((said.model, said.lang.as_str()), ("qwen3-tts", "zh"));
         let task = app.update(Message::Voice(VoiceMsg::TrySpeech("supertonic-3")));
         settle(&mut app, task);
         let said = voice.said.lock().unwrap().last().cloned().unwrap();
-        assert_eq!((said.model, said.lang.as_str()), ("supertonic-3", "en"));
-        let task = app.update(Message::Voice(VoiceMsg::TrySpeech("kokoro-zh")));
-        settle(&mut app, task);
-        let said = voice.said.lock().unwrap().last().cloned().unwrap();
-        assert_eq!((said.model, said.lang.as_str()), ("kokoro-zh", "zh"));
+        assert_eq!((said.model, said.lang.as_str()), ("supertonic-3", "nl"));
     });
     // A voice the model does not have is not taken.
     let before = app.voice.prefs.voices.clone();
     let _ = app.update(Message::Voice(VoiceMsg::PickSpeechVoice {
-        model: "supertonic-3",
+        model: "qwen3-tts",
         voice: 99,
     }));
     assert_eq!(app.voice.prefs.voices, before);
@@ -690,16 +714,16 @@ fn speech_settings_are_kept() {
     let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Never)));
     let _ = app.update(Message::Voice(VoiceMsg::SetSpeed(1.25)));
     let task = app.update(Message::Voice(VoiceMsg::PickSpeechVoice {
-        model: "supertonic-3",
-        voice: 8,
+        model: "qwen3-tts",
+        voice: 5,
     }));
     settle(&mut app, task);
     let read = VoicePrefs::load();
     assert_eq!(read, app.voice.prefs);
     assert_eq!(read.read_aloud, ReadAloud::Never);
     assert_eq!(read.speed, 1.25);
-    assert_eq!(read.voice_for(speech::find("supertonic-3").unwrap()), 8);
-    assert_eq!(read.voice_for(speech::find("kokoro-zh").unwrap()), 47);
+    assert_eq!(read.voice_for(speech::find("qwen3-tts").unwrap()), 5);
+    assert_eq!(read.voice_for(speech::find("supertonic-3").unwrap()), 0);
     let _ = app.update(Message::Voice(VoiceMsg::SetSpeed(9.0)));
     assert_eq!(app.voice.prefs.speed, 1.25);
     // Kept as a switch by an earlier Clew: on read the answers to spoken
@@ -744,7 +768,7 @@ fn junk_fetch(
 #[test]
 fn speech_models_download_verified_file_by_file() {
     let (mut app, voice, _) = speech_app("speech-download");
-    let model = speech::find("kokoro-zh").unwrap();
+    let model = speech::find("supertonic-3").unwrap();
     let store = app.voice.store.clone().unwrap();
     // All but its last file are here.
     install(&app, model);
@@ -753,10 +777,10 @@ fn speech_models_download_verified_file_by_file() {
     assert!(!app.speech_installed(model));
     app.voice.fetch = junk_fetch;
     FETCHED.lock().unwrap().clear();
-    let task = app.update(Message::Voice(VoiceMsg::DownloadSpeech("kokoro-zh")));
-    assert!(app.voice.speech.downloads.contains_key("kokoro-zh"));
+    let task = app.update(Message::Voice(VoiceMsg::DownloadSpeech("supertonic-3")));
+    assert!(app.voice.speech.downloads.contains_key("supertonic-3"));
     // Twice is once.
-    let again = app.update(Message::Voice(VoiceMsg::DownloadSpeech("kokoro-zh")));
+    let again = app.update(Message::Voice(VoiceMsg::DownloadSpeech("supertonic-3")));
     settle(&mut app, again);
     settle(&mut app, task);
     assert_eq!(
@@ -768,7 +792,7 @@ fn speech_models_download_verified_file_by_file() {
         .voice
         .speech
         .download_errors
-        .get("kokoro-zh")
+        .get("supertonic-3")
         .cloned()
         .unwrap();
     assert!(error.contains("does not match the published"), "{error}");
@@ -783,17 +807,19 @@ fn speech_models_download_verified_file_by_file() {
         "nothing half-written left"
     );
     // Cancelled: whatever it says after is nobody's.
-    let task = app.update(Message::Voice(VoiceMsg::DownloadSpeech("kokoro-zh")));
-    let _ = app.update(Message::Voice(VoiceMsg::CancelSpeechDownload("kokoro-zh")));
+    let task = app.update(Message::Voice(VoiceMsg::DownloadSpeech("supertonic-3")));
+    let _ = app.update(Message::Voice(VoiceMsg::CancelSpeechDownload(
+        "supertonic-3",
+    )));
     assert!(app.voice.speech.downloads.is_empty());
     let before = app.status.clone();
     settle(&mut app, task);
     assert_eq!(app.status, before);
     // Removed: the voice let go of first.
-    let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("kokoro-zh")));
+    let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("supertonic-3")));
     settle(&mut app, task);
     assert!(!dir.exists());
-    assert_eq!(*voice.stopped.lock().unwrap(), ["kokoro-zh"], "its own");
+    assert_eq!(*voice.stopped.lock().unwrap(), ["supertonic-3"], "its own");
     assert!(app.status.contains("Removed"), "{}", app.status);
 }
 
@@ -1007,8 +1033,107 @@ fn sentences_come_at_the_outputs_rate() {
         "{:?}",
         script.rates
     );
-    // Two words, made as 400 samples at 2 kHz: 200 at the output's 1 kHz.
-    assert_eq!(script.played[0], 200, "{:?}", script.played);
+    // Two words, made as 400 samples at 2 kHz: 200 at the output's 1 kHz —
+    // each sentence, however many parts it came in.
+    let total: usize = script.played.iter().sum();
+    assert!(
+        total >= 200 && total.is_multiple_of(200),
+        "{:?}",
+        script.played
+    );
+}
+
+/// A voice that streams is heard as it speaks: each part is played as it
+/// comes, at the output's rate, and the next sentence is made only once the
+/// last part of this one is in.
+#[test]
+fn a_streaming_voice_is_played_part_by_part() {
+    // At the output's own rate: each part played as it was made.
+    let (mut app, voice, output) = speech_app("speech-parts");
+    *voice.parts.lock().unwrap() = 2;
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "This is the first. That is the second. Then");
+    let script = output.lock().unwrap();
+    assert!(script.played.len() >= 3, "{:?}", script.played);
+    assert!(
+        script.rates.iter().all(|r| *r == 1000),
+        "{:?}",
+        script.rates
+    );
+    // Four words each: 400 samples at the output's rate, sentence by
+    // sentence, whatever the parts — all of the first before any of the
+    // second (each sentence's samples are the tenth of its turn).
+    let total: usize = script.played.iter().sum();
+    assert_eq!(total, 800, "{:?}", script.played);
+    let turns: Vec<f32> = script
+        .rest
+        .iter()
+        .map(|s| (s * 10.0).round())
+        .filter(|t| *t > 0.0)
+        .collect();
+    assert!(
+        turns.windows(2).all(|w| w[0] <= w[1]),
+        "sentences interleaved"
+    );
+    assert_eq!(turns.first(), Some(&1.0));
+    assert_eq!(turns.last(), Some(&2.0));
+    assert_eq!(voice.texts(), ["This is the first.", "That is the second."]);
+}
+
+/// A sentence's parts are played as they come, and the next sentence is
+/// not asked for until the last of them is in: one sentence is made at a
+/// time, whatever order the parts are handled in.
+#[test]
+fn the_next_sentence_waits_for_the_last_part() {
+    let (mut app, voice, output) = speech_app("speech-parts-wait");
+    *voice.parts.lock().unwrap() = 2;
+    asked(&mut app, 1, true);
+    let task = app.on_ask_delta(1, "This is the first. That is the second. Then".into());
+    let spoken: Vec<Message> = run_task(task)
+        .into_iter()
+        .filter(|m| matches!(m, Message::Voice(VoiceMsg::Spoken { .. })))
+        .collect();
+    assert_eq!(voice.texts(), ["This is the first."]);
+    let parts = spoken
+        .iter()
+        .filter(|m| matches!(m, Message::Voice(VoiceMsg::Spoken { last: false, .. })))
+        .count();
+    assert_eq!(parts, 2, "two parts, then the end");
+    for message in spoken {
+        let last = matches!(message, Message::Voice(VoiceMsg::Spoken { last: true, .. }));
+        let next = app.update(message);
+        if last {
+            settle(&mut app, next);
+        } else {
+            // A part played, and nothing more asked for.
+            assert!(run_task(next).is_empty());
+            assert_eq!(voice.texts().len(), 1);
+        }
+    }
+    assert_eq!(voice.texts(), ["This is the first.", "That is the second."]);
+    assert!(output.lock().unwrap().played.len() >= 4);
+}
+
+/// A voice's name reads in the interface's language when it is a
+/// description, and as it is when it is a person's.
+#[test]
+fn voice_names_read_in_the_interfaces_language() {
+    use crate::app::choices::voice_called;
+    use crate::i18n::Lang;
+    assert_eq!(
+        voice_called(Lang::Fr, "Native to each language"),
+        "Propre à chaque langue"
+    );
+    assert_eq!(
+        voice_called(Lang::Ja, "Native to each language"),
+        "言語ごとのネイティブの声"
+    );
+    assert_eq!(
+        voice_called(Lang::En, "Native to each language"),
+        "Native to each language"
+    );
+    assert_eq!(voice_called(Lang::Zh, "Ono Anna"), "Ono Anna");
+    assert_eq!(voice_called(Lang::Fr, "F2"), "Voix féminine 2");
 }
 
 /// A project to ask in by retrieval: a selection pinned as its grounding (no
@@ -1150,7 +1275,7 @@ fn a_spoken_question_waits_for_mcp_servers_with_its_voice() {
 fn nothing_is_said_with_a_model_being_removed() {
     let (mut app, voice, _) = speech_app("speech-removing");
     let store = app.voice.store.clone().unwrap();
-    let model = speech::find("supertonic-3").unwrap();
+    let model = speech::find("qwen3-tts").unwrap();
     let claim = Claim::take(speech::dir(&store, model), ClaimedFor::Download).unwrap();
     asked(&mut app, 1, true);
     delta(&mut app, 1, "This is. That is. Third");
@@ -1159,7 +1284,7 @@ fn nothing_is_said_with_a_model_being_removed() {
     drop(claim);
     // Removing a model being downloaded is refused, saying so.
     let claim = Claim::take(speech::dir(&store, model), ClaimedFor::Download).unwrap();
-    let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("supertonic-3")));
+    let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("qwen3-tts")));
     settle(&mut app, task);
     assert!(app.speech_installed(model));
     assert!(app.status.contains("already downloading"), "{}", app.status);
@@ -1171,11 +1296,11 @@ fn nothing_is_said_with_a_model_being_removed() {
 #[test]
 fn a_model_being_removed_says_so() {
     let (mut app, _voice, _) = speech_app("speech-removed-twice");
-    let removing = app.update(Message::Voice(VoiceMsg::RemoveSpeech("supertonic-3")));
-    let _ = app.update(Message::Voice(VoiceMsg::RemoveSpeech("supertonic-3")));
+    let removing = app.update(Message::Voice(VoiceMsg::RemoveSpeech("qwen3-tts")));
+    let _ = app.update(Message::Voice(VoiceMsg::RemoveSpeech("qwen3-tts")));
     assert!(app.status.contains("being removed"), "{}", app.status);
     app.status.clear();
-    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("supertonic-3")));
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
     assert!(app.status.contains("being removed"), "{}", app.status);
     settle(&mut app, removing);
     assert!(app.status.starts_with("Removed"), "{}", app.status);
@@ -1186,19 +1311,19 @@ fn a_model_being_removed_says_so() {
 #[test]
 fn removing_a_model_ends_only_what_it_says() {
     let (mut app, _voice, _) = speech_app("speech-remove-other");
-    install(&app, speech::find("kokoro-zh").unwrap());
+    install(&app, speech::find("supertonic-3").unwrap());
     asked(&mut app, 1, true);
     delta(&mut app, 1, "The total adds every price. Then it rounds.");
     ended(&mut app, 1, StreamOutcome::Done);
     assert!(app.voice.speech.is_speaking());
-    let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("kokoro-zh")));
+    let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("supertonic-3")));
     settle(&mut app, task);
-    assert!(!app.speech_installed(speech::find("kokoro-zh").unwrap()));
+    assert!(!app.speech_installed(speech::find("supertonic-3").unwrap()));
     assert!(
         app.voice.speech.is_speaking(),
         "another model's speech goes on"
     );
-    let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("supertonic-3")));
+    let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("qwen3-tts")));
     settle(&mut app, task);
     assert!(!app.voice.speech.is_speaking());
 }
@@ -1215,7 +1340,7 @@ fn windows_keep_each_others_voice_settings() {
     let (mut second, _, _) = speech_app("speech-window-b");
     let _ = first.update(Message::Voice(VoiceMsg::SetSpeed(1.25)));
     let task = first.update(Message::Voice(VoiceMsg::PickSpeechVoice {
-        model: "supertonic-3",
+        model: "qwen3-tts",
         voice: 6,
     }));
     settle(&mut first, task);
@@ -1224,7 +1349,7 @@ fn windows_keep_each_others_voice_settings() {
     let _ = second.update(Message::Voice(VoiceMsg::SetRunCommands(false)));
     let read = VoicePrefs::load();
     assert_eq!(read.speed, 1.25);
-    assert_eq!(read.voice_for(speech::find("supertonic-3").unwrap()), 6);
+    assert_eq!(read.voice_for(speech::find("qwen3-tts").unwrap()), 6);
     assert_eq!(read.read_aloud, ReadAloud::Always);
     assert!(!read.run_commands);
 }

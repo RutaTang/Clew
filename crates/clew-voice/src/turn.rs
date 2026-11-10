@@ -527,7 +527,7 @@ mod tests {
     fn an_older_clew_speak_is_said_to_be_older() {
         let (_dir, program, model) = stand_in(
             "old",
-            "echo 'usage: clew-speak supertonic|kokoro <model dir>' >&2; exit 2",
+            "echo 'usage: clew-speak supertonic|qwen3 <model dir>' >&2; exit 2",
         );
         let error = Judge::start(&program, &model).err().unwrap();
         assert!(error.contains("older than it"), "{error}");

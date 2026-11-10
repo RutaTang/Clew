@@ -13,10 +13,20 @@
 //! writes answers to stdout, one JSON object per line:
 //!
 //! ```text
-//! clew-speak supertonic <model dir>     (or: kokoro <model dir>)
+//! clew-speak supertonic <model dir>     (or: qwen3 <model dir>)
 //! → {"ready":{"rate":44100,"voices":10}}
 //! ← {"say":{"id":1,"text":"Hello.","lang":"en","voice":0,"speed":1.0}}
 //! → {"audio":{"id":1,"pcm":"<base64: 16-bit little-endian samples>"}}
+//! ```
+//!
+//! A voice that streams ([`qwen3`]) answers a sentence in parts, as they
+//! are made, each `"more":true` — then the last, `"more"` left out (its
+//! `pcm` may be empty):
+//!
+//! ```text
+//! → {"audio":{"id":1,"pcm":"…","more":true}}
+//! → {"audio":{"id":1,"pcm":"…","more":true}}
+//! → {"audio":{"id":1,"pcm":""}}
 //! ```
 //!
 //! It also makes embeddings (`clew-speak embed <model dir>`, [`embed`]),
@@ -29,9 +39,12 @@
 //! when stdin closes.
 
 mod embed;
+mod graph;
 mod listen;
 mod mel;
+mod qwen3;
 mod runtime;
+mod stretch;
 mod turn;
 
 use std::io::{BufRead, Write};
@@ -43,20 +56,27 @@ use serde::{Deserialize, Serialize};
 /// A model family, and the files of its folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Family {
-    /// Supertonic: characters in, any of its 31 languages.
+    /// Supertonic: characters in, any of its languages; a sentence made
+    /// whole.
     Supertonic,
-    /// Kokoro: words looked up in its lexicons (Mandarin and English).
-    Kokoro,
+    /// Qwen3-TTS: speech as a person says it, streamed ([`qwen3`]).
+    Qwen3,
 }
 
 impl Family {
     fn parse(name: &str) -> Option<Family> {
         match name {
             "supertonic" => Some(Family::Supertonic),
-            "kokoro" => Some(Family::Kokoro),
+            "qwen3" => Some(Family::Qwen3),
             _ => None,
         }
     }
+}
+
+/// A model loaded.
+enum Voice {
+    Sherpa(sherpa_onnx::OfflineTts),
+    Qwen3(Box<qwen3::Qwen3>),
 }
 
 /// One request: say `text`.
@@ -64,8 +84,7 @@ impl Family {
 struct Say {
     id: u64,
     text: String,
-    /// Its language, as a code (`en`, `ko`, `fr`): Supertonic's choice of
-    /// pronunciation; Kokoro reads it from its lexicons.
+    /// Its language, as a code (`en`, `ko`, `fr`): how it is pronounced.
     #[serde(default)]
     lang: Option<String>,
     /// The model's voice, by number.
@@ -89,9 +108,21 @@ enum Request {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Answer {
-    Ready { rate: i32, voices: i32 },
-    Audio { id: u64, pcm: String },
-    Failed { id: u64, error: String },
+    Ready {
+        rate: i32,
+        voices: i32,
+    },
+    Audio {
+        id: u64,
+        pcm: String,
+        /// More of the sentence is coming.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        more: bool,
+    },
+    Failed {
+        id: u64,
+        error: String,
+    },
     Error(String),
 }
 
@@ -127,27 +158,27 @@ fn main() {
         std::process::exit(turn::run(Path::new(&file)));
     }
     let (Some(family), Some(dir)) = (first.as_deref().and_then(Family::parse), args.next()) else {
-        eprintln!("usage: clew-speak supertonic|kokoro <model dir>");
+        eprintln!("usage: clew-speak supertonic|qwen3 <model dir>");
         std::process::exit(2);
     };
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let tts = match load(family, Path::new(&dir)) {
-        Ok(tts) => tts,
+    let loaded = match family {
+        Family::Qwen3 => qwen3::Qwen3::load(Path::new(&dir)).map(|q| Voice::Qwen3(Box::new(q))),
+        Family::Supertonic => load(family, Path::new(&dir)).map(Voice::Sherpa),
+    };
+    let mut voice = match loaded {
+        Ok(voice) => voice,
         Err(e) => {
             let _ = send(&mut out, &Answer::Error(e));
             std::process::exit(1);
         }
     };
-    if send(
-        &mut out,
-        &Answer::Ready {
-            rate: tts.sample_rate(),
-            voices: tts.num_speakers().max(1),
-        },
-    )
-    .is_err()
-    {
+    let (rate, voices) = match &voice {
+        Voice::Sherpa(tts) => (tts.sample_rate(), tts.num_speakers().max(1)),
+        Voice::Qwen3(_) => (qwen3::RATE, qwen3::VOICES),
+    };
+    if send(&mut out, &Answer::Ready { rate, voices }).is_err() {
         return;
     }
     for line in std::io::stdin().lock().lines() {
@@ -155,15 +186,57 @@ fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        let answer = match serde_json::from_str::<Request>(&line) {
-            Ok(Request::Say(say)) => match speak(&tts, family, &say) {
+        let say = match serde_json::from_str::<Request>(&line) {
+            Ok(Request::Say(say)) => say,
+            Err(e) => {
+                if send(&mut out, &Answer::Error(format!("not a request: {e}"))).is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
+        let id = say.id;
+        let answer = match &mut voice {
+            Voice::Sherpa(tts) => match speak(tts, family, &say) {
                 Ok(samples) => Answer::Audio {
-                    id: say.id,
+                    id,
                     pcm: pcm16(&samples),
+                    more: false,
                 },
-                Err(error) => Answer::Failed { id: say.id, error },
+                Err(error) => Answer::Failed { id, error },
             },
-            Err(e) => Answer::Error(format!("not a request: {e}")),
+            Voice::Qwen3(qwen3) => {
+                // Each part as it is made; a reader gone ends it.
+                let mut gone = false;
+                let said = qwen3.say(
+                    &say.text,
+                    say.lang.as_deref().unwrap_or(""),
+                    say.voice,
+                    say.speed,
+                    &mut |samples| {
+                        let part = Answer::Audio {
+                            id,
+                            pcm: pcm16(samples),
+                            more: true,
+                        };
+                        send(&mut out, &part).map_err(|e| {
+                            gone = true;
+                            e.to_string()
+                        })
+                    },
+                );
+                if gone {
+                    break;
+                }
+                match said {
+                    Ok(()) => Answer::Audio {
+                        id,
+                        pcm: String::new(),
+                        more: false,
+                    },
+                    Err(error) => Answer::Failed { id, error },
+                }
+            }
         };
         if send(&mut out, &answer).is_err() {
             break;
@@ -202,27 +275,7 @@ fn load(family: Family, dir: &Path) -> Result<sherpa_onnx::OfflineTts, String> {
                 voice_style: Some(file("voice.bin")?),
             };
         }
-        Family::Kokoro => {
-            let lexicons = ["lexicon-us-en.txt", "lexicon-zh.txt"]
-                .iter()
-                .map(|name| file(name))
-                .collect::<Result<Vec<_>, _>>()?;
-            config.model.kokoro = OfflineTtsKokoroModelConfig {
-                model: Some(file("model.int8.onnx")?),
-                voices: Some(file("voices.bin")?),
-                tokens: Some(file("tokens.txt")?),
-                lexicon: Some(lexicons.join(",")),
-                dict_dir: Some(dir.join("dict").to_string_lossy().into_owned()),
-                ..Default::default()
-            };
-            config.rule_fsts = Some(
-                ["date-zh.fst", "number-zh.fst", "phone-zh.fst"]
-                    .iter()
-                    .map(|name| file(name))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(","),
-            );
-        }
+        Family::Qwen3 => return Err("not a sherpa-onnx model".into()),
     }
     // Half the cores, at least one: the editor goes on drawing meanwhile.
     config.model.num_threads =
@@ -267,61 +320,7 @@ fn speak(tts: &sherpa_onnx::OfflineTts, family: Family, say: &Say) -> Result<Vec
     else {
         return Err("nothing could be made of it".into());
     };
-    let mut samples = audio.samples().to_vec();
-    if family == Family::Kokoro {
-        without_hop_whine(&mut samples, tts.sample_rate());
-    }
-    Ok(samples)
-}
-
-/// How narrow each notch of [`without_hop_whine`] is: its centre over the
-/// width it takes out.
-const WHINE_Q: f64 = 20.0;
-
-/// Kokoro's int8 model whines at a fifth and two fifths of its rate — 4.8
-/// and 9.6 kHz at its 24 kHz — from its vocoder's five-sample hop, which
-/// int8 weights leave a steady tone of: measured 15 to 25 dB above what is
-/// around it, all through the speech and the pauses between (the full-size
-/// model, three times the download, about 5). Two narrow notches there, run
-/// forward and back so nothing is shifted in time, take it out and leave
-/// the rest of the voice within a fraction of a dB. (The pattern's other
-/// harmonics fold onto these two below the Nyquist frequency.)
-fn without_hop_whine(samples: &mut [f32], rate: i32) {
-    if rate <= 0 {
-        return;
-    }
-    let rate = f64::from(rate);
-    for fifths in [1.0, 2.0] {
-        let (b, a) = notch(rate * fifths / 5.0, rate, WHINE_Q);
-        biquad(samples, b, a);
-        samples.reverse();
-        biquad(samples, b, a);
-        samples.reverse();
-    }
-}
-
-/// A notch at `centre` Hz (the audio EQ cookbook's), normalized: the
-/// numerator and the denominator's last two.
-fn notch(centre: f64, rate: f64, q: f64) -> ([f64; 3], [f64; 2]) {
-    let w = std::f64::consts::TAU * centre / rate;
-    let alpha = w.sin() / (2.0 * q);
-    let a0 = 1.0 + alpha;
-    let cos = w.cos();
-    (
-        [1.0 / a0, -2.0 * cos / a0, 1.0 / a0],
-        [-2.0 * cos / a0, (1.0 - alpha) / a0],
-    )
-}
-
-/// `samples` through the biquad `b`/`a`, in place.
-fn biquad(samples: &mut [f32], b: [f64; 3], a: [f64; 2]) {
-    let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
-    for sample in samples.iter_mut() {
-        let x = f64::from(*sample);
-        let y = b[0] * x + b[1] * x1 + b[2] * x2 - a[0] * y1 - a[1] * y2;
-        (x2, x1, y2, y1) = (x1, x, y1, y);
-        *sample = y as f32;
-    }
+    Ok(audio.samples().to_vec())
 }
 
 /// Samples in [-1, 1] as 16-bit little-endian PCM, in base64.
@@ -336,8 +335,7 @@ fn pcm16(samples: &[f32]) -> String {
 #[cfg(test)]
 mod tests {
     /// Supertonic refines each sentence in more steps than its default —
-    /// a smoother voice — in the language it is told; Kokoro reads its
-    /// language from its lexicons and has no steps to set.
+    /// a smoother voice — in the language it is told.
     #[test]
     fn supertonic_speaks_in_more_steps_than_its_default() {
         let say = |lang: Option<&str>| super::Say {
@@ -355,68 +353,12 @@ mod tests {
             config.extra.as_ref().and_then(|e| e.get("lang")),
             Some(&serde_json::Value::from("fr"))
         );
-        let config = super::generation(super::Family::Kokoro, &say(Some("zh")), 4);
-        assert_eq!(
-            config.num_steps,
-            sherpa_onnx::GenerationConfig::default().num_steps
-        );
+        let config = super::generation(super::Family::Supertonic, &say(None), 4);
         assert_eq!(config.sid, 3, "a voice it has");
         assert!(config.extra.is_none());
     }
 
     use super::*;
-
-    /// How strong `hz` is in `samples` at `rate`, in dB, over their middle
-    /// half (the filters' edges left out).
-    fn level(samples: &[f32], rate: f64, hz: f64) -> f64 {
-        let (from, to) = (samples.len() / 4, samples.len() * 3 / 4);
-        let (mut re, mut im) = (0.0, 0.0);
-        for (n, &s) in samples.iter().enumerate().take(to).skip(from) {
-            let phase = std::f64::consts::TAU * hz * n as f64 / rate;
-            re += f64::from(s) * phase.cos();
-            im += f64::from(s) * phase.sin();
-        }
-        10.0 * ((re * re + im * im) / ((to - from) as f64).powi(2)).log10()
-    }
-
-    /// Kokoro's whine at a fifth and two fifths of its rate is taken out;
-    /// the voice around it — low, middle, high, and right beside the
-    /// notches — is left as it was.
-    #[test]
-    fn the_hop_whine_is_taken_out_and_the_voice_left() {
-        let rate = 24_000.0;
-        let probes = [
-            200.0, 1_000.0, 3_000.0, 4_300.0, 7_000.0, 10_400.0, 11_000.0,
-        ];
-        let whine = [4_800.0, 9_600.0];
-        let mut samples: Vec<f32> = (0..24_000)
-            .map(|n| {
-                let t = f64::from(n) / rate;
-                probes
-                    .iter()
-                    .chain(&whine)
-                    .map(|hz| 0.05 * (std::f64::consts::TAU * hz * t).sin())
-                    .sum::<f64>() as f32
-            })
-            .collect();
-        let before: Vec<f64> = probes.iter().map(|&hz| level(&samples, rate, hz)).collect();
-        let whine_before: Vec<f64> = whine.iter().map(|&hz| level(&samples, rate, hz)).collect();
-        without_hop_whine(&mut samples, rate as i32);
-        for (hz, was) in probes.iter().zip(before) {
-            let now = level(&samples, rate, *hz);
-            assert!(
-                (now - was).abs() < 0.5,
-                "{hz} Hz went from {was:.1} to {now:.1} dB"
-            );
-        }
-        for (hz, was) in whine.iter().zip(whine_before) {
-            let now = level(&samples, rate, *hz);
-            assert!(
-                was - now > 40.0,
-                "{hz} Hz only from {was:.1} to {now:.1} dB"
-            );
-        }
-    }
 
     /// A request reads as the client writes it; what is left out is the
     /// model's own.
@@ -438,6 +380,20 @@ mod tests {
             serde_json::to_string(&Answer::Error("x".into())).unwrap(),
             r#"{"error":"x"}"#
         );
+        // A sentence whole reads as it always has; a part says more comes.
+        let audio = |more| Answer::Audio {
+            id: 1,
+            pcm: "AA==".into(),
+            more,
+        };
+        assert_eq!(
+            serde_json::to_string(&audio(false)).unwrap(),
+            r#"{"audio":{"id":1,"pcm":"AA=="}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&audio(true)).unwrap(),
+            r#"{"audio":{"id":1,"pcm":"AA==","more":true}}"#
+        );
     }
 
     /// Samples become 16-bit PCM, clipped at full scale.
@@ -454,7 +410,8 @@ mod tests {
     #[test]
     fn families_are_named() {
         assert_eq!(Family::parse("supertonic"), Some(Family::Supertonic));
-        assert_eq!(Family::parse("kokoro"), Some(Family::Kokoro));
+        assert_eq!(Family::parse("qwen3"), Some(Family::Qwen3));
+        assert_eq!(Family::parse("kokoro"), None);
         assert_eq!(Family::parse("piper"), None);
     }
 }

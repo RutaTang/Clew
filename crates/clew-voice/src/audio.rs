@@ -61,68 +61,157 @@ const MAX_PHASES: u64 = 1024;
 /// band. The filter is tabulated once per fractional delay (polyphase), so
 /// the cost is one multiply-add per tap.
 pub fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
-    if from == to || input.is_empty() || from == 0 || to == 0 {
-        return input.to_vec();
-    }
-    let g = gcd(u64::from(from), u64::from(to));
-    let (up, down) = (u64::from(to) / g, u64::from(from) / g);
-    let phases = up.min(MAX_PHASES);
-    // Cutoff in cycles per input sample; the kernel's half-width in input
-    // samples follows from it.
-    let ratio = f64::from(to) / f64::from(from);
-    let cutoff = 0.5 * ratio.min(1.0) * ROLLOFF;
-    let half_width = ZERO_CROSSINGS / (2.0 * cutoff);
-    let half = half_width.ceil() as i64;
-    let taps = (2 * half) as usize;
-    // table[p][j]: the weight of input sample k0 + j + 1 - half for an
-    // output `p / phases` of a sample past k0, normalized to unity gain.
-    let table: Vec<Vec<f32>> = (0..phases)
-        .map(|p| {
-            let frac = p as f64 / phases as f64;
-            let mut row: Vec<f64> = (0..taps)
-                .map(|j| {
-                    let d = frac - (j as i64 + 1 - half) as f64;
-                    if d.abs() >= half_width {
-                        return 0.0;
+    let mut resampler = Resampler::new(from, to);
+    let mut out = resampler.push(input);
+    out.extend(resampler.finish());
+    out
+}
+
+/// [`resample`] for audio that comes in parts — speech as it is made: each
+/// sample out is made once all the input its filter reaches is in, so the
+/// parts join as if they had been resampled whole, with nothing at the
+/// joins; [`Resampler::finish`] makes the last, past the end of the input.
+pub struct Resampler {
+    /// Rates the same, or one of them none: the input as it is.
+    unchanged: bool,
+    up: u64,
+    down: u64,
+    phases: u64,
+    half: i64,
+    /// table[p][j]: the weight of input sample k0 + j + 1 - half for an
+    /// output `p / phases` of a sample past k0, normalized to unity gain.
+    table: Vec<Vec<f32>>,
+    /// The input still reached by what is to be made, and where in all of
+    /// it that starts.
+    input: Vec<f32>,
+    base: u64,
+    /// Input taken in all.
+    seen: u64,
+    /// The next sample to make.
+    next: u64,
+}
+
+impl Resampler {
+    pub fn new(from: u32, to: u32) -> Resampler {
+        let unchanged = from == to || from == 0 || to == 0;
+        let g = gcd(u64::from(from.max(1)), u64::from(to.max(1)));
+        let (up, down) = (u64::from(to.max(1)) / g, u64::from(from.max(1)) / g);
+        let phases = up.min(MAX_PHASES);
+        // Cutoff in cycles per input sample; the kernel's half-width in input
+        // samples follows from it.
+        let ratio = f64::from(to.max(1)) / f64::from(from.max(1));
+        let cutoff = 0.5 * ratio.min(1.0) * ROLLOFF;
+        let half_width = ZERO_CROSSINGS / (2.0 * cutoff);
+        let half = half_width.ceil() as i64;
+        let taps = (2 * half) as usize;
+        let table = if unchanged {
+            Vec::new()
+        } else {
+            (0..phases)
+                .map(|p| {
+                    let frac = p as f64 / phases as f64;
+                    let mut row: Vec<f64> = (0..taps)
+                        .map(|j| {
+                            let d = frac - (j as i64 + 1 - half) as f64;
+                            if d.abs() >= half_width {
+                                return 0.0;
+                            }
+                            2.0 * cutoff * sinc(2.0 * cutoff * d) * blackman(d / half_width)
+                        })
+                        .collect();
+                    let sum: f64 = row.iter().sum();
+                    if sum.abs() > f64::EPSILON {
+                        row.iter_mut().for_each(|w| *w /= sum);
                     }
-                    2.0 * cutoff * sinc(2.0 * cutoff * d) * blackman(d / half_width)
+                    row.into_iter().map(|w| w as f32).collect()
                 })
-                .collect();
-            let sum: f64 = row.iter().sum();
-            if sum.abs() > f64::EPSILON {
-                row.iter_mut().for_each(|w| *w /= sum);
-            }
-            row.into_iter().map(|w| w as f32).collect()
-        })
-        .collect();
-    let out_len = (input.len() as u64 * up / down) as usize;
-    let mut out = Vec::with_capacity(out_len);
-    for n in 0..out_len as u64 {
+                .collect()
+        };
+        Resampler {
+            unchanged,
+            up,
+            down,
+            phases,
+            half,
+            table,
+            input: Vec::new(),
+            base: 0,
+            seen: 0,
+            next: 0,
+        }
+    }
+
+    /// Output sample `n`'s filter row, and the first input sample it
+    /// reaches.
+    fn at(&self, n: u64) -> (usize, i64) {
         // Output sample n sits at input position n * down / up.
-        let num = n * down;
-        let mut k0 = (num / up) as i64;
-        let rem = num % up;
-        let mut p = if phases == up {
+        let num = n * self.down;
+        let mut k0 = (num / self.up) as i64;
+        let rem = num % self.up;
+        let mut p = if self.phases == self.up {
             rem
         } else {
-            ((rem as f64 / up as f64) * phases as f64).round() as u64
+            ((rem as f64 / self.up as f64) * self.phases as f64).round() as u64
         };
-        if p == phases {
+        if p == self.phases {
             p = 0;
             k0 += 1;
         }
-        let row = &table[p as usize];
-        let first = k0 + 1 - half;
-        let mut acc = 0.0f32;
-        for (j, w) in row.iter().enumerate() {
-            let k = first + j as i64;
-            if k >= 0 && (k as usize) < input.len() {
-                acc += input[k as usize] * w;
-            }
-        }
-        out.push(acc);
+        (p as usize, k0 + 1 - self.half)
     }
-    out
+
+    /// Make samples while `ready` says the input for the next is in.
+    fn make(&mut self, until: u64, ready: impl Fn(i64) -> bool) -> Vec<f32> {
+        let mut out = Vec::new();
+        while self.next < until {
+            let (p, first) = self.at(self.next);
+            if !ready(first) {
+                break;
+            }
+            let mut acc = 0.0f32;
+            for (j, w) in self.table[p].iter().enumerate() {
+                let k = first + j as i64;
+                if k >= self.base as i64
+                    && let Some(x) = self.input.get((k - self.base as i64) as usize)
+                {
+                    acc += x * w;
+                }
+            }
+            out.push(acc);
+            self.next += 1;
+        }
+        // Input none of what is still to be made reaches.
+        let (_, first) = self.at(self.next);
+        let keep = first.max(0) as u64;
+        if keep > self.base {
+            let drop = ((keep - self.base) as usize).min(self.input.len());
+            self.input.drain(..drop);
+            self.base += drop as u64;
+        }
+        out
+    }
+
+    /// More input: what of the output is made of it now.
+    pub fn push(&mut self, input: &[f32]) -> Vec<f32> {
+        if self.unchanged {
+            return input.to_vec();
+        }
+        self.input.extend_from_slice(input);
+        self.seen += input.len() as u64;
+        let taps = self.half * 2;
+        let seen = self.seen as i64;
+        self.make(u64::MAX, |first| first + taps <= seen)
+    }
+
+    /// The input ended: the rest of the output, as long as the input was at
+    /// the new rate.
+    pub fn finish(&mut self) -> Vec<f32> {
+        if self.unchanged {
+            return Vec::new();
+        }
+        let until = self.seen * self.up / self.down;
+        self.make(until, |_| true)
+    }
 }
 
 fn gcd(mut a: u64, mut b: u64) -> u64 {
@@ -376,6 +465,39 @@ mod tests {
 
     /// Upsampling a narrowband microphone keeps its tone and adds nothing
     /// above its own Nyquist frequency.
+    /// Resampled a part at a time, as speech is made, the parts join into
+    /// exactly what resampling all of it at once makes — for any sizes of
+    /// part, up and down.
+    #[test]
+    fn parts_resample_as_the_whole_does() {
+        let input: Vec<f32> = tone(440.0, 24_000, 0.5, 0.5)
+            .iter()
+            .zip(tone(3_100.0, 24_000, 0.5, 0.2))
+            .map(|(a, b)| a + b)
+            .collect();
+        for (from, to) in [
+            (24_000, 48_000),
+            (24_000, 44_100),
+            (24_000, 16_000),
+            (44_100, 24_000),
+        ] {
+            let whole = resample(&input, from, to);
+            for part in [1, 7, 1920, 5000] {
+                let mut r = Resampler::new(from, to);
+                let mut parts = Vec::new();
+                for chunk in input.chunks(part) {
+                    parts.extend(r.push(chunk));
+                }
+                parts.extend(r.finish());
+                assert_eq!(parts, whole, "{from} → {to} in parts of {part}");
+            }
+        }
+        // The same rate: as it came, part by part.
+        let mut r = Resampler::new(24_000, 24_000);
+        assert_eq!(r.push(&input[..10]), &input[..10]);
+        assert!(r.finish().is_empty());
+    }
+
     #[test]
     fn upsampling_adds_no_images() {
         let x = tone(1_000.0, 8_000, 0.5, 0.5);

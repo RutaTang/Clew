@@ -169,7 +169,10 @@ impl std::fmt::Debug for Opened {
 /// Text made speech: `clew-speak`, or a test's.
 pub(crate) trait Synthesizer: Send + Sync {
     /// `text` said in `lang` by `model` (its files in `dir`), in voice
-    /// `voice` at `speed`: samples, one channel, and their rate.
+    /// `voice` at `speed`, given to `part` as it is made — whole, or a part
+    /// at a time from a voice that streams: samples, one channel, and their
+    /// rate.
+    #[allow(clippy::too_many_arguments)]
     fn say(
         &self,
         model: &'static VoiceModel,
@@ -178,7 +181,8 @@ pub(crate) trait Synthesizer: Send + Sync {
         lang: &str,
         voice: i32,
         speed: f32,
-    ) -> Result<(Vec<f32>, u32), SayError>;
+        part: &mut dyn FnMut(Vec<f32>, u32),
+    ) -> Result<(), SayError>;
     /// Let `model` go, if it is loaded, and do `work` — remove its files —
     /// with nothing said meanwhile: what would be is said once `work` is
     /// done.
@@ -199,9 +203,10 @@ impl Synthesizer for System {
         lang: &str,
         voice: i32,
         speed: f32,
-    ) -> Result<(Vec<f32>, u32), SayError> {
+        part: &mut dyn FnMut(Vec<f32>, u32),
+    ) -> Result<(), SayError> {
         match &self.speakers {
-            Some(speakers) => speakers.say(model, dir, text, lang, voice, speed),
+            Some(speakers) => speakers.say(model, dir, text, lang, voice, speed, part),
             None => Err(SayError::Voice(
                 tr!("clew-speak, which reads answers aloud, is not installed next to Clew").into(),
             )),
@@ -253,8 +258,8 @@ fn speak_bin_path() -> Option<PathBuf> {
     clew_core::lsp::store::find_on_path(NAME)
 }
 
-/// A sentence said: its samples (one channel) and their rate. Shown in a
-/// message's debug form by its length alone.
+/// A sentence said, or a part of it: its samples (one channel) and their
+/// rate. Shown in a message's debug form by its length alone.
 #[derive(Clone)]
 pub struct Audio {
     pub samples: Arc<Vec<f32>>,
@@ -440,16 +445,13 @@ impl Speech {
 /// What Settings' Try says with `model`: a sentence in the interface's
 /// language when the model speaks it, else in one it does.
 fn sample(model: &VoiceModel) -> Sentence {
-    // Its own words in the one language Kokoro speaks here.
-    const CHINESE: &str = "这就是 Clew 朗读回答时的声音。";
+    // Its own words in a language Supertonic speaks here, which none of the
+    // interface's are.
+    const DUTCH: &str = "Zo klinkt Clew wanneer het een antwoord voorleest.";
     let ui = crate::i18n::current().code();
     if model.speaks(ui) {
-        let text = match ui {
-            "zh" => CHINESE.to_string(),
-            _ => tr!("This is how Clew sounds when it reads an answer aloud.").to_string(),
-        };
         Sentence {
-            text,
+            text: tr!("This is how Clew sounds when it reads an answer aloud.").to_string(),
             lang: clew_voice::say::known_language(ui).unwrap_or("en"),
         }
     } else if model.speaks("en") {
@@ -459,8 +461,8 @@ fn sample(model: &VoiceModel) -> Sentence {
         }
     } else {
         Sentence {
-            text: CHINESE.into(),
-            lang: "zh",
+            text: DUTCH.into(),
+            lang: "nl",
         }
     }
 }
@@ -473,7 +475,8 @@ impl App {
                 round,
                 result,
                 opened,
-            } => self.on_spoken(round, result, opened),
+                last,
+            } => self.on_spoken(round, result, opened, last),
             VoiceMsg::SpeakTick => self.on_speak_tick(),
             VoiceMsg::StopSpeaking => {
                 if self.stop_speaking() {
@@ -822,10 +825,28 @@ impl App {
             self.voice.speech.made_with.insert(model.id);
             self.voice.speech.quiet_since = None;
             let round = self.voice.speech.round;
-            return Task::perform(
-                async move {
+            // Made off the UI thread, each part sent as it comes: a voice
+            // that streams is heard while the rest is still being made.
+            let stream = iced::stream::channel(
+                16,
+                move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                    use iced::futures::SinkExt;
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
                     tokio::task::spawn_blocking(move || {
-                        let opening = open.map(|open| std::thread::spawn(move || open()));
+                        let mut opening = open.map(|open| std::thread::spawn(move || open()));
+                        let mut device_rate = device_rate;
+                        // The output opened, taken with the first part, its rate
+                        // what the parts are made at.
+                        let mut take_opened = |device_rate: &mut Option<u32>| -> Option<Opened> {
+                            let opened: Opening = opening.take()?.join().unwrap_or_else(|_| {
+                                Err(tr!("speaking failed unexpectedly").into())
+                            });
+                            if let Ok(output) = &opened {
+                                device_rate.get_or_insert(output.rate());
+                            }
+                            Some(Opened::new(opened))
+                        };
+                        let mut resampler: Option<(u32, clew_voice::audio::Resampler)> = None;
                         let said = synthesizer.say(
                             model,
                             &dir,
@@ -833,55 +854,67 @@ impl App {
                             sentence.lang,
                             voice,
                             speed,
+                            &mut |samples, rate| {
+                                let opened = take_opened(&mut device_rate);
+                                let to = device_rate.unwrap_or(rate);
+                                // One resampler for all the parts: they join as
+                                // if made whole.
+                                let (_, resampler) = resampler.get_or_insert_with(|| {
+                                    (to, clew_voice::audio::Resampler::new(rate, to))
+                                });
+                                let audio = Audio {
+                                    samples: Arc::new(resampler.push(&samples)),
+                                    rate: to,
+                                };
+                                let _ = tx.send(Message::Voice(VoiceMsg::Spoken {
+                                    round,
+                                    result: Ok(audio),
+                                    opened,
+                                    last: false,
+                                }));
+                            },
                         );
-                        let opened: Option<Opening> = opening.map(|opening| {
-                            opening
-                                .join()
-                                .unwrap_or_else(|_| Err(tr!("speaking failed unexpectedly").into()))
-                        });
-                        let device_rate = device_rate.or(match &opened {
-                            Some(Ok(output)) => Some(output.rate()),
-                            _ => None,
-                        });
-                        let result = said.map(|(samples, rate)| match device_rate {
-                            Some(to) if to != rate => Audio {
-                                samples: Arc::new(clew_voice::audio::resample(&samples, rate, to)),
-                                rate: to,
+                        let opened = take_opened(&mut device_rate);
+                        let rest = match resampler.as_mut() {
+                            Some((to, resampler)) => Audio {
+                                samples: Arc::new(resampler.finish()),
+                                rate: *to,
                             },
-                            _ => Audio {
-                                samples: Arc::new(samples),
-                                rate,
+                            None => Audio {
+                                samples: Arc::new(Vec::new()),
+                                rate: device_rate.unwrap_or(1),
                             },
-                        });
-                        (result, opened.map(Opened::new))
-                    })
-                    .await
-                    .unwrap_or_else(|_| {
-                        (
-                            Err(SayError::Voice(tr!("speaking failed unexpectedly").into())),
-                            None,
-                        )
-                    })
-                },
-                move |(result, opened)| {
-                    Message::Voice(VoiceMsg::Spoken {
-                        round,
-                        result,
-                        opened,
-                    })
+                        };
+                        let _ = tx.send(Message::Voice(VoiceMsg::Spoken {
+                            round,
+                            result: said.map(|()| rest),
+                            opened,
+                            last: true,
+                        }));
+                    });
+                    while let Some(message) = rx.recv().await {
+                        let last =
+                            matches!(message, Message::Voice(VoiceMsg::Spoken { last: true, .. }));
+                        if output.send(message).await.is_err() || last {
+                            break;
+                        }
+                    }
                 },
             );
+            return Task::run(stream, |message| message);
         }
         Task::none()
     }
 
-    /// A sentence made: played after what is playing, and the next one
-    /// made meanwhile.
+    /// A sentence made, or a part of it (all but its `last`): played after
+    /// what is playing — and, once all of it is made, the next one made
+    /// meanwhile.
     fn on_spoken(
         &mut self,
         round: u64,
         result: Result<Audio, SayError>,
         opened: Option<Opened>,
+        last: bool,
     ) -> Task<Message> {
         let opened = opened.and_then(|o| o.take());
         if round != self.voice.speech.round {
@@ -890,7 +923,9 @@ impl App {
             }
             return Task::none();
         }
-        self.voice.speech.making = false;
+        if last {
+            self.voice.speech.making = false;
+        }
         match opened {
             Some(Ok(output)) => match self.voice.speech.output {
                 Some(_) => close_later(output),
@@ -907,8 +942,9 @@ impl App {
         match result {
             Ok(audio) => {
                 // Opened with the first sentence; one closed since (none is
-                // while a sentence is made) is opened again here.
-                if self.voice.speech.output.is_none() {
+                // while a sentence is made) is opened again here — not for
+                // a sentence's end with nothing left in it.
+                if self.voice.speech.output.is_none() && !audio.samples.is_empty() {
                     match (self.voice.speech.open_output)() {
                         Ok(output) => self.voice.speech.output = Some(output),
                         Err(e) => {
@@ -925,13 +961,19 @@ impl App {
                     // sentence was not the output's. Given it with some
                     // still to play, the count goes on — an output that
                     // stopped is found out however many sentences come.
-                    if output.idle() {
-                        self.voice.speech.progress = None;
+                    if !audio.samples.is_empty() {
+                        if output.idle() {
+                            self.voice.speech.progress = None;
+                        }
+                        output.play(&audio.samples, audio.rate);
                     }
-                    output.play(&audio.samples, audio.rate);
                 }
                 self.voice.speech.quiet_since = None;
-                self.speak_next()
+                if last {
+                    self.speak_next()
+                } else {
+                    Task::none()
+                }
             }
             // This sentence could not be said; the next can.
             Err(SayError::Sentence(_)) => self.speak_next(),
