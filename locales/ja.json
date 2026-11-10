@@ -1247,6 +1247,7 @@
  "Revoke": "取り消す",
  "Right-click a function and choose Call Hierarchy.": "関数を右クリックして「呼び出し階層」を選んでください。",
  "Right-click a line and choose Why Is This Here? to see the commit that wrote it, and why. This line came from the fix that taxes the discounted amount, not the whole subtotal.": "行を右クリックして「なぜここにあるのか？」を選ぶと、その行を書いたコミットと理由がわかります。この行は、小計全体ではなく割引後の金額に課税するようにした修正から来ています。",
+ "Right-click a variable and choose Trace Value.": "変数を右クリックして「値をトレース」を選んでください。",
  "Routes": "ルート",
  "Run": "実行",
  "Run Explain All first": "先に「すべて解説」を実行してください",

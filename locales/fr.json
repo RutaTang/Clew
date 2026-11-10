@@ -1247,6 +1247,7 @@
  "Revoke": "Révoquer",
  "Right-click a function and choose Call Hierarchy.": "Faites un clic droit sur une fonction et choisissez Hiérarchie d’appels.",
  "Right-click a line and choose Why Is This Here? to see the commit that wrote it, and why. This line came from the fix that taxes the discounted amount, not the whole subtotal.": "Faites un clic droit sur une ligne et choisissez « Pourquoi ce code est-il là ? » pour voir le commit qui l’a écrite, et pourquoi. Cette ligne vient du correctif qui taxe le montant remisé, et non tout le sous-total.",
+ "Right-click a variable and choose Trace Value.": "Faites un clic droit sur une variable et choisissez Tracer la valeur.",
  "Routes": "Routes",
  "Run": "Exécuter",
  "Run Explain All first": "Lancez d’abord « Tout expliquer »",

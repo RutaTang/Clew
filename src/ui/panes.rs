@@ -1792,13 +1792,18 @@ fn active_note<'a>(
             super::toolbar::explain_all_message(app),
         ));
     }
-    let actions = actions
-        .push(action(
+    // A function's calls: a file's card had the way in too, to a margin
+    // tab that follows the function the caret is in and said only "Move
+    // the cursor into a function" — on a README as on a module.
+    if matches!(of, NoteOf::Function { .. }) {
+        actions = actions.push(action(
             Glyph::Network,
             calls_label,
             false,
             Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Calls)),
-        ))
+        ));
+    }
+    let actions = actions
         .push(action(
             Glyph::Clock,
             history_label,
@@ -2068,18 +2073,20 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     // notes are indexed by symbol once — the first note for a name wins, as
     // with `notes::find`.
     let ordinals = crate::outline::fn_ordinals(&v.symbols);
+    let keys = crate::notes::note_keys(&v.symbols);
     let mut notes: std::collections::HashMap<&str, &crate::notes::Note> =
         std::collections::HashMap::new();
     for n in app.proj.notes.iter().filter(|n| n.rel == v.rel) {
         notes.entry(n.symbol.as_str()).or_insert(n);
     }
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    for (symbol, &ordinal) in v.symbols.iter().zip(&ordinals) {
+    for ((symbol, &ordinal), key) in v.symbols.iter().zip(&ordinals).zip(&keys) {
         let is_fn = matches!(symbol.kind.as_str(), "function" | "method");
         let is_current = is_fn && current == Some((symbol.name.as_str(), ordinal));
         // The reader's note/progress on this symbol (anchored by name, so it
-        // follows the symbol across edits/re-scans).
-        let note = notes.get(symbol.name.as_str()).copied();
+        // follows the symbol across edits/re-scans; by what it is inside
+        // too, where the file has two of the name).
+        let note = notes.get(key.as_str()).copied();
         let understood = note.is_some_and(|n| n.understood);
         let has_text = note.is_some_and(|n| !n.text.is_empty());
 
@@ -2206,7 +2213,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 &symbol.name,
                 Message::Reading(ReadingMsg::NoteToggleUnderstood {
                     rel: v.rel.clone(),
-                    symbol: symbol.name.clone(),
+                    symbol: key.clone(),
                 }),
             ));
         let pencil = button(glyph::icon(
@@ -2225,7 +2232,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             &symbol.name,
             Message::Reading(ReadingMsg::NoteEditStart {
                 rel: v.rel.clone(),
-                symbol: symbol.name.clone(),
+                symbol: key.clone(),
             }),
         ));
         // Top-align so the toggle circle and pencil sit on the kind-badge/name
@@ -2254,7 +2261,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     // this file. Plain text, left-aligned with the section header — no decorative
     // leading circle (that read as a stray, non-clickable control). Explain-All
     // progress lives only in the status bar, so it isn't duplicated here.
-    let names: Vec<String> = v.symbols.iter().map(|s| s.name.clone()).collect();
+    let names = crate::notes::note_keys(&v.symbols);
     let (done, total) = crate::notes::coverage(&app.proj.notes, &v.rel, &names);
     let header_content: Element<'_, Message> =
         text(tr!("{done}/{total} understood", done = done, total = total))

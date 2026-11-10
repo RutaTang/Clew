@@ -206,53 +206,14 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
     // was pressed, and only deleting every letter brought the tree back.
     let filter: Element<'_, Message> =
         if app.sidebar == SidebarTab::Files && app.proj.project.is_some() {
-            let cleared = Message::Window(WindowMsg::FileFilterChanged(String::new()));
-            let mut field = row![
-                glyph::icon(Glyph::Filter, theme::dim(), 13.0),
-                ts::field_in(
-                    text_input(tr!("Filter files"), &app.file_filter)
-                        .id(super::file_filter_id())
-                        .on_input(|s| Message::Window(WindowMsg::FileFilterChanged(s)))
-                        .on_submit(Message::Window(WindowMsg::FileFilterSubmitted))
-                        .style(theme::bare_input),
-                    FILTER_H - 2.0,
-                    ts::INTER,
-                    ts::BODY,
-                ),
-            ]
-            .spacing(8)
-            .height(Fill)
-            .align_y(iced::Center);
-            if !app.file_filter.is_empty() {
-                field = field.push(tip_at(
-                    button(glyph::icon(Glyph::Close, theme::dim(), 12.0))
-                        .style(theme::toolbar_button)
-                        .padding(3)
-                        .on_press(super::heard::said(tr!("Clear filter"), cleared.clone())),
-                    tr!("Clear filter"),
-                    None,
-                    tooltip::Position::Bottom,
-                ));
-            }
-            container(
-                super::escape_clears::EscapeClears::new(
-                    container(field)
-                        .height(Length::Fixed(FILTER_H))
-                        // The design's 10 inside its 1 px border, which here
-                        // takes no room of its own.
-                        .padding([1, 11])
-                        .style(theme::field(!app.file_filter.is_empty())),
-                    Message::Window(WindowMsg::FileFilterEscaped),
-                )
-                .ringed(9.0),
+            filter_field(
+                tr!("Filter files"),
+                &app.file_filter,
+                Some(super::file_filter_id()),
+                |s| Message::Window(WindowMsg::FileFilterChanged(s)),
+                Some(Message::Window(WindowMsg::FileFilterSubmitted)),
+                Message::Window(WindowMsg::FileFilterEscaped),
             )
-            .padding(Padding {
-                top: 0.0,
-                right: 10.0,
-                bottom: SIDEBAR_GAP,
-                left: 10.0,
-            })
-            .into()
         } else {
             slot()
         };
@@ -2199,4 +2160,67 @@ fn walk_action<'a>(
         .on_press_maybe(press);
     let does: String = does.into();
     super::toolbar::tip_at(control, does, None, iced::widget::tooltip::Position::Bottom)
+}
+
+/// A sidebar view's filter: the filter mark, the field, and — once there is
+/// something in it — a × that empties it; Escape in it does too
+/// (`escaped`). The Files view's and the API docs': the docs' was a plain
+/// field of another style.
+pub(crate) fn filter_field<'a>(
+    placeholder: &'a str,
+    value: &'a str,
+    id: Option<iced::widget::Id>,
+    on_input: fn(String) -> Message,
+    on_submit: Option<Message>,
+    escaped: Message,
+) -> Element<'a, Message> {
+    let mut input = text_input(placeholder, value)
+        .on_input(on_input)
+        .style(theme::bare_input);
+    if let Some(id) = id {
+        input = input.id(id);
+    }
+    if let Some(submit) = on_submit {
+        input = input.on_submit(submit);
+    }
+    let mut field = row![
+        glyph::icon(Glyph::Filter, theme::dim(), 13.0),
+        ts::field_in(input, FILTER_H - 2.0, ts::INTER, ts::BODY),
+    ]
+    .spacing(8)
+    .height(Fill)
+    .align_y(iced::Center);
+    if !value.is_empty() {
+        field = field.push(tip_at(
+            button(glyph::icon(Glyph::Close, theme::dim(), 12.0))
+                .style(theme::toolbar_button)
+                .padding(3)
+                .on_press(super::heard::said(
+                    tr!("Clear filter"),
+                    on_input(String::new()),
+                )),
+            tr!("Clear filter"),
+            None,
+            tooltip::Position::Bottom,
+        ));
+    }
+    container(
+        super::escape_clears::EscapeClears::new(
+            container(field)
+                .height(Length::Fixed(FILTER_H))
+                // The design's 10 inside its 1 px border, which here
+                // takes no room of its own.
+                .padding([1, 11])
+                .style(theme::field(!value.is_empty())),
+            escaped,
+        )
+        .ringed(9.0),
+    )
+    .padding(Padding {
+        top: 0.0,
+        right: 10.0,
+        bottom: SIDEBAR_GAP,
+        left: 10.0,
+    })
+    .into()
 }

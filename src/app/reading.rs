@@ -403,12 +403,19 @@ impl App {
     pub fn note_symbol_line(&self, rel: &str, symbol: &str) -> Option<usize> {
         let root = &self.proj.project.as_ref()?.root;
         let abs = root.join(rel);
-        self.proj
-            .symbol_index_by_file
-            .get(&abs)?
+        let symbols = self.proj.symbol_index_by_file.get(&abs)?;
+        if let Some(s) = symbols.iter().find(|s| s.name == symbol) {
+            return Some(s.line);
+        }
+        // A name the file has twice is kept under what it is inside
+        // (`notes::note_keys`): the first of the name after that.
+        let (outer, name) = symbol.rsplit_once('.')?;
+        let after = symbols.iter().find(|s| s.name == outer)?.line;
+        symbols
             .iter()
-            .find(|s| s.name == symbol)
+            .filter(|s| s.name == name && s.line > after)
             .map(|s| s.line)
+            .min()
     }
 
     pub(crate) fn on_target_selected(&mut self, target: inactive::Target) -> Task<Message> {

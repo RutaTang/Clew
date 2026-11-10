@@ -365,6 +365,27 @@ pub(crate) fn path<'a>(s: impl Into<String>) -> iced::widget::Text<'a> {
         .wrapping(Wrapping::Glyph)
 }
 
+/// [`segmented`], small enough for a sidebar's row: each segment's press
+/// is optional — a toggle's chosen half has nothing to do.
+pub(crate) fn segmented_compact<'a>(
+    segments: impl IntoIterator<Item = (String, bool, Option<Message>)>,
+) -> Element<'a, Message> {
+    container(
+        Row::with_children(segments.into_iter().map(|(label, chosen, msg)| {
+            let msg = msg.map(|msg| super::heard::said(&label, msg));
+            button(text(label).size(ts::SMALL))
+                .style(theme::segment(chosen))
+                .padding([2, 8])
+                .on_press_maybe(msg)
+                .into()
+        }))
+        .spacing(2),
+    )
+    .padding(2)
+    .style(theme::trough)
+    .into()
+}
+
 /// A segmented control: one segment per `(label, chosen, msg)`, the
 /// chosen one raised in the trough.
 pub(crate) fn segmented<'a>(

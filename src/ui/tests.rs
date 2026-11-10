@@ -6056,6 +6056,10 @@ fn the_empty_call_hierarchy_says_how_to_fill_it() {
     assert!(app.proj.call_graph.is_none());
     let mut sim = sim_elem(super::calls_tab(&app));
     assert!(shows(&mut sim, "choose Call Hierarchy"));
+    // Value flow says how to fill it too.
+    assert!(app.proj.flow.is_none());
+    let mut sim = sim_elem(super::panels::flow_tab(&app));
+    assert!(shows(&mut sim, "choose Trace Value"));
 }
 
 /// A language server's list in the Search sidebar is a list of its own:
@@ -7765,6 +7769,44 @@ fn doc_file(rel: &str, items: &[(&str, bool)]) -> clew_protocol::DocFile {
         })).collect::<Vec<_>>(),
     }))
     .expect("a DocFile")
+}
+
+/// The API docs' grouping and visibility are pairs with the chosen half
+/// raised: pressing the other half switches, pressing the chosen one does
+/// nothing — a chip that named what was on and flipped read as two tabs
+/// with neither picked.
+#[test]
+fn the_docs_toggles_show_which_is_chosen() {
+    let mut app = reader_app();
+    app.proj.docs.files = vec![doc_file("src/lib.rs", &[("open", true)])];
+    let sent = |app: &App, label: &str| {
+        click(sim_elem(super::docs_stats::docs_tab(app)), label)
+            .into_iter()
+            .filter(|m| matches!(m, Message::Docs(_)))
+            .collect::<Vec<_>>()
+    };
+    for both in ["Files", "Modules", "Public", "All"] {
+        assert!(
+            shows(&mut sim_elem(super::docs_stats::docs_tab(&app)), both),
+            "{both}"
+        );
+    }
+    assert!(sent(&app, "Files").is_empty(), "Files is chosen");
+    assert!(matches!(
+        sent(&app, "Modules").as_slice(),
+        [Message::Docs(DocsMsg::ToggleGrouping)]
+    ));
+    assert!(sent(&app, "Public").is_empty(), "Public is chosen");
+    assert!(matches!(
+        sent(&app, "All").as_slice(),
+        [Message::Docs(DocsMsg::ToggleShowAll)]
+    ));
+    app.docs_view.by_module = true;
+    assert!(sent(&app, "Modules").is_empty(), "now Modules is");
+    assert!(matches!(
+        sent(&app, "Files").as_slice(),
+        [Message::Docs(DocsMsg::ToggleGrouping)]
+    ));
 }
 
 /// I5: the DOCS grouping is computed per installed index and view options,
@@ -12164,6 +12206,75 @@ fn the_view_menus_inert_row_says_why() {
         position: minimap.center(),
     })]);
     assert!(!shows(&mut sim, why));
+}
+
+/// A file's card has no way to a function's calls: the margin's Calls tab
+/// follows the function the caret is in, and from a file's card — a
+/// README's, a schema's — it said only to move the cursor into one.
+#[test]
+fn a_files_card_offers_no_calls() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.explain.cache.insert(
+        crate::explain::Node::File(abs.clone()),
+        crate::explain::Cached {
+            summary: "What the whole file is for.".into(),
+            prompt_hash: crate::incremental::content_hash(b"test"),
+            detail: None,
+            basis: None,
+        },
+    );
+    app.proj.explain.view = Some(crate::explain::Node::File(abs));
+    let mut sim = sim_of(&app);
+    // The card is up: its History beside the margin's own tab of the name.
+    assert!(
+        text_at(&mut sim, |t| t == "History", 1).is_some(),
+        "the card's History, after the tab's"
+    );
+    assert!(
+        text_at(&mut sim, |t| t == "Calls", 0).is_some(),
+        "the margin's own tab"
+    );
+    assert!(
+        text_at(&mut sim, |t| t == "Calls", 1).is_none(),
+        "and no second Calls, on the card"
+    );
+}
+
+/// Two classes' `__init__` are two rows with notes of their own: each
+/// row's understood mark is kept under its class, not shared — marking one
+/// marked both.
+#[test]
+fn each_init_in_the_outline_has_a_note_of_its_own() {
+    let mut app = reader_app();
+    let symbol = |name: &str, kind: &str, line: usize, end_line: usize| clew_protocol::Symbol {
+        name: name.into(),
+        kind: kind.into(),
+        line,
+        end_line,
+    };
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![
+        symbol("OutOfStock", "class", 1, 4),
+        symbol("__init__", "method", 2, 4),
+        symbol("Inventory", "class", 6, 12),
+        symbol("__init__", "method", 7, 9),
+    ];
+    let toggled = |nth: usize| {
+        click_left_of(
+            || sim_elem(super::outline_content(&app)),
+            "__init__",
+            nth,
+            |m| matches!(m, Message::Reading(ReadingMsg::NoteToggleUnderstood { .. })),
+        )
+        .into_iter()
+        .find_map(|m| match m {
+            Message::Reading(ReadingMsg::NoteToggleUnderstood { symbol, .. }) => Some(symbol),
+            _ => None,
+        })
+    };
+    assert_eq!(toggled(0).as_deref(), Some("OutOfStock.__init__"));
+    assert_eq!(toggled(1).as_deref(), Some("Inventory.__init__"));
 }
 
 /// A setting whose value is words — the interpreter in use — has them on

@@ -1247,6 +1247,7 @@
  "Revoke": "撤销",
  "Right-click a function and choose Call Hierarchy.": "右键点击一个函数，然后选择“调用层次结构”。",
  "Right-click a line and choose Why Is This Here? to see the commit that wrote it, and why. This line came from the fix that taxes the discounted amount, not the whole subtotal.": "右键点击一行，选择“为什么会有这段代码？”，即可看到写下它的提交及原因。这一行来自一次修复：对折扣后的金额计税，而不是对整个小计计税。",
+ "Right-click a variable and choose Trace Value.": "右键点击一个变量，然后选择“追踪值”。",
  "Routes": "路由",
  "Run": "运行",
  "Run Explain All first": "请先运行“全部解释”",

@@ -247,34 +247,35 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         };
     }
 
-    // Toolbar: a filter on top, then the grouping / visibility / rebuild
-    // controls (two rows so they fit a narrow sidebar).
-    let filter = text_input(tr!("Filter docs…"), &app.proj.docs.filter)
-        .style(theme::input)
-        .on_input(|v| Message::Docs(DocsMsg::FilterChanged(v)))
-        .size(ts::BODY)
-        .padding(6)
-        .width(Fill);
-    let chip = |label: String, msg: Message| {
-        button(text(label.clone()).size(ts::SMALL))
-            .style(theme::toolbar_button)
-            .padding([4, 8])
-            .on_press(super::heard::said(&label, msg))
+    // Toolbar: a filter on top — the Files view's, as it looks there —
+    // then the grouping / visibility / rebuild controls.
+    let filter = super::sidebar::filter_field(
+        tr!("Filter docs…"),
+        &app.proj.docs.filter,
+        None,
+        |v| Message::Docs(DocsMsg::FilterChanged(v)),
+        None,
+        Message::Docs(DocsMsg::FilterChanged(String::new())),
+    );
+    // Each a pair whose chosen half is raised: a chip that said what was
+    // on ("Files", "Public") and flipped when pressed read as two tabs
+    // with neither picked.
+    let pair = |a: (&'static str, bool), b: (&'static str, bool), flip: Message| {
+        super::form::segmented_compact([
+            (a.0.to_string(), a.1, (!a.1).then(|| flip.clone())),
+            (b.0.to_string(), b.1, (!b.1).then_some(flip)),
+        ])
     };
-    let group_btn = chip(
-        if app.docs_view.by_module {
-            tr!("Modules").into()
-        } else {
-            tr!("Files").into()
-        },
+    let by_module = app.docs_view.by_module;
+    let show_all = app.docs_view.show_all;
+    let group = pair(
+        (tr!("Files"), !by_module),
+        (tr!("Modules"), by_module),
         Message::Docs(DocsMsg::ToggleGrouping),
     );
-    let vis_btn = chip(
-        if app.docs_view.show_all {
-            tr!("All").into()
-        } else {
-            tr!("Public").into()
-        },
+    let visible = pair(
+        (tr!("Public"), !show_all),
+        (tr!("All"), show_all),
         Message::Docs(DocsMsg::ToggleShowAll),
     );
     let refresh = super::toolbar::icon_action(
@@ -282,10 +283,16 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         tr!("Rebuild"),
         Some(Message::Docs(DocsMsg::Refresh)),
     );
-    let controls = row![group_btn, vis_btn, space().width(Fill), refresh]
-        .spacing(4)
-        .align_y(iced::Center);
-    let toolbar = column![filter, controls].spacing(4);
+    let controls = row![group, visible, space().width(Fill), refresh]
+        .spacing(6)
+        .align_y(iced::Center)
+        .padding(Padding {
+            top: 0.0,
+            right: 6.0,
+            bottom: 0.0,
+            left: 10.0,
+        });
+    let toolbar = column![filter, controls];
 
     let query = app.proj.docs.filter.trim().to_lowercase();
     let selected_line = app.proj.docs.page.as_ref().and_then(|p| {
@@ -393,7 +400,12 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     }
 
     column![
-        container(toolbar).padding([6, 6]),
+        container(toolbar).padding(Padding {
+            top: 6.0,
+            right: 0.0,
+            bottom: 6.0,
+            left: 0.0,
+        }),
         scrollable(Column::with_children(rows).width(Fill))
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
@@ -532,11 +544,13 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
             Column::with_children(blocks)
                 .spacing(4)
                 .width(Fill)
+                // Under the header's path, 16 in as it is: 8 put the page
+                // closer to the sheet's edge than its own header.
                 .padding(Padding {
                     top: 6.0,
                     right: 20.0,
                     bottom: 24.0,
-                    left: 8.0,
+                    left: 16.0,
                 }),
         )
         .direction(thin_scroll())

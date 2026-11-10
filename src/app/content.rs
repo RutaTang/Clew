@@ -418,7 +418,8 @@ impl App {
         // symbol inside this loop scanned the whole list per symbol —
         // quadratic, on every caret move.
         let ordinals = outline::fn_ordinals(&v.symbols);
-        for (s, &symbol_ordinal) in v.symbols.iter().zip(&ordinals) {
+        let keys = crate::notes::note_keys(&v.symbols);
+        for ((s, &symbol_ordinal), key) in v.symbols.iter().zip(&ordinals).zip(&keys) {
             if matches!(s.kind.as_str(), "function" | "method")
                 && s.name == name
                 && symbol_ordinal == ordinal
@@ -444,10 +445,7 @@ impl App {
             if has_summary {
                 h += 14.0;
             }
-            if notes
-                .get(s.name.as_str())
-                .is_some_and(|n| !n.text.is_empty())
-            {
+            if notes.get(key.as_str()).is_some_and(|n| !n.text.is_empty()) {
                 h += 14.0;
             }
             y += h;

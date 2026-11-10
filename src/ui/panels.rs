@@ -2047,7 +2047,14 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
     // Its rows counted from 1, as voice picks them.
     super::heard::list();
     let Some(tree) = &app.proj.flow else {
-        return empty_state(Glyph::Search, tr!("No value trace yet"), "", None);
+        // How to fill it, as the call hierarchy's says: the tab alone gave
+        // no way in.
+        return empty_state(
+            Glyph::Flow,
+            tr!("No value trace yet"),
+            tr!("Right-click a variable and choose Trace Value."),
+            None,
+        );
     };
     let pending = app.proj.flow_pending == Some(tree.token);
     let header = tree_head(
