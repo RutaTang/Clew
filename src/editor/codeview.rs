@@ -2618,6 +2618,36 @@ where
             );
         }
 
+        // A line that runs past the view's right edge fades out there, not
+        // cut off mid-word: it says the line goes on, to scroll to. Over the
+        // text, in a layer of its own (within one, quads draw before text);
+        // left of the minimap, when one is drawn.
+        let right = self
+            .minimap_band(viewport)
+            .map_or(viewport.x + viewport.width, |band| band.x);
+        let text_right = bounds.x + gutter_px + state.measured_for(self.extent_key());
+        if text_right > right + 0.5 && right - viewport.x > 2.0 * RUNS_ON_FADE {
+            let fade = Rectangle {
+                x: right - RUNS_ON_FADE,
+                y: viewport.y,
+                width: RUNS_ON_FADE,
+                height: viewport.height,
+            };
+            let bg = theme::bg();
+            let gradient = iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_2))
+                .add_stop(0.0, Color { a: 0.0, ..bg })
+                .add_stop(1.0, bg);
+            renderer.with_layer(fade, |renderer| {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: fade,
+                        ..renderer::Quad::default()
+                    },
+                    iced::Background::Gradient(iced::Gradient::Linear(gradient)),
+                );
+            });
+        }
+
         // Minimap: a compressed overview pinned to the right of the viewport,
         // one sampled bar per few pixel rows, shaped by indentation and line
         // length, with a soft rounded box marking the visible range. It is
@@ -2632,6 +2662,9 @@ where
         }
     }
 }
+
+/// How wide the fade is where a line runs past the view's right edge.
+const RUNS_ON_FADE: f32 = 28.0;
 
 /// The room either side of the words in a chip past a line's end, and the
 /// widest its words are laid out.
