@@ -573,7 +573,10 @@ pub(crate) struct VoiceState {
     /// What was said, waiting to be worked out after what was said before
     /// it — one at a time, in the order it was said — with the model it is
     /// worked out with.
-    unheard: VecDeque<(Recording, &'static Model)>,
+    unheard: VecDeque<(Recording, &'static Model, bool)>,
+    /// What is being worked out began with Clew called by its name: what
+    /// was heard before the name is not what was asked.
+    run_called: bool,
     /// Where, in what the microphone is hearing, speech said over Clew
     /// began, in seconds: what is heard before it — what was left of Clew's
     /// voice — is not worked out with it.
@@ -630,6 +633,7 @@ impl VoiceState {
             listening: None,
             mic_on: false,
             unheard: VecDeque::new(),
+            run_called: false,
             over_from: None,
             transcribing: None,
             token: 0,
@@ -1401,6 +1405,7 @@ impl App {
         // what is said now.
         let waiting = self.voice.wake.is_waiting();
         self.voice.mic_on = true;
+        self.voice.wake.called = called;
         self.voice.heard = None;
         self.open_mic();
         if waiting && !called {
@@ -1483,8 +1488,9 @@ impl App {
         let speaking = self.voice.speech.is_speaking() || self.answer_read_aloud_coming();
         // Called by its name, and nothing said for a while — Clew quiet,
         // nothing being worked out or waiting for a yes: it waits for its
-        // name again.
-        if self.voice.prefs.wake {
+        // name again. Turned on by the voice key, it listens until turned
+        // off.
+        if self.voice.prefs.wake && self.voice.wake.called {
             let busy = speaking
                 || quiet.is_some()
                 || self.voice.transcribing.is_some()
@@ -1493,9 +1499,7 @@ impl App {
             if busy {
                 self.voice.wake.last_said = Instant::now();
             } else if self.voice.wake.last_said.elapsed() >= crate::app::wake::IDLE {
-                let task = self.mic_off();
-                self.status = tr!("Waiting for “Hey, Clew”").into();
-                return task;
+                return self.mic_off();
             }
         }
         if speaking && !self.voice.prefs.talk_over && quiet.is_none() {
@@ -1539,16 +1543,18 @@ impl App {
     /// Of what was heard, what was said over Clew: from where it began, a
     /// little before — not what was heard of Clew's own voice before it.
     /// And what was heard just before Clew was called, before it: what was
-    /// said in one breath with "Hey, Clew" is heard whole.
-    fn said_from(&mut self, recording: &mut Recording) {
+    /// said in one breath with "Hey, Clew" is heard whole. Whether it was.
+    fn said_from(&mut self, recording: &mut Recording) -> bool {
         if let Some(from) = self.voice.over_from.take() {
             let cut = ((from - OVER_LEAD).max(0.0) * recording.rate as f32) as usize;
             recording.samples.drain(..cut.min(recording.samples.len()));
         }
-        if let Some(lead) = self.voice.wake.lead.take()
-            && lead.rate == recording.rate
-        {
-            recording.samples.splice(0..0, lead.samples);
+        match self.voice.wake.lead.take() {
+            Some(lead) if lead.rate == recording.rate => {
+                recording.samples.splice(0..0, lead.samples);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1557,7 +1563,7 @@ impl App {
     /// would learn the room again, and let Clew's voice through meanwhile.
     /// `None`, nothing taken, when it may not listen on as it is: turned
     /// off, to wait while Clew speaks, or opened for another model.
-    fn listen_on_afresh(&mut self) -> Option<Recording> {
+    fn listen_on_afresh(&mut self) -> Option<(Recording, bool)> {
         let model = self.voice.prefs.model();
         let waits = !self.voice.prefs.talk_over
             && (self.voice.speech.is_speaking() || self.answer_read_aloud_coming());
@@ -1569,13 +1575,13 @@ impl App {
             return None;
         }
         let mut recording = listening.take();
-        self.said_from(&mut recording);
+        let called = self.said_from(&mut recording);
         self.voice.phase = VoicePhase::Listening {
             since: Instant::now(),
             level: 0.0,
         };
         self.turn_listening_began();
-        Some(recording)
+        Some((recording, called))
     }
 
     /// What is being said has ended — a pause, Smart Turn, the most that
@@ -1583,8 +1589,8 @@ impl App {
     /// it, while the microphone listens on for what is said next.
     fn end_utterance(&mut self) -> Task<Message> {
         let model = self.voice.listening.as_ref().map(|(_, model)| *model);
-        if let (Some(recording), Some(model)) = (self.listen_on_afresh(), model) {
-            self.voice.unheard.push_back((recording, model));
+        if let (Some((recording, called)), Some(model)) = (self.listen_on_afresh(), model) {
+            self.voice.unheard.push_back((recording, model, called));
             return self.transcribe_next();
         }
         let task = self.end_utterance_now();
@@ -1600,8 +1606,8 @@ impl App {
         };
         self.voice.phase = VoicePhase::Idle;
         let mut recording = listening.stop();
-        self.said_from(&mut recording);
-        self.voice.unheard.push_back((recording, model));
+        let called = self.said_from(&mut recording);
+        self.voice.unheard.push_back((recording, model, called));
         self.transcribe_next()
     }
 
@@ -1612,9 +1618,10 @@ impl App {
         if self.voice.transcribing.is_some() {
             return Task::none();
         }
-        let Some((recording, model)) = self.voice.unheard.pop_front() else {
+        let Some((recording, model, called)) = self.voice.unheard.pop_front() else {
             return Task::none();
         };
+        self.voice.run_called = called;
         self.voice.token += 1;
         let token = self.voice.token;
         self.voice.transcribing = Some(token);
@@ -1706,14 +1713,17 @@ impl App {
                 }
             }
         }
-        let task = self.on_words(result);
+        let called = std::mem::take(&mut self.voice.run_called);
+        let task = self.on_words(result, called);
         Task::batch([task, self.transcribe_next()])
     }
 
     /// The words heard: a command, run (or asked about); else a question
     /// for Ask. Nothing that could be read is let go without a word: the
     /// microphone listens on.
-    fn on_words(&mut self, result: Result<String, String>) -> Task<Message> {
+    /// Begun with Clew `called` by its name, what was heard before the name
+    /// is not what was asked.
+    fn on_words(&mut self, result: Result<String, String>, called: bool) -> Task<Message> {
         let text = match result {
             Ok(text) => text.trim().to_string(),
             Err(e) => {
@@ -1725,10 +1735,19 @@ impl App {
                 return Task::none();
             }
         };
-        // "Bye, Clew", "Stop listening": the microphone turned off — or,
-        // called by its name, waiting for it again. A command waiting for a
-        // yes is put away, as by anything else said.
-        if crate::app::spoken::stops_listening(&text) {
+        // Clew called by its name before what is said to it: what is said
+        // is what follows ("Hey, Clew, open Settings").
+        let named = if called {
+            crate::app::spoken::after_name(&text)
+        } else {
+            crate::app::spoken::without_name(&text)
+        };
+        // "Bye, Clew", "Stop listening" — after the name or not: the
+        // microphone turned off — or, called by its name, waiting for it
+        // again. A command waiting for a yes is put away, as by anything
+        // else said.
+        if crate::app::spoken::stops_listening(&text) || crate::app::spoken::stops_listening(named)
+        {
             self.voice.confirm = None;
             self.voice.hear(Heard {
                 text,
@@ -1736,9 +1755,7 @@ impl App {
             });
             return self.mic_off();
         }
-        // Clew called by its name before what is said to it: what is said
-        // is what follows ("Hey, Clew, open Settings").
-        let text = crate::app::spoken::without_name(&text).to_string();
+        let text = named.to_string();
         if text.is_empty() {
             return Task::none();
         }

@@ -126,70 +126,100 @@ const CALLED: &str = tr_noop!("hey, hi, hello, ok, okay");
 /// Clew's name, as it is heard: the English spellings, and the reader's.
 const NAME: &str = tr_noop!("clew, clue");
 
-/// The words of a list, each phrase's words lower-cased: the English
-/// list's, and the reader's.
-fn phrase_words(list: &'static str) -> Vec<Vec<String>> {
+/// The phrases of a list, lower-cased: the English list's, and the
+/// reader's.
+fn phrases(list: &'static str) -> Vec<String> {
     [list, crate::i18n::lookup(list)]
         .into_iter()
         .flat_map(|l| l.split([',', '，', '、']))
-        .map(|p| {
-            said_words(p)
-                .into_iter()
-                .map(|(_, w)| w)
-                .collect::<Vec<_>>()
-        })
-        .filter(|p: &Vec<String>| !p.is_empty())
+        .map(|p| p.trim().to_lowercase())
+        .filter(|p| !p.is_empty())
         .collect()
 }
 
-/// The words of `said`, lower-cased and without the marks around them,
-/// each with where it ends in `said`; Chinese, Japanese and Korean set
-/// apart from Latin letters beside them ("再见Clew").
-fn said_words(said: &str) -> Vec<(usize, String)> {
-    let cjk = |c: char| matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF);
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut last_cjk = false;
+/// Whether `c` is of a script written without spaces between its words —
+/// Chinese, Japanese — or with its syllables run together, as Korean is.
+fn cjk(c: char) -> bool {
+    matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF)
+}
+
+/// What sets one part of what was said from the next.
+fn mark(c: char) -> bool {
+    matches!(
+        c,
+        ',' | '.'
+            | '!'
+            | '?'
+            | ':'
+            | ';'
+            | '-'
+            | '—'
+            | '…'
+            | '，'
+            | '。'
+            | '！'
+            | '？'
+            | '、'
+            | '：'
+    )
+}
+
+/// `said` without the marks and spaces at its start.
+fn unmarked(said: &str) -> &str {
+    said.trim_start_matches(|c: char| c.is_whitespace() || mark(c))
+}
+
+/// How much of the start of `said` is `phrase`, case aside — a phrase of
+/// Latin letters only as whole words: "clue" does not begin "clueless".
+fn begins(said: &str, phrase: &str) -> Option<usize> {
+    let mut chars = said.char_indices();
     let mut end = 0;
-    for (i, c) in said.char_indices() {
-        let letter = c.is_alphanumeric() || c == '\'' || c == '’';
-        if (!letter || cjk(c) != last_cjk) && !word.is_empty() {
-            words.push((end, std::mem::take(&mut word)));
+    for p in phrase.chars() {
+        let (i, c) = chars.next()?;
+        if !c.to_lowercase().eq(p.to_lowercase()) {
+            return None;
         }
-        if letter {
-            if c != '\'' && c != '’' {
-                word.extend(c.to_lowercase());
-            }
-            last_cjk = cjk(c);
-            end = i + c.len_utf8();
-        }
+        end = i + c.len_utf8();
     }
-    if !word.is_empty() {
-        words.push((end, word));
+    let ends_word = phrase.chars().last().is_some_and(|c| !cjk(c));
+    let next = said[end..].chars().next();
+    if ends_word && next.is_some_and(|c| c.is_alphanumeric() && !cjk(c)) {
+        return None;
     }
-    words
+    Some(end)
 }
 
 /// Whether `said` is nothing but a word to stop listening: "Stop
 /// listening", "Bye, Clew", "Bye, Clew! Stop listening." — not "stop
-/// listening to the test output", which is something else.
+/// listening to the test output", which is something else. Matched with
+/// its spaces and marks left out, so that Chinese and Japanese, written
+/// without them, are heard too ("再见克鲁").
 pub(crate) fn stops_listening(said: &str) -> bool {
-    let names: Vec<String> = phrase_words(NAME).into_iter().flatten().collect();
-    let said: Vec<String> = said_words(said)
-        .into_iter()
-        .map(|(_, w)| if names.contains(&w) { "clew".into() } else { w })
-        .collect();
+    let names = phrases(NAME);
+    let compact = |text: &str| {
+        let mut text: String = text
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        for name in &names {
+            let name: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
+            if !name.is_empty() && name != "clew" {
+                text = text.replace(&name, "clew");
+            }
+        }
+        text
+    };
+    let said: Vec<char> = compact(said).chars().collect();
     if said.is_empty() {
         return false;
     }
-    let phrases: Vec<Vec<String>> = phrase_words(STOP_LISTENING)
-        .into_iter()
-        .map(|p| {
-            p.into_iter()
-                .map(|w| if names.contains(&w) { "clew".into() } else { w })
-                .collect()
-        })
+    let phrases: Vec<Vec<char>> = phrases(STOP_LISTENING)
+        .iter()
+        .map(|p| compact(p).chars().collect::<Vec<_>>())
+        .filter(|p| !p.is_empty())
         .collect();
+    // Made, from its start, of nothing but those phrases.
     let mut made = vec![false; said.len() + 1];
     made[0] = true;
     for i in 0..said.len() {
@@ -210,31 +240,45 @@ pub(crate) fn stops_listening(said: &str) -> bool {
 /// name alone is a call only with a mark after it, as one is written: "Clue
 /// me in" is not one.
 pub(crate) fn without_name(said: &str) -> &str {
-    let names: Vec<String> = phrase_words(NAME).into_iter().flatten().collect();
-    let called: Vec<String> = phrase_words(CALLED).into_iter().flatten().collect();
-    let mark = |c: char| {
-        matches!(
-            c,
-            ',' | '.' | '!' | '?' | ':' | ';' | '，' | '。' | '！' | '？' | '、' | '-' | '—'
-        )
-    };
-    let words = said_words(said);
-    let named = match words.as_slice() {
-        [(_, first), (end, second), ..] if called.contains(first) && names.contains(second) => {
-            Some(*end)
-        }
-        [(end, first), ..]
-            if names.contains(first)
-                && said[*end..].trim_start().chars().next().is_none_or(mark) =>
-        {
-            Some(*end)
-        }
-        _ => None,
-    };
-    match named {
-        Some(end) => said[end..].trim_start_matches(|c: char| c.is_whitespace() || mark(c)),
-        None => said,
+    let names = phrases(NAME);
+    let start = said.trim_start();
+    fn named<'a>(names: &[String], at: &'a str) -> Option<&'a str> {
+        names
+            .iter()
+            .find_map(|n| begins(at, n).map(|end| &at[end..]))
     }
+    // Called, then named.
+    for call in phrases(CALLED) {
+        if let Some(end) = begins(start, &call)
+            && let Some(rest) = named(&names, unmarked(&start[end..]))
+        {
+            return unmarked(rest);
+        }
+    }
+    // Named alone, a mark after it.
+    if let Some(rest) = named(&names, start)
+        && rest.trim_start().chars().next().is_none_or(mark)
+    {
+        return unmarked(rest);
+    }
+    said
+}
+
+/// What was said after Clew's name, wherever it was said in `said` —
+/// what was heard just before the call is not what was asked; `said` as
+/// [`without_name`] leaves it when the name is not in it.
+pub(crate) fn after_name(said: &str) -> &str {
+    let names = phrases(NAME);
+    let mut last: Option<char> = None;
+    for (i, c) in said.char_indices() {
+        // A name begins a word, or is in a run of Chinese or Japanese.
+        let at_word = last.is_none_or(|l| !l.is_alphanumeric() || cjk(l) || cjk(c));
+        if at_word && let Some(end) = names.iter().find_map(|n| begins(&said[i..], n)) {
+            return unmarked(&said[i + end..]);
+        }
+        last = Some(c);
+    }
+    without_name(said)
 }
 
 /// The phrases said with a value, in the order they are tried — after the
@@ -801,13 +845,40 @@ mod tests {
         assert_eq!(without_name("A clue is in the log"), "A clue is in the log");
         assert_eq!(without_name("Clue me in on this"), "Clue me in on this");
         assert_eq!(without_name("Clew!"), "");
-        // Written without a space, as Chinese is: its words apart from the
-        // name beside them.
-        let words: Vec<String> = said_words("再见Clew！")
-            .into_iter()
-            .map(|(_, w)| w)
-            .collect();
-        assert_eq!(words, ["再见", "clew"]);
+        // Chinese and Japanese, written without spaces: the name heard in
+        // them, call and all.
+        use crate::i18n::{Lang, with_lang};
+        with_lang(Lang::Zh, || {
+            assert_eq!(without_name("嘿克鲁，打开设置"), "打开设置");
+            assert_eq!(without_name("嘿 Clew 打开设置"), "打开设置");
+            assert_eq!(without_name("克鲁是什么"), "克鲁是什么", "no mark: no call");
+            assert!(stops_listening("再见克鲁"));
+            assert!(stops_listening("再见Clew！"));
+            assert!(!stops_listening("再见"));
+        });
+        with_lang(Lang::Ja, || {
+            assert!(stops_listening("バイバイクルー"));
+            assert_eq!(without_name("ねえクルー、設定を開いて"), "設定を開いて");
+        });
+    }
+
+    /// What was said once Clew was called is what follows its name, wherever
+    /// the name was heard: what was heard just before the call is not asked.
+    #[test]
+    fn what_is_asked_once_called_follows_the_name() {
+        assert_eq!(
+            after_name("So anyway. Hey, Clew, open Settings."),
+            "open Settings."
+        );
+        assert_eq!(after_name("A clue, go to line 30"), "go to line 30");
+        assert_eq!(after_name("Hey Clew"), "");
+        // Not in a word, and nothing to cut without it.
+        assert_eq!(
+            after_name("Open the clueless file"),
+            "Open the clueless file"
+        );
+        assert_eq!(after_name("Clew, next"), "next");
+        assert_eq!(after_name("Maclew, next"), "Maclew, next", "not in a word");
     }
 
     /// A question on screen is answered only by what is all a yes or all

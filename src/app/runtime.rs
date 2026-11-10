@@ -45,8 +45,6 @@ impl App {
         };
         // Silently check for a newer release in the background (once per process).
         let check = app.startup_update_check();
-        // Called by its name: the microphone waits for it from the start.
-        app.resume_waiting();
         (app, Task::batch([open_task, check]))
     }
 

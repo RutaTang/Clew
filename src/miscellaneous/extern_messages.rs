@@ -445,6 +445,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the keyword spotter answered before it was ready"),
     tr_noop!("the keyword spotter ended"),
     tr_noop!("the keyword spotter said something unreadable: {e}"),
+    tr_noop!("the keyword spotter stopped answering"),
     tr_noop!("the keyword spotter stopped taking audio: {e}"),
     tr_noop!("the keyword spotter stopped while starting — it may be damaged"),
     tr_noop!("the keyword spotter took too long to load"),

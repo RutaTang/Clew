@@ -12,8 +12,9 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -115,8 +116,13 @@ pub fn archive(store: &Store) -> PathBuf {
 
 /// Whether the model is in `store`: every file it runs from, whole.
 pub fn installed(store: &Store) -> bool {
+    installed_at(&dir(store))
+}
+
+/// Whether the model is in `dir` ([`dir`]): every file it runs from, whole.
+pub fn installed_at(dir: &Path) -> bool {
     MODEL.files.iter().all(|f| {
-        std::fs::metadata(dir(store).join(f.name)).is_ok_and(|m| m.is_file() && m.len() == f.bytes)
+        std::fs::metadata(dir.join(f.name)).is_ok_and(|m| m.is_file() && m.len() == f.bytes)
     })
 }
 
@@ -127,19 +133,29 @@ pub fn begin(store: &Store) -> std::io::Result<Install> {
 }
 
 /// Take the files the spotter runs from out of the downloaded archive in
-/// `store`, each checked, then let the archive go.
-pub fn unpack(store: &Store) -> Result<(), String> {
+/// `store`, each checked, then let the archive go — unless `cancel` is set
+/// meanwhile: nothing more is then put in place.
+pub fn unpack(store: &Store, cancel: &AtomicBool) -> Result<(), String> {
     let file = std::fs::File::open(archive(store))
         .map_err(|e| format!("the download could not be opened: {e}"))?;
-    let result = unpack_from(file, &dir(store), MODEL.files);
+    let result = unpack_from(file, &dir(store), MODEL.files, cancel);
     let _ = std::fs::remove_file(archive(store));
     result
 }
 
+/// What unpacking a cancelled download comes to.
+pub const CANCELLED: &str = "cancelled";
+
 /// Take `files` out of the `.tar.bz2` read from `archive` into `dir`: each
 /// written beside its name, checked against its size and checksum, then
-/// put in place. Anything else in the archive is passed over.
-pub fn unpack_from(archive: impl Read, dir: &Path, files: &[WakeFile]) -> Result<(), String> {
+/// put in place — none once `cancel` is set. Anything else in the archive
+/// is passed over.
+pub fn unpack_from(
+    archive: impl Read,
+    dir: &Path,
+    files: &[WakeFile],
+    cancel: &AtomicBool,
+) -> Result<(), String> {
     let mut found = vec![false; files.len()];
     let mut tar = tar::Archive::new(bzip2::read::BzDecoder::new(archive));
     let entries = tar
@@ -195,6 +211,10 @@ pub fn unpack_from(archive: impl Read, dir: &Path, files: &[WakeFile]) -> Result
                 "{name} in the archive is not the file it should be"
             ));
         }
+        if cancel.load(Ordering::Relaxed) {
+            let _ = std::fs::remove_file(&part);
+            return Err(CANCELLED.into());
+        }
         std::fs::rename(&part, dir.join(name))
             .map_err(|e| format!("could not save the model: {e}"))?;
         found[i] = true;
@@ -227,6 +247,8 @@ pub fn remove(store: &Store) -> std::io::Result<()> {
 
 /// How long loading the model may take.
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long letting go of what was heard may take.
+const RESET_TIMEOUT: Duration = Duration::from_secs(2);
 /// What `clew-speak` exits with when it does not know what it was asked to
 /// run.
 const USAGE: i32 = 2;
@@ -243,6 +265,8 @@ enum Answer {
         #[allow(dead_code)]
         keyword: String,
     },
+    /// What was heard before has been let go of.
+    Reset {},
     Error(String),
 }
 
@@ -309,7 +333,7 @@ impl Spotter {
         match spotter.answers.recv_timeout(READY_TIMEOUT) {
             Ok(Ok(Answer::Ready { .. })) => Ok(spotter),
             Ok(Ok(Answer::Error(e))) | Ok(Err(e)) => Err(e),
-            Ok(Ok(Answer::Heard { .. })) => {
+            Ok(Ok(Answer::Heard { .. } | Answer::Reset {})) => {
                 Err("the keyword spotter answered before it was ready".into())
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -342,7 +366,7 @@ impl Spotter {
         loop {
             match self.answers.try_recv() {
                 Ok(Ok(Answer::Heard { .. })) => heard = true,
-                Ok(Ok(Answer::Ready { .. })) => {}
+                Ok(Ok(Answer::Ready { .. } | Answer::Reset {})) => {}
                 Ok(Ok(Answer::Error(e))) | Ok(Err(e)) => return Err(e),
                 Err(mpsc::TryRecvError::Empty) => return Ok(heard),
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -352,11 +376,25 @@ impl Spotter {
         }
     }
 
-    /// Let go of what it has heard so far.
+    /// Let go of what it has heard so far — and of what it has said of it
+    /// and is not yet read: a phrase heard before is not heard after.
     pub fn reset(&mut self) -> Result<(), String> {
         writeln!(self.stdin, "{}", serde_json::json!({ "reset": {} }))
             .and_then(|()| self.stdin.flush())
-            .map_err(|e| format!("the keyword spotter stopped taking audio: {e}"))
+            .map_err(|e| format!("the keyword spotter stopped taking audio: {e}"))?;
+        loop {
+            match self.answers.recv_timeout(RESET_TIMEOUT) {
+                Ok(Ok(Answer::Reset {})) => return Ok(()),
+                Ok(Ok(Answer::Heard { .. } | Answer::Ready { .. })) => {}
+                Ok(Ok(Answer::Error(e))) | Ok(Err(e)) => return Err(e),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err("the keyword spotter stopped answering".into());
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("the keyword spotter ended".into());
+                }
+            }
+        }
     }
 
     /// Whether it has ended.
@@ -387,18 +425,31 @@ impl Spotters {
         }
     }
 
-    /// Start one with the model in `dir`, if none is running with it: it
-    /// loads in a moment, off the thread that hands it audio.
+    fn running(&self) -> MutexGuard<'_, Option<(Spotter, PathBuf)>> {
+        self.running.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Start one with the model in `dir`, if none is running with it. It
+    /// loads with nothing held: what stops or resets the spotter meanwhile
+    /// does not wait for it.
     pub fn warm(&self, dir: &Path) -> Result<(), String> {
-        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((spotter, at)) = running.as_mut()
-            && !spotter.ended()
-            && at == dir
-        {
-            return Ok(());
+        let gone = {
+            let mut running = self.running();
+            if let Some((spotter, at)) = running.as_mut()
+                && !spotter.ended()
+                && at == dir
+            {
+                return Ok(());
+            }
+            running.take()
+        };
+        drop(gone);
+        let started = Spotter::start(&self.program, dir)?;
+        let mut running = self.running();
+        // Another loaded meanwhile: that one runs, this one ends.
+        if running.is_none() {
+            *running = Some((started, dir.to_path_buf()));
         }
-        *running = None;
-        *running = Some((Spotter::start(&self.program, dir)?, dir.to_path_buf()));
         Ok(())
     }
 
@@ -406,8 +457,10 @@ impl Spotters {
     /// whether the phrase was heard — `None` while none is running with it,
     /// or one is loading: never waited for ([`Spotters::warm`] starts one).
     pub fn hear(&self, dir: &Path, samples: &[f32]) -> Result<Option<bool>, String> {
-        let Ok(mut running) = self.running.try_lock() else {
-            return Ok(None);
+        let mut running = match self.running.try_lock() {
+            Ok(running) => running,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(TryLockError::WouldBlock) => return Ok(None),
         };
         let Some((spotter, at)) = running.as_mut() else {
             return Ok(None);
@@ -425,7 +478,7 @@ impl Spotters {
 
     /// Let go of what the spotter has heard so far, if one is running.
     pub fn reset(&self) {
-        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        let mut running = self.running();
         if let Some((spotter, _)) = running.as_mut()
             && spotter.reset().is_err()
         {
@@ -436,7 +489,8 @@ impl Spotters {
     /// Let the model go: what is running ends, and with it its hold on the
     /// model's files.
     pub fn stop(&self) {
-        *self.running.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let gone = self.running().take();
+        drop(gone);
     }
 }
 
@@ -526,7 +580,7 @@ mod tests {
         ];
         let dir = temp_dir("unpack");
         let archive = archive_of(&[("a.onnx", a), ("test.wav", b"riff"), ("tokens.txt", b)]);
-        unpack_from(archive.as_slice(), &dir, &files).unwrap();
+        unpack_from(archive.as_slice(), &dir, &files, &AtomicBool::new(false)).unwrap();
         assert_eq!(std::fs::read(dir.join("a.onnx")).unwrap(), a);
         assert_eq!(std::fs::read(dir.join("tokens.txt")).unwrap(), b);
         assert!(
@@ -536,15 +590,83 @@ mod tests {
         // A file that is not the one it should be is not put in place.
         let dir = temp_dir("unpack-bad");
         let archive = archive_of(&[("a.onnx", b"encoder weightz"), ("tokens.txt", b)]);
-        let e = unpack_from(archive.as_slice(), &dir, &files).unwrap_err();
+        let e = unpack_from(archive.as_slice(), &dir, &files, &AtomicBool::new(false)).unwrap_err();
         assert!(e.contains("a.onnx"), "{e}");
         assert!(!dir.join("a.onnx").exists());
         assert!(!dir.join("a.onnx.part").exists());
         // One missing is said.
         let dir = temp_dir("unpack-missing");
         let archive = archive_of(&[("a.onnx", a)]);
-        let e = unpack_from(archive.as_slice(), &dir, &files).unwrap_err();
+        let e = unpack_from(archive.as_slice(), &dir, &files, &AtomicBool::new(false)).unwrap_err();
         assert!(e.contains("tokens.txt"), "{e}");
+        // Cancelled: nothing more put in place, nor left half-written.
+        let dir = temp_dir("unpack-cancelled");
+        let archive = archive_of(&[("a.onnx", a), ("tokens.txt", b)]);
+        let e = unpack_from(archive.as_slice(), &dir, &files, &AtomicBool::new(true)).unwrap_err();
+        assert_eq!(e, CANCELLED);
+        assert!(!dir.join("a.onnx").exists());
+        assert!(!dir.join("a.onnx.part").exists());
+    }
+
+    /// A stand-in for `clew-speak listen`: ready at once; every piece of
+    /// audio is answered "heard" — the first only after a moment, as a
+    /// phrase is found a little after it is said — and a reset answered as
+    /// one, after what came before it.
+    #[cfg(unix)]
+    fn stand_in(tag: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir(tag);
+        let program = dir.join("clew-speak");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\n\
+             echo '{\"ready\":{\"keywords\":1}}'\n\
+             while read -r line; do\n\
+               case \"$line\" in\n\
+                 *hear*) sleep 0.2; echo '{\"heard\":{\"keyword\":\"hey_clew\"}}' ;;\n\
+                 *reset*) echo '{\"reset\":{}}' ;;\n\
+               esac\n\
+             done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
+    /// The phrase heard before a reset is not heard after it, though its
+    /// answer comes late: a waiting that ended as the phrase was said does
+    /// not start the next one listening.
+    #[cfg(unix)]
+    #[test]
+    fn a_phrase_heard_before_a_reset_is_not_heard_after() {
+        let program = stand_in("stand-in-reset");
+        let dir = program.parent().unwrap().to_path_buf();
+        let spotters = Spotters::new(program);
+        assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(None), "not loaded");
+        spotters.warm(&dir).unwrap();
+        // Heard, but said a moment later than it is asked.
+        assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(Some(false)));
+        spotters.reset();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(spotters.hear(&dir, &[]), Ok(Some(false)), "let go of");
+        // Said after a reset, it is heard.
+        assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(Some(false)));
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(spotters.hear(&dir, &[]), Ok(Some(true)));
+        // A thread that panicked holding it does not leave it unheard.
+        std::thread::scope(|s| {
+            let _ = s
+                .spawn(|| {
+                    let _held = spotters.running.lock();
+                    panic!("held as it failed");
+                })
+                .join();
+        });
+        assert!(spotters.running.is_poisoned());
+        assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(Some(false)));
+        // Stopped, it runs no more: loaded anew when asked.
+        spotters.stop();
+        assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(None));
     }
 
     /// What is heard goes to the spotter in pieces of a fifth of a second,
@@ -631,9 +753,12 @@ mod tests {
             .map(|e| e.unwrap().path())
             .collect();
         names.sort();
+        // One spotter, let go of what it heard before each recording, as a
+        // waiting begins afresh.
+        let mut spotter = Spotter::start(Path::new(&program), Path::new(&model)).unwrap();
         for path in names {
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            let mut spotter = Spotter::start(Path::new(&program), Path::new(&model)).unwrap();
+            spotter.reset().unwrap();
             let mut samples = vec![0.0; RATE as usize / 2];
             samples.extend(read(&path));
             samples.extend(vec![0.0; RATE as usize]);

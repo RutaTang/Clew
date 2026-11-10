@@ -16,7 +16,9 @@
 //! → {"heard":{"keyword":"hey_clew"}}
 //! ```
 //!
-//! `{"reset":{}}` lets go of what was heard so far.
+//! `{"reset":{}}` lets go of what was heard so far, and is answered
+//! `{"reset":{}}` once it has: whatever was answered before it is about
+//! what came before.
 
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -109,6 +111,7 @@ enum Request {
 enum Answer {
     Ready { keywords: usize },
     Heard { keyword: String },
+    Reset {},
     Error(String),
 }
 
@@ -158,7 +161,7 @@ pub fn run(dir: &Path, keywords: &[String]) -> i32 {
             },
             Ok(Request::Reset {}) => {
                 spotter.reset();
-                None
+                Some(Answer::Reset {})
             }
             Err(e) => Some(Answer::Error(format!("not a request: {e}"))),
         };

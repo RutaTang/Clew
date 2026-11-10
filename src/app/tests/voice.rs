@@ -2535,6 +2535,7 @@ fn hey_clew_starts_listening_with_the_microphone_that_waited() {
     assert!(!app.voice.mic_on && !app.voice.is_listening());
     assert!(!wait_step(&mut app), "loading");
     assert_eq!(*spots.warmed.lock().unwrap(), 1);
+    assert_eq!(*spots.resets.lock().unwrap(), 1, "begun afresh");
     assert!(!wait_step(&mut app), "the first piece is not the phrase");
     let wait = app.voice.wake.wait().cloned().unwrap();
     assert_eq!(wait.step(), crate::app::wake::Step::Called, "the second is");
@@ -2550,12 +2551,16 @@ fn hey_clew_starts_listening_with_the_microphone_that_waited() {
     assert!(app.voice.mic_on && app.voice.is_listening());
     assert!(!app.voice.wake.is_waiting());
     assert!(!script.lock().unwrap().stopped, "the same microphone");
-    assert_eq!(*spots.resets.lock().unwrap(), 1, "the phrase let go of");
+    assert_eq!(
+        *spots.resets.lock().unwrap(),
+        1,
+        "not on the window's thread"
+    );
     assert!(app.status.starts_with("Listening"), "{}", app.status);
     // The last moment waited through, before what is said next.
     let lead = app.voice.wake.lead.clone().unwrap();
     assert_eq!(lead.rate, 16_000);
-    assert_eq!(lead.samples, spoken()[8_000..]);
+    assert_eq!(lead.samples, spoken());
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
     for message in run_task(task) {
@@ -2711,6 +2716,15 @@ fn listening_with_nothing_said_waits_for_the_name_again() {
     let _ = app.update(Message::Voice(VoiceMsg::Tick));
     assert!(!app.voice.mic_on && app.voice.wake.is_waiting());
     assert!(app.status.contains("Hey, Clew"), "{}", app.status);
+    // Turned on by the key, not called: it listens until turned off.
+    app.voice.forget_last_press();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    app.voice.wake.last_said = long_ago();
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(app.voice.is_listening());
+    app.voice.forget_last_press();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.wake.is_waiting());
     // Turned on by the key, waiting turned off: it listens on.
     let _ = app.update(Message::Voice(VoiceMsg::SetWake(false)));
     assert!(!app.voice.wake.is_waiting());
@@ -2739,11 +2753,13 @@ fn a_call_over_clew_is_one_only_with_its_voice_taken_out() {
     assert!(wait_step(&mut app));
     assert!(app.voice.speech.is_speaking());
     assert!(!app.voice.mic_on && app.voice.wake.is_waiting());
-    // It hears on.
+    // It hears on — afresh.
+    let resets = *spots.resets.lock().unwrap();
     *spots.call.lock().unwrap() = 3;
     assert!(wait_step(&mut app));
     assert!(!app.voice.mic_on);
     assert_eq!(spots.pieces.lock().unwrap().len(), 3);
+    assert_eq!(*spots.resets.lock().unwrap(), resets + 1);
     app.voice.prefs.talk_over = true;
     *spots.call.lock().unwrap() = 4;
     assert!(wait_step(&mut app));
@@ -2754,6 +2770,68 @@ fn a_call_over_clew_is_one_only_with_its_voice_taken_out() {
     let _ = app.update(Message::Voice(VoiceMsg::SetTalkOver(false)));
     assert!(app.voice.is_listening());
     assert!(app.voice.wake.lead.is_none());
+}
+
+/// "Goodbye, Clew" said once called, the call before it: it waits again —
+/// not asked as a question.
+#[test]
+fn stop_listening_said_with_the_name_stops() {
+    let (_turn, mut app, script, _, _) = wake_app("wake-called-stop", "Hey Clew, goodbye Clew.", 1);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    script.lock().unwrap().silence = None;
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(!app.voice.mic_on && app.voice.wake.is_waiting());
+    assert!(app.proj.ask_input.is_empty(), "nothing asked");
+}
+
+/// Called, what was heard just before the name is not what was asked —
+/// only what was said after it.
+#[test]
+fn what_was_said_before_the_call_is_not_asked() {
+    let (_turn, mut app, script, _, _) = wake_app(
+        "wake-said-before",
+        "So anyway, hey Clew, open the call graph.",
+        1,
+    );
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    script.lock().unwrap().silence = None;
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.proj.overlay, Some(Overlay::ProjectCalls));
+    assert_eq!(
+        app.voice.heard.as_ref().map(|h| h.text.as_str()),
+        Some("open the call graph.")
+    );
+}
+
+/// Called while an answer to be read aloud is still on its way: it is not
+/// read, and the microphone listens, as it does for the voice key.
+#[test]
+fn a_call_stops_an_answer_on_its_way_to_being_read() {
+    let (_turn, mut app, _, _, _) = wake_app("wake-answer-coming", "open settings", 1);
+    app.voice.prefs.talk_over = false;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 7,
+        question: "what does total do?".into(),
+        spoken: true,
+        streaming: true,
+        ..Default::default()
+    });
+    assert!(app.answer_read_aloud_coming());
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    assert!(!app.answer_read_aloud_coming(), "not read");
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(app.voice.is_listening(), "not left waiting for it");
 }
 
 /// What was heard at another rate before the one the microphone hears at
@@ -2879,7 +2957,11 @@ fn a_waiting_that_fails_says_why() {
         app.status
     );
     assert!(script.lock().unwrap().stopped);
-    assert!(app.resume_waiting());
+    // What failed would fail again: not tried by itself — only once turned
+    // on again.
+    assert!(!app.resume_waiting());
+    let _ = app.update(Message::Voice(VoiceMsg::SetWake(true)));
+    assert!(app.voice.wake.is_waiting());
     assert!(app.voice.wake.error.is_none());
     assert!(!wait_step(&mut app), "loaded this time");
     *spots.broken.lock().unwrap() = Some("the keyword spotter ended".into());
@@ -2889,7 +2971,22 @@ fn a_waiting_that_fails_says_why() {
         app.voice.wake.error.as_deref(),
         Some("the keyword spotter ended")
     );
-    assert!(app.resume_waiting());
+    let _ = app.update(Message::Voice(VoiceMsg::SetWake(true)));
+    assert!(app.voice.wake.is_waiting());
+    // The model removed — in another window — as it waited: not loaded
+    // again, and said so.
+    crate::app::wake::Waking::stop(&*spots);
+    let store = app.voice.store.clone().unwrap();
+    let file = clew_voice::wake::dir(&store).join(clew_voice::wake::MODEL.files[0].name);
+    std::fs::remove_file(&file).unwrap();
+    let warmed = *spots.warmed.lock().unwrap();
+    assert!(wait_step(&mut app));
+    assert_eq!(*spots.warmed.lock().unwrap(), warmed, "not loaded again");
+    assert!(!app.voice.wake.is_waiting());
+    assert!(app.status.contains("removed"), "{}", app.status);
+    install_wake(&store);
+    let _ = app.update(Message::Voice(VoiceMsg::SetWake(true)));
+    assert!(app.voice.wake.is_waiting());
     script.lock().unwrap().error = Some("the microphone was unplugged".into());
     assert!(wait_step(&mut app));
     assert!(!app.voice.wake.is_waiting());
@@ -2963,7 +3060,8 @@ fn the_keyword_spotter_downloads_verified_and_is_removed() {
     );
     assert!(!clew_voice::wake::installed(&store));
     assert!(!app.voice.wake.is_waiting());
-    // Downloaded: it waits at once.
+    // Downloaded: it waits at once — whatever failed before.
+    app.voice.wake.failed = true;
     let _ = app.update(Message::Voice(VoiceMsg::DownloadWake));
     install_wake(&store);
     let _ = app.update(Message::Voice(VoiceMsg::WakeDownloaded(Ok(()))));

@@ -88,7 +88,7 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 
 **全在本机。** 麦克风通过系统自己的音频接口读取（Core Audio、WASAPI、ALSA，PipeWire 和 PulseAudio 都支持 ALSA），音频重采样到 16 kHz、裁剪到有人声的部分，再由 whisper.cpp 在这台电脑上转成文字：Mac 上通过 Metal 用 GPU，其他平台用 CPU。不会发送任何内容；只有你选择提问的问题才会像打字提问一样发给你的语言模型。
 
-**叫它的名字。** 在 **设置 → Voice** 中打开 **说出“Hey, Clew”时开始聆听**，并在那里下载它需要的 **关键词检测器**（33 MB：k2-fsa 的流式 Zipformer，支持英文和中文，Apache-2.0，按公布的大小和 SHA-256 核对）。之后，只要麦克风没有在聆听，它就会等待——按钮以强调色显示：说“Hey, Clew”，它就开始聆听，就像按了语音快捷键一样；一口气说“Hey, Clew, open the call graph”也可以。说“再见，Clew”“Bye, Clew”或“停止聆听”，它就回到等待；三分钟没有说话也会如此。语音快捷键和麦克风按钮照常可以开关聆听。等待期间，麦克风听到的声音只交给关键词检测器——它在这台电脑上的 `clew-speak` 中运行，只认得这一句：什么都不会保存，也不会转成文字。
+**叫它的名字。** 在 **设置 → Voice** 中打开 **说出“Hey, Clew”时开始聆听**，并在那里下载它需要的 **关键词检测器**（33 MB：k2-fsa 的流式 Zipformer，支持英文和中文，Apache-2.0，按公布的大小和 SHA-256 核对）。之后，只要麦克风没有在聆听，它就会等待——按钮以强调色显示：说“Hey, Clew”，它就开始聆听，就像按了语音快捷键一样；一口气说“Hey, Clew, open the call graph”也可以。说“再见，Clew”“Bye, Clew”或“停止聆听”，它就回到等待；用名字叫起来的聆听，三分钟没有说话也会如此。语音快捷键和麦克风按钮照常可以开关聆听。同一时间只有一个窗口在等待：最前面的那个。等待期间，麦克风听到的声音只交给关键词检测器——它在这台电脑上的 `clew-speak` 中运行，只认得这一句：什么都不会保存，也不会转成文字。
 
 **模型。** 使用 whisper.cpp 自己的模型，与 [Echo](https://github.com/damien-schneider/Echo) 使用的相同，只有在你点击某个模型的 **Download**（按钮上标有大小）时才会下载，并且只有与公布的文件逐字节一致才会被接受：**Small**（`small-q5_1`，190 MB，默认）、**Medium**（`large-v3-turbo-q5_0`，574 MB）和 **Large**（`large-v3-q5_0`，1081 MB）按 Echo 的方式用 SHA-256 和精确大小核对，三者都支持多语言；另有 Tiny 和 Base（英文），适合在较慢的机器上快速下命令，用 whisper.cpp 列出的 SHA-1 核对。模型保存在 Clew 的数据目录（`voice/`）中，可以在那里删除。在 macOS 上，Clew 第一次收音时，系统会询问是否允许使用麦克风。
 

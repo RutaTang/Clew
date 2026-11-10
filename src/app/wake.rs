@@ -28,9 +28,10 @@ use crate::app::voice::{
 };
 use crate::*;
 
-/// What was heard just before the phrase was, kept for what was said in
-/// one breath with it.
-pub(crate) const LEAD_SECONDS: f32 = 1.5;
+/// What was heard just before the phrase was found, kept for what was
+/// said in one breath with it: the phrase itself, and the moment the
+/// spotter takes to be sure of it.
+pub(crate) const LEAD_SECONDS: f32 = 2.0;
 /// Listening this long with nothing said, Clew quiet and nothing on its
 /// way, it waits for its name again.
 pub(crate) const IDLE: Duration = Duration::from_secs(180);
@@ -112,6 +113,9 @@ pub(crate) struct Hearing {
     /// nothing more is taken from the microphone meanwhile — what is said
     /// next is listened to.
     told: bool,
+    /// What the spotter heard before is let go of at the next step: a
+    /// waiting begins afresh, and goes on afresh after a call it was not.
+    fresh: bool,
 }
 
 /// What a step of waiting came to.
@@ -142,10 +146,17 @@ impl Wait {
         self.hearing.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Whether the waiting goes on: its microphone not handed back, the
+    /// window not told it is over.
+    fn waits(&self) -> bool {
+        let hearing = self.hearing();
+        hearing.mic.is_some() && !hearing.told
+    }
+
     /// What the microphone heard since the last step, to the spotter: the
     /// model loaded first, if it is not.
     pub(crate) fn step(&self) -> Step {
-        let piece = {
+        let (piece, fresh) = {
             let mut hearing = self.hearing();
             let hearing = &mut *hearing;
             if hearing.told {
@@ -167,8 +178,14 @@ impl Wait {
             let keep = (heard.rate as f32 * LEAD_SECONDS) as usize;
             let over = hearing.recent.len().saturating_sub(keep);
             hearing.recent.drain(..over);
-            hearing.feed.push(&heard.samples, heard.rate)
+            (
+                hearing.feed.push(&heard.samples, heard.rate),
+                std::mem::take(&mut hearing.fresh),
+            )
         };
+        if fresh {
+            self.spotters.reset();
+        }
         let Some(piece) = piece else {
             return Step::Nothing;
         };
@@ -176,8 +193,20 @@ impl Wait {
             Ok(Some(true)) => Step::Called,
             Ok(Some(false)) => Step::Nothing,
             // Not loaded — the first step, or `clew-speak` gone since: it
-            // loads now, and hears from the next piece.
+            // loads now, and hears from the next piece. Not for a waiting
+            // over meanwhile, nor a model being removed (in any window).
+            Ok(None) if !self.waits() => Step::Nothing,
+            Ok(None)
+                if crate::app::voice::downloading(&self.dir) || !spot::installed_at(&self.dir) =>
+            {
+                Step::Failed(tr!("the keyword spotter was removed").into())
+            }
             Ok(None) => match self.spotters.warm(&self.dir) {
+                // Over while it loaded: it is let go of again.
+                Ok(()) if !self.waits() => {
+                    self.spotters.stop();
+                    Step::Nothing
+                }
                 Ok(()) => Step::Nothing,
                 Err(e) => Step::Failed(e),
             },
@@ -276,6 +305,13 @@ pub(crate) struct WakeState {
     /// While listening: when something was last said — or Clew last spoke,
     /// or listening began.
     pub(crate) last_said: Instant,
+    /// Listening began with "Hey, Clew", not the voice key: a while with
+    /// nothing said has it wait for its name again.
+    pub(crate) called: bool,
+    /// Waiting failed, and is not tried again by itself — only once the
+    /// reader turns it on again, or downloads the model: what failed (an
+    /// old `clew-speak`, a model that does not load) fails again.
+    pub(crate) failed: bool,
 }
 
 impl WakeState {
@@ -287,6 +323,8 @@ impl WakeState {
             waiting: None,
             lead: None,
             last_said: Instant::now(),
+            called: false,
+            failed: false,
         }
     }
 
@@ -311,9 +349,20 @@ impl App {
         (!crate::app::voice::downloading(&dir) && spot::installed(store)).then_some(dir)
     }
 
-    /// The microphone, not listening, waits for the phrase — if the reader
-    /// asked for it, everything it needs is here, and no other window
-    /// waits. Whether it waits.
+    /// Whether this window could wait for the phrase — the reader asked for
+    /// it, it is not listening, waiting has not failed, and everything it
+    /// needs is here — another window waiting aside.
+    pub(crate) fn can_wait(&self) -> bool {
+        self.voice.prefs.wake
+            && !self.voice.mic_on
+            && !self.voice.wake.failed
+            // What is said once it is called needs a model to be heard with.
+            && self.voice.installed(self.voice.prefs.model())
+            && self.wake_model().is_some()
+    }
+
+    /// The microphone, not listening, waits for the phrase — if
+    /// [`App::can_wait`], and no other window waits. Whether it waits.
     pub(crate) fn resume_waiting(&mut self) -> bool {
         self.wait_with(None)
     }
@@ -328,11 +377,8 @@ impl App {
             }
             return true;
         }
-        // What is said once it is called needs a model to be heard with.
-        let ready = self.voice.prefs.wake
-            && !self.voice.mic_on
-            && self.voice.installed(self.voice.prefs.model());
-        let start = ready
+        let start = self
+            .can_wait()
             .then(|| self.wake_model())
             .flatten()
             .zip(self.voice.wake.spotters.clone())
@@ -355,6 +401,7 @@ impl App {
                 let id = WAITS.fetch_add(1, Ordering::Relaxed) + 1;
                 let hearing = Hearing {
                     mic: Some(mic),
+                    fresh: true,
                     ..Hearing::default()
                 };
                 self.voice.wake.waiting = Some(Waiting {
@@ -381,16 +428,25 @@ impl App {
         self.voice.wake.waiting = None;
     }
 
+    /// The microphone that waited, handed over — to wait in another window
+    /// — and this one waiting no more.
+    pub(crate) fn give_up_waiting(&mut self) -> Option<Box<dyn Listening>> {
+        let (mic, _) = self.voice.wake.waiting.take()?.into_mic()?;
+        Some(mic)
+    }
+
     /// The voice settings another window changed, taken as this one's: its
-    /// waiting follows them — stopped, started, or opened anew for talking
-    /// over Clew or not.
+    /// waiting follows them — stopped, or opened anew for talking over Clew
+    /// or not. Begun only where the shell has it begin: in the window in
+    /// front.
     pub(crate) fn adopt_voice_prefs(&mut self, prefs: crate::app::voice::VoicePrefs) {
         let reopen = prefs.talk_over != self.voice.prefs.talk_over;
         self.voice.prefs = prefs;
+        let waiting = self.voice.wake.is_waiting();
         if !self.voice.prefs.wake || reopen {
             self.stop_waiting();
         }
-        if self.voice.prefs.wake {
+        if waiting && reopen && self.voice.prefs.wake {
             self.resume_waiting();
         }
     }
@@ -412,11 +468,12 @@ impl App {
         if waiting.wait.id != wait {
             return Task::none();
         }
-        waiting.wait.spotters.reset();
         // Heard with Clew's voice in it, nothing taken out: Clew's own,
-        // most likely — no call. Waiting goes on.
+        // most likely — no call. Waiting goes on, afresh.
         if self.voice.speech.is_speaking() && !self.voice.prefs.talk_over {
-            waiting.wait.hearing().told = false;
+            let mut hearing = waiting.wait.hearing();
+            hearing.told = false;
+            hearing.fresh = true;
             return Task::none();
         }
         // The model listened with, removed meanwhile: nothing to hear with —
@@ -424,7 +481,9 @@ impl App {
         if !self.voice.installed(self.voice.prefs.model()) {
             self.stop_waiting();
         }
-        if self.voice.speech.is_speaking() {
+        // As the voice key: Clew stops — and an answer on its way to being
+        // read aloud is not read.
+        if self.voice.speech.is_speaking() || self.answer_read_aloud_coming() {
             self.stop_speaking();
         }
         self.listen_now(true)
@@ -438,6 +497,7 @@ impl App {
         self.stop_waiting();
         self.status = tr!("Stopped waiting for “Hey, Clew”: {error}", error = error);
         self.voice.wake.error = Some(error);
+        self.voice.wake.failed = true;
         Task::none()
     }
 
@@ -446,6 +506,7 @@ impl App {
         self.voice.prefs.wake = on;
         self.save_voice_pref(Pref::Wake);
         self.voice.wake.error = None;
+        self.voice.wake.failed = false;
         if !on {
             self.stop_waiting();
             if let Some(spotters) = &self.voice.wake.spotters {
@@ -455,11 +516,27 @@ impl App {
         }
         if self.resume_waiting() {
             self.status = tr!("Waiting for “Hey, Clew”").into();
-        } else if self.wake_model().is_none() && self.voice.wake.download.is_none() {
+            return;
+        }
+        // Why not, said — listening, it waits once it stops.
+        if self.voice.mic_on {
+            return;
+        }
+        let store = self.voice.store.as_ref();
+        if self.voice.wake.spotters.is_none() {
+            self.status = tr!("clew-speak, which runs it, is not installed beside Clew").into();
+        } else if !store.is_some_and(spot::installed) && self.voice.wake.download.is_none() {
             self.status = tr!(
                 "Download {model} ({size} MB) in Settings → Voice to start listening when you say “Hey, Clew”",
                 model = crate::i18n::lookup(MODEL.name),
                 size = MODEL.size_mb()
+            );
+        } else if !self.voice.installed(self.voice.prefs.model()) {
+            let model = self.voice.prefs.model();
+            self.status = tr!(
+                "Voice needs a speech model on this computer — download {model} ({size} MB) in Settings → Voice",
+                model = crate::i18n::lookup(model.name),
+                size = model.size_mb
             );
         }
     }
@@ -495,6 +572,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.voice.wake.error = None;
+                        self.voice.wake.failed = false;
                         self.status = if self.resume_waiting() {
                             tr!("Waiting for “Hey, Clew”").into()
                         } else {
@@ -589,7 +667,13 @@ impl App {
                             }
                             Ok(_) => {
                                 install.finish().map(|_| ())?;
-                                spot::unpack(&store)
+                                spot::unpack(&store, &worker_cancel).map_err(|e| {
+                                    if e == spot::CANCELLED {
+                                        clew_core::llm::CANCELLED.to_string()
+                                    } else {
+                                        e
+                                    }
+                                })
                             }
                             Err(e) => Err(crate::app::voice::download_failure_sized(
                                 &e,
@@ -698,6 +782,10 @@ pub(crate) mod testing {
         }
     }
 
+    /// How many microphones [`ready`] opened.
+    pub(crate) static OPENED: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
     /// A keyword spotter that never hears the phrase.
     pub(crate) struct NeverCalled;
 
@@ -728,7 +816,10 @@ pub(crate) mod testing {
         }
         app.voice.store = Some(store);
         app.voice.wake.spotters = Some(Arc::new(NeverCalled));
-        app.voice.open_mic = |_, _| Ok(Box::new(Unheard));
+        app.voice.open_mic = |_, _| {
+            OPENED.fetch_add(1, Ordering::Relaxed);
+            Ok(Box::new(Unheard))
+        };
         app.voice.prefs.wake = true;
     }
 }
