@@ -117,6 +117,18 @@ pub enum GitResult {
     /// (`GitOp::WorkingStatus`): `M`odified, `A`dded, `D`eleted, `R`enamed,
     /// `U`ntracked, `!` in conflict.
     WorkingStatus(Vec<(Rel, char)>),
+    /// What HEAD is (`GitOp::Head`); `None` when it names nothing.
+    Head(Option<HeadName>),
+}
+
+/// What HEAD is: a branch, or, detached, a commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HeadName {
+    /// The branch checked out, by its short name (`main`, `feature/x`) —
+    /// one with no commit yet too.
+    Branch(String),
+    /// Detached: the full id of the commit HEAD is at.
+    Detached(String),
 }
 
 impl GitResult {
@@ -138,6 +150,7 @@ impl GitResult {
                 | (GitResult::RangePatch(_), GitOp::RangePatch { .. })
                 | (GitResult::Churn(_), GitOp::Churn { .. })
                 | (GitResult::WorkingStatus(_), GitOp::WorkingStatus)
+                | (GitResult::Head(_), GitOp::Head)
         )
     }
 
@@ -157,6 +170,7 @@ impl GitResult {
             GitResult::RangePatch(_) => "RangePatch",
             GitResult::Churn(_) => "Churn",
             GitResult::WorkingStatus(_) => "WorkingStatus",
+            GitResult::Head(_) => "Head",
         }
     }
 }

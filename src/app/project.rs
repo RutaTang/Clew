@@ -1237,6 +1237,12 @@ impl App {
                 self.proj.git_status = result.unwrap_or_default().into_iter().collect();
                 Task::none()
             }
+            ProjectMsg::HeadRead { result, .. } => {
+                self.proj.head_loading = false;
+                // Not a repository (or git refused): no branch, not the old one.
+                self.proj.head = result.ok().flatten();
+                Task::none()
+            }
             ProjectMsg::SetUpMissing => self.on_set_up_missing(),
             ProjectMsg::SetupClose => {
                 // A first open's sheet is answered with Open or Not now.

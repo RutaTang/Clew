@@ -1962,6 +1962,14 @@ pub struct ProjectSession {
     pub git_status_stale: bool,
     /// A read of it on its way.
     pub git_status_loading: bool,
+    /// What HEAD is — the branch the status bar names — as last read
+    /// (`GitOp::Head`); `None` outside a repository.
+    pub head: Option<clew_protocol::HeadName>,
+    /// Whether HEAD may have moved since `head` was read: a new project,
+    /// the window back in front (a checkout made elsewhere), a file changed.
+    pub head_stale: bool,
+    /// A read of it on its way.
+    pub head_loading: bool,
     /// Numbers the time-travel requests — each start (`time_start`), each
     /// revision a session asks for (`TimeTravel::generation`) — so no two
     /// share one. A reply applies only while its own request is still the
@@ -2373,6 +2381,9 @@ impl Default for ProjectSession {
             git_status: HashMap::new(),
             git_status_stale: true,
             git_status_loading: false,
+            head: None,
+            head_stale: true,
+            head_loading: false,
             time_gen: Default::default(),
             time_start: Default::default(),
             overlay: Default::default(),

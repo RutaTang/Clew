@@ -74,6 +74,11 @@ impl App {
             Some(read) => Task::batch([task, read]),
             None => task,
         };
+        // The status bar names the branch checked out.
+        let task = match self.sync_head() {
+            Some(read) => Task::batch([task, read]),
+            None => task,
+        };
         // An answer that came with Ask put away is read once its card is
         // open, whichever way it was opened.
         if self.ask_view.is_open() {

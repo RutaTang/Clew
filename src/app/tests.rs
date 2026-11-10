@@ -14611,6 +14611,64 @@ fn the_files_view_learns_what_the_working_tree_changes() {
     assert!(app.sync_git_status().is_some(), "read as it shows");
 }
 
+/// What HEAD is, read for the status bar as the project opens, anew when
+/// the window comes back to the front or a file changes, one read at a
+/// time; outside a repository, no branch — not the one read before.
+#[test]
+fn the_status_bar_learns_the_branch_checked_out() {
+    use clew_protocol::HeadName;
+    let mut app = scanned_app("git-head-bar");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let git = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(["-c", "user.name=clew", "-c", "user.email=clew@test"])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(done.status.success(), "git {args:?}: {done:?}");
+    };
+    let read = |app: &mut App| {
+        app.proj.head_loading = false;
+        app.proj.head_stale = true;
+        let task = app.sync_head().expect("a read");
+        for m in run_task(task) {
+            let _ = app.update(m);
+        }
+    };
+    read(&mut app);
+    assert_eq!(app.proj.head, None, "not a repository");
+
+    git(&["init", "-q", "-b", "trunk"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "one"]);
+    read(&mut app);
+    assert_eq!(app.proj.head, Some(HeadName::Branch("trunk".into())));
+    git(&["checkout", "-q", "--detach"]);
+    read(&mut app);
+    assert!(matches!(app.proj.head, Some(HeadName::Detached(_))));
+
+    // Read once; asked again only when HEAD may have moved.
+    assert!(app.sync_head().is_none(), "nothing changed since");
+    let _ = app.update(Message::Window(WindowMsg::FocusChanged(true)));
+    assert!(
+        app.proj.head_stale || app.proj.head_loading,
+        "back in front"
+    );
+    app.proj.head_stale = false;
+    app.proj.head_loading = false;
+    let _ = app.on_files_changed(vec![root.join("src/lib.rs")]);
+    assert!(app.proj.head_stale, "a file changed");
+    // One at a time: while a read is on its way, none other.
+    app.proj.head_loading = true;
+    assert!(app.sync_head().is_none());
+
+    // No longer a repository: the branch read before is not kept.
+    std::fs::remove_dir_all(root.join(".git")).unwrap();
+    read(&mut app);
+    assert_eq!(app.proj.head, None);
+}
+
 /// D1-19: git failing is reported as a failure. A history that could not be
 /// read is not "No git history", and a revision git could not produce is not
 /// shown as an empty file.

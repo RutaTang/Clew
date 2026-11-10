@@ -167,6 +167,7 @@ const COVERED: &[&str] = &[
     "Event",
     "GitOp",
     "GitResult",
+    "HeadName",
     "LspResolution",
     "NotebookOutput",
     "Patch",
@@ -434,6 +435,7 @@ fn git_op_index(op: &GitOp) -> usize {
         GitOp::RangePatch { .. } => 10,
         GitOp::Churn { .. } => 11,
         GitOp::WorkingStatus => 12,
+        GitOp::Head => 13,
     }
 }
 
@@ -452,6 +454,7 @@ fn git_result_index(r: &GitResult) -> usize {
         GitResult::RangePatch(_) => 10,
         GitResult::Churn(_) => 11,
         GitResult::WorkingStatus(_) => 12,
+        GitResult::Head(_) => 13,
     }
 }
 
@@ -526,6 +529,13 @@ fn server_message_index(m: &ServerMessage) -> usize {
     match m {
         ServerMessage::Reply { .. } => 0,
         ServerMessage::Notification { .. } => 1,
+    }
+}
+
+fn head_name_index(h: &HeadName) -> usize {
+    match h {
+        HeadName::Branch(_) => 0,
+        HeadName::Detached(_) => 1,
     }
 }
 
@@ -618,6 +628,7 @@ fn git_ops() -> Vec<GitOp> {
         },
         GitOp::Churn { commits: 300 },
         GitOp::WorkingStatus,
+        GitOp::Head,
     ]
 }
 
@@ -682,6 +693,9 @@ fn git_results() -> Vec<GitResult> {
         GitResult::CommitSubjects(vec!["s".into()]),
         GitResult::ChangedFiles(vec![("a.rs".into(), 'M')]),
         GitResult::WorkingStatus(vec![("a.rs".into(), 'M'), ("new.rs".into(), 'U')]),
+        GitResult::Head(Some(HeadName::Branch("main".into()))),
+        GitResult::Head(Some(HeadName::Detached("abc".into()))),
+        GitResult::Head(None),
         GitResult::RangePatch(String::new()),
         GitResult::Churn(vec![FileChurn {
             rel: "a.rs".into(),
@@ -1578,6 +1592,14 @@ fn every_variant_has_a_sample() {
         .map(|l| l.kind)
         .collect();
     assert_covers("DiffKind", &diff_kinds, diff_kind_index);
+    let head_names: Vec<HeadName> = git_results()
+        .into_iter()
+        .filter_map(|r| match r {
+            GitResult::Head(head) => head,
+            _ => None,
+        })
+        .collect();
+    assert_covers("HeadName", &head_names, head_name_index);
     let change_kinds: Vec<ChangeKind> = events
         .iter()
         .filter_map(|e| match e {

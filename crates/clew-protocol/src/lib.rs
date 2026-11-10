@@ -132,7 +132,10 @@ pub use payload::*;
 /// v23: [`Event::AgentDraftEnd`] says when the step is asked `again` (cut
 /// at its length): its text comes anew, and reading it aloud goes on from
 /// where the first try had come to — it was said through, then said again.
-pub const PROTOCOL_VERSION: u32 = 23;
+///
+/// v24: [`GitOp::Head`] reads what HEAD is ([`HeadName`]): the branch the
+/// status bar names, or the commit a detached HEAD is at.
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -429,6 +432,9 @@ pub enum GitOp {
     /// those git does not track yet — under the project directory: what the
     /// Files view marks.
     WorkingStatus,
+    /// What HEAD is: the branch checked out, or the commit a detached HEAD
+    /// is at — what the status bar names.
+    Head,
 }
 
 /// One file's entry in a `ProjectSymbols` snapshot.

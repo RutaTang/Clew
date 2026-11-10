@@ -53,7 +53,7 @@ pub(crate) fn validate_git_op(op: &clew_protocol::GitOp) -> Result<(), String> {
     match op {
         GitOp::FileHistory { rel, limit } => rel_ok(rel).and(limit_ok(*limit)),
         GitOp::Churn { commits } => limit_ok(*commits),
-        GitOp::WorkingStatus => Ok(()),
+        GitOp::WorkingStatus | GitOp::Head => Ok(()),
         GitOp::SymbolHistory { rel, limit, .. } => rel_ok(rel).and(limit_ok(*limit)),
         GitOp::FileAt { sha, rel } | GitOp::AddedLines { sha, rel } => sha_ok(sha).and(rel_ok(rel)),
         GitOp::CommitMessage { sha } => sha_ok(sha),

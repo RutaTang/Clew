@@ -2476,3 +2476,35 @@ fn a_written_history_is_the_one_asked_for() {
     assert!(matches!(refused, Err(GitError::Refused(_))), "{refused:?}");
     assert!(!root.parent().unwrap().join("escaped.py").exists());
 }
+
+/// What HEAD is: the branch checked out (one with no commit yet too), a
+/// branch of a folder's name, or the commit a detached HEAD is at — and
+/// nothing outside a repository.
+#[test]
+fn head_names_the_branch_or_the_detached_commit() {
+    use clew_protocol::HeadName;
+    let dir = repo_dir("git-head");
+    sh_git(&dir, &["checkout", "-q", "-b", "trunk"]);
+    // No commit yet: still the branch it is on.
+    assert_eq!(
+        head_name(&dir).unwrap(),
+        Some(HeadName::Branch("trunk".into()))
+    );
+    std::fs::write(dir.join("a.rs"), "1\n").unwrap();
+    commit_all(&dir, "start");
+    sh_git(&dir, &["checkout", "-q", "-b", "feature/read-heads"]);
+    assert_eq!(
+        head_name(&dir).unwrap(),
+        Some(HeadName::Branch("feature/read-heads".into()))
+    );
+    let sha = sh_git_out(&dir, &["rev-parse", "HEAD"]);
+    sh_git(&dir, &["checkout", "-q", "--detach"]);
+    assert_eq!(head_name(&dir).unwrap(), Some(HeadName::Detached(sha)));
+    // The op the client sends answers the same.
+    assert!(matches!(
+        run_op(&dir, clew_protocol::GitOp::Head).unwrap(),
+        clew_protocol::GitResult::Head(Some(HeadName::Detached(_)))
+    ));
+    let plain = TempDir::new("git-head-none");
+    assert!(head_name(plain.path()).is_err(), "not a repository");
+}

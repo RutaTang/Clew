@@ -1234,6 +1234,28 @@ impl App {
     }
 }
 
+impl App {
+    /// What HEAD is read anew when it may have moved, for the status bar:
+    /// one read at a time, another after it when it moved meanwhile.
+    /// `None` when there is nothing to read.
+    pub(crate) fn sync_head(&mut self) -> Option<Task<Message>> {
+        if !self.proj.head_stale || self.proj.head_loading {
+            return None;
+        }
+        let git = self.git_source()?;
+        self.proj.head_stale = false;
+        self.proj.head_loading = true;
+        let stamp = self.stamp();
+        Some(Task::perform(
+            async move {
+                git.run::<Option<clew_protocol::HeadName>>(clew_protocol::GitOp::Head)
+                    .await
+            },
+            move |result| Message::Project(ProjectMsg::HeadRead { stamp, result }),
+        ))
+    }
+}
+
 /// About how much of the window's height is not the Files view's tree: the
 /// top bar, the sidebar's tabs and filter, the status bar.
 const TREE_CHROME_H: f32 = 160.0;

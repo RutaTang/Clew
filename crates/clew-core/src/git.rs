@@ -2059,6 +2059,27 @@ pub fn changed_files(root: &Path, base: &str) -> Result<Vec<(String, char)>, Git
 /// those git does not track yet — under the project directory, as
 /// `(root-relative path, letter)`: `M`odified, `A`dded, `D`eleted,
 /// `R`enamed, `U`ntracked, `!` in conflict.
+/// What HEAD is: the branch checked out — one with no commit yet too — or,
+/// detached, the commit it is at. `None` when it names neither.
+pub fn head_name(root: &Path) -> Result<Option<clew_protocol::HeadName>, GitError> {
+    use clew_protocol::HeadName;
+    let git = Git::open(root)?;
+    let finished = git.run(
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+        GIT_TIMEOUT,
+        Cap::Fail(4096),
+    )?;
+    // `--quiet` says "not a branch" by exiting 1: HEAD is detached.
+    if let Ended::Exited(status) = &finished.ended
+        && status.code() == Some(1)
+    {
+        return Ok(git.resolve("HEAD")?.map(HeadName::Detached));
+    }
+    let out = finished.success()?;
+    let name = String::from_utf8_lossy(&out.bytes).trim().to_string();
+    Ok((!name.is_empty()).then_some(HeadName::Branch(name)))
+}
+
 pub fn working_status(root: &Path) -> Result<Vec<(String, char)>, GitError> {
     let git = Git::open(root)?;
     let out = git.bytes(
@@ -3269,6 +3290,7 @@ pub fn run_op(root: &Path, op: clew_protocol::GitOp) -> Result<clew_protocol::Gi
         GitOp::ChangedFiles { base } => GitResult::ChangedFiles(changed_files(root, &base)?),
         GitOp::Churn { commits } => GitResult::Churn(churn(root, commits)?),
         GitOp::WorkingStatus => GitResult::WorkingStatus(working_status(root)?),
+        GitOp::Head => GitResult::Head(head_name(root)?),
         GitOp::RangePatch { base, max_bytes } => {
             GitResult::RangePatch(range_patch(root, &base, max_bytes)?)
         }

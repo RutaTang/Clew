@@ -12488,6 +12488,47 @@ fn the_status_bars_place_shows_it_opens_something() {
     assert!(!opens(state.center()), "the scan's state is no connection");
 }
 
+/// The status bar names the branch checked out, after the scan's state —
+/// a long one cut short, a detached HEAD by its commit's short name — and
+/// nothing outside a repository.
+#[test]
+fn the_status_bar_names_the_branch_checked_out() {
+    use clew_protocol::HeadName;
+    let mut app = reader_app();
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, "main"), "no repository, no branch");
+    }
+    app.proj.head = Some(HeadName::Branch("main".into()));
+    {
+        let mut sim = sim_of(&app);
+        let state = text_at(&mut sim, |t| t == "Up to date", 0).expect("the scan's state");
+        let branch = text_at(&mut sim, |t| t == "main", 0).expect("the branch");
+        assert!(branch.x > state.x, "after the scan's state");
+        assert!(
+            (branch.center_y() - state.center_y()).abs() < 2.0,
+            "on its line"
+        );
+    }
+    let long = "feature/reading-guide-with-every-file-in-order";
+    app.proj.head = Some(HeadName::Branch(long.into()));
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, long), "cut short");
+        let start: String = long.chars().take(27).collect();
+        assert!(
+            text_at(&mut sim, |t| t == format!("{start}…"), 0).is_some(),
+            "its start, and a mark that it goes on"
+        );
+    }
+    app.proj.head = Some(HeadName::Detached(
+        "0123456789abcdef0123456789abcdef01234567".into(),
+    ));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "0123456"), "the commit, as git shortens it");
+    assert!(!shows(&mut sim, "01234567"));
+}
+
 /// What Clew says with a name in it — "Connecting to `prod`…", the MCP
 /// server's, the host key's command — shows the name in the reader's
 /// quotation marks: the backticks the message was written with stood in

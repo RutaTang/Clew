@@ -17,6 +17,7 @@ impl App {
         // What the working tree changes is read anew (`sync_git_status`).
         if !paths.is_empty() {
             self.proj.git_status_stale = true;
+            self.proj.head_stale = true;
         }
         // A file the resolver reads for the whole project (go.mod, a
         // tsconfig, a base a tsconfig `extends` under any name) changed:

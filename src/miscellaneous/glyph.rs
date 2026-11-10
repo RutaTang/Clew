@@ -122,6 +122,8 @@ pub enum Glyph {
     Network,
     /// When something was: a clock face.
     Clock,
+    /// A line of work forking off another: a git branch.
+    Branch,
     /// A speech bubble: ask Clew, in the command bar.
     Message,
     // Settings' pages, and Ask's sessions
@@ -399,6 +401,10 @@ fn body(g: Glyph) -> &'static str {
              <path d='M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3'/><path d='M12 12V8'/>"
         }
         Clock => "<circle cx='12' cy='12' r='10'/><path d='M12 6v6l4 2'/>",
+        Branch => {
+            "<circle cx='6' cy='5' r='2.5'/><circle cx='6' cy='19' r='2.5'/><circle cx='18' cy='7' r='2.5'/>\
+             <path d='M6 7.5v9'/><path d='M18 9.5c0 4.5-4 5.5-9.5 7.5'/>"
+        }
     }
 }
 

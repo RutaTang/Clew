@@ -637,6 +637,16 @@ impl GitAnswer for Vec<String> {
     }
 }
 
+/// `Head`: what HEAD is.
+impl GitAnswer for Option<clew_protocol::HeadName> {
+    fn take(result: clew_protocol::GitResult) -> Option<Self> {
+        match result {
+            clew_protocol::GitResult::Head(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
 /// `ChangedFiles` and `WorkingStatus`: `(rel, status letter)`.
 impl GitAnswer for Vec<(String, char)> {
     fn take(result: clew_protocol::GitResult) -> Option<Self> {

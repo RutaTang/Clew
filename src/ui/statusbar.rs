@@ -115,6 +115,56 @@ pub(crate) fn target_label(target: &crate::inactive::Target) -> String {
     }
 }
 
+/// The longest branch name the status bar shows whole; a longer one is cut
+/// to it, and said whole where the pointer rests.
+const BRANCH_ROOM: usize = 28;
+
+/// What the status bar says HEAD is: the branch's name, cut to
+/// [`BRANCH_ROOM`] characters — or, detached, the commit's short name.
+pub(crate) fn head_shown(head: &clew_protocol::HeadName) -> String {
+    match head {
+        clew_protocol::HeadName::Branch(name) if name.chars().count() > BRANCH_ROOM => {
+            let cut: String = name.chars().take(BRANCH_ROOM - 1).collect();
+            format!("{cut}…")
+        }
+        clew_protocol::HeadName::Branch(name) => name.clone(),
+        clew_protocol::HeadName::Detached(sha) => super::panes::short_sha(sha),
+    }
+}
+
+/// The branch checked out, after the place the code is read from — or the
+/// commit a detached HEAD is at — with the whole of it where the pointer
+/// rests. Nothing outside a repository.
+fn branch_item(app: &App) -> Option<Element<'_, Message>> {
+    let head = app.proj.head.as_ref()?;
+    let about = match head {
+        clew_protocol::HeadName::Branch(name) => {
+            tr!("On branch {branch}", branch = name.as_str())
+        }
+        clew_protocol::HeadName::Detached(sha) => tr!(
+            "Not on a branch: at commit {commit}",
+            commit = super::panes::short_sha(sha)
+        ),
+    };
+    let shown = row![
+        glyph::icon(Glyph::Branch, theme::dim(), 12.0),
+        status_text(head_shown(head)),
+    ]
+    .spacing(5)
+    .align_y(iced::Center);
+    Some(
+        super::tip::tip(
+            container(shown).padding([2, 4]),
+            container(text(about).size(ts::SMALL).color(theme::tip_text()))
+                .padding([3, 7])
+                .style(theme::tip),
+            tooltip::Position::Top,
+        )
+        .gap(5.0)
+        .into(),
+    )
+}
+
 /// The status bar: one quiet line along the window's foot. On the left,
 /// where the code is read from and what Clew is doing; on the right, the
 /// open file — its language and language server, its problems, the caret,
@@ -200,8 +250,14 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     }))
     .width(Fill)
     .height(Length::Fixed(STATUS_LINE_H));
+    // The place, its scan's state, then the branch: "Local · Up to date ·
+    // ⎇ main", the state still read as the place's.
+    let mut left = row![conn_indicator, sync];
+    if let Some(branch) = branch_item(app) {
+        left = left.push(branch);
+    }
     let mut bar = row![
-        row![conn_indicator, sync, said_row]
+        left.push(said_row)
             .spacing(STATUS_GAP - 8.0)
             .align_y(iced::Center)
             .width(Fill)
