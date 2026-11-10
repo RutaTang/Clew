@@ -1738,7 +1738,21 @@ impl Resolver {
 
     fn resolve_python(&self, raw: &RawImport, from: &Path) -> Target {
         let level = raw.module.chars().take_while(|&c| c == '.').count();
-        let body = &raw.module[level..];
+        let dots = &raw.module[..level];
+        // `from m import name` (recorded `m:name`): the package's submodule
+        // `name` when it has one, else the module itself — whose
+        // `__init__.py`, for a package, defines or imports the name, and runs
+        // first in either case.
+        let (body, name) = match raw.module[level..].split_once(PY_NAME_SEP) {
+            Some((module, name)) => (module, Some(name)),
+            None => (&raw.module[level..], None),
+        };
+        let segs: Vec<&str> = body.split('.').filter(|s| !s.is_empty()).collect();
+        let named = |name| -> Vec<&str> {
+            let mut segs = segs.clone();
+            segs.push(name);
+            segs
+        };
 
         if level > 0 {
             // Relative: `.` = current package (dir), each extra dot goes up one.
@@ -1746,31 +1760,20 @@ impl Resolver {
             for _ in 1..level {
                 base = base.parent().unwrap_or(&self.root).to_path_buf();
             }
-            // `from . import name` (recorded `.:name`): the package's
-            // submodule `name` when it has one, else an attribute of the
-            // package itself — defined or imported by its `__init__.py`, which
-            // Python runs first in either case. A package's own `__init__.py`
-            // does not import a name from itself, so that reading never
-            // points back at `from`.
-            if let Some(name) = body.strip_prefix(PY_NAME_SEP) {
-                return self
-                    .python_module_file(&base, &[name])
-                    .or_else(|| {
-                        self.python_module_file(&base, &[])
-                            .filter(|init| init != from)
-                    })
-                    .map(Target::Internal)
-                    .unwrap_or_else(|| {
-                        Target::Unresolved(format!("{}{name}", &raw.module[..level]))
-                    });
-            }
-            let segs: Vec<&str> = body.split('.').filter(|s| !s.is_empty()).collect();
-            return self
-                .python_module_file(&base, &segs)
+            // A package's own `__init__.py` does not import a name from
+            // itself, so the package's reading never points back at `from`.
+            return name
+                .and_then(|name| self.python_module_file(&base, &named(name)))
+                .or_else(|| {
+                    self.python_module_file(&base, &segs)
+                        .filter(|init| !segs.is_empty() || init != from)
+                })
                 .map(Target::Internal)
-                .unwrap_or_else(|| Target::Unresolved(raw.module.clone()));
+                .unwrap_or_else(|| match name {
+                    Some(name) if segs.is_empty() => Target::Unresolved(format!("{dots}{name}")),
+                    _ => Target::Unresolved(format!("{dots}{body}")),
+                });
         }
-        let segs: Vec<&str> = body.split('.').filter(|s| !s.is_empty()).collect();
         // Absolute: try the project root and each ancestor of `from` as a source
         // root (covers `src/`-layout and package-relative resolution), then
         // `src/` itself, as Pyright does: a `tests/` file's `from cart import`
@@ -1786,11 +1789,14 @@ impl Resolver {
         }
         bases.push(self.root.join("src"));
         for base in bases {
-            if let Some(f) = self.python_module_file(&base, &segs) {
+            if let Some(f) = name
+                .and_then(|name| self.python_module_file(&base, &named(name)))
+                .or_else(|| self.python_module_file(&base, &segs))
+            {
                 return Target::Internal(f);
             }
         }
-        Target::External(segs.first().copied().unwrap_or(&raw.module).to_string())
+        Target::External(segs.first().copied().unwrap_or(body).to_string())
     }
 
     fn python_module_file(&self, base: &Path, segs: &[&str]) -> Option<PathBuf> {
@@ -4156,9 +4162,10 @@ mod tests {
         let mods: Vec<&str> = extracted.iter().map(|i| i.module.as_str()).collect();
         assert!(mods.contains(&"os"), "{mods:?}");
         assert!(mods.contains(&"a.b.c"), "{mods:?}");
-        assert!(mods.contains(&".sibling"), "{mods:?}");
-        assert!(mods.contains(&"..pkg"), "{mods:?}");
-        assert!(mods.contains(&"mod"), "{mods:?}");
+        // A `from` import keeps the name it imports beside its module.
+        assert!(mods.contains(&".sibling:thing"), "{mods:?}");
+        assert!(mods.contains(&"..pkg:other"), "{mods:?}");
+        assert!(mods.contains(&"mod:y"), "{mods:?}");
     }
 
     #[test]
@@ -7355,6 +7362,80 @@ mod resolution_tests {
         assert_eq!(
             res(".nope", "pkg/__init__.py"),
             Target::Unresolved(".nope".into())
+        );
+    }
+
+    /// `from shop import payments` reads `shop/payments.py`, not the
+    /// package's `__init__.py`; `from shop.models import Tea` reads the
+    /// module the name is defined in, and so does `from .models import Tea`
+    /// (recorded `.models:Tea`). A namespace package (no `__init__.py`) is
+    /// read through its submodules; another package's is external.
+    #[test]
+    fn python_from_import_names_a_submodule_before_the_package() {
+        let root = Path::new("/p");
+        let r = resolver(
+            root,
+            &[
+                "shop/__init__.py",
+                "shop/payments.py",
+                "shop/models.py",
+                "shop/checkout.py",
+                "shop/sub/__init__.py",
+                "spaced/thing.py",
+                "main.py",
+            ],
+        );
+        let res = |s: &str, from: &str| r.resolve(&ri(s), &root.join(from), "python");
+        let internal = |f: &str| Target::Internal(root.join(f));
+        assert_eq!(
+            res("shop:payments", "main.py"),
+            internal("shop/payments.py")
+        );
+        assert_eq!(
+            res("shop:Inventory", "main.py"),
+            internal("shop/__init__.py")
+        );
+        assert_eq!(
+            res("shop.models:Tea", "main.py"),
+            internal("shop/models.py")
+        );
+        assert_eq!(res("shop:sub", "main.py"), internal("shop/sub/__init__.py"));
+        assert_eq!(res("spaced:thing", "main.py"), internal("spaced/thing.py"));
+        assert_eq!(
+            res("flask:Flask", "main.py"),
+            Target::External("flask".into())
+        );
+        assert_eq!(
+            res(".models:Tea", "shop/checkout.py"),
+            internal("shop/models.py")
+        );
+        assert_eq!(
+            res(".:payments", "shop/checkout.py"),
+            internal("shop/payments.py")
+        );
+        assert_eq!(
+            res(".nope:x", "shop/checkout.py"),
+            Target::Unresolved(".nope".into())
+        );
+        // Straight from the extractor, end to end: each name its own file,
+        // a star import the module's.
+        let extracted = imports_of(
+            "from shop import payments, Inventory\nfrom shop.models import Tea, Order\nfrom shop import *\n",
+            "python",
+        );
+        let targets: Vec<Target> = extracted
+            .iter()
+            .map(|i| r.resolve(i, &root.join("main.py"), "python"))
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                internal("shop/payments.py"),
+                internal("shop/__init__.py"),
+                internal("shop/models.py"),
+                internal("shop/models.py"),
+                internal("shop/__init__.py"),
+            ]
         );
     }
 

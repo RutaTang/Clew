@@ -627,10 +627,11 @@ pub fn statement_of(raw: &RawImport, lang: Lang) -> String {
     }
 }
 
-/// Separates a relative package from a name imported out of it, for
-/// `from . import views` (`.:views`) and `from .. import up` (`..:up`): the
-/// name is the package's submodule when one exists, else an attribute of the
-/// package's `__init__.py`. Never part of a module path.
+/// Separates a module from a name imported out of it, for `from . import
+/// views` (`.:views`), `from .. import up` (`..:up`) and `from shop import
+/// payments` (`shop:payments`): the name is the package's submodule when
+/// one exists, else an attribute of the module (a package's `__init__.py`).
+/// Never part of a module path.
 pub const PY_NAME_SEP: char = ':';
 
 const PYTHON_QUERY: &str = r#"
@@ -661,10 +662,12 @@ fn python_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
         // its `__init__.py` defines under that name. Recording just `.` pointed
         // every such edge at the package even for a submodule; recording
         // `.views` made a name `__init__.py` defines unresolvable. `.:views`
-        // (see [`PY_NAME_SEP`]) keeps both readings for the resolver. Only a
-        // bare relative prefix needs this: in `from .pkg import x` the module
-        // is `.pkg` itself.
-        if !text.is_empty() && text.chars().all(|c| c == '.') {
+        // (see [`PY_NAME_SEP`]) keeps both readings for the resolver. So does
+        // `from shop import payments` (`shop:payments`), whose edge went to
+        // `shop/__init__.py` though `shop/payments.py` is what it reads; in
+        // `from shop.models import Tea` the name is no submodule, and the
+        // edge is the module's.
+        if !text.is_empty() {
             let mut cursor = stmt.walk();
             let names: Vec<Node> = stmt.children_by_field_name("name", &mut cursor).collect();
             for name in &names {
@@ -1469,16 +1472,26 @@ mod extraction_tests {
     }
 
     /// `from . import views` names `views` OF the package (a submodule or an
-    /// attribute of its `__init__.py`), not the package itself; `from .pkg
-    /// import x` names the module `.pkg`.
+    /// attribute of its `__init__.py`), not the package itself; so does
+    /// `from .pkg import x`, of `.pkg`, and `from mod import y`, of `mod`. A
+    /// star import names the module alone.
     #[test]
     fn python_relative_from_import_names_each_submodule() {
         let src = "import os\nimport a.b.c as x\nfrom . import views, models as m\n\
-                   from .. import (up)\nfrom . import *\nfrom .pkg import thing\nfrom mod import y\n";
+                   from .. import (up)\nfrom . import *\nfrom .pkg import thing\nfrom mod import y\n\
+                   from mod import *\n";
         assert_eq!(
             modules(src, "python"),
             vec![
-                "os", "a.b.c", ".:views", ".:models", "..:up", ".", ".pkg", "mod"
+                "os",
+                "a.b.c",
+                ".:views",
+                ".:models",
+                "..:up",
+                ".",
+                ".pkg:thing",
+                "mod:y",
+                "mod"
             ]
         );
     }

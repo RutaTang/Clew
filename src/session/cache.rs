@@ -84,7 +84,10 @@ use crate::incremental::Version;
 /// (`clew_core::fs_scan::is_minified_source`), and files up to the viewer's
 /// size are read; an older store holds a bundle's names, or nothing of a
 /// file between the old and the new cap.
-pub(crate) const CACHE_VERSION: u32 = 18;
+/// 19: Python's `from shop import payments` is recorded with the name it
+/// imports (`shop:payments`), so the edge reaches `shop/payments.py`, not
+/// `shop/__init__.py`; an older entry has only the module.
+pub(crate) const CACHE_VERSION: u32 = 19;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
