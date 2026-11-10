@@ -78,8 +78,8 @@ pub struct Resampler {
     down: u64,
     phases: u64,
     half: i64,
-    /// table[p][j]: the weight of input sample k0 + j + 1 - half for an
-    /// output `p / phases` of a sample past k0, normalized to unity gain.
+    /// `table[p][j]`: the weight of input sample `k0 + j + 1 - half` for an
+    /// output `p / phases` of a sample past `k0`, normalized to unity gain.
     table: Vec<Vec<f32>>,
     /// The input still reached by what is to be made, and where in all of
     /// it that starts.
