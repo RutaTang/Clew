@@ -261,6 +261,33 @@ fn also_called(title: &str) -> &'static str {
     }
 }
 
+/// The name the command titled `title` had before it took that title,
+/// heard as a title of its own when the words said name no command by its
+/// title: "show the stats" still opens Code Statistics.
+fn formerly(title: &str) -> Option<&'static str> {
+    match title {
+        "Project Graphs" => Some("Project Maps"),
+        "Type Graph" => Some("Type Map"),
+        "Code Statistics" => Some("Stats"),
+        "Architecture Overview" => Some("Overview"),
+        _ => None,
+    }
+}
+
+/// The index in `commands` of the command `said` plainly names: by its
+/// title, or, when no title is named, by the name it had ([`formerly`]).
+pub(crate) fn command_said(said: &str, commands: &[PaletteCommand]) -> Option<usize> {
+    let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+    clew_voice::intent::command(said, &titles).or_else(|| {
+        let (names, at): (Vec<&str>, Vec<usize>) = commands
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| formerly(&c.title).map(|name| (name, i)))
+            .unzip();
+        clew_voice::intent::command(said, &names).map(|k| at[k])
+    })
+}
+
 /// `row`, and the words the command titled `title` also goes by.
 fn with_aliases(row: &str, title: &str) -> String {
     match also_called(title) {

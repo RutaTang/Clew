@@ -1833,10 +1833,9 @@ impl App {
             return Some(task);
         }
         let commands = self.palette_commands();
-        let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
         // Said in English, or as the palette shows it in the reader's
         // language.
-        let found = clew_voice::intent::command(text, &titles).or_else(|| {
+        let found = crate::app::palette::command_said(text, &commands).or_else(|| {
             let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
             said_as_shown(crate::i18n::current(), text, &shown)
         });

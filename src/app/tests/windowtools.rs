@@ -169,7 +169,7 @@ fn the_agent_lists_and_runs_the_windows_commands() {
         keys("⇧⌘E")
     )));
     assert!(
-        listed.contains(&format!("- Overview ({})\n", keys("⇧⌘O"))),
+        listed.contains(&format!("- Architecture Overview ({})\n", keys("⇧⌘O"))),
         "{listed}"
     );
     // One with no key: its title alone.
@@ -195,6 +195,17 @@ fn the_agent_lists_and_runs_the_windows_commands() {
         json!({"title": "show the stats"}),
     );
     assert!(app.proj.stats.showing);
+    assert!(!results(&mut rx)[0].2);
+    // And the name a command had before it was renamed: Overview is now
+    // Architecture Overview.
+    let _ = call(
+        &mut app,
+        stream,
+        5,
+        RUN_COMMAND,
+        json!({"title": "show the overview"}),
+    );
+    assert!(app.proj.overview.showing);
     assert!(!results(&mut rx)[0].2);
     // No such command: said, and how to find one.
     let _ = call(

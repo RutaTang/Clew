@@ -335,10 +335,10 @@ impl App {
         };
         let commands = self.palette_commands();
         // Its exact title; or, failing that, one the words plainly name.
-        let command = commands.iter().find(|c| c.title == title).or_else(|| {
-            let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
-            clew_voice::intent::command(&title, &titles).map(|i| &commands[i])
-        });
+        let command = commands
+            .iter()
+            .find(|c| c.title == title)
+            .or_else(|| crate::app::palette::command_said(&title, &commands).map(|i| &commands[i]));
         let Some(command) = command else {
             self.window_tool_result(
                 stream,

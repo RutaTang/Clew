@@ -8350,7 +8350,10 @@ fn time_travel_shows_the_commit_being_read() {
         story_loading: false,
     });
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "01234567"), "the short sha");
+    assert!(
+        shows(&mut sim, "0123456"),
+        "the short sha, as git shortens it"
+    );
     assert!(shows(&mut sim, "Ada"));
     assert!(shows(&mut sim, "Teach the parser about raw strings"));
     assert!(!shows(&mut sim, "Exit"), "the Time Travel button ends it");
@@ -11804,7 +11807,7 @@ fn time_travel_says_each_thing_once_and_counts_as_its_slider_runs() {
         assert!(shows(&mut sim, "3 / 3"));
         let hashes = {
             let mut n = 0;
-            while text_at(&mut sim, |t| t.contains("cccccccc"), n).is_some() {
+            while text_at(&mut sim, |t| t.contains("ccccccc"), n).is_some() {
                 n += 1;
             }
             n

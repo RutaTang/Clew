@@ -231,6 +231,19 @@ fn a_command_heard_runs_as_the_palette_runs_it() {
     );
 }
 
+/// A command renamed is still heard by the name it had: "show the stats"
+/// opens Code Statistics.
+#[test]
+fn a_command_is_heard_by_the_name_it_had() {
+    let (mut app, script, _) = voice_app("voice-former-name", "Show the stats.");
+    say(&mut app, &script);
+    assert!(app.proj.stats.showing);
+    assert_eq!(
+        app.voice.heard.as_ref().map(|h| &h.outcome),
+        Some(&HeardOutcome::Ran("Code Statistics".into()))
+    );
+}
+
 /// A command that costs something waits for a yes — listened for, the
 /// microphone on; Esc is a no, and the microphone listens on.
 #[test]
