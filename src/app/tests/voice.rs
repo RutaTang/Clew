@@ -30,27 +30,34 @@ struct MicScript {
 
 struct FakeMic(Arc<Mutex<MicScript>>);
 
+/// The script, even after a test failed holding it: the microphone is
+/// still closed as the test unwinds, and a second panic would end every
+/// test at once, saying nothing of which failed.
+fn script(script: &Mutex<MicScript>) -> std::sync::MutexGuard<'_, MicScript> {
+    script.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 impl Listening for FakeMic {
     fn level(&self) -> f32 {
-        self.0.lock().unwrap().level
+        script(&self.0).level
     }
     fn silence_after_speech(&self) -> Option<f32> {
-        self.0.lock().unwrap().silence
+        script(&self.0).silence
     }
     fn speech_over(&self) -> Option<f32> {
-        self.0.lock().unwrap().silence.map(|_| 0.0)
+        script(&self.0).silence.map(|_| 0.0)
     }
     fn recent(&self, _seconds: f32) -> (Vec<f32>, u32) {
         (spoken(), 16_000)
     }
     fn full(&self) -> bool {
-        self.0.lock().unwrap().full
+        script(&self.0).full
     }
     fn error(&self) -> Option<String> {
-        self.0.lock().unwrap().error.clone()
+        script(&self.0).error.clone()
     }
     fn take(&mut self) -> Recording {
-        let mut script = self.0.lock().unwrap();
+        let mut script = script(&self.0);
         script.taken += 1;
         Recording {
             samples: spoken(),
@@ -62,7 +69,7 @@ impl Listening for FakeMic {
         }
     }
     fn stop(self: Box<Self>) -> Recording {
-        let mut script = self.0.lock().unwrap();
+        let mut script = script(&self.0);
         script.stopped = true;
         Recording {
             samples: spoken(),
@@ -83,7 +90,7 @@ thread_local! {
 fn fake_mic(_max_seconds: u32, _cancel_echo: bool) -> Result<Box<dyn Listening>, String> {
     MIC.with(|m| m.borrow().clone())
         .map(|script| {
-            script.lock().unwrap().opened += 1;
+            self::script(&script).opened += 1;
             Box::new(FakeMic(script)) as Box<dyn Listening>
         })
         .ok_or_else(|| "no microphone is available".to_string())
@@ -2561,7 +2568,12 @@ fn hey_clew_starts_listening_with_the_microphone_that_waited() {
     assert!(app.voice.wake.lead.is_none(), "kept for that one alone");
     // Whisper was told the name, to spell it so; "Hey, Clew" is not part
     // of the command.
-    assert!(hears.hints.lock().unwrap()[0].contains("Clew"));
+    assert!(
+        hears.hints.lock().unwrap()[0]
+            .split(", ")
+            .any(|word| word == "Clew"),
+        "the name, on its own"
+    );
     assert_eq!(app.proj.overlay, Some(Overlay::ProjectCalls));
     assert_eq!(
         app.voice.heard.as_ref().map(|h| h.text.as_str()),
