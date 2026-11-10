@@ -129,8 +129,9 @@ fn asking_opens_the_card_and_debug_keeps_the_bottom_panel() {
 }
 
 /// The card stands in the window's bottom-right corner wherever the caret
-/// is — left of the tool strip, over the status bar — and on the debugger's
-/// panel when it shows; the large window is centred, wider than the card.
+/// is — left of the tool strip, over the status bar — and stays there when
+/// the debugger's panel shows, over the panel's corner rather than lifted
+/// above it; the large window is centred, wider than the card.
 #[test]
 fn the_card_stands_in_the_corner() {
     let mut app = scanned_app("askfloat-dodge");
@@ -167,15 +168,19 @@ fn the_card_stands_in_the_corner() {
             < 1.0,
         "{corner:?} over the status bar"
     );
-    // The debugger's panel up: the card stands on it.
+    // The debugger's panel up, however tall: the card, and the pill it
+    // hides to, stay in the corner.
     app.show_bottom = true;
-    app.bottom_height = 200.0;
-    let raised = crate::ui::ask_corner_rect(&app);
-    assert!(
-        raised.y + raised.height < corner.y + corner.height - 199.0,
-        "{raised:?}"
-    );
+    for height in [200.0, 500.0] {
+        app.bottom_height = height;
+        assert_eq!(crate::ui::ask_corner_rect(&app), corner, "{height}");
+        assert_eq!(crate::ui::ask_place(&app), Some(card), "{height}");
+    }
+    let _ = app.update(Message::Ask(AskMsg::Hide));
+    let pill = crate::ui::ask_corner_rect(&app);
     app.show_bottom = false;
+    assert_eq!(crate::ui::ask_corner_rect(&app), pill);
+    let _ = app.update(Message::Ask(AskMsg::Open));
     // Large: centred, wider than the card.
     let _ = app.update(Message::Ask(AskMsg::Expand));
     let place = crate::ui::ask_place(&app).unwrap();

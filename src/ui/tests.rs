@@ -4226,8 +4226,9 @@ fn a_fitted_cards_approval_stays_put_while_its_turn_grows() {
 
 /// A question's Allow counts once its answers have been in view for the
 /// delay, where they are now (`ui::placed`): the Ask card moved under them
-/// moves them, and a card too low for them hides them — each waits again.
-/// And a hover's peek over the window counts as over the card.
+/// (the window made shorter, its corner up) moves them, and a card too low
+/// for them hides them — each waits again. And a hover's peek over the
+/// window counts as over the card.
 #[test]
 fn a_question_moved_or_out_of_view_waits_again() {
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
@@ -4235,9 +4236,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
     app.ask_view = crate::AskView::Compact;
-    // The debugger's panel under the card, low: its height squeezes it.
-    app.show_bottom = true;
-    app.bottom_height = 100.0;
+    shorter(&mut app, 100.0);
     app.proj.ask_turns.push(AskTurn {
         stream: 9,
         question: "why?".into(),
@@ -4270,7 +4269,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
     let mut frame = |app: &mut App| -> Vec<Option<Rectangle>> {
         let mut ui = UserInterface::build(
             super::view(app),
-            WINDOW,
+            Size::new(app.window_width, app.window_height),
             std::mem::take(&mut cache),
             &mut renderer,
         );
@@ -4309,9 +4308,9 @@ fn a_question_moved_or_out_of_view_waits_again() {
     assert!(frame(&mut app).is_empty(), "where it was: nothing to say");
     assert!(app.may_allow(&card));
 
-    // The debugger's panel taller: the Ask card standing on it moves up,
-    // and with it the approval card in it.
-    app.bottom_height = 140.0;
+    // The window shorter: the Ask card in its corner moves up, and with it
+    // the approval card in it.
+    shorter(&mut app, 140.0);
     let _ = app.update(Message::Noop);
     let moved = frame(&mut app);
     assert!(
@@ -4322,13 +4321,13 @@ fn a_question_moved_or_out_of_view_waits_again() {
     read(&mut app);
     assert!(app.may_allow(&card));
 
-    // An Ask card too low for the approval card (the debugger's panel tall
-    // under it): not all of it in view, however long.
-    app.bottom_height = SQUEEZING;
+    // An Ask card too low for the approval card (the window too short for
+    // it): not all of it in view, however long.
+    shorter(&mut app, SQUEEZING);
     assert_eq!(frame(&mut app), [None]);
     read(&mut app);
     assert!(!app.may_allow(&card), "out of view");
-    app.bottom_height = 340.0;
+    shorter(&mut app, 340.0);
     assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
     assert!(!app.may_allow(&card), "back in view: unread");
     read(&mut app);
@@ -4374,7 +4373,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
         use iced_test::selector::{Candidate, Selector};
         let mut ui = UserInterface::build(
             super::view(app),
-            WINDOW,
+            Size::new(app.window_width, app.window_height),
             std::mem::take(&mut cache),
             &mut renderer,
         );
@@ -4486,7 +4485,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
     let mut unheard = |app: &App| -> Vec<Message> {
         let mut ui = UserInterface::build(
             super::view(app),
-            WINDOW,
+            Size::new(app.window_width, app.window_height),
             std::mem::take(&mut cache),
             &mut renderer,
         );
@@ -4563,8 +4562,8 @@ fn yes_said_to_an_approval_never_allows_always() {
 
 /// An agent's answers, however many, stay within the card's reach: a few
 /// of each kind at a time — a way to decline always among them — the rest
-/// a page on, where the card is read anew. And a card coming up in a
-/// bottom panel too low for it opens the panel to where it fits, once.
+/// a page on, where the card is read anew. And a card coming up in an Ask
+/// card too low for it opens the Ask window large, where it fits, once.
 #[test]
 fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
@@ -4644,15 +4643,15 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_some());
     assert!(text_at(&mut sim, |t| t == "Allow 0", 0).is_none());
 
-    // In an Ask card too low for it — the debugger's panel tall under it —
-    // drawn, and found squeezed, it opens the Ask window large, where it
-    // fits, and is answered there once read.
+    // In an Ask card too low for it — a window short for it — drawn, and
+    // found squeezed, it opens the Ask window large, where it fits (wider,
+    // its answers in fewer rows), and is answered there once read.
+    let squeezing = squeezed_in_the_card_only(&approval);
     let mut app = reader_app();
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
     app.ask_view = crate::AskView::Compact;
-    app.show_bottom = true;
-    app.bottom_height = SQUEEZING;
+    shorter(&mut app, squeezing);
     app.proj.ask_turns.push(AskTurn {
         stream: 9,
         question: "why?".into(),
@@ -4672,7 +4671,7 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     let mut frame = |app: &mut App| -> Vec<Option<Rectangle>> {
         let mut ui = UserInterface::build(
             super::view(app),
-            WINDOW,
+            Size::new(app.window_width, app.window_height),
             std::mem::take(&mut cache),
             &mut renderer,
         );
@@ -4741,14 +4740,14 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     assert_eq!(app.ask_view, crate::AskView::Expanded);
     assert!(text_at(&mut sim_of(&app), |t| t == "Allow 0", 0).is_some());
     // One that fits when first drawn moves nothing — nor does the user's
-    // own drag of the debugger's panel squeezing it after.
+    // own resize of the window squeezing it after.
     let _ = app.update(Message::Ask(AskMsg::Shrink));
-    app.bottom_height = 120.0;
+    shorter(&mut app, 120.0);
     app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 3 };
     let _ = app.update(Message::Noop);
     assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
     assert_eq!(app.ask_view, crate::AskView::Compact);
-    app.bottom_height = SQUEEZING;
+    shorter(&mut app, squeezing);
     assert_eq!(frame(&mut app), [None], "squeezed by the user");
     assert_eq!(app.ask_view, crate::AskView::Compact, "and left so");
     // Reported again from nothing (the window moved): still left so.
@@ -4759,9 +4758,56 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     let _ = card;
 }
 
-/// A debugger's panel tall enough that the Ask card above it is too low
-/// for an approval card's answers.
-const SQUEEZING: f32 = 660.0;
+/// How much shorter than [`WINDOW`] a window is whose Ask card, in its
+/// corner, is too low for an approval card's answers.
+const SQUEEZING: f32 = 620.0;
+
+/// The window `by` shorter than [`WINDOW`]: the Ask card in its corner
+/// with that much less room.
+fn shorter(app: &mut App, by: f32) {
+    app.window_height = WINDOW.height - by;
+}
+
+/// How much shorter than [`WINDOW`] the window is when the Ask card in it
+/// is too low for `approval`'s first page of answers and the large Ask
+/// window — wider, its answers in fewer rows — is not.
+fn squeezed_in_the_card_only(approval: &crate::app::model::Approval) -> f32 {
+    use crate::app::model::{AskTurn, TurnExtras};
+    let fits = |by: f32, view| {
+        let mut app = reader_app();
+        shorter(&mut app, by);
+        app.ask_view = view;
+        app.proj.ask_turns.push(AskTurn {
+            stream: 9,
+            question: "why?".into(),
+            streaming: true,
+            extras: TurnExtras {
+                approvals: vec![approval.clone()],
+                ..TurnExtras::default()
+            },
+            ..AskTurn::default()
+        });
+        let _ = app.update(Message::Noop);
+        let mut renderer = renderer();
+        let size = Size::new(app.window_width, app.window_height);
+        let mut ui = UserInterface::build(super::view(&app), size, Cache::default(), &mut renderer);
+        let mut sent = Vec::new();
+        let _ = ui.update(
+            &redraw(),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        sent.iter()
+            .any(|m| matches!(m, Message::Placed { place: Some(_), .. }))
+    };
+    (300..700)
+        .step_by(4)
+        .map(|by| by as f32)
+        .find(|&by| !fits(by, crate::AskView::Compact) && fits(by, crate::AskView::Expanded))
+        .expect("precondition: a window the card is too low in and the large window is not")
+}
 
 /// A page of answers taller than the first — its labels running over more
 /// rows — in an Ask card the first page fitted: drawn, and found squeezed,
@@ -4783,14 +4829,13 @@ fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
         option(format!("yes{i}"), label, true)
     }));
     options.push(option("no".into(), "Deny".into(), false));
-    // With the debugger's panel `height` tall under the Ask card: where the
-    // card was placed on its first page, then on its second, and the Ask
-    // window's size after.
+    // In a window `height` shorter than the test's: where the card was
+    // placed on its first page, then on its second, and the Ask window's
+    // size after.
     let at = |height: f32| -> (Option<Rectangle>, Option<Rectangle>, crate::AskView) {
         let mut app = reader_app();
         app.ask_view = crate::AskView::Compact;
-        app.show_bottom = true;
-        app.bottom_height = height;
+        shorter(&mut app, height);
         app.proj.ask_turns.push(AskTurn {
             stream: 9,
             question: "why?".into(),
@@ -4813,7 +4858,7 @@ fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
         let mut frame = |app: &mut App| -> Option<Option<Rectangle>> {
             let mut ui = UserInterface::build(
                 super::view(app),
-                WINDOW,
+                Size::new(app.window_width, app.window_height),
                 std::mem::take(&mut cache),
                 &mut renderer,
             );

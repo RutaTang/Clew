@@ -22,8 +22,7 @@ use crate::app::voice::{HeardOutcome, VoicePhase};
 /// The card's size, where the window has room for it.
 pub(crate) const ASK_CARD_W: f32 = 400.0;
 pub(crate) const ASK_CARD_H: f32 = 520.0;
-/// Least height the card shrinks to in a short window (or over a tall
-/// debugger's panel).
+/// Least height the card shrinks to in a short window.
 pub(crate) const ASK_CARD_MIN_H: f32 = 120.0;
 /// Space between the card and the edges around it.
 pub(crate) const ASK_MARGIN: f32 = 16.0;
@@ -48,22 +47,18 @@ pub(crate) struct AskPlace {
 }
 
 /// The band of the window the floating Ask may use: under the toolbar (and
-/// the update banner), over the status bar — and, for the card, over the
-/// debugger's panel too: the large window is over everything.
+/// the update banner), over the status bar. The debugger's panel takes none
+/// of it: Ask lives in the window's corner, over the panel's corner when it
+/// shows, rather than moving up with it to float over the code.
 fn band(app: &App) -> (f32, f32) {
     let top = TOOLBAR_H + update_banner_height(app) + TOP_GAP;
-    let bottom_panel = if app.show_bottom && app.ask_view != AskView::Expanded {
-        app.bottom_height + crate::resize::THICKNESS
-    } else {
-        0.0
-    };
-    let bottom = app.window_height - STATUSBAR_H - bottom_panel - ASK_MARGIN;
+    let bottom = app.window_height - STATUSBAR_H - ASK_MARGIN;
     (top, bottom.max(top))
 }
 
 /// The corner the card and the pill sit in, as how far their right edge is
 /// from the window's (left of the tool strip) and their bottom edge from its
-/// bottom (over the status bar, and the debugger's panel when it shows).
+/// bottom (over the status bar), whatever panels are open.
 fn corner(app: &App) -> (f32, f32) {
     let (_, bottom) = band(app);
     (STRIP_W + STRIP_GAP, app.window_height - bottom)
