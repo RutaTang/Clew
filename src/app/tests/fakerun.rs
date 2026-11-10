@@ -516,3 +516,33 @@ fn fake_run_from_the_menu_takes_the_definition_in_view() {
     assert!(app.proj.fake.sheet.is_none());
     assert!(app.status.contains("caret"), "{}", app.status);
 }
+
+/// A step on a file that is not open is kept only on a line the file has —
+/// read from the disk for a local project: past its end it is the model's
+/// mistake, left out and counted, as on an open file.
+#[test]
+fn a_step_past_an_unopened_files_end_is_left_out() {
+    let mut app = fake_app("fake-unopened-end");
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let seq = app.proj.fake.working.as_ref().expect("working").seq;
+    let answer = r#"{"steps": [
+      {"file": "src/lib.rs", "line": 3, "function": "origin"},
+      {"file": "notes.txt", "line": 1},
+      {"file": "notes.txt", "line": 40}]}"#;
+    let _ = app.update(Message::Fake(FakeMsg::Answered {
+        stamp: app.stamp(),
+        seq,
+        result: Ok(answer.into()),
+    }));
+    let sim = app.proj.fake.sim.as_ref().expect("a trace");
+    let steps: Vec<(&str, usize)> = sim
+        .trace
+        .steps
+        .iter()
+        .map(|s| (s.file.as_str(), s.line))
+        .collect();
+    assert_eq!(steps, [("src/lib.rs", 3), ("notes.txt", 1)]);
+    assert_eq!(sim.trace.dropped, 1);
+}

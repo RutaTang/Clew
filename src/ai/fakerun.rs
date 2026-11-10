@@ -212,7 +212,9 @@ fn param(part: &str, lang: &str) -> Option<(String, String)> {
     let colon = lhs
         .char_indices()
         .find(|&(i, c)| {
-            c == ':' && !lhs[i + 1..].starts_with(':') && (i == 0 || &lhs[i - 1..i] != ":")
+            // `lhs[..i]`, not the byte before `i`: a name may end in a
+            // character of more than one byte (`café:`, `名前:`).
+            c == ':' && !lhs[i + 1..].starts_with(':') && !lhs[..i].ends_with(':')
         })
         .map(|(i, _)| i);
     let (name, ty) = match colon {
@@ -538,6 +540,29 @@ fn vars_of(v: Option<serde_json::Value>) -> Vec<(String, String)> {
     }
 }
 
+/// The answer's trace: the first whole JSON object in it that has steps —
+/// read from each `{` in turn, so prose before it may hold braces of its
+/// own (`fn add() {}`) and prose after it anything at all. With none, the
+/// span from the first `{` to the last `}`, read as before, says why.
+fn trace_object(answer: &str) -> Result<RawTrace, String> {
+    for (at, _) in answer.match_indices('{') {
+        let mut values =
+            serde_json::Deserializer::from_str(&answer[at..]).into_iter::<serde_json::Value>();
+        if let Some(Ok(serde_json::Value::Object(object))) = values.next()
+            && object.contains_key("steps")
+        {
+            return serde_json::from_value(serde_json::Value::Object(object))
+                .map_err(|e| format!("could not read the trace: {e}"));
+        }
+    }
+    let start = answer.find('{').ok_or("no JSON object in the answer")?;
+    let end = answer.rfind('}').ok_or("no JSON object in the answer")?;
+    if end < start {
+        return Err("malformed JSON in the answer".into());
+    }
+    serde_json::from_str(&answer[start..=end]).map_err(|e| format!("could not read the trace: {e}"))
+}
+
 /// The trace in the model's answer, tolerating a code fence or prose around
 /// the JSON. `resolve` names a step's file in the project — its
 /// project-relative path and how many lines it has (`usize::MAX` when
@@ -548,13 +573,7 @@ pub fn parse(
     answer: &str,
     resolve: impl Fn(&str) -> Option<(String, usize)>,
 ) -> Result<Trace, String> {
-    let start = answer.find('{').ok_or("no JSON object in the answer")?;
-    let end = answer.rfind('}').ok_or("no JSON object in the answer")?;
-    if end < start {
-        return Err("malformed JSON in the answer".into());
-    }
-    let raw: RawTrace = serde_json::from_str(&answer[start..=end])
-        .map_err(|e| format!("could not read the trace: {e}"))?;
+    let raw = trace_object(answer)?;
     let mut trace = Trace {
         returns: raw.returns.as_ref().map(shown).unwrap_or_default(),
         output: lines_of(raw.output),
@@ -813,6 +832,33 @@ mod tests {
         assert_eq!(names("def go:\n  x = f(1)", "go", "python"), None);
     }
 
+    /// Names in any script are read whole — a character of more than one
+    /// byte just before the colon took the byte before it apart.
+    #[test]
+    fn parameter_names_in_any_script_are_read() {
+        assert_eq!(
+            names("def total(café: int, ö=1):", "total", "python"),
+            Some(pairs(&[("café", "int"), ("ö", "1")]))
+        );
+        assert_eq!(
+            names("func greet(_ 名前: String, 年齢: Int) {", "greet", "swift"),
+            Some(pairs(&[("名前", "String"), ("年齢", "Int")]))
+        );
+        assert_eq!(
+            names(
+                "function 합계(가격: number, ü: Map<string, 숫자>) {",
+                "합계",
+                "typescript"
+            ),
+            Some(pairs(&[("가격", "number"), ("ü", "Map<string, 숫자>")]))
+        );
+        assert_eq!(
+            names("fn f(a: std::path::Path, é: u8) {", "f", "rust"),
+            Some(pairs(&[("a", "std::path::Path"), ("é", "u8")])),
+            "a path's `::` still not a name's colon"
+        );
+    }
+
     /// A function's fields are its parameters (or one Inputs field), a
     /// type's how it is made and what is called; each ends with Context.
     #[test]
@@ -925,6 +971,22 @@ mod tests {
 
     /// Nothing usable is an error that says which way it failed; a trace
     /// past the cap is cut there and says so.
+    /// The trace is found however the model words around it: braces in
+    /// the prose before it, more prose (with braces) after it.
+    #[test]
+    fn the_trace_is_found_among_prose_with_braces() {
+        let json = r#"{"steps": [{"file": "src/a.rs", "line": 1, "function": "add"}]}"#;
+        for answer in [
+            format!("I read `fn add() {{}}` first.\n{json}"),
+            format!("{json}\nThen `add` returns {{ a + b }}."),
+            format!("A dict {{\"k\": 1}} is built, then:\n```json\n{json}\n```"),
+        ] {
+            let t = parse(&answer, file).unwrap_or_else(|e| panic!("{answer}: {e}"));
+            assert_eq!(t.steps.len(), 1, "{answer}");
+            assert_eq!(t.steps[0].function, "add");
+        }
+    }
+
     #[test]
     fn an_unusable_trace_says_why_and_a_long_one_is_cut() {
         assert!(parse("no json", file).is_err());

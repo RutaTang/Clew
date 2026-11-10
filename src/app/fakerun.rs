@@ -443,8 +443,9 @@ impl App {
     }
 
     /// A step's file as the project knows it — its relative path and how
-    /// many lines it has, when that is known (an open file's) — or `None`
-    /// when the project has no such file.
+    /// many lines it has, when that is known (an open file's, or a local
+    /// project's file read from the disk) — or `None` when the project has
+    /// no such file.
     fn fake_resolve(&self, file: &str) -> Option<(String, usize)> {
         if !clew_core::statefile::safe_rel(file) {
             return None;
@@ -455,13 +456,15 @@ impl App {
             .iter()
             .find(|f| f.rel == file)
             .map(|f| f.rel.clone())?;
-        let lines = self
-            .proj
-            .panes
-            .iter()
-            .flatten()
-            .find(|v| v.rel == rel)
-            .map_or(usize::MAX, |v| v.lines.len().max(1));
+        let lines = match self.proj.panes.iter().flatten().find(|v| v.rel == rel) {
+            Some(open) => open.lines.len().max(1),
+            // Not open: counted where it is, when that is this computer —
+            // a step past its end is the model's mistake, and left out.
+            None if !self.connection.is_remote() => {
+                lines_on_disk(&project.root.join(&rel)).unwrap_or(usize::MAX)
+            }
+            None => usize::MAX,
+        };
         Some((rel, lines))
     }
 
@@ -812,6 +815,20 @@ fn parse_suggestion(text: &str, n: usize) -> Result<Vec<String>, String> {
         .collect();
     out.resize(n, String::new());
     Ok(out)
+}
+
+/// How many lines the file at `path` has (at least 1), read whole — `None`
+/// for one that cannot be read, or too large to be a source file worth
+/// reading here.
+fn lines_on_disk(path: &std::path::Path) -> Option<usize> {
+    const MAX_BYTES: u64 = 8 * 1024 * 1024;
+    if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let breaks = bytes.iter().filter(|b| **b == b'\n').count();
+    let last_unended = bytes.last().is_some_and(|b| *b != b'\n');
+    Some((breaks + usize::from(last_unended)).max(1))
 }
 
 #[cfg(test)]

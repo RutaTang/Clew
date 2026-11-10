@@ -714,7 +714,9 @@ impl Viewer {
                 // for the line there: three rows down from a line inside four
                 // nested blocks, the target was under their headers.
                 let row = self.row_of(l.saturating_sub(1));
-                if self.viewport_measured && (row + 4) as f32 * line_height <= self.viewport_h {
+                if self.viewport_measured
+                    && row.saturating_add(4) as f32 * line_height <= self.viewport_h
+                {
                     return 0.0;
                 }
                 let max_y = (self.content_rows().saturating_sub(1)) as f32 * line_height;
