@@ -65,16 +65,16 @@ impl Synthesizer for Voice {
             rate => rate,
         };
         let mut samples = vec![0.25; words * 100 * rate as usize / 1000];
-        // In parts, as a voice that streams gives them: a sentence of more
-        // than one word in two — each sentence's samples the tenth of its
-        // turn, so what is played shows whose they are.
+        // In parts, as a voice that streams gives them: as many as the test
+        // says, alike in size but for the last — each sentence's samples
+        // the tenth of its turn, so what is played shows whose they are.
         match *self.parts.lock().unwrap() {
             parts if parts > 1 && samples.len() > 1 => {
                 let turn = self.said.lock().unwrap().len();
                 samples.fill(turn as f32 / 10.0);
-                let half = samples.len() / 2;
-                part(samples[..half].to_vec(), rate);
-                part(samples[half..].to_vec(), rate);
+                for piece in samples.chunks(samples.len().div_ceil(parts)) {
+                    part(piece.to_vec(), rate);
+                }
             }
             _ => part(samples, rate),
         }
@@ -1080,6 +1080,33 @@ fn a_streaming_voice_is_played_part_by_part() {
     assert_eq!(voice.texts(), ["This is the first.", "That is the second."]);
 }
 
+/// However small its parts — a sample at a time — and whatever its rate, a
+/// voice that streams is heard as its sentences resampled whole would be:
+/// nothing of a part lost at its edges, however little a part makes.
+#[test]
+fn the_smallest_parts_at_another_rate_are_heard_whole() {
+    let (mut app, voice, output) = speech_app("speech-sample-parts");
+    *voice.rate.lock().unwrap() = 1500;
+    *voice.parts.lock().unwrap() = usize::MAX;
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "This is the first. That is the second. Then");
+    assert_eq!(voice.texts(), ["This is the first.", "That is the second."]);
+    // Four words each, 600 samples at 1.5 kHz, the tenth of their turn.
+    let whole: Vec<f32> = [0.1f32, 0.2]
+        .iter()
+        .flat_map(|turn| clew_voice::audio::resample(&[*turn; 600], 1500, 1000))
+        .collect();
+    let script = output.lock().unwrap();
+    assert!(
+        script.rates.iter().all(|r| *r == 1000),
+        "{:?}",
+        script.rates
+    );
+    // Given a sample at a time, some parts make a single sample.
+    assert!(script.played.contains(&1), "{:?}", script.played);
+    assert_eq!(script.rest, whole);
+}
+
 /// A sentence's parts are played as they come, and the next sentence is
 /// not asked for until the last of them is in: one sentence is made at a
 /// time, whatever order the parts are handled in.
@@ -1105,9 +1132,16 @@ fn the_next_sentence_waits_for_the_last_part() {
         if last {
             settle(&mut app, next);
         } else {
-            // A part played, and nothing more asked for.
+            // A part played, and nothing more asked for: not by the part,
+            // nor by the tick that finds the output has played all it was
+            // given — the rest of the sentence is still being made.
             assert!(run_task(next).is_empty());
+            output.lock().unwrap().idle = true;
+            let tick = app.update(Message::Voice(VoiceMsg::SpeakTick));
+            settle(&mut app, tick);
             assert_eq!(voice.texts().len(), 1);
+            assert!(app.voice.speech.preparing(), "the rest is still to come");
+            output.lock().unwrap().idle = false;
         }
     }
     assert_eq!(voice.texts(), ["This is the first.", "That is the second."]);
