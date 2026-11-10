@@ -12523,7 +12523,7 @@ fn jump_codes_go_on_every_control_and_a_code_presses_it() {
     type_key(&mut app, keyboard::Key::Character("j".into()), cmd_j);
     assert_eq!(app.jump.as_deref(), Some(""), "{}", app.status);
     draw_window(&app);
-    let dealt = crate::ui::jump::dealt();
+    let dealt = crate::ui::jump::dealt(app.main_window);
     assert!(dealt.len() > 26, "{} codes", dealt.len());
     let codes: std::collections::HashSet<&str> = dealt.iter().map(|(c, _)| c.as_str()).collect();
     assert_eq!(codes.len(), dealt.len(), "each code is another");
@@ -12547,7 +12547,48 @@ fn jump_codes_go_on_every_control_and_a_code_presses_it() {
     assert!(app.jump.is_none(), "the codes go");
     // Drawn without them, none is dealt.
     draw_window(&app);
-    assert!(crate::ui::jump::dealt().is_empty());
+    assert!(crate::ui::jump::dealt(app.main_window).is_empty());
+}
+
+/// Each window keeps its own codes: another window drawn after it, without
+/// codes or with its own, neither puts them away nor gives this one its.
+#[test]
+fn jump_codes_are_each_windows_own() {
+    let mut first = reader_app();
+    first.main_window = Some(iced::window::Id::unique());
+    let mut second = reader_app();
+    second.main_window = Some(iced::window::Id::unique());
+    let cmd_j = keyboard::Modifiers::COMMAND;
+    type_key(&mut first, keyboard::Key::Character("j".into()), cmd_j);
+    draw_window(&first);
+    // The codes and what each presses, as words to compare.
+    let codes = |app: &App| -> Vec<String> {
+        crate::ui::jump::dealt(app.main_window)
+            .iter()
+            .map(|(code, m)| format!("{code} {m:?}"))
+            .collect()
+    };
+    let dealt = codes(&first);
+    let (code, _) = crate::ui::jump::dealt(first.main_window)
+        .into_iter()
+        .find(|(_, m)| matches!(m, Message::Weak(crate::WeakMsg::Show)))
+        .expect("the strip's Weak Spots");
+    // The other window, drawn since without codes, leaves the first's.
+    draw_window(&second);
+    assert_eq!(codes(&first), dealt);
+    // With codes of its own, it keeps them to itself.
+    second.show_left_sidebar = true;
+    type_key(&mut second, keyboard::Key::Character("j".into()), cmd_j);
+    draw_window(&second);
+    assert_ne!(codes(&second), dealt);
+    assert_eq!(codes(&first), dealt);
+    type_letters(&mut first, &code);
+    assert!(first.proj.weak.showing, "pressed in the first window");
+    assert!(!second.proj.weak.showing);
+    assert!(first.jump.is_none(), "the codes go");
+    draw_window(&first);
+    assert!(crate::ui::jump::dealt(first.main_window).is_empty());
+    assert!(!crate::ui::jump::dealt(second.main_window).is_empty());
 }
 
 /// Backspace takes a letter back; a letter no code goes on with, or Esc,
@@ -12559,7 +12600,7 @@ fn jump_mode_takes_letters_back_and_ends_on_a_wrong_one() {
         crate::keymap::Action::Jump,
     )));
     draw_window(&app);
-    let dealt = crate::ui::jump::dealt();
+    let dealt = crate::ui::jump::dealt(app.main_window);
     let first = dealt[0].0.clone();
     type_letters(&mut app, &first[..1]);
     type_key(
@@ -12611,7 +12652,7 @@ fn a_dialog_takes_the_codes_from_what_is_under_it() {
         crate::keymap::Action::Jump,
     )));
     draw_window(&app);
-    let dealt = crate::ui::jump::dealt();
+    let dealt = crate::ui::jump::dealt(app.main_window);
     assert!(
         dealt
             .iter()
@@ -12713,7 +12754,7 @@ fn rows_scrolled_away_have_no_code() {
     app.proj.expanded.insert("src".into());
     app.jump = Some(String::new());
     draw_window(&app);
-    let dealt = crate::ui::jump::dealt();
+    let dealt = crate::ui::jump::dealt(app.main_window);
     let rows = |name: &str| {
         dealt
             .iter()

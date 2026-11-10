@@ -57,7 +57,7 @@ impl App {
                     return Task::none();
                 };
                 typed.push(letter.to_ascii_lowercase());
-                match ui::jump::pressed(&typed) {
+                match ui::jump::pressed(self.main_window, &typed) {
                     ui::jump::Typed::Press(message) => {
                         self.status.clear();
                         self.update(*message)

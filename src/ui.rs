@@ -671,6 +671,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         window,
         app.jump.as_deref(),
         app.ask_view == crate::AskView::Expanded,
+        app.main_window,
     )
 }
 

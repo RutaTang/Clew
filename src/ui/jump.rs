@@ -15,12 +15,13 @@
 //! [`heard::gather`]: crate::ui::heard::gather
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::text::Renderer as _;
 use iced::advanced::widget::{Operation, Tree, Widget, tree};
 use iced::advanced::{Clipboard, Renderer as _, Shell, mouse, overlay, renderer};
-use iced::{Border, Color, Element, Event, Length, Pixels, Point, Rectangle, Size, Vector};
+use iced::{Border, Color, Element, Event, Length, Pixels, Point, Rectangle, Size, Vector, window};
 
 use crate::Message;
 use crate::ui::heard::{self, Layer};
@@ -78,8 +79,11 @@ impl Reach {
 thread_local! {
     static BUILD: RefCell<Build> = RefCell::new(Build::default());
     static DEALING: RefCell<Option<Dealing>> = const { RefCell::new(None) };
-    /// The codes on screen, dealt when the window was last drawn.
-    static DEALT: RefCell<Vec<(String, Message)>> = const { RefCell::new(Vec::new()) };
+    /// The codes on screen in each window, dealt when it was last drawn.
+    /// Kept apart: another window drawn after this one, with codes or
+    /// without, leaves this one's as they are.
+    static DEALT: RefCell<HashMap<Option<window::Id>, Vec<(String, Message)>>> =
+        RefCell::new(HashMap::new());
 }
 
 /// The view is built afresh: with the codes up (`on`) or not.
@@ -127,16 +131,17 @@ pub(crate) fn mark<'a>(
     })
 }
 
-/// `view`, the whole window, drawn with a code on each mark on screen while
-/// `typed` is (what has been typed of a code so far); `ask_large`, whether
-/// Ask is large over the window, leaving nothing under it to press.
+/// `view`, the whole of `window`, drawn with a code on each mark on screen
+/// while `typed` is (what has been typed of a code so far); `ask_large`,
+/// whether Ask is large over the window, leaving nothing under it to press.
 pub(crate) fn root<'a>(
     view: Element<'a, Message>,
     typed: Option<&str>,
     ask_large: bool,
+    window: Option<window::Id>,
 ) -> Element<'a, Message> {
     let Some(typed) = typed else {
-        DEALT.with(|d| d.borrow_mut().clear());
+        forget(window);
         return view;
     };
     let (top, counts) = BUILD.with(|b| {
@@ -154,6 +159,7 @@ pub(crate) fn root<'a>(
     };
     Element::new(Root {
         content: view,
+        window,
         typed: typed.to_string(),
         reach,
         len: code_len(marks),
@@ -196,11 +202,12 @@ pub(crate) enum Typed {
     Nothing,
 }
 
-/// `typed` against the codes dealt when the window was last drawn. Before
+/// `typed` against the codes dealt when `window` was last drawn. Before
 /// any is dealt, every letter waits (the codes are on their way).
-pub(crate) fn pressed(typed: &str) -> Typed {
+pub(crate) fn pressed(window: Option<window::Id>, typed: &str) -> Typed {
     DEALT.with(|d| {
-        let dealt = d.borrow();
+        let all = d.borrow();
+        let dealt = all.get(&window).map(Vec::as_slice).unwrap_or_default();
         if dealt.is_empty() {
             return Typed::More;
         }
@@ -215,15 +222,21 @@ pub(crate) fn pressed(typed: &str) -> Typed {
     })
 }
 
-/// The codes dealt when the window was last drawn, in the order drawn.
+/// `window`'s codes are put away: its codes are down, or it is closed.
+pub(crate) fn forget(window: Option<window::Id>) {
+    DEALT.with(|d| d.borrow_mut().remove(&window));
+}
+
+/// The codes dealt when `window` was last drawn, in the order drawn.
 #[cfg(test)]
-pub(crate) fn dealt() -> Vec<(String, Message)> {
-    DEALT.with(|d| d.borrow().clone())
+pub(crate) fn dealt(window: Option<window::Id>) -> Vec<(String, Message)> {
+    DEALT.with(|d| d.borrow().get(&window).cloned().unwrap_or_default())
 }
 
 /// The window, dealing codes to its marks as it is drawn.
 struct Root<'a> {
     content: Element<'a, Message>,
+    window: Option<window::Id>,
     typed: String,
     reach: Reach,
     len: usize,
@@ -357,7 +370,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Root<'_> {
             .with(|d| d.borrow_mut().take())
             .map(|d| d.dealt)
             .unwrap_or_default();
-        DEALT.with(|d| *d.borrow_mut() = dealt);
+        DEALT.with(|d| d.borrow_mut().insert(self.window, dealt));
     }
 }
 

@@ -1086,6 +1086,7 @@ impl Clew {
         let Some(mut app) = self.windows.remove(&id) else {
             return Task::none();
         };
+        crate::ui::jump::forget(Some(id));
         if self.focused == Some(id) {
             self.focused = self.windows.keys().next().copied();
         }
