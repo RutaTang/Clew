@@ -12,11 +12,9 @@
 //! holds is kept only while the codes are up, or while [`heard::gather`]
 //! reads the window.
 //!
-//! The same marks carry the keyboard's ring: with no field holding the
-//! keys, Tab and Shift-Tab move a ring from control to control in the
-//! order they are drawn ([`Up::Ring`]), and Enter or Space presses the one
-//! it is on ([`ring_press`]) — a button reached by the keyboard is seen to
-//! be, as a field holding the keys is.
+//! The same marks are the stops of the keyboard's ring ([`super::ring`]):
+//! the window, at the root of its view ([`root`]), takes Tab and moves the
+//! ring among them and its fields.
 //!
 //! [`heard::gather`]: crate::ui::heard::gather
 
@@ -31,6 +29,7 @@ use iced::{Border, Color, Element, Event, Length, Pixels, Point, Rectangle, Size
 
 use crate::Message;
 use crate::ui::heard::{self, Layer};
+use crate::ui::ring::{self, RingAsk, StopKind};
 
 /// The letters codes are made of: the home row's first, as the hand rests.
 const LETTERS: &[u8] = b"asdfjklghqwertyuiopzxcvbnm";
@@ -54,15 +53,19 @@ struct Build {
     on: bool,
     layer: Option<Layer>,
     marks: [usize; 4],
+    /// The number the next mark is built with: counted on past the view's
+    /// own by marks built as the window is laid out (a `responsive`'s), so
+    /// that no two marks of a window share one.
+    next: usize,
 }
+
+/// The first number of a mark built as the window is laid out, past those
+/// built with the view: a window laid out again after another's view was
+/// built counts on from that one's, past its own view's still.
+const LAID_OUT_MARKS: usize = usize::MAX / 2;
 
 /// The codes being dealt as the window is drawn.
 struct Dealing {
-    /// Whether codes are dealt; else the marks are counted for the ring,
-    /// which goes on [`Self::ring`].
-    codes: bool,
-    /// The mark the ring is on, by its place among those dealt.
-    ring: Option<usize>,
     /// What has been typed of a code.
     typed: String,
     /// Which layers' marks a press reaches now.
@@ -95,27 +98,13 @@ impl Reach {
 /// Each window's codes on screen, with what each does.
 type Dealt = HashMap<Option<window::Id>, Vec<(String, Message)>>;
 
-/// Where each window's ring was drawn last: the mark it was on, among how
-/// many, and the layer on top then.
-#[derive(Debug, Clone, Copy)]
-struct Ringed {
-    at: Option<usize>,
-    count: usize,
-    top: Option<Layer>,
-    /// Where the window asked it to be then ([`Up::Ring`]): while it asks
-    /// the same, it stays where it was drawn — on the first control of a
-    /// layer come up since, though the window asked for another.
-    asked: isize,
-}
-
 /// What the marks are up for: codes to type, or the keyboard's ring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Up<'a> {
     /// Jump mode's codes, with what has been typed of one.
     Codes(&'a str),
-    /// The ring, on the mark at this place among those drawn — counted
-    /// from the end when below 0 (Shift-Tab's first press: the last).
-    Ring(isize),
+    /// The ring, where the window asks it to be.
+    Ring(RingAsk),
 }
 
 thread_local! {
@@ -125,8 +114,11 @@ thread_local! {
     /// Kept apart: another window drawn after this one, with codes or
     /// without, leaves this one's as they are.
     static DEALT: RefCell<Dealt> = RefCell::new(HashMap::new());
-    /// Where each window's ring was drawn last.
-    static RINGED: RefCell<HashMap<Option<window::Id>, Ringed>> = RefCell::new(HashMap::new());
+    /// Where each window's ring is (`ring::Placed`).
+    static PLACED: RefCell<HashMap<Option<window::Id>, ring::Placed>> =
+        RefCell::new(HashMap::new());
+    /// The mark the ring is on in the window being drawn.
+    static RINGED: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 /// The view is built afresh: with the codes up (`on`) or not.
@@ -161,32 +153,56 @@ pub(crate) fn mark<'a>(
         return content;
     }
     heard::marked(&message);
-    let layer = BUILD.with(|b| {
+    let (layer, id) = BUILD.with(|b| {
         let mut b = b.borrow_mut();
         let layer = b.layer.unwrap_or(Layer::Window);
         b.marks[layer as usize] += 1;
-        layer
+        let id = b.next;
+        b.next += 1;
+        (layer, id)
     });
     Element::new(Mark {
         content,
         message,
         layer,
+        id,
+    })
+}
+
+/// `content`, said to be the part `tag` of the window — a layer, the
+/// title bar, the Files view's tree — for the ring's order ([`ring`]).
+pub(crate) fn scope<'a>(
+    content: impl Into<Element<'a, Message>>,
+    tag: ring::ScopeTag,
+) -> Element<'a, Message> {
+    Element::new(Scope {
+        content: content.into(),
+        tag,
     })
 }
 
 /// `view`, the whole of `window`, drawn with a code on each mark on screen
-/// while `typed` is (what has been typed of a code so far); `ask_large`,
-/// whether Ask is large over the window, leaving nothing under it to press.
+/// while the codes are `up` — or the ring round the one it is on;
+/// `ask_large`, whether Ask is large over the window, leaving nothing under
+/// it to press; `tab`, whether the window's Tab is the ring's (not while
+/// the tutorial holds the keys, a shortcut is being typed for a command,
+/// or jump mode's codes are up).
 pub(crate) fn root<'a>(
     view: Element<'a, Message>,
     up: Option<Up<'_>>,
     ask_large: bool,
     window: Option<window::Id>,
+    tab: bool,
 ) -> Element<'a, Message> {
-    let Some(up) = up else {
+    if up.is_none() {
         forget(window);
-        return view;
-    };
+    }
+    // Marks built from here on — as the window is laid out — are numbered
+    // past the view's.
+    BUILD.with(|b| {
+        let mut b = b.borrow_mut();
+        b.next = b.next.max(LAID_OUT_MARKS);
+    });
     let (top, counts) = BUILD.with(|b| {
         let b = b.borrow();
         let top = [Layer::Tutorial, Layer::Overlay, Layer::Ask, Layer::Window]
@@ -201,66 +217,48 @@ pub(crate) fn root<'a>(
         None => counts.iter().sum(),
     };
     let (typed, ring) = match up {
-        Up::Codes(typed) => (Some(typed.to_string()), None),
-        Up::Ring(at) => (None, Some(at)),
+        Some(Up::Codes(typed)) => (Some(typed.to_string()), None),
+        Some(Up::Ring(ask)) => (None, Some(ask)),
+        None => (None, None),
     };
     Element::new(Root {
         content: view,
         window,
         typed,
         ring,
+        tab,
         top,
         reach,
         len: code_len(marks),
     })
 }
 
-/// The mark the ring would be on in a window of `count` marks, asked for
-/// `at` (from the end below 0); none when there are none — or, with the
-/// count not known yet, for one from the end.
-fn ring_place(at: isize, count: Option<usize>) -> Option<usize> {
-    match count {
-        Some(0) => None,
-        Some(n) => Some(at.rem_euclid(n as isize) as usize),
-        None => usize::try_from(at).ok(),
-    }
-}
-
-/// Where `window`'s ring was drawn last — the mark it was on — and how
-/// many marks there were.
-#[cfg(test)]
-pub(crate) fn ring_drawn(window: Option<window::Id>) -> Option<(usize, usize)> {
-    RINGED.with(|r| {
-        let r = r.borrow();
-        let ringed = r.get(&window)?;
-        Some((ringed.at?, ringed.count))
-    })
-}
-
-/// The mark `window`'s ring is on, asked to be at `asked`: where it was
-/// drawn, while that is what was asked (a layer come up since put it on
-/// its first); else where `asked` falls among the marks drawn — a key
-/// pressed again before the window is drawn again goes on from the last.
-pub(crate) fn ring_on(window: Option<window::Id>, asked: isize) -> Option<usize> {
-    RINGED.with(|r| {
-        let r = r.borrow();
-        let ringed = r.get(&window)?;
-        match ringed.at {
-            Some(at) if ringed.asked == asked => Some(at),
-            _ => ring_place(asked, Some(ringed.count)),
-        }
-    })
-}
-
 /// What pressing the control `window`'s ring is on sends, as its click
-/// sends; the ring asked to be at `asked`.
-pub(crate) fn ring_press(window: Option<window::Id>, asked: isize) -> Option<Message> {
-    let at = ring_on(window, asked)?;
-    DEALT.with(|d| {
-        d.borrow()
+/// sends; nothing while it is on a field (which holds the keys) or not up.
+pub(crate) fn ring_press(window: Option<window::Id>) -> Option<Message> {
+    PLACED.with(|p| {
+        p.borrow()
             .get(&window)
-            .and_then(|dealt| dealt.get(at))
-            .map(|(_, message)| message.clone())
+            .and_then(|placed| placed.press.clone())
+    })
+}
+
+/// Which stop `window`'s ring is on.
+#[cfg(test)]
+pub(crate) fn ring_target(window: Option<window::Id>) -> Option<ring::StopKind> {
+    PLACED.with(|p| p.borrow().get(&window).and_then(|placed| placed.target))
+}
+
+/// Where `window`'s ring is: its place among the stops, how many there
+/// are, and what pressing it sends.
+#[cfg(test)]
+pub(crate) fn ring_placed(
+    window: Option<window::Id>,
+) -> Option<(Option<usize>, usize, Option<Message>)> {
+    PLACED.with(|p| {
+        p.borrow()
+            .get(&window)
+            .map(|placed| (placed.at, placed.count, placed.press.clone()))
     })
 }
 
@@ -323,7 +321,7 @@ pub(crate) fn pressed(window: Option<window::Id>, typed: &str) -> Typed {
 /// `window`'s codes are put away: its codes are down, or it is closed.
 pub(crate) fn forget(window: Option<window::Id>) {
     DEALT.with(|d| d.borrow_mut().remove(&window));
-    RINGED.with(|r| r.borrow_mut().remove(&window));
+    PLACED.with(|p| p.borrow_mut().remove(&window));
 }
 
 /// The codes dealt when `window` was last drawn, in the order drawn.
@@ -332,15 +330,17 @@ pub(crate) fn dealt(window: Option<window::Id>) -> Vec<(String, Message)> {
     DEALT.with(|d| d.borrow().get(&window).cloned().unwrap_or_default())
 }
 
-/// The window, dealing codes to its marks as it is drawn — or counting
-/// them for the ring.
+/// The window, dealing codes to its marks as it is drawn; and the
+/// keyboard's ring, placed as it is laid out and moved by its Tab.
 struct Root<'a> {
     content: Element<'a, Message>,
     window: Option<window::Id>,
     /// Jump mode's: what has been typed of a code.
     typed: Option<String>,
-    /// The ring's: the mark it is asked to be on ([`Up::Ring`]).
-    ring: Option<isize>,
+    /// The ring's: where the window asks it to be ([`Up::Ring`]).
+    ring: Option<RingAsk>,
+    /// Whether the window's Tab is the ring's.
+    tab: bool,
     /// The layer on top, whose marks a press reaches.
     top: Layer,
     reach: Reach,
@@ -352,6 +352,14 @@ struct Mark<'a> {
     content: Element<'a, Message>,
     message: Message,
     layer: Layer,
+    /// The number it was built with.
+    id: usize,
+}
+
+/// A part of the window, said to the ring's operations ([`scope`]).
+struct Scope<'a> {
+    content: Element<'a, Message>,
+    tag: ring::ScopeTag,
 }
 
 /// Both widgets are the content they wrap to everything but drawing: the
@@ -382,27 +390,6 @@ macro_rules! transparent {
             self.content.as_widget().size_hint()
         }
 
-        fn layout(
-            &mut self,
-            tree: &mut Tree,
-            renderer: &iced::Renderer,
-            limits: &layout::Limits,
-        ) -> layout::Node {
-            self.content.as_widget_mut().layout(tree, renderer, limits)
-        }
-
-        fn operate(
-            &mut self,
-            tree: &mut Tree,
-            layout: Layout<'_>,
-            renderer: &iced::Renderer,
-            operation: &mut dyn Operation,
-        ) {
-            self.content
-                .as_widget_mut()
-                .operate(tree, layout, renderer, operation);
-        }
-
         fn mouse_interaction(
             &self,
             tree: &Tree,
@@ -431,6 +418,40 @@ macro_rules! transparent {
     };
 }
 
+/// [`transparent!`]'s layout: the content's own.
+macro_rules! transparent_layout {
+    () => {
+        fn layout(
+            &mut self,
+            tree: &mut Tree,
+            renderer: &iced::Renderer,
+            limits: &layout::Limits,
+        ) -> layout::Node {
+            self.content.as_widget_mut().layout(tree, renderer, limits)
+        }
+    };
+}
+
+/// [`transparent!`]'s drawing: the content's own.
+macro_rules! transparent_draw {
+    () => {
+        fn draw(
+            &self,
+            tree: &Tree,
+            renderer: &mut iced::Renderer,
+            theme: &iced::Theme,
+            style: &renderer::Style,
+            layout: Layout<'_>,
+            cursor: mouse::Cursor,
+            viewport: &Rectangle,
+        ) {
+            self.content
+                .as_widget()
+                .draw(tree, renderer, theme, style, layout, cursor, viewport);
+        }
+    };
+}
+
 /// [`transparent!`]'s events: the content's own.
 macro_rules! transparent_update {
     () => {
@@ -452,15 +473,117 @@ macro_rules! transparent_update {
     };
 }
 
-thread_local! {
-    /// Windows whose ring could not be placed when drawn (its marks not
-    /// counted yet, or fewer now): drawn again, now they are.
-    static REDRAW: RefCell<std::collections::HashSet<Option<window::Id>>> =
-        RefCell::new(std::collections::HashSet::new());
+impl Root<'_> {
+    /// The ring's stops in the window as laid out (`layout`), in its order.
+    fn stops(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+    ) -> Vec<ring::Stop> {
+        let mut census = ring::Census::default();
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, &mut census);
+        let reach = self.reach;
+        ring::order(census.stops, |layer| reach.reaches(layer))
+    }
+
+    /// The ring put on `stops[at]`: a field reached takes the keys (and
+    /// every other gives them up); a stop scrolled away is scrolled to.
+    fn put_on(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        stop: &ring::Stop,
+    ) {
+        let target = match stop.kind {
+            StopKind::Field { index, .. } => Some(index),
+            StopKind::Mark(_) => None,
+        };
+        let mut focus = ring::FocusNth { target, seen: 0 };
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, &mut focus);
+        if let Some(mut reveal) = ring::Reveal::of(stop) {
+            self.content
+                .as_widget_mut()
+                .operate(tree, layout, renderer, &mut reveal);
+        }
+    }
+
+    /// The ring kept at `at` among `stops`, asked `ask`: the window told
+    /// where it is when `announce`.
+    fn keep(
+        &self,
+        ask: RingAsk,
+        at: Option<usize>,
+        stops: &[ring::Stop],
+        saved: Vec<(Layer, usize)>,
+        announce: bool,
+    ) {
+        let stop = at.and_then(|at| stops.get(at));
+        let placed = ring::Placed {
+            ask,
+            at,
+            #[cfg(test)]
+            count: stops.len(),
+            top: self.top,
+            saved,
+            target: stop.map(|s| s.kind),
+            press: stop.and_then(|s| s.press.clone()),
+            announce,
+        };
+        PLACED.with(|p| p.borrow_mut().insert(self.window, placed));
+    }
 }
 
 impl Widget<Message, iced::Theme, iced::Renderer> for Root<'_> {
     transparent!();
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, operation);
+    }
+
+    /// Laid out, the ring is placed: where the window asks it to be, among
+    /// the stops as they are now.
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        let node = self.content.as_widget_mut().layout(tree, renderer, limits);
+        let Some(ask) = self.ring else {
+            return node;
+        };
+        let at = Layout::new(&node);
+        let stops = self.stops(tree, at, renderer);
+        let last = PLACED.with(|p| p.borrow().get(&self.window).cloned());
+        let (place, saved) = ring::resolve(ask, &stops, self.top, last.as_ref());
+        let target = place.and_then(|i| stops.get(i)).map(|s| s.kind);
+        // Moved: on another stop, or asked anew (a first Tab). Asked to keep
+        // it where it is, it has not: a field the pointer focused since keeps
+        // the keys.
+        let moved = last
+            .as_ref()
+            .is_none_or(|l| l.target != target || (ask != RingAsk::Kept && l.ask != ask));
+        if moved && let Some(stop) = place.and_then(|i| stops.get(i)).cloned() {
+            self.put_on(tree, at, renderer, &stop);
+        }
+        let announce = moved || last.is_some_and(|l| l.announce);
+        self.keep(ask, place, &stops, saved, announce);
+        node
+    }
 
     fn update(
         &mut self,
@@ -473,15 +596,95 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Root<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        if self.ring.is_some() {
-            if REDRAW.with(|r| r.borrow_mut().remove(&self.window)) {
-                shell.request_redraw();
+        use iced::keyboard::{self, key::Named};
+        // Put away by this event: not said to be anywhere after.
+        let mut ended = false;
+        match event {
+            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                if self.tab && !(modifiers.command() || modifiers.control() || modifiers.alt()) =>
+            {
+                let step = match key.as_ref() {
+                    keyboard::Key::Named(Named::Tab) => Some(!modifiers.shift()),
+                    // The arrows move the ring too, while no field holds
+                    // the keys (they are the field's then).
+                    keyboard::Key::Named(Named::ArrowDown | Named::ArrowRight) => Some(true),
+                    keyboard::Key::Named(Named::ArrowUp | Named::ArrowLeft) => Some(false),
+                    _ => None,
+                };
+                let is_tab = matches!(key.as_ref(), keyboard::Key::Named(Named::Tab));
+                match (self.ring, step) {
+                    // The first Tab: the window puts the ring up — after the
+                    // field holding the keys, if one does.
+                    (None, Some(forward)) if is_tab => {
+                        let stops = self.stops(tree, layout, renderer);
+                        let field = ring::focused(&stops).is_some();
+                        shell.publish(Message::Window(crate::WindowMsg::TabPressed {
+                            forward,
+                            field,
+                        }));
+                        shell.capture_event();
+                        return;
+                    }
+                    (Some(ask), step) => {
+                        let stops = self.stops(tree, layout, renderer);
+                        let held = ring::focused(&stops);
+                        match step {
+                            Some(forward) if is_tab || held.is_none() => {
+                                let last = PLACED.with(|p| p.borrow().get(&self.window).cloned());
+                                if !stops.is_empty() {
+                                    let from = held.or(last.as_ref().and_then(|l| l.at));
+                                    let to = from
+                                        .map_or(if forward { 0 } else { stops.len() - 1 }, |f| {
+                                            ring::step(f, forward, stops.len())
+                                        });
+                                    let stop = stops[to].clone();
+                                    self.put_on(tree, layout, renderer, &stop);
+                                    let saved = last.map(|l| l.saved).unwrap_or_default();
+                                    self.keep(RingAsk::Kept, Some(to), &stops, saved, true);
+                                    let _ = ask;
+                                }
+                                shell.capture_event();
+                                shell.request_redraw();
+                            }
+                            // A field holds the keys: what is typed is its,
+                            // and the ring is put away.
+                            _ if held.is_some() => {
+                                shell.publish(Message::Window(crate::WindowMsg::RingEnd));
+                                ended = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
             }
             // A press of the pointer puts the ring away: the pointer has
             // the window now.
-            if let Event::Mouse(mouse::Event::ButtonPressed(_)) = event {
+            Event::Mouse(mouse::Event::ButtonPressed(_)) if self.ring.is_some() => {
                 shell.publish(Message::Window(crate::WindowMsg::RingEnd));
+                ended = true;
             }
+            _ => {}
+        }
+        // The window told where the ring is, once it is put somewhere new.
+        let told = PLACED.with(|p| {
+            let mut p = p.borrow_mut();
+            let placed = p.get_mut(&self.window)?;
+            if !std::mem::take(&mut placed.announce) {
+                return None;
+            }
+            Some(placed.press.clone())
+        });
+        if self.ring.is_some()
+            && !ended
+            && let Some(press) = told
+        {
+            shell.publish(Message::Window(crate::WindowMsg::RingMoved(
+                press.map(Box::new),
+            )));
+        }
+        if shell.is_event_captured() {
+            return;
         }
         self.content.as_widget_mut().update(
             tree, event, layout, cursor, renderer, clipboard, shell, viewport,
@@ -498,61 +701,90 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Root<'_> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        // Where the ring goes: among as many marks as were drawn last, and
-        // on the first of a layer come up on top since (a menu opened, a
-        // dialog) — as a dialog takes the keyboard.
-        let last = RINGED.with(|r| r.borrow().get(&self.window).copied());
-        let ring = self.ring.and_then(|at| match last {
-            Some(last) if last.top.is_some_and(|top| top != self.top) => Some(0),
-            Some(last) if last.asked == at => last.at.or(ring_place(at, Some(last.count))),
-            Some(last) => ring_place(at, Some(last.count)),
-            None => ring_place(at, None),
+        // The mark the ring is on, for it to draw the ring round itself.
+        let ringed = self.ring.and_then(|_| {
+            PLACED.with(|p| {
+                p.borrow()
+                    .get(&self.window)
+                    .and_then(|placed| match placed.target {
+                        Some(StopKind::Mark(id)) => Some(id),
+                        _ => None,
+                    })
+            })
         });
-        DEALING.with(|d| {
-            *d.borrow_mut() = Some(Dealing {
-                codes: self.typed.is_some(),
-                ring,
-                typed: self.typed.clone().unwrap_or_default(),
-                reach: self.reach,
-                len: self.len,
-                dealt: Vec::new(),
+        RINGED.with(|r| r.set(ringed));
+        if let Some(typed) = &self.typed {
+            DEALING.with(|d| {
+                *d.borrow_mut() = Some(Dealing {
+                    typed: typed.clone(),
+                    reach: self.reach,
+                    len: self.len,
+                    dealt: Vec::new(),
+                });
             });
-        });
+        }
         self.content
             .as_widget()
             .draw(tree, renderer, theme, style, layout, cursor, viewport);
-        let dealt = DEALING
-            .with(|d| d.borrow_mut().take())
-            .map(|d| d.dealt)
-            .unwrap_or_default();
-        if self.ring.is_some() {
-            let count = dealt.len();
-            let at = ring.filter(|&at| at < count);
-            // Not placed — the count was not known, or there are fewer marks
-            // than it was asked for — while there are marks to place it on:
-            // drawn again, the count known now.
-            if at.is_none() && count > 0 {
-                REDRAW.with(|r| r.borrow_mut().insert(self.window));
-            }
-            RINGED.with(|r| {
-                r.borrow_mut().insert(
-                    self.window,
-                    Ringed {
-                        at,
-                        count,
-                        top: Some(self.top),
-                        asked: self.ring.unwrap_or_default(),
-                    },
-                )
-            });
+        RINGED.with(|r| r.set(None));
+        if self.typed.is_some() {
+            let dealt = DEALING
+                .with(|d| d.borrow_mut().take())
+                .map(|d| d.dealt)
+                .unwrap_or_default();
+            DEALT.with(|d| d.borrow_mut().insert(self.window, dealt));
         }
-        DEALT.with(|d| d.borrow_mut().insert(self.window, dealt));
+    }
+}
+
+impl Widget<Message, iced::Theme, iced::Renderer> for Scope<'_> {
+    transparent!();
+    transparent_layout!();
+    transparent_update!();
+    transparent_draw!();
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        let bounds = layout.bounds();
+        operation.custom(None, bounds, &mut ring::Edge::Begin(self.tag));
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, operation);
+        operation.custom(None, bounds, &mut ring::Edge::End(self.tag));
     }
 }
 
 impl Widget<Message, iced::Theme, iced::Renderer> for Mark<'_> {
     transparent!();
+    transparent_layout!();
     transparent_update!();
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        // Said to the ring's census: a stop.
+        operation.custom(
+            None,
+            layout.bounds(),
+            &mut ring::MarkSeen {
+                id: self.id,
+                layer: self.layer,
+                press: self.message.clone(),
+            },
+        );
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, operation);
+    }
 
     fn draw(
         &self,
@@ -575,17 +807,14 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Mark<'_> {
         if seen.width < 1.0 || seen.height < 1.0 {
             return;
         }
+        if RINGED.with(|r| r.get()) == Some(self.id) {
+            ring_round(renderer, bounds, *viewport);
+        }
         let shown = DEALING.with(|d| {
             let mut d = d.borrow_mut();
             let d = d.as_mut()?;
             if !d.reach.reaches(self.layer) {
                 return None;
-            }
-            // The ring's: counted, and ringed when it is the one.
-            if !d.codes {
-                let place = d.dealt.len();
-                d.dealt.push((String::new(), self.message.clone()));
-                return (d.ring == Some(place)).then_some(Shown::Ring);
             }
             // Past the last code, a mark goes without (see `code_len`).
             if d.dealt.len() >= codes_of(d.len) {
@@ -594,20 +823,12 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Mark<'_> {
             let code = code(d.dealt.len(), d.len);
             d.dealt.push((code.clone(), self.message.clone()));
             let shown = code.starts_with(&d.typed);
-            shown.then_some(Shown::Badge(code, d.typed.len()))
+            shown.then_some((code, d.typed.len()))
         });
-        match shown {
-            Some(Shown::Badge(code, typed)) => badge(renderer, seen, *viewport, &code, typed),
-            Some(Shown::Ring) => ring(renderer, bounds, *viewport),
-            None => {}
+        if let Some((code, typed)) = shown {
+            badge(renderer, seen, *viewport, &code, typed);
         }
     }
-}
-
-/// What a mark shows: its code's badge, or the keyboard's ring.
-enum Shown {
-    Badge(String, usize),
-    Ring,
 }
 
 /// How far the ring stands out round its control.
@@ -616,7 +837,7 @@ const RING_OUT: f32 = 2.0;
 /// The ring round `at`, the control the keyboard is on: the accent edge a
 /// field holding the keys has, a little outside the control, within
 /// `room` (what of the window is seen).
-fn ring(renderer: &mut iced::Renderer, at: Rectangle, room: Rectangle) {
+fn ring_round(renderer: &mut iced::Renderer, at: Rectangle, room: Rectangle) {
     let palette = crate::theme::active();
     let bounds = at.expand(RING_OUT);
     let Some(seen) = bounds.expand(1.0).intersection(&room) else {

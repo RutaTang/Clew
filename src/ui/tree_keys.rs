@@ -182,9 +182,22 @@ impl Widget<Message, iced::Theme, iced::Renderer> for TreeKeys<'_> {
     ) {
         let state = tree.state.downcast_mut::<State>();
         operation.focusable(Some(&self.id), layout.bounds(), state);
+        // Its rows are walked by its own keys: to the keyboard's ring the
+        // tree is one stop, this one.
+        let bounds = layout.bounds();
+        operation.custom(
+            None,
+            bounds,
+            &mut super::ring::Edge::Begin(super::ring::ScopeTag::Tree),
+        );
         self.content
             .as_widget_mut()
             .operate(&mut tree.children[0], layout, renderer, operation);
+        operation.custom(
+            None,
+            bounds,
+            &mut super::ring::Edge::End(super::ring::ScopeTag::Tree),
+        );
     }
 
     fn update(

@@ -327,24 +327,57 @@ pub(crate) fn pick<'a, T, L, V>(
     options: L,
     selected: Option<V>,
     on_select: impl Fn(T) -> Message + 'a,
-) -> iced::widget::PickList<'a, T, L, V, Message>
+) -> Element<'a, Message>
 where
     T: ToString + PartialEq + Clone + 'a,
     L: std::borrow::Borrow<[T]> + 'a,
     V: std::borrow::Borrow<T> + 'a,
 {
+    pick_with(options, selected, on_select, None)
+}
+
+/// [`pick`], saying `placeholder` while nothing is picked.
+pub(crate) fn pick_with<'a, T, L, V>(
+    options: L,
+    selected: Option<V>,
+    on_select: impl Fn(T) -> Message + 'a,
+    placeholder: Option<String>,
+) -> Element<'a, Message>
+where
+    T: ToString + PartialEq + Clone + 'a,
+    L: std::borrow::Borrow<[T]> + 'a,
+    V: std::borrow::Borrow<T> + 'a,
+{
+    let choices = std::borrow::Borrow::<[T]>::borrow(&options);
     // Each choice said by what the list shows for it.
     if super::heard::gathering() {
-        for option in std::borrow::Borrow::<[T]>::borrow(&options) {
+        for option in choices {
             super::heard::said(&option.to_string(), on_select(option.clone()));
         }
     }
-    pick_list(options, selected, on_select)
+    // Pressed by its jump code or the keyboard's ring, it moves on to the
+    // next choice — a list that opens is the pointer's.
+    let at = selected
+        .as_ref()
+        .and_then(|v| choices.iter().position(|c| c == v.borrow()));
+    let next = match at {
+        Some(i) => choices.get((i + 1) % choices.len()),
+        None => choices.first(),
+    }
+    .map(|c| on_select(c.clone()));
+    let mut list = pick_list(options, selected, on_select)
         .style(theme::pick)
         .menu_style(theme::pick_menu)
         .text_size(ts::BASE)
         .padding([6, 10])
-        .width(PICK_W)
+        .width(PICK_W);
+    if let Some(placeholder) = placeholder {
+        list = list.placeholder(placeholder);
+    }
+    match next {
+        Some(next) => super::jump::mark(list, next),
+        None => list.into(),
+    }
 }
 
 /// A line said under a group, or between them: small and dim.

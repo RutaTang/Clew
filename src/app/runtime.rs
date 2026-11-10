@@ -174,6 +174,7 @@ impl App {
             code_focused: true,
             jump: None,
             ring: None,
+            ring_code: false,
             region: crate::app::keys::Region::Code,
             pending_g: false,
             pending_z: false,
@@ -797,7 +798,11 @@ impl App {
             WindowMsg::TreeKey(key) => self.on_tree_key(key),
             WindowMsg::TabPressed { forward, field } => self.on_tab(forward, field),
             WindowMsg::RingEnd => {
-                self.ring = None;
+                self.end_ring(false);
+                Task::none()
+            }
+            WindowMsg::RingMoved(press) => {
+                self.on_ring_moved(press.map(|p| *p));
                 Task::none()
             }
             // Enter opens what the filter found first, as a click on its row

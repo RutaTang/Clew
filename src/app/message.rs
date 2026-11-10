@@ -2223,8 +2223,12 @@ pub enum WindowMsg {
         forward: bool,
         field: bool,
     },
-    /// The pointer pressed: the keyboard's ring is put away.
+    /// The pointer pressed, or a field took the keys: the keyboard's ring
+    /// is put away.
     RingEnd,
+    /// The keyboard's ring is on another stop now: what pressing it sends,
+    /// for a control (none for a field, which holds the keys).
+    RingMoved(Option<Box<Message>>),
     /// A key the Files view's tree took, while it has the keyboard
     /// (`ui::tree_keys`).
     TreeKey(TreeKey),
@@ -3072,6 +3076,7 @@ impl WindowMsg {
             | WindowMsg::FileFilterDown
             | WindowMsg::TabPressed { .. }
             | WindowMsg::RingEnd
+            | WindowMsg::RingMoved(..)
             | WindowMsg::TreeKey(..)
             | WindowMsg::TreeFocused(..)
             | WindowMsg::ToggleMaximize

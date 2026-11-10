@@ -84,26 +84,58 @@ impl App {
         }
     }
 
-    /// Tab or Shift-Tab, a field holding the keys (`field`) or not: the
-    /// next field, as before; else the keyboard's ring, on the first
-    /// control (the last, going back), the code giving up the keys.
+    /// Tab or Shift-Tab, the ring not up: the window puts it up — on the
+    /// first stop (the last, going back), or, a field holding the keys
+    /// (`field`), on the stop after it. The keys it takes are given back
+    /// when the ring is put away by a key.
     pub(crate) fn on_tab(&mut self, forward: bool, field: bool) -> Task<Message> {
-        self.code_focused = false;
-        if field {
-            return ui::cycle_focus(forward);
+        if self.tutorial.is_some() {
+            return Task::none();
         }
-        self.ring = Some(if forward { 0 } else { -1 });
+        if self.ring.is_none() {
+            self.ring_code = self.code_focused;
+        }
+        self.ring = Some(if field {
+            ui::RingAsk::AfterFocused { forward }
+        } else {
+            ui::RingAsk::Start { forward }
+        });
+        self.code_focused = false;
         self.pending_g = false;
         self.pending_z = false;
-        // The Files view's tree gives up the keys too: its arrows are the
-        // ring's now.
-        operation::focus(nowhere())
+        Task::none()
     }
 
-    /// A key while the keyboard's ring is up: Tab and the arrows move it,
-    /// Enter and Space press what it is on (as a click does, the ring
-    /// staying), Esc puts it away. Any other key puts it away and is left
-    /// to do what it does (`None`).
+    /// The ring is on another stop: what it presses, said in the status
+    /// bar — a strip's tool is an icon alone — or nothing, on a field.
+    pub(crate) fn on_ring_moved(&mut self, press: Option<Message>) {
+        // Said late, of a ring put away since: it stays away.
+        if self.ring.is_none() {
+            return;
+        }
+        self.ring = Some(ui::RingAsk::Kept);
+        self.status = match press {
+            Some(press) => ring_name(self, &press).unwrap_or_default(),
+            None => Default::default(),
+        };
+    }
+
+    /// The ring put away: by a key (`give_back`), the keys go back where
+    /// they were when it came up; by the pointer or a field taking them,
+    /// they are where those put them.
+    pub(crate) fn end_ring(&mut self, give_back: bool) {
+        if self.ring.take().is_some() {
+            self.status.clear();
+            if give_back {
+                self.code_focused = self.ring_code;
+            }
+        }
+    }
+
+    /// A key while the keyboard's ring is up (the window took Tab and the
+    /// arrows already): Enter and Space press what it is on, as a click
+    /// does, the ring staying; Esc puts it away. Any other key puts it away
+    /// and is left to do what it does (`None`).
     fn ring_key(
         &mut self,
         key: &keyboard::Key,
@@ -112,37 +144,17 @@ impl App {
         use keyboard::Key;
         use keyboard::key::Named;
         let plain = !(modifiers.command() || modifiers.control() || modifiers.alt());
-        let step = match key.as_ref() {
-            Key::Named(Named::Tab) if plain => Some(!modifiers.shift()),
-            Key::Named(Named::ArrowDown | Named::ArrowRight) if plain => Some(true),
-            Key::Named(Named::ArrowUp | Named::ArrowLeft) if plain => Some(false),
-            _ => None,
-        };
-        if let Some(forward) = step {
-            // From where it is: on the first control of a layer come up on
-            // top since, if one has.
-            let asked = self.ring.unwrap_or(0);
-            let at = ui::jump::ring_on(self.main_window, asked).map_or(asked, |at| at as isize);
-            self.ring = Some(if forward { at + 1 } else { at - 1 });
-            return Some(Task::none());
-        }
         match key.as_ref() {
             Key::Named(Named::Enter | Named::Space) if plain => {
-                let asked = self.ring.unwrap_or(0);
-                let message = ui::jump::ring_press(self.main_window, asked)?;
-                // Where it is, so a press that changes nothing on screen
-                // leaves it there.
-                if let Some(at) = ui::jump::ring_on(self.main_window, asked) {
-                    self.ring = Some(at as isize);
-                }
+                let message = ui::jump::ring_press(self.main_window)?;
                 Some(self.update(message))
             }
             Key::Named(Named::Escape) => {
-                self.ring = None;
+                self.end_ring(true);
                 Some(Task::none())
             }
             _ => {
-                self.ring = None;
+                self.end_ring(true);
                 None
             }
         }
@@ -276,9 +288,12 @@ impl App {
         if self.jump.is_some() {
             return self.jump_key(&key, modifiers);
         }
-        // The keyboard's ring is up: Tab, the arrows, Enter, Space and Esc
-        // are its (`ring_key`); any other key puts it away and does what it
-        // does.
+        // The tutorial holds the keys: no ring over it.
+        if self.tutorial.is_some() {
+            self.ring = None;
+        }
+        // The keyboard's ring is up: Enter, Space and Esc are its
+        // (`ring_key`); any other key puts it away and does what it does.
         if self.ring.is_some()
             && let Some(task) = self.ring_key(&key, modifiers)
         {
@@ -323,16 +338,8 @@ impl App {
             }
             return Task::none();
         }
-        // Tab / Shift-Tab move keyboard focus between fields (inside the open
-        // modal, if any) while a field holds the keys; else the keyboard's
-        // ring among the controls on screen (`WindowMsg::TabPressed`).
-        if matches!(key.as_ref(), Key::Named(Named::Tab))
-            && !(cmd || modifiers.alt() || modifiers.control())
-        {
-            let forward = !modifiers.shift();
-            return ui::field_focused()
-                .map(move |field| Message::Window(WindowMsg::TabPressed { forward, field }));
-        }
+        // Tab is the window's: it moves the keyboard's ring among the
+        // controls and fields (`ui::ring`) before a key reaches here.
         // F6 / Shift-F6 move the keys between the window's regions — the
         // code, the sidebar's field, the chat — but not out of a dialog
         // holding them.
@@ -682,4 +689,14 @@ impl App {
         }
         Task::none()
     }
+}
+
+/// What a control pressing `press` is called on screen: the words a voice
+/// would press it by.
+fn ring_name(app: &App, press: &Message) -> Option<String> {
+    let wanted = format!("{press:?}");
+    ui::heard::gather(app)
+        .into_iter()
+        .find(|t| format!("{:?}", t.message) == wanted)
+        .map(|t| t.shown)
 }

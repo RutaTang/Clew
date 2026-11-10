@@ -376,13 +376,16 @@ pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
         return space().into();
     }
     super::tip::tip(
-        iced::widget::checkbox(app.debug_hover_eval)
-            .style(theme::check)
-            .label(tr!("Evaluate on hover"))
-            .on_toggle(|_| Message::Debug(DebugMsg::ToggleHoverEval))
-            .size(14)
-            .text_size(ts::SMALL)
-            .spacing(6),
+        super::jump::mark(
+            iced::widget::checkbox(app.debug_hover_eval)
+                .style(theme::check)
+                .label(tr!("Evaluate on hover"))
+                .on_toggle(|_| Message::Debug(DebugMsg::ToggleHoverEval))
+                .size(14)
+                .text_size(ts::SMALL)
+                .spacing(6),
+            Message::Debug(DebugMsg::ToggleHoverEval),
+        ),
         container(
             text(tr!("May run the program's own code."))
                 .size(ts::SMALL)

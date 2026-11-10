@@ -15,7 +15,7 @@ use iced::advanced::widget::Operation;
 use iced::advanced::widget::operation::focusable::find_focused;
 use iced::advanced::widget::operation::scrollable::Scrollable;
 use iced::advanced::widget::operation::{Outcome, black_box};
-use iced::widget::{Id, column, container, scrollable, space, text_input};
+use iced::widget::{Id, container, scrollable, space};
 use iced::{Element, Event, Font, Pixels, Point, Rectangle, Size, Vector, keyboard, mouse, window};
 use iced_test::runtime::user_interface::{Cache, UserInterface};
 
@@ -1734,6 +1734,8 @@ fn press(key: keyboard::Key, typed: keyboard::Key, modifiers: keyboard::Modifier
 /// A Files view with a folder and a file, for the tree's keys.
 fn tree_app() -> App {
     let mut app = reader_app();
+    // No repository at a path that is not there: no marks to read.
+    app.proj.git_status_stale = false;
     app.show_left_sidebar = true;
     app.sidebar = crate::SidebarTab::Files;
     app.code_focused = false;
@@ -1853,6 +1855,510 @@ fn an_empty_tree_is_not_gone_down_to() {
         keyboard::Modifiers::empty(),
     );
     assert_eq!(app.region, crate::app::keys::Region::Chat);
+}
+
+/// A window run as the runtime runs it: events through its widgets, what
+/// they send — and the keys none took, as the window's key handler gets
+/// them — through the app, the app's widget operations run on the window
+/// built anew, the widgets' state kept from build to build.
+struct Driven {
+    renderer: iced::Renderer,
+    cache: Option<Cache>,
+    size: Size,
+}
+
+impl Driven {
+    fn new(app: &App) -> Driven {
+        Driven::sized(app, WINDOW)
+    }
+
+    fn sized(app: &App, size: Size) -> Driven {
+        let mut driven = Driven {
+            renderer: renderer(),
+            cache: Some(Cache::default()),
+            size,
+        };
+        driven.build(app);
+        driven
+    }
+
+    /// How far the scrollable `id` is scrolled.
+    fn scrolled(&mut self, app: &App, id: Id) -> Option<Vector> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            self.size,
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        let mut probe = ScrollProbe {
+            target: id,
+            found: None,
+        };
+        ui.operate(&self.renderer, &mut probe);
+        self.cache = Some(ui.into_cache());
+        probe.found
+    }
+
+    fn build(&mut self, app: &App) {
+        let ui = UserInterface::build(
+            super::view(app),
+            self.size,
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        self.cache = Some(ui.into_cache());
+    }
+
+    /// `events`, then a redraw; how each of `events` was taken.
+    fn send(&mut self, app: &mut App, events: &[Event]) -> Vec<iced::event::Status> {
+        let mut all = events.to_vec();
+        all.push(Event::Window(window::Event::RedrawRequested(
+            std::time::Instant::now(),
+        )));
+        let mut ui = UserInterface::build(
+            super::view(app),
+            self.size,
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        let mut sent = Vec::new();
+        let (_, statuses) = ui.update(
+            &all,
+            mouse::Cursor::Unavailable,
+            &mut self.renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        let mut cache = ui.into_cache();
+        for (event, status) in all.iter().zip(&statuses) {
+            if let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event {
+                let escape = matches!(
+                    key.as_ref(),
+                    keyboard::Key::Named(keyboard::key::Named::Escape)
+                );
+                if *status == iced::event::Status::Ignored || escape {
+                    sent.push(Message::Editor(EditorMsg::KeyPressed(
+                        key.clone(),
+                        *modifiers,
+                    )));
+                }
+            }
+        }
+        for message in sent {
+            let ops = ready_ops(app.update(message));
+            let mut ui =
+                UserInterface::build(super::view(app), self.size, cache, &mut self.renderer);
+            for mut op in ops {
+                loop {
+                    ui.operate(&self.renderer, &mut black_box(&mut *op));
+                    match op.finish() {
+                        Outcome::Chain(next) => op = next,
+                        _ => break,
+                    }
+                }
+            }
+            cache = ui.into_cache();
+        }
+        self.cache = Some(cache);
+        self.build(app);
+        statuses[..events.len()].to_vec()
+    }
+
+    /// `key` pressed, plainly or with `modifiers`, then a redraw (which
+    /// tells the app where the ring went).
+    fn key(
+        &mut self,
+        app: &mut App,
+        key: keyboard::Key,
+        modifiers: keyboard::Modifiers,
+    ) -> iced::event::Status {
+        let status = self.send(app, &[press(key.clone(), key, modifiers)])[0];
+        let _ = self.send(app, &[]);
+        status
+    }
+
+    fn tab(&mut self, app: &mut App, back: bool) -> iced::event::Status {
+        let modifiers = if back {
+            keyboard::Modifiers::SHIFT
+        } else {
+            keyboard::Modifiers::empty()
+        };
+        self.key(
+            app,
+            keyboard::Key::Named(keyboard::key::Named::Tab),
+            modifiers,
+        )
+    }
+
+    /// The widget holding the keys.
+    fn focused(&mut self, app: &App) -> Option<Id> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            self.size,
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        let found = run_operation(&mut ui, &self.renderer, find_focused());
+        self.cache = Some(ui.into_cache());
+        found
+    }
+
+    /// `id` given the keys, as a click on it gives them.
+    fn focus(&mut self, app: &App, id: Id) {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            self.size,
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        let _ = run_operation(
+            &mut ui,
+            &self.renderer,
+            iced::advanced::widget::operation::focusable::focus::<()>(id),
+        );
+        self.cache = Some(ui.into_cache());
+    }
+}
+
+/// The widget operations `task` asks for at once — what waits (a file
+/// read, an operation's answer) is left, as a turn of the runtime leaves
+/// it for later.
+fn ready_ops(task: iced::Task<Message>) -> Vec<Box<dyn Operation>> {
+    use iced_test::futures::futures::{FutureExt, StreamExt};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let _inside = runtime.enter();
+    let Some(mut stream) = iced_test::runtime::task::into_stream(task) else {
+        return Vec::new();
+    };
+    let mut ops = Vec::new();
+    while let Some(Some(action)) = stream.next().now_or_never() {
+        if let iced_test::runtime::Action::Widget(op) = action {
+            ops.push(op);
+        }
+    }
+    ops
+}
+
+/// Where the window's ring is: its place, how many stops, what it presses.
+fn ring_at(app: &App) -> (Option<usize>, usize, Option<Message>) {
+    crate::ui::jump::ring_placed(app.main_window).expect("the ring placed")
+}
+
+/// A control built as the window is laid out — in a `responsive`, as the
+/// status bar's chips are — is a stop of its own: the ring on it presses
+/// it, not the first control built with the view (whose number it took).
+#[test]
+fn a_control_built_as_laid_out_presses_itself() {
+    use iced::widget::{button, column, responsive, text};
+    let view = |ask: super::RingAsk| -> Element<'static, Message> {
+        super::jump::begin(true);
+        let early = Message::Nav(NavMsg::PaletteOpened);
+        let first = super::jump::mark(button(text("early")).on_press(early.clone()), early);
+        let second = responsive(|_| {
+            let late = Message::Project(ProjectMsg::SetUpMissing);
+            super::jump::mark(button(text("late")).on_press(late.clone()), late)
+        });
+        super::jump::root(
+            column![first, second].into(),
+            Some(super::jump::Up::Ring(ask)),
+            false,
+            None,
+            true,
+        )
+    };
+    let mut renderer = renderer();
+    let size = Size::new(400.0, 300.0);
+    super::jump::forget(None);
+    // The first Tab puts the ring on the first control...
+    let ui = UserInterface::build(
+        view(super::RingAsk::Start { forward: true }),
+        size,
+        Cache::default(),
+        &mut renderer,
+    );
+    let (at, count, pressed) = super::jump::ring_placed(None).expect("the ring placed");
+    assert_eq!((at, count), (Some(0), 2), "both controls are stops");
+    assert!(
+        matches!(pressed, Some(Message::Nav(NavMsg::PaletteOpened))),
+        "{pressed:?}"
+    );
+    let first = super::jump::ring_target(None);
+    // ...and the next goes on to the one built as it was laid out.
+    let mut ui = UserInterface::build(
+        view(super::RingAsk::Kept),
+        size,
+        ui.into_cache(),
+        &mut renderer,
+    );
+    let tab = keyboard::Key::Named(keyboard::key::Named::Tab);
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &[press(tab.clone(), tab, keyboard::Modifiers::empty())],
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    let (at, _, pressed) = super::jump::ring_placed(None).expect("the ring placed");
+    assert_eq!(at, Some(1));
+    assert!(
+        matches!(pressed, Some(Message::Project(ProjectMsg::SetUpMissing))),
+        "its own press, not the first control's: {pressed:?}"
+    );
+    // Another stop, by another number: the ring is drawn round it alone.
+    assert_ne!(super::jump::ring_target(None), first);
+    super::jump::forget(None);
+}
+
+/// Tab, no field holding the keys, rings the window's first stop — not its
+/// title bar's, which come last — and goes from stop to stop: buttons and
+/// fields alike, the filter field and the tree each one, Shift-Tab back.
+/// A field reached holds the keys; a control reached is named in the status
+/// bar, and Enter presses it as a click does, the ring staying.
+#[test]
+fn tab_walks_the_controls_and_fields_and_enter_presses() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = tree_app();
+    app.code_focused = true;
+    let mut window = Driven::new(&app);
+    assert_eq!(window.tab(&mut app, false), iced::event::Status::Captured);
+    assert!(app.ring.is_some(), "up");
+    let (at, count, first) = ring_at(&app);
+    assert_eq!(at, Some(0));
+    assert!(count > 10, "{count} stops");
+    assert!(
+        !matches!(first, Some(Message::Window(WindowMsg::ToggleAppMenu))),
+        "the title bar's come last: {first:?}"
+    );
+    // Back from the first: the last, the title bar's.
+    window.tab(&mut app, true);
+    assert_eq!(ring_at(&app).0, Some(count - 1));
+    window.tab(&mut app, false);
+    // On, to the filter: it holds the keys; then the tree, one stop.
+    let mut reached = Vec::new();
+    for _ in 0..count {
+        window.tab(&mut app, false);
+        let held = window.focused(&app);
+        if let Some(id) = held.clone() {
+            reached.push(id);
+        }
+        if held == Some(super::files_tree_keys_id()) {
+            break;
+        }
+    }
+    assert_eq!(
+        reached,
+        [super::file_filter_id(), super::files_tree_keys_id()],
+        "the filter, then the tree"
+    );
+    assert!(
+        ring_at(&app).2.is_none(),
+        "a field is not pressed by the ring"
+    );
+    // Past the tree: not one of its rows (its own keys walk them).
+    window.tab(&mut app, false);
+    let past = format!("{:?}", ring_at(&app).2);
+    assert!(
+        !past.contains("OpenRel") && !past.contains("ToggleDir"),
+        "a row of the tree: {past}"
+    );
+    window.tab(&mut app, true);
+    window.tab(&mut app, true);
+    assert_eq!(window.focused(&app), Some(super::file_filter_id()), "back");
+    // On to the strip's Weak Spots: named, then pressed.
+    for _ in 0..count {
+        if matches!(ring_at(&app).2, Some(Message::Weak(crate::WeakMsg::Show))) {
+            break;
+        }
+        window.tab(&mut app, false);
+    }
+    assert_eq!(window.focused(&app), None, "no field holds the keys");
+    assert!(!app.status.is_empty(), "named: {}", app.status);
+    window.key(
+        &mut app,
+        Key::Named(Named::Enter),
+        keyboard::Modifiers::empty(),
+    );
+    assert!(app.proj.weak.showing, "pressed");
+    assert!(app.ring.is_some(), "the ring stays");
+}
+
+/// Esc puts the ring away, and the keys go back where they were — the
+/// code, its reading keys at work again; so does any other key, doing what
+/// it does.
+#[test]
+fn the_ring_put_away_gives_the_keys_back() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let mut app = reader_app();
+    app.code_focused = true;
+    let line = |app: &App| app.active_viewer().unwrap().caret.map_or(0, |(l, _)| l);
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    assert!(!app.code_focused);
+    window.key(&mut app, Key::Named(Named::Escape), none);
+    assert_eq!(app.ring, None);
+    assert!(app.code_focused, "the code's again");
+    let before = line(&app);
+    window.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(line(&app), before + 1, "j reads on");
+    // Another key: the ring goes, and the key does what it does.
+    window.tab(&mut app, false);
+    window.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(app.ring, None);
+    assert_eq!(line(&app), before + 2, "j read on, the ring gone");
+}
+
+/// A field taking the keys — a press that focuses one — puts the ring away:
+/// its arrows are the field's, not the ring's.
+#[test]
+fn a_field_taking_the_keys_puts_the_ring_away() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = tree_app();
+    app.sidebar = crate::SidebarTab::Search;
+    app.code_focused = true;
+    let line = |app: &App| app.active_viewer().unwrap().caret.map_or(0, |(l, _)| l);
+    let before = line(&app);
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    window.focus(&app, super::search_input_id());
+    let status = window.key(
+        &mut app,
+        Key::Named(Named::ArrowDown),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.ring, None, "put away");
+    // The keys are the field's: the arrow went nowhere near the code.
+    assert!(!app.code_focused);
+    assert_eq!(line(&app), before, "the code's caret stayed");
+    assert_ne!(
+        ring_at_or_none(&app),
+        Some(1),
+        "the arrow did not move it: {status:?}"
+    );
+}
+
+fn ring_at_or_none(app: &App) -> Option<usize> {
+    crate::ui::jump::ring_placed(app.main_window).and_then(|(at, _, _)| at)
+}
+
+/// Tab from a field the pointer gave the keys to goes on to the stop after
+/// it — the filter's next is the tree.
+#[test]
+fn tab_from_a_field_goes_on_from_it() {
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.focus(&app, super::file_filter_id());
+    window.tab(&mut app, false);
+    assert_eq!(window.focused(&app), Some(super::files_tree_keys_id()));
+    window.tab(&mut app, true);
+    assert_eq!(
+        window.focused(&app),
+        Some(super::file_filter_id()),
+        "and back"
+    );
+}
+
+/// A dialog come up takes the ring to its own first stop, and only its
+/// own; closed, the ring is back on what opened it.
+#[test]
+fn a_dialog_takes_the_ring_and_gives_it_back() {
+    let mut app = reader_app();
+    let mut window = Driven::new(&app);
+    for _ in 0..4 {
+        window.tab(&mut app, false);
+    }
+    let (under, window_count, press) = ring_at(&app);
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let _ = window.send(&mut app, &[]);
+    let (at, count, _) = ring_at(&app);
+    assert_eq!(at, Some(0), "the dialog's first");
+    assert_ne!(count, window_count, "the dialog's own stops");
+    window.tab(&mut app, false);
+    assert_eq!(ring_at(&app).0, Some(1));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Close));
+    let _ = window.send(&mut app, &[]);
+    let (back, _, back_press) = ring_at(&app);
+    assert_eq!(back, under, "back on what it was on");
+    assert_eq!(format!("{back_press:?}"), format!("{press:?}"));
+}
+
+/// Tab is each window's own: a field holding the keys in another window
+/// does not keep this one from ringing its controls.
+#[test]
+fn tab_is_each_windows_own() {
+    let mut first = tree_app();
+    first.main_window = Some(iced::window::Id::unique());
+    let mut second = tree_app();
+    second.main_window = Some(iced::window::Id::unique());
+    let mut one = Driven::new(&first);
+    let mut two = Driven::new(&second);
+    one.focus(&first, super::file_filter_id());
+    two.tab(&mut second, false);
+    assert_eq!(
+        second.ring,
+        Some(crate::ui::RingAsk::Kept),
+        "rung, from its own first stop"
+    );
+    assert_eq!(ring_at(&second).0, Some(0));
+}
+
+/// The tutorial's keys are its own: Tab puts up no ring over it.
+#[test]
+fn the_tutorial_keeps_tab() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Tutorial(crate::TutorialMsg::Begin));
+    assert!(app.tutorial.is_some());
+    let mut window = Driven::new(&app);
+    assert_ne!(window.tab(&mut app, false), iced::event::Status::Captured);
+    assert_eq!(app.ring, None);
+}
+
+/// A control scrolled out of sight is scrolled to when the ring reaches
+/// it; a picker and a tick are stops, pressed by Enter as by a click.
+#[test]
+fn the_ring_reaches_what_is_scrolled_away_and_the_pickers() {
+    use crate::SettingsPage;
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        SettingsPage::Appearance,
+    )));
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let (_, count, _) = ring_at(&app);
+    let mut presses = Vec::new();
+    for _ in 0..count {
+        presses.push(format!("{:?}", ring_at(&app).2));
+        window.tab(&mut app, false);
+    }
+    assert!(
+        presses.iter().any(|p| p.contains("SetLanguage")),
+        "the display language's picker: {presses:#?}"
+    );
+    // A page longer than the window: its last stops are scrolled to.
+    let mut app = reader_app();
+    app.window_height = 520.0;
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        SettingsPage::Voice,
+    )));
+    let mut window = Driven::sized(&app, Size::new(1000.0, 520.0));
+    window.tab(&mut app, false);
+    let top = window
+        .scrolled(&app, super::settings_scroll_id())
+        .expect("the page");
+    assert_eq!(top.y, 0.0);
+    window.tab(&mut app, true);
+    window.tab(&mut app, true);
+    let low = window
+        .scrolled(&app, super::settings_scroll_id())
+        .expect("the page");
+    assert!(low.y > 0.0, "scrolled to the page's last stops: {low:?}");
 }
 
 /// A file's row in the Files view's tree is counted as the tree lays its
@@ -2459,52 +2965,6 @@ fn escape_closes_overlays_one_at_a_time() {
     );
     let _ = app.update(escape());
     assert!(app.proj.context_menu.is_none());
-}
-
-/// E2-6: Tab cycles focus through the open modal's fields only, wrapping, and
-/// clears any focus left behind it; with no modal it covers every field.
-#[test]
-fn tab_focus_cycles_inside_the_open_modal() {
-    let mut renderer = renderer();
-    let input = |id: &'static str| {
-        text_input::<Message, iced::Theme, iced::Renderer>("", "")
-            .id(Id::new(id))
-            .on_input(|_| Message::Noop)
-    };
-    // The modal is framed by the real `modal()` every dialog is built with
-    // — the scope is whatever that frame marks, not a container this test
-    // labelled itself.
-    let view = |with_modal: bool| -> Element<'static, Message> {
-        let modal: Element<'static, Message> = if with_modal {
-            super::modal(
-                column![input("modal-a"), input("modal-b")],
-                super::Placement::Center,
-                super::Backdrop::Dim(None),
-            )
-        } else {
-            space().into()
-        };
-        iced::widget::stack![column![input("behind-a"), input("behind-b")], modal].into()
-    };
-    let mut focused_after = |with_modal: bool, cache: Cache, forward: bool| {
-        let mut ui = UserInterface::build(view(with_modal), WINDOW, cache, &mut renderer);
-        let _ = run_operation(&mut ui, &renderer, super::focus_cycle(forward));
-        let focused = run_operation(&mut ui, &renderer, find_focused());
-        (focused, ui.into_cache())
-    };
-
-    let (first, cache) = focused_after(true, Cache::default(), true);
-    assert_eq!(first, Some(Id::new("modal-a")));
-    let (second, cache) = focused_after(true, cache, true);
-    assert_eq!(second, Some(Id::new("modal-b")));
-    let (wrapped, cache) = focused_after(true, cache, true);
-    assert_eq!(wrapped, Some(Id::new("modal-a")), "the cycle wraps");
-    let (back, cache) = focused_after(true, cache, false);
-    assert_eq!(back, Some(Id::new("modal-b")), "Shift-Tab goes backwards");
-
-    // No modal: every field takes part (the first after the last).
-    let (open, _) = focused_after(false, cache, true);
-    assert_eq!(open, Some(Id::new("behind-a")));
 }
 
 /// E2-6: moving the finder's selection scrolls its list just enough to keep
@@ -13414,155 +13874,6 @@ fn jump_codes_go_on_every_control_and_a_code_presses_it() {
     assert!(crate::ui::jump::dealt(app.main_window).is_empty());
 }
 
-/// Tab, no field holding the keys, puts the keyboard's ring on the first
-/// control on screen and moves it from control to control in the order
-/// they are drawn — Shift-Tab back, from the first to the last — and Enter
-/// presses the one it is on as a click does, the ring staying. Esc puts it
-/// away and does nothing else; another key puts it away and does what it
-/// does; a field holding the keys keeps Tab for the fields.
-#[test]
-fn tab_rings_each_control_in_turn_and_enter_presses_it() {
-    use keyboard::Key;
-    use keyboard::key::Named;
-    let mut app = reader_app();
-    let none = keyboard::Modifiers::empty();
-    let shift = keyboard::Modifiers::SHIFT;
-    let drawn = |app: &App| {
-        draw_window(app);
-        crate::ui::jump::ring_drawn(app.main_window).expect("the ring drawn")
-    };
-    // A field holds the keys: Tab is the fields', as before.
-    let _ = app.update(Message::Window(WindowMsg::TabPressed {
-        forward: true,
-        field: true,
-    }));
-    assert_eq!(app.ring, None);
-    // None does: the ring, on the first control.
-    app.code_focused = true;
-    let _ = app.update(Message::Window(WindowMsg::TabPressed {
-        forward: true,
-        field: false,
-    }));
-    assert!(!app.code_focused, "the keys are the ring's");
-    let (at, count) = drawn(&app);
-    assert_eq!(at, 0);
-    assert!(count > 10, "{count} controls");
-    type_key(&mut app, Key::Named(Named::Tab), none);
-    assert_eq!(drawn(&app).0, 1);
-    type_key(&mut app, Key::Named(Named::ArrowDown), none);
-    assert_eq!(drawn(&app).0, 2, "the arrows move it too");
-    // Two before the window is drawn again: the second goes on from the
-    // first.
-    type_key(&mut app, Key::Named(Named::Tab), shift);
-    type_key(&mut app, Key::Named(Named::ArrowUp), none);
-    assert_eq!(drawn(&app).0, 0);
-    // Back from the first: the last.
-    type_key(&mut app, Key::Named(Named::Tab), shift);
-    assert_eq!(drawn(&app).0, count - 1);
-    // On to the strip's Weak Spots, and Enter presses it.
-    for _ in 0..count {
-        if matches!(
-            crate::ui::jump::ring_press(app.main_window, app.ring.unwrap()),
-            Some(Message::Weak(crate::WeakMsg::Show))
-        ) {
-            break;
-        }
-        type_key(&mut app, Key::Named(Named::Tab), none);
-        draw_window(&app);
-    }
-    type_key(&mut app, Key::Named(Named::Enter), none);
-    assert!(app.proj.weak.showing, "pressed");
-    assert!(app.ring.is_some(), "the ring stays");
-    // Esc puts the ring away, and only that.
-    type_key(&mut app, Key::Named(Named::Escape), none);
-    assert_eq!(app.ring, None);
-    assert!(app.proj.weak.showing, "the page stays");
-    // Shift-Tab first: the last control, once the controls are counted.
-    let _ = app.update(Message::Window(WindowMsg::TabPressed {
-        forward: false,
-        field: false,
-    }));
-    draw_window(&app);
-    let (at, count) = drawn(&app);
-    assert_eq!(at, count - 1);
-    // Another key puts it away and does what it does.
-    type_key(&mut app, Key::Character("j".into()), none);
-    assert_eq!(app.ring, None);
-}
-
-/// Tab asks first whether a field holds the keys: a text field does; the
-/// Files view's tree, whose keys are its rows', does not — nor nothing.
-#[test]
-fn tab_knows_whether_a_field_holds_the_keys() {
-    let mut renderer = renderer();
-    let mut app = reader_app();
-    app.show_left_sidebar = true;
-    app.sidebar = crate::SidebarTab::Files;
-    let mut ui = UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
-    let held = |ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>| {
-        run_operation(ui, &renderer, super::field_focused_operation())
-    };
-    assert_eq!(held(&mut ui), Some(false), "nothing holds the keys");
-    for (id, field) in [
-        (super::file_filter_id(), true),
-        (super::files_tree_keys_id(), false),
-    ] {
-        let _ = run_operation(
-            &mut ui,
-            &renderer,
-            iced::advanced::widget::operation::focusable::focus::<()>(id.clone()),
-        );
-        assert_eq!(
-            run_operation(&mut ui, &renderer, find_focused()),
-            Some(id.clone()),
-            "precondition"
-        );
-        assert_eq!(held(&mut ui), Some(field), "{id:?}");
-    }
-}
-
-/// A dialog come up over the window takes the ring as it takes the keys:
-/// on its first control, drawn again and again, and walking its own.
-#[test]
-fn a_dialog_come_up_takes_the_ring_to_its_first_control() {
-    let mut app = reader_app();
-    app.ring = Some(5);
-    draw_window(&app);
-    let (at, window_count) = crate::ui::jump::ring_drawn(app.main_window).expect("drawn");
-    assert_eq!(at, 5);
-    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
-    for _ in 0..3 {
-        draw_window(&app);
-        let (at, count) = crate::ui::jump::ring_drawn(app.main_window).expect("drawn");
-        assert_eq!(at, 0, "on the dialog's first, every time it is drawn");
-        assert_ne!(count, window_count, "the dialog's own controls");
-    }
-    type_key(
-        &mut app,
-        keyboard::Key::Named(keyboard::key::Named::Tab),
-        keyboard::Modifiers::empty(),
-    );
-    draw_window(&app);
-    assert_eq!(crate::ui::jump::ring_drawn(app.main_window).unwrap().0, 1);
-}
-
-/// The pointer pressed anywhere puts the keyboard's ring away.
-#[test]
-fn a_press_of_the_pointer_puts_the_ring_away() {
-    let mut app = reader_app();
-    app.ring = Some(0);
-    let mut sim = sim_of(&app);
-    sim.point_at(Point::new(WINDOW.width / 2.0, WINDOW.height / 2.0));
-    let _ = sim.simulate(iced_test::simulator::click());
-    assert!(
-        sent_by(sim)
-            .iter()
-            .any(|m| matches!(m, Message::Window(WindowMsg::RingEnd)))
-    );
-    let _ = app.update(Message::Window(WindowMsg::RingEnd));
-    assert_eq!(app.ring, None);
-}
-
 /// Each window keeps its own codes: another window drawn after it, without
 /// codes or with its own, neither puts them away nor gives this one its.
 #[test]
@@ -13697,6 +14008,11 @@ fn a_dialog_takes_the_codes_from_what_is_under_it() {
 #[test]
 fn f6_moves_the_keys_between_the_regions() {
     let mut app = reader_app();
+    // A tree with a row to rest on: an empty one is passed over.
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: vec![],
+        files: vec!["main.py".into()],
+    };
     app.show_left_sidebar = true;
     app.sidebar = crate::SidebarTab::Files;
     app.code_focused = true;

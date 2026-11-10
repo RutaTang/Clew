@@ -27,12 +27,14 @@ mod anchored;
 mod baseline;
 mod corner_safe;
 mod escape_clears;
+mod ring;
 mod tree_keys;
 pub(crate) use anchored::*;
 mod chrome;
 pub(crate) use chrome::*;
 mod ops;
 pub(crate) use ops::*;
+pub(crate) use ring::RingAsk;
 mod dialogs;
 pub(crate) use dialogs::*;
 mod fakerun;
@@ -633,10 +635,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // A slim "update available" / download-progress banner sits between the
     // toolbar and the content, reading as an extension of the toolbar chrome.
     let banner = update_banner(app).unwrap_or_else(slot);
-    let base = container(column![toolbar(app), banner, main, statusbar(app)])
+    // The title bar's controls are the keyboard ring's last stops.
+    let bar = jump::scope(toolbar(app), ring::ScopeTag::Chrome);
+    let base = container(column![bar, banner, main, statusbar(app)])
         .width(Fill)
         .height(Fill)
         .style(theme::chrome);
+    let base = jump::scope(base, ring::ScopeTag::Layer(heard::Layer::Window));
 
     // The floating Ask window (or its launcher) over the window; over it,
     // the overlay layer (at most one overlay), so the palette or a menu
@@ -645,18 +650,22 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // Each layer said as it is built, for what voice may press
     // (`heard::gather`): a dialog holding the keys leaves nothing under it.
     heard::layer(heard::Layer::Ask);
-    let ask = ask_layer(app);
+    let ask = jump::scope(ask_layer(app), ring::ScopeTag::Layer(heard::Layer::Ask));
     let overlay = active_overlay(app).map_or_else(slot, |o| {
-        heard::layer(if o.holds_keys() {
+        let layer = if o.holds_keys() {
             heard::Layer::Overlay
         } else {
             heard::Layer::Window
-        });
-        o.view(app)
+        };
+        heard::layer(layer);
+        jump::scope(o.view(app), ring::ScopeTag::Layer(layer))
     });
     heard::layer(heard::Layer::Tutorial);
     let tutorial = if app.tutorial.is_some() {
-        tutorial_overlay(app)
+        jump::scope(
+            tutorial_overlay(app),
+            ring::ScopeTag::Layer(heard::Layer::Tutorial),
+        )
     } else {
         slot()
     };
@@ -680,14 +689,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
     );
     let up = match (&app.jump, app.ring) {
         (Some(typed), _) => Some(jump::Up::Codes(typed)),
-        (None, Some(at)) => Some(jump::Up::Ring(at)),
+        (None, Some(ask)) => Some(jump::Up::Ring(ask)),
         (None, None) => None,
     };
+    // The tutorial, a shortcut being typed, jump mode's codes: their keys
+    // are their own, Tab too.
+    let tab = app.tutorial.is_none() && app.rebinding.is_none() && app.jump.is_none();
     jump::root(
         window,
         up,
         app.ask_view == crate::AskView::Expanded,
         app.main_window,
+        tab,
     )
 }
 

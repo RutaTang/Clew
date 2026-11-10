@@ -952,13 +952,19 @@ fn rust_block<'a>(
     let choices = &app.proj.lang_choices;
     let rust = choices.rust.clone().unwrap_or_default();
     let check = |label: &'static str, on: bool, set: fn(&mut clew_protocol::RustChoices, bool)| {
-        iced::widget::checkbox(on)
-            .style(theme::check)
-            .label(label)
-            .on_toggle(move |on| choose_with(choices, |c| set(c.rust.get_or_insert_default(), on)))
-            .text_size(ts::BASE)
-            .size(15)
-            .spacing(8)
+        let press = choose_with(choices, |c| set(c.rust.get_or_insert_default(), !on));
+        super::jump::mark(
+            iced::widget::checkbox(on)
+                .style(theme::check)
+                .label(label)
+                .on_toggle(move |on| {
+                    choose_with(choices, |c| set(c.rust.get_or_insert_default(), on))
+                })
+                .text_size(ts::BASE)
+                .size(15)
+                .spacing(8),
+            press,
+        )
     };
     let mut features = column![check(
         tr!("All features of all packages"),
@@ -1445,10 +1451,12 @@ fn servers_block(app: &App) -> Element<'_, Message> {
     rows.push(form::field(
         tr!("programming language\u{4}Language"),
         None,
-        form::pick(languages, drafts.server_language.clone(), |l: String| {
-            Message::Languages(L::ServerLanguage(l))
-        })
-        .placeholder(tr!("Choose…")),
+        form::pick_with(
+            languages,
+            drafts.server_language.clone(),
+            |l: String| Message::Languages(L::ServerLanguage(l)),
+            Some(tr!("Choose…").to_string()),
+        ),
     ));
     let mut program = row![draft_field(
         app,
@@ -1727,13 +1735,17 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     let mut agents = Vec::new();
     for agent in &draft.acp {
         let name = agent.name.clone();
-        let share = iced::widget::checkbox(agent.share_mcp)
-            .style(theme::check)
-            .label(tr!("Share my MCP servers"))
-            .on_toggle(move |on| Message::Integrations(M::AcpShareMcp(name.clone(), on)))
-            .text_size(ts::BODY)
-            .size(15)
-            .spacing(6);
+        let flip = Message::Integrations(M::AcpShareMcp(name.clone(), !agent.share_mcp));
+        let share = super::jump::mark(
+            iced::widget::checkbox(agent.share_mcp)
+                .style(theme::check)
+                .label(tr!("Share my MCP servers"))
+                .on_toggle(move |on| Message::Integrations(M::AcpShareMcp(name.clone(), on)))
+                .text_size(ts::BODY)
+                .size(15)
+                .spacing(6),
+            flip,
+        );
         super::heard::about_with(
             || crate::app::integrations::acp_label(agent),
             || {
@@ -2300,7 +2312,7 @@ pub(crate) fn connect_picker<'a>(
     // Per-host consent for AI keys. Off: keys stay on this machine and AI
     // calls run locally. On: this host's clew-server receives the keys and
     // runs Ask/Explain remotely.
-    col = col.push(
+    col = col.push(super::jump::mark(
         iced::widget::checkbox(ui.send_ai_keys)
             .style(theme::check)
             .label(tr!("Send my API keys to this host"))
@@ -2313,7 +2325,8 @@ pub(crate) fn connect_picker<'a>(
             .size(14)
             .text_size(ts::BODY)
             .spacing(8),
-    );
+        Message::Connect(ConnectMsg::ToggleAiKeys(!ui.send_ai_keys)),
+    ));
     let said: Element<'a, Message> = match error {
         Some(why) => text(crate::i18n::quoted(why).into_owned())
             .size(ts::BODY)

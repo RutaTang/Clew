@@ -123,9 +123,11 @@ pub(crate) fn setup_sheet<'a>(
             super::heard::switch(label, on, toggle);
         }
         column![
+            // A tick is pressed by its jump code and the keyboard's ring as
+            // by a click.
             match toggle {
-                Some(toggle) => tick.on_toggle(toggle),
-                None => tick,
+                Some(toggle) => super::jump::mark(tick.on_toggle(toggle), toggle(!on)),
+                None => tick.into(),
             },
             container(row![
                 // The room the line keeps, whatever it says for now: a pixel
