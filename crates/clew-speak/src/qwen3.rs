@@ -479,9 +479,12 @@ impl Decoder {
     }
 
     /// The chunks made since asked last, in order; all that are still to
-    /// come too if `all`.
+    /// come too if `all`. A chunk that failed fails the lot, but only once
+    /// every chunk that has come back is taken off the queue, so none of
+    /// this sentence's audio is left to be played with the next one's.
     fn made(&mut self, all: bool) -> Result<Vec<Vec<f32>>, String> {
         let mut made = Vec::new();
+        let mut error = None;
         while self.waiting > 0 {
             let next = if all {
                 self.done
@@ -497,9 +500,17 @@ impl Decoder {
                 }
             };
             self.waiting -= 1;
-            made.push(next?);
+            match next {
+                Ok(audio) => made.push(audio),
+                Err(e) => {
+                    error.get_or_insert(e);
+                }
+            }
         }
-        Ok(made)
+        match error {
+            Some(e) => Err(e),
+            None => Ok(made),
+        }
     }
 }
 
@@ -689,6 +700,34 @@ impl Qwen3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chunk that failed doesn't leave the chunks after it queued: the
+    /// next sentence's first ask finds nothing of this one.
+    #[test]
+    fn a_failed_chunk_leaves_nothing_behind() {
+        let (back, done) = mpsc::channel();
+        let mut decoder = Decoder {
+            jobs: None,
+            done,
+            waiting: 3,
+            worker: None,
+        };
+        back.send(Ok(vec![0.1])).unwrap();
+        back.send(Err("bad chunk".to_string())).unwrap();
+        back.send(Ok(vec![0.3])).unwrap();
+        assert_eq!(decoder.made(false), Err("bad chunk".to_string()));
+        assert_eq!(decoder.waiting, 0);
+        back.send(Ok(vec![0.4])).unwrap();
+        decoder.waiting = 1;
+        assert_eq!(decoder.made(true), Ok(vec![vec![0.4]]));
+        // Waiting for all of them gives the same.
+        decoder.waiting = 2;
+        back.send(Err("bad".to_string())).unwrap();
+        back.send(Ok(vec![0.6])).unwrap();
+        assert_eq!(decoder.made(true), Err("bad".to_string()));
+        assert_eq!(decoder.waiting, 0);
+        assert!(decoder.done.try_recv().is_err());
+    }
 
     /// Each language it speaks is told it by its own code; one it does not
     /// is left to the model to hear; a region is no other language.

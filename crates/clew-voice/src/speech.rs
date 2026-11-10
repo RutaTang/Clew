@@ -370,9 +370,14 @@ pub fn remove(store: &Store, model: &VoiceModel) -> io::Result<()> {
     }
 }
 
+/// The voices an earlier Clew offered and this one does not: their folders
+/// are removed. Only these — a folder of `speech/` this build has never
+/// heard of may be a newer Clew's, sharing the data folder (side by side,
+/// or after a downgrade), and is left as it is.
+const RETIRED: &[&str] = &["kokoro-zh"];
+
 /// Remove what a voice Clew no longer offers left in `store` — a folder of
-/// its `speech/` that no model of [`VOICE_MODELS`] is kept in — and say how
-/// many went. A model being downloaded is one Clew offers: its folder stays.
+/// its `speech/` named in [`RETIRED`] — and say how many went.
 pub fn remove_retired(store: &Store) -> usize {
     let Ok(entries) = fs::read_dir(store.dir().join("speech")) else {
         return 0;
@@ -382,7 +387,7 @@ pub fn remove_retired(store: &Store) -> usize {
         let name = entry.file_name();
         let retired = name
             .to_str()
-            .is_some_and(|name| !name.starts_with('.') && find(name).is_none());
+            .is_some_and(|name| RETIRED.contains(&name) && find(name).is_none());
         let folder = entry.file_type().is_ok_and(|t| t.is_dir());
         if retired && folder && fs::remove_dir_all(entry.path()).is_ok() {
             removed += 1;
@@ -454,7 +459,8 @@ mod tests {
     }
 
     /// A voice Clew no longer offers is removed, files and all; the ones
-    /// it offers, and anything not a folder, are left.
+    /// it offers, one it has never heard of (a newer Clew's), and anything
+    /// not a folder, are left.
     #[test]
     fn a_retired_voice_is_removed() {
         let dir = std::env::temp_dir().join(format!("clew-voice-retired-{}", std::process::id()));
@@ -468,12 +474,26 @@ mod tests {
         fs::create_dir_all(speech.join("kokoro-zh").join("dict")).unwrap();
         fs::write(speech.join("kokoro-zh").join("voices.bin"), b"x").unwrap();
         fs::write(speech.join("notes.txt"), b"x").unwrap();
+        fs::create_dir_all(speech.join("qwen4-tts")).unwrap();
+        fs::write(speech.join("qwen4-tts").join("model.onnx"), b"x").unwrap();
         assert_eq!(remove_retired(&store), 1);
+        assert!(
+            speech.join("qwen4-tts").join("model.onnx").is_file(),
+            "a newer Clew's voice is left"
+        );
         assert!(!speech.join("kokoro-zh").exists());
         assert!(speech.join(VOICE_MODELS[0].id).is_dir());
         assert!(speech.join(VOICE_MODELS[1].id).is_dir());
         assert!(speech.join("notes.txt").is_file());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// What is retired is not offered: a retired id never names a model.
+    #[test]
+    fn a_retired_voice_is_not_offered() {
+        for id in RETIRED {
+            assert!(find(id).is_none(), "{id}");
+        }
     }
 
     /// A model is installed once every file is here; removing it removes
