@@ -1480,9 +1480,19 @@ fn notes_beside_code<'a>(
         let mut notes: Vec<(f32, f32, Element<'_, Message>)> = Vec::new();
         if matches!(active, Some(Node::File(_))) {
             let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
+            // As tall as what it says, up to the margin's foot, as a
+            // function's card is: it was four lines, the fifth cut through
+            // its letters, over half a margin left empty.
+            let summary = app
+                .proj
+                .explain
+                .cache
+                .get(&Node::File(v.abs.clone()))
+                .map(|c| crate::app::shown_summary(c));
+            let h = summary_note_h(summary.as_deref(), size.width, size.height - foot);
             notes.push((
                 0.0,
-                ACTIVE_NOTE_H,
+                h,
                 active_note(app, name, tr!("file").into(), NoteOf::File),
             ));
         }
@@ -1529,11 +1539,13 @@ fn notes_beside_code<'a>(
             if !replaced && (y + h < 0.0 || y - lift > size.height) {
                 continue;
             }
-            let meta = tr!(
-                "{kind}, line {line}",
-                kind = short_kind(&sym.kind),
-                line = sym.line
-            );
+            // "function, line 15": the kind in words, not "fn".
+            let kind = if sym.kind == "method" {
+                tr!("method")
+            } else {
+                tr!("function")
+            };
+            let meta = tr!("{kind}, line {line}", kind = kind, line = sym.line);
             let note = if is_active {
                 active_note(
                     app,
