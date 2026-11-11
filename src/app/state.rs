@@ -1416,6 +1416,9 @@ pub struct App {
     /// Off, the status bar says the explanations are out of date, and
     /// refreshing them asks first, with what it would cost.
     pub keep_explanations_fresh: bool,
+    /// Whether Ask's "Try asking" questions are written by the model for
+    /// where the reader is (one small call a place), or templates.
+    pub suggest_questions: bool,
     /// The LLM settings modal: whether it's open and its draft fields (see
     /// [`SettingsDraft`]).
     pub settings: SettingsDraft,

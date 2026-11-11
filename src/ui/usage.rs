@@ -74,8 +74,8 @@ pub(crate) fn usage_page(app: &App) -> Element<'_, Message> {
     }
     groups.push(prices_group(app, &app.usage.model));
     // What spends without a press each time: said, and the reader's to
-    // turn off. A file changed on disk explained itself again, a few calls
-    // at a time, with nothing anywhere saying so.
+    // turn off. A file changed on disk explained itself again, and opening
+    // Ask wrote its questions, with nothing anywhere saying so.
     groups.push(form::group(
         tr!("Automatic AI calls"),
         None,
@@ -88,6 +88,14 @@ pub(crate) fn usage_page(app: &App) -> Element<'_, Message> {
             ),
             app.keep_explanations_fresh,
             |on| Message::Usage(UsageMsg::KeepFresh(on)),
+        ), form::toggle(
+            tr!("Suggest questions in Ask"),
+            Some(
+                tr!("When Ask opens, Clew writes a few questions about the code you're on: one small AI call for each new place. When off, Ask offers general questions.")
+                    .to_string(),
+            ),
+            app.suggest_questions,
+            |on| Message::Usage(UsageMsg::SuggestQuestions(on)),
         )],
     ));
     form::page(groups)

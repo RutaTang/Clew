@@ -11581,6 +11581,34 @@ fn ask_corner_edges() -> (f32, f32) {
 /// conversation in it, the code above and beside it taking its own clicks;
 /// Esc hides it to the pill, and put away the pill goes too; the large
 /// window's dimmed rest makes it a card again when clicked.
+/// A question to try names code as code (`total()` in the code font, not
+/// "How does total handle…" run into the prose), and a click still asks
+/// it, backticks and all, as the model wrote it.
+#[test]
+fn a_question_to_try_sets_its_names_as_code() {
+    let mut app = reader_app();
+    app.llm_available = false;
+    let q = "What does `total()` return?".to_string();
+    app.proj.suggestions = Some(crate::app::suggest::Suggestions {
+        key: app.suggest_key(),
+        pool: vec![q.clone()],
+    });
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    let mut sim = sim_of(&app);
+    let caption = text_at(&mut sim, |t| t == "Try asking", 0).expect("Try asking");
+    assert!(!shows(&mut sim, "`"), "a backtick is shown to the reader");
+    let at = Point::new(caption.x + 24.0, caption.y + caption.height + 14.0);
+    let mut sim = sim_of(&app);
+    sim.point_at(at);
+    let _ = sim.simulate(iced_test::simulator::click());
+    let sent = sent_by(sim);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Suggested(s)) if *s == q)),
+        "the question is not asked: {sent:?}"
+    );
+}
+
 #[test]
 fn the_floating_ask_is_driven_from_the_screen() {
     let mut app = reader_app();

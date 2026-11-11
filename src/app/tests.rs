@@ -35244,10 +35244,12 @@ fn a_stopped_answer_says_where_it_stopped() {
 }
 
 /// "Try asking" offers the model's questions, written for where the reader
-/// is, once they come — asked for as the empty card opens, and afresh for
-/// each new session, which draws another few of them at once. Without a key
-/// nothing is asked, and the templates are offered; questions written for
-/// another file are not offered on this one.
+/// is, once they come — asked for as the empty card opens, once a place: a
+/// new session draws another few of them, and asks nothing. While they are
+/// written nothing is offered that they would replace under the pointer.
+/// Without a key, or with the setting off, nothing is asked and the
+/// templates are offered; questions written for another file are not
+/// offered on this one.
 #[test]
 fn try_asking_offers_questions_written_for_here() {
     let mut app = scanned_app("ask-suggest");
@@ -35272,6 +35274,12 @@ fn try_asking_offers_questions_written_for_here() {
     let _ = app.update(Message::Ask(AskMsg::Open));
     let key = app.proj.suggest_asked.clone().expect("questions asked for");
     assert_eq!(key.file.as_deref(), Some("src/lib.rs"));
+    assert!(app.suggestions_coming());
+    assert!(
+        app.suggested_questions().is_empty(),
+        "templates offered, to be swapped under the pointer: {:?}",
+        app.suggested_questions()
+    );
     let written: String = (1..=8)
         .map(|i| format!("{i}. Question {i} about lib.rs?\n"))
         .collect();
@@ -35284,9 +35292,12 @@ fn try_asking_offers_questions_written_for_here() {
     let first = app.suggested_questions();
     assert_eq!(first.len(), 4);
     assert!(first.iter().all(|q| q.starts_with("Question")), "{first:?}");
-    // A new session: another draw at once, and asked afresh.
+    // A new session: another draw at once, and nothing asked.
     let _ = app.update(Message::Ask(AskMsg::NewSession));
-    assert!(app.proj.suggest_asked.is_some(), "asked afresh");
+    assert!(
+        app.proj.suggest_asked.is_none(),
+        "asked again for the same place"
+    );
     let second = app.suggested_questions();
     assert_ne!(first, second, "the same few again");
     // On another file, they are not this one's.
@@ -35295,6 +35306,21 @@ fn try_asking_offers_questions_written_for_here() {
         !app.suggested_questions()
             .iter()
             .any(|q| q.starts_with("Question")),
+        "{:?}",
+        app.suggested_questions()
+    );
+    // Switched off (Settings → Usage and cost): nothing asked, templates.
+    let _ = app.update(Message::Usage(UsageMsg::SuggestQuestions(false)));
+    let _ = app.update(Message::Ask(AskMsg::Close));
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    assert!(
+        app.proj.suggest_asked.is_none(),
+        "asked with the setting off"
+    );
+    assert!(
+        app.suggested_questions()
+            .iter()
+            .any(|q| q.contains("entry point")),
         "{:?}",
         app.suggested_questions()
     );

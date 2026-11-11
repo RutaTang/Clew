@@ -1685,6 +1685,11 @@ impl App {
             qs.truncate(crate::app::suggest::SHOWN);
             return qs;
         }
+        // While they are being written, nothing that would be swapped for
+        // them under the pointer.
+        if self.suggestions_coming() {
+            return qs;
+        }
         // Else the few that fit any project, and where the reader is.
         match self.cursor_target() {
             Some(explain::Node::Function { name, .. }) => {

@@ -842,6 +842,15 @@ impl App {
                 Task::none()
             }
             UsageMsg::PriceSaved(Ok(())) => Task::none(),
+            UsageMsg::SuggestQuestions(on) => {
+                self.suggest_questions = on;
+                self.keep_view_pref(crate::app::runtime::SUGGEST_QUESTIONS, on);
+                if !on {
+                    // Off, what was asked is not waited for.
+                    self.proj.suggest_asked = None;
+                }
+                Task::none()
+            }
             UsageMsg::KeepFresh(on) => {
                 self.keep_explanations_fresh = on;
                 self.keep_view_pref(crate::app::runtime::KEEP_EXPLANATIONS_FRESH, on);

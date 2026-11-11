@@ -144,6 +144,7 @@ impl App {
             show_inline_blame: view_pref(VIEW_BLAME, false),
             show_indent_guides: view_pref(VIEW_INDENT_GUIDES, false),
             keep_explanations_fresh: view_pref(KEEP_EXPLANATIONS_FRESH, true),
+            suggest_questions: view_pref(SUGGEST_QUESTIONS, true),
             settings: SettingsDraft::default(),
             ask_agent: crate::app::integrations::stored_ask_agent(),
             overlay_open: false,
@@ -974,6 +975,8 @@ pub(crate) const VIEW_BLAME: &str = "view_inline_blame";
 pub(crate) const VIEW_INDENT_GUIDES: &str = "view_indent_guides";
 /// Whether explanations are refreshed by themselves as code changes.
 pub(crate) const KEEP_EXPLANATIONS_FRESH: &str = "keep_explanations_fresh";
+/// [`App::suggest_questions`], kept between launches.
+pub(crate) const SUGGEST_QUESTIONS: &str = "suggest_questions";
 
 /// A View-menu choice as saved, or `default` when it never was (or the
 /// config cannot be read).

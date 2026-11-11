@@ -2161,6 +2161,8 @@ pub enum UsageMsg {
     PriceSaved(Result<(), String>),
     /// Whether explanations are refreshed by themselves as code changes.
     KeepFresh(bool),
+    /// Whether Ask's questions to try are written by the model.
+    SuggestQuestions(bool),
 }
 
 /// Auto-update: checking, downloading and installing a release.
@@ -3195,7 +3197,8 @@ impl UsageMsg {
             | UsageMsg::Price(..)
             | UsageMsg::ResetPrice
             | UsageMsg::PriceSaved(..)
-            | UsageMsg::KeepFresh(..) => None,
+            | UsageMsg::KeepFresh(..)
+            | UsageMsg::SuggestQuestions(..) => None,
         }
     }
 }

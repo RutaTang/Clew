@@ -808,7 +808,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         }
         // Context-aware starter questions — click one to ask it.
         let suggestions = app.suggested_questions();
-        if !suggestions.is_empty() && !app.voice.is_listening() {
+        let coming = app.suggestions_coming();
+        if (!suggestions.is_empty() || coming) && !app.voice.is_listening() {
             convo.push(
                 text(tr!("Try asking"))
                     .size(ts::CAPTION)
@@ -818,21 +819,27 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             let chips: Vec<Element<'_, Message>> = suggestions
                 .into_iter()
                 .map(|q| {
-                    button(
-                        text(strip_backticks(&q))
-                            .size(ts::SMALL)
-                            .color(theme::accent()),
-                    )
-                    .style(theme::list_row(false))
-                    .padding([3, 8])
-                    .on_press(super::heard::said_with(
-                        || strip_backticks(&q),
-                        Message::Ask(AskMsg::Suggested(q.clone())),
-                    ))
-                    .into()
+                    button(question_text(&q))
+                        .style(theme::list_row(false))
+                        .padding([3, 8])
+                        .on_press(super::heard::said_with(
+                            || strip_backticks(&q),
+                            Message::Ask(AskMsg::Suggested(q.clone())),
+                        ))
+                        .into()
                 })
                 .collect();
-            convo.push(Row::with_children(chips).spacing(4).wrap().into());
+            if !chips.is_empty() {
+                convo.push(Row::with_children(chips).spacing(4).wrap().into());
+            }
+            if coming {
+                convo.push(
+                    text(tr!("Writing questions about this code…"))
+                        .size(ts::SMALL)
+                        .color(theme::dim())
+                        .into(),
+                );
+            }
         }
     }
     // The question's bubble grows to the design's 82% of the column it is
@@ -2791,4 +2798,31 @@ fn push_var_rows<'a>(
             }
         }
     }
+}
+
+/// A question to try, as the reader reads it: names from the code (written
+/// in backticks) set in the code font, the rest as prose.
+fn question_text<'a>(q: &str) -> Element<'a, Message> {
+    if q.matches('`').count() % 2 == 1 {
+        // A backtick with no pair: nothing to set apart.
+        return text(strip_backticks(q))
+            .size(ts::SMALL)
+            .color(theme::accent())
+            .into();
+    }
+    let spans: Vec<iced::widget::text::Span<'a, Message>> = q
+        .split('`')
+        .enumerate()
+        .filter(|(_, piece)| !piece.is_empty())
+        .map(|(i, piece)| {
+            let span = iced::widget::span(piece.to_string()).color(theme::accent());
+            // Odd pieces sat between a pair of backticks.
+            if i % 2 == 1 {
+                span.font(crate::fonts::CODE)
+            } else {
+                span
+            }
+        })
+        .collect();
+    iced::widget::rich_text(spans).size(ts::SMALL).into()
 }
