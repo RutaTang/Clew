@@ -479,7 +479,9 @@ pub(crate) fn segmented_across<'a>(
 pub(crate) fn segmented<'a>(
     segments: impl IntoIterator<Item = (String, bool, Message)>,
 ) -> Element<'a, Message> {
-    const PAD_X: f32 = 14.0;
+    // The least room each label keeps a side: at [`PICK_W`] the parts are
+    // wider and the labels sit centred with more.
+    const PAD_X: f32 = 8.0;
     const GAP: f32 = 2.0;
     let segments: Vec<(String, bool, Message)> = segments.into_iter().collect();
     let n = segments.len().max(1) as f32;

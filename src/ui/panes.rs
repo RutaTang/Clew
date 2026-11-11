@@ -1946,24 +1946,40 @@ fn active_note<'a>(
     // A function's calls: a file's card had the way in too, to a margin
     // tab that follows the function the caret is in and said only "Move
     // the cursor into a function" — on a README as on a module.
+    // A count and a date read as facts, not controls: their tips say
+    // where each leads.
+    let tipped = |control, tip: &str| {
+        super::toolbar::tip_at(control, tip.to_string(), None, tooltip::Position::Top)
+    };
     if matches!(of, NoteOf::Function { .. }) {
-        actions = actions.push(action(
-            Glyph::Network,
-            calls_label,
-            false,
-            Some(calls_room),
-            true,
-            Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Calls)),
+        actions = actions.push(tipped(
+            action(
+                Glyph::Network,
+                calls_label,
+                false,
+                Some(calls_room),
+                true,
+                Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Calls)),
+            ),
+            tr!("Who calls it, and what it calls"),
         ));
     }
+    let history_tip = match changed {
+        Some(Some(_)) => tr!("When it last changed. Click for this file's commits"),
+        Some(None) => tr!("Changed since the last commit. Click for this file's commits"),
+        None => tr!("This file's commits"),
+    };
     let actions = actions
-        .push(action(
-            Glyph::Clock,
-            history_label,
-            false,
-            Some(history_room),
-            !date_coming,
-            Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::History)),
+        .push(tipped(
+            action(
+                Glyph::Clock,
+                history_label,
+                false,
+                Some(history_room),
+                !date_coming,
+                Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::History)),
+            ),
+            history_tip,
         ))
         .push(action(
             Glyph::Message,

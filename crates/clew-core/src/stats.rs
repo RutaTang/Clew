@@ -83,6 +83,11 @@ fn compute_files_capped(root: &Path, files: &[FileEntry], max_bytes: u64) -> Sta
                     let Some(lang) = language_of(&file.abs) else {
                         continue;
                     };
+                    // Prose is no code: a README's paragraphs were counted
+                    // as one more code file's comments.
+                    if lang.is_some_and(is_prose) {
+                        continue;
+                    }
                     let Some(bytes) =
                         crate::fs_scan::read_confined_bytes_capped(root, &file.abs, max_bytes)
                     else {
@@ -169,6 +174,19 @@ fn compute_files_capped(root: &Path, files: &[FileEntry], max_bytes: u64) -> Sta
 /// by path, following symlinks, blocking on a FIFO, reading an unbounded first
 /// line — so it is handed a path that cannot be opened (same name, nonexistent
 /// directory) and the shebang is read from the capped bytes instead.
+/// Whether `lang` is written prose or its markup (a README, notes, a
+/// manual), not code: left out of the counts.
+fn is_prose(lang: LanguageType) -> bool {
+    matches!(
+        lang,
+        LanguageType::Markdown
+            | LanguageType::Text
+            | LanguageType::ReStructuredText
+            | LanguageType::AsciiDoc
+            | LanguageType::Org
+    )
+}
+
 fn language_of(path: &Path) -> Option<Option<LanguageType>> {
     let name = path.file_name()?;
     let probe = Path::new("/nonexistent-clew-stats-probe").join(name);
@@ -242,6 +260,22 @@ mod tests {
         assert!(report.top_files[0].lines >= report.top_files[1].lines);
         assert!(!Path::new(&report.top_files[0].rel).is_absolute());
         assert_eq!(report.skipped, 0);
+    }
+
+    /// Prose — a README, notes — is not counted as code: README.md was one
+    /// more "code file" with 0 code lines and its paragraphs as comments.
+    #[test]
+    fn prose_is_not_counted_as_code() {
+        let dir = TempDir::new("stats-prose");
+        std::fs::write(dir.join("README.md"), "# Teashop\n\nSells tea.\n").unwrap();
+        std::fs::write(dir.join("NOTES.txt"), "remember the milk\n").unwrap();
+        std::fs::write(dir.join("guide.rst"), "Guide\n=====\n").unwrap();
+        std::fs::write(dir.join("app.py"), "print('hi')\n").unwrap();
+        let report = compute(&dir);
+        assert_eq!(report.totals.files, 1, "{:?}", report.langs);
+        assert_eq!(report.langs.len(), 1);
+        assert_eq!(report.langs[0].name, "Python");
+        assert_eq!(report.totals.comments, 0);
     }
 
     /// A file past the cap is never read whole — it is skipped and counted,

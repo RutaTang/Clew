@@ -1361,6 +1361,12 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let mut last_rel: Option<&str> = None;
+    // What a preview has beside its line number, inside the view's and the
+    // row's padding and clear of the scrollbar: a longer line is cut there
+    // with an ellipsis, not clipped mid-letter at the panel's edge.
+    let preview_room =
+        (app.sidebar_width - 2.0 * 8.0 - (8.0 + 6.0) - (36.0 + 4.0) - crate::ui::SCROLLBAR_W - 2.0)
+            .max(0.0);
     for (i, hit) in app.proj.search.hits.iter().enumerate() {
         if last_rel != Some(hit.rel.as_str()) {
             last_rel = Some(hit.rel.as_str());
@@ -1373,7 +1379,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                         .size(ts::SMALL)
                         .color(theme::dim())
                         .width(36),
-                    search_preview(app, i, &hit.preview),
+                    search_preview(app, i, &hit.preview, preview_room),
                 ]
                 .spacing(4),
             )
@@ -1438,7 +1444,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
 /// (`SearchState::styled`), what the search matched — or the symbol a
 /// reference list is of — marked as the code view marks a find. It was
 /// plain text, and the reader had to look for the match along the line.
-fn search_preview<'a>(app: &'a App, i: usize, preview: &'a str) -> Element<'a, Message> {
+fn search_preview<'a>(app: &'a App, i: usize, preview: &'a str, room: f32) -> Element<'a, Message> {
     // As the code view draws the line, wherever the preview came from — the
     // server's search, a reference read from disk or from an open pane: a
     // direction control in it reordered it here.
@@ -1475,7 +1481,7 @@ fn search_preview<'a>(app: &'a App, i: usize, preview: &'a str) -> Element<'a, M
             .map(|m| m.ranges_in_preview(&shown))
             .unwrap_or_default(),
     };
-    let pieces = mark_spans(spans, &marks);
+    let pieces = fit_pieces(mark_spans(spans, &marks), &shown, room);
     let mark = theme::with_alpha(theme::find(), 0.35);
     let spans: Vec<iced::widget::text::Span<'static, Message>> = pieces
         .into_iter()
@@ -1497,6 +1503,38 @@ fn search_preview<'a>(app: &'a App, i: usize, preview: &'a str) -> Element<'a, M
     iced::widget::rich_text(spans)
         .wrapping(Wrapping::None)
         .into()
+}
+
+/// `pieces` of `shown` as they fit in `room`: whole, or as many of their
+/// characters as `steady::cut` keeps, an ellipsis after them — each piece
+/// keeping its colour and its mark.
+pub(crate) fn fit_pieces(
+    pieces: Vec<(String, Option<u8>, bool)>,
+    shown: &str,
+    room: f32,
+) -> Vec<(String, Option<u8>, bool)> {
+    let font = crate::fonts::UI;
+    if super::steady::width_of(shown, ts::BODY, font) <= room {
+        return pieces;
+    }
+    let cut = super::steady::cut(shown, room, ts::BODY, font);
+    let mut keep = cut.chars().count().saturating_sub(1);
+    let mut out = Vec::new();
+    for (piece, style, marked) in pieces {
+        if keep == 0 {
+            break;
+        }
+        let n = piece.chars().count();
+        if n <= keep {
+            keep -= n;
+            out.push((piece, style, marked));
+        } else {
+            out.push((piece.chars().take(keep).collect(), style, marked));
+            keep = 0;
+        }
+    }
+    out.push(("…".to_string(), None, false));
+    out
 }
 
 /// `spans` cut where `marks` (byte ranges of their joined text) begin and

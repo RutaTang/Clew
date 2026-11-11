@@ -16286,14 +16286,16 @@ fn a_forms_switch_is_as_wide_as_its_pickers() {
         centre(&mut sim, "Light"),
         centre(&mut sim, "Dark"),
     );
-    // Equal parts: their centres evenly apart, a third of the picker's width.
-    let step = super::form::PICK_W / 3.0;
+    // Equal parts of exactly the picker's width (less the trough's 2 a
+    // side and the 2 between parts): their centres a part and a gap apart.
+    // At 8 more it started 8 px left of the pickers.
+    let step = (super::form::PICK_W - 4.0 - 2.0 * 2.0) / 3.0 + 2.0;
     assert!(
-        ((light - system) - step).abs() < 3.0,
+        ((light - system) - step).abs() < 1.0,
         "{system} {light} {dark}"
     );
     assert!(
-        ((dark - light) - step).abs() < 3.0,
+        ((dark - light) - step).abs() < 1.0,
         "{system} {light} {dark}"
     );
 }
@@ -16563,4 +16565,40 @@ fn an_untracked_files_diff_is_every_line_added() {
         .filter(|l| l.kind == crate::git::DiffKind::Add)
         .count();
     assert_eq!(added, total);
+}
+
+/// A search result longer than its row is cut with an ellipsis, each piece
+/// keeping its colour and mark: it was clipped mid-letter at the panel's
+/// edge ("Discounts an order can earn. Each or").
+#[test]
+fn a_long_search_result_ends_in_an_ellipsis() {
+    crate::fonts::load();
+    let shown = "Discounts an order can earn. Each one is checked in turn";
+    let pieces = vec![
+        ("Discounts".to_string(), Some(1), true),
+        (
+            " an order can earn. Each one is checked in turn".to_string(),
+            None,
+            false,
+        ),
+    ];
+    let room = super::steady::width_of("Discounts an order", super::ts::BODY, crate::fonts::UI);
+    let fit = super::sidebar::fit_pieces(pieces.clone(), shown, room);
+    let joined: String = fit.iter().map(|(p, ..)| p.as_str()).collect();
+    assert!(joined.ends_with('…'), "{joined}");
+    assert!(joined.starts_with("Discounts an"), "{joined}");
+    assert!(
+        super::steady::width_of(&joined, super::ts::BODY, crate::fonts::UI) <= room + 0.5,
+        "{joined}"
+    );
+    assert_eq!(
+        fit[0],
+        ("Discounts".to_string(), Some(1), true),
+        "mark kept"
+    );
+    // What fits is left whole, with no ellipsis.
+    assert_eq!(
+        super::sidebar::fit_pieces(pieces.clone(), shown, 10_000.0),
+        pieces
+    );
 }
