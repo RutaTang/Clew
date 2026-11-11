@@ -467,6 +467,16 @@ impl App {
     }
 }
 
+/// The file at `rel` — a project path written with '/', as the tree
+/// writes it — under `root`, joined part by part: on Windows `root.join`
+/// kept the slashes ("C:\\proj\\src/app/main.rs"), which Explorer's
+/// `/select` does not read.
+pub(crate) fn rel_abs(root: &std::path::Path, rel: &str) -> std::path::PathBuf {
+    rel.split('/')
+        .filter(|part| !part.is_empty())
+        .fold(root.to_path_buf(), |path, part| path.join(part))
+}
+
 /// `path` as people write it: without Windows' `\\?\` long-path prefix,
 /// which a canonical path carries and Explorer does not read.
 pub(crate) fn plain_path(path: &std::path::Path) -> String {
@@ -645,5 +655,42 @@ mod tests {
         // A batch that ran is passed through as it came.
         let fine = run_render_batch(vec![7], SvgBatch::default).await;
         assert!(fine.rendered.is_empty() && fine.failed.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::{plain_path, rel_abs};
+    use std::path::Path;
+
+    /// A canonical Windows path is shown as people write it; any other
+    /// path as it is.
+    #[test]
+    fn a_long_path_prefix_is_not_shown() {
+        assert_eq!(plain_path(Path::new(r"\\?\C:\proj\a.rs")), r"C:\proj\a.rs");
+        assert_eq!(
+            plain_path(Path::new(r"\\?\UNC\server\share\a.rs")),
+            r"\\server\share\a.rs"
+        );
+        assert_eq!(plain_path(Path::new("/home/ada/a.rs")), "/home/ada/a.rs");
+    }
+
+    /// A tree path is joined part by part under the root: no slash of its
+    /// own survives on Windows, and an empty part adds nothing.
+    #[test]
+    fn a_tree_path_is_joined_part_by_part() {
+        let root = Path::new("/proj");
+        assert_eq!(
+            rel_abs(root, "src/app/main.rs"),
+            root.join("src").join("app").join("main.rs")
+        );
+        assert_eq!(rel_abs(root, "README.md"), root.join("README.md"));
+        #[cfg(windows)]
+        assert_eq!(
+            rel_abs(Path::new(r"C:\proj"), "src/app/main.rs")
+                .display()
+                .to_string(),
+            r"C:\proj\src\app\main.rs"
+        );
     }
 }

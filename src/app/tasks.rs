@@ -2431,15 +2431,9 @@ pub(crate) fn plain_detail(raw: &str) -> String {
     };
     let lower = said.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
-    if has(&["connection refused"]) {
+    if has(REFUSED) {
         tr!("nothing answered at that address").to_string()
-    } else if has(&[
-        "dns error",
-        "failed to lookup address",
-        "name or service not known",
-        "nodename nor servname",
-        "no such host",
-    ]) {
+    } else if has(NO_SUCH_HOST) {
         tr!("no such address was found").to_string()
     } else if has(&["timed out", "deadline has elapsed"]) {
         tr!("no answer came in time").to_string()
@@ -2482,17 +2476,27 @@ impl ExplainFailure {
 /// provider could be made at all — what the base URL is to blame for.
 pub(crate) fn unreached(raw: &str) -> bool {
     let lower = raw.to_lowercase();
-    [
-        "connection refused",
-        "dns error",
-        "failed to lookup address",
-        "name or service not known",
-        "nodename nor servname",
-        "no such host",
-    ]
-    .iter()
-    .any(|w| lower.contains(w))
+    REFUSED
+        .iter()
+        .chain(NO_SUCH_HOST)
+        .any(|w| lower.contains(w))
 }
+
+/// How a refused connection is worded: by Linux and macOS ("Connection
+/// refused"), and by Windows ("… the target machine actively refused it"),
+/// which matched nothing, and was said in the OS's own words.
+const REFUSED: &[&str] = &["connection refused", "actively refused"];
+
+/// How an address that names no host is worded: by the resolver, by each
+/// OS, and by ureq ("host not found").
+const NO_SUCH_HOST: &[&str] = &[
+    "dns error",
+    "failed to lookup address",
+    "name or service not known",
+    "nodename nor servname",
+    "no such host",
+    "host not found",
+];
 
 /// What an AI call that failed with `raw` says to the reader, wherever it
 /// failed: no connection to the provider at all — nothing at the address,
@@ -4505,6 +4509,20 @@ mod pass_tests {
                 .describe()
                 .starts_with("the connection to the server was lost")
         );
+        // Every OS's way of saying it, and ureq's: on Windows a refused
+        // connection was said in the OS's own words, with no way to Settings.
+        for raw in [
+            "request failed: Connection refused (os error 111)",
+            "No connection could be made because the target machine actively refused it. (os error 10061)",
+            "dns error: failed to lookup address information: Name or service not known",
+            "host not found",
+        ] {
+            assert!(unreached(raw), "{raw}");
+            assert!(ai_reason(raw).contains("base URL"), "{raw}");
+        }
+        for raw in ["timed out reading response", "connection reset by peer"] {
+            assert!(!unreached(raw), "{raw}");
+        }
     }
 
     /// Once calls are answered, a few unanswered ones do not stop the

@@ -782,8 +782,15 @@ impl App {
 fn connection_failure(err: &crate::app::rpc::CallError, cfg: &llm::Config) -> String {
     use crate::app::tasks::{ExplainFailure, Rejection};
     match ExplainFailure::of_call(err, &cfg.model) {
-        ExplainFailure::Network(detail) | ExplainFailure::Unreached(detail) => tr!(
+        ExplainFailure::Unreached(detail) => tr!(
             "Couldn't reach {host} ({detail}). Check the base URL and your network.",
+            host = host_of(&cfg.base_url),
+            detail = detail
+        ),
+        // Reached, then lost or timed out while it answered: the address
+        // is right, so it is not the base URL to check.
+        ExplainFailure::Network(detail) => tr!(
+            "The connection to {host} was lost before it answered ({detail}). Try again in a moment.",
             host = host_of(&cfg.base_url),
             detail = detail
         ),
@@ -904,6 +911,13 @@ mod tests {
         assert!(said.contains("Couldn't reach 127.0.0.1:9"), "{said}");
         assert!(said.contains("nothing answered at that address"), "{said}");
         assert!(!said.contains("os error"), "{said}");
+        // Reached, then lost: not the base URL to check.
+        let lost = CallError::Llm(llm::LlmError::Transport(
+            "timed out reading response".into(),
+        ));
+        let said = connection_failure(&lost, &local);
+        assert!(said.contains("was lost before it answered"), "{said}");
+        assert!(!said.contains("base URL"), "{said}");
         let tls = CallError::Llm(llm::LlmError::Connect(
             "invalid peer certificate: UnknownIssuer".into(),
         ));

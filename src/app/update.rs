@@ -20,6 +20,7 @@ impl App {
         // arrives (see below).
         let left_focus = ui::active_overlay(self).and_then(|o| o.leaves_focus());
         let task = self.dispatch(message);
+        self.drop_stale_tree_menu();
         // What this window's own model calls spent since: counted where it
         // is shown (the server's are counted as their `Usage` comes).
         self.take_local_spent();
@@ -478,6 +479,27 @@ impl App {
                 self.overlay_open = open;
                 Task::none()
             }
+        }
+    }
+}
+
+impl App {
+    /// The file tree's menu, put away once what it was opened over is
+    /// gone — the Files view hidden or left — or another overlay has come
+    /// up over it: it stayed, came back when that one closed, and acted on
+    /// a row no longer shown.
+    fn drop_stale_tree_menu(&mut self) {
+        if self.proj.tree_menu.is_none() {
+            return;
+        }
+        let files_shown = self.show_left_sidebar && self.sidebar == crate::SidebarTab::Files;
+        let on_top = matches!(
+            ui::active_overlay(self),
+            Some(ui::ActiveOverlay::TreeMenu(_))
+        );
+        if !files_shown || !on_top {
+            self.proj.tree_menu = None;
+            self.proj.tree_menu_for = None;
         }
     }
 }

@@ -1323,7 +1323,14 @@ impl App {
                 ))
             }
             StreamOutcome::Failed(e) => {
-                let e = crate::app::tasks::ai_reason(e);
+                // An ACP agent brings its own model: Clew's base URL has
+                // nothing to do with its failure, so its words are said
+                // plainly, not "check the base URL in Settings".
+                let e = if self.proj.ask_turns[idx].extras.agent.is_some() {
+                    crate::app::tasks::plain_detail(e)
+                } else {
+                    crate::app::tasks::ai_reason(e)
+                };
                 self.status = tr!("Ask failed: {error}", error = e);
                 Some(format!("*{}*", tr!("Couldn't answer: {error}", error = e)))
             }
@@ -1833,8 +1840,26 @@ impl App {
                 let Some(question) = failed else {
                     return Task::none();
                 };
-                self.proj.ask_turns.remove(n);
-                self.update_ask(AskMsg::Suggested(question))
+                // Out of the conversation while it is asked again (what is
+                // sent is built from the turns before it), and back in its
+                // place if it could not be asked — no key, nothing to
+                // answer from: the question was in no turn, no queue and
+                // not the field, the draft typed meanwhile over it.
+                let turn = self.proj.ask_turns.remove(n);
+                let draft = std::mem::replace(&mut self.proj.ask_input, question);
+                let draft_spoken = std::mem::replace(&mut self.proj.ask_spoken, false);
+                let task = self.on_ask_submit();
+                // Whatever takes a question clears the field.
+                let taken = self.proj.ask_input.trim().is_empty();
+                if !taken {
+                    let at = n.min(self.proj.ask_turns.len());
+                    self.proj.ask_turns.insert(at, turn);
+                }
+                if !taken || !draft.trim().is_empty() {
+                    self.proj.ask_input = draft;
+                    self.proj.ask_spoken = draft_spoken;
+                }
+                task
             }
             AskMsg::Suggested(q) => {
                 let draft = std::mem::replace(&mut self.proj.ask_input, q);

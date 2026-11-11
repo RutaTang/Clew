@@ -130,7 +130,7 @@ fn header_right(app: &App) -> f32 {
 }
 
 /// Left edge of the sheet's content, in window coordinates.
-fn sheet_content_left(app: &App) -> f32 {
+pub(crate) fn sheet_content_left(app: &App) -> f32 {
     // The sidebar's divider lies over it, taking no room of its own.
     let sidebar = if app.show_left_sidebar {
         app.sidebar_width

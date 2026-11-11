@@ -375,14 +375,30 @@ impl App {
             .map(|p| p.files.clone())
             .unwrap_or_default();
         let n = self.palette.len();
-        let english = self.ranked_in_english(|finder, titles| finder.refresh_bar(titles, &files));
+        let english = self.ranked_in_english(|finder, titles| {
+            finder.refresh_bar(titles, &files);
+            finder.bar_worded
+        });
         let searched: Vec<String> = self.palette.iter().map(PaletteCommand::searched).collect();
         let searched: Vec<&str> = searched.iter().map(String::as_str).collect();
         self.proj.finder.refresh_bar(&searched, &files);
-        if let Some(english) = english {
+        if let Some((english, english_worded)) = english {
+            let worded = self.proj.finder.bar_worded;
             let results = &mut self.proj.finder.results;
             let (mut commands, files): (Vec<usize>, Vec<usize>) =
                 results.iter().partition(|&&i| i < n);
+            // Titles that say what was typed, in either language, before
+            // any that only hold its letters: the English merge brought
+            // back "Thème clair : One Light" for "ligne", and an English
+            // phrase typed in French came after six loose matches.
+            let english = match (worded, english_worded) {
+                (false, true) => {
+                    commands.clear();
+                    english
+                }
+                (true, false) => Vec::new(),
+                _ => english,
+            };
             let most = commands
                 .len()
                 .max(english.iter().filter(|&&i| i < n).count());
@@ -400,10 +416,10 @@ impl App {
     /// The finder's results ranked, by `rank`, against the commands'
     /// English titles — `None` while the interface speaks English, where
     /// those are the titles shown.
-    fn ranked_in_english(
+    fn ranked_in_english<T>(
         &mut self,
-        rank: impl FnOnce(&mut crate::finder::Finder, &[&str]),
-    ) -> Option<Vec<usize>> {
+        rank: impl FnOnce(&mut crate::finder::Finder, &[&str]) -> T,
+    ) -> Option<(Vec<usize>, T)> {
         if crate::i18n::current() == crate::i18n::Lang::En {
             return None;
         }
@@ -413,8 +429,8 @@ impl App {
             .map(PaletteCommand::searched_in_english)
             .collect();
         let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
-        rank(&mut self.proj.finder, &titles);
-        Some(std::mem::take(&mut self.proj.finder.results))
+        let said = rank(&mut self.proj.finder, &titles);
+        Some((std::mem::take(&mut self.proj.finder.results), said))
     }
 
     /// What the command bar suggests here, in the order it lists them.
@@ -548,7 +564,7 @@ impl App {
         let searched: Vec<String> = self.palette.iter().map(PaletteCommand::searched).collect();
         let searched: Vec<&str> = searched.iter().map(String::as_str).collect();
         self.proj.finder.refresh_commands(&searched, &recent);
-        if let Some(english) = english {
+        if let Some((english, ())) = english {
             let results = &mut self.proj.finder.results;
             for i in english {
                 if !results.contains(&i) {

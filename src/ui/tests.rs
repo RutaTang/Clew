@@ -1918,6 +1918,28 @@ impl Driven {
         driven
     }
 
+    /// `message` through the app, and the widget operations it asks for
+    /// run on the window built anew, as the runtime runs them.
+    fn deliver(&mut self, app: &mut App, message: Message) {
+        let ops = ready_ops(app.update(message));
+        let mut ui = UserInterface::build(
+            super::view(app),
+            self.size,
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        for mut op in ops {
+            loop {
+                ui.operate(&self.renderer, &mut black_box(&mut *op));
+                match op.finish() {
+                    Outcome::Chain(next) => op = next,
+                    _ => break,
+                }
+            }
+        }
+        self.cache = Some(ui.into_cache());
+    }
+
     /// How far the scrollable `id` is scrolled.
     fn scrolled(&mut self, app: &App, id: Id) -> Option<Vector> {
         let mut ui = UserInterface::build(
@@ -17408,4 +17430,89 @@ fn a_rows_two_shortcuts_are_each_drawn_as_keys() {
         ctrl(&mut sim, 1).x > ctrl(&mut sim, 0).x,
         "both Ctrls, side by side"
     );
+}
+
+/// Time Travel in the left half of a split keeps no room for the Ask card
+/// in the right corner: measured from the window's edge, the card took
+/// the left half's slider to nothing. In the right half, or unsplit, the
+/// bar still keeps clear of it.
+#[test]
+fn time_travel_in_a_splits_left_half_keeps_no_room_for_a_card_far_off() {
+    let mut app = reader_app();
+    let _ = app.on_window_resized(iced::Size::new(1400.0, 800.0));
+    app.show_left_sidebar = true;
+    app.ask_view = crate::AskView::Compact;
+    let unsplit = super::panes::time_travel_bar_clear(&app);
+    assert!(
+        unsplit > 0.0,
+        "the card is over the bar's right end: {unsplit}"
+    );
+    app.proj.panes[1] = app.proj.panes[0].clone();
+    app.proj.split = true;
+    app.proj.active = 0;
+    assert_eq!(super::panes::time_travel_bar_clear(&app), 0.0);
+    app.proj.active = 1;
+    assert!(super::panes::time_travel_bar_clear(&app) > 0.0);
+}
+
+/// The raised card counts the lines its rows of actions run on to: where
+/// the margin is too narrow for the date and the callers on one line, or
+/// for Explain and Ask, each line more is added to the card, not taken
+/// from what it says — "Not explained yet." and a failure's reason were
+/// drawn no lines high.
+#[test]
+fn a_raised_cards_wrapped_rows_add_to_its_height() {
+    let mut app = reader_app();
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 3,
+    }];
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    // Not explained: one line of words at any width, so the difference is
+    // the rows' alone. Wide, each row is one line; at 150 the callers go
+    // under the date and Ask under Explain — two lines more.
+    let h = |width| super::panes::raised_card_h(&app, &node, width, 2000.0);
+    assert!(
+        (h(150.0) - h(600.0) - 2.0 * (26.0 + 2.0)).abs() < 0.01,
+        "{} vs {}",
+        h(150.0),
+        h(600.0)
+    );
+    // Explained, there is no Explain: Ask has a line of its own no more.
+    app.proj.explain.cache.insert(
+        node.clone(),
+        crate::explain::Cached {
+            summary: "Zero.".into(),
+            prompt_hash: crate::incremental::content_hash(b"t"),
+            detail: None,
+            basis: None,
+        },
+    );
+    let h = |width| super::panes::raised_card_h(&app, &node, width, 2000.0);
+    assert!((h(150.0) - h(600.0) - (26.0 + 2.0)).abs() < 0.01);
+}
+
+/// A failure's Settings link opens Settings with the keys in the field to
+/// fix: the key for a rejected key, the model for an unknown model, the
+/// base URL for an address nothing answered at.
+#[test]
+fn a_failures_settings_link_puts_the_keys_in_the_field_to_fix() {
+    use crate::app::state::LlmField;
+    let mut app = reader_app();
+    let mut window = Driven::new(&app);
+    for (field, id) in [
+        (LlmField::Key, super::settings_key_id()),
+        (LlmField::Model, super::settings_model_id()),
+        (LlmField::BaseUrl, super::settings_base_url_id()),
+    ] {
+        window.deliver(&mut app, Message::Settings(crate::SettingsMsg::Fix(field)));
+        assert_eq!(window.focused(&app), Some(id), "{field:?}");
+    }
 }

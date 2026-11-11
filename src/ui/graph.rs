@@ -1795,11 +1795,14 @@ impl GraphCanvas<'_> {
         // What a label must keep clear of: the labels placed before it, and
         // every node's own disc. A label moved off a neighbour's label went
         // over that neighbour's dot ("discounts.py" ending on pricing.py's).
-        let mut placed: Vec<iced::Rectangle> = lproj
+        // A search's hits keep clear of labels only: lit, they are named
+        // over a crowd's dots, or a hit in a dense map went unnamed.
+        let discs: Vec<iced::Rectangle> = lproj
             .iter()
             .zip(&self.layout.nodes)
             .map(|(&(x, y, _, persp), node)| node_disc(x, y, node_radius(node.weight, persp)))
             .collect();
+        let mut placed: Vec<iced::Rectangle> = Vec::new();
         let mut target = vec![0.0f32; n];
         let mut side = st.label_side_target.clone();
         side.resize(n, 0.0);
@@ -1834,7 +1837,13 @@ impl GraphCanvas<'_> {
             let spot = if is_hover {
                 Some((label_rect(x, y, r, width, left), left))
             } else {
-                label_spot(&placed, x, y, r, width, left, bounds.width)
+                let found = lit.is_some_and(|l| l.found.get(i) == Some(&true));
+                let obstacles: &[&[iced::Rectangle]] = if found {
+                    &[&placed]
+                } else {
+                    &[&placed, &discs]
+                };
+                label_spot(obstacles, x, y, r, width, left, bounds.width)
             };
             if let Some((rect, left)) = spot {
                 side[i] = if left { 1.0 } else { 0.0 };
@@ -2164,7 +2173,7 @@ fn node_disc(x: f32, y: f32, r: f32) -> iced::Rectangle {
 /// frame — a label its neighbour's took the place of was hidden, and left a
 /// node unnamed with room to spare across it. `None`: no room either side.
 fn label_spot(
-    placed: &[iced::Rectangle],
+    placed: &[&[iced::Rectangle]],
     x: f32,
     y: f32,
     r: f32,
@@ -2172,7 +2181,12 @@ fn label_spot(
     left: bool,
     frame_w: f32,
 ) -> Option<(iced::Rectangle, bool)> {
-    let free = |rect: iced::Rectangle| !placed.iter().any(|p| rects_overlap(*p, rect));
+    let free = |rect: iced::Rectangle| {
+        !placed
+            .iter()
+            .flat_map(|rects| rects.iter())
+            .any(|p| rects_overlap(*p, rect))
+    };
     let own = label_rect(x, y, r, width, left);
     if free(own) {
         return Some((own, left));
@@ -4655,13 +4669,13 @@ mod tests {
         // A neighbour's label already right of the node.
         let taken = [label_rect(100.0, 50.0, 5.0, 60.0, false)];
         let (rect, left) =
-            label_spot(&taken, 100.0, 50.0, 5.0, 60.0, false, 800.0).expect("a place");
+            label_spot(&[&taken], 100.0, 50.0, 5.0, 60.0, false, 800.0).expect("a place");
         assert!(left, "{rect:?}");
         assert!(rect.x + rect.width <= 100.0 - 5.0);
         // At the frame's left edge there is no other side.
         let near_edge = [label_rect(20.0, 50.0, 5.0, 60.0, false)];
         assert_eq!(
-            label_spot(&near_edge, 20.0, 50.0, 5.0, 60.0, false, 800.0).map(|s| s.1),
+            label_spot(&[&near_edge], 20.0, 50.0, 5.0, 60.0, false, 800.0).map(|s| s.1),
             None
         );
         // Nothing in the way: its own side.
@@ -4679,11 +4693,11 @@ mod tests {
         // run.
         let discs = [node_disc(100.0, 50.0, 5.0), node_disc(140.0, 52.0, 5.0)];
         let (rect, left) =
-            label_spot(&discs, 100.0, 50.0, 5.0, 60.0, false, 800.0).expect("a place");
+            label_spot(&[&discs], 100.0, 50.0, 5.0, 60.0, false, 800.0).expect("a place");
         assert!(left, "{rect:?}");
         // Its own disc is never in its way.
         assert_eq!(
-            label_spot(&discs[..1], 100.0, 50.0, 5.0, 60.0, false, 800.0).map(|s| s.1),
+            label_spot(&[&discs[..1]], 100.0, 50.0, 5.0, 60.0, false, 800.0).map(|s| s.1),
             Some(false)
         );
         // A disc either side: no name at rest (the pointer still shows it).
@@ -4693,9 +4707,44 @@ mod tests {
             node_disc(60.0, 48.0, 5.0),
         ];
         assert_eq!(
-            label_spot(&boxed, 100.0, 50.0, 5.0, 60.0, false, 800.0),
+            label_spot(&[&boxed], 100.0, 50.0, 5.0, 60.0, false, 800.0),
             None
         );
+    }
+
+    /// In a settled map, no label shown in full lies over another node's
+    /// disc: the pass that places them keeps clear of every disc, not only
+    /// of the labels before.
+    #[test]
+    fn a_settled_maps_labels_keep_off_other_nodes_discs() {
+        let l = layout(40);
+        let (st, _, _) = settled(&l, false);
+        let c = canvas(&l, false, false);
+        let at: Vec<(f32, f32, f32, f32)> = (0..l.nodes.len())
+            .map(|i| c.node_screen(i, BOUNDS, &st))
+            .collect();
+        let disc = |j: usize| {
+            let (x, y, _, persp) = at[j];
+            node_disc(x, y, node_radius(l.nodes[j].weight, persp))
+        };
+        let mut shown = 0;
+        for (i, &(x, y, _, persp)) in at.iter().enumerate() {
+            if st.label_target[i] < 0.6 {
+                continue;
+            }
+            shown += 1;
+            let r = node_radius(l.nodes[i].weight, persp);
+            let rect = label_rect(x, y, r, st.label_w[i], st.label_side_target[i] >= 0.5);
+            for j in (0..l.nodes.len()).filter(|&j| j != i) {
+                assert!(
+                    !rects_overlap(rect, disc(j)),
+                    "{}'s label over {}'s dot",
+                    l.nodes[i].label,
+                    l.nodes[j].label
+                );
+            }
+        }
+        assert!(shown > 10, "a map named at all: {shown}");
     }
 
     /// A label that would run off the right edge is drawn left of its node,

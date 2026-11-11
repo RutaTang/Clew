@@ -381,3 +381,30 @@ fn a_command_is_found_by_the_words_it_also_goes_by() {
         assert!(found.iter().any(|t| t == "Project Graphs"), "{found:?}");
     });
 }
+
+/// In another language too, the command bar lists the commands that say
+/// what was typed — in that language or in English — and not those that
+/// only hold its letters: "ligne" brought back "Thème clair : One Light",
+/// and "go to line" typed in French came after six loose matches.
+#[test]
+fn the_command_bar_keeps_to_worded_titles_in_another_language() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = scanned_app("palette-worded-fr");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    with_lang(Lang::Fr, || {
+        for query in ["ligne", "go to line"] {
+            open_palette(&mut app);
+            typed(&mut app, query);
+            let found = titles(&app);
+            assert!(
+                found.iter().any(|t| t == "Go to Line…"),
+                "{query}: {found:?}"
+            );
+            assert!(
+                !found.iter().any(|t| t.to_lowercase().contains("theme")),
+                "{query}: {found:?}"
+            );
+            let _ = app.update(Message::Nav(NavMsg::FinderClosed));
+        }
+    });
+}

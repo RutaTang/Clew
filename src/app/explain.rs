@@ -491,16 +491,28 @@ impl App {
             .as_ref()
             .filter(|t| !self.proj.explain.cache.contains_key(*t))
         {
-            let why = match &failures.stopped {
-                Some(stopped) => Some(stopped.describe()),
-                None if failures.failed > 0 => Some(
-                    failures
-                        .calls
-                        .iter()
-                        .map(|f| f.describe())
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                ),
+            // Kept as what failed, not as its words: said in the language
+            // spoken when the card is drawn — switched to French, the card
+            // kept the English reason beside "Réessayer".
+            let why: Option<crate::app::state::SayAgain> = match &failures.stopped {
+                Some(stopped) => {
+                    let stopped = stopped.clone();
+                    Some(crate::app::state::SayAgain(std::sync::Arc::new(
+                        move || stopped.describe(),
+                    )))
+                }
+                None if failures.failed > 0 => {
+                    let calls = failures.calls.clone();
+                    Some(crate::app::state::SayAgain(std::sync::Arc::new(
+                        move || {
+                            calls
+                                .iter()
+                                .map(|f| f.describe())
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        },
+                    )))
+                }
                 None => None,
             };
             self.proj.explain.node_failed = why.map(|why| (target.clone(), why));

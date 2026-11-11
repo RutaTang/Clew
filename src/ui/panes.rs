@@ -328,7 +328,7 @@ pub(crate) fn time_travel_code<'a>(
 /// and (for a function scope) the "story of this function" narrative button.
 /// How much of Time Travel's bar, from its right, the Ask card covers in
 /// its corner: kept clear, so Newer and the commit count stay in reach.
-fn time_travel_bar_clear(app: &App) -> f32 {
+pub(crate) fn time_travel_bar_clear(app: &App) -> f32 {
     let margin = if right_panel_shown(app) {
         margin_w(app)
     } else {
@@ -339,11 +339,17 @@ fn time_travel_bar_clear(app: &App) -> f32 {
     } else {
         0.0
     };
-    super::askfloat::card_reach(
-        app,
-        app.window_width - super::toolbar::STRIP_W - margin,
-        app.window_height - super::STATUSBAR_H - below,
-    )
+    // The bar's own right edge: the sheet's, or — in a split, where the
+    // left half may hold the session — that half's. Measured from the
+    // window's edge, a card nowhere near the left half took its slider.
+    let right = app.window_width - super::toolbar::STRIP_W - margin;
+    let right = if app.proj.split && app.proj.active == 0 {
+        let left = super::sheet::sheet_content_left(app);
+        left + ((right - left - 1.0) / 2.0).max(0.0)
+    } else {
+        right
+    };
+    super::askfloat::card_reach(app, right, app.window_height - super::STATUSBAR_H - below)
 }
 
 pub(crate) fn time_travel_bar(tt: &TimeTravel, clear: f32) -> Element<'_, Message> {
@@ -1464,7 +1470,7 @@ const ACTIVE_NOTE_TEXT_INSET: f32 = 44.0;
 /// its two rows of facts and actions, up to `room` (the margin's foot),
 /// where what it says scrolls. A card of one line of words was given four
 /// lines' height, and stood half empty over its actions.
-fn raised_card_h(app: &App, node: &crate::explain::Node, width: f32, room: f32) -> f32 {
+pub(crate) fn raised_card_h(app: &App, node: &crate::explain::Node, width: f32, room: f32) -> f32 {
     use super::explain_view::{NOTE_LINE_HEIGHT, NOTE_SIZE};
     use iced::widget::text::LineHeight;
     let line = NOTE_SIZE * NOTE_LINE_HEIGHT;
@@ -1485,7 +1491,7 @@ fn raised_card_h(app: &App, node: &crate::explain::Node, width: f32, room: f32) 
         ) + line / 4.0
     } else if let Some(why) = explain_failed(app, node) {
         super::sheet::text_height_spaced(
-            why,
+            &why,
             ts::SMALL,
             LineHeight::default(),
             crate::fonts::UI,
@@ -1494,12 +1500,100 @@ fn raised_card_h(app: &App, node: &crate::explain::Node, width: f32, room: f32) 
     } else {
         line
     };
-    let least = RAISED_CARD_CHROME + line;
-    (RAISED_CARD_CHROME + said).clamp(least, room.max(least))
+    let chrome =
+        RAISED_CARD_CHROME + card_extra_lines(app, node, width) as f32 * (NOTE_ACTION_H + 2.0);
+    let least = chrome + line;
+    (chrome + said).clamp(least, room.max(least))
 }
 
-/// Why the Explain of `node` failed, while it has no note.
-fn explain_failed<'a>(app: &'a App, node: &crate::explain::Node) -> Option<&'a str> {
+/// The face a raised note's action is set in: semibold for an accent one.
+fn note_action_font(accent: bool) -> iced::Font {
+    crate::fonts::in_control(if accent {
+        crate::fonts::UI_SEMIBOLD
+    } else {
+        crate::fonts::UI_MEDIUM
+    })
+}
+
+/// The room the note's date keeps: as wide as any date, "Uncommitted" or
+/// "History" — what it says before the file's history is read, and after.
+fn note_history_room() -> f32 {
+    super::steady::widest(
+        &[tr!("History"), tr!("Uncommitted")],
+        NOTE_ACTION_SIZE,
+        note_action_font(false),
+    )
+    .max(widest_short_date(NOTE_ACTION_SIZE, note_action_font(false)))
+}
+
+/// The one slot Explain, Try again and Explaining… take turns in.
+fn note_explain_room() -> f32 {
+    let words = [tr!("Explain"), tr!("Try again"), tr!("Explaining…")];
+    super::steady::widest(&words, NOTE_ACTION_SIZE, note_action_font(true)).max(
+        super::steady::widest(&words, NOTE_ACTION_SIZE, note_action_font(false)),
+    )
+}
+
+/// How wide a raised note's action is: its icon and the gap after it, its
+/// words (in `room` at the least), and its padding.
+fn note_action_w(label: &str, accent: bool, room: Option<f32>) -> f32 {
+    let own = super::steady::width_of(label, NOTE_ACTION_SIZE, note_action_font(accent));
+    13.0 + 6.0 + room.map_or(own, |room| room.max(own)).ceil() + 2.0 * NOTE_ACTION_PAD_X
+}
+
+/// How many lines a row of the card's actions `widths` wide (2 apart)
+/// takes where `room` is all there is, as iced wraps it.
+fn wrapped_lines(widths: &[f32], room: f32) -> usize {
+    let mut lines = 1;
+    let mut x = 0.0;
+    for &w in widths {
+        if x > 0.0 && x + w > room {
+            lines += 1;
+            x = 0.0;
+        }
+        x += w + 2.0;
+    }
+    lines
+}
+
+/// The rows of actions under the raised card on `node` past the two its
+/// height counts: the facts row (its date, and a function's callers) and
+/// the actions row (Explain while it is not explained, and Ask) each run
+/// on to a line more where the margin is too narrow — "2 callers, 5 calls"
+/// at the margin's usual width, "No callers" at its least, more in French
+/// — and those lines came out of what the card says: "Not explained
+/// yet." and a failure's reason were drawn no lines high.
+fn card_extra_lines(app: &App, node: &crate::explain::Node, width: f32) -> usize {
+    use crate::explain::Node;
+    let room = width - ACTIVE_NOTE_TEXT_INSET + NOTE_ACTION_PAD_X;
+    let mut facts = vec![note_action_w("", false, Some(note_history_room()))];
+    if let Node::Function {
+        file,
+        name,
+        ordinal,
+    } = node
+    {
+        let calls = leaning_on(app, file, name, *ordinal)
+            .map_or_else(|| tr!("Calls").to_string(), Leaning::label);
+        facts.push(note_action_w(&calls, false, None));
+    }
+    let explain = &app.proj.explain;
+    let slot = if explain.running {
+        explain.pass_target.as_ref() == Some(node)
+    } else {
+        !explain.cache.contains_key(node)
+    };
+    let mut actions = Vec::new();
+    if slot {
+        actions.push(note_action_w("", true, Some(note_explain_room())));
+    }
+    actions.push(note_action_w(tr!("Ask"), true, None));
+    wrapped_lines(&facts, room) + wrapped_lines(&actions, room) - 2
+}
+
+/// Why the Explain of `node` failed, while it has no note, in the language
+/// spoken now.
+fn explain_failed(app: &App, node: &crate::explain::Node) -> Option<String> {
     if app.proj.explain.cache.contains_key(node) {
         return None;
     }
@@ -1508,7 +1602,7 @@ fn explain_failed<'a>(app: &'a App, node: &crate::explain::Node) -> Option<&'a s
         .node_failed
         .as_ref()
         .filter(|(of, _)| of == node)
-        .map(|(_, why)| why.as_str())
+        .map(|(_, why)| (why.0)())
 }
 
 /// Height of the raised card while it shows the explanation in blocks: a
@@ -2028,13 +2122,7 @@ fn active_note<'a>(
     let date_coming = app
         .active_viewer()
         .is_some_and(|v| v.git.is_none() && app.proj.git_latest.contains_key(&v.abs));
-    let font = |accent: bool| {
-        crate::fonts::in_control(if accent {
-            crate::fonts::UI_SEMIBOLD
-        } else {
-            crate::fonts::UI_MEDIUM
-        })
-    };
+    let font = note_action_font;
     // `room`: the width its words keep whatever they say — a date or a
     // count that comes in after the card is drawn, or changes from one
     // file to the next, reflowed the actions under it: "Ask" ran on to a
@@ -2101,12 +2189,7 @@ fn active_note<'a>(
     };
     // As wide as any date, "Uncommitted" or "History" — what it says before
     // the file's history is read, and after.
-    let history_room = super::steady::widest(
-        &[tr!("History"), tr!("Uncommitted")],
-        NOTE_ACTION_SIZE,
-        font(false),
-    )
-    .max(widest_short_date(NOTE_ACTION_SIZE, font(false)));
+    let history_room = note_history_room();
     // Not explained yet: what explains it, first, where the note says so.
     let node = match (of, v) {
         (NoteOf::Function { sym, ordinal }, Some(v)) => Some(crate::explain::Node::Function {
@@ -2143,14 +2226,7 @@ fn active_note<'a>(
     // the widest: pressed, Explain became the wider "Explaining…", and
     // "2 callers" went to a row of its own, under the pointer, its tip
     // over the very word the reader waited for.
-    let explain_room = {
-        let words = [tr!("Explain"), tr!("Try again"), tr!("Explaining…")];
-        super::steady::widest(&words, NOTE_ACTION_SIZE, font(true)).max(super::steady::widest(
-            &words,
-            NOTE_ACTION_SIZE,
-            font(false),
-        ))
-    };
+    let explain_room = note_explain_room();
     if unexplained && let Some(node) = node {
         // Marked as what spends an AI call is: the sparkle, and a tip.
         // (Never explained: not "Explain this again".)

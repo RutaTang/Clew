@@ -406,21 +406,10 @@ pub(crate) fn tree_menu<'a>(
     menu: &'a crate::app::state::TreeMenu,
 ) -> Element<'a, Message> {
     use crate::app::state::TreeAct;
-    let act = |label: &'static str, what: TreeAct| -> Element<'a, Message> {
-        button(text(label).size(ts::BASE).wrapping(Wrapping::None))
-            .style(theme::list_row(false))
-            .width(Fill)
-            .padding([5, 12])
-            .on_press(super::heard::said(
-                label,
-                Message::Project(ProjectMsg::TreeMenuAct(what)),
-            ))
-            .into()
-    };
-    let mut rows: Vec<Element<'a, Message>> = Vec::new();
+    let mut acts: Vec<(&'static str, TreeAct)> = Vec::new();
     if menu.dir {
         let open = app.proj.expanded.contains(&menu.rel);
-        rows.push(act(
+        acts.push((
             if open {
                 tr!("Collapse Folder")
             } else {
@@ -429,14 +418,14 @@ pub(crate) fn tree_menu<'a>(
             TreeAct::Open,
         ));
     } else {
-        rows.push(act(tr!("Open"), TreeAct::Open));
-        rows.push(act(tr!("Open to the Side"), TreeAct::OpenToSide));
+        acts.push((tr!("Open"), TreeAct::Open));
+        acts.push((tr!("Open to the Side"), TreeAct::OpenToSide));
     }
-    rows.push(act(tr!("Copy Path"), TreeAct::CopyPath));
-    rows.push(act(tr!("Copy Relative Path"), TreeAct::CopyRelativePath));
+    acts.push((tr!("Copy Path"), TreeAct::CopyPath));
+    acts.push((tr!("Copy Relative Path"), TreeAct::CopyRelativePath));
     // Only a file on this computer is there to show.
     if !app.connection.is_remote() {
-        rows.push(act(
+        acts.push((
             if cfg!(target_os = "macos") {
                 tr!("Show in Finder")
             } else if cfg!(target_os = "windows") {
@@ -447,8 +436,34 @@ pub(crate) fn tree_menu<'a>(
             TreeAct::Reveal,
         ));
     }
+    // As designed, or as wide as its longest row in the reader's language
+    // (its padding and the panel's), as the code's own menu is: French's
+    // "Afficher dans le gestionnaire de fichiers" ran past its edge.
+    let width = acts
+        .iter()
+        .map(|(label, _)| {
+            super::sheet::text_width(label, ts::BASE, crate::fonts::UI)
+                + 2.0 * 12.0
+                + 2.0 * 4.0
+                + 2.0
+        })
+        .fold(MENU_W, f32::max)
+        .ceil();
+    let rows = acts
+        .into_iter()
+        .map(|(label, what)| -> Element<'a, Message> {
+            button(text(label).size(ts::BASE).wrapping(Wrapping::None))
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding([5, 12])
+                .on_press(super::heard::said(
+                    label,
+                    Message::Project(ProjectMsg::TreeMenuAct(what)),
+                ))
+                .into()
+        });
     let panel = container(Column::with_children(rows).spacing(1))
-        .width(Length::Fixed(MENU_W))
+        .width(Length::Fixed(width))
         .padding(4)
         .style(theme::modal_panel);
     let placed = Anchored::new(

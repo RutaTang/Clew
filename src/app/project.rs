@@ -1039,7 +1039,19 @@ impl App {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
-        let abs = root.join(&menu.rel);
+        let abs = crate::app::content::rel_abs(&root, &menu.rel);
+        // A name with a line break (or any control character) in it is
+        // not put on the clipboard: pasted into a terminal, the part after
+        // the break runs as a command of its own — a repository's file
+        // named for that.
+        if matches!(act, TreeAct::CopyPath | TreeAct::CopyRelativePath)
+            && menu.rel.chars().any(char::is_control)
+        {
+            self.status =
+                tr!("Didn't copy it: its name has a line break or another control character")
+                    .to_string();
+            return Task::none();
+        }
         match act {
             TreeAct::Open if menu.dir => self.on_toggle_dir(menu.rel),
             TreeAct::Open => self.update(Message::Editor(EditorMsg::OpenRel {
@@ -1047,10 +1059,11 @@ impl App {
                 line: None,
             })),
             // Beside what is read: in the split's other half, opened if
-            // it is not.
+            // it is not — the left half from the right one too, not over
+            // the file being read.
             TreeAct::OpenToSide => {
                 let split = if self.proj.split {
-                    self.proj.active = 1;
+                    self.proj.active = 1 - self.proj.active.min(1);
                     Task::none()
                 } else {
                     self.on_toggle_split()

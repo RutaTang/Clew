@@ -38,6 +38,9 @@ pub struct Finder {
     /// matches" there, though the field over the window that opens it
     /// says it searches commands too.
     pub bar_fallback: bool,
+    /// The command bar's commands are those whose titles hold every word
+    /// typed ([`rank_commands`]), not merely its letters.
+    pub bar_worded: bool,
 }
 
 impl Finder {
@@ -213,7 +216,8 @@ impl Finder {
         self.selected = 0;
         let query = self.query.trim().to_string();
         let query = query.as_str();
-        let mut results = rank_commands(query, titles);
+        let (mut results, worded) = rank_commands(query, titles);
+        self.bar_worded = worded;
         let n = titles.len();
         // A file asked for at a line is matched by its name.
         let file_query = self.file_query();
@@ -245,16 +249,18 @@ impl Finder {
 /// Each word was matched by its letters anywhere in a title: "go to line"
 /// listed "Light theme: One Light", "Rosé Pine Dawn" and "Start
 /// listening…" under Go to Line….
-fn rank_commands(query: &str, titles: &[&str]) -> Vec<usize> {
+/// Also whether they are the worded ones.
+fn rank_commands(query: &str, titles: &[&str]) -> (Vec<usize>, bool) {
     let ranked = rank(query, titles.iter().copied(), titles.len(), false);
     let worded: Vec<usize> = ranked
         .iter()
         .copied()
         .filter(|&i| contains_words(titles[i], query))
         .collect();
-    let mut ranked = if worded.is_empty() { ranked } else { worded };
+    let is_worded = !worded.is_empty();
+    let mut ranked = if is_worded { worded } else { ranked };
     ranked.truncate(BAR_COMMANDS);
-    ranked
+    (ranked, is_worded)
 }
 
 /// Whether `name` holds every word of `query` as it is spelled (case
