@@ -1765,29 +1765,49 @@ pub(crate) fn short_date(time: i64, now: i64) -> String {
         let y = yoe + era * 400 + i64::from(m <= 2);
         (y, m, d)
     }
-    // The months' short names, in the reader's language where shown.
-    const MONTHS: [&str; 12] = [
-        tr_noop!("Jan"),
-        tr_noop!("Feb"),
-        tr_noop!("Mar"),
-        tr_noop!("Apr"),
-        tr_noop!("May"),
-        tr_noop!("Jun"),
-        tr_noop!("Jul"),
-        tr_noop!("Aug"),
-        tr_noop!("Sep"),
-        tr_noop!("Oct"),
-        tr_noop!("Nov"),
-        tr_noop!("Dec"),
-    ];
     let (y, m, d) = civil(time);
-    let month = crate::i18n::lookup(MONTHS[(m - 1) as usize]);
+    let month = crate::i18n::lookup(SHORT_MONTHS[(m - 1) as usize]);
     if y == civil(now).0 {
         tr!("{month} {day}", month = month, day = d)
     } else {
         tr!("{month} {day}, {year}", month = month, day = d, year = y)
     }
 }
+
+/// The widest [`short_date`] can read, in the reader's language: a slot
+/// for one stays as wide as any.
+fn widest_short_date(size: f32, font: iced::Font) -> f32 {
+    let day = super::steady::widest_figure("28");
+    let year = super::steady::widest_figure("2000");
+    SHORT_MONTHS
+        .iter()
+        .map(|m| {
+            let date = tr!(
+                "{month} {day}, {year}",
+                month = crate::i18n::lookup(m),
+                day = day,
+                year = year
+            );
+            super::steady::width_of(&date, size, font)
+        })
+        .fold(0.0, f32::max)
+}
+
+/// The months' short names, in the reader's language where shown.
+const SHORT_MONTHS: [&str; 12] = [
+    tr_noop!("Jan"),
+    tr_noop!("Feb"),
+    tr_noop!("Mar"),
+    tr_noop!("Apr"),
+    tr_noop!("May"),
+    tr_noop!("Jun"),
+    tr_noop!("Jul"),
+    tr_noop!("Aug"),
+    tr_noop!("Sep"),
+    tr_noop!("Oct"),
+    tr_noop!("Nov"),
+    tr_noop!("Dec"),
+];
 
 fn active_note<'a>(
     app: &'a App,
@@ -1796,13 +1816,40 @@ fn active_note<'a>(
     of: NoteOf<'a>,
 ) -> Element<'a, Message> {
     let code = matches!(of, NoteOf::Function { .. });
-    let action = |glyph: Glyph, label: String, accent: bool, msg: Message| {
+    // The file's history on its way (its blame being read): the History
+    // action's words are held back until its date comes. "History" turned
+    // into the date a moment later, at every file opened.
+    let date_coming = app
+        .active_viewer()
+        .is_some_and(|v| v.git.is_none() && app.proj.git_latest.contains_key(&v.abs));
+    let font = |accent: bool| {
+        crate::fonts::in_control(if accent {
+            crate::fonts::UI_SEMIBOLD
+        } else {
+            crate::fonts::UI_MEDIUM
+        })
+    };
+    // `room`: the width its words keep whatever they say — a date or a
+    // count that comes in after the card is drawn, or changes from one
+    // file to the next, reflowed the actions under it: "Ask" ran on to a
+    // second line once the date came, and back, a flash at every file.
+    let action = |glyph: Glyph,
+                  label: String,
+                  accent: bool,
+                  room: Option<f32>,
+                  words: bool,
+                  msg: Message| {
         let msg = super::heard::said(&label, msg);
+        let label = if words { label } else { String::new() };
         let tint = if accent {
             theme::accent()
         } else {
             theme::fg_muted()
         };
+        let width = room.map_or(iced::Length::Shrink, |room| {
+            let own = super::steady::width_of(&label, NOTE_ACTION_SIZE, font(accent));
+            iced::Length::Fixed(room.max(own).ceil())
+        });
         // A button lays its content out at its top: the row is given the
         // button's height to sit in the middle of.
         button(
@@ -1810,12 +1857,10 @@ fn active_note<'a>(
                 glyph::icon(glyph, tint, 13.0),
                 text(label)
                     .size(NOTE_ACTION_SIZE)
-                    .font(crate::fonts::in_control(if accent {
-                        crate::fonts::UI_SEMIBOLD
-                    } else {
-                        crate::fonts::UI_MEDIUM
-                    }))
-                    .color(tint),
+                    .font(font(accent))
+                    .color(tint)
+                    .wrapping(Wrapping::None)
+                    .width(width),
             ]
             .spacing(6)
             .height(Fill)
@@ -1846,6 +1891,25 @@ fn active_note<'a>(
         Some(None) => tr!("Uncommitted").to_string(),
         None => tr!("History").to_string(),
     };
+    // As wide as any date, "Uncommitted" or "History" — what it says before
+    // the file's history is read, and after.
+    let history_room = super::steady::widest(
+        &[tr!("History"), tr!("Uncommitted")],
+        NOTE_ACTION_SIZE,
+        font(false),
+    )
+    .max(widest_short_date(NOTE_ACTION_SIZE, font(false)));
+    // As wide as "Calls", or a count of two figures — what it says before
+    // the call graph is built, and after.
+    let calls_room = super::steady::widest(
+        &[
+            tr!("Calls"),
+            &Leaning::References(88).label(),
+            &Leaning::Callers(88).label(),
+        ],
+        NOTE_ACTION_SIZE,
+        font(false),
+    );
     // Not explained yet: what explains it, first, where the note says so.
     let node = match (of, v) {
         (NoteOf::Function { sym, ordinal }, Some(v)) => Some(crate::explain::Node::Function {
@@ -1864,6 +1928,8 @@ fn active_note<'a>(
             Glyph::TextLines,
             tr!("Explain All").into(),
             true,
+            None,
+            true,
             super::toolbar::explain_all_message(app),
         ));
     }
@@ -1875,6 +1941,8 @@ fn active_note<'a>(
             Glyph::Network,
             calls_label,
             false,
+            Some(calls_room),
+            true,
             Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Calls)),
         ));
     }
@@ -1883,11 +1951,15 @@ fn active_note<'a>(
             Glyph::Clock,
             history_label,
             false,
+            Some(history_room),
+            !date_coming,
             Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::History)),
         ))
         .push(action(
             Glyph::Message,
             tr!("Ask").into(),
+            true,
+            None,
             true,
             Message::Ask(AskMsg::Suggested(tr!(
                 "What does `{name}` in {file} do, and why is it written this way?",

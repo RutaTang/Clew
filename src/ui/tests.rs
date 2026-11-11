@@ -14407,6 +14407,40 @@ fn a_fields_checkbox_and_chips_sit_on_its_labels_line() {
     level(&mut sim, "Build tags", "No build tags in this project.");
 }
 
+/// A file's card keeps its actions where they are while its history is
+/// read: "History" turned into the date once it came, and the longer date
+/// sent "Ask" on to a second line, and back on the next file: a flash at
+/// every file opened.
+#[test]
+fn a_file_cards_actions_stay_put_when_its_date_comes() {
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.show_right_panel = true;
+    app.margin_tab = crate::MarginTab::Notes;
+    app.active_viewer_mut().unwrap().caret = Some((0, 0));
+    app.proj.explain.view = Some(crate::explain::Node::File(abs));
+    let ask_at = |app: &App| {
+        let mut sim = sim_of(app);
+        text_at(&mut sim, |t| t == "Ask", 0).expect("the card's Ask")
+    };
+    let before = ask_at(&app);
+    let line = |time: i64| clew_protocol::BlameLine {
+        commit: "a".repeat(40),
+        author: "Ada".into(),
+        time,
+        summary: "Read lines lazily".into(),
+        uncommitted: false,
+    };
+    // A date of the widest kind: another year, a two-figure day.
+    app.proj.panes[0].as_mut().unwrap().git = Some(Arc::new(clew_protocol::GitInfo {
+        blame: vec![line(1_701_302_400); 400],
+        status: Vec::new(),
+        deleted_at: Default::default(),
+    }));
+    let after = ask_at(&app);
+    assert_eq!((before.x, before.y), (after.x, after.y));
+}
+
 /// The find bar's ‹ and › go to the matches while there are some, and do
 /// nothing while there are none — in grey then, as they were always drawn,
 /// so that with 16 matches they looked switched off.
