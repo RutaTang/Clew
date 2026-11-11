@@ -16223,8 +16223,38 @@ fn the_usage_page_says_what_the_key_spent() {
     }
     drop(sim);
     // Down the page, the prices the money is worked out at.
-    let mut page = sim_elem(super::usage::usage_page(&app));
+    let mut page = sim_tall(super::usage::usage_page(&app));
     assert!(shows(&mut page, "Prices"));
+    // The chart says what a bar measures and when it runs; each call says
+    // when, to the minute.
+    for said in ["Cost per day", "30 days ago", "Today, "] {
+        assert!(shows(&mut page, said), "{said:?}");
+    }
+    drop(page);
+    // Prices Clew knows are said in a line, not three boxes to fill in;
+    // Edit shows the boxes.
+    app.usage.model = "gpt-4o-mini".into();
+    let mut page = sim_tall(super::usage::usage_page(&app));
+    assert!(shows(&mut page, "$0.15 in, $0.60 out, per million tokens"));
+    assert!(!shows(&mut page, "per 1M tokens"), "boxes for known prices");
+    drop(page);
+    assert!(matches!(
+        click(sim_tall(super::usage::usage_page(&app)), "Edit").as_slice(),
+        [Message::Usage(crate::UsageMsg::EditPrices(true))]
+    ));
+    let _ = app.update(Message::Usage(crate::UsageMsg::EditPrices(true)));
+    let mut page = sim_tall(super::usage::usage_page(&app));
+    assert!(shows(&mut page, "per 1M tokens"));
+    assert!(shows(&mut page, "Done"));
+    assert!(!shows(&mut page, "Enter a number"));
+    drop(page);
+    // A price that is no number is said to be one, not taken silently.
+    let _ = app.update(Message::Usage(crate::UsageMsg::Price(
+        crate::app::usage::PriceField::Input,
+        "abc".into(),
+    )));
+    let mut page = sim_tall(super::usage::usage_page(&app));
+    assert!(shows(&mut page, "Enter a number."));
 }
 
 /// An empty call hierarchy, with the caret in a function, offers that
@@ -16260,8 +16290,11 @@ fn a_balance_leaves_out_an_empty_currency() {
                 .collect::<Vec<_>>(),
         )
     };
-    assert_eq!(said(&[("USD", "0.00"), ("CNY", "72.01")]), "¥72.01");
-    assert_eq!(said(&[("USD", "3.10"), ("CNY", "72.01")]), "$3.10, ¥72.01");
+    assert_eq!(said(&[("USD", "0.00"), ("CNY", "72.01")]), "CN¥72.01");
+    assert_eq!(
+        said(&[("USD", "3.10"), ("CNY", "72.01")]),
+        "$3.10, CN¥72.01"
+    );
     assert_eq!(said(&[("USD", "0.00")]), "$0.00");
 }
 

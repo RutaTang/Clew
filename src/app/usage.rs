@@ -91,7 +91,7 @@ pub(crate) fn purpose_label(key: &str) -> &'static str {
         TIME_TRAVEL => tr!("Time Travel"),
         FAKE_RUN => tr!("Fake run"),
         SUGGEST => tr!("Suggested questions"),
-        KEY_TEST => tr!("Key test"),
+        KEY_TEST => tr!("Connection test"),
         _ => tr!("Other"),
     }
 }
@@ -175,10 +175,6 @@ impl Price {
             / 1e6
     }
 }
-
-/// When Clew's own prices were last looked up: they change, and the page
-/// that shows them says so.
-pub(crate) const PRICES_AS_OF: &str = "November 2026";
 
 /// Clew's own prices, by the model id's start (a dated id is its model's):
 /// the longer start first where one is another's.
@@ -603,6 +599,20 @@ pub(crate) fn money(dollars: f64) -> String {
     }
 }
 
+/// [`money`] for a column of amounts: `fine` (some amount in it is under a
+/// cent) writes every one to four places, so "$0.02" does not sit over
+/// "$0.0045".
+pub(crate) fn money_in_column(dollars: f64, fine: bool) -> String {
+    if !fine {
+        return money(dollars);
+    }
+    if dollars > 0.0 && dollars < 0.0001 {
+        "<$0.0001".into()
+    } else {
+        format!("${:.4}", dollars.max(0.0))
+    }
+}
+
 /// Where a provider's own billing page is, for one that tells an API key
 /// nothing of its balance.
 pub(crate) fn billing_page(provider: llm::Provider) -> Option<&'static str> {
@@ -647,6 +657,10 @@ pub struct UsageState {
     /// The price fields as typed, for the model in use: `[input, cached,
     /// output]`, `None` until one is typed in.
     pub price_draft: Option<[String; 3]>,
+    /// The typed prices were kept: said under them until the next edit.
+    pub price_saved: bool,
+    /// The reader asked to change prices Clew knows: their fields shown.
+    pub editing_prices: bool,
     /// The cost of each Ask answer the server reported on, by its stream.
     pub by_stream: std::collections::HashMap<u64, (llm::Usage, String)>,
 }
@@ -815,6 +829,7 @@ impl App {
                     })
                 });
                 draft[field as usize] = value;
+                self.usage.price_saved = false;
                 let typed = draft_price(&draft);
                 self.usage.price_draft = Some(draft);
                 if let Some(price) = typed {
@@ -841,7 +856,18 @@ impl App {
                 self.status = e;
                 Task::none()
             }
-            UsageMsg::PriceSaved(Ok(())) => Task::none(),
+            UsageMsg::PriceSaved(Ok(())) => {
+                self.usage.price_saved = true;
+                Task::none()
+            }
+            UsageMsg::EditPrices(on) => {
+                self.usage.editing_prices = on;
+                if !on {
+                    // What was typed and could not be kept is let go.
+                    self.usage.price_draft = None;
+                }
+                Task::none()
+            }
             UsageMsg::SuggestQuestions(on) => {
                 self.suggest_questions = on;
                 self.keep_view_pref(crate::app::runtime::SUGGEST_QUESTIONS, on);
@@ -867,6 +893,8 @@ impl App {
                     self.status = e;
                 }
                 self.usage.price_draft = None;
+                self.usage.price_saved = false;
+                self.usage.editing_prices = false;
                 Task::none()
             }
         }
@@ -885,6 +913,8 @@ impl App {
     /// and the balance where the provider tells it.
     pub(crate) fn usage_opened(&mut self) -> Task<Message> {
         self.usage.price_draft = None;
+        self.usage.price_saved = false;
+        self.usage.editing_prices = false;
         self.refresh_usage_model();
         let ledger = self.read_ledger();
         let balance = match self.usage.balance {

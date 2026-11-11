@@ -2157,6 +2157,8 @@ pub enum UsageMsg {
     Price(crate::app::usage::PriceField, String),
     /// Back to Clew's own price for the model in use.
     ResetPrice,
+    /// Show (`true`) or put away the fields of prices Clew knows.
+    EditPrices(bool),
     /// A price was kept in `config.toml` — or why not.
     PriceSaved(Result<(), String>),
     /// Whether explanations are refreshed by themselves as code changes.
@@ -3196,6 +3198,7 @@ impl UsageMsg {
             | UsageMsg::OpenBilling
             | UsageMsg::Price(..)
             | UsageMsg::ResetPrice
+            | UsageMsg::EditPrices(..)
             | UsageMsg::PriceSaved(..)
             | UsageMsg::KeepFresh(..)
             | UsageMsg::SuggestQuestions(..) => None,

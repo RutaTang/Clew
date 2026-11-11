@@ -46,6 +46,11 @@ pub(crate) fn usage_page(app: &App) -> Element<'_, Message> {
             }
             if !s.recent.is_empty() {
                 let now = usage::now_secs() as i64;
+                let fine = s
+                    .recent
+                    .iter()
+                    .filter_map(usage::Entry::cost)
+                    .any(|c| c > 0.0 && c < 0.01);
                 groups.push(form::group(
                     tr!("Latest calls"),
                     None,
@@ -55,12 +60,15 @@ pub(crate) fn usage_page(app: &App) -> Element<'_, Message> {
                         .map(|e| {
                             let about = tr!(
                                 "{date}, {model}: {input} tokens in, {output} out",
-                                date = super::panes::short_date(e.at as i64, now),
+                                date = when(e.at as i64, now),
                                 model = e.model.as_str(),
                                 input = usage::tokens(e.input),
                                 output = usage::tokens(e.output)
                             );
-                            let cost = e.cost().map_or_else(|| "—".to_string(), usage::money);
+                            let cost = e.cost().map_or_else(
+                                || "—".to_string(),
+                                |c| usage::money_in_column(c, fine),
+                            );
                             form::item(
                                 usage::purpose_label(&e.purpose),
                                 Some(about),
@@ -191,10 +199,11 @@ pub(crate) fn balance_said(amounts: &[(String, String)]) -> String {
     shown.join(", ")
 }
 
-/// An amount in its currency, as a reader writes it: ¥110.00, $3.10.
+/// An amount in its currency, as a reader writes it: CN¥110.00, $3.10 —
+/// "¥" alone is yuan or yen, and sat over costs in dollars.
 fn amount(currency: &str, value: &str) -> String {
     match currency {
-        "CNY" => format!("¥{value}"),
+        "CNY" => format!("CN¥{value}"),
         "USD" => format!("${value}"),
         other => format!("{value} {other}"),
     }
@@ -221,7 +230,9 @@ fn spent_group<'a>(s: &usage::Summary) -> Element<'a, Message> {
         if priced { d.cost } else { d.tokens() as f64 }
     };
     let top = s.days.iter().map(measure).fold(0.0_f64, f64::max);
-    let bars = iced::widget::Row::with_children(s.days.iter().map(|d| {
+    let now = usage::now_secs() as i64;
+    let last = s.days.len().saturating_sub(1);
+    let bars = iced::widget::Row::with_children(s.days.iter().enumerate().map(|(i, d)| {
         let h = if top > 0.0 {
             (measure(d) / top * f64::from(CHART_H)) as f32
         } else {
@@ -245,32 +256,49 @@ fn spent_group<'a>(s: &usage::Summary) -> Element<'a, Message> {
                 },
                 ..container::Style::default()
             });
-        container(bar)
-            .height(CHART_H)
-            .width(Fill)
-            .align_y(iced::alignment::Vertical::Bottom)
-            .into()
+        // Which day it is, and what it spent: a bar alone said neither.
+        let day = day_said(last - i, now);
+        let said = if d.calls == 0 {
+            tr!("{day}: no calls", day = day.as_str())
+        } else if priced {
+            tr!(
+                "{day}: {calls}, {cost}",
+                day = day.as_str(),
+                calls = calls_count(d),
+                cost = usage::money(d.cost)
+            )
+        } else {
+            tr!("{day}: {calls}", day = day.as_str(), calls = calls_line(d))
+        };
+        super::toolbar::tip_at(
+            container(bar)
+                .height(CHART_H)
+                .width(Fill)
+                .align_y(iced::alignment::Vertical::Bottom),
+            said,
+            None,
+            tooltip::Position::Top,
+        )
     }))
     .spacing(3)
     .width(Fill);
+    // What a bar measures, said as its heading; when it runs, under it.
+    let caption = |words: &str| text(words.to_string()).size(ts::SMALL).color(theme::dim());
     rows.push(form::row_of(
         column![
-            row![
-                text(tr!("Last 30 days"))
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
-                space().width(Fill),
-                text(if priced {
-                    tr!("By cost")
-                } else {
-                    tr!("By tokens")
-                })
-                .size(ts::SMALL)
-                .color(theme::dim()),
-            ],
+            caption(if priced {
+                tr!("Cost per day")
+            } else {
+                tr!("Tokens per day")
+            }),
             bars,
+            row![
+                caption(tr!("30 days ago")),
+                space().width(Fill),
+                caption(tr!("Today")),
+            ],
         ]
-        .spacing(8),
+        .spacing(6),
     ));
     // Said only when it changes how the figures read: a call with no
     // price is left out of them.
@@ -287,6 +315,42 @@ fn spent_group<'a>(s: &usage::Summary) -> Element<'a, Message> {
         None,
         rows,
     )
+}
+
+/// Which day `back` days before today is, as the chart's tip says it:
+/// "Today", "Yesterday", "Nov 9".
+fn day_said(back: usize, now: i64) -> String {
+    match back {
+        0 => tr!("Today").to_string(),
+        1 => tr!("Yesterday").to_string(),
+        _ => {
+            // Noon of that day on the reader's clock, as a moment: a day's
+            // length off midnight, a change of clocks moved it a day.
+            let offset = usage::local_secs(now) - now;
+            let local_day = usage::local_secs(now).div_euclid(86_400) - back as i64;
+            super::panes::short_date(local_day * 86_400 + 43_200 - offset, now)
+        }
+    }
+}
+
+/// When a call was made, to the minute, on the reader's clock: "Today,
+/// 14:05", "Nov 10, 09:12". A date alone left a day's calls alike.
+fn when(at: i64, now: i64) -> String {
+    let local = usage::local_secs(at);
+    let days_back = usage::local_secs(now).div_euclid(86_400) - local.div_euclid(86_400);
+    let secs = local.rem_euclid(86_400);
+    let time = format!("{:02}:{:02}", secs / 3_600, secs % 3_600 / 60);
+    let day = match days_back {
+        0 => tr!("Today").to_string(),
+        1 => tr!("Yesterday").to_string(),
+        _ => super::panes::short_date(at, now),
+    };
+    tr!("{day}, {time}", day = day.as_str(), time = time.as_str())
+}
+
+/// "12 calls".
+fn calls_count(t: &Totals) -> String {
+    trn!("1 call", "{n} calls", t.calls as usize)
 }
 
 /// "12 calls, 48k tokens".
@@ -313,53 +377,138 @@ fn cost_text<'a>(t: &Totals) -> Element<'a, Message> {
         .into()
 }
 
-/// The model in use's prices: Clew's, or the reader's own.
+/// The model in use's prices: said in a line where Clew knows them, with
+/// a way to change them; three boxes to fill only where it doesn't, or the
+/// reader asks to. Three boxes always, and a date, read as a form to fill
+/// in for prices Clew already had.
 fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
+    if model.is_empty() {
+        return form::group(
+            tr!("Prices"),
+            Some(tr!("Set a model on the Language model page first.").to_string()),
+            None,
+            Vec::new(),
+        );
+    }
+    let known = usage::price_of(model);
+    let own = usage::own_price(model).is_some();
+    let defaults = usage::builtin_price(model).is_some();
+    let restore = || {
+        form::action(
+            tr!("Restore defaults"),
+            Some(Message::Usage(UsageMsg::ResetPrice)),
+        )
+    };
+    // Being typed in, the fields stay: once two of them read as prices
+    // they are kept, and the row turned back into a line under the pointer.
+    let drafted = app.usage.price_draft.is_some();
+    let editing = app.usage.editing_prices || drafted;
+    if let (Some(p), false) = (known, editing) {
+        let said = tr!(
+            "{input} in, {output} out, per million tokens. Cached input {cached}.",
+            input = price_said(p.input).as_str(),
+            output = price_said(p.output).as_str(),
+            cached = price_said(p.cached).as_str()
+        );
+        let about = match (own, app.usage.price_saved) {
+            (true, true) => tr!("Your prices, saved. {prices}", prices = said.as_str()),
+            (true, false) => tr!("Your prices. {prices}", prices = said.as_str()),
+            (false, _) => said,
+        };
+        let mut buttons = row![].spacing(8).align_y(iced::Center);
+        if own && defaults {
+            buttons = buttons.push(restore());
+        }
+        buttons = buttons.push(form::action(
+            tr!("Edit"),
+            Some(Message::Usage(UsageMsg::EditPrices(true))),
+        ));
+        return form::group(
+            tr!("Prices"),
+            None,
+            None,
+            vec![form::item(model.to_string(), Some(about), buttons)],
+        );
+    }
     let shown = app.usage.price_draft.clone().unwrap_or_else(|| {
-        usage::price_of(model).map_or_else(Default::default, |p| {
+        known.map_or_else(Default::default, |p| {
             [p.input, p.cached, p.output].map(usage::price_text)
         })
     });
-    let field = |label: &str, which: PriceField, value: String| {
-        form::field(
-            label.to_string(),
-            None,
+    // What is wrong with a field as typed, said under its name: "abc"
+    // was taken, kept nowhere, and nothing said so.
+    let problem = |which: PriceField, value: &str| -> Option<String> {
+        let v = value.trim();
+        if v.is_empty() {
+            (drafted && which != PriceField::Cached).then(|| tr!("Needed to save.").to_string())
+        } else if !v.parse::<f64>().is_ok_and(|n| n.is_finite() && n >= 0.0) {
+            Some(tr!("Enter a number.").to_string())
+        } else {
+            None
+        }
+    };
+    let field = |label: &str, about: Option<String>, which: PriceField, value: String| {
+        let about = problem(which, &value).or(about);
+        // Dollars per million tokens, said where the figure is typed, and
+        // set at the right as the page's other figures are.
+        let control = row![
+            text("$").size(ts::BODY).color(theme::dim()),
             form::input("0", &value)
                 .on_input(move |v| Message::Usage(UsageMsg::Price(which, v)))
-                .width(Length::Fixed(120.0)),
+                .width(Length::Fixed(96.0)),
+            text(tr!("per 1M tokens"))
+                .size(ts::SMALL)
+                .color(theme::dim()),
+        ]
+        .spacing(6)
+        .align_y(iced::Center);
+        form::field(
+            label.to_string(),
+            about,
+            container(control)
+                .width(Fill)
+                .align_x(iced::alignment::Horizontal::Right),
         )
     };
     let [input, cached, output] = shown;
     let mut rows = vec![
-        field(tr!("Input"), PriceField::Input, input),
-        field(tr!("Cached input"), PriceField::Cached, cached),
-        field(tr!("Output"), PriceField::Output, output),
+        field(tr!("Input"), None, PriceField::Input, input),
+        field(tr!("Cached input"), None, PriceField::Cached, cached),
+        field(tr!("Output"), None, PriceField::Output, output),
     ];
-    if usage::own_price(model).is_some() {
-        rows.push(form::item(
-            tr!("Your own prices"),
-            usage::builtin_price(model)
-                .is_some()
-                .then(|| tr!("Clew has defaults for this model.").to_string()),
-            form::action(
-                tr!("Restore defaults"),
-                Some(Message::Usage(UsageMsg::ResetPrice)),
-            ),
+    // Editing prices Clew knows: a way back to the line, and to its own.
+    if known.is_some() && editing {
+        let mut buttons = row![].spacing(8).align_y(iced::Center);
+        if app.usage.price_saved {
+            buttons = buttons.push(text(tr!("Saved.")).size(ts::SMALL).color(theme::dim()));
+        }
+        if own && defaults {
+            buttons = buttons.push(restore());
+        }
+        buttons = buttons.push(form::primary(
+            tr!("Done"),
+            Some(Message::Usage(UsageMsg::EditPrices(false))),
+        ));
+        rows.push(form::row_of(
+            row![space().width(Fill), buttons].align_y(iced::Center),
         ));
     }
-    let about = if model.is_empty() {
-        tr!("Set a model on the Language model page first.").to_string()
-    } else if usage::price_of(model).is_none() {
+    let about = known.is_none().then(|| {
         tr!(
-            "Clew doesn't know {model}'s prices. Enter them, in US dollars per million tokens, to see what calls cost.",
+            "Clew doesn't know {model}'s prices. Enter them to see what calls cost.",
             model = model
         )
-    } else {
-        tr!(
-            "US dollars per million tokens, for {model}. Clew's defaults date from {date} and prices change, so check your provider's pricing page.",
-            model = model,
-            date = usage::PRICES_AS_OF
-        )
-    };
-    form::group(tr!("Prices"), Some(about), None, rows)
+    });
+    form::group(tr!("Prices"), about, None, rows)
+}
+
+/// A price per million tokens as the line says it: "$0.30", "$0.006".
+fn price_said(dollars: f64) -> String {
+    let text = usage::price_text(dollars);
+    // Cents kept to two places: "$0.3" read as thirty cents to no one.
+    match text.split_once('.') {
+        Some((_, cents)) if cents.len() == 1 => format!("${text}0"),
+        Some(_) => format!("${text}"),
+        None => format!("${text}.00"),
+    }
 }
