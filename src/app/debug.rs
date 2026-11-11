@@ -85,10 +85,58 @@ impl App {
     /// launch.json.
     fn debuggable_script(&self) -> Option<PathBuf> {
         let abs = &self.active_viewer()?.abs;
-        match dap::Lang::detect(None, abs)? {
-            dap::Lang::Native | dap::Lang::CSharp => None,
-            _ => Some(abs.clone()),
+        let lang = dap::Lang::detect(None, abs)?;
+        if matches!(lang, dap::Lang::Native | dap::Lang::CSharp) {
+            return None;
         }
+        // A module that only defines things does nothing run on its own:
+        // the project's one program start in its language runs instead —
+        // what the reader meant. Run on a library module of a project with
+        // a `main.py` printed nothing and exited 0, and nothing said why.
+        if !self.runs_on_its_own(abs)
+            && let Some(start) = self.only_program_start(lang)
+        {
+            return Some(start);
+        }
+        Some(abs.clone())
+    }
+
+    /// Whether running `file` does something: it has a program start (a
+    /// `main`) or code at its top level, in no function. Not read yet: taken
+    /// to, as before.
+    pub(crate) fn runs_on_its_own(&self, file: &Path) -> bool {
+        let Some(symbols) = self.proj.symbol_index_by_file.get(file) else {
+            return true;
+        };
+        if symbols
+            .iter()
+            .any(|s| s.entry == Some(crate::graph::index::EntryKind::Main))
+        {
+            return true;
+        }
+        // Only files with calls are kept: one read without is all defs.
+        self.proj
+            .calls_by_file
+            .get(file)
+            .is_some_and(|calls| calls.calls.iter().any(|s| s.caller.is_none()))
+    }
+
+    /// The one file of the project in `lang` with a program start (a
+    /// `main`), when there is exactly one.
+    fn only_program_start(&self, lang: dap::Lang) -> Option<PathBuf> {
+        let mut starts = self
+            .proj
+            .symbol_index_by_file
+            .iter()
+            .filter(|(file, symbols)| {
+                symbols
+                    .iter()
+                    .any(|s| s.entry == Some(crate::graph::index::EntryKind::Main))
+                    && dap::Lang::detect(None, file) == Some(lang)
+            })
+            .map(|(file, _)| file.clone());
+        let start = starts.next()?;
+        starts.next().is_none().then_some(start)
     }
 
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
@@ -107,10 +155,18 @@ impl App {
     /// What the status line says while the session runs: a run is no
     /// debugger's.
     fn running_said(&self) -> String {
-        if self.debug.no_debug {
-            tr!("Running…").into()
-        } else {
-            tr!("Debugger running…").into()
+        // What runs, named: which file Run picked was said nowhere.
+        let name = self
+            .debug
+            .session
+            .as_ref()
+            .and_then(|s| s.program.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        match (self.debug.no_debug, name) {
+            (true, Some(name)) => tr!("Running {file}…", file = name),
+            (true, None) => tr!("Running…").into(),
+            (false, Some(name)) => tr!("Debugging {file}…", file = name),
+            (false, None) => tr!("Debugger running…").into(),
         }
     }
 
@@ -1564,12 +1620,9 @@ impl App {
                 push_debug_output(session, o.category, o.text);
                 Task::none()
             }
+            // Its code said once, beside the run's name — the output said
+            // it again under it.
             dap::DapEvent::Exited { code } => {
-                push_debug_output(
-                    session,
-                    "console".into(),
-                    format!("{}\n", tr!("Process exited with code {code}", code = code)),
-                );
                 session.status = DebugStatus::Terminated;
                 session.exit_code = Some(code);
                 session.current = None;

@@ -456,6 +456,16 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 .into(),
         );
     }
+    // Ended without a word: said, where an empty pane read as Clew's
+    // failure as much as the program's.
+    if session.output.is_empty() && session.status == DebugStatus::Terminated {
+        out_rows.push(
+            text(tr!("The program printed nothing."))
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .into(),
+        );
+    }
     // The pill floats over the panel's foot at its right, where the output
     // is: scrolled to its end, the last lines are clear of it.
     if app.ask_view == crate::AskView::Hidden {

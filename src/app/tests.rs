@@ -6003,7 +6003,18 @@ fn a_finished_run_is_no_longer_said_to_be_running() {
             all_threads: true,
         },
     );
-    assert_eq!(app.status, tr!("Debugger running…"));
+    // Running again, and which program: Run's pick was said nowhere.
+    let name = app
+        .debug
+        .session
+        .as_ref()
+        .unwrap()
+        .program
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(app.status, tr!("Debugging {file}…", file = name));
 }
 
 /// A late event from a stopped debug run must not land on the next session.
@@ -27950,6 +27961,76 @@ fn run_starts_the_program_without_the_debugger() {
     assert!(app.debug.session.is_some(), "{}", app.status);
     assert!(!app.debug.no_debug, "Debug debugs");
     assert!(app.status.contains("Starting debugger"), "{}", app.status);
+}
+
+/// Run on a module that only defines things runs the project's one
+/// program start instead — Run on `pricing.py` beside a `main.py` printed
+/// nothing and exited 0 — and the status line names what runs. A file that
+/// does something at its top level runs itself, as before.
+#[test]
+fn run_on_a_module_of_defs_runs_the_projects_main() {
+    let mut app = scanned_app("debug-run-main");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("main.py"),
+        "from pricing import price\n\ndef main():\n    print(price())\n\nif __name__ == \"__main__\":\n    main()\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("pricing.py"), "def price():\n    return 3\n").unwrap();
+    let symbol = |file: &str, name: &str, entry| SymbolEntry {
+        name: name.into(),
+        kind: "function".into(),
+        rel: file.into(),
+        abs: root.join(file),
+        line: 1,
+        is_test: false,
+        entry,
+    };
+    app.proj.symbol_index_by_file.insert(
+        root.join("main.py"),
+        Arc::new(vec![symbol(
+            "main.py",
+            "main",
+            Some(crate::graph::index::EntryKind::Main),
+        )]),
+    );
+    app.proj.symbol_index_by_file.insert(
+        root.join("pricing.py"),
+        Arc::new(vec![symbol("pricing.py", "price", None)]),
+    );
+    assert!(!app.runs_on_its_own(&root.join("pricing.py")));
+    assert!(app.runs_on_its_own(&root.join("main.py")));
+    open_synchronously(&mut app, "pricing.py", None);
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    let session = app.debug.session.as_ref().expect("a run");
+    assert_eq!(session.program, root.join("main.py"), "{}", app.status);
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+
+    // A script with code at its top level runs itself.
+    std::fs::write(root.join("tool.py"), "print('hi')\n").unwrap();
+    app.proj
+        .symbol_index_by_file
+        .insert(root.join("tool.py"), Arc::new(Vec::new()));
+    app.proj.calls_by_file.insert(
+        root.join("tool.py"),
+        Arc::new(crate::projectcalls::FileCalls::new(
+            root.join("tool.py"),
+            crate::highlight::Lang::Python,
+            vec![crate::projectcalls::CallSite {
+                caller: None,
+                callee: "print".into(),
+                method: false,
+                receiver: None,
+                line: 1,
+            }],
+            &[],
+            Default::default(),
+        )),
+    );
+    open_synchronously(&mut app, "tool.py", None);
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    let session = app.debug.session.as_ref().expect("a run");
+    assert_eq!(session.program, root.join("tool.py"));
 }
 
 /// D1-10: hovering a word while the debuggee is paused evaluates it in the top
