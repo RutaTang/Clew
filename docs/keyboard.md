@@ -1,0 +1,5 @@
+# Keyboard
+
+**English** · [简体中文](keyboard.zh-CN.md)
+
+Everything Clew does is also a keystroke away (on Linux and Windows, **⌘** is **Ctrl**): **⌘⇧P** opens the command palette, where you can search for any command — the graphs, the sidebar's views and panels, what the right-click menu does at the cursor, the debugger's controls, the theme — and run it with Enter. Typing `>` in the file finder (⌘P) does the same, and **⌘/** lists the shortcuts. **⌘J** puts a short code of letters on every button and row on screen — the sidebar's files, the strip's tools, a dialog's buttons — and typing a code presses it, as a click would; the command bar also lists what is on screen by name. **F6** moves the keys between the code, the sidebar's field, the file tree and Ask; in the tree, the arrow keys walk it (→ opens a folder, ← closes it, Enter reads a file). With no field holding the keys, **Tab** rings each control on screen in turn, and Enter or Space presses it. Or say it: **⌘⇧S** listens for a command or a question (see [Voice](voice.md)).
