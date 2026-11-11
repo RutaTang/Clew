@@ -325,13 +325,85 @@ fn a_failed_run_says_why_and_can_be_tried_again() {
     let cancelled = std::iter::from_fn(|| rx.try_recv().ok())
         .any(|m| matches!(m.request, clew_protocol::Request::Cancel { id } if id == stream));
     assert!(cancelled, "the turn was cancelled on the server");
+    // Its tab stays, saying it was stopped, with Try again there.
+    let stopped = app.proj.fake.failed.clone();
+    assert!(
+        stopped.as_deref().is_some_and(|w| w.contains("stopped")),
+        "{stopped:?}"
+    );
+    assert!(app.proj.fake.shown());
     // Its late end changes nothing.
     let _ = app.update(Message::Fake(FakeMsg::TurnEnded {
         stamp: app.stamp(),
         stream,
         outcome: clew_protocol::StreamOutcome::Done,
     }));
-    assert!(app.proj.fake.sim.is_none() && app.proj.fake.failed.is_none());
+    assert!(app.proj.fake.sim.is_none());
+    assert_eq!(app.proj.fake.failed, stopped);
+}
+
+/// Fake runs run side by side, each in its own tab: a second does not stop
+/// the first; the first's answer, come while the second is on screen, is
+/// taken in its own tab and shows nothing; Edit inputs runs again in the
+/// same tab; closed, the tab beside it is shown.
+#[test]
+fn fake_runs_run_side_by_side_each_in_its_own_tab() {
+    use crate::app::state::RunTab;
+    let mut app = fake_app("fake-tabs");
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: false }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let first_seq = app.proj.fake.working.as_ref().unwrap().seq;
+    let first = app.proj.fake.tab;
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let second_seq = app.proj.fake.working.as_ref().unwrap().seq;
+    let second = app.proj.fake.tab;
+    assert_ne!(first, second);
+    assert_eq!(app.run_tabs(), [RunTab::Fake(first), RunTab::Fake(second)]);
+    assert_eq!(app.shown_run_tab(), Some(RunTab::Fake(second)));
+
+    // The first's answer, off screen: in its own tab.
+    let _ = app.update(Message::Fake(FakeMsg::Answered {
+        stamp: app.stamp(),
+        seq: first_seq,
+        result: Ok(TRACE.into()),
+    }));
+    assert!(app.proj.fake.working.is_some(), "the second still works");
+    assert_eq!(app.proj.fake.tab, second);
+    assert!(app.status.contains("ready in its tab"), "{}", app.status);
+    let _ = app.update(Message::Debug(DebugMsg::ShowTab(RunTab::Fake(first))));
+    assert_eq!(app.proj.fake.tab, first);
+    assert_eq!(app.proj.fake.sim.as_ref().unwrap().trace.steps.len(), 2);
+    let caret = app.active_viewer().unwrap().caret;
+
+    // The second's, a fake debug off screen now: its first line is not
+    // shown over the first's.
+    let _ = app.update(Message::Fake(FakeMsg::Answered {
+        stamp: app.stamp(),
+        seq: second_seq,
+        result: Ok(TRACE.into()),
+    }));
+    assert_eq!(app.proj.fake.tab, first, "the tab on screen stays");
+    assert_eq!(app.active_viewer().unwrap().caret, caret);
+    assert_eq!(
+        app.run_tab_faces()[1].state,
+        crate::app::runs::TabState::Paused,
+        "the fake debug waits on its first line"
+    );
+
+    // Edit inputs, run: again, in its own tab.
+    let _ = app.update(Message::Fake(FakeMsg::EditInputs));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    assert_eq!(app.proj.fake.tab, first);
+    assert_eq!(app.run_tabs().len(), 2);
+
+    // Closed: its work stopped, the tab beside it shown.
+    let _ = app.update(Message::Fake(FakeMsg::Close));
+    assert_eq!(app.run_tabs(), [RunTab::Fake(second)]);
+    assert_eq!(app.proj.fake.tab, second);
+    assert!(app.proj.fake.sim.is_some());
 }
 
 /// Suggested inputs fill the fields left empty, not what was typed; a

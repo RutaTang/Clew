@@ -4111,6 +4111,71 @@ fn the_proof_panel_marks_what_each_tactic_did() {
     assert!(shows(&mut sim_of(&app), "No goals left: proved."));
 }
 
+/// The bottom panel has a tab for each run, named by what it runs — the
+/// second of two Debugs of one program numbered — each pressed to show it
+/// and closed by its ×; with none, it offers the four ways to run.
+#[test]
+fn the_panel_has_a_tab_for_each_run() {
+    use crate::app::state::RunTab;
+    let mut app = reader_app();
+    app.show_bottom = true;
+    assert!(shows(&mut sim_of(&app), "Nothing is running"));
+    let sent = click(sim_of(&app), "Start Debugging");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::Start))),
+        "{sent:?}"
+    );
+    let session = |status| crate::DebugSession {
+        client: None,
+        status,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/p/main.py"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/p"),
+        addr: None,
+    };
+    app.debug.session = Some(session(crate::DebugStatus::Running));
+    app.debug.tab = 1;
+    app.park_debug();
+    app.debug.session = Some(session(crate::DebugStatus::Stopped));
+    app.debug.tab = 2;
+    app.run_shown = Some(RunTab::Real(2));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "main.py (2)"), "two Debugs of one program");
+    drop(sim);
+    let sent = click(sim_of(&app), "main.py");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::ShowTab(RunTab::Real(1))))),
+        "{sent:?}"
+    );
+    let (targets, _) = super::heard::gather_all(&app);
+    for (shown, tab) in [("Close Debug main.py", 1), ("Close Debug main.py (2)", 2)] {
+        assert!(
+            targets.iter().any(|t| t.shown == shown
+                && matches!(t.message, Message::Debug(DebugMsg::CloseTab(RunTab::Real(id))) if id == tab)),
+            "{shown}: {:?}",
+            targets.iter().map(|t| &t.shown).collect::<Vec<_>>()
+        );
+    }
+    // Shown, a tab's run is the one on screen.
+    for m in sent {
+        let _ = app.update(m);
+    }
+    assert_eq!(app.debug.tab, 1);
+    assert_eq!(
+        app.debug.session.as_ref().unwrap().status,
+        crate::DebugStatus::Running
+    );
+}
+
 /// In a window too short for the four ways to run, they fold into the bug,
 /// whose Run menu opens beside the strip, level with it: Run and Debug,
 /// then Fake Run and Fake Debug, each named as the menu bar names it, with

@@ -539,13 +539,18 @@ impl App {
         // any adapter started while no server was up) does not ride it, and
         // goes on: ended here, the program it debugs was cut off mid-session
         // for nothing. A run still starting may yet be proxied, and goes.
-        if self.debug_rides_transport() {
-            if let Some(session) = self.debug.session.as_mut() {
-                session.status = DebugStatus::Terminated;
-                session.current = None;
+        let end = |app: &mut App| {
+            if app.debug_rides_transport() {
+                if let Some(session) = app.debug.session.as_mut() {
+                    session.status = DebugStatus::Terminated;
+                    session.current = None;
+                }
+                app.bump_debug_run();
             }
-            self.bump_debug_run();
-        }
+        };
+        end(self);
+        // And each run in a tab not on screen, the same way.
+        self.for_each_parked_debug(end);
         closed
     }
 

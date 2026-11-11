@@ -7311,51 +7311,171 @@ fn a_failed_debug_run_stops_what_it_started() {
     assert!(app.status.contains("Debug failed"), "{}", app.status);
 }
 
-/// A program that ended leaves its session on screen, but nothing runs in
-/// it: Debug starts again instead of answering "already running" until the
-/// reader thinks to press Stop.
+/// Runs open side by side, each in a tab of its own: a second Debug while
+/// the first runs starts beside it — it was refused as "already running" —
+/// each run keeps its own messages, off screen too, and an ended run of the
+/// same program, run the same way, gives its tab to the next one.
 #[test]
-fn debug_starts_again_after_the_program_ended() {
-    let mut app = scanned_app("debug-restart-ended");
-    app.debug.session = Some(DebugSession {
-        client: None,
-        status: DebugStatus::Terminated,
-        exit_code: None,
-        thread_id: None,
-        frames: Vec::new(),
-        scopes: Vec::new(),
-        watches: Vec::new(),
-        output: Vec::new(),
-        current: None,
-        program: PathBuf::from("/bin/true"),
-        args: Vec::new(),
-        cwd: PathBuf::from("/"),
-        addr: None,
-    });
-    let run = app.debug_run;
+fn runs_open_side_by_side_each_in_its_own_tab() {
+    use crate::app::state::RunTab;
+    let mut app = scanned_app("debug-tabs");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("app.py"), "print('hi')\n").unwrap();
+    open_synchronously(&mut app, "app.py", None);
+    let _ = app.start_debug();
+    let (first, first_tab) = (app.debug_run, app.debug.tab);
+    assert_ne!(first_tab, 0);
     let _ = app.start_debug();
     assert!(!app.status.contains("already running"), "{}", app.status);
-    assert!(app.debug.session.is_none(), "the ended session was kept");
-    assert_ne!(app.debug_run, run, "the ended run's identity lived on");
+    let (second, second_tab) = (app.debug_run, app.debug.tab);
+    assert_ne!(second, first);
+    assert_ne!(second_tab, first_tab);
+    assert_eq!(
+        app.run_tabs(),
+        [RunTab::Real(first_tab), RunTab::Real(second_tab)]
+    );
+    assert_eq!(app.shown_run_tab(), Some(RunTab::Real(second_tab)));
+    // Each run's adapter answers; the first's, off screen, too.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for run in [first, second] {
+        let (client, _seen) = fake_js_session(&rt);
+        let _ = app.update(Message::Debug(DebugMsg::DapStarted {
+            stamp: app.transport_stamp(),
+            run,
+            client,
+            addr: None,
+            hover_safe: false,
+            proxied: false,
+        }));
+    }
+    assert_eq!(
+        app.debug.session.as_ref().unwrap().status,
+        DebugStatus::Running
+    );
+    assert_eq!(
+        app.debug_parked[0].session.as_ref().unwrap().status,
+        DebugStatus::Running,
+        "the first's start, taken off screen"
+    );
+    // The first, off screen, still hears from its program.
+    let said = |app: &mut App, run: u64, text: &str| {
+        let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+            stamp: app.transport_stamp(),
+            run,
+            event: dap::DapEvent::Output(dap::proto::Output {
+                category: "stdout".into(),
+                text: text.into(),
+            }),
+        }));
+    };
+    said(&mut app, first, "one\n");
+    said(&mut app, second, "two\n");
+    let output = |app: &App| {
+        app.debug
+            .session
+            .as_ref()
+            .unwrap()
+            .output
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<String>()
+    };
+    assert_eq!(output(&app), "two\n", "the second's own, on screen");
+    assert_eq!(app.debug.tab, second_tab);
+    let _ = app.update(Message::Debug(DebugMsg::ShowTab(RunTab::Real(first_tab))));
+    assert_eq!(app.debug.tab, first_tab);
+    assert_eq!(app.debug_run, first);
+    assert_eq!(output(&app), "one\n", "the first's, kept while off screen");
+    assert_eq!(app.debug_parked.len(), 1, "the second set aside");
 
-    // A session still running is not replaced.
-    app.debug.session = Some(DebugSession {
-        client: None,
-        status: DebugStatus::Running,
-        exit_code: None,
-        thread_id: None,
-        frames: Vec::new(),
-        scopes: Vec::new(),
-        watches: Vec::new(),
-        output: Vec::new(),
-        current: None,
-        program: PathBuf::from("/bin/true"),
-        args: Vec::new(),
-        cwd: PathBuf::from("/"),
-        addr: None,
-    });
+    // The second, off screen, stops: the tab on screen is running, not
+    // being read, so the stop brings the second on screen.
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: second,
+        event: dap::DapEvent::Stopped(dap::proto::Stopped {
+            reason: "breakpoint".into(),
+            thread_id: Some(1),
+            description: None,
+            text: None,
+            all_threads: false,
+        }),
+    }));
+    assert_eq!(app.shown_run_tab(), Some(RunTab::Real(second_tab)));
+    assert_eq!(app.debug_run, second);
+    assert_eq!(
+        app.debug.session.as_ref().unwrap().status,
+        DebugStatus::Stopped
+    );
+
+    // The first stops too, while the second is paused on screen, being
+    // read: it is said, and waits in its tab — the screen is not taken.
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: first,
+        event: dap::DapEvent::Stopped(dap::proto::Stopped {
+            reason: "breakpoint".into(),
+            thread_id: Some(1),
+            description: None,
+            text: None,
+            all_threads: false,
+        }),
+    }));
+    assert_eq!(app.shown_run_tab(), Some(RunTab::Real(second_tab)));
+    assert!(app.status.contains("its tab shows where"), "{}", app.status);
+    let faces = app.run_tab_faces();
+    assert_eq!(faces[0].state, crate::app::runs::TabState::Paused);
+
+    // The first ends, off screen; debugged again, it takes its own tab.
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: first,
+        event: dap::DapEvent::Terminated,
+    }));
+    assert_eq!(app.run_tabs().len(), 2, "an ended run stays, to be read");
     let _ = app.start_debug();
-    assert!(app.status.contains("already running"), "{}", app.status);
+    assert_eq!(app.debug.tab, first_tab, "run again in its tab");
+    assert_eq!(app.run_tabs().len(), 2);
+
+    // Closed, a tab's run ends, and the tab beside it is shown.
+    let _ = app.update(Message::Debug(DebugMsg::CloseTab(RunTab::Real(first_tab))));
+    assert_eq!(app.run_tabs(), [RunTab::Real(second_tab)]);
+    assert_eq!(app.shown_run_tab(), Some(RunTab::Real(second_tab)));
+    assert_eq!(app.debug.tab, second_tab);
+}
+
+/// Stop ends the program, and its tab stays with what it printed, ended:
+/// Debug Again runs it again in that tab, and the tab's × closes it.
+#[test]
+fn stop_keeps_the_tab_and_again_runs_it_in_it() {
+    use crate::app::state::RunTab;
+    let mut app = scanned_app("debug-stop-again");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("app.py"), "print('hi')\n").unwrap();
+    open_synchronously(&mut app, "app.py", None);
+    let _ = app.start_run();
+    let tab = app.debug.tab;
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: app.debug_run,
+        event: dap::DapEvent::Output(dap::proto::Output {
+            category: "stdout".into(),
+            text: "hi\n".into(),
+        }),
+    }));
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+    let session = app.debug.session.as_ref().expect("its tab stays");
+    assert_eq!(session.status, DebugStatus::Terminated);
+    assert_eq!(session.output.len(), 1, "with what it printed");
+    assert_eq!(app.status, "Program stopped");
+    let _ = app.update(Message::Debug(DebugMsg::Again));
+    let session = app.debug.session.as_ref().unwrap();
+    assert_eq!(session.status, DebugStatus::Launching, "running again");
+    assert!(app.debug.no_debug, "as it was: Run, not Debug");
+    assert_eq!(app.debug.tab, tab, "in its own tab");
+    let _ = app.update(Message::Debug(DebugMsg::CloseTab(RunTab::Real(tab))));
+    assert!(app.debug.session.is_none());
+    assert!(app.run_tabs().is_empty());
 }
 
 /// Stopping during `Launching` — before the adapter handed back a client —
@@ -7383,7 +7503,13 @@ fn debug_stop_while_launching_cancels_the_startup() {
     let launching = app.debug_run;
 
     let _ = app.update(Message::Debug(DebugMsg::Stop));
-    assert!(app.debug.session.is_none());
+    let ended = |app: &App| {
+        app.debug
+            .session
+            .as_ref()
+            .is_some_and(|s| s.status == DebugStatus::Terminated && s.client.is_none())
+    };
+    assert!(ended(&app), "its tab stays, ended");
     assert_ne!(app.debug_run, launching, "the run identity moved on");
     assert_eq!(
         app.debug_run_live.load(std::sync::atomic::Ordering::SeqCst),
@@ -7397,7 +7523,7 @@ fn debug_stop_while_launching_cancels_the_startup() {
         run: launching,
         event: dap::DapEvent::Terminated,
     }));
-    assert!(app.debug.session.is_none());
+    assert!(ended(&app), "no session resurrects");
 }
 
 /// Start a debug run in a REMOTE project and drive it the way the runtime

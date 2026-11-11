@@ -689,7 +689,7 @@ impl App {
         // teardown the Stop button performs, rather than a copy of it that
         // reads the same: the copy was where the breakpoint-verdict reset would
         // have gone missing.
-        Task::batch([stop_ask, self.stop_debug_session()])
+        Task::batch([stop_ask, self.stop_every_debug_run()])
     }
 
     /// Read the open project's persisted state on the blocking pool (see

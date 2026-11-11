@@ -1791,6 +1791,13 @@ pub enum DebugMsg {
     },
     /// End the debug session.
     Stop,
+    /// Show a tab of the bottom panel: its run comes on screen.
+    ShowTab(crate::app::state::RunTab),
+    /// Close a tab of the bottom panel, ending its run if it still runs.
+    CloseTab(crate::app::state::RunTab),
+    /// The ended run on screen, run again as it was (Run or Debug): in its
+    /// own tab.
+    Again,
     /// Toggle a breakpoint at (file, 1-based line) — from the code context menu.
     BreakpointToggle { path: PathBuf, line: usize },
     /// Toggle a breakpoint at the right-clicked line (code context menu).
@@ -2831,6 +2838,43 @@ impl TimeTravelMsg {
 }
 
 impl DebugMsg {
+    /// The run a message from the debug adapter's side belongs to; `None`
+    /// for the reader's own (a press, a key), which is the run on screen's.
+    pub fn run(&self) -> Option<u64> {
+        match self {
+            DebugMsg::DapStarted { run, .. }
+            | DebugMsg::DapChildStarted { run, .. }
+            | DebugMsg::DapEvent { run, .. }
+            | DebugMsg::DapChildEvent { run, .. }
+            | DebugMsg::DapStopInspected { run, .. }
+            | DebugMsg::DapControlFailed { run, .. }
+            | DebugMsg::DapControlled { run, .. }
+            | DebugMsg::DapBreakpointsAnswered { run, .. }
+            | DebugMsg::DapConfigured { run, .. }
+            | DebugMsg::WatchesEvaluated { run, .. }
+            | DebugMsg::VarChildren { run, .. }
+            | DebugMsg::Failed { run, .. }
+            | DebugMsg::ChildFailed { run, .. }
+            | DebugMsg::NeedsInstall { run, .. } => Some(*run),
+            _ => None,
+        }
+    }
+
+    /// Whether this is a stop of the program: a run paused at one comes on
+    /// screen — unless the one on screen is paused too, being read.
+    pub fn is_stop(&self) -> bool {
+        matches!(
+            self,
+            DebugMsg::DapEvent {
+                event: crate::dap::DapEvent::Stopped(_),
+                ..
+            } | DebugMsg::DapChildEvent {
+                event: crate::dap::DapEvent::Stopped(_),
+                ..
+            }
+        )
+    }
+
     /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
     /// new variant cannot compile until it is classified here.
     /// `AdapterInstalled` carries a stamp but is not checked here: the install
@@ -2857,6 +2901,9 @@ impl DebugMsg {
             | DebugMsg::Run
             | DebugMsg::Control(..)
             | DebugMsg::Stop
+            | DebugMsg::ShowTab(..)
+            | DebugMsg::CloseTab(..)
+            | DebugMsg::Again
             | DebugMsg::BreakpointToggle { .. }
             | DebugMsg::ToggleBreakpointFromMenu
             | DebugMsg::ConditionalBreakpointFromMenu

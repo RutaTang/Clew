@@ -96,6 +96,7 @@ impl App {
         // evaluation has no side effects, otherwise only after the reader
         // opted in (see `dap::hover_eval_allowed`).
         if dap::hover_eval_allowed(self.debug.hover_safe, self.debug_hover_eval)
+            && self.real_run_shown()
             && let Some(session) = self
                 .debug
                 .session

@@ -37,10 +37,38 @@ pub struct FakeRun {
     /// Numbers each run and each suggestion: only the newest's answer is
     /// taken.
     seq: u64,
+    /// The tab of the bottom panel the run here is
+    /// ([`RunTab::Fake`](crate::app::state::RunTab::Fake)); 0
+    /// while there is none.
+    pub(crate) tab: u64,
+    /// The sheet open is that tab's own inputs, opened again (Edit inputs,
+    /// Try again): run, they are run again in it, not in a new tab.
+    pub(crate) again: Option<u64>,
+    /// The fake runs in tabs not on screen.
+    pub(crate) parked: Vec<ParkedFake>,
 }
 
 impl FakeRun {
     /// Whether the bottom panel has a fake run to show.
+    pub(crate) fn shown(&self) -> bool {
+        self.working.is_some() || self.sim.is_some() || self.failed.is_some()
+    }
+}
+
+/// A fake run in a tab not on screen: all of [`FakeRun`] that is a run's
+/// own, kept aside and swapped back in to be shown, or for its answer to
+/// be taken.
+#[derive(Debug, Default)]
+pub struct ParkedFake {
+    pub(crate) tab: u64,
+    pub(crate) working: Option<Working>,
+    pub(crate) sim: Option<Sim>,
+    pub(crate) failed: Option<String>,
+    pub(crate) last: Option<Sheet>,
+}
+
+impl ParkedFake {
+    /// Whether it is still a run: worked out, being worked out, or failed.
     pub(crate) fn shown(&self) -> bool {
         self.working.is_some() || self.sim.is_some() || self.failed.is_some()
     }
@@ -162,6 +190,8 @@ impl App {
             suggesting: None,
             debug,
         });
+        // A new run, in a tab of its own.
+        self.proj.fake.again = None;
         operation::focus(field_id(0))
     }
 
@@ -224,7 +254,17 @@ impl App {
         };
         sheet.suggesting = None;
         let debug = sheet.debug;
-        let stopped = self.stop_fake_work();
+        // Its own inputs again (Edit inputs, Try again): run again in its
+        // tab. Else a new tab: the fake run on screen goes on in its own.
+        let again = self.proj.fake.again.take();
+        let stopped = if self.proj.fake.tab != 0 && again == Some(self.proj.fake.tab) {
+            self.stop_fake_work()
+        } else {
+            self.park_fake();
+            self.proj.fake.tab = self.next_run_tab();
+            Task::none()
+        };
+        self.run_shown = Some(crate::app::state::RunTab::Fake(self.proj.fake.tab));
         let given = fr::given(&sheet.fields, &sheet.values);
         let target = sheet.target.clone();
         self.proj.fake.last = Some(sheet);
@@ -363,7 +403,7 @@ impl App {
 
     /// Stop the run being worked out, if one is: its turn is cancelled on
     /// the server, and its answer no longer waited for.
-    fn stop_fake_work(&mut self) -> Task<Message> {
+    pub(crate) fn stop_fake_work(&mut self) -> Task<Message> {
         if let Some(stream) = self.proj.fake.working.take().and_then(|w| w.stream) {
             self.proj.link.agent_streams.remove(&stream);
             let _ = self.send_to_server(clew_protocol::Request::Cancel { id: stream });
@@ -471,8 +511,12 @@ impl App {
         Some((rel, lines))
     }
 
-    /// Show the step the trace is at: its file, open at its line.
-    fn fake_show_step(&mut self) -> Task<Message> {
+    /// Show the step the trace is at: its file, open at its line — not for
+    /// a run in a tab not on screen.
+    pub(crate) fn fake_show_step(&mut self) -> Task<Message> {
+        if self.debug_off_screen {
+            return Task::none();
+        }
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
@@ -491,7 +535,7 @@ impl App {
     /// `abs`'s — lit in the code as a paused debugger's is — and no real
     /// session is running, whose line that is.
     pub(crate) fn fake_line(&self, abs: &Path) -> Option<usize> {
-        if self.debug.session.is_some() {
+        if !self.fake_run_shown() {
             return None;
         }
         let sim = self.proj.fake.sim.as_ref().filter(|s| !s.ended)?;
@@ -629,6 +673,39 @@ impl App {
     }
 
     pub(crate) fn update_fake(&mut self, message: FakeMsg) -> Task<Message> {
+        // The answer of a fake run in a tab not on screen is that run's.
+        let owner = match &message {
+            FakeMsg::Read { stream, .. }
+            | FakeMsg::Delta { stream, .. }
+            | FakeMsg::Draft { stream, .. }
+            | FakeMsg::DraftEnd { stream, .. }
+            | FakeMsg::TurnEnded { stream, .. } => Some((Some(*stream), 0)),
+            FakeMsg::Answered { seq, .. } => Some((None, *seq)),
+            _ => None,
+        };
+        if let Some((stream, seq)) = owner {
+            let of = move |w: &Working| match stream {
+                Some(stream) => w.stream == Some(stream),
+                None => (w.seq, w.stream) == (seq, None),
+            };
+            let parked = !self.proj.fake.working.as_ref().is_some_and(of)
+                && self
+                    .proj
+                    .fake
+                    .parked
+                    .iter()
+                    .any(|p| p.working.as_ref().is_some_and(of));
+            if parked {
+                return self
+                    .with_parked_fake(of, move |app| app.update_fake_here(message))
+                    .unwrap_or_else(Task::none);
+            }
+        }
+        self.update_fake_here(message)
+    }
+
+    /// [`Self::update_fake`], for the fake run on screen.
+    fn update_fake_here(&mut self, message: FakeMsg) -> Task<Message> {
         match message {
             FakeMsg::FromMenu { debug } => self.on_fake_from_menu(debug),
             FakeMsg::AtCaret { debug } => self.on_fake_at_caret(debug),
@@ -738,6 +815,9 @@ impl App {
             FakeMsg::Stop => {
                 let stopped = self.stop_fake_work();
                 self.status = tr!("Fake run stopped").into();
+                // Its tab stays, saying so, with Try again there.
+                self.proj.fake.failed =
+                    Some(tr!("You stopped it before the model was done.").into());
                 stopped
             }
             FakeMsg::Step(cmd) => self.on_fake_step(cmd),
@@ -748,14 +828,19 @@ impl App {
                     return Task::none();
                 };
                 self.proj.fake.sheet = Some(last);
+                // Run, they are run again in this tab.
+                self.proj.fake.again = Some(self.proj.fake.tab);
                 operation::focus(field_id(0))
             }
-            FakeMsg::Close => {
-                let stopped = self.stop_fake_work();
-                self.proj.fake.sim = None;
-                self.proj.fake.failed = None;
-                stopped
-            }
+            FakeMsg::Close => match self.proj.fake.tab {
+                0 => {
+                    let stopped = self.stop_fake_work();
+                    self.proj.fake.sim = None;
+                    self.proj.fake.failed = None;
+                    stopped
+                }
+                tab => self.close_run_tab(crate::app::state::RunTab::Fake(tab)),
+            },
         }
     }
 }

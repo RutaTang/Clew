@@ -20,30 +20,50 @@ pub(crate) fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message>
     .into()
 }
 
-/// The collapsible bottom panel: the debugger's, under a title strip with a
-/// collapse control. (Ask floats over the code instead: `ui::askfloat`.)
+/// The collapsible bottom panel: a tab for every run — of the program (Run,
+/// Debug) and worked out by the model (Fake Run, Fake Debug) — open at
+/// once, in the order they were opened, the one on screen drawn below its
+/// tab. (Ask floats over the code instead: `ui::askfloat`.)
 pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
-    // A proof being stepped through, else a fake run's session, shows
-    // while no real one runs.
-    let proof = app.debug.session.is_none() && app.proj.proof.is_some();
-    let fake = app.debug.session.is_none() && !proof && app.proj.fake.shown();
-    let title = container(
-        row![
-            glyph::icon(Glyph::Debug, theme::fg_bright(), 16.0),
-            text(if proof {
-                tr!("Proof")
-            } else if fake {
-                tr!("Fake debug")
-            } else {
-                tr!("Debug")
-            })
-            .size(ts::SMALL)
-            .color(theme::fg_bright()),
-        ]
-        .spacing(6)
-        .align_y(iced::Center),
-    )
-    .padding([5, 12]);
+    use crate::app::state::RunTab;
+    let faces = app.run_tab_faces();
+    let shown = app.shown_run_tab();
+    // A proof being stepped through shows while no run has a tab.
+    let proof = faces.is_empty() && app.proj.proof.is_some();
+    let head: Element<'_, Message> = if faces.is_empty() {
+        container(
+            row![
+                glyph::icon(Glyph::Debug, theme::fg_bright(), 16.0),
+                text(if proof {
+                    tr!("Proof")
+                } else {
+                    tr!("Run and Debug")
+                })
+                .size(ts::SMALL)
+                .color(theme::fg_bright()),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        )
+        .padding([5, 12])
+        .into()
+    } else {
+        let labels = run_tab_labels(&faces);
+        let tabs = faces
+            .iter()
+            .zip(labels)
+            .map(|(face, label)| run_tab(face, label, shown == Some(face.tab)))
+            .collect::<Vec<_>>();
+        scrollable(row(tabs).spacing(4).align_y(iced::Center))
+            .direction(iced::widget::scrollable::Direction::Horizontal(
+                iced::widget::scrollable::Scrollbar::new()
+                    .width(3)
+                    .scroller_width(3),
+            ))
+            .style(theme::overlay_scrollbar)
+            .width(Fill)
+            .into()
+    };
     // A borderless "hide" affordance — no button box, just a chevron that
     // brightens on hover.
     let collapse = button(glyph::icon(Glyph::ChevronDown, theme::fg_muted(), 12.0))
@@ -53,30 +73,200 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
             tr!("Hide panel"),
             Message::Window(WindowMsg::CollapseBottom),
         ));
-    let tabs = row![title, space().width(Fill), collapse,]
-        .spacing(2)
-        .align_y(iced::Center)
-        .padding(Padding {
-            top: 2.0,
-            right: 6.0,
-            bottom: 2.0,
-            left: 6.0,
-        });
-
-    let content: Element<'_, Message> = if app.debug.session.is_some() {
-        debug_panel(app)
-    } else if proof {
-        super::proof::proof_panel(app)
-    } else if fake {
-        fake_panel(app)
+    let mut top = row![].spacing(2).align_y(iced::Center);
+    top = if faces.is_empty() {
+        top.push(head).push(space().width(Fill))
     } else {
-        empty_state(Glyph::Debug, tr!("No debug session"), "", None)
+        top.push(head)
+    };
+    let tabs = top.push(collapse).padding(Padding {
+        top: 2.0,
+        right: 6.0,
+        bottom: 2.0,
+        left: 6.0,
+    });
+
+    let content: Element<'_, Message> = match shown {
+        Some(RunTab::Real(_)) => debug_panel(app),
+        Some(RunTab::Fake(_)) => fake_panel(app),
+        None if proof => super::proof::proof_panel(app),
+        None => nothing_running(),
     };
 
     container(column![tabs, hairline(), content].height(Fill))
         .height(Fill)
         .style(theme::on_sheet)
         .into()
+}
+
+/// The four ways to run, as the strip has them: what the empty panel offers.
+fn nothing_running<'a>() -> Element<'a, Message> {
+    let start = |g: Glyph, label: &'static str, msg: Message| {
+        button(
+            row![
+                glyph::icon(g, theme::fg_muted(), 13.0),
+                text(label).size(ts::BODY).wrapping(Wrapping::None),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        )
+        .style(theme::toolbar_button)
+        .padding([4, 10])
+        .on_press(super::heard::said(label, msg))
+    };
+    container(
+        column![
+            text(tr!("Nothing is running"))
+                .size(ts::EMPHASIS)
+                .color(theme::fg()),
+            text(tr!(
+                "Each run opens here in a tab of its own, and goes on while you look at another."
+            ))
+            .size(ts::BODY)
+            .color(theme::dim())
+            .align_x(iced::Center),
+            space().height(6),
+            row![
+                start(
+                    Glyph::Play,
+                    tr!("Run Without Debugging"),
+                    Message::Debug(DebugMsg::Run)
+                ),
+                start(
+                    Glyph::FakeRun,
+                    tr!("Fake Run…"),
+                    Message::Fake(crate::FakeMsg::AtCaret { debug: false })
+                ),
+                start(
+                    Glyph::Debug,
+                    tr!("Start Debugging"),
+                    Message::Debug(DebugMsg::Start)
+                ),
+                start(
+                    Glyph::FakeDebug,
+                    tr!("Fake Debug…"),
+                    Message::Fake(crate::FakeMsg::AtCaret { debug: true })
+                ),
+            ]
+            .spacing(6)
+            .wrap(),
+        ]
+        .spacing(4)
+        .align_x(iced::Center)
+        .max_width(560),
+    )
+    .center(Fill)
+    .padding(12)
+    .into()
+}
+
+/// Each tab's name: what it runs, numbered where two runs of the same kind
+/// run the same thing ("main.py", "main.py (2)").
+pub(crate) fn run_tab_labels(faces: &[crate::app::runs::TabFace]) -> Vec<String> {
+    use crate::app::state::RunTab;
+    let kind = |f: &crate::app::runs::TabFace| (matches!(f.tab, RunTab::Fake(_)), f.plain);
+    faces
+        .iter()
+        .enumerate()
+        .map(|(i, face)| {
+            let before = faces[..i]
+                .iter()
+                .filter(|f| kind(f) == kind(face) && f.name == face.name)
+                .count();
+            match before {
+                0 => face.name.clone(),
+                n => format!("{} ({})", face.name, n + 1),
+            }
+        })
+        .collect()
+}
+
+/// What a tab's run is, said: its kind and its name ("Debug main.py").
+pub(crate) fn run_tab_said(face: &crate::app::runs::TabFace, label: &str) -> String {
+    use crate::app::state::RunTab;
+    match (face.tab, face.plain) {
+        (RunTab::Real(_), true) => tr!("Run {name}", name = label),
+        (RunTab::Real(_), false) => tr!("Debug {name}", name = label),
+        (RunTab::Fake(_), true) => tr!("Fake run {name}", name = label),
+        (RunTab::Fake(_), false) => tr!("Fake debug {name}", name = label),
+    }
+}
+
+/// One tab: the kind of run by its icon (the strip's own), what it runs, a
+/// mark of how it is doing, and a × that ends and closes it.
+fn run_tab<'a>(
+    face: &crate::app::runs::TabFace,
+    label: String,
+    shown: bool,
+) -> Element<'a, Message> {
+    use crate::app::runs::TabState;
+    use crate::app::state::RunTab;
+    let g = match (face.tab, face.plain) {
+        (RunTab::Real(_), true) => Glyph::Play,
+        (RunTab::Real(_), false) => Glyph::Debug,
+        (RunTab::Fake(_), true) => Glyph::FakeRun,
+        (RunTab::Fake(_), false) => Glyph::FakeDebug,
+    };
+    let color = if shown {
+        theme::fg()
+    } else {
+        theme::fg_muted()
+    };
+    let (mark, state): (Option<iced::Color>, &str) = match face.state {
+        TabState::Starting => (Some(theme::dim()), tr!("starting")),
+        TabState::Running => (Some(theme::success()), tr!("running")),
+        TabState::Paused => (Some(theme::warning()), tr!("paused")),
+        TabState::Done => (None, tr!("ended")),
+        TabState::Failed => (Some(theme::danger()), tr!("failed")),
+    };
+    let dot: Element<'a, Message> = match mark {
+        Some(c) => container(space().width(6).height(6))
+            .style(move |_: &iced::Theme| container::Style {
+                background: Some(c.into()),
+                border: iced::Border {
+                    radius: 3.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into(),
+        None => space().width(6).into(),
+    };
+    let said = run_tab_said(face, &label);
+    let pick = button(
+        row![
+            glyph::icon(g, color, 13.0),
+            text(label)
+                .size(ts::SMALL)
+                .color(color)
+                .wrapping(Wrapping::None),
+            dot,
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .style(theme::segment(shown))
+    .padding([3, 8])
+    .on_press(super::heard::said(
+        &said,
+        Message::Debug(DebugMsg::ShowTab(face.tab)),
+    ));
+    let close_said = tr!("Close {name}", name = said.clone());
+    let close = button(glyph::icon(Glyph::Close, theme::fg_muted(), 10.0))
+        .style(theme::list_row(false))
+        .padding([5, 5])
+        .on_press(super::heard::said(
+            &close_said,
+            Message::Debug(DebugMsg::CloseTab(face.tab)),
+        ));
+    let tip = format!("{said} — {state}");
+    row![
+        super::toolbar::tip_at(pick, tip, None, tooltip::Position::Top),
+        super::toolbar::tip_at(close, close_said, None, tooltip::Position::Top),
+    ]
+    .spacing(0)
+    .align_y(iced::Center)
+    .into()
 }
 
 /// The bottom debugger panel: status + step controls, and four columns —
@@ -116,7 +306,20 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         }
         b
     };
-    let stop = ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), !ended);
+    // Ended, Stop gives way to running it again, as it was, in its tab.
+    let stop = if ended {
+        ctrl(
+            if plain {
+                tr!("↻ Run Again")
+            } else {
+                tr!("↻ Debug Again")
+            },
+            Message::Debug(DebugMsg::Again),
+            true,
+        )
+    } else {
+        ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), true)
+    };
     let controls = if plain {
         row![stop]
     } else {
@@ -372,7 +575,13 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
 /// evaluation may run the program's own code, so it is a checkbox the
 /// reader has to tick, with the risk named beside it.
 pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
-    if app.debug.hover_safe {
+    // Promised safe, or over: nothing to choose.
+    let ended = app
+        .debug
+        .session
+        .as_ref()
+        .is_none_or(|s| s.status == crate::DebugStatus::Terminated);
+    if app.debug.hover_safe || ended {
         return space().into();
     }
     super::tip::tip(

@@ -242,10 +242,17 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M5 7 L14 13 L5 19 Z'/>\
              <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z'/>"
         }
-        // A step over a line, and the spark.
+        // Debug's own bug, and the spark — as Fake Run is Run's play and
+        // the spark: each fake one its real twin, worked out by the AI.
+        // The bug drawn smaller, its lines as thick as the rest.
         FakeDebug => {
-            "<path d='M3.5 15.5 C4.5 9.5 13.5 9.5 14.5 15.5'/><path d='M11.6 14.6 L14.5 15.5 L15.5 12.6'/>\
-             <circle cx='9' cy='19.5' r='1.4' fill='STROKE' stroke='none'/>\
+            "<g transform='translate(0.2 6.6) scale(0.74)' stroke-width='2.6'>\
+             <path d='m8 2 1.88 1.88'/><path d='M14.12 3.88 16 2'/>\
+             <path d='M9 7.13v-1a3.003 3.003 0 1 1 6 0v1'/>\
+             <path d='M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6'/>\
+             <path d='M12 20v-9'/><path d='M6.53 9C4.6 8.8 3 7.1 3 5'/><path d='M6 13H2'/>\
+             <path d='M3 21c0-2.1 1.7-3.9 3.8-4'/><path d='M20.97 5c0 2.1-1.6 3.8-3.5 4'/>\
+             <path d='M22 13h-4'/><path d='M17.2 17c2.1.1 3.8 1.9 3.8 4'/></g>\
              <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z'/>"
         }
         Compass => "<circle cx='12' cy='12' r='8'/><path d='M12 6 L14.2 12 L12 18 L9.8 12 Z'/>",

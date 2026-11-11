@@ -117,23 +117,6 @@ impl App {
     /// Begin a session from the launch config: a debug one, or with
     /// `no_debug` a plain run ([`Self::start_run`]).
     fn start_session(&mut self, no_debug: bool) -> Task<Message> {
-        // A program that has ended leaves its session on screen — its output,
-        // its last frames — but nothing runs in it: starting again ends it
-        // (and lets its adapter go) rather than calling it "already running"
-        // until the reader thinks to press Stop.
-        if self
-            .debug
-            .session
-            .as_ref()
-            .is_some_and(|s| s.status == DebugStatus::Terminated)
-        {
-            let ended = self.stop_debug_session();
-            return Task::batch([ended, self.start_session(no_debug)]);
-        }
-        if self.debug.session.is_some() {
-            self.status = tr!("A debug session is already running").into();
-            return Task::none();
-        }
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
@@ -194,6 +177,12 @@ impl App {
             };
             (cfg.program, cfg.args, cfg.cwd, Some(lang))
         };
+        // A run of its own, in a tab of its own: the run on screen goes on in
+        // its tab. An ended run of the same program, run the same way, gives
+        // this one its tab — run again, not run beside it.
+        let (tab, ended) = self.tab_for_new_run(&program, no_debug);
+        self.debug.tab = tab;
+        self.run_shown = Some(crate::app::state::RunTab::Real(tab));
         self.debug.session = Some(DebugSession {
             client: None,
             status: DebugStatus::Launching,
@@ -729,7 +718,7 @@ impl App {
                     .await;
             },
         );
-        Task::run(stream, |m| m)
+        Task::batch([ended, Task::run(stream, |m| m)])
     }
 
     /// The debug adapter a run needs is not installed. Nothing is installed
@@ -831,10 +820,47 @@ impl App {
     }
 
     pub(crate) fn on_debug_stop(&mut self) -> Task<Message> {
-        self.status = tr!("Debugger stopped").into();
+        self.status = if self.debug.no_debug {
+            tr!("Program stopped").into()
+        } else {
+            tr!("Debugger stopped").into()
+        };
+        // Its tab stays, with what the program printed, as a run that ended
+        // by itself leaves it: the tab's × closes it.
+        let kept = self.debug.session.as_ref().map(|s| DebugSession {
+            client: None,
+            status: DebugStatus::Terminated,
+            exit_code: s.exit_code,
+            thread_id: None,
+            frames: Vec::new(),
+            scopes: Vec::new(),
+            watches: Vec::new(),
+            output: s.output.clone(),
+            current: None,
+            program: s.program.clone(),
+            args: s.args.clone(),
+            cwd: s.cwd.clone(),
+            addr: None,
+        });
         // The teardown itself is shared with the project switch, which used to
         // carry its own copy of it (see `stop_debug_session`).
-        self.stop_debug_session()
+        let ended = self.stop_debug_session();
+        self.debug.session = kept;
+        self.debug.said = None;
+        ended
+    }
+
+    /// The ended run on screen, run again as it was: in its own tab.
+    fn on_debug_again(&mut self) -> Task<Message> {
+        if self
+            .debug
+            .session
+            .as_ref()
+            .is_none_or(|s| s.status != DebugStatus::Terminated)
+        {
+            return Task::none();
+        }
+        self.start_session(self.debug.no_debug)
     }
 
     /// Tear down the work this window owns, just before the shell drops its
@@ -1082,6 +1108,13 @@ impl App {
         true
     }
 
+    /// Draw the answers of the session on screen about the breakpoints in
+    /// the gutter: a run come on screen from its tab.
+    pub(crate) fn show_own_debug_verdicts(&mut self) {
+        let id = self.active_debug_session();
+        self.show_debug_verdicts(id);
+    }
+
     /// Draw session `id`'s answers about the breakpoints in the gutter: what
     /// it has not answered for is unknown.
     fn show_debug_verdicts(&mut self, id: crate::app::state::DebugSessionId) {
@@ -1168,7 +1201,10 @@ impl App {
     /// Put `text` on the status line as what the run is doing now.
     pub(crate) fn say_debug_state(&mut self, text: String) {
         self.debug.said = Some(text.clone());
-        self.status = text;
+        // Off screen, it is said when its tab is shown.
+        if !self.debug_off_screen {
+            self.status = text;
+        }
     }
 
     /// Take down what [`say_debug_state`](Self::say_debug_state) said, if
@@ -1298,7 +1334,7 @@ impl App {
     /// from the previous run are dropped, and an in-flight startup stream
     /// cancels itself at its next checkpoint.
     pub(crate) fn bump_debug_run(&mut self) {
-        self.debug_run += 1;
+        self.debug_run = self.next_debug_run();
         self.debug_run_live
             .store(self.debug_run, std::sync::atomic::Ordering::SeqCst);
         self.bump_debug_stop();
@@ -1877,6 +1913,11 @@ impl App {
             let fname = session.frames.first().map(|f| short_frame_name(&f.name));
             (t, fname)
         };
+        // A run in a tab not on screen: its stop is read, not shown — the
+        // code and the reading trail are the reader's.
+        if self.debug_off_screen {
+            return self.eval_watches();
+        }
         // Fuse into the reading trail: when execution enters a NEW
         // function, record one entry (labelled with the function name) so
         // the debug run becomes a navigable path in the TRAIL tab.
@@ -2381,9 +2422,27 @@ impl App {
     /// Handle a [`DebugMsg`]: this feature's share of what `dispatch` routes
     /// (after its one ownership check and the menu bookkeeping).
     pub(crate) fn update_debug(&mut self, message: DebugMsg) -> Task<Message> {
+        // A message of a run in a tab not on screen is that run's.
+        if let Some(i) = self.parked_owner(&message) {
+            return self.with_parked_debug(i, message);
+        }
+        let stop = message.is_stop() && message.run() == Some(self.debug_run);
+        let task = self.update_debug_here(message);
+        // The run on screen stopped: its tab comes up, if another was.
+        if stop && self.debug.tab != 0 {
+            self.run_shown = Some(crate::app::state::RunTab::Real(self.debug.tab));
+        }
+        task
+    }
+
+    /// [`Self::update_debug`], for the run on screen.
+    pub(crate) fn update_debug_here(&mut self, message: DebugMsg) -> Task<Message> {
         match message {
             DebugMsg::Start => self.start_debug(),
             DebugMsg::Run => self.start_run(),
+            DebugMsg::ShowTab(tab) => self.show_run_tab(tab),
+            DebugMsg::CloseTab(tab) => self.close_run_tab(tab),
+            DebugMsg::Again => self.on_debug_again(),
             DebugMsg::DapStarted {
                 run,
                 client,

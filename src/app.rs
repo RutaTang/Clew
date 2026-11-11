@@ -69,6 +69,7 @@ pub(crate) mod flow;
 pub(crate) mod glossary;
 mod graph;
 pub(crate) mod proof;
+pub(crate) mod runs;
 pub(crate) mod setup;
 pub(crate) mod suggest;
 pub(crate) mod weakspots;

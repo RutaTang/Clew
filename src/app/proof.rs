@@ -187,9 +187,9 @@ impl App {
     }
 
     /// The 1-based line of `abs` the proof walk is on, lit in the code as
-    /// a paused debugger's is; none while a debug session runs.
+    /// a paused debugger's is; none while a run's tab is shown.
     pub(crate) fn proof_line(&self, abs: &Path) -> Option<usize> {
-        if self.debug.session.is_some() {
+        if self.shown_run_tab().is_some() {
             return None;
         }
         let walk = self.proj.proof.as_ref().filter(|w| w.goals.is_some())?;

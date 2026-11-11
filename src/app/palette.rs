@@ -759,8 +759,13 @@ impl App {
             }
         }
 
-        // The debugger, while a session runs.
-        if let Some(session) = &self.debug.session {
+        // The debugger, while the run whose tab is shown goes on.
+        if let Some(session) = self
+            .debug
+            .session
+            .as_ref()
+            .filter(|s| s.status != DebugStatus::Terminated && self.real_run_shown())
+        {
             if session.status == DebugStatus::Stopped {
                 for (title, cmd) in [
                     (tr_noop!("Debug: Continue"), DebugCmd::Continue),

@@ -1054,10 +1054,13 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
                 .collect()
         })
         .unwrap_or_default();
+    // The line of the run whose tab is shown: another tab's run is not
+    // the one being read.
     let debug_current = app
         .debug
         .session
         .as_ref()
+        .filter(|_| app.real_run_shown())
         .and_then(|d| d.current.as_ref())
         .filter(|(p, _)| *p == v.abs)
         .map(|(_, line)| *line);

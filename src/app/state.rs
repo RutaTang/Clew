@@ -248,6 +248,57 @@ pub struct DebugState {
     /// stopped, so both go with the stop (`App::bump_debug_stop`).
     pub open_vars: std::collections::HashSet<i64>,
     pub var_children: HashMap<i64, Vec<crate::dap::Variable>>,
+    /// The tab of the bottom panel the session here is ([`RunTab::Real`]);
+    /// 0 while there is none.
+    pub tab: u64,
+}
+
+/// A tab of the bottom panel: a run of the program (Run or Debug), or one
+/// the model works out (Fake Run or Fake Debug). By an id of its own, from
+/// one counter for both kinds, so the tabs stand in the order they were
+/// opened; a run that takes an ended one's place keeps its id, and so its
+/// place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RunTab {
+    Real(u64),
+    Fake(u64),
+}
+
+impl RunTab {
+    /// Its id, which orders the tabs.
+    pub fn id(self) -> u64 {
+        match self {
+            RunTab::Real(id) | RunTab::Fake(id) => id,
+        }
+    }
+}
+
+/// A run of the program in a tab not on screen: all [`DebugState`] and the
+/// [`App`] hold of the one on screen that is a run's own — its session,
+/// its children, its trace, its run and stop counters and the token that
+/// cancels it — kept aside, and swapped back in to be shown, or for a
+/// message of its own to be handled as the one on screen's is
+/// (`App::with_parked_debug`). The breakpoints and the watch expressions
+/// are every run's, and stay.
+pub struct ParkedDebug {
+    pub tab: u64,
+    pub run: u64,
+    pub live: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub stop: u64,
+    pub session: Option<DebugSession>,
+    pub no_debug: bool,
+    pub trace: Vec<TraceStop>,
+    pub trace_cut: bool,
+    pub trace_program: Option<String>,
+    pub pending_reason: String,
+    pub said: Option<String>,
+    pub last_fn: Option<String>,
+    pub hover_safe: bool,
+    pub child_started: Option<u64>,
+    pub children: DebugChildren,
+    pub proxied_run: Option<u64>,
+    pub open_vars: std::collections::HashSet<i64>,
+    pub var_children: HashMap<i64, Vec<crate::dap::Variable>>,
 }
 
 /// The session a DAP event, an answer or a client belongs to: the run's own
@@ -1115,6 +1166,22 @@ pub struct App {
     /// carry the value minted at their stop and are checked with
     /// `owns_debug_stop`.
     pub debug_stop: u64,
+    /// The highest run id handed out: runs in tabs not on screen keep theirs
+    /// ([`ParkedDebug::run`]), and a new one is above them all.
+    pub debug_run_high: u64,
+    /// The runs of the program in tabs not on screen, with all of each that
+    /// is its own ([`ParkedDebug`]).
+    pub debug_parked: Vec<ParkedDebug>,
+    /// A parked run is swapped in to handle a message of its own, off
+    /// screen: what it would show (the file it stopped in) is not shown.
+    pub debug_off_screen: bool,
+    /// The last tab id handed out ([`RunTab`]): one counter for real and fake
+    /// runs, so the tabs stand in the order they were opened.
+    pub run_tab_last: u64,
+    /// The tab of the bottom panel on screen. The real run in it is the one
+    /// in [`Self::debug`], the fake one the one in `proj.fake`: shown, a
+    /// tab's run is swapped in.
+    pub run_shown: Option<RunTab>,
     /// Persisted Imports/Importers direction preference across focus changes.
     pub import_dir: imports::Dir,
     /// Writes the reading trail off the UI thread, one write at a time (see
