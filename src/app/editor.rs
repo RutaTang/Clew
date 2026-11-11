@@ -435,10 +435,12 @@ impl App {
         };
         // What the tour's step waits to show of this file, if it does.
         let tour = self.tour_file_loaded(&abs);
+        // What the History view waits for this file to open for.
+        let after = self.after_history_open(&abs);
         let content = self.content_tasks(abs, source, lang_key);
         // Symbols arrive later via `Highlighted`; follow_caret there resolves the
         // enclosing function. Here it shows the file until then.
-        self.follow_caret(Task::batch([scroll, lsp_task, content, tour]))
+        self.follow_caret(Task::batch([scroll, lsp_task, content, tour, after]))
     }
 
     /// Off-thread re-highlight + git-info tasks for a file's current source,
@@ -510,7 +512,14 @@ impl App {
         // (a dependency gone to by a definition), git refuses — "outside
         // repository" — and that refusal took the status line at every such
         // jump.
-        let git_task = match self
+        let git_task = self.local_git_info(abs, stamp);
+        Task::batch([highlight_task, git_task])
+    }
+
+    /// The blame and change status of `abs`, a file of the project, read
+    /// here (the local path's `GitInfo`); none for a file outside it.
+    fn local_git_info(&mut self, abs: PathBuf, stamp: Stamp) -> Task<Message> {
+        match self
             .proj
             .project
             .as_ref()
@@ -547,8 +556,33 @@ impl App {
                 )
             }
             None => Task::none(),
-        };
-        Task::batch([highlight_task, git_task])
+        }
+    }
+
+    /// The blame and change status of every file open, read again: the
+    /// project's history moved (`App::repo_moved`), and what the gutter
+    /// showed was of the commit before. Through the server when it is up,
+    /// as a file's content came; here otherwise.
+    pub(crate) fn refresh_git_of_open_files(&mut self) -> Task<Message> {
+        let mut open: Vec<(PathBuf, String)> = self
+            .proj
+            .panes
+            .iter()
+            .flatten()
+            .map(|v| (v.abs.clone(), v.rel.clone()))
+            .collect();
+        open.sort();
+        open.dedup();
+        let mut tasks = Vec::new();
+        for (abs, rel) in open {
+            if self.server.is_up() {
+                self.request_git_info(rel, abs);
+            } else {
+                let stamp = self.stamp();
+                tasks.push(self.local_git_info(abs, stamp));
+            }
+        }
+        Task::batch(tasks)
     }
 
     pub(crate) fn on_open_rel(&mut self, rel: String, line: Option<usize>) -> Task<Message> {
@@ -704,8 +738,10 @@ impl App {
             Some(lang) => self.ensure_lsp(lang),
             None => Task::none(),
         };
-        self.request_git_info(git_rel, abs);
-        self.follow_caret(Task::batch([scroll, lsp_task]))
+        self.request_git_info(git_rel, abs.clone());
+        // What the History view waits for this file to open for.
+        let after = self.after_history_open(&abs);
+        self.follow_caret(Task::batch([scroll, lsp_task, after]))
     }
 
     /// Rough pixel height of one rendered notebook cell, for scroll estimation.

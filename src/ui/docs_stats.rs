@@ -258,13 +258,13 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         Message::Docs(DocsMsg::FilterChanged(String::new())),
         None,
     );
-    // Each a pair whose chosen half is raised: a chip that said what was
-    // on ("Files", "Public") and flipped when pressed read as two tabs
-    // with neither picked.
+    // Each a pair whose chosen half is raised (a chip that said what was
+    // on, "Files" or "Public", and flipped when pressed read as two tabs
+    // with neither picked); the two share the row, each across its half.
     let pair = |a: (&'static str, bool), b: (&'static str, bool), flip: Message| {
-        super::form::segmented_compact([
-            (a.0.to_string(), a.1, (!a.1).then(|| flip.clone())),
-            (b.0.to_string(), b.1, (!b.1).then_some(flip)),
+        super::form::segmented_across([
+            (a.0.to_string(), a.1, flip.clone()),
+            (b.0.to_string(), b.1, flip),
         ])
     };
     let by_module = app.docs_view.by_module;
@@ -284,7 +284,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         tr!("Rebuild"),
         Some(Message::Docs(DocsMsg::Refresh)),
     );
-    let controls = row![group, visible, space().width(Fill), refresh]
+    let controls = row![group, visible, refresh]
         .spacing(6)
         .align_y(iced::Center)
         .padding(Padding {

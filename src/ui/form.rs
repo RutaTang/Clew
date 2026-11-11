@@ -419,23 +419,45 @@ pub(crate) fn path<'a>(s: impl Into<String>) -> iced::widget::Text<'a> {
         .wrapping(Wrapping::Glyph)
 }
 
-/// [`segmented`], small enough for a sidebar's row: each segment's press
-/// is optional — a toggle's chosen half has nothing to do.
-pub(crate) fn segmented_compact<'a>(
-    segments: impl IntoIterator<Item = (String, bool, Option<Message>)>,
+/// Height of one side of a [`segmented_across`].
+const ACROSS_SIDE_H: f32 = 24.0;
+
+/// A choice of views or ways a list reads (callers or callees, this branch
+/// or every branch): a segmented control across its row, as the sidebar's
+/// views are — equal parts, each label centred in its own, the chosen one
+/// raised; pressing another switches. Not one hugging its labels at the
+/// row's start with nothing after it.
+pub(crate) fn segmented_across<'a>(
+    sides: impl IntoIterator<Item = (String, bool, Message)>,
 ) -> Element<'a, Message> {
     container(
-        Row::with_children(segments.into_iter().map(|(label, chosen, msg)| {
-            let msg = msg.map(|msg| super::heard::said(&label, msg));
-            button(text(label).size(ts::SMALL))
-                .style(theme::segment(chosen))
-                .padding([2, 8])
-                .on_press_maybe(msg)
-                .into()
+        Row::with_children(sides.into_iter().map(|(label, chosen, msg)| {
+            let press = (!chosen).then(|| super::heard::said(&label, msg));
+            button(
+                container(
+                    text(label)
+                        .size(ts::SMALL)
+                        .font(if chosen {
+                            crate::fonts::UI_MEDIUM
+                        } else {
+                            crate::fonts::UI
+                        })
+                        .wrapping(Wrapping::None),
+                )
+                .center_x(Fill)
+                .center_y(Fill),
+            )
+            .style(theme::segment(chosen))
+            .padding(0)
+            .width(Fill)
+            .height(Length::Fixed(ACROSS_SIDE_H))
+            .on_press_maybe(press)
+            .into()
         }))
         .spacing(2),
     )
     .padding(2)
+    .width(Fill)
     .style(theme::trough)
     .into()
 }

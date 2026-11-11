@@ -2150,6 +2150,14 @@ fn margin_history(app: &App) -> Element<'_, Message> {
         tr!("Why is this line here?"),
         Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
     ));
+    // All of the file's commits, in the History view: beyond the margin's
+    // own list, with what each changed beside this file.
+    if let Some(rel) = app.active_viewer().map(|v| v.rel.clone()) {
+        links = links.push(link(
+            tr!("All of this file's commits"),
+            Message::History(crate::HistoryMsg::Show { path: Some(rel) }),
+        ));
+    }
     scrollable(
         column![rows, container(links.wrap()).padding([4, 4])]
             .spacing(6)

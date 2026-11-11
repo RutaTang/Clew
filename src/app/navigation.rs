@@ -1216,7 +1216,7 @@ impl App {
         if !self.proj.git_status_stale
             || self.proj.git_status_loading
             || !self.show_left_sidebar
-            || self.sidebar != SidebarTab::Files
+            || !matches!(self.sidebar, SidebarTab::Files | SidebarTab::History)
         {
             return None;
         }

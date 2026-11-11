@@ -18,8 +18,9 @@ use crate::viewer::Viewer;
 use crate::{App, Message, SidebarTab, TimeScope, TimeTravel, theme};
 use crate::{
     AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
-    GlossaryMsg, GraphMsg, HoverMsg, LspMsg, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg,
-    SemanticMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WindowMsg,
+    GlossaryMsg, GraphMsg, HistoryMsg, HoverMsg, LspMsg, NavMsg, OverviewMsg, ProjectMsg,
+    ReadingMsg, SemanticMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg,
+    WindowMsg,
 };
 use crate::{tr, tr_noop, trn};
 mod anchored;
@@ -81,6 +82,7 @@ pub(crate) use connect::*;
 mod graph;
 pub(crate) use graph::*;
 mod graph_labels;
+mod history;
 mod memo;
 pub use memo::ViewMemo;
 pub(crate) use memo::{CallsSummary, DocsGroup, DocsKey, ImportRanks, RankedFile};

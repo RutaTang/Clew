@@ -465,6 +465,14 @@ impl App {
                 self.ensure_docs();
                 Task::none()
             }
+            // Its first page, and the uncommitted changes at its head.
+            SidebarTab::History => {
+                self.proj.git_status_stale = true;
+                Task::batch([
+                    self.sync_history(),
+                    self.sync_git_status().unwrap_or_else(Task::none),
+                ])
+            }
             _ => Task::none(),
         }
     }
@@ -617,6 +625,7 @@ impl App {
                     // marks are read anew.
                     self.proj.git_status_stale = true;
                     self.proj.head_stale = true;
+                    self.proj.repo_tip_stale = true;
                     self.follow_system_appearance();
                     // Another window may have saved Settings while this one was
                     // in the background: re-read the AI config on next use.

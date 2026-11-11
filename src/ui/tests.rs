@@ -56,6 +56,7 @@ fn reader_app() -> App {
     app.proj.active = 0;
     // No repository at a path that is not there: no branch to read.
     app.proj.head_stale = false;
+    app.proj.repo_tip_stale = false;
     app.show_left_sidebar = false;
     app.show_right_panel = false;
     app.show_bottom = false;
@@ -15804,4 +15805,197 @@ fn dragging_the_sidebars_divider_moves_its_edge_with_the_pointer() {
         })
         .collect();
     assert_eq!(widths, [app.sidebar_width + 40.0]);
+}
+
+/// A History view of two commits, the newer opened to its files: what the
+/// History tests read.
+fn history_app() -> (App, String, String) {
+    use clew_protocol::{CommitDetail, CommitFile, LogCommit, LogRef, RefKind};
+    let mut app = reader_app();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let (new, old) = ("b".repeat(40), "a".repeat(40));
+    let commit = |sha: &str, parents: &[&str], subject: &str| LogCommit {
+        sha: sha.to_string(),
+        parents: parents.iter().map(|p| p.to_string()).collect(),
+        author: "Mira Chen".into(),
+        time: now - 3 * 86_400,
+        subject: subject.into(),
+        refs: Vec::new(),
+    };
+    let mut commits = vec![
+        commit(&new, &[&old], "Tax the total"),
+        commit(&old, &[], "Start the shop"),
+    ];
+    commits[0].refs.push(LogRef {
+        kind: RefKind::Head,
+        name: "main".into(),
+    });
+    let h = &mut app.proj.git_log;
+    h.asked = true;
+    h.graph = crate::app::history::graph_rows(&commits);
+    h.commits = commits;
+    h.open = Some(new.clone());
+    h.details.insert(
+        new.clone(),
+        Ok(Some(CommitDetail {
+            sha: new.clone(),
+            parents: vec![old.clone()],
+            author: "Mira Chen".into(),
+            time: now - 3 * 86_400,
+            message: "Tax the total\n\nNot each line.".into(),
+            files: vec![
+                CommitFile {
+                    rel: "teashop/pricing.py".into(),
+                    old: None,
+                    status: 'M',
+                    added: Some(4),
+                    removed: Some(2),
+                },
+                CommitFile {
+                    rel: "teashop/legacy.py".into(),
+                    old: None,
+                    status: 'D',
+                    added: Some(0),
+                    removed: Some(9),
+                },
+            ],
+            more_files: 0,
+        })),
+    );
+    (app, new, old)
+}
+
+/// The History view lists the project's commits, newest first: the name
+/// that points at one, its subject, its short id, who and when. Pressed, a
+/// commit opens to its message and files, each file read as the commit
+/// left it — not a deleted one, which it did not leave — and its whole id
+/// is there to copy.
+#[test]
+fn the_history_view_lists_commits_and_opens_one_to_its_files() {
+    use crate::HistoryMsg;
+    let (app, new, old) = history_app();
+    let view = || sim_elem(super::history::history_tab(&app));
+    assert!(shows(&mut view(), "Tax the total"));
+    assert!(shows(&mut view(), "main"));
+    assert!(shows(&mut view(), "bbbbbbb by Mira Chen, 3 days ago"));
+    assert!(
+        shows(&mut view(), "Not each line."),
+        "the body of the opened one"
+    );
+    assert!(shows(&mut view(), "2 files changed"));
+
+    let sent = click(view(), "Start the shop");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::History(HistoryMsg::Toggle(s)) if *s == old)),
+        "{sent:?}"
+    );
+    let sent = click(view(), "pricing.py");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::History(HistoryMsg::OpenAt { sha, rel })
+                if *sha == new && rel == "teashop/pricing.py"
+        )),
+        "{sent:?}"
+    );
+    let sent = click(view(), "legacy.py");
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::History(HistoryMsg::OpenAt { .. }))),
+        "a file the commit deleted is not there to read: {sent:?}"
+    );
+    let sent = click(view(), "Copy id");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::History(HistoryMsg::CopyId(s)) if *s == new)),
+        "{sent:?}"
+    );
+}
+
+/// This branch / All branches spans the row, two equal halves, each label
+/// centred in its own: one hugging its labels at the row's start, with
+/// nothing after it, looked unfinished. The half not chosen switches; the
+/// chosen one has nothing to do.
+#[test]
+fn the_branch_switch_spans_the_row() {
+    use crate::HistoryMsg;
+    let (app, ..) = history_app();
+    let view = || sim_elem(super::history::history_tab(&app));
+    let mut sim = view();
+    let this = text_at(&mut sim, |t| t == "This branch", 0).expect("This branch");
+    let all = text_at(&mut sim, |t| t == "All branches", 0).expect("All branches");
+    // The simulator's 1024 wide, less the header's 10 a side: halves
+    // centred near a quarter and three quarters across.
+    let quarter = (1024.0 - 20.0) / 4.0 + 10.0;
+    assert!(
+        (this.center_x() - quarter).abs() < 8.0,
+        "This branch centred in the left half: {this:?}"
+    );
+    assert!(
+        (all.center_x() - 3.0 * quarter + 10.0).abs() < 16.0,
+        "All branches centred in the right half: {all:?}"
+    );
+    let sent = click(view(), "All branches");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::History(HistoryMsg::AllBranches(true)))),
+        "{sent:?}"
+    );
+    let sent = click(view(), "This branch");
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::History(HistoryMsg::AllBranches(_)))),
+        "the chosen half: {sent:?}"
+    );
+}
+
+/// A page read for a filter of words or an author is drawn as one dashed
+/// lane: its commits are not each other's parents, and a second lane drawn
+/// for one read as a branch that is not there. The whole history keeps its
+/// branches.
+#[test]
+fn a_filtered_history_draws_no_branches() {
+    use crate::HistoryMsg;
+    use clew_protocol::{LogCommit, LogPage};
+    let (mut app, new, old) = history_app();
+    // Two matches with a commit between them the filter left out.
+    let page = |app: &App| LogPage {
+        commits: vec![
+            LogCommit {
+                parents: vec!["c".repeat(40)],
+                ..app.proj.git_log.commits[0].clone()
+            },
+            app.proj.git_log.commits[1].clone(),
+        ],
+        more: false,
+    };
+    app.proj.git_log.query = "tax".into();
+    let loaded = HistoryMsg::Loaded {
+        stamp: app.stamp(),
+        generation: app.proj.git_log.generation,
+        skip: 0,
+        result: Ok(page(&app)),
+    };
+    let _ = app.update(Message::History(loaded));
+    let g = &app.proj.git_log.graph;
+    assert_eq!(app.proj.git_log.commits[0].sha, new);
+    assert!(g.iter().all(|r| r.dashed && r.col == 0), "{g:?}");
+
+    app.proj.git_log.query.clear();
+    let loaded = HistoryMsg::Loaded {
+        stamp: app.stamp(),
+        generation: app.proj.git_log.generation,
+        skip: 0,
+        result: Ok(page(&app)),
+    };
+    let _ = app.update(Message::History(loaded));
+    let g = &app.proj.git_log.graph;
+    assert_eq!(app.proj.git_log.commits[1].sha, old);
+    assert!(g.iter().all(|r| !r.dashed), "{g:?}");
 }

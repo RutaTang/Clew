@@ -83,6 +83,11 @@ pub fn project_log(
         "log".into(),
         "--no-color".into(),
         "--decorate=full".into(),
+        // Parents as the history read shows it: a path's log names the
+        // commit before that touched it, not one it never lists, so its
+        // graph joins up. (Commits a filter of words or author leaves out
+        // are not rewritten past: the view draws those apart.)
+        "--parents".into(),
         LOG_FORMAT.into(),
         format!("-n{}", limit.saturating_add(1)),
         format!("--skip={skip}"),

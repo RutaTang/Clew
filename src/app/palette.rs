@@ -1066,6 +1066,16 @@ impl App {
             None,
             send(Message::Connect(ConnectMsg::Open)),
         );
+        // The file being read's commits, in the History view.
+        if let Some(rel) = self.active_viewer().map(|v| v.rel.clone()) {
+            add(
+                tr_noop!("History of This File").into(),
+                None,
+                send(Message::History(crate::HistoryMsg::Show {
+                    path: Some(rel),
+                })),
+            );
+        }
 
         // Every setting's every choice: the language, the theme, how voice
         // listens and speaks ("Language: French", "Read answers aloud: Never").
@@ -1098,5 +1108,6 @@ fn sidebar_title(tab: SidebarTab) -> &'static str {
         SidebarTab::Walk => tr_noop!("Sidebar: Walkthroughs"),
         SidebarTab::Notes => tr_noop!("Sidebar: Your Notes"),
         SidebarTab::Docs => tr_noop!("Sidebar: API Docs"),
+        SidebarTab::History => tr_noop!("Sidebar: History"),
     }
 }

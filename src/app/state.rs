@@ -2037,6 +2037,24 @@ pub struct ProjectSession {
     /// The commit the next Time Travel session lands on (the margin's
     /// History, a commit picked), and not the newest.
     pub time_travel_at: Option<String>,
+    /// A file asked for from the History view, opened to be read as a
+    /// commit left it: Time Travel starts at that commit once it opens.
+    pub time_travel_after_open: Option<(PathBuf, String)>,
+    /// A changed file asked for from the History view: its Diff shown once
+    /// it opens.
+    pub diff_after_open: Option<PathBuf>,
+    /// The History view: the project's commits (`crate::app::history`).
+    pub git_log: crate::app::history::HistoryView,
+    /// The project's newest commit as last read: when it moves (a commit,
+    /// a checkout, a pull made elsewhere), what was read of the history —
+    /// the gutter's blame, the margin's History, the History view — is
+    /// read anew.
+    pub repo_tip: Option<String>,
+    /// Whether it may have moved since: a new project, the window back in
+    /// front, a file changed.
+    pub repo_tip_stale: bool,
+    /// A read of it on its way.
+    pub repo_tip_loading: bool,
     /// The commits that touched the file being read, for the margin's
     /// History: its file, and them once they come.
     pub margin_history: Option<(PathBuf, Option<FileHistory>)>,
@@ -2472,6 +2490,12 @@ impl Default for ProjectSession {
             insight: Default::default(),
             time_travel: Default::default(),
             time_travel_at: None,
+            time_travel_after_open: None,
+            diff_after_open: None,
+            git_log: Default::default(),
+            repo_tip: None,
+            repo_tip_stale: true,
+            repo_tip_loading: false,
             margin_history: None,
             tree_revealed: None,
             tree_scroll: None,

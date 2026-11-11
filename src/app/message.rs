@@ -35,6 +35,9 @@ pub enum Message {
     Reading(ReadingMsg),
     /// The Calls tab's call hierarchy. Handled in `app::calls` (`App::update_calls`).
     Calls(CallsMsg),
+    /// The History view: the project's commits. Handled in `app::history`
+    /// (`App::update_history`).
+    History(HistoryMsg),
     /// The FLOW tab's value trace. Handled in `app::flow` (`App::update_flow`).
     Flow(FlowMsg),
     /// The project graphs and their overlays: imports and the call graph. Handled in
@@ -803,6 +806,52 @@ pub enum ReadingMsg {
     },
     /// Pick the target the `#[cfg]` dimming is evaluated against.
     TargetSelected(inactive::Target),
+}
+
+/// The History view: the project's commits.
+#[derive(Debug, Clone)]
+pub enum HistoryMsg {
+    /// Show the History view: of `path` (a file or folder), or of the whole
+    /// project.
+    Show { path: Option<String> },
+    /// The filter as typed: words of the message, `@author`, a commit id.
+    Query(String),
+    /// Every branch's commits, or only HEAD's.
+    AllBranches(bool),
+    /// The whole project's commits, not only one path's.
+    WholeProject,
+    /// The next page.
+    More,
+    /// The list scrolled: near its end, the next page comes.
+    Scrolled { near_end: bool },
+    /// A page read.
+    Loaded {
+        stamp: Stamp,
+        generation: u64,
+        skip: usize,
+        result: Result<clew_protocol::LogPage, String>,
+    },
+    /// Open (or close) a commit to its message and files.
+    Toggle(String),
+    /// A commit read whole.
+    DetailRead {
+        stamp: Stamp,
+        sha: String,
+        result: Result<Option<clew_protocol::CommitDetail>, String>,
+    },
+    /// Open (or close) the uncommitted changes to their files.
+    ToggleChanges,
+    /// Read file `rel` as commit `sha` left it, in Time Travel.
+    OpenAt { sha: String, rel: String },
+    /// Open the changed file `rel` in its Diff.
+    OpenChanged(String),
+    /// Copy commit `sha`'s whole id.
+    CopyId(String),
+    /// The project's newest commit read (`App::sync_repo_tip`).
+    TipRead {
+        stamp: Stamp,
+        result: Result<Option<String>, String>,
+    },
 }
 
 /// The Calls tab's call hierarchy.
@@ -2313,6 +2362,7 @@ impl Message {
             Message::Nav(m) => m.origin(),
             Message::Reading(m) => m.origin(),
             Message::Calls(m) => m.origin(),
+            Message::History(m) => m.origin(),
             Message::Flow(m) => m.origin(),
             Message::Graph(m) => m.origin(),
             Message::Explain(m) => m.origin(),
@@ -2560,6 +2610,29 @@ impl ReadingMsg {
             | ReadingMsg::HistoryClear
             | ReadingMsg::TrailSaved { .. }
             | ReadingMsg::TargetSelected(..) => None,
+        }
+    }
+}
+
+impl HistoryMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            HistoryMsg::Loaded { stamp, .. }
+            | HistoryMsg::DetailRead { stamp, .. }
+            | HistoryMsg::TipRead { stamp, .. } => Some(Origin::Stamped(stamp)),
+            HistoryMsg::Show { .. }
+            | HistoryMsg::Query(_)
+            | HistoryMsg::AllBranches(_)
+            | HistoryMsg::WholeProject
+            | HistoryMsg::More
+            | HistoryMsg::Scrolled { .. }
+            | HistoryMsg::Toggle(_)
+            | HistoryMsg::ToggleChanges
+            | HistoryMsg::OpenAt { .. }
+            | HistoryMsg::OpenChanged(_)
+            | HistoryMsg::CopyId(_) => None,
         }
     }
 }

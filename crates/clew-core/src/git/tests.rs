@@ -2562,6 +2562,19 @@ fn the_project_log_pages_through_its_commits() {
     );
     assert!(!page.more);
     assert!(page.commits.iter().all(|c| c.time > 0 && c.sha.len() == 40));
+    // Parents as the project's history reads: the commit outside it left
+    // out, its child names the one before it — every parent listed, so the
+    // graph joins up.
+    let listed: Vec<&str> = page.commits.iter().map(|c| c.sha.as_str()).collect();
+    for c in &page.commits {
+        for parent in &c.parents {
+            assert!(
+                listed.contains(&parent.as_str()),
+                "{} -> {parent}",
+                c.subject
+            );
+        }
+    }
 
     // A page at a time.
     let first = project_log(&proj, false, None, None, None, 0, 2).unwrap();

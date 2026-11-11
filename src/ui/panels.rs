@@ -1969,45 +1969,6 @@ fn expand_all<'a>(msg: Message) -> Element<'a, Message> {
     super::toolbar::icon_action(crate::glyph::Glyph::ExpandAll, tr!("Expand all"), Some(msg))
 }
 
-/// Height of one side of a [`direction_switch`].
-const SWITCH_SIDE_H: f32 = 24.0;
-
-/// Which way a tree reads (callers or callees, imports or importers): a
-/// segmented control across the panel, as the sidebar's views are — two
-/// equal halves, each label centred in its own, the way it reads raised;
-/// the other switches.
-fn direction_switch<'a>(sides: [(&'static str, bool, Message); 2]) -> Element<'a, Message> {
-    container(
-        Row::with_children(sides.into_iter().map(|(label, chosen, msg)| {
-            button(
-                container(
-                    text(label)
-                        .size(ts::SMALL)
-                        .font(if chosen {
-                            crate::fonts::UI_MEDIUM
-                        } else {
-                            crate::fonts::UI
-                        })
-                        .wrapping(Wrapping::None),
-                )
-                .center_x(Fill)
-                .center_y(Fill),
-            )
-            .style(theme::segment(chosen))
-            .padding(0)
-            .width(Fill)
-            .height(Length::Fixed(SWITCH_SIDE_H))
-            .on_press_maybe((!chosen).then(|| super::heard::said(label, msg)))
-            .into()
-        }))
-        .spacing(2),
-    )
-    .padding(2)
-    .width(Fill)
-    .style(theme::trough)
-    .into()
-}
-
 /// A note under a tree's header: what the tree cannot show by itself, as a
 /// quiet row — its glyph, what it says, and, when there is more to it, a
 /// chevron that shows that under it (`about`, while `open`).
@@ -2441,10 +2402,10 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         &tree.root_name,
         None,
         vec![expand_all(Message::Calls(CallsMsg::ExpandAll))],
-        Some(direction_switch(
+        Some(super::form::segmented_across(
             [Direction::Incoming, Direction::Outgoing].map(|d| {
                 (
-                    crate::i18n::lookup(d.label()),
+                    crate::i18n::lookup(d.label()).to_string(),
                     tree.direction == d,
                     Message::Calls(CallsMsg::Direction),
                 )
@@ -2600,13 +2561,15 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
         &tree.root_name,
         None,
         vec![expand_all(Message::Graph(GraphMsg::ImportExpandAll))],
-        Some(direction_switch([Dir::Imports, Dir::Importers].map(|d| {
-            (
-                crate::i18n::lookup(d.label()),
-                tree.direction == d,
-                Message::Graph(GraphMsg::ImportDirection),
-            )
-        }))),
+        Some(super::form::segmented_across(
+            [Dir::Imports, Dir::Importers].map(|d| {
+                (
+                    crate::i18n::lookup(d.label()).to_string(),
+                    tree.direction == d,
+                    Message::Graph(GraphMsg::ImportDirection),
+                )
+            }),
+        )),
     );
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();

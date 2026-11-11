@@ -579,6 +579,24 @@ impl GitAnswer for Option<String> {
     }
 }
 
+impl GitAnswer for clew_protocol::LogPage {
+    fn take(result: clew_protocol::GitResult) -> Option<Self> {
+        match result {
+            clew_protocol::GitResult::Log(page) => Some(page),
+            _ => None,
+        }
+    }
+}
+
+impl GitAnswer for Option<clew_protocol::CommitDetail> {
+    fn take(result: clew_protocol::GitResult) -> Option<Self> {
+        match result {
+            clew_protocol::GitResult::CommitDetail(detail) => Some(detail),
+            _ => None,
+        }
+    }
+}
+
 impl GitAnswer for HashSet<usize> {
     fn take(result: clew_protocol::GitResult) -> Option<Self> {
         match result {

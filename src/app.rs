@@ -68,6 +68,7 @@ pub(crate) mod fakerun;
 pub(crate) mod flow;
 pub(crate) mod glossary;
 mod graph;
+pub(crate) mod history;
 pub(crate) mod proof;
 pub(crate) mod runs;
 pub(crate) mod setup;

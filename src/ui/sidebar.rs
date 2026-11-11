@@ -7,13 +7,14 @@ use iced::widget::{column, row};
 
 /// The sidebar tabs in strip order — the one source of truth for both rendering
 /// the strip and computing which one to scroll into view (`reveal_sidebar_tab`).
-pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 11] = [
+pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 12] = [
     ("FILES", SidebarTab::Files),
     ("SEARCH", SidebarTab::Search),
     ("FIND", SidebarTab::Semantic),
     ("WALK", SidebarTab::Walk),
     ("MARKS", SidebarTab::Marks),
     ("TRAIL", SidebarTab::Trail),
+    ("HISTORY", SidebarTab::History),
     ("CALLS", SidebarTab::Calls),
     ("FLOW", SidebarTab::Flow),
     ("IMPORTS", SidebarTab::Imports),
@@ -52,6 +53,7 @@ pub(crate) fn tab_glyph(tab: SidebarTab) -> Glyph {
         SidebarTab::Walk => Glyph::Compass,
         SidebarTab::Notes => Glyph::Note,
         SidebarTab::Docs => Glyph::Book,
+        SidebarTab::History => Glyph::Branch,
     }
 }
 
@@ -79,6 +81,7 @@ pub(crate) fn tab_name(tab: SidebarTab) -> &'static str {
         SidebarTab::Walk => tr!("Walkthroughs"),
         SidebarTab::Notes => tr!("Your notes"),
         SidebarTab::Docs => tr!("API docs"),
+        SidebarTab::History => tr!("History"),
     }
 }
 
@@ -232,6 +235,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
         SidebarTab::Walk => walk_tab(app),
         SidebarTab::Notes => notes_tab(app),
         SidebarTab::Docs => docs_tab(app),
+        SidebarTab::History => super::history::history_tab(app),
     };
 
     // Each tab's own widgets: tabs of one shape (a list in a scrollable)

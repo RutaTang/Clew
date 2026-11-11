@@ -81,6 +81,11 @@ impl App {
             Some(read) => Task::batch([task, read]),
             None => task,
         };
+        // The history read anew when the project's newest commit moved.
+        let task = match self.sync_repo_tip() {
+            Some(read) => Task::batch([task, read]),
+            None => task,
+        };
         // An answer that came with Ask put away is read once its card is
         // open, whichever way it was opened.
         if self.ask_view.is_open() {
@@ -409,6 +414,7 @@ impl App {
             Message::Nav(message) => self.update_nav(message),
             Message::Reading(message) => self.update_reading(message),
             Message::Calls(message) => self.update_calls(message),
+            Message::History(message) => self.update_history(message),
             Message::Flow(message) => self.update_flow(message),
             Message::Graph(message) => self.update_graph(message),
             Message::Explain(message) => self.update_explain(message),

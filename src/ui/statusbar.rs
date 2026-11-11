@@ -159,9 +159,17 @@ fn branch_item(app: &App) -> Option<Element<'_, Message>> {
     ]
     .spacing(5)
     .align_y(iced::Center);
+    // Pressed, the branch's history: its commits, in the History view.
+    let shown = button(shown)
+        .style(theme::icon_button(false))
+        .padding([2, 4])
+        .on_press(super::heard::said(
+            tr!("History"),
+            Message::History(crate::HistoryMsg::Show { path: None }),
+        ));
     Some(
         super::tip::tip(
-            container(shown).padding([2, 4]),
+            shown,
             container(text(about).size(ts::SMALL).color(theme::tip_text()))
                 .padding([3, 7])
                 .style(theme::tip),

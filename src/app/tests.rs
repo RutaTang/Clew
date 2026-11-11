@@ -7096,6 +7096,7 @@ fn remote_project_never_touches_local_state_or_files() {
     // Nor the branch, which this stand-in server answers no more than the
     // marks.
     app.proj.head_stale = false;
+    app.proj.repo_tip_stale = false;
     // The planted local .clew state was not read…
     assert!(
         app.proj.bookmarks.is_empty(),
@@ -15370,6 +15371,7 @@ fn the_status_bar_learns_the_branch_checked_out() {
         "back in front"
     );
     app.proj.head_stale = false;
+    app.proj.repo_tip_stale = false;
     app.proj.head_loading = false;
     let _ = app.on_files_changed(vec![root.join("src/lib.rs")]);
     assert!(app.proj.head_stale, "a file changed");
@@ -22848,6 +22850,24 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Project(ProjectMsg::HeadRead {
             stamp: s(),
             result: Ok(Some(clew_protocol::HeadName::Branch("stale".into()))),
+        }),
+        Message::History(HistoryMsg::Loaded {
+            stamp: s(),
+            generation: app.proj.git_log.generation,
+            skip: 0,
+            result: Ok(clew_protocol::LogPage {
+                commits: Vec::new(),
+                more: false,
+            }),
+        }),
+        Message::History(HistoryMsg::DetailRead {
+            stamp: s(),
+            sha: "a".repeat(40),
+            result: Ok(None),
+        }),
+        Message::History(HistoryMsg::TipRead {
+            stamp: s(),
+            result: Ok(Some("a".repeat(40))),
         }),
         Message::Watch(WatchMsg::SymbolIndexDone {
             stamp: s(),

@@ -220,6 +220,8 @@ pub enum SidebarTab {
     Notes,
     /// The project's API documentation surface.
     Docs,
+    /// The project's commits (`app::history`).
+    History,
 }
 
 /// What the WALK tab's top input does: search the saved library, or generate a
