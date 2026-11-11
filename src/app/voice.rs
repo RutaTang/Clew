@@ -1179,7 +1179,7 @@ impl App {
                         self.voice.download_errors.insert(id, e);
                     }
                 }
-                Task::none()
+                crate::app::embedding::redraw_once_just_downloaded()
             }
             VoiceMsg::RemoveModel(id) => {
                 let mut rechosen = false;

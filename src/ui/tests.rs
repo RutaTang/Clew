@@ -4729,14 +4729,15 @@ fn an_unknown_host_is_trusted_only_by_a_click_on_the_key_shown() {
         Some(crate::ConnectStage::TrustHost { key, .. }) if *key == scanned_key()
     ));
 
-    // Cancel: back to the form, saying why — and back on this machine:
-    // the host never connected.
+    // Cancel: back to the form, saying why. A connect clew made itself
+    // (not asked from the form) has nowhere else to go back to: the window
+    // stays on the host, to trust it from there.
     let _ = app.update(Message::Connect(ConnectMsg::TrustCancel));
     assert!(matches!(
         app.connect.as_ref().map(|u| &u.stage),
         Some(crate::ConnectStage::Error(reason)) if reason == "refused: unknown key"
     ));
-    assert!(!app.connection.is_remote());
+    assert_eq!(app.connection, port_2222_target());
     // Asked again, the key is shown again.
     let _ = app.connect_to(port_2222_target());
     let conn = app.conn_gen;
@@ -7577,7 +7578,12 @@ fn the_connect_modal_can_revoke_the_live_hosts_ai_keys() {
     assert!(shows(&mut sim_of(&app), "does not hold your API keys"));
     // With no key here, there is nothing for it to hold, or not.
     app.settings.key.clear();
+    app.llm_available = false;
     assert!(!shows(&mut sim_of(&app), "does not hold your API keys"));
+    // A key configured — in config.toml or the environment — with Settings
+    // never opened (its draft empty) is one it does not hold.
+    app.llm_available = true;
+    assert!(shows(&mut sim_of(&app), "does not hold your API keys"));
     // Locally there is nothing to grant, so nothing is shown.
     app.connection = crate::connect::ConnTarget::Local;
     let mut local = sim_of(&app);

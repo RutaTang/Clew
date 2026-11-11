@@ -537,11 +537,22 @@ impl App {
                 // their names: "No matches" for a function its list showed.
                 // A function found goes to the file it is in.
                 if kind == Overlay::ProjectCalls {
-                    for file in self.call_graph_files_of(&self.graph_search) {
-                        if let Some(i) = layout.nodes.iter().position(|n| n.file == file)
-                            && !found.contains(&i)
-                        {
-                            found.push(i);
+                    let files = self.call_graph_files_of(&self.graph_search);
+                    if !files.is_empty() {
+                        let mut seen: std::collections::HashSet<usize> =
+                            found.iter().copied().collect();
+                        let node_of: std::collections::HashMap<&std::path::Path, usize> = layout
+                            .nodes
+                            .iter()
+                            .enumerate()
+                            .map(|(i, n)| (n.file.as_path(), i))
+                            .collect();
+                        for file in files {
+                            if let Some(&i) = node_of.get(file.as_path())
+                                && seen.insert(i)
+                            {
+                                found.push(i);
+                            }
                         }
                     }
                 }
@@ -577,13 +588,14 @@ impl App {
             })
             .collect();
         ranked.sort_by_key(|(rank, _)| *rank);
-        let mut files: Vec<std::path::PathBuf> = Vec::new();
-        for (_, file) in ranked {
-            if !files.iter().any(|f| f == file) {
-                files.push(file.to_path_buf());
-            }
-        }
-        files
+        // Each file once — through a set: a query of one letter finds most of
+        // the functions, and the list it was checked against grew with them.
+        let mut seen: std::collections::HashSet<&std::path::Path> = Default::default();
+        ranked
+            .into_iter()
+            .filter(|(_, file)| seen.insert(file))
+            .map(|(_, file)| file.to_path_buf())
+            .collect()
     }
 
     /// The search moved to another match, or was cleared: the camera goes

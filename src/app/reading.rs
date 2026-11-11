@@ -344,19 +344,34 @@ impl App {
         }
         // A note written for a line with no bookmark yet (Bookmark with
         // Note…): the bookmark is put on with it.
-        if let Some((rel, line, _)) = self.proj.note_edit.clone()
-            && !self
-                .proj
-                .bookmarks
-                .iter()
-                .any(|b| b.rel == rel && b.line == line)
-            && let Some(pane) = self
-                .proj
-                .panes
-                .iter()
-                .position(|v| v.as_ref().is_some_and(|v| v.rel == rel))
-        {
-            let _ = self.bookmark_line(pane, line, Some(true));
+        if let Some((rel, line, _)) = self.proj.note_edit.clone() {
+            let marked = |app: &Self| {
+                app.proj
+                    .bookmarks
+                    .iter()
+                    .any(|b| b.rel == rel && b.line == line)
+            };
+            if !marked(self) {
+                match self
+                    .proj
+                    .panes
+                    .iter()
+                    .position(|v| v.as_ref().is_some_and(|v| v.rel == rel))
+                {
+                    Some(pane) => {
+                        let _ = self.bookmark_line(pane, line, Some(true));
+                    }
+                    None => self.status = tr!("Open the file to bookmark this line").into(),
+                }
+                // Not put on — Time Travel on screen, the file no longer
+                // open, a refused remote write (each says why): the note
+                // stays in its editor, to be saved once it can be. It was
+                // attached to no bookmark, the editor closed, and the text
+                // lost.
+                if !marked(self) {
+                    return Task::none();
+                }
+            }
         }
         if let Some((rel, line, draft)) = self.proj.note_edit.take() {
             if !self.local_project_state() {

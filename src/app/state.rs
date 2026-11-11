@@ -1203,13 +1203,9 @@ pub struct App {
     /// closes it, and a connect that failed left the window empty, the
     /// project it was reading a folder pick away.
     pub left_local: Option<std::path::PathBuf>,
-    /// The file the window was reading in [`Self::left_local`], and the
-    /// line its caret was on: a connect that never came up reopens it there.
-    pub left_local_at: Option<(std::path::PathBuf, Option<usize>)>,
-    /// The host a connect asked from the form is dialling: kept among the
-    /// saved hosts once it answers, not before — a typo that never
-    /// connected was listed for good.
-    pub connecting_as: Option<connect::SavedConnection>,
+    /// A connect asked from the Connect form or its saved hosts, until the
+    /// host answers (see [`Dial`]).
+    pub dial: Option<Dial>,
     /// The Escape now reaching the key handler has done its work already —
     /// it cleared the Files filter (`WindowMsg::FileFilterEscaped`) — and is
     /// to do nothing more. Any key press consumes it.
@@ -2875,4 +2871,26 @@ impl LanguageDrafts {
             crate::LangField::ServerArgs => &mut self.server_args,
         }
     }
+}
+
+/// A connect asked from the Connect form or its saved hosts, from the moment
+/// it is asked until the host answers (`on_server_ready`): what to save once
+/// it does, and where the reader was, to go back to if it never does
+/// (`back_home_after_failed_connect`). A connect clew makes on its own — at
+/// startup, or again after a link that came up and dropped — is not one: it
+/// has nowhere else to go back to.
+#[derive(Debug, Clone)]
+pub struct Dial {
+    /// The host dialled.
+    pub to: connect::ConnTarget,
+    /// The form's host, kept among the saved hosts once it answers — not
+    /// before: a typo that never connected was listed for good. `None` for
+    /// a host already saved.
+    pub save: Option<connect::SavedConnection>,
+    /// Where the window was: this machine, or the host it was on.
+    pub from: connect::ConnTarget,
+    /// The project it was reading there, and the file and line (1-based) it
+    /// was at — or the ones a project on its way back was to reopen at.
+    pub root: Option<PathBuf>,
+    pub at: Option<(PathBuf, Option<usize>)>,
 }

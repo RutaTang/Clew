@@ -574,7 +574,7 @@ impl App {
                         self.voice.speech.download_errors.insert(id, e);
                     }
                 }
-                Task::none()
+                crate::app::embedding::redraw_once_just_downloaded()
             }
             VoiceMsg::RemoveSpeech(id) => {
                 let (Some(model), Some(store)) = (speech::find(id), self.voice.store.clone())

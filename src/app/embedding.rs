@@ -31,6 +31,15 @@ pub(crate) struct LocalEmbedding {
 /// before Remove takes the place.
 pub(crate) const JUST_DOWNLOADED: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// A frame once [`JUST_DOWNLOADED`] has passed, so Remove takes its place
+/// then — not whenever some other message next redraws the window.
+pub(crate) fn redraw_once_just_downloaded() -> Task<Message> {
+    Task::perform(
+        async { tokio::time::sleep(JUST_DOWNLOADED + std::time::Duration::from_millis(50)).await },
+        |()| Message::Noop,
+    )
+}
+
 /// What a download of `file` must turn out to be.
 fn expected(file: &ModelFile) -> Expected {
     Expected {
@@ -251,7 +260,7 @@ impl App {
                         self.local_embedding.error = Some(e);
                     }
                 }
-                Task::none()
+                redraw_once_just_downloaded()
             }
             SettingsMsg::RemoveEmbedModel => {
                 let Some(dir) = local::dir() else {

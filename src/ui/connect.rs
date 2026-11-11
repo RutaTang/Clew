@@ -2139,8 +2139,14 @@ pub(crate) fn host_key_changed_prompt<'a>(
 /// when the connection is local (there is nothing to grant).
 pub(crate) fn live_ai_keys_row(app: &App) -> Option<Element<'_, Message>> {
     let held = app.live_ai_opt_in()?;
-    // No key here: nothing for a host to hold, or not.
-    if !held && app.settings.key.trim().is_empty() && app.settings.embed_key.trim().is_empty() {
+    // No key here: nothing for a host to hold, or not. The keys configured
+    // (`llm_available`: config.toml or the environment), not only the
+    // Settings draft — empty until Settings is opened, and never holding
+    // a key from the environment.
+    let has_key = app.llm_available
+        || !app.settings.key.trim().is_empty()
+        || !app.settings.embed_key.trim().is_empty();
+    if !held && !has_key {
         return None;
     }
     let host = app.connection.label();

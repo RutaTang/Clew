@@ -1736,9 +1736,11 @@ pub(crate) fn resolve_rel(root: &Path, p: &str) -> PathBuf {
 }
 
 /// What a Rust crate at `root` builds to run, by its `Cargo.toml`: the
-/// binary's name — a `[[bin]]`'s, or the package's when it has
-/// `src/main.rs` or `src/bin/` — or, a library with none, nothing to run.
-/// `None` without a package to read (no manifest, a bare workspace).
+/// binary's name — a `[[bin]]`'s; the package's for `src/main.rs`; for
+/// `src/bin/<name>.rs` (or `src/bin/<name>/main.rs`) that file's name, as
+/// Cargo names it — or, a library with none, nothing to run. `None`
+/// without a package to read (no manifest, a bare workspace), and for a
+/// workspace's root library: its members may well run.
 pub(crate) fn cargo_binary(root: &Path) -> Option<Option<String>> {
     let text = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
     let manifest: toml::Value = toml::from_str(&text).ok()?;
@@ -1751,8 +1753,32 @@ pub(crate) fn cargo_binary(root: &Path) -> Option<Option<String>> {
     if named_bin.is_some() {
         return Some(named_bin);
     }
-    let has_main = root.join("src/main.rs").is_file() || root.join("src/bin").is_dir();
-    Some(has_main.then_some(package))
+    if root.join("src/main.rs").is_file() {
+        return Some(Some(package));
+    }
+    let mut bins: Vec<String> = std::fs::read_dir(root.join("src/bin"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "rs") && path.is_file() {
+                path.file_stem()?.to_str().map(str::to_string)
+            } else if path.join("main.rs").is_file() {
+                path.file_name()?.to_str().map(str::to_string)
+            } else {
+                None
+            }
+        })
+        .collect();
+    bins.sort();
+    if let Some(first) = bins.into_iter().next() {
+        return Some(Some(first));
+    }
+    if manifest.get("workspace").is_some() {
+        return None;
+    }
+    Some(None)
 }
 
 /// A `launch.json` for a program in `lang` (a language key, as a pane has),

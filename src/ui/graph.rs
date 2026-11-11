@@ -472,7 +472,12 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
         )
         .with_visited(Some(trace_files(app)), app.debug.trace_rev)
         .with_fit(app.graph_fit_rev)
-        .with_search(&app.graph_search, app.graph_found, app.graph_focus_rev),
+        .with_search(
+            &app.graph_search,
+            &app.graph_matches(),
+            app.graph_found,
+            app.graph_focus_rev,
+        ),
     )
     .width(Fill)
     .height(Fill);
@@ -596,15 +601,29 @@ impl<'a> GraphCanvas<'a> {
         }
     }
 
-    /// Light what the search `query` finds, `found` being which of its
-    /// matches (counted from 0, round) the camera goes to each time
-    /// `focus_rev` moves on.
-    pub(crate) fn with_search(mut self, query: &str, found: usize, focus_rev: u64) -> Self {
+    /// Light what the search `query` finds — `matches`, the list its header
+    /// counts (`App::graph_matches`: the Call Graph's adds the files of the
+    /// functions it finds) — `found` being which of them (counted from 0,
+    /// round) the camera goes to each time `focus_rev` moves on. The map
+    /// matched labels on its own, and the two lists parted: "1 of 1" over a
+    /// map with nothing lit, or the camera on one file and Open under the
+    /// header naming another.
+    pub(crate) fn with_search(
+        mut self,
+        query: &str,
+        matches: &[usize],
+        found: usize,
+        focus_rev: u64,
+    ) -> Self {
         self.focus_rev = focus_rev;
-        let matches = graph_matches(self.layout, query);
         if query.trim().is_empty() {
             return self;
         }
+        let matches: Vec<usize> = matches
+            .iter()
+            .copied()
+            .filter(|&i| i < self.layout.nodes.len())
+            .collect();
         let n = self.layout.nodes.len();
         let focus = (!matches.is_empty()).then(|| matches[found % matches.len()]);
         let mut lit = Lit {
@@ -1297,9 +1316,20 @@ impl GraphCanvas<'_> {
         st.zoom_at = None;
         st.zoom_vel = 0.0;
         st.pan = iced::Vector::new(0.0, 0.0);
-        st.focus = None;
         st.hold = None;
         st.picked = None;
+        // But the search's node is this set's (`with_search` ran on this
+        // layout): the camera goes to it. A search typed while the graph was
+        // being laid out lit its match and left the camera over the whole
+        // map — the focus it was sent had gone with the reseed.
+        st.focus = self
+            .lit
+            .as_ref()
+            .and_then(|lit| lit.focus)
+            .filter(|&f| f < n);
+        if st.focus.is_some() {
+            st.zoom_target = FOCUS_ZOOM;
+        }
         st.touch();
     }
 
@@ -3921,14 +3951,19 @@ mod tests {
     #[test]
     fn the_search_lights_its_finds_and_the_focus_neighbours() {
         let l = layout(8);
-        let c = canvas(&l, true, false).with_search("file_4", 0, 1);
+        let c = canvas(&l, true, false).with_search("file_4", &graph_matches(&l, "file_4"), 0, 1);
         let lit = c.lit.as_ref().expect("a search");
         assert_eq!(lit.focus, Some(4));
         let on: Vec<usize> = (0..8).filter(|&i| lit.lit(i)).collect();
         assert_eq!(on, [3, 4, 5], "the found node and its neighbours");
-        assert!(canvas(&l, true, false).with_search(" ", 0, 1).lit.is_none());
+        assert!(
+            canvas(&l, true, false)
+                .with_search(" ", &[], 0, 1)
+                .lit
+                .is_none()
+        );
         // Round: the third of one match is that match.
-        let c = canvas(&l, true, false).with_search("file_4", 2, 1);
+        let c = canvas(&l, true, false).with_search("file_4", &graph_matches(&l, "file_4"), 2, 1);
         assert_eq!(c.lit.as_ref().unwrap().focus, Some(4));
     }
 
@@ -3945,7 +3980,8 @@ mod tests {
             redraw_at(&plain, &mut st, t0, t);
             t += 16.667;
         }
-        let found = canvas(&l, true, true).with_search("file_6", 0, 1);
+        let found =
+            canvas(&l, true, true).with_search("file_6", &graph_matches(&l, "file_6"), 0, 1);
         while t < 15_000.0 {
             redraw_at(&found, &mut st, t0, t);
             t += 16.667;
@@ -3959,7 +3995,7 @@ mod tests {
         assert!(st.zoom >= FOCUS_ZOOM - 1e-3, "not zoomed in: {}", st.zoom);
         assert!(st.yaw_vel.abs() < 1e-3, "still spinning");
 
-        let cleared = canvas(&l, true, true).with_search("", 0, 2);
+        let cleared = canvas(&l, true, true).with_search("", &[], 0, 2);
         while t < 20_000.0 {
             redraw_at(&cleared, &mut st, t0, t);
             t += 16.667;
@@ -3967,6 +4003,44 @@ mod tests {
         assert!((st.zoom - 1.0).abs() < 1e-3, "{}", st.zoom);
         assert!((st.yaw_vel - SPIN_RATE).abs() < 2e-3, "{}", st.yaw_vel);
         assert_eq!(st.focus, None);
+    }
+
+    /// A search typed before the map was first drawn — while the graph was
+    /// laid out — still sends the camera to its match: the first frame's
+    /// reseed went to it, not over the whole map.
+    #[test]
+    fn a_search_typed_before_the_map_is_drawn_is_flown_to() {
+        let l = layout(8);
+        let t0 = std::time::Instant::now();
+        let mut st = GraphState::default();
+        let found = canvas(&l, true, true).with_search("file_6", &[6], 0, 1);
+        let mut t = 0.0;
+        while t < 4_000.0 {
+            redraw_at(&found, &mut st, t0, t);
+            t += 16.667;
+        }
+        assert_eq!(st.focus, Some(6));
+        assert!(st.zoom >= FOCUS_ZOOM - 1e-3, "not zoomed in: {}", st.zoom);
+        let (x, y, _, _) = found.node_screen(6, BOUNDS, &st);
+        assert!(
+            (x - BOUNDS.width / 2.0).abs() < 1.0 && (y - BOUNDS.height / 2.0).abs() < 1.0,
+            "not centred: {x},{y}"
+        );
+    }
+
+    /// What the map lights is the list its header counts: a match the
+    /// label search would not find (a function's file, on the Call Graph)
+    /// is lit and flown to all the same.
+    #[test]
+    fn the_map_lights_the_list_the_header_counts() {
+        let l = layout(8);
+        let c = canvas(&l, true, false).with_search("deser", &[2], 0, 1);
+        let lit = c.lit.as_ref().expect("a search");
+        assert_eq!(lit.focus, Some(2));
+        assert!(lit.found[2]);
+        // An index past the map is not one of its nodes.
+        let c = canvas(&l, true, false).with_search("x", &[99], 0, 1);
+        assert_eq!(c.lit.as_ref().unwrap().focus, None);
     }
 
     /// Fit puts the camera back where it starts: zoom, pan and turn.

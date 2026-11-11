@@ -3130,6 +3130,18 @@ fn the_context_menu_bookmarks_its_line_with_a_note() {
     assert_eq!(six.note.as_deref(), Some("why it is here"));
     assert_eq!(bookmarks::load(&root), app.proj.bookmarks);
 
+    // A note for a line that cannot be bookmarked now — its file no longer
+    // open — stays in its editor: it was attached to nothing, the editor
+    // closed, and the text lost.
+    app.proj.note_edit = Some(("src/other.rs".into(), 2, "kept".into()));
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteSave));
+    assert_eq!(
+        app.proj.note_edit.as_ref().map(|(_, _, t)| t.as_str()),
+        Some("kept")
+    );
+    assert!(app.status.contains("Open the file"), "{}", app.status);
+    app.proj.note_edit = None;
+
     // On a bookmarked line, the menu says it edits the note.
     menu_on(&mut app, 5);
     let menu = app.proj.context_menu.unwrap();
@@ -6365,7 +6377,198 @@ fn a_host_is_saved_once_it_answers() {
         "{:?}",
         app.saved_connections
     );
-    assert!(app.connecting_as.is_none());
+    assert!(app.dial.is_none());
+    // Up, then dropped: no way home — the window stays on the host, to
+    // reconnect to.
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "the link dropped".into(),
+    }));
+    assert!(app.connection.is_remote());
+}
+
+/// A Revoke clicked while the host connects stands once it answers: the
+/// form's tick, saved when it answered, wrote the keys back — and the next
+/// click on that saved host sent them to a host the reader had revoked.
+#[test]
+fn a_revoke_while_connecting_stands_once_the_host_answers() {
+    let mut app = scanned_app("connect-revoke-while-dialling");
+    app.connect = Some(ConnectUi {
+        host: "keys.example".into(),
+        user: "root".into(),
+        send_ai_keys: true,
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    assert!(app.remote_ai_opt_in);
+    let _ = app.update(Message::Connect(ConnectMsg::RevokeAiKeys));
+    let _ = app.on_server_ready();
+    let saved = app
+        .saved_connections
+        .iter()
+        .find(|c| c.host == "keys.example")
+        .expect("saved once it answered");
+    assert!(!saved.send_ai_keys, "the revoke was undone");
+}
+
+/// A connect asked again while the project of the last one that failed is
+/// still on its way back (its scan, its consent sheet) keeps the way home:
+/// it failing too reopens that project; it answering leaves it to come back
+/// to.
+#[test]
+fn a_retry_while_the_project_reopens_keeps_the_way_home() {
+    let mut app = scanned_app("connect-fast-retry");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    app.active_viewer_mut().unwrap().caret = Some((2, 0));
+    let form = |host: &str| ConnectUi {
+        host: host.into(),
+        user: "root".into(),
+        ..ConnectUi::default()
+    };
+    app.connect = Some(form("hots.example"));
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "no such host".into(),
+    }));
+    assert!(!app.connection.is_remote());
+    assert!(app.proj.project.is_none(), "still reopening");
+    // The typo fixed, asked again before the project is back.
+    app.connect = Some(form("host.example"));
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    assert_eq!(
+        app.left_local.as_deref(),
+        Some(root.as_path()),
+        "the project on its way back is the one to come back to"
+    );
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "still no host".into(),
+    }));
+    assert!(!app.connection.is_remote());
+    let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
+        || app.pending_consent.as_deref() == Some(root.as_path());
+    assert!(reopening, "the project was lost on the second failure");
+    assert_eq!(app.pending_open_line, Some(3));
+}
+
+/// A connect clew made on its own — `CLEW_SSH` at startup — has nowhere
+/// else to go back to: its host key turned down leaves the window on that
+/// host, saying why, to trust it from there. Going home dropped a target
+/// only a restart could dial again.
+#[test]
+fn a_key_turned_down_for_a_startup_host_stays_on_it() {
+    let mut app = blank_app();
+    let target = crate::backend::connect::ConnTarget::Ssh {
+        label: "root@bastioned".into(),
+        args: vec!["-J".into(), "bastion".into(), "root@bastioned".into()],
+    };
+    app.connection = target.clone();
+    app.connect = Some(ConnectUi {
+        stage: ConnectStage::TrustHost {
+            target: target.clone(),
+            reason: "bastioned is not a known host".into(),
+            key: crate::backend::connect::ScannedHostKey {
+                host: "bastioned".into(),
+                line: "bastioned ssh-ed25519 AAAA".into(),
+                kind: "ED25519".into(),
+                fingerprint: "SHA256:abc".into(),
+            },
+        },
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::TrustCancel));
+    assert_eq!(app.connection, target, "the startup host was dropped");
+    assert!(matches!(
+        app.connect.as_ref().map(|u| &u.stage),
+        Some(ConnectStage::Error(e)) if e.contains("not a known host")
+    ));
+}
+
+/// A connect asked from another host that never comes up goes back to that
+/// host, and its project — not to this machine.
+#[test]
+fn a_failed_connect_from_a_host_goes_back_to_that_host() {
+    let mut app = scanned_app("connect-failed-back-remote");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let first = crate::backend::connect::ConnTarget::Ssh {
+        label: "root@first".into(),
+        args: vec!["root@first".into()],
+    };
+    app.connection = first.clone();
+    app.connect = Some(ConnectUi {
+        host: "second.example".into(),
+        user: "root".into(),
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    assert_ne!(app.connection, first);
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "second is down".into(),
+    }));
+    assert_eq!(app.connection, first, "back on the host it was on");
+    let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
+        || app.pending_consent.as_deref() == Some(root.as_path());
+    assert!(reopening, "its project is opened again");
+}
+
+/// Cancel while it connects gives the connect up: the reader is back where
+/// they were. The connect went on with the modal gone and, should it fail,
+/// left an empty window on the host.
+#[test]
+fn cancelling_a_connect_goes_back_to_where_the_reader_was() {
+    let mut app = scanned_app("connect-cancel-home");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.connect = Some(ConnectUi {
+        host: "slow.example".into(),
+        user: "root".into(),
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    let gen_before = app.conn_gen;
+    let _ = app.update(Message::Connect(ConnectMsg::Close));
+    assert!(!app.connection.is_remote());
+    assert!(app.conn_gen > gen_before, "the dial goes on");
+    assert!(app.connect.is_none());
+    let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
+        || app.pending_consent.as_deref() == Some(root.as_path());
+    assert!(reopening);
+    // Nothing to save, and nothing more to undo.
+    let _ = app.on_server_ready();
+    assert!(
+        !app.saved_connections
+            .iter()
+            .any(|c| c.host == "slow.example")
+    );
+}
+
+/// A host whose server refuses the handshake never came up either: a
+/// connect from the form goes back, as for any other failure.
+#[test]
+fn a_refused_handshake_from_the_form_goes_back() {
+    let mut app = scanned_app("connect-refused-home");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.connect = Some(ConnectUi {
+        host: "old.example".into(),
+        user: "root".into(),
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    let _ = app.on_handshake_failed("clew-server speaks protocol 3".into());
+    assert!(!app.connection.is_remote());
+    assert!(
+        app.handshake_failure.is_none(),
+        "the host's verdict is not this machine's"
+    );
+    assert!(matches!(
+        app.connect.as_ref().map(|u| &u.stage),
+        Some(ConnectStage::Error(e)) if e.contains("protocol 3")
+    ));
+    let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
+        || app.pending_consent.as_deref() == Some(root.as_path());
+    assert!(reopening);
 }
 
 /// A host whose key is not trusted, its prompt cancelled, never connected
@@ -35165,6 +35368,30 @@ fn debug_suggests_a_launch_config_in_the_projects_language() {
     assert!(app.status.contains("target/debug/tool"), "{}", app.status);
     // A script project, by the file open.
     assert!(crate::app::tasks::launch_example(&root, Some("ruby")).contains("main.rb"));
+}
+
+/// The binary a crate builds is the one Cargo names: `src/bin/<name>.rs`
+/// is `<name>`, not the package; and a workspace's root library is not
+/// "nothing to run" — its members may well run.
+#[test]
+fn the_binary_a_crate_builds_is_the_one_cargo_names() {
+    use crate::app::tasks::cargo_binary;
+    let root = test_dir("cargo-binary-names");
+    std::fs::create_dir_all(root.join("src/bin/served")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"pkg\"\n").unwrap();
+    assert_eq!(cargo_binary(&root), Some(None), "nothing in src/bin yet");
+    std::fs::write(root.join("src/bin/served/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(root.join("src/bin/cli.rs"), "fn main() {}\n").unwrap();
+    assert_eq!(cargo_binary(&root), Some(Some("cli".into())));
+    std::fs::remove_file(root.join("src/bin/cli.rs")).unwrap();
+    assert_eq!(cargo_binary(&root), Some(Some("served".into())));
+    std::fs::remove_dir_all(root.join("src/bin")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"pkg\"\n[workspace]\nmembers = [\"app\"]\n",
+    )
+    .unwrap();
+    assert_eq!(cargo_binary(&root), None, "a workspace's members may run");
 }
 
 /// A save says which provider is in use without nesting parentheses — the

@@ -124,13 +124,65 @@ impl App {
         }
         let opt_in = conn.send_ai_keys;
         let target = conn.target();
-        let stop_old = self.connect_to(target);
         // Saved once it answers (`on_server_ready`), not now: a host that
         // never connected — a typo — was listed for good.
-        self.connecting_as = Some(conn);
+        let stop_old = self.dial_to(target, Some(conn));
         // After connect_to: it resets the opt-in for every transport switch.
         self.remote_ai_opt_in = opt_in;
         stop_old
+    }
+
+    /// Connect to `target`, asked from the Connect form (`save`: the form's
+    /// host) or its saved hosts: recorded as a [`Dial`] until it answers.
+    /// Where the reader was is where a dial that never answers goes back to
+    /// — and a dial asked while another never answered goes back to where
+    /// that one began.
+    fn dial_to(
+        &mut self,
+        target: connect::ConnTarget,
+        save: Option<connect::SavedConnection>,
+    ) -> Task<Message> {
+        let dial = match self.dial.take() {
+            Some(before) if !self.server.ready => crate::app::state::Dial {
+                to: target.clone(),
+                save,
+                ..before
+            },
+            _ => {
+                let (root, at) = self.reading_place().unzip();
+                crate::app::state::Dial {
+                    to: target.clone(),
+                    save,
+                    from: self.connection.clone(),
+                    root,
+                    at: at.flatten(),
+                }
+            }
+        };
+        let stop_old = self.connect_to(target);
+        self.dial = Some(dial);
+        stop_old
+    }
+
+    /// The project this window is reading and the file and line (1-based) it
+    /// is at — or, a project on its way back (its scan, its consent sheet),
+    /// the ones it is to reopen at.
+    pub(crate) fn reading_place(&self) -> Option<(PathBuf, Option<(PathBuf, Option<usize>)>)> {
+        if let Some(project) = &self.proj.project {
+            let at = self
+                .active_viewer()
+                .map(|v| (v.abs.clone(), v.caret.map(|(line, _)| line + 1)));
+            return Some((project.root.clone(), at));
+        }
+        let root = self
+            .pending_scan_root
+            .clone()
+            .or_else(|| self.pending_consent.clone())?;
+        let at = self
+            .pending_open
+            .clone()
+            .map(|file| (file, self.pending_open_line));
+        Some((root, at))
     }
 
     /// Add (or update) a saved connection, de-duplicated by `user@host:port`, and
@@ -169,25 +221,18 @@ impl App {
         let label = target.label();
         // Leaving this machine for a host: its project is the one to come
         // back to. Any other switch keeps what was remembered.
+        // (Or the one on its way back: a scan still running, a consent
+        // sheet still open, after a connect that never came up.)
         if !self.connection.is_remote()
             && target.is_remote()
-            && let Some(project) = &self.proj.project
+            && let Some((root, _)) = self.reading_place()
         {
-            self.left_local = Some(project.root.clone());
-            // And where in it: a connect that never comes up reopens the
-            // file at the line the reader was on.
-            self.left_local_at = self
-                .active_viewer()
-                .map(|v| (v.abs.clone(), v.caret.map(|(line, _)| line + 1)));
+            self.left_local = Some(root);
         }
-        // Another host asked for: the one dialled before is not to be saved.
-        // (The same one again — trusted, then dialled anew — still is.)
-        if self
-            .connecting_as
-            .as_ref()
-            .is_some_and(|c| c.target() != target)
-        {
-            self.connecting_as = None;
+        // Another host asked for: the dial before is over. (The same one
+        // again — its key trusted, then dialled anew — still is that dial.)
+        if self.dial.as_ref().is_some_and(|d| d.to != target) {
+            self.dial = None;
         }
         // Stop the old project's work FIRST: `drop_connection_state` drops the
         // project's link (its stream ids) and the server link (the channel) —
@@ -241,27 +286,43 @@ impl App {
         stop_old
     }
 
-    /// A connect asked from the Connect form that never came up — no ssh, a
-    /// host not there, a key not trusted, a server that refused — leaves the
-    /// reader where they were: back on this machine, the project they left
+    /// Whether a connect asked from the Connect form or its saved hosts is
+    /// still on its way up ([`Dial`](crate::app::state::Dial)): one that
+    /// never came up goes back to where it began.
+    pub(crate) fn dialling(&self) -> bool {
+        self.connection.is_remote()
+            && !self.server.ready
+            && self.dial.as_ref().is_some_and(|d| d.to == self.connection)
+    }
+
+    /// A connect asked from the Connect form or its saved hosts that never
+    /// came up — no ssh, a host not there, a key not trusted, a server that
+    /// refused, the reader's Cancel — leaves the reader where they were: on
+    /// this machine or the host they were on, the project they left
     /// reopened at the file and line they were reading. The form keeps
-    /// saying why, to try again from. A link that came up and dropped is
-    /// not this: its project stays, to reconnect to.
+    /// saying why, to try again from. A connect clew made on its own (at
+    /// startup, from `CLEW_SSH`) or a link that came up and dropped is not
+    /// this: there is nowhere else to go back to, and a dropped link's
+    /// project stays, to reconnect to.
     pub(crate) fn back_home_after_failed_connect(&mut self, why: String) -> Task<Message> {
-        if !self.connection.is_remote() || self.proj.project.is_some() {
+        if !self.dialling() {
             return Task::none();
         }
-        let root = self.left_local.take().filter(|root| root.is_dir());
-        let at = self.left_local_at.take();
-        let switched = self.connect_to_saying(connect::ConnTarget::Local, why.clone());
+        let Some(dial) = self.dial.take() else {
+            return Task::none();
+        };
+        let back_here = !dial.from.is_remote();
+        let switched = self.connect_to_saying(dial.from, why.clone());
+        // What the host that never came up said is not this one's verdict.
+        self.handshake_failure = None;
         if let Some(ui) = &mut self.connect {
             ui.stage = ConnectStage::Error(why);
         }
-        let Some(root) = root else {
+        let Some(root) = dial.root.filter(|root| !back_here || root.is_dir()) else {
             return switched;
         };
         let open = self.request_open(root.clone());
-        if let Some((file, line)) = at.filter(|(file, _)| file.starts_with(&root)) {
+        if let Some((file, line)) = dial.at.filter(|(file, _)| file.starts_with(&root)) {
             self.pending_open = Some(file);
             self.pending_open_line = line;
         }
@@ -580,8 +641,8 @@ impl App {
                 if let Some(ui) = &mut self.connect {
                     ui.stage = ConnectStage::Error(reason.clone());
                 }
-                // The host not trusted, so never connected: back to where
-                // the reader was.
+                // The host not trusted, so never connected: a connect the
+                // reader asked for goes back to where they were.
                 self.back_home_after_failed_connect(reason)
             }
             ConnectMsg::ForgetHostKey { host } => self.on_connect_forget_host_key(&host),
@@ -596,10 +657,24 @@ impl App {
                 Task::none()
             }
             ConnectMsg::Close => {
+                // Closed while it connects — its Cancel, ✕ or a click
+                // outside: the connect is given up, and the reader is back
+                // where they were. It went on with the modal gone, and,
+                // should it fail, left an empty window on the host.
+                let cancelled = self
+                    .connect
+                    .as_ref()
+                    .is_some_and(|ui| matches!(ui.stage, ConnectStage::Connecting { .. }))
+                    && self.dialling();
+                let back = if cancelled {
+                    self.back_home_after_failed_connect(tr!("Connecting was cancelled.").into())
+                } else {
+                    Task::none()
+                };
                 self.connect = None;
                 // Back to reading (see `SettingsMsg::Close`).
                 self.code_focused = true;
-                Task::none()
+                back
             }
             ConnectMsg::Field(field, value) => self.on_connect_field(field, value),
             ConnectMsg::PickIdentity => {
@@ -636,7 +711,7 @@ impl App {
                 .cloned()
             {
                 Some(conn) => {
-                    let stop_old = self.connect_to(conn.target());
+                    let stop_old = self.dial_to(conn.target(), None);
                     // After connect_to (which resets it): apply this host's
                     // saved AI-key opt-in.
                     self.remote_ai_opt_in = conn.send_ai_keys;
