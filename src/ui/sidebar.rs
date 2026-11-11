@@ -1631,7 +1631,9 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
 
         // A collapse chevron for nodes with children (forks stand out in accent);
         // leaves get a fixed-width spacer so names still line up.
-        let toggle: Element<'_, Message> = if v.has_children {
+        // Only where the trail branches (or was folded there): in a straight
+        // run every row had one, and folding one hid every later stop.
+        let toggle: Element<'_, Message> = if v.has_children && (v.forks || v.collapsed) {
             chevron(
                 !v.collapsed,
                 Message::Reading(ReadingMsg::TrailToggleCollapse {
@@ -1689,7 +1691,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                     .color(theme::fg())
                     .wrapping(Wrapping::None),
                     text(super::steady::elide_start(
-                        &rel_of(app, &v.loc.path),
+                        &trail_caption(app, v),
                         ts::CAPTION,
                         crate::fonts::UI,
                         room,
@@ -1725,11 +1727,26 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     column![
         header,
         scrollable(Column::with_children(rows).spacing(1))
+            .id(super::trail_scroll_id())
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
             .height(Fill),
     ]
     .into()
+}
+
+/// What a trail row says under its name: the file a place is in — or, for
+/// a whole file, the folder it is in: "pricing.py" over
+/// "teashop/pricing.py" said its name twice.
+fn trail_caption(app: &App, v: &crate::history::Visit) -> String {
+    let rel = rel_of(app, &v.loc.path);
+    if v.label.is_some() || v.loc.line.is_some() {
+        return rel;
+    }
+    match rel.rsplit_once('/') {
+        Some((dir, _)) => format!("{dir}/"),
+        None => String::new(),
+    }
 }
 
 pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {

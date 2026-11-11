@@ -322,6 +322,11 @@ pub fn ask_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("ask-conversation")
 }
 
+/// The Reading trail's list, so it opens on the place being read.
+pub fn trail_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("trail-list")
+}
+
 /// The outline scrollable, so it can follow the caret's current symbol.
 pub fn outline_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("outline-list")

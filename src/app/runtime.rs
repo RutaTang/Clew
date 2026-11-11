@@ -473,6 +473,9 @@ impl App {
                 self.ensure_docs();
                 Task::none()
             }
+            // On the place being read: it opened at the oldest stop, the
+            // current one off its foot.
+            SidebarTab::Trail => self.trail_to_current(),
             // Its first page, and the uncommitted changes at its head.
             SidebarTab::History => {
                 self.proj.git_status_stale = true;
@@ -483,6 +486,25 @@ impl App {
             }
             _ => Task::none(),
         }
+    }
+
+    /// The Reading trail's list scrolled to the place being read: its row
+    /// at the same share of the way down as it is of the list, so on screen
+    /// wherever it is.
+    pub(crate) fn trail_to_current(&self) -> Task<Message> {
+        let visits = self.proj.history.flatten_with(&self.proj.trail_collapsed);
+        let Some(i) = visits.iter().position(|v| v.is_current) else {
+            return Task::none();
+        };
+        let y = if visits.len() > 1 {
+            i as f32 / (visits.len() - 1) as f32
+        } else {
+            0.0
+        };
+        iced::widget::operation::snap_to(
+            ui::trail_scroll_id(),
+            iced::widget::scrollable::RelativeOffset { x: 0.0, y },
+        )
     }
 
     /// Note what the status line says now: when it says something new, the

@@ -3396,6 +3396,38 @@ fn search_flow_message_wiring() {
     );
 }
 
+/// The Reading trail opens on the place being read: it opened at the
+/// oldest stop, the current one off its foot.
+#[test]
+fn the_reading_trail_opens_on_the_current_stop() {
+    let mut app = blank_app();
+    assert_eq!(
+        app.update(Message::Window(WindowMsg::SidebarTabPicked(
+            SidebarTab::Trail
+        )))
+        .units(),
+        0,
+        "nothing to scroll to"
+    );
+    for i in 0..30 {
+        app.proj.history.push(
+            crate::history::Loc {
+                path: PathBuf::from(format!("/p/f{i}.rs")),
+                line: Some(1),
+            },
+            None,
+        );
+    }
+    assert_eq!(
+        app.update(Message::Window(WindowMsg::SidebarTabPicked(
+            SidebarTab::Trail
+        )))
+        .units(),
+        1,
+        "the list is not brought to the current stop"
+    );
+}
+
 #[test]
 fn font_size_rescales_scroll() {
     let mut app = scanned_app("font");
