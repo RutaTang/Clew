@@ -12163,6 +12163,15 @@ fn the_voice_settings_offer_each_model_and_its_size() {
         click(sim_elem(super::voice_section(&app)), "Remove").as_slice(),
         [Message::Voice(crate::VoiceMsg::RemoveModel("base.en"))]
     ));
+    // Just downloaded, its Remove is not yet where its Cancel was: a click
+    // meant for Cancel removed what had just arrived.
+    app.voice
+        .downloaded_at
+        .insert("small-q5_1", std::time::Instant::now());
+    app.voice
+        .downloaded_at
+        .insert("base.en", std::time::Instant::now());
+    assert!(!shows(&mut sim_elem(super::voice_section(&app)), "Remove"));
     let _ = std::fs::remove_dir_all(store.dir());
 }
 

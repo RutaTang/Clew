@@ -531,11 +531,59 @@ impl App {
     /// `ui::graph_matches`).
     pub(crate) fn graph_matches(&self) -> Vec<usize> {
         match (&self.proj.graph_layout, self.proj.overlay) {
-            (Some(layout), Some(_)) if self.proj.graph_layout_for == self.proj.overlay => {
-                ui::graph_matches(layout, &self.graph_search)
+            (Some(layout), Some(kind)) if self.proj.graph_layout_for == self.proj.overlay => {
+                let mut found = ui::graph_matches(layout, &self.graph_search);
+                // The Call Graph draws files, and its search found only
+                // their names: "No matches" for a function its list showed.
+                // A function found goes to the file it is in.
+                if kind == Overlay::ProjectCalls {
+                    for file in self.call_graph_files_of(&self.graph_search) {
+                        if let Some(i) = layout.nodes.iter().position(|n| n.file == file)
+                            && !found.contains(&i)
+                        {
+                            found.push(i);
+                        }
+                    }
+                }
+                found
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The files of the project's functions whose name `query` finds — the
+    /// whole name first, then its start, then anywhere in it — in that
+    /// order, each once.
+    fn call_graph_files_of(&self, query: &str) -> Vec<std::path::PathBuf> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let graph = &self.proj.project_calls.graph;
+        let mut ranked: Vec<(u8, &std::path::Path)> = (0..graph.node_count())
+            .filter_map(|i| {
+                let node = graph.node(i);
+                let name = node.name.to_lowercase();
+                let rank = if name == query {
+                    0
+                } else if name.starts_with(&query) {
+                    1
+                } else if name.contains(&query) {
+                    2
+                } else {
+                    return None;
+                };
+                Some((rank, node.file.as_path()))
+            })
+            .collect();
+        ranked.sort_by_key(|(rank, _)| *rank);
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        for (_, file) in ranked {
+            if !files.iter().any(|f| f == file) {
+                files.push(file.to_path_buf());
+            }
+        }
+        files
     }
 
     /// The search moved to another match, or was cleared: the camera goes

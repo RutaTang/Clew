@@ -25,6 +25,7 @@ use crate::{tr, tr_noop, trn};
 mod anchored;
 // A line of text on the design's baseline wherever it lands (`ts::set_in`).
 mod baseline;
+mod clipped;
 mod corner_safe;
 mod escape_clears;
 mod ring;

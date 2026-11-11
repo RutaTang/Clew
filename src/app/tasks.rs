@@ -1735,6 +1735,26 @@ pub(crate) fn resolve_rel(root: &Path, p: &str) -> PathBuf {
     if pb.is_absolute() { pb } else { root.join(pb) }
 }
 
+/// What a Rust crate at `root` builds to run, by its `Cargo.toml`: the
+/// binary's name — a `[[bin]]`'s, or the package's when it has
+/// `src/main.rs` or `src/bin/` — or, a library with none, nothing to run.
+/// `None` without a package to read (no manifest, a bare workspace).
+pub(crate) fn cargo_binary(root: &Path) -> Option<Option<String>> {
+    let text = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let manifest: toml::Value = toml::from_str(&text).ok()?;
+    let package = manifest.get("package")?.get("name")?.as_str()?.to_string();
+    let named_bin = manifest
+        .get("bin")
+        .and_then(|b| b.as_array())
+        .and_then(|bins| bins.iter().find_map(|b| b.get("name")?.as_str()))
+        .map(str::to_string);
+    if named_bin.is_some() {
+        return Some(named_bin);
+    }
+    let has_main = root.join("src/main.rs").is_file() || root.join("src/bin").is_dir();
+    Some(has_main.then_some(package))
+}
+
 /// A `launch.json` for a program in `lang` (a language key, as a pane has),
 /// for the project at `root`: what Debug suggests writing when there is
 /// none. It suggested a Python script whatever the project was written in.
@@ -1759,7 +1779,12 @@ pub(crate) fn launch_example(root: &Path, lang: Option<&str>) -> String {
         .map(|(_, lang)| lang)
     });
     let program = match lang {
-        Some("rust") => format!("target/debug/{name}"),
+        // The binary Cargo builds, by its own name: the folder's was a
+        // guess, often wrong.
+        Some("rust") => format!(
+            "target/debug/{}",
+            cargo_binary(root).flatten().unwrap_or(name)
+        ),
         Some("c" | "cpp") => format!("build/{name}"),
         Some("zig") => format!("zig-out/bin/{name}"),
         Some("go") => "main.go".into(),

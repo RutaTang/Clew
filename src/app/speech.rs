@@ -556,6 +556,9 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.voice.speech.download_errors.remove(id);
+                        self.voice
+                            .downloaded_at
+                            .insert(id, std::time::Instant::now());
                         self.voice.speech.told.remove(id);
                         self.status = tr!(
                             "{model} is ready — answers to what you ask by voice are read aloud",

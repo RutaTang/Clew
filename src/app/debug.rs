@@ -145,9 +145,21 @@ impl App {
                         type_hint: None,
                     }
                 }
-                // None at all: one for this project, in its language.
+                // None at all: one for this project, in its language —
+                // or, a library crate, that it has nothing to run: a
+                // program named after the folder sent the reader to build
+                // one that would never be.
                 Err(_) if !root.join(".clew").join("launch.json").exists() => {
                     let lang = self.active_viewer().and_then(|v| v.lang_key);
+                    if matches!(lang, None | Some("rust"))
+                        && crate::app::tasks::cargo_binary(&root) == Some(None)
+                    {
+                        self.status = tr!(
+                            "Nothing to run: this crate is a library. To run a program, name it in {path}",
+                            path = Path::new(".clew").join("launch.json").display()
+                        );
+                        return Task::none();
+                    }
                     self.status = tr!(
                         "Create {path} with {example}",
                         path = Path::new(".clew").join("launch.json").display(),

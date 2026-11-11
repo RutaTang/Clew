@@ -598,6 +598,10 @@ pub(crate) struct VoiceState {
     pub downloads: HashMap<&'static str, ModelDownload>,
     /// The last download's failure, by model id.
     pub download_errors: HashMap<&'static str, String>,
+    /// When each model — to hear with, or to speak with — last finished
+    /// downloading: for a moment its row says so where its Cancel was,
+    /// not Remove (`embedding::JUST_DOWNLOADED`).
+    pub downloaded_at: HashMap<&'static str, Instant>,
     pub prefs: VoicePrefs,
     /// Where models are kept: under the data directory.
     pub store: Option<Store>,
@@ -642,6 +646,7 @@ impl VoiceState {
             heard_at: None,
             confirm: None,
             downloads: HashMap::new(),
+            downloaded_at: HashMap::new(),
             download_errors: HashMap::new(),
             prefs: VoicePrefs::load(),
             store: voice_store(),
@@ -1140,6 +1145,7 @@ impl App {
                 match result {
                     Ok(_) => {
                         self.voice.download_errors.remove(id);
+                        self.voice.downloaded_at.insert(id, Instant::now());
                         // The model just downloaded is the one the voice
                         // key hears with when the one chosen is not on this
                         // computer (the first one chosen, Small, is not):

@@ -153,3 +153,34 @@ fn find_over_a_map_finds_in_the_map() {
     assert!(task.is_some());
     assert!(!app.proj.find.open, "the find bar under the map opened");
 }
+
+/// The Call Graph draws files: a function's name found nothing there, while
+/// its List showed the function. A function found goes to its file.
+#[test]
+fn the_call_graph_finds_a_function_in_its_file() {
+    use crate::graph::projectcalls::{Def, ProjectCallGraph};
+    let mut app = map_with(&["bytes.rs", "lib.rs", "ser.rs"]);
+    let def = |name: &str, file: &str| Def {
+        name: name.into(),
+        kind: "function".into(),
+        file: PathBuf::from(format!("/p/{file}")),
+        line: 3,
+    };
+    app.proj.project_calls.graph = std::sync::Arc::new(ProjectCallGraph::from_callable_defs(
+        vec![
+            def("deserialize", "ser.rs"),
+            def("serialize", "ser.rs"),
+            def("read_bytes", "bytes.rs"),
+        ],
+        std::collections::HashSet::new(),
+    ));
+    let _ = app.update(Message::Graph(GraphMsg::Search("deser".into())));
+    assert_eq!(app.graph_matches(), vec![2]);
+    assert_eq!(picked(&app).as_deref(), Some("ser.rs"));
+    // A file's own name still comes first.
+    let _ = app.update(Message::Graph(GraphMsg::Search("bytes".into())));
+    assert_eq!(app.graph_matches(), vec![0]);
+    // Nothing of either: nothing.
+    let _ = app.update(Message::Graph(GraphMsg::Search("zzz".into())));
+    assert!(app.graph_matches().is_empty());
+}

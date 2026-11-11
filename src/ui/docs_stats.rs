@@ -729,12 +729,14 @@ fn module_map(app: &App) -> Option<Element<'_, Message>> {
             text(tr!("Module graph"))
                 .size(ts::SUBTITLE)
                 .color(theme::fg_muted()),
-            container(
+            // Clipped to its frame: a canvas draws where its geometry
+            // says, and a map zoomed or panned drew over the page around
+            // it.
+            super::clipped::Clipped::new(
                 iced::widget::canvas::Canvas::new(overview_map_canvas(app, layout))
                     .width(Fill)
                     .height(iced::Length::Fixed(OVERVIEW_MAP_H)),
-            )
-            .width(Fill),
+            ),
         ]
         .spacing(6)
         .into(),

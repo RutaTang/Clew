@@ -21,7 +21,15 @@ pub(crate) struct LocalEmbedding {
     pub(crate) download: Option<ModelDownload>,
     pub(crate) error: Option<String>,
     pub(crate) program: bool,
+    /// When the last download finished: for a moment its row says it is
+    /// ready where Cancel was, not Remove — a click meant for Cancel
+    /// deleted the model just fetched.
+    pub(crate) downloaded_at: Option<std::time::Instant>,
 }
+
+/// How long a model just downloaded shows "Ready" where its Cancel was,
+/// before Remove takes the place.
+pub(crate) const JUST_DOWNLOADED: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What a download of `file` must turn out to be.
 fn expected(file: &ModelFile) -> Expected {
@@ -223,6 +231,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.local_embedding.error = None;
+                        self.local_embedding.downloaded_at = Some(std::time::Instant::now());
                         self.status = if local::program().is_some() {
                             tr!(
                                 "{model} is ready — Find by meaning now runs on this computer",

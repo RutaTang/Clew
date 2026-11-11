@@ -48,15 +48,20 @@ fn model_row_of<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message>
             Message::Voice(VoiceMsg::CancelDownload(model.id)),
         )
     } else if installed {
+        // Just downloaded: only that it is, where Cancel was — a click meant
+        // for Cancel removed what had just arrived.
+        let remove = (!just_downloaded(app, model.id)).then(|| {
+            form::action(
+                tr!("Remove"),
+                Some(Message::Voice(VoiceMsg::RemoveModel(model.id))),
+            )
+        });
         row![
             text(tr!("Downloaded"))
                 .size(ts::SMALL)
                 .color(theme::success()),
-            form::action(
-                tr!("Remove"),
-                Some(Message::Voice(VoiceMsg::RemoveModel(model.id)))
-            ),
         ]
+        .push(remove)
         .spacing(8)
         .align_y(iced::Center)
         .into()
@@ -161,6 +166,13 @@ fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a
             d.total.unwrap_or(model.bytes()),
             Message::Voice(VoiceMsg::CancelSpeechDownload(model.id)),
         )
+    } else if installed && just_downloaded(app, model.id) {
+        // Just downloaded: only that it is, where Cancel was — a click meant
+        // for Cancel removed what had just arrived.
+        text(tr!("Downloaded"))
+            .size(ts::SMALL)
+            .color(theme::success())
+            .into()
     } else if installed {
         row![
             form::action(
@@ -225,6 +237,15 @@ fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a
 
 /// A download under way: how far it is, and its Cancel. The share is said
 /// in a slot as wide as "100%" reads, so its bar does not move as it grows.
+/// Whether model `id` finished downloading a moment ago: its row says so
+/// where its Cancel was, before Remove takes the place.
+fn just_downloaded(app: &App, id: &str) -> bool {
+    app.voice
+        .downloaded_at
+        .get(id)
+        .is_some_and(|at| at.elapsed() < crate::app::embedding::JUST_DOWNLOADED)
+}
+
 pub(crate) fn getting<'a>(done: u64, total: u64, cancel: Message) -> Element<'a, Message> {
     let share = (done as f32 / total.max(1) as f32).clamp(0.0, 1.0);
     let percent = |share: f64| tr!("{percent}%", percent = crate::i18n::decimal(share, 0));

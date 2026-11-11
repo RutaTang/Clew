@@ -476,7 +476,9 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     )
     .width(Fill)
     .height(Fill);
-    map.into()
+    // Clipped to its frame: a canvas draws where its geometry says, and a
+    // map zoomed in drew its edges over the header above it.
+    super::clipped::Clipped::new(map).into()
 }
 
 /// A distinct base colour per graphed language (see `theme::language_hue`).
@@ -1286,6 +1288,18 @@ impl GraphCanvas<'_> {
         st.sig = layout_sig(self.layout);
         st.drag = Drag::None;
         st.moved = 0.0;
+        // Nor is it seen through the last one's camera: a map that took
+        // over another's place (the Overview's, after the Call Graph's)
+        // kept its zoom and pan, and drew its nodes far outside its frame.
+        // The node indices it pointed at belonged to the last set too.
+        st.zoom = 1.0;
+        st.zoom_target = 1.0;
+        st.zoom_at = None;
+        st.zoom_vel = 0.0;
+        st.pan = iced::Vector::new(0.0, 0.0);
+        st.focus = None;
+        st.hold = None;
+        st.picked = None;
         st.touch();
     }
 
@@ -3623,6 +3637,34 @@ mod tests {
         assert!(graph_settled(&st));
         st.flattening = true;
         assert!(!graph_settled(&st));
+    }
+
+    /// A map that takes over another's state — the Overview's, where the
+    /// Call Graph was — is not seen through the last one's camera: zoomed
+    /// and panned, it drew its nodes far outside its frame, over the page.
+    #[test]
+    fn a_new_graph_is_not_seen_through_the_last_ones_camera() {
+        let old = layout(8);
+        let new = layout(3);
+        let mut st = GraphState::default();
+        let tick = |c: &GraphCanvas<'_>, st: &mut GraphState| {
+            let _ = c.tick(
+                st,
+                BOUNDS,
+                std::time::Instant::now(),
+                iced::advanced::mouse::Cursor::Unavailable,
+            );
+        };
+        tick(&canvas(&old, false, false), &mut st);
+        st.zoom = 4.0;
+        st.zoom_target = 4.0;
+        st.pan = iced::Vector::new(300.0, -200.0);
+        st.focus = Some(7);
+        st.hold = Some(6);
+        tick(&canvas(&new, false, false), &mut st);
+        assert_eq!((st.zoom, st.zoom_target), (1.0, 1.0));
+        assert_eq!(st.pan, iced::Vector::new(0.0, 0.0));
+        assert_eq!((st.focus, st.hold), (None, None));
     }
 
     /// E2-4: a layout swapped in mid-drag (a rebuilt graph lands async) must

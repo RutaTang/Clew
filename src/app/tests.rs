@@ -35146,14 +35146,23 @@ fn debug_suggests_a_launch_config_in_the_projects_language() {
     let mut app = scanned_app("debug-launch-example");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
-    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+    // A library: nothing to run, said so — not a binary named after the
+    // folder, built for nothing.
     let _ = app.update(Message::Debug(DebugMsg::Start));
-    assert!(
-        app.status.contains(&format!("target/debug/{name}")),
-        "{}",
-        app.status
-    );
+    assert!(app.status.contains("library"), "{}", app.status);
+    // With a main, the binary Cargo builds, by the package's name.
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert!(app.status.contains("target/debug/x"), "{}", app.status);
     assert!(!app.status.contains("python"), "{}", app.status);
+    // A [[bin]] of another name, by its own.
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"x\"\n[[bin]]\nname = \"tool\"\npath = \"src/main.rs\"\n",
+    )
+    .unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert!(app.status.contains("target/debug/tool"), "{}", app.status);
     // A script project, by the file open.
     assert!(crate::app::tasks::launch_example(&root, Some("ruby")).contains("main.rb"));
 }
@@ -35350,6 +35359,20 @@ fn test_connection_asks_the_fields_model_and_says_what_it_found() {
         app.settings.connection_test,
         ConnectionTest::Failed("Name the model and its endpoint first.".into())
     );
+    // A service that takes a key, with none: asked for, not tested — the
+    // server answered "no AI chat config", which said nothing to do.
+    app.settings.provider = llm::Provider::DeepSeek;
+    app.settings.key.clear();
+    app.settings.model = "deepseek-chat".into();
+    app.settings.base_url = "https://api.deepseek.com".into();
+    if std::env::var("DEEPSEEK_API_KEY").is_err() {
+        assert!(test(&mut app).is_empty(), "nothing to ask was asked");
+        assert_eq!(
+            app.settings.connection_test,
+            ConnectionTest::Failed("Enter the API key first.".into())
+        );
+    }
+    app.settings.provider = llm::Provider::Custom;
 
     // An endpoint that answers: the model named in the field is the one
     // asked, saved or not.

@@ -2695,11 +2695,24 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
             Message::Settings(SettingsMsg::CancelEmbedDownload),
         )
     } else if app.embed_model_installed() {
-        form::action(
-            tr!("Remove"),
-            Some(Message::Settings(SettingsMsg::RemoveEmbedModel)),
-        )
-        .into()
+        // Just downloaded: "Ready" where Cancel was, not yet Remove — a
+        // click meant for Cancel removed what had just arrived.
+        let just = app
+            .local_embedding
+            .downloaded_at
+            .is_some_and(|at| at.elapsed() < crate::app::embedding::JUST_DOWNLOADED);
+        if just {
+            text(tr!("Downloaded"))
+                .size(ts::SMALL)
+                .color(theme::success())
+                .into()
+        } else {
+            form::action(
+                tr!("Remove"),
+                Some(Message::Settings(SettingsMsg::RemoveEmbedModel)),
+            )
+            .into()
+        }
     } else {
         form::primary(
             &tr!("Download ({size} MB)", size = MODEL.size_mb()),

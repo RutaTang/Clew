@@ -64,6 +64,14 @@ impl App {
             );
             return Task::none();
         }
+        // No key, for a service that takes one: said as that, not as the
+        // server's "no AI chat config". A custom endpoint may need none.
+        if cfg.api_key.trim().is_empty() && cfg.provider != llm::Provider::Custom {
+            self.settings.connection_test = crate::app::state::ConnectionTest::Failed(
+                tr_noop!("Enter the API key first.").to_string(),
+            );
+            return Task::none();
+        }
         self.settings.connection_test = crate::app::state::ConnectionTest::Testing(number);
         // Asked the way every call is made: through the server, for a
         // project on another machine.
