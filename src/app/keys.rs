@@ -228,6 +228,48 @@ impl App {
         }
     }
 
+    /// What a function key does for the debugger now, if anything: F9 sets
+    /// or clears a breakpoint on the caret's line; F5 continues a paused
+    /// program, or starts debugging when none runs; ⇧F5 stops it; F10, F11
+    /// and ⇧F11 step over, in and out of a paused one.
+    pub(crate) fn debug_key(
+        &self,
+        key: &iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> Option<Message> {
+        use iced::keyboard::{Key, key::Named};
+        let Key::Named(named) = key.as_ref() else {
+            return None;
+        };
+        if modifiers.command() || modifiers.alt() {
+            return None;
+        }
+        let status = self.debug.session.as_ref().map(|s| s.status);
+        let paused = status == Some(crate::DebugStatus::Stopped);
+        let live = status.is_some_and(|s| s != crate::DebugStatus::Terminated);
+        let shift = modifiers.shift();
+        let step = |cmd| Message::Debug(DebugMsg::Control(cmd));
+        Some(match named {
+            Named::F9 if !shift => {
+                let v = self.active_viewer()?;
+                let (line, _) = v.caret?;
+                Message::Debug(DebugMsg::BreakpointToggle {
+                    path: v.abs.clone(),
+                    line: line + 1,
+                })
+            }
+            Named::F5 if shift && live => Message::Debug(DebugMsg::Stop),
+            Named::F5 if !shift && paused => step(crate::DebugCmd::Continue),
+            Named::F5 if !shift && !live => {
+                Message::Editor(EditorMsg::RunAction(keymap::Action::StartDebug))
+            }
+            Named::F10 if !shift && paused => step(crate::DebugCmd::StepOver),
+            Named::F11 if !shift && paused => step(crate::DebugCmd::StepIn),
+            Named::F11 if shift && paused => step(crate::DebugCmd::StepOut),
+            _ => return None,
+        })
+    }
+
     /// The regions F6 moves through now: the code while a file is open,
     /// the sidebar while it shows a field, and the chat.
     fn regions(&self) -> Vec<Region> {
@@ -437,6 +479,14 @@ impl App {
         // which every overlay takes, went to the one on top above.)
         if let Some(task) = self.overlay_key(&key) {
             return task;
+        }
+        // The debugger's function keys, as editors have them — F9 a
+        // breakpoint, F5 continue (or start), ⇧F5 stop, F10 over, F11 in,
+        // ⇧F11 out — unless a dialog holds the keys.
+        if !ui::active_overlay(self).is_some_and(|o| o.holds_keys())
+            && let Some(msg) = self.debug_key(&key, modifiers)
+        {
+            return self.update(msg);
         }
         // Time Travel history navigation uses COMMAND chords — ⌘← steps to an
         // older commit, ⌘→ to a newer one — so plain ←/→/h/l stay free for

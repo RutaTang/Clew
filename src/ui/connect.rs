@@ -2679,7 +2679,7 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
     } else {
         "Enter   Space"
     };
-    let motions: [(&str, &str); 20] = [
+    let motions: [(&str, &str); 24] = [
         (tr!("Move left / down / up / right"), "h j k l   ← ↓ ↑ →"),
         (tr!("Word forward / back"), "w   b"),
         (tr!("Line start / end"), "0   $   Home   End"),
@@ -2703,6 +2703,10 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
             "↑ ↓ → ←   j k l h",
         ),
         (tr!("Close the top panel / clear selection"), "Esc"),
+        (tr!("Debugger: breakpoint on this line"), "F9"),
+        (tr!("Debugger: start / continue, stop"), "F5   ⇧F5"),
+        (tr!("Debugger: step over"), "F10"),
+        (tr!("Debugger: step into / out"), "F11   ⇧F11"),
     ];
     let vim = motions
         .into_iter()

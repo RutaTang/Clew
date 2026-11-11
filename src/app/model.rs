@@ -703,7 +703,7 @@ pub struct Bp {
 pub(crate) type BpList = Vec<(usize, Option<String>)>;
 
 /// Which stepping action to send the adapter.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugCmd {
     Continue,
     StepOver,

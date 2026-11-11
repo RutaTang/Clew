@@ -330,29 +330,64 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     } else {
         ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), true)
     };
+    // Each says what it does and its function key where the pointer rests
+    // (`App::debug_key`): the keys were there, and nothing said so.
+    let keyed = |control: Element<'static, Message>, name: &'static str, key: &str| {
+        super::toolbar::tip_at(
+            control,
+            name,
+            Some(crate::keymap::local_keys(key)),
+            iced::widget::tooltip::Position::Top,
+        )
+    };
+    let stop: Element<'_, Message> = if ended {
+        stop.into()
+    } else {
+        keyed(stop.into(), tr!("Stop"), "⇧F5")
+    };
     let controls = if output_only {
         row![stop]
     } else {
         row![
-            ctrl(
-                tr!("▶ Continue"),
-                Message::Debug(DebugMsg::Control(DebugCmd::Continue)),
-                stopped
+            keyed(
+                ctrl(
+                    tr!("▶ Continue"),
+                    Message::Debug(DebugMsg::Control(DebugCmd::Continue)),
+                    stopped
+                )
+                .into(),
+                tr!("Continue"),
+                "F5"
             ),
-            ctrl(
-                tr!("⤼ Over"),
-                Message::Debug(DebugMsg::Control(DebugCmd::StepOver)),
-                stopped
+            keyed(
+                ctrl(
+                    tr!("⤼ Over"),
+                    Message::Debug(DebugMsg::Control(DebugCmd::StepOver)),
+                    stopped
+                )
+                .into(),
+                tr!("Step over"),
+                "F10"
             ),
-            ctrl(
-                tr!("⤓ In"),
-                Message::Debug(DebugMsg::Control(DebugCmd::StepIn)),
-                stopped
+            keyed(
+                ctrl(
+                    tr!("⤓ In"),
+                    Message::Debug(DebugMsg::Control(DebugCmd::StepIn)),
+                    stopped
+                )
+                .into(),
+                tr!("Step into"),
+                "F11"
             ),
-            ctrl(
-                tr!("⤒ Out"),
-                Message::Debug(DebugMsg::Control(DebugCmd::StepOut)),
-                stopped
+            keyed(
+                ctrl(
+                    tr!("⤒ Out"),
+                    Message::Debug(DebugMsg::Control(DebugCmd::StepOut)),
+                    stopped
+                )
+                .into(),
+                tr!("Step out"),
+                "⇧F11"
             ),
             stop,
         ]

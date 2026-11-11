@@ -5890,6 +5890,78 @@ fn debug_runs_the_open_script_without_a_config_and_hides_telemetry() {
     assert!(!shown.contains("ptvsd"), "{shown:?}");
 }
 
+/// The debugger's function keys, as editors have them: F9 a breakpoint on
+/// the caret's line; F5 starts debugging when nothing runs, continues a
+/// paused program; F10, F11 and ⇧F11 step a paused one; ⇧F5 stops it. A
+/// running program takes no step; Ctrl/Cmd with them is not theirs.
+#[test]
+fn the_debugger_has_its_function_keys() {
+    use iced::keyboard::{Key, Modifiers, key::Named};
+    let mut app = scanned_app("debug-fkeys");
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    let f = |n: Named| Key::Named(n);
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.proj.panes[0].as_mut().unwrap().caret = Some((2, 0));
+    assert!(matches!(
+        app.debug_key(&f(Named::F9), Modifiers::empty()),
+        Some(Message::Debug(DebugMsg::BreakpointToggle { path, line: 3 })) if path == abs
+    ));
+    assert!(matches!(
+        app.debug_key(&f(Named::F5), Modifiers::empty()),
+        Some(Message::Editor(EditorMsg::RunAction(
+            crate::keymap::Action::StartDebug
+        )))
+    ));
+    assert!(app.debug_key(&f(Named::F10), Modifiers::empty()).is_none());
+    let session = |status| DebugSession {
+        client: None,
+        status,
+        exit_code: None,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    };
+    app.debug.session = Some(session(DebugStatus::Stopped));
+    let step = |app: &App, n: Named, m: Modifiers| match app.debug_key(&f(n), m) {
+        Some(Message::Debug(DebugMsg::Control(cmd))) => Some(cmd),
+        _ => None,
+    };
+    assert_eq!(
+        step(&app, Named::F5, Modifiers::empty()),
+        Some(DebugCmd::Continue)
+    );
+    assert_eq!(
+        step(&app, Named::F10, Modifiers::empty()),
+        Some(DebugCmd::StepOver)
+    );
+    assert_eq!(
+        step(&app, Named::F11, Modifiers::empty()),
+        Some(DebugCmd::StepIn)
+    );
+    assert_eq!(
+        step(&app, Named::F11, Modifiers::SHIFT),
+        Some(DebugCmd::StepOut)
+    );
+    assert!(matches!(
+        app.debug_key(&f(Named::F5), Modifiers::SHIFT),
+        Some(Message::Debug(DebugMsg::Stop))
+    ));
+    assert!(app.debug_key(&f(Named::F10), Modifiers::CTRL).is_none());
+    app.debug.session = Some(session(DebugStatus::Running));
+    assert!(
+        step(&app, Named::F10, Modifiers::empty()).is_none(),
+        "running"
+    );
+    assert!(app.debug_key(&f(Named::F5), Modifiers::empty()).is_none());
+}
+
 /// A variable with children opens in the panel (it could not: debugpy's
 /// globals sat behind three value-less "… variables =" rows): its children
 /// are kept for the stop they were read at, and a reply for a stop already
