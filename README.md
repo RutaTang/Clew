@@ -19,40 +19,43 @@ Clew is an **IUE**, an *Integrated Understanding Environment*, where you underst
 
 </div>
 
-## ✨ Highlights
+## Highlights
 
-| | |
-|---|---|
-| 🗺️ **See the shape** | An architecture overview, and live 3D graphs of who calls and imports whom |
-| 🧭 **Know where to start** | A reading guide, and step-by-step walkthroughs of any flow |
-| 💬 **Ask anything** | An agent that knows the whole project and shows the lines it read |
-| 🕰️ **Travel in time** | Step a function back through its git history, and ask why it changed |
-| 🧪 **Run it in your head** | Step through a function on inputs you give it, without running it |
-| 🎙️ **Just talk** | Ask aloud and hear the answer, with speech kept on your computer |
+- **Essential Features Given by IDEs**
 
-**Works with** any LLM · MCP and ACP · 15 languages, from Rust and Python to Haskell and Zig
+  All essential features provided by IDEs are also given by Clew, such as language servers, tree-sitter, debug, and more.
 
-## See it
+  ![Essential Features Given by IDEs](assets/readme/ide.gif)
 
-**Ask about the code.** The answer cites the lines it came from; click one to go there.
+- **Understand Code Comprehensively**
 
-<img src="assets/readme/ask.gif" width="800" alt="A question about declined cards answered from checkout.py, with file and line sources" />
+  Clew provides features, such as *architecture overview, codebase statistics,* *call graph, type graph, project graph, glossary, and more, to help you* *comprehensively understand any codebase.*
 
-**See how it fits together.** Spin the call graph, search it, and fly to a file.
+  ![Understand Code Comprehensively](assets/readme/comprehensive.gif)
 
-<img src="assets/readme/graph.gif" width="800" alt="The 3D call graph spinning, searched for pricing, and the file opened" />
+- **Understand Code in Detail**
 
-**Go back in time.** Step a function through its history, and ask what each change was for.
+  Clew provides features, such as *walkthrough,* *call hierarchy, semantic search,* *debug, run, fake debug, fake run, code explanation, time travel, and more, to* *help you comprehensively understand any codebase.*
 
-<img src="assets/readme/time-travel.gif" width="800" alt="Time Travel showing a tax bug in an older version of total, then the fix and its explanation" />
+  ![Understand Code in Detail](assets/readme/detail.gif)
 
-**Run it in your head.** Clew's model traces a function line by line, on inputs you describe.
+- **AI Onside**
 
-<img src="assets/readme/fake-run.gif" width="800" alt="Fake run of discounts for a member's order, stepping line by line with its variables" />
+  Clew has a built-in AI agent with MCP and ACP supported.
 
-**Never leave the keyboard.** **⌘J** puts a short code on every button; type it to press it.
+  ![AI Onside](assets/readme/ai.gif)
 
-<img src="assets/readme/jump-mode.gif" width="800" alt="Jump mode labelling each control with a code that presses it" />
+- **Voice Mode**
+
+  With voice mode, you can use Clew without using mouse or keyboard, in which you speak to Clew and the AI agent inside will operate Clew for you and also answer you in voice.
+
+  ![Voice Mode](assets/readme/voice.gif)
+
+- **Jump Mode**
+
+  With jump mode, you can goes anywhere and use any features with only keyboard.
+
+  ![Jump Mode](assets/readme/jump-mode.gif)
 
 ## Get started
 

@@ -19,40 +19,43 @@ Clew 是一个 **IUE**，即*集成理解环境*（Integrated Understanding Envi
 
 </div>
 
-## ✨ 亮点
+## 亮点
 
-| | |
-|---|---|
-| 🗺️ **看清全貌** | 架构概览，以及谁调用谁、谁导入谁的实时 3D 图 |
-| 🧭 **知道从哪读起** | 阅读指南，以及任意流程的分步导览 |
-| 💬 **有问必答** | 一个读过整个项目的智能体，并给出它读过的代码行 |
-| 🕰️ **回到过去** | 让一个函数沿着 git 历史一步步倒退，并问它为什么改 |
-| 🧪 **在脑中运行** | 按你给的输入一步步走完一个函数，而不真正运行它 |
-| 🎙️ **直接说话** | 开口提问、听到回答，语音都留在你的电脑上 |
+- **IDE 的基本功能，一样不少**
 
-**支持** 任意 LLM · MCP 与 ACP · 15 种语言，从 Rust、Python 到 Haskell、Zig
+  IDE 提供的基本功能，Clew 也都有，例如语言服务器、tree-sitter、调试等等。
 
-## 看看效果
+  ![IDE 的基本功能，一样不少](assets/readme/ide.gif)
 
-**就代码提问。** 回答会注明出自哪几行代码，点一下就跳过去。
+- **全面理解代码**
 
-<img src="assets/readme/ask.gif" width="800" alt="一个关于信用卡被拒的问题，回答出自 checkout.py，并附有文件和行号" />
+  Clew 提供*架构概览、代码库统计、调用图、类型图、项目图、术语表*等功能，帮助你*全面理解任何代码库*。
 
-**看清各部分如何连在一起。** 旋转调用图、在图里搜索，然后飞到某个文件。
+  ![全面理解代码](assets/readme/comprehensive.gif)
 
-<img src="assets/readme/graph.gif" width="800" alt="旋转的 3D 调用图，搜索 pricing 后打开这个文件" />
+- **深入理解代码细节**
 
-**回到过去。** 让一个函数沿着历史一步步走，并问每次改动是为了什么。
+  Clew 提供*导览、调用层级、语义搜索、调试、运行、模拟调试、模拟运行、代码解释、时间旅行*等功能，帮助你*全面理解任何代码库*。
 
-<img src="assets/readme/time-travel.gif" width="800" alt="时间旅行先显示旧版 total 里的税费 bug，再显示修复和它的解释" />
+  ![深入理解代码细节](assets/readme/detail.gif)
 
-**在脑中运行。** Clew 的模型按你描述的输入，一行一行地推演一个函数。
+- **AI 随行**
 
-<img src="assets/readme/fake-run.gif" width="800" alt="对一位会员的订单模拟运行 discounts，逐行显示变量" />
+  Clew 内置 AI 智能体，并支持 MCP 和 ACP。
 
-**手不离键盘。** **⌘J** 会在每个按钮上标出一个短代码，输入它就等于按下按钮。
+  ![AI 随行](assets/readme/ai.gif)
 
-<img src="assets/readme/jump-mode.gif" width="800" alt="跳转模式给每个控件标上代码，输入代码即可按下它" />
+- **语音模式**
+
+  在语音模式下，你不用鼠标和键盘也能使用 Clew：你对 Clew 说话，其中的 AI 智能体会替你操作 Clew，并用语音回答你。
+
+  ![语音模式](assets/readme/voice.gif)
+
+- **跳转模式**
+
+  在跳转模式下，只用键盘就能去往任何地方、使用任何功能。
+
+  ![跳转模式](assets/readme/jump-mode.gif)
 
 ## 开始使用
 
