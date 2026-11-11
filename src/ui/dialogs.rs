@@ -281,9 +281,15 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     if app.proj.finder.is_commands() {
         finder_command_rows(app, &mut rows);
     } else if let Some(n) = app.proj.finder.goto_line() {
+        // Past the end: where Enter goes, the last line, said as such.
+        let last = app.active_viewer().map(|v| v.lines.len().max(1));
+        let said = match last {
+            Some(last) if n > last => tr!("Go to line {n}, the last line", n = last),
+            _ => tr!("Go to line {n}", n = n),
+        };
         rows.push(
             container(
-                text(format!("↵  {}", tr!("Go to line {n}", n = n)))
+                text(format!("↵  {said}"))
                     .size(ts::BASE)
                     .color(theme::accent()),
             )

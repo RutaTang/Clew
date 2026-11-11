@@ -371,7 +371,12 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 .color(status_color)
                 .wrapping(Wrapping::None),
             space().width(Fill),
-            trace_control(app),
+            // A plain run never stops: no trace to count, nor to walk.
+            if plain {
+                Element::from(space().width(0))
+            } else {
+                trace_control(app)
+            },
             hover_eval_control(app),
         ]
         .spacing(8)
@@ -379,7 +384,15 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     )
     .width(Fill)
     .clip(true);
-    let header = row![said, controls].spacing(8).align_y(iced::Center);
+    // A rule between what is said and the stepping controls: "Walk this
+    // run", an AI call, sat against Continue, where steps are clicked fast.
+    let rule = container(space().width(1).height(16)).style(|_: &iced::Theme| {
+        iced::widget::container::Style {
+            background: Some(theme::hairline().into()),
+            ..Default::default()
+        }
+    });
+    let header = row![said, rule, controls].spacing(10).align_y(iced::Center);
 
     // Call stack — click a frame to jump to its source.
     let mut stack_rows: Vec<Element<'_, Message>> = vec![
@@ -466,11 +479,17 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     // Ended without a word: said, where an empty pane read as Clew's
     // failure as much as the program's.
     if session.output.is_empty() && session.status == DebugStatus::Terminated {
+        // With no exit to report, it was stopped: said so, not as if it ran
+        // to its end.
         out_rows.push(
-            text(tr!("The program printed nothing."))
-                .size(ts::SMALL)
-                .color(theme::dim())
-                .into(),
+            text(if session.exit_code.is_some() {
+                tr!("The program printed nothing.")
+            } else {
+                tr!("Stopped before the program printed anything.")
+            })
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .into(),
         );
     }
     // The pill floats over the panel's foot at its right, where the output
@@ -529,14 +548,18 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 
     // The output takes the room a run's lines need: half the panel beside
     // the debugger's three columns, all of it for a plain run.
+    // The variables, what a reader opens the debugger for, take twice a
+    // column's room — and the output's, while the program has printed
+    // nothing: values were cut at 180 px beside an empty column.
+    let quiet = session.output.is_empty();
     let panels = if output_only {
         row![debug_col(out_rows)]
     } else {
         row![
-            debug_col(stack_rows),
-            debug_col(var_rows),
-            debug_col(watch_rows),
-            container(debug_col(out_rows)).width(Length::FillPortion(3)),
+            container(debug_col(stack_rows)).width(Length::FillPortion(2)),
+            container(debug_col(var_rows)).width(Length::FillPortion(if quiet { 6 } else { 4 })),
+            container(debug_col(watch_rows)).width(Length::FillPortion(2)),
+            container(debug_col(out_rows)).width(Length::FillPortion(if quiet { 2 } else { 6 })),
         ]
     }
     .spacing(6)
@@ -585,7 +608,7 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
             button(super::toolbar::ai_words(
                 tr!("Walk this run"),
                 ts::SMALL,
-                theme::fg()
+                theme::accent()
             ))
             .style(theme::toolbar_button)
             .padding([2, 8])
@@ -836,23 +859,29 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         let suggestions = app.suggested_questions();
         let coming = app.suggestions_coming();
         if (!suggestions.is_empty() || coming) && !app.voice.is_listening() {
-            convo.push(
-                text(tr!("Try asking"))
-                    .size(ts::CAPTION)
-                    .color(theme::dim())
-                    .into(),
-            );
+            // A question asked at a click is an answer paid for: marked so,
+            // as every control that spends is, and said where the pointer
+            // rests — they looked like plain links.
+            convo.push(super::toolbar::ai_words(
+                tr!("Try asking"),
+                ts::CAPTION,
+                theme::dim(),
+            ));
             let chips: Vec<Element<'_, Message>> = suggestions
                 .into_iter()
                 .map(|q| {
-                    button(question_text(&q))
-                        .style(theme::list_row(false))
-                        .padding([3, 8])
-                        .on_press(super::heard::said_with(
-                            || strip_backticks(&q),
-                            Message::Ask(AskMsg::Suggested(q.clone())),
-                        ))
-                        .into()
+                    super::toolbar::tip_at(
+                        button(question_text(&q))
+                            .style(theme::list_row(false))
+                            .padding([3, 8])
+                            .on_press(super::heard::said_with(
+                                || strip_backticks(&q),
+                                Message::Ask(AskMsg::Suggested(q.clone())),
+                            )),
+                        tr!("Ask this, with AI"),
+                        None,
+                        iced::widget::tooltip::Position::Bottom,
+                    )
                 })
                 .collect();
             if !chips.is_empty() {
@@ -2803,7 +2832,7 @@ fn push_var_rows<'a>(
                         .wrapping(Wrapping::None),
                 );
         }
-        out.push(if opens {
+        let row: Element<'a, Message> = if opens {
             button(line)
                 .style(theme::list_row(false))
                 .padding(0)
@@ -2814,6 +2843,20 @@ fn push_var_rows<'a>(
                 .into()
         } else {
             line.into()
+        };
+        // A value too long for its column, whole where the pointer rests:
+        // "order = Order(customer" was all a reader could see.
+        const SHOWN: usize = 24;
+        out.push(if v.value.chars().count() > SHOWN {
+            let whole: String = v.value.chars().take(600).collect();
+            super::toolbar::tip_at(
+                row,
+                format!("{} = {}", v.name, whole),
+                None,
+                iced::widget::tooltip::Position::Top,
+            )
+        } else {
+            row
         });
         if open {
             match app.debug.var_children.get(&reference) {

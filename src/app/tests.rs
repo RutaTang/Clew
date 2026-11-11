@@ -27155,6 +27155,21 @@ fn go_to_line_without_a_number_opens_nothing() {
     assert!(app.proj.finder.open, "the finder stays for the number");
 }
 
+/// Go to Line past the end goes to the last line: line 99 of a 5-line
+/// file was gone to, said as the caret's place, and kept as a stop.
+#[test]
+fn go_to_line_past_the_end_goes_to_the_last() {
+    let mut app = scanned_app("goto-past-end");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.on_goto_line_requested();
+    let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged(":99".into())));
+    assert_eq!(app.proj.finder.goto_line(), Some(99));
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    let v = app.active_viewer().unwrap();
+    assert_eq!(v.target_line, Some(5));
+    assert_eq!(app.proj.history.current_loc().and_then(|l| l.line), Some(5));
+}
+
 /// Browse… picks what its field names — a JDK's home is a folder, a
 /// version is typed, not browsed to — under the field's own title (every
 /// one was "Choose an SSH private key"); and a picker that could not be
@@ -28117,6 +28132,39 @@ fn run_on_a_module_of_defs_runs_the_projects_main() {
     let _ = app.update(Message::Debug(DebugMsg::Run));
     let session = app.debug.session.as_ref().expect("a run");
     assert_eq!(session.program, root.join("tool.py"));
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+
+    // A module whose only call at its top is a constant's value is still a
+    // module of definitions: the program's start runs.
+    std::fs::write(
+        root.join("rates.py"),
+        "from decimal import Decimal\nTAX_RATE = Decimal(\"0.08\")\n",
+    )
+    .unwrap();
+    app.proj
+        .symbol_index_by_file
+        .insert(root.join("rates.py"), Arc::new(Vec::new()));
+    app.proj.calls_by_file.insert(
+        root.join("rates.py"),
+        Arc::new(crate::projectcalls::FileCalls::new(
+            root.join("rates.py"),
+            crate::highlight::Lang::Python,
+            vec![crate::projectcalls::CallSite {
+                caller: None,
+                callee: "Decimal".into(),
+                method: false,
+                receiver: None,
+                line: 2,
+            }],
+            &[],
+            Default::default(),
+        )),
+    );
+    open_synchronously(&mut app, "rates.py", None);
+    assert!(!app.runs_on_its_own(&root.join("rates.py")));
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    let session = app.debug.session.as_ref().expect("a run");
+    assert_eq!(session.program, root.join("main.py"));
 }
 
 /// D1-10: hovering a word while the debuggee is paused evaluates it in the top

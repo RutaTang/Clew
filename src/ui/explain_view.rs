@@ -554,7 +554,15 @@ fn reached_from_rows<'a>(
         for (i, &step) in chain.iter().enumerate() {
             let n = g.node(step);
             if i == last {
-                steps.push(text(tr!("this")).size(ts::SMALL).color(theme::dim()).into());
+                // Named, as the steps before it are: "› this" said which
+                // function only to one who remembered it.
+                steps.push(
+                    text(format!("{}()", n.name))
+                        .size(ts::SMALL)
+                        .font(crate::fonts::UI_MEDIUM)
+                        .color(theme::fg())
+                        .into(),
+                );
                 break;
             }
             let entry = i == 0;

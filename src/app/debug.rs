@@ -115,10 +115,26 @@ impl App {
             return true;
         }
         // Only files with calls are kept: one read without is all defs.
-        self.proj
-            .calls_by_file
-            .get(file)
-            .is_some_and(|calls| calls.calls.iter().any(|s| s.caller.is_none()))
+        let Some(calls) = self.proj.calls_by_file.get(file) else {
+            return false;
+        };
+        // A call at the top level that is a statement of its own — `main()`,
+        // `app.run()`, an `if __name__ == "__main__":` block's — not one in
+        // a constant's value or a decorator: `TAX_RATE = Decimal("0.08")`
+        // made a module of definitions run itself, and print nothing.
+        let text = self
+            .active_viewer()
+            .filter(|v| v.abs == file)
+            .map(|v| v.source.clone());
+        let lines: Option<Vec<&str>> = text.as_deref().map(|t| t.lines().collect());
+        calls.calls.iter().any(|s| {
+            s.caller.is_none()
+                && lines.as_ref().is_none_or(|lines| {
+                    lines
+                        .get(s.line.saturating_sub(1))
+                        .is_none_or(|l| is_call_statement(l))
+                })
+        })
     }
 
     /// The project's evident program start in `lang`, when there is exactly
@@ -2755,6 +2771,79 @@ pub(crate) struct Closing {
     pub(crate) teardown: Task<Message>,
 }
 
+/// Whether `line` is a statement that does something when its file runs: a
+/// call, or a block that calls (`if __name__ == "__main__":`) — not a
+/// declaration, an import, an assignment or a decorator, whose calls only
+/// make a value.
+fn is_call_statement(line: &str) -> bool {
+    let t = line.trim_start();
+    let t = t.strip_prefix("await ").unwrap_or(t);
+    // The name it starts with: `app.run`, `Foo::bar`, `$obj`.
+    let mut head_len = 0;
+    while head_len < t.len() {
+        let rest = &t[head_len..];
+        if rest.starts_with("::") {
+            head_len += 2;
+        } else if let Some(c) = rest
+            .chars()
+            .next()
+            .filter(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '$'))
+        {
+            head_len += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let (head, rest) = t.split_at(head_len);
+    if head.is_empty() {
+        return false;
+    }
+    const DECLARES: &[&str] = &[
+        "def",
+        "class",
+        "async",
+        "import",
+        "from",
+        "fn",
+        "func",
+        "function",
+        "let",
+        "const",
+        "var",
+        "val",
+        "pub",
+        "use",
+        "mod",
+        "struct",
+        "enum",
+        "type",
+        "interface",
+        "export",
+        "static",
+        "final",
+        "public",
+        "private",
+        "protected",
+        "global",
+        "nonlocal",
+        "require",
+        "require_relative",
+        "include",
+        "extend",
+        "using",
+        "package",
+        "namespace",
+        "module",
+    ];
+    if DECLARES.contains(&head) {
+        return false;
+    }
+    let rest = rest.trim_start();
+    // A value given a name (`x = f()`, `x: int = f()`, `x += f()`), or
+    // indexed into: no statement of its own.
+    !rest.starts_with(|c: char| "=:+-*/%&|^<>![,".contains(c)) || rest.starts_with("==")
+}
+
 /// Folders whose `main` is not the program's: its tests and their inputs,
 /// examples, helper scripts and tools, docs, benchmarks, others' code.
 const NOT_THE_PROGRAM: &[&str] = &[
@@ -2797,6 +2886,38 @@ fn is_program_start_file(rel: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call that is a statement does something when the file runs; one
+    /// that only makes a value, or decorates, does not.
+    #[test]
+    fn a_call_statement_is_not_a_value_made() {
+        for line in [
+            "main()",
+            "    main()",
+            "app.run(debug=True)",
+            "if __name__ == \"__main__\":",
+            "asyncio.run(main())",
+            "await main()",
+            "puts \"hi\"",
+            "console.log(total);",
+        ] {
+            assert!(is_call_statement(line), "{line}");
+        }
+        for line in [
+            "TAX_RATE = Decimal(\"0.08\")",
+            "rate: Decimal = Decimal(\"0.08\")",
+            "@dataclass(frozen=True)",
+            "app = Flask(__name__)",
+            "const total = sum(items);",
+            "let x = f();",
+            "import os",
+            "def helper(x=f()):",
+            "counts[k] = f()",
+            "x += f()",
+        ] {
+            assert!(!is_call_statement(line), "{line}");
+        }
+    }
 
     /// A program evidently starts in a `main` or `__main__` file outside its
     /// tests, scripts, tools and the like — not in any file with a `main`.

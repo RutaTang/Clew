@@ -77,6 +77,7 @@ pub(crate) const EXPLAIN: &str = "explain";
 pub(crate) const OVERVIEW: &str = "overview";
 pub(crate) const WALKTHROUGH: &str = "walkthrough";
 pub(crate) const TIME_TRAVEL: &str = "time_travel";
+pub(crate) const WHY_LINE: &str = "why_line";
 pub(crate) const FAKE_RUN: &str = "fake_run";
 pub(crate) const SUGGEST: &str = "suggest";
 pub(crate) const KEY_TEST: &str = "key_test";
@@ -89,6 +90,7 @@ pub(crate) fn purpose_label(key: &str) -> &'static str {
         OVERVIEW => tr!("Architecture overview"),
         WALKTHROUGH => tr!("Walkthroughs"),
         TIME_TRAVEL => tr!("Time Travel"),
+        WHY_LINE => tr!("Why this line"),
         FAKE_RUN => tr!("Fake run"),
         SUGGEST => tr!("Suggested questions"),
         KEY_TEST => tr!("Connection test"),

@@ -408,15 +408,24 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
     }
     let mut field = row![input].spacing(6).align_y(iced::Center);
     if !is_search {
-        field = field.push(
-            button(text(tr!("Generate")).size(ts::SMALL))
-                .style(theme::secondary_button)
-                .padding([5, 10])
-                .on_press(super::heard::said(
-                    tr!("Generate"),
-                    Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone())),
-                )),
-        );
+        // It writes with the model: marked so, and said so where the
+        // pointer rests — Enter in the field does the same.
+        field = field.push(super::toolbar::tip_at(
+            button(super::toolbar::ai_words(
+                tr!("Generate"),
+                ts::SMALL,
+                theme::fg(),
+            ))
+            .style(theme::secondary_button)
+            .padding([5, 10])
+            .on_press(super::heard::said(
+                tr!("Generate"),
+                Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone())),
+            )),
+            tr!("The AI writes a tour of this feature, or of the whole codebase (one AI call)"),
+            None,
+            iced::widget::tooltip::Position::Bottom,
+        ));
     }
     container(column![toggle, field].spacing(8))
         .padding(8)
@@ -1596,6 +1605,34 @@ pub(crate) fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> Strin
     if let Some(name) = label {
         return name.to_string();
     }
+    file_stop_label(loc)
+}
+
+/// A trail stop as the trail's views name it: a function with `()` — as the
+/// reading trail over the code says it; the sidebar said "cents" where the
+/// row over the code said "cents()" — anything else by its name, a file by
+/// its file name and line.
+pub(crate) fn stop_label(app: &App, loc: &crate::history::Loc, label: Option<&str>) -> String {
+    match label {
+        Some(name)
+            if app
+                .proj
+                .symbol_index_by_file
+                .get(&loc.path)
+                .is_some_and(|symbols| {
+                    symbols
+                        .iter()
+                        .any(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))
+                }) =>
+        {
+            format!("{name}()")
+        }
+        _ => loc_label(loc, label),
+    }
+}
+
+/// A file's stop: its name, and its line when it has one.
+fn file_stop_label(loc: &crate::history::Loc) -> String {
     let base = loc.path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
     match loc.line {
         Some(l) => format!("{base}:{l}"),
@@ -1705,7 +1742,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                 container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12),
                 container(column![
                     text(super::steady::elide_end(
-                        &loc_label(&v.loc, v.label.as_deref()),
+                        &stop_label(app, &v.loc, v.label.as_deref()),
                         ts::BODY,
                         name_font,
                         room,
@@ -1739,7 +1776,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
             left: 6.0,
         })
         .on_press(super::heard::row(
-            || loc_label(&v.loc, v.label.as_deref()),
+            || stop_label(app, &v.loc, v.label.as_deref()),
             Message::Reading(ReadingMsg::HistoryJump {
                 id: v.id,
                 loc: v.loc.clone(),
@@ -2403,9 +2440,16 @@ fn walk_action<'a>(
     does: impl Into<String>,
     press: Option<Message>,
 ) -> Element<'a, Message> {
+    // One that writes with the model is marked so, as every such control
+    // is: "Where to start reading" looked like the free rows beside it.
+    let spends = press.as_ref().is_some_and(crate::app::palette::spends_ai);
     let press = press.map(|msg| super::heard::said(spoken.as_deref().unwrap_or(&label), msg));
     let face = row![
-        crate::glyph::icon(glyph, theme::fg_muted(), 13.0),
+        if spends {
+            crate::glyph::icon(Glyph::Sparkle, theme::accent(), 13.0)
+        } else {
+            crate::glyph::icon(glyph, theme::fg_muted(), 13.0)
+        },
         text(label).size(ts::SMALL),
     ]
     .spacing(6)
@@ -2416,6 +2460,11 @@ fn walk_action<'a>(
         .width(Fill)
         .on_press_maybe(press);
     let does: String = does.into();
+    let does = if spends {
+        tr!("{what} (one AI call)", what = does)
+    } else {
+        does
+    };
     super::toolbar::tip_at(control, does, None, iced::widget::tooltip::Position::Bottom)
 }
 

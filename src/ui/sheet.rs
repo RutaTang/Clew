@@ -544,7 +544,9 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         file_tool(
             Glyph::TextLines,
             tr!("Explain"),
-            Some(tr!("Explain this file with AI")),
+            Some(tr!(
+                "Explain this file with AI (an AI call for each part not yet explained)"
+            )),
             false,
             None,
             Message::Explain(ExplainMsg::Explain(crate::explain::Node::File(

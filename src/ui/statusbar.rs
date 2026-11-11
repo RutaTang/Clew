@@ -910,8 +910,11 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
         // As Explain All is: the sheet first, with what it would cost. A
         // click on a label that read "up to date" ran the whole pass, every
         // function not yet explained included, with no word of its cost.
+        // Named for what it does, Explain All, not for the state it shows:
+        // "No changes to explain" was listed in the command bar as a
+        // command, and led to a paid pass under a state's name.
         b = b.on_press(super::heard::said(
-            &label,
+            tr!("Explain All"),
             super::toolbar::explain_all_message(app),
         ));
         return Some(super::toolbar::tip_at(

@@ -2322,11 +2322,11 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 state.spin_goal = 0.0;
                 state.last_yaw = state.yaw;
                 state.last_pitch = state.pitch;
+                // A press on a node heats nothing: a click to pick it set
+                // the map moving under the pointer. A drag does, as it
+                // moves (`CursorMoved`).
                 state.drag = match self.hit(cin, bounds, state) {
-                    Some(i) => {
-                        state.alpha = state.alpha.max(0.5);
-                        Drag::Node(i, state.sig)
-                    }
+                    Some(i) => Drag::Node(i, state.sig),
                     None if self.is_3d => Drag::Orbit,
                     None => Drag::Pan,
                 };

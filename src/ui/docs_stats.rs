@@ -598,14 +598,23 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     // Named by its tooltip, turning while it writes; the height of the
     // header's title line, so the page below sits where it did.
     let write = (generated || generating || ready).then(|| {
-        let (glyph, name) = if generated {
-            (Glyph::Refresh, tr!("Regenerate overview"))
+        let (glyph, name, tip) = if generated {
+            (
+                Glyph::Refresh,
+                tr!("Regenerate overview"),
+                tr!("Regenerate overview with AI (one AI call)"),
+            )
         } else {
-            (Glyph::Sparkle, tr!("Generate overview"))
+            (
+                Glyph::Sparkle,
+                tr!("Generate overview"),
+                tr!("Generate overview with AI (one AI call)"),
+            )
         };
-        super::toolbar::busy_action(
+        super::toolbar::busy_action_tip(
             glyph,
             name,
+            tip,
             Some(Message::Overview(OverviewMsg::Generate)),
             generating,
         )

@@ -114,6 +114,9 @@ impl App {
             Task::none()
         };
         let saved = if push {
+            // The visit being left is made where the reader is in it: Back
+            // returns to the line jumped from, not to where the file opened.
+            self.settle_visit();
             // Remember the symbol at the target so the trail can re-anchor to it
             // after edits shift its line (see `reanchor` in FilesRehashed).
             let label = line.and_then(|l| self.symbol_name_at(&abs, l));
@@ -240,6 +243,23 @@ impl App {
     /// [`Self::open_file`] once the trail is recorded: show `abs` at `line`
     /// in the active pane — moving the cursor when it is already there, else
     /// loading it.
+    /// Make the current visit where the reader is: the caret's line in the
+    /// file it is of ([`crate::history::History::settle`]).
+    fn settle_visit(&mut self) {
+        let Some((abs, line)) = self
+            .active_viewer()
+            .and_then(|v| v.caret.map(|(l, _)| (v.abs.clone(), l + 1)))
+        else {
+            return;
+        };
+        let here = self.proj.history.current_loc();
+        if here.is_none_or(|loc| loc.path != abs || loc.line == Some(line)) {
+            return;
+        }
+        let label = self.symbol_name_at(&abs, line);
+        self.proj.history.settle(line, label);
+    }
+
     /// How many lines the code view shows from a file's top — what Back,
     /// Forward and the trail take to be a file's first screen. Not measured
     /// yet: none.

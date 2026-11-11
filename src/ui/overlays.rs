@@ -411,19 +411,20 @@ pub(crate) fn strip_backticks(s: &str) -> String {
     s.replace('`', "")
 }
 
-/// A dim, single-line secondary description: first sentence, backticks stripped,
-/// truncated with an ellipsis and clipped so it never wraps or overflows the
-/// panel. Shared by the right-panel call-flow / contains rows so they match the
+/// A dim, short secondary description: first sentence, backticks stripped,
+/// cut at `max` characters with an ellipsis, wrapped in a narrow panel.
+/// Shared by the right-panel call-flow / contains rows so they match the
 /// outline rows' treatment instead of hard-cutting mid-word.
 pub(crate) fn one_line_desc<'a>(full: &str, max: usize) -> Element<'a, Message> {
     let one = truncate_ellipsis(&first_sentence(&strip_backticks(full)), max);
+    // Wrapped, not clipped: cut at a narrow column's edge it ended mid-word
+    // ("the final amount to charg"), with no sign more was there.
     container(
         text(one)
             .size(ts::CAPTION)
             .color(theme::dim())
-            .wrapping(Wrapping::None),
+            .wrapping(Wrapping::WordOrGlyph),
     )
-    .clip(true)
     .width(Fill)
     .into()
 }

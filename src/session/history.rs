@@ -207,6 +207,38 @@ impl History {
         self.renumbered = renumbered;
     }
 
+    /// The reader, at the current visit, has moved to `line` (labelled
+    /// `label`, the function there) — and is about to leave: the visit is
+    /// made where they are, so that Back returns there. Read further in the
+    /// same place (a file opened with no line, the function it named), the
+    /// visit moves with them; gone on to another function, that is a visit
+    /// of its own. A jump from line 20 to a definition in the same file,
+    /// Back went to the file's top — the place it was opened at — and the
+    /// call the reader jumped from was lost.
+    pub fn settle(&mut self, line: usize, label: Option<String>) {
+        let Some(cur) = self.current else {
+            return;
+        };
+        let label = label.map(cap_label);
+        let node = &mut self.nodes[cur];
+        if node.loc.line == Some(line) {
+            return;
+        }
+        if node.loc.line.is_none() || node.label == label {
+            node.loc.line = Some(line);
+            node.label = label;
+        } else {
+            let path = node.loc.path.clone();
+            self.push(
+                Loc {
+                    path,
+                    line: Some(line),
+                },
+                label,
+            );
+        }
+    }
+
     /// Go back to the visit before this one; see [`History::back_showing`].
     /// With no view measured, only a visit to this very place is passed.
     pub fn back(&mut self) -> Option<Loc> {
@@ -314,6 +346,11 @@ impl History {
         self.nodes.clear();
         self.current = None;
         self.renumbered += 1;
+    }
+
+    /// Where the current visit is, if there is one.
+    pub fn current_loc(&self) -> Option<&Loc> {
+        self.current.map(|c| &self.nodes[c].loc)
     }
 
     /// Where node `id` points, if there is such a node — how a click on a
@@ -1081,6 +1118,30 @@ mod tests {
         push(&mut h, "main", None);
         h.push(loc("main", Some(12)), Some("main".into()));
         assert_eq!(h.back_showing(40), Some(loc("main", None)));
+    }
+
+    /// Where the reader went in a visit is where Back returns: a file
+    /// opened at its top, read down to line 20, then a definition in it
+    /// gone to — Back is to line 20. Gone on to another function first,
+    /// that is a stop of its own.
+    #[test]
+    fn a_jump_leaves_from_where_the_reader_was() {
+        let mut h = History::default();
+        push(&mut h, "main", None);
+        push(&mut h, "pricing", None);
+        h.settle(20, Some("discounts".into()));
+        h.push(loc("pricing", Some(5)), Some("cents".into()));
+        assert_eq!(h.back_showing(40), Some(loc("pricing", Some(20))));
+        // In the same function, read further: the stop moves with it.
+        h.settle(24, Some("discounts".into()));
+        h.push(loc("pricing", Some(5)), Some("cents".into()));
+        assert_eq!(h.back_showing(40), Some(loc("pricing", Some(24))));
+        // Gone on to another function: a stop of its own, and the one
+        // before it kept.
+        h.settle(40, Some("total".into()));
+        h.push(loc("pricing", Some(5)), Some("cents".into()));
+        assert_eq!(h.back_showing(40), Some(loc("pricing", Some(40))));
+        assert_eq!(h.back_showing(40), Some(loc("pricing", Some(24))));
     }
 
     #[test]

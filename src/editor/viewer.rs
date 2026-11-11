@@ -1002,6 +1002,17 @@ impl Viewer {
         (line, c)
     }
 
+    /// Whether line `line0` (from 0) holds code: something but blanks and
+    /// comments. "Why is this line here?" asked of a blank line paid to be
+    /// told it was a blank separator.
+    pub fn has_code(&self, line0: usize) -> bool {
+        self.lines.get(line0).is_some_and(|l| {
+            l.spans.iter().any(|(text, style)| {
+                !text.trim().is_empty() && !style.is_some_and(crate::highlight::style_is_comment)
+            })
+        })
+    }
+
     /// Plain text of a line (cleaned spans, concatenated), for previews.
     pub fn line_text(&self, line: usize) -> String {
         self.lines

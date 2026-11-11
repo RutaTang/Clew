@@ -104,7 +104,8 @@ pub(crate) fn search_field_rect(app: &App) -> iced::Rectangle {
 /// like the free links beside them.
 pub(crate) fn ai_words<'a>(label: &str, size: f32, color: iced::Color) -> Element<'a, Message> {
     iced::widget::row![
-        glyph::icon(Glyph::Sparkle, color, (size - 1.0).max(9.0)),
+        // No smaller than 12: at the caption's size it drew as a dot.
+        glyph::icon(Glyph::Sparkle, color, (size + 1.0).max(12.0)),
         text(label.to_string()).size(size).color(color),
     ]
     .spacing(4)
@@ -143,6 +144,18 @@ pub(crate) fn busy_action<'a>(
     message: Option<Message>,
     busy: bool,
 ) -> Element<'a, Message> {
+    busy_action_tip(glyph, name, name, message, busy)
+}
+
+/// [`busy_action`], its tooltip `tip` where it says more than its name
+/// (what it costs).
+pub(crate) fn busy_action_tip<'a>(
+    glyph: crate::glyph::Glyph,
+    name: &'a str,
+    tip: &'a str,
+    message: Option<Message>,
+    busy: bool,
+) -> Element<'a, Message> {
     let icon = if busy {
         super::meter::spinning(glyph, theme::accent(), 15.0)
     } else {
@@ -158,7 +171,7 @@ pub(crate) fn busy_action<'a>(
             .width(24)
             .height(24)
             .on_press_maybe(message),
-        name,
+        tip,
         None,
     )
 }

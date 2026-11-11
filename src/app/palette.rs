@@ -33,7 +33,7 @@ pub(crate) fn spends_ai(msg: &Message) -> bool {
             TimeTravelMsg::WhyIsThisHere | TimeTravelMsg::Why | TimeTravelMsg::Story
         ) | Message::Fake(FakeMsg::FromMenu { .. } | FakeMsg::AtCaret { .. })
             | Message::Overview(OverviewMsg::Generate)
-            | Message::Walk(WalkMsg::GenerateTrace | WalkMsg::GenerateDiff)
+            | Message::Walk(WalkMsg::Generate(_) | WalkMsg::GenerateTrace | WalkMsg::GenerateDiff)
     )
 }
 

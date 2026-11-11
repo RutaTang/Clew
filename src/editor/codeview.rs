@@ -2223,16 +2223,18 @@ where
             if let Some(status) = self.git_status
                 && let Some(Some(kind)) = status.get(i)
             {
+                // Modified in the info colour, as editors mark it — the
+                // accent is the reader's own: their bookmarks, their line.
                 let color = match kind {
                     crate::git::ChangeKind::Added => theme::success(),
-                    crate::git::ChangeKind::Modified => theme::accent(),
+                    crate::git::ChangeKind::Modified => theme::info(),
                 };
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
                             x: bounds.x,
                             y,
-                            width: 3.0,
+                            width: GIT_BAR_W,
                             height: lh,
                         },
                         ..renderer::Quad::default()
@@ -2708,6 +2710,14 @@ struct GutterMark {
 /// The width of a bookmark's ribbon at the gutter's left edge.
 const BOOKMARK_RIBBON_W: f32 = 2.5;
 
+/// The width of the git change bar at the gutter's very left.
+const GIT_BAR_W: f32 = 3.0;
+
+/// Where a bookmark's ribbon starts: right of the git change bar, never on
+/// it — a modified line's bar and a bookmark's ribbon were one purple bar
+/// in one place, and a reader's own mark read as someone's change.
+const BOOKMARK_X: f32 = GIT_BAR_W + 1.5;
+
 /// The marks a line's gutter shows at its left, from the gutter's `x`, the
 /// row at `y` `lh` tall, `room` wide before the file's widest line number
 /// starts: a bookmark's ribbon down its edge — the line number tinted was
@@ -2727,7 +2737,7 @@ fn gutter_marks(
     if bookmark {
         marks.push(GutterMark {
             bounds: Rectangle {
-                x,
+                x: x + BOOKMARK_X,
                 y: y + 2.0,
                 width: BOOKMARK_RIBBON_W,
                 height: (lh - 4.0).max(1.0),
@@ -2741,7 +2751,7 @@ fn gutter_marks(
         let d = (lh * 0.55).min(9.0);
         marks.push(GutterMark {
             bounds: Rectangle {
-                x: x + ((room - d) / 2.0).max(BOOKMARK_RIBBON_W + 1.0),
+                x: x + ((room - d) / 2.0).max(BOOKMARK_X + BOOKMARK_RIBBON_W + 1.0),
                 y: y + (lh - d) / 2.0,
                 width: d,
                 height: d,
@@ -3203,6 +3213,10 @@ mod tests {
         assert!(
             ribbon[0].bounds.height > ribbon[0].bounds.width * 3.0,
             "a ribbon"
+        );
+        assert!(
+            ribbon[0].bounds.x >= super::GIT_BAR_W,
+            "beside the git change bar, not on it"
         );
         let dot = gutter_marks(false, Some(plain), 0.0, 0.0, 20.0, 0.0)[0];
         let square = gutter_marks(

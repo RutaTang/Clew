@@ -928,8 +928,13 @@ impl App {
         }
         if let Some(line) = self.proj.finder.goto_line() {
             self.proj.finder.open = false;
-            if let Some(abs) = self.active_viewer().map(|v| v.abs.clone()) {
-                return self.open_file(abs, Some(line), true);
+            // Past the end, the last line: line 99 of 24 was gone to, said
+            // as where the caret was, and kept as a stop no Back could show.
+            if let Some((abs, last)) = self
+                .active_viewer()
+                .map(|v| (v.abs.clone(), v.lines.len().max(1)))
+            {
+                return self.open_file(abs, Some(line.min(last)), true);
             }
             return Task::none();
         }

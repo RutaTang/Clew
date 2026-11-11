@@ -2254,55 +2254,96 @@ fn margin_history(app: &App) -> Element<'_, Message> {
         }
     }
     // What only this tab offers: the function's own history, and why the
-    // line under the caret is there.
-    let link = |title: &'static str, msg: Message| {
-        button(text(title).size(ts::SMALL).color(theme::accent()))
+    // line under the caret is there. Each link keeps its place, inert with
+    // why where it cannot be followed: shown only in a function, the free
+    // link left its place to the paid one, and a click aimed at it spent.
+    let link = |title: &'static str, msg: Option<Message>| {
+        let color = if msg.is_some() {
+            theme::accent()
+        } else {
+            theme::dim()
+        };
+        button(text(title).size(ts::SMALL).color(color))
             .style(theme::icon_button(false))
             .padding([3, 6])
-            .on_press(super::heard::said(title, msg))
+            .on_press_maybe(msg.map(|m| super::heard::said(title, m)))
     };
     let mut links = row![].spacing(6);
-    if in_function && uncommitted.is_none() {
-        links = links.push(link(
-            tr!("This function through time"),
-            Message::TimeTravel(TimeTravelMsg::Start { symbol: true }),
-        ));
-    }
-    // An AI call, marked as one: beside the free links it looked like them.
-    links = links.push(chrome_tip(
-        button(super::toolbar::ai_words(
-            tr!("Why is this line here?"),
-            ts::SMALL,
-            theme::accent(),
-        ))
-        .style(theme::icon_button(false))
-        .padding([3, 6])
-        .on_press(super::heard::said(
-            tr!("Why is this line here?"),
-            Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
-        )),
-        tr!(
-            "Explain from the commits that touched it why this line is here, with AI (one AI call)"
-        ),
-        None,
-    ));
+    let through_time = link(
+        tr!("This function through time"),
+        (in_function && uncommitted.is_none())
+            .then_some(Message::TimeTravel(TimeTravelMsg::Start { symbol: true })),
+    );
+    links = links.push(if !in_function {
+        chrome_tip(through_time, tr!("Put the cursor in a function"), None)
+    } else if uncommitted.is_some() {
+        chrome_tip(
+            through_time,
+            tr!("This function is not in any commit yet"),
+            None,
+        )
+    } else {
+        through_time.into()
+    });
     // All of the file's commits, in the History view: beyond the margin's
     // own list, with what each changed beside this file.
     if let Some(rel) = app.active_viewer().map(|v| v.rel.clone()) {
         links = links.push(link(
             tr!("History of this file"),
-            Message::History(crate::HistoryMsg::Show { path: Some(rel) }),
+            Some(Message::History(crate::HistoryMsg::Show {
+                path: Some(rel),
+            })),
         ));
     }
+    // An AI call, marked as one, and last, on a row of its own: beside the
+    // free links it looked like them. Asked of a line with no code — a
+    // blank, a comment — it paid to be told the line was blank.
+    let has_code = app
+        .active_viewer()
+        .is_some_and(|v| match v.selection_ordered() {
+            Some(((a, _), (b, _))) => (a..=b).any(|l| v.has_code(l)),
+            None => v.caret.is_some_and(|(l, _)| v.has_code(l)),
+        });
+    let why = button(super::toolbar::ai_words(
+        tr!("Why is this line here?"),
+        ts::SMALL,
+        if has_code {
+            theme::accent()
+        } else {
+            theme::dim()
+        },
+    ))
+    .style(theme::icon_button(false))
+    .padding([3, 6])
+    .on_press_maybe(has_code.then(|| {
+        super::heard::said(
+            tr!("Why is this line here?"),
+            Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
+        )
+    }));
+    let why = chrome_tip(
+        why,
+        if has_code {
+            tr!(
+                "Explain from the commits that touched it why this line is here, with AI (one AI call)"
+            )
+        } else {
+            tr!("Put the cursor on a line of code to ask why it is there")
+        },
+        None,
+    );
     scrollable(
-        column![rows, container(links.wrap()).padding([4, 4])]
-            .spacing(6)
-            .padding(Padding {
-                top: 2.0,
-                right: 8.0,
-                bottom: 8.0,
-                left: 8.0,
-            }),
+        column![
+            rows,
+            container(column![links.wrap(), why].spacing(2)).padding([4, 4])
+        ]
+        .spacing(6)
+        .padding(Padding {
+            top: 2.0,
+            right: 8.0,
+            bottom: 8.0,
+            left: 8.0,
+        }),
     )
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)

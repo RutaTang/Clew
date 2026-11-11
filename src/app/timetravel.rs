@@ -144,6 +144,11 @@ pub(crate) fn path_at(history: &[git::HistCommit], sha: &str, rel: &str) -> Stri
 /// How many of a file's commits the margin's History lists.
 const MARGIN_HISTORY_COMMITS: usize = 30;
 
+/// The most an answer to "Why is this line here?" may run to: room for its
+/// few sentences in one call. At 512 one answer in two ran on into a second
+/// call, and the "one AI call" its link promises was two.
+const WHY_MAX_TOKENS: u32 = 1024;
+
 impl App {
     /// Resolve the scope a Time Travel run should use. `symbol` = the reader
     /// asked for "this symbol" (the toolbar entry asks for the whole file, the
@@ -1279,6 +1284,12 @@ impl App {
                 None => return Task::none(),
             },
         };
+        // Nothing but blanks and comments: nothing to ask the model about,
+        // and nothing paid for.
+        if !(l0..=l1).any(|l| v.has_code(l)) {
+            self.status = tr!("Put the cursor on a line of code to ask why it is there").into();
+            return Task::none();
+        }
         // Distinct committed commits touching the range (a few at most).
         let mut seen = HashSet::new();
         let mut commits: Vec<(String, String)> = Vec::new();
@@ -1368,8 +1379,14 @@ impl App {
                     history.push((sha, msg, diff));
                 }
                 let prompt = why_prompt(&rel, (l0 + 1, last + 1), &code, &history);
-                ai.complete(cfg, crate::app::usage::TIME_TRAVEL, WHY_SYSTEM, prompt, 512)
-                    .await
+                ai.complete(
+                    cfg,
+                    crate::app::usage::WHY_LINE,
+                    WHY_SYSTEM,
+                    prompt,
+                    WHY_MAX_TOKENS,
+                )
+                .await
             },
             move |result| {
                 Message::TimeTravel(TimeTravelMsg::BlameWhyDone {
