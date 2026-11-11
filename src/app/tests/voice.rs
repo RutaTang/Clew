@@ -220,8 +220,17 @@ fn a_command_heard_runs_as_the_palette_runs_it() {
     // Whisper was told the window's command names, to spell them so, and
     // given the speech without the quiet before it.
     let hints = hears.hints.lock().unwrap();
-    assert!(hints[0].contains("Call Graph"), "{}", hints[0]);
+    assert!(hints[0].contains("call graph"), "{}", hints[0]);
     assert!(!hints[0].contains('…'));
+    // What whisper is given of it, too: the settings' choices, listed
+    // last, were all it kept, and the command names never reached it.
+    let kept = clew_voice::whisper::hint(&hints[0]);
+    assert!(kept.contains("call graph"), "{kept}");
+    assert!(!kept.contains("voice language"), "{kept}");
+    // In lower case, but for capitals ("HEAD"), and ended as a sentence:
+    // whisper writes in the style of its hint.
+    assert!(kept.contains("diff vs HEAD"), "{kept}");
+    assert!(kept.ends_with("Clew."), "{kept}");
     let audio = *hears.heard_audio.lock().unwrap();
     assert!(audio < spoken().len(), "trimmed: {audio}");
     assert!(
@@ -1274,6 +1283,17 @@ fn what_is_named_is_found_and_opened() {
         "{}",
         app.status
     );
+    // Its name run into the word before it, as whisper writes it now and
+    // then: opened all the same — and a word that only starts with "open"
+    // is left to Ask.
+    say_words(&mut app, &script, "Opennotes.txt");
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.as_str()),
+        Some("notes.txt"),
+        "{}",
+        app.status
+    );
+    assert!(app.spoken("opener").is_none());
     say_words(&mut app, &script, "Go to origin.");
     assert_eq!(ran(&app), Some("origin"), "{}", app.status);
     let v = app.active_viewer().unwrap();
@@ -1370,10 +1390,10 @@ fn phrases_are_heard_in_the_readers_language() {
     let hints = hears.hints.lock().unwrap();
     // The titles, and nothing that whisper might hear in what was not
     // clearly said.
-    assert!(hints[0].contains("Scroll Down"), "{}", hints[0]);
+    assert!(hints[0].contains("scroll down"), "{}", hints[0]);
     assert!(!hints[0].contains("breakpoint on line"), "{}", hints[0]);
     assert!(
-        !hints[0].split(", ").any(|w| w == "Talk"),
+        !hints[0].split(", ").any(|w| w == "talk"),
         "the voice key's own command: {}",
         hints[0]
     );
@@ -2615,6 +2635,7 @@ fn hey_clew_starts_listening_with_the_microphone_that_waited() {
     // of the command.
     assert!(
         hears.hints.lock().unwrap()[0]
+            .trim_end_matches('.')
             .split(", ")
             .any(|word| word == "Clew"),
         "the name, on its own"

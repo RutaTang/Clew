@@ -1635,9 +1635,21 @@ impl App {
         // spelled here — and only those: the longer the hint, the likelier
         // whisper is to hear it in what was not clearly said. The phrases
         // said with a value ("go to line 30") use the titles' words.
+        //
+        // Not the settings' choices ("Voice language: Portuguese", "Speed:
+        // 1.25×", the only commands shown in parts, `shown_as`): listed
+        // last, four times the length of the rest, they were all whisper
+        // kept of the hint (`whisper::hint` keeps its end), and "open the
+        // call graph" was heard as "open the call draft". Their values are
+        // everyday words whisper spells unaided. And the rest backwards:
+        // the palette lists the window's own commands first — the graphs,
+        // Explain, Time Travel — and those are the ones to keep.
+        let mut seen = std::collections::HashSet::new();
         let words: Vec<String> = self
             .palette_commands()
             .iter()
+            .rev()
+            .filter(|c| c.shown_as.is_none())
             // Not the voice key's own "Talk": nobody says it, and whisper
             // would hear it for "start".
             .filter(|c| {
@@ -1648,11 +1660,13 @@ impl App {
                     ))
                 )
             })
-            .map(|c| c.shown().trim_end_matches('…').to_string())
+            .map(|c| hint_case(c.shown().trim_end_matches('…')))
             // Clew's own name, as it is called by — not "clue".
             .chain(["Clew".to_string()])
+            .filter(|w| seen.insert(w.clone()))
             .collect();
-        let hint = words.join(", ");
+        // Ended as a sentence is: what is said after it starts as one.
+        let hint = format!("{}.", words.join(", "));
         let options = Options {
             language: self.voice.prefs.language.clone(),
             hint,
@@ -2186,4 +2200,22 @@ fn voice_store() -> Option<Store> {
             .spawn(move || clew_voice::speech::remove_retired(&store));
     });
     Some(store)
+}
+
+/// A command's name as whisper's hint gives it: in lower case, but for a
+/// word in capitals ("HEAD", "API"). Whisper writes what it hears in the
+/// style of the text before it, and a list of names in Title Case had it
+/// write "What does the Total Function do?".
+fn hint_case(title: &str) -> String {
+    title
+        .split(' ')
+        .map(|word| {
+            if word.chars().filter(|c| c.is_uppercase()).count() > 1 {
+                word.to_string()
+            } else {
+                word.to_lowercase()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }

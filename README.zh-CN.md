@@ -12,7 +12,7 @@
 
 [English](README.md) · **简体中文**
 
-<img src="assets/readme/hero.png" width="900" alt="Clew 打开一个项目的代码，旁边是 Ask 的回答，并注明它读过的代码行" />
+<img src="assets/readme/hero.png" width="900" alt="Clew 打开一个函数的代码，旁边的页边栏是它的解释" />
 
 IDE 是你写代码的地方。<br>
 Clew 是一个 **IUE**，即*集成理解环境*（Integrated Understanding Environment），是你读懂代码的地方。

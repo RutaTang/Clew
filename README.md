@@ -12,7 +12,7 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-<img src="assets/readme/hero.png" width="900" alt="Clew showing a project's code, with Ask's answer beside it citing the lines it read" />
+<img src="assets/readme/hero.png" width="900" alt="Clew showing a function's code, with its explanation in the margin beside it" />
 
 Your IDE is where you write code.<br>
 Clew is an **IUE**, an *Integrated Understanding Environment*, where you understand it.

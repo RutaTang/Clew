@@ -333,13 +333,54 @@ impl App {
     /// [`PHRASES`]: what it came to, said for the reader, and the task doing
     /// it. `None` leaves it to Ask.
     pub(crate) fn spoken(&mut self, said: &str) -> Option<(Done, Task<Message>)> {
-        PHRASES.iter().find_map(|&(kind, template)| {
-            let translated = crate::i18n::lookup(template);
-            [translated, template]
-                .into_iter()
-                .find_map(|t| value_in(t, said))
-                .and_then(|value| self.do_spoken(kind, &value))
-        })
+        PHRASES
+            .iter()
+            .find_map(|&(kind, template)| {
+                let translated = crate::i18n::lookup(template);
+                [translated, template]
+                    .into_iter()
+                    .find_map(|t| value_in(t, said))
+                    .and_then(|value| self.do_spoken(kind, &value))
+            })
+            .or_else(|| self.spoken_glued(said))
+    }
+
+    /// "openpricing.py": a name the recognizer ran into the word before it
+    /// — as whisper does with a file's name — opens it as "open pricing.py"
+    /// would. Only a name to open or go to, and only one the project has:
+    /// "opener" is still Ask's.
+    fn spoken_glued(&mut self, said: &str) -> Option<(Done, Task<Message>)> {
+        let kept = said_form(said, true);
+        let lower = kept.to_lowercase();
+        PHRASES
+            .iter()
+            .filter(|(kind, _)| matches!(kind, Kind::Open | Kind::GoTo))
+            .find_map(|&(kind, template)| {
+                let translated = crate::i18n::lookup(template);
+                [translated, template]
+                    .into_iter()
+                    .find_map(|t| {
+                        let (head, rest) = t.split_once('{')?;
+                        // A template that ends at its name, and a head that
+                        // ends in a space for the name to run into.
+                        if !rest.split_once('}')?.1.trim().is_empty() || !head.ends_with(' ') {
+                            return None;
+                        }
+                        let head = plain(head);
+                        let rest = lower.strip_prefix(head.as_str())?;
+                        if rest.is_empty() || rest.starts_with(' ') {
+                            return None;
+                        }
+                        let value =
+                            if kept.len() == lower.len() && kept.is_char_boundary(head.len()) {
+                                &kept[head.len()..]
+                            } else {
+                                rest
+                            };
+                        Some(value.trim().to_string())
+                    })
+                    .and_then(|value| self.do_spoken(kind, &value))
+            })
     }
 
     /// Do `kind` with `value`; `None` when it cannot be done here (no file

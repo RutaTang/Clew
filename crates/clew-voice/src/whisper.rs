@@ -206,7 +206,7 @@ mod tests {
     /// A recording heard by a real model, when the test is pointed at both:
     /// what it says is printed, and is not nothing.
     #[test]
-    #[ignore = "needs CLEW_WHISPER_MODEL and CLEW_WHISPER_WAV"]
+    #[ignore = "needs CLEW_WHISPER_MODEL and CLEW_WHISPER_WAV (CLEW_WHISPER_HINT optional)"]
     fn a_real_model_hears_a_recording() {
         let model = std::path::PathBuf::from(std::env::var("CLEW_WHISPER_MODEL").unwrap());
         let wav = std::fs::read(std::env::var("CLEW_WHISPER_WAV").unwrap()).unwrap();
@@ -215,7 +215,7 @@ mod tests {
         let whisper = Whisper::load(&model).unwrap();
         let options = Options {
             language: std::env::var("CLEW_WHISPER_LANGUAGE").ok(),
-            hint: String::new(),
+            hint: std::env::var("CLEW_WHISPER_HINT").unwrap_or_default(),
             threads: 0,
         };
         let text = whisper
