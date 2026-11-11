@@ -221,7 +221,14 @@ pub(crate) fn time_travel_banner<'a>(
                 .color(theme::accent()),
         )
         .style(theme::toolbar_button)
-        .padding([2, 8])
+        // Its words under the subject's, at its left edge: padded on the
+        // left too, they stood 8 px in from the line above.
+        .padding(iced::Padding {
+            top: 2.0,
+            right: 8.0,
+            bottom: 2.0,
+            left: 0.0,
+        })
         .on_press(super::heard::said(
             tr!("What & why?"),
             Message::TimeTravel(TimeTravelMsg::Why),
