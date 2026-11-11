@@ -23950,6 +23950,17 @@ impl CountingProvider {
             // no listener to a port in TIME_WAIT unless the socket that left
             // it had SO_REUSEADDR too, and the port read as taken.
             drop(peer);
+            // And reaches the held end before that closes: read to its end
+            // of stream. Closed before the FIN came — a loaded machine late
+            // with it — the two ends closed at once, both were left in
+            // TIME_WAIT, the handed-over port too, and no listener could be
+            // bound to it for a minute.
+            let mut held = held;
+            held.set_read_timeout(Some(std::time::Duration::from_secs(30)))
+                .expect("a read timeout");
+            let mut byte = [0u8; 1];
+            let read = std::io::Read::read(&mut held, &mut byte);
+            assert!(matches!(read, Ok(0)), "the peer's close came: {read:?}");
             drop(held);
             drop(other);
             // The held end's close is answered at once on loopback; the port
