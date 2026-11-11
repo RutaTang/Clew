@@ -359,6 +359,9 @@ pub(crate) fn scope_label(scope: &str) -> String {
         }
     } else if let Some(rest) = scope.strip_prefix("@diff") {
         match rest.trim() {
+            // The review on its way, before its branch is known: titled
+            // "Change review (changes)", it said "changes" twice.
+            _ if scope == crate::app::DIFF_SCOPE_PENDING => tr!("Change review").to_string(),
             "" => tr!("Change review").to_string(),
             label => tr!("Change review ({label})", label = label),
         }
@@ -370,7 +373,10 @@ pub(crate) fn scope_label(scope: &str) -> String {
 /// The top bar: a Search/Walk segmented toggle, the shared input, and (in Walk
 /// mode) a Generate button.
 pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
-    let is_search = app.walk_ui.mode == crate::WalkMode::Search;
+    // With no tour yet there is nothing to search: the tab opens on New,
+    // where it opened on an empty "Search walkthroughs…" field.
+    let empty = app.proj.walk.library.is_empty();
+    let is_search = app.walk_ui.mode == crate::WalkMode::Search && !empty;
     // Two segments, the mode in use raised; only the other is pressable (it
     // flips mode). On a line of its own — beside the field it left the field
     // too narrow to say what it is for — and across it, in halves, as tall
@@ -386,7 +392,8 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
         .padding([5, 0])
         .width(Fill)
         .on_press_maybe(
-            (!active).then(|| super::heard::said(label, Message::Walk(WalkMsg::ToggleMode))),
+            (!active && !(empty && label == tr!("Search")))
+                .then(|| super::heard::said(label, Message::Walk(WalkMsg::ToggleMode))),
         )
     };
     let toggle =

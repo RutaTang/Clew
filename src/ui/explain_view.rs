@@ -571,14 +571,22 @@ fn reached_from_rows<'a>(
                     .entry_kind_of(&n.file, &n.name)
                     .map(|k| crate::i18n::lookup(k.label()))
                     .unwrap_or(tr!("test"));
+                // Its kind as a tag, set apart from its name: side by
+                // side in one face, "main main" read as the name twice.
                 row![
-                    text(n.name.clone()).size(ts::SMALL).color(theme::success()),
-                    text(kind).size(ts::CAPTION).color(theme::dim()),
+                    text(format!("{}()", n.name))
+                        .size(ts::SMALL)
+                        .color(theme::success()),
+                    container(text(kind).size(ts::CAPTION).color(theme::dim()))
+                        .padding([0, 5])
+                        .style(theme::chip),
                 ]
                 .spacing(4)
+                .align_y(iced::Center)
                 .into()
             } else {
-                text(n.name.clone())
+                // A function, said as one, as the last step is.
+                text(format!("{}()", n.name))
                     .size(ts::SMALL)
                     .color(theme::accent())
                     .into()

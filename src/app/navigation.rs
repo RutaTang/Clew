@@ -972,6 +972,8 @@ impl App {
 
     pub(crate) fn finder_open_index(&mut self, idx: usize) -> Task<Message> {
         self.proj.finder.open = false;
+        // "pricing.py:37": the file, at that line.
+        let line = self.proj.finder.file_line().map(|(_, n)| n);
         match self.proj.finder.mode {
             FinderMode::Files => {
                 let Some(files) = self.proj.project.as_ref().map(|p| &p.files) else {
@@ -988,7 +990,7 @@ impl App {
                 let Some(entry) = files.get(idx).cloned() else {
                     return Task::none();
                 };
-                self.open_file(entry.abs, None, true)
+                self.open_file(entry.abs, line, true)
             }
             FinderMode::Symbols => {
                 let Some(entry) = self.proj.symbol_index.get(idx).cloned() else {

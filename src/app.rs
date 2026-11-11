@@ -114,6 +114,7 @@ pub(crate) use remote_state::{UnsavedEdits, close_question, quit_question};
 
 // A summary as the views outside the explanation overlay show it (`crate::ui`).
 pub(crate) use explain::shown_summary;
+pub(crate) use walkthrough::DIFF_SCOPE_PENDING;
 
 // The mark it carries when it was kept unchecked, for the views' tests.
 #[cfg(test)]

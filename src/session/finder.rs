@@ -47,6 +47,24 @@ impl Finder {
         (n > 0).then_some(n)
     }
 
+    /// A `file:N` query — "pricing.py:37", as a compiler or a stack trace
+    /// writes a place: the file part, and the 1-based line to open it at.
+    /// It found "No matches", the `:37` taken as part of the name.
+    pub fn file_line(&self) -> Option<(&str, usize)> {
+        let (file, line) = self.query.trim().rsplit_once(':')?;
+        let n: usize = line.trim().parse().ok()?;
+        let file = file.trim();
+        (n > 0 && !file.is_empty()).then_some((file, n))
+    }
+
+    /// What files are matched by: the query, less a `:N` line after it.
+    fn file_query(&self) -> String {
+        self.file_line().map_or_else(
+            || self.query.trim().to_string(),
+            |(file, _)| file.to_string(),
+        )
+    }
+
     /// Whether the query asks for a line (`:`, as Go to Line opens it) —
     /// with or without its number typed yet.
     pub fn is_line_query(&self) -> bool {
@@ -94,7 +112,8 @@ impl Finder {
         recent: &[&std::path::Path],
     ) {
         self.selected = 0;
-        let query = self.query.trim();
+        let query = self.file_query();
+        let query = query.as_str();
         let mut results = if query.is_empty() {
             let mut order: Vec<usize> = recent
                 .iter()
@@ -109,7 +128,7 @@ impl Finder {
             order
         } else {
             rank(
-                &self.query,
+                query,
                 files.iter().map(|f| f.rel.as_str()),
                 MAX_RESULTS,
                 true,
@@ -120,7 +139,7 @@ impl Finder {
             results.extend(
                 tests_last(
                     rank(
-                        &self.query,
+                        query,
                         symbols.iter().map(|s| s.name.as_str()),
                         usize::MAX,
                         true,
@@ -185,17 +204,20 @@ impl Finder {
     /// file at that index less `titles.len()`.
     pub fn refresh_bar(&mut self, titles: &[&str], files: &[FileEntry]) {
         self.selected = 0;
-        let query = self.query.trim();
+        let query = self.query.trim().to_string();
+        let query = query.as_str();
         let mut results = rank(query, titles.iter().copied(), BAR_COMMANDS, false);
         let n = titles.len();
+        // A file asked for at a line is matched by its name.
+        let file_query = self.file_query();
         let mut ranked = rank(
-            query,
+            &file_query,
             files.iter().map(|f| f.rel.as_str()),
             MAX_RESULTS,
             true,
         );
         // Files the query names ahead of those it reaches through a folder.
-        ranked.sort_by_key(|&i| files.get(i).map_or(4, |f| file_tier(&f.rel, query)));
+        ranked.sort_by_key(|&i| files.get(i).map_or(4, |f| file_tier(&f.rel, &file_query)));
         results.extend(ranked.into_iter().map(|i| i + n));
         self.results = results;
     }
@@ -295,6 +317,31 @@ pub(crate) fn rank<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_at_a_line_is_found_by_its_name() {
+        let mut f = Finder {
+            query: "pricing.py:37".into(),
+            ..Finder::default()
+        };
+        assert_eq!(f.file_line(), Some(("pricing.py", 37)));
+        let files: Vec<FileEntry> = ["teashop/pricing.py", "teashop/models.py"]
+            .iter()
+            .map(|rel| FileEntry {
+                rel: rel.to_string(),
+                abs: std::path::PathBuf::from("/p").join(rel),
+            })
+            .collect();
+        f.refresh_files(&files, &[], &[]);
+        assert_eq!(f.results.first(), Some(&0), "{:?}", f.results);
+        f.refresh_bar(&["Open Folder…"], &files);
+        assert!(f.results.contains(&1), "{:?}", f.results);
+        // A line alone, or no line, is not a file at a line.
+        for query in [":37", "pricing.py", "pricing.py:", "pricing.py:0"] {
+            f.query = query.into();
+            assert_eq!(f.file_line(), None, "{query}");
+        }
+    }
 
     #[test]
     fn goto_line_parses_colon_queries() {
