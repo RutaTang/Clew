@@ -3423,13 +3423,17 @@ pub(crate) fn trace_files(
         })
 }
 
+/// A function the last debug run stopped in: its node, how many stops, and
+/// the line it first stopped on.
+pub(crate) type TraceVisit = (usize, usize, usize);
+
 /// The call graph's nodes the last run stopped in — the innermost frame
 /// of each stop that the graph knows — with their stop counts, most first
 /// then by name; memoized per graph and trace revision.
 pub(crate) fn trace_visits(
     app: &App,
     g: &crate::projectcalls::ProjectCallGraph,
-) -> std::sync::Arc<Vec<(usize, usize, usize)>> {
+) -> std::sync::Arc<Vec<TraceVisit>> {
     app.proj.view_memo.trace_visits.get_or(
         (app.proj.project_calls.graph_rev, app.debug.trace_rev),
         || {
@@ -3448,7 +3452,7 @@ pub(crate) fn trace_visits(
                 };
                 counts.entry(id).or_insert((0, line)).0 += 1;
             }
-            let mut visits: Vec<(usize, usize, usize)> = counts
+            let mut visits: Vec<TraceVisit> = counts
                 .into_iter()
                 .map(|(id, (stops, line))| (id, stops, line))
                 .collect();
