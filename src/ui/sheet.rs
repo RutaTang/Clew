@@ -165,6 +165,10 @@ fn file_tool_w(label: &str, short: bool) -> f32 {
 /// width, up to this.
 const TITLE_MIN_W: f32 = 160.0;
 
+/// The least room the file's folder keeps beside its name before the
+/// header's tools give up their words: its width, up to this.
+const FOLDER_MIN_W: f32 = 96.0;
+
 /// Width of the header's tools, Explain through View, labelled or `short`.
 fn file_tools_w(short: bool) -> f32 {
     let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
@@ -183,8 +187,16 @@ fn file_tools_short(app: &App) -> bool {
     let Some(v) = app.active_viewer() else {
         return false;
     };
-    let (name, _) = title_parts(v);
-    let title = text_width(&name, ts::EMPHASIS, TITLE_FONT).min(TITLE_MIN_W);
+    let (name, folder) = title_parts(v);
+    // The name, and enough of its folder to say where it is: the tools'
+    // words go first. In French, "Voyage dans le temps" and "Affichage"
+    // left the folder "…op".
+    let folder = if folder.is_empty() {
+        0.0
+    } else {
+        TITLE_SPACING + text_width(&folder, ts::BODY, crate::fonts::UI).min(FOLDER_MIN_W)
+    };
+    let title = text_width(&name, ts::EMPHASIS, TITLE_FONT).min(TITLE_MIN_W) + folder;
     let room = header_right(app) - HEADER_PAD_RIGHT - (sheet_content_left(app) + HEADER_PAD_X);
     room - TITLE_GAP / 2.0 - file_tools_w(false) < title
 }
