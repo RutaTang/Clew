@@ -2540,6 +2540,7 @@
  "open {file} to follow into `{callee}`": "ouvrez {file} pour entrer dans `{callee}`",
  "open {name}": "ouvrir {name}",
  "optional: a file's contents, what a service returns, the time…": "facultatif : le contenu d’un fichier, la réponse d’un service, l’heure…",
+ "or {keys}": "ou {keys}",
  "output ({n})": "sorties ({n})",
  "outside the project": "hors du projet",
  "overrides": "redéfinit",

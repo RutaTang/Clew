@@ -947,9 +947,12 @@ impl Viewer {
                 line = 0;
                 col = 0;
             }
+            // The file's very end, as Ctrl+End goes in any editor — its last
+            // column too, as Ctrl+Home goes to the first: the column kept put
+            // it at column 5 of the last line.
             Motion::FileEnd => {
                 line = self.visible.last().copied().unwrap_or(last_line);
-                col = col.min(self.line_len(line));
+                col = self.line_len(line);
             }
             Motion::WordForward => (line, col) = self.word_forward(line, col, last_line),
             Motion::WordBack => (line, col) = self.word_back(line, col),
@@ -1645,10 +1648,10 @@ mod tests {
         assert_eq!(v.caret, Some((1, 0)));
         v.move_caret(Motion::Left); // clamped at col 0
         assert_eq!(v.caret, Some((1, 0)));
-        v.move_caret(Motion::FileEnd);
-        assert_eq!(v.caret, Some((9, 0)));
+        v.move_caret(Motion::FileEnd); // the end of the last line
+        assert_eq!(v.caret, Some((9, 6)));
         v.move_caret(Motion::Down); // clamped at last line
-        assert_eq!(v.caret, Some((9, 0)));
+        assert_eq!(v.caret, Some((9, 6)));
         v.move_caret(Motion::FileStart);
         assert_eq!(v.caret, Some((0, 0)));
         // Word motion within "line 0": "line" then "0".

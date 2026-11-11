@@ -2540,6 +2540,7 @@
  "open {file} to follow into `{callee}`": "`{callee}` 안으로 따라가려면 {file} 파일을 여세요",
  "open {name}": "{name} 열기",
  "optional: a file's contents, what a service returns, the time…": "선택: 파일 내용, 서비스 응답, 현재 시각 등",
+ "or {keys}": "또는 {keys}",
  "output ({n})": "출력 ({n})",
  "outside the project": "프로젝트 밖에 있음",
  "overrides": "재정의",

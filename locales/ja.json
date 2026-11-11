@@ -2540,6 +2540,7 @@
  "open {file} to follow into `{callee}`": "`{callee}` の中までトレースするには {file} を開いてください",
  "open {name}": "{name}を開く",
  "optional: a file's contents, what a service returns, the time…": "任意: ファイルの内容、サービスの応答、現在時刻など",
+ "or {keys}": "または {keys}",
  "output ({n})": "出力（{n}）",
  "outside the project": "プロジェクト外",
  "overrides": "オーバーライド",

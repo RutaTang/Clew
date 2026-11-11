@@ -2654,6 +2654,20 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
                 || action.label().to_string(),
                 Message::Window(WindowMsg::RebindStart(action)),
             ));
+            // The chord other editors use for it, where it reaches it too:
+            // said beside the one a click rebinds.
+            let pill: Element<'_, Message> = match app.keymap.alias(action) {
+                Some(alias) => row![
+                    pill,
+                    text(tr!("or {keys}", keys = alias.caps()))
+                        .size(ts::SMALL)
+                        .color(theme::dim()),
+                ]
+                .spacing(6)
+                .align_y(iced::Center)
+                .into(),
+                None => pill.into(),
+            };
             if app.keymap.is_overridden(action) {
                 row![
                     button(text("↺").size(ts::BASE).color(theme::dim()))
@@ -2670,7 +2684,7 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
                 .align_y(iced::Center)
                 .into()
             } else {
-                pill.into()
+                pill
             }
         };
         cmds.push(slim(action.label().to_string(), binding));

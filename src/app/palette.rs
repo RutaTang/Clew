@@ -696,7 +696,7 @@ impl App {
             }
             add(
                 action.menu().title.to_string(),
-                Some(self.keymap.chord(action).caps()),
+                Some(self.keymap.shown(action)),
                 send(Message::Editor(EditorMsg::RunAction(action))),
             );
         }

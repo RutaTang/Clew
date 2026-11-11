@@ -1443,7 +1443,7 @@ fn menu_separator<'a>() -> Element<'a, Message> {
 
 /// A shortcut trailing a menu row.
 fn menu_chord<'a>(app: &App, action: Action) -> Element<'a, Message> {
-    text(app.keymap.chord(action).caps())
+    text(app.keymap.shown(action))
         .size(ts::SMALL)
         .color(theme::dim())
         .into()

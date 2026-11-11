@@ -1565,9 +1565,11 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     // back to the search: it took the search's place under the search's
     // own empty fields, "(references)" the only word of what it was.
     let mut col = match &app.proj.search.listing {
+        // Named when it was made, maybe in another language: said in the
+        // reader's ("References to “cents”" stayed English in French).
         Some(list) => column![
             row![
-                text(list.clone())
+                text(crate::i18n::message(list))
                     .size(ts::BASE)
                     .color(theme::fg())
                     .wrapping(Wrapping::WordOrGlyph)

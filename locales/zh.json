@@ -2540,6 +2540,7 @@
  "open {file} to follow into `{callee}`": "打开 {file} 以继续追踪到 `{callee}`",
  "open {name}": "打开{name}",
  "optional: a file's contents, what a service returns, the time…": "可选：文件内容、服务的返回值、当前时间…",
+ "or {keys}": "或 {keys}",
  "output ({n})": "输出（{n}）",
  "outside the project": "在项目之外",
  "overrides": "重写",

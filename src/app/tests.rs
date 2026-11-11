@@ -37080,5 +37080,14 @@ fn ctrl_home_goes_to_the_start_and_ctrl_g_to_a_line() {
                 .action_for(&crate::keymap::Chord::cmd('g'))
                 .is_none()
         );
+        // And said where the keys are listed: it worked, and nothing said
+        // so.
+        let shown = app.keymap.shown(crate::keymap::Action::GotoLine);
+        assert!(shown.ends_with("/ Ctrl+G"), "{shown}");
     }
+    // Ctrl+End goes to the file's very end — its last column too.
+    let _ = app.move_cursor(viewer::Motion::FileEnd);
+    let v = app.active_viewer().unwrap();
+    let last = v.lines.len() - 1;
+    assert_eq!(v.caret, Some((last, v.line_len(last))));
 }

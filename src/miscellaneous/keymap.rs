@@ -839,6 +839,24 @@ impl Keymap {
         self.stamp
     }
 
+    /// The chord other editors use for `action` that reaches it here too
+    /// (`alias_for`), while no action is bound to it: Ctrl+G for Go to
+    /// Line. It worked, and no list of keys said so.
+    pub fn alias(&self, action: Action) -> Option<Chord> {
+        let g = Chord::cmd('g');
+        (alias_for(&g) == Some(action) && self.action_for(&g).is_none()).then_some(g)
+    }
+
+    /// `action`'s keys as lists say them: its chord, and the one other
+    /// editors use for it where that reaches it too ("Ctrl+L / Ctrl+G").
+    pub fn shown(&self, action: Action) -> String {
+        let own = self.chord(action).caps();
+        match self.alias(action) {
+            Some(alias) => format!("{own} / {}", alias.caps()),
+            None => own,
+        }
+    }
+
     /// The action currently bound to `chord`, if any.
     pub fn action_for(&self, chord: &Chord) -> Option<Action> {
         self.bindings
