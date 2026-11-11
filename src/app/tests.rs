@@ -23461,6 +23461,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             scope: String::new(),
             result: Err("stale".into()),
         }),
+        Message::Walk(WalkMsg::Unnarrated {
+            stamp: s(),
+            seq: app.proj.walk.seq,
+            why: "stale".into(),
+        }),
         Message::Overview(OverviewMsg::Done {
             stamp: s(),
             seq: app.proj.overview.seq,
@@ -28097,11 +28102,8 @@ fn run_starts_the_program_without_the_debugger() {
     let _ = app.update(Message::Debug(DebugMsg::Run));
     assert!(app.debug.session.is_some(), "{}", app.status);
     assert!(app.debug.no_debug);
-    assert!(
-        app.status.contains("Starting the program"),
-        "{}",
-        app.status
-    );
+    // What runs, named — no debugger named for a run without one.
+    assert!(app.status.contains("Running main.py"), "{}", app.status);
     let _ = app.update(Message::Debug(DebugMsg::Stop));
     let _ = app.update(Message::Debug(DebugMsg::Start));
     assert!(app.debug.session.is_some(), "{}", app.status);
