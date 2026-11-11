@@ -26530,8 +26530,9 @@ fn a_connection_that_failed_is_said_to_have_failed() {
         "a request the provider had read was not sent again, once: {status}"
     );
     assert!(
-        status.contains("1 failed: the connection failed (request failed")
-            && status.ends_with("— check the network and try again"),
+        status.contains("1 failed: couldn't reach the AI provider (")
+            && status.ends_with("— check the base URL in Settings")
+            && !status.contains("request failed"),
         "{status}"
     );
 
@@ -36743,7 +36744,16 @@ fn a_failed_explain_stands_until_dismissed_with_a_way_to_try_again() {
         written: Default::default(),
     }));
     let said = app.status.clone();
-    assert!(said.contains("connection failed"), "{said}");
+    // In plain words: what was wrong, and what to check — not the OS's
+    // "(os error 111)", nor "try again" beside a Try again.
+    assert!(
+        said.contains("couldn't reach the AI provider (nothing answered at that address)"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("os error") && !said.contains("try again"),
+        "{said}"
+    );
     let notice = app.failure_shown().expect("said as a failure");
     assert!(
         matches!(
@@ -36759,7 +36769,7 @@ fn a_failed_explain_stands_until_dismissed_with_a_way_to_try_again() {
             .explain
             .node_failed
             .as_ref()
-            .is_some_and(|(n, why)| *n == node && why.contains("connection failed")),
+            .is_some_and(|(n, why)| *n == node && why.contains("couldn't reach")),
         "{:?}",
         app.proj.explain.node_failed
     );
@@ -36854,7 +36864,7 @@ fn a_failed_explain_is_not_buried_by_what_follows_it() {
     }));
     assert!(
         app.status
-            .starts_with("Couldn't explain helper(): the connection failed"),
+            .starts_with("Couldn't explain helper(): couldn't reach the AI provider"),
         "{}",
         app.status
     );

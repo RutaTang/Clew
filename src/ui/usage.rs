@@ -177,7 +177,10 @@ fn balance_group(app: &App) -> Element<'_, Message> {
             ),
             Balance::Failed(e) => form::item(
                 tr!("Balance"),
-                Some(tr!("Couldn't check it: {error}", error = e.as_str())),
+                Some(tr!(
+                    "Couldn't check it: {error}",
+                    error = crate::app::tasks::plain_detail(e)
+                )),
                 refresh(false),
             ),
             Balance::Reading | Balance::Unread | Balance::NotTold => form::item(

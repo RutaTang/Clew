@@ -293,7 +293,7 @@ impl App {
         if let Some(name) = name {
             self.status = tr!("The fake run of {name} is ready in its tab", name = name);
         } else if failed {
-            self.status = tr!("A fake run brought no trace — its tab says why").into();
+            self.status = tr!("A fake run failed — its tab says why").into();
         }
         Some(task)
     }

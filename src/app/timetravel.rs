@@ -1151,7 +1151,12 @@ impl App {
             Ok(text) => {
                 tt.why.insert(sha, text.trim().to_string());
             }
-            Err(e) => self.status = tr!("Couldn't summarize: {error}", error = e),
+            Err(e) => {
+                self.status = tr!(
+                    "Couldn't summarize: {error}",
+                    error = crate::app::tasks::plain_detail(&e)
+                )
+            }
         }
         if let Some(tt) = self.proj.time_travel.as_mut() {
             tt.sync_why_loading();

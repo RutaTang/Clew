@@ -595,7 +595,10 @@ impl App {
             Err(e) => {
                 self.proj.asking = false;
                 self.return_question(question, spoken);
-                self.status = tr!("Ask failed: {error}", error = e);
+                self.status = tr!(
+                    "Ask failed: {error}",
+                    error = crate::app::tasks::plain_detail(&e.to_string())
+                );
                 return Task::none();
             }
         };
@@ -625,7 +628,10 @@ impl App {
             Err(e) => {
                 self.proj.asking = false;
                 self.return_question(question, spoken);
-                self.status = tr!("Ask failed: {error}", error = e);
+                self.status = tr!(
+                    "Ask failed: {error}",
+                    error = crate::app::tasks::plain_detail(&e.to_string())
+                );
                 return Task::none();
             }
         };
@@ -1317,6 +1323,7 @@ impl App {
                 ))
             }
             StreamOutcome::Failed(e) => {
+                let e = crate::app::tasks::plain_detail(e);
                 self.status = tr!("Ask failed: {error}", error = e);
                 Some(format!("*{}*", tr!("Couldn't answer: {error}", error = e)))
             }

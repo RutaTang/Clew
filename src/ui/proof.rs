@@ -67,7 +67,7 @@ pub(crate) fn proof_panel(app: &App) -> Element<'_, Message> {
             Message::Proof(ProofMsg::Goto(last)),
             ready && walk.at < last
         ),
-        control(tr!("■ Close"), Message::Proof(ProofMsg::Close), true),
+        control(tr!("Close"), Message::Proof(ProofMsg::Close), true),
     ]
     .spacing(4);
     let header = row![container(lead).width(Fill).clip(true), controls]

@@ -203,7 +203,7 @@ impl App {
         self.say_failure(
             tr!(
                 "Couldn't narrate the run with AI ({reason}) — showing its stops as recorded",
-                reason = why
+                reason = crate::app::tasks::plain_detail(&why)
             ),
             Some(Message::Walk(WalkMsg::GenerateTrace)),
             crate::app::state::FailureOf::Walkthrough,
@@ -481,9 +481,10 @@ impl App {
                 self.proj.walk.retried = false;
                 // Kept where it was asked for, and on the status line until
                 // it is read, each with a way to try again.
-                self.proj.walk.failed = Some((scope.clone(), e.to_string()));
+                let why = crate::app::tasks::plain_detail(&e.to_string());
+                self.proj.walk.failed = Some((scope.clone(), why.clone()));
                 self.say_failure(
-                    tr!("Walkthrough failed: {error}", error = e),
+                    tr!("Walkthrough failed: {error}", error = why),
                     Some(Message::Walk(WalkMsg::again(&scope))),
                     crate::app::state::FailureOf::Walkthrough,
                 );

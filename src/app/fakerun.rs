@@ -487,8 +487,8 @@ impl App {
                 self.fake_show_step()
             }
             Err(why) => {
-                self.status = tr!("The fake run brought no trace").into();
-                self.proj.fake.failed = Some(why);
+                self.status = tr!("The fake run failed — its panel says why").into();
+                self.proj.fake.failed = Some(crate::app::tasks::plain_detail(&why));
                 Task::none()
             }
         }

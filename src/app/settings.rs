@@ -824,7 +824,8 @@ mod tests {
         ));
         let said = connection_failure(&refused, &local);
         assert!(said.contains("Couldn't reach 127.0.0.1:9"), "{said}");
-        assert!(said.contains("Connection refused"), "{said}");
+        assert!(said.contains("nothing answered at that address"), "{said}");
+        assert!(!said.contains("os error"), "{said}");
         let tls = CallError::Llm(llm::LlmError::Connect(
             "invalid peer certificate: UnknownIssuer".into(),
         ));

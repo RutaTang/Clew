@@ -2269,10 +2269,12 @@ impl ExplainFailure {
                     detail = detail
                 )
             }
+            // Said once, the same way everywhere a call failed so: what
+            // to check, not "try again" beside a Try again.
             ExplainFailure::Network(detail) | ExplainFailure::Unreached(detail) => {
                 tr!(
-                    "the connection failed ({detail}) — check the network and try again",
-                    detail = detail
+                    "couldn't reach the AI provider ({detail}) — check the base URL in Settings",
+                    detail = plain_detail(detail)
                 )
             }
             ExplainFailure::Unusable(detail) => tr!(
@@ -2385,7 +2387,46 @@ fn is_length_refusal(kind: Option<&str>, message: &str) -> bool {
 /// An error's first line, trimmed and capped: what the status line quotes.
 fn first_line(err: &str) -> String {
     let line = err.trim().lines().next().unwrap_or_default().trim();
-    line.chars().take(160).collect()
+    plain_detail(&line.chars().take(160).collect::<String>())
+}
+
+/// A failed call's words as a reader takes them: without the transport's
+/// "request failed: " and the system's "(os error 111)", and a connection
+/// that could not be made said for what it means. One refused connection
+/// read ten ways across Clew, each with the OS's jargon: "the connection
+/// failed (request failed: Connection refused (os error 111))".
+pub(crate) fn plain_detail(raw: &str) -> String {
+    let mut said = raw.trim();
+    while let Some(rest) = said.strip_prefix("request failed: ") {
+        said = rest.trim_start();
+    }
+    let said = match said.rfind(" (os error ") {
+        Some(at) if said.ends_with(')') => said[..at].trim_end(),
+        _ => said,
+    };
+    let lower = said.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
+    if has(&["connection refused"]) {
+        tr!("nothing answered at that address").to_string()
+    } else if has(&[
+        "dns error",
+        "failed to lookup address",
+        "name or service not known",
+        "nodename nor servname",
+        "no such host",
+    ]) {
+        tr!("no such address was found").to_string()
+    } else if has(&["timed out", "deadline has elapsed"]) {
+        tr!("no answer came in time").to_string()
+    } else if has(&[
+        "connection reset",
+        "broken pipe",
+        "connection closed before",
+    ]) {
+        tr!("the connection was cut").to_string()
+    } else {
+        said.to_string()
+    }
 }
 
 /// How an explain pass fell short, if it did.
@@ -4595,6 +4636,44 @@ mod pass_tests {
             ExplainFailure::of_call(&from_server(&quoted), "m"),
             ExplainFailure::Network(_)
         ));
+    }
+
+    /// A failed call's words are said plainly, one way for one cause:
+    /// without the transport's prefix and the OS's error number, and a
+    /// connection that could not be made for what it means. What is none of
+    /// these is kept as it was.
+    #[test]
+    fn a_failure_is_said_in_plain_words() {
+        assert_eq!(
+            plain_detail("request failed: Connection refused (os error 111)"),
+            "nothing answered at that address"
+        );
+        assert_eq!(
+            plain_detail("request failed: dns error: failed to lookup address information"),
+            "no such address was found"
+        );
+        assert_eq!(
+            plain_detail("request failed: operation timed out"),
+            "no answer came in time"
+        );
+        assert_eq!(
+            plain_detail("Connection reset by peer (os error 104)"),
+            "the connection was cut"
+        );
+        assert_eq!(
+            plain_detail(
+                "request failed: the proxy answered HTTP 407 (Proxy Authentication Required)"
+            ),
+            "the proxy answered HTTP 407 (Proxy Authentication Required)"
+        );
+        assert_eq!(
+            plain_detail("Permission denied (os error 13)"),
+            "Permission denied"
+        );
+        assert_eq!(
+            plain_detail("HTTP 401: invalid key"),
+            "HTTP 401: invalid key"
+        );
     }
 
     /// A failed call is classified by what failed, as the side that made it

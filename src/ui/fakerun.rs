@@ -206,7 +206,7 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
         .spacing(8)
         .align_y(iced::Center)
     };
-    let close = || control(tr!("■ Close"), Message::Fake(FakeMsg::Close), true);
+    let close = || control(tr!("Close"), Message::Fake(FakeMsg::Close), true);
     let edit = || control(tr!("Edit inputs"), Message::Fake(FakeMsg::EditInputs), true);
 
     let (header, body): (Element<'_, Message>, Element<'_, Message>) =
@@ -233,7 +233,7 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
         } else if let Some(why) = fake.failed.as_ref() {
             let name = fake.last.as_ref().map_or("", |s| s.target.name.as_str());
             let header = row![
-                container(lead(name, tr!("no trace").to_string()))
+                container(lead(name, tr!("failed").to_string()))
                     .width(Fill)
                     .clip(true),
                 control(tr!("Try again"), Message::Fake(FakeMsg::EditInputs), true),
@@ -242,13 +242,10 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
             .spacing(4)
             .align_y(iced::Center);
             let rows = vec![
-                text(tr!(
-                    "The fake run brought no trace: {why}",
-                    why = why.clone()
-                ))
-                .size(ts::SMALL)
-                .color(theme::danger())
-                .into(),
+                text(tr!("The fake run failed: {why}", why = why.clone()))
+                    .size(ts::SMALL)
+                    .color(theme::danger())
+                    .into(),
             ];
             (header.into(), debug_col(rows))
         } else if let Some(sim) = fake.sim.as_ref() {
