@@ -36949,6 +36949,24 @@ fn a_failed_walkthrough_keeps_its_row_with_a_way_to_try_again() {
     ));
 }
 
+/// A debug run's tour opens each step where the run stopped — its line —
+/// not on its function's first line; a written tour's step is still found
+/// by its symbol, wherever it has moved to.
+#[test]
+fn a_recorded_runs_step_opens_where_the_run_stopped() {
+    let mut app = scanned_app("walk-trace-line");
+    let mut tours = walk_tour("origin", Some(5));
+    tours[0].scope = "@trace app.py".into();
+    tours.extend(walk_tour("origin", Some(5)));
+    app.proj.walk.library = tours;
+    app.proj.walk.open = Some("@trace app.py".into());
+    let step = app.tour_step(0).unwrap();
+    assert_eq!((step.symbol, step.line), (None, Some(5)));
+    app.proj.walk.open = Some("tour".into());
+    let step = app.tour_step(0).unwrap();
+    assert_eq!(step.symbol.as_deref(), Some("origin"));
+}
+
 /// A walkthrough being made can be stopped from its row: the request goes,
 /// the row is no longer "Generating…", and a late answer to it opens
 /// nothing. While generating, its row had no control at all.

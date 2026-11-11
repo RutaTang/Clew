@@ -651,14 +651,21 @@ impl App {
     /// step (`WalkState::anchor_note`, shown in the WALK panel) as well as
     /// said in the status line — which the file load the step starts
     /// overwrites.
+    /// Step `i` of the open tour, as it is to be found in its file. A debug
+    /// run's step is where the run stopped: its line, not its function's
+    /// first one — found by its function's name, "Stop 1 (breakpoint) in
+    /// main" opened on `def main`, four lines above the stop.
+    pub(crate) fn tour_step(&self, i: usize) -> Option<walkthrough::Step> {
+        let tour = self.proj.walk.open_tour()?;
+        let mut step = tour.steps.get(i)?.clone();
+        if tour.scope.starts_with("@trace ") && step.line.is_some_and(|l| l >= 1) {
+            step.symbol = None;
+        }
+        Some(step)
+    }
+
     pub(crate) fn walkthrough_goto(&mut self, i: usize) -> Task<Message> {
-        let Some(step) = self
-            .proj
-            .walk
-            .open_tour()
-            .and_then(|w| w.steps.get(i))
-            .cloned()
-        else {
+        let Some(step) = self.tour_step(i) else {
             return Task::none();
         };
         self.proj.walk.step = i;
@@ -750,12 +757,7 @@ impl App {
             load,
             superseded,
         } = self.proj.walk.pending_anchor.clone()?;
-        let step = self
-            .proj
-            .walk
-            .open_tour()
-            .and_then(|w| w.steps.get(i))
-            .cloned();
+        let step = self.tour_step(i);
         let Some(step) = step.filter(|_| self.proj.walk.step == i) else {
             // The reader moved to another step, or closed the tour.
             self.proj.walk.pending_anchor = None;
