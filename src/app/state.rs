@@ -769,6 +769,9 @@ pub struct ExplainState {
     pub pass_automatic: bool,
     /// The node the running pass re-explains (`ExplainMsg::ReexplainNode`).
     pub pass_target: Option<explain::Node>,
+    /// That node had no explanation: the pass writes its first
+    /// (`ExplainMsg::Explain`), said so when it is done.
+    pub pass_target_new: bool,
     /// The functions whose blocks are being explained (`ExplainMsg::Blocks`)
     /// until the answer lands: asked again meanwhile, each click made one
     /// more paid call for the same answer.

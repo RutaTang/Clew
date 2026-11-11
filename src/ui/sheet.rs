@@ -526,7 +526,9 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             Some(tr!("Explain this file with AI")),
             false,
             None,
-            Message::Explain(ExplainMsg::Show(crate::explain::Node::File(v.abs.clone()))),
+            Message::Explain(ExplainMsg::Explain(crate::explain::Node::File(
+                v.abs.clone(),
+            ))),
             short,
         ),
         file_tool(

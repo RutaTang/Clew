@@ -736,6 +736,12 @@ pub enum ReadingMsg {
     },
     /// Open the note editor for the bookmark at (rel, 1-based line).
     BookmarkNoteEdit(String, usize),
+    /// From the code's context menu, on the line it was opened on: the
+    /// bookmark put on or taken off, or (`note`) a note written for it —
+    /// the bookmark put on as the note is saved.
+    BookmarkFromMenu {
+        note: bool,
+    },
     /// The bookmark-note draft text changed.
     BookmarkNoteInput(String),
     /// Save the bookmark note draft.
@@ -1027,6 +1033,10 @@ pub enum ExplainMsg {
     },
     /// Show a file's / folder's explanation (Cmd+click in the tree).
     Show(explain::Node),
+    /// The file's Explain: its explanation shown — written first, it alone,
+    /// when it has none. It only showed one, and for a file not yet
+    /// explained said "Not explained yet." and did nothing.
+    Explain(explain::Node),
     /// Re-explain the node in the open explanation modal: it, and what quotes
     /// its summary (`explain::Reuse::Node`).
     ReexplainNode,
@@ -2532,6 +2542,7 @@ impl ReadingMsg {
             ReadingMsg::BookmarkToggled
             | ReadingMsg::BookmarkRemoved { .. }
             | ReadingMsg::BookmarkNoteEdit(..)
+            | ReadingMsg::BookmarkFromMenu { .. }
             | ReadingMsg::BookmarkNoteInput(..)
             | ReadingMsg::BookmarkNoteSave
             | ReadingMsg::BookmarkNoteCancel
@@ -2623,6 +2634,7 @@ impl ExplainMsg {
             | ExplainMsg::Cancel
             | ExplainMsg::RefreshAll
             | ExplainMsg::Show(..)
+            | ExplainMsg::Explain(..)
             | ExplainMsg::ReexplainNode
             | ExplainMsg::ToggleBlocks
             | ExplainMsg::Blocks(..) => None,

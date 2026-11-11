@@ -1442,6 +1442,33 @@ fn reexplain_on_unexplained_node_does_not_start_a_project_pass() {
     );
 }
 
+/// The file's Explain writes the explanation a file does not have yet —
+/// it alone, as a re-explain does, never the whole project — and shows it;
+/// it only showed one, and for a file not yet explained did nothing.
+#[test]
+fn the_files_explain_writes_its_missing_explanation() {
+    let mut app = scanned_app("explain-file-button");
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let file = explain::Node::File(app.proj.project.as_ref().unwrap().root.join("src/lib.rs"));
+    assert!(app.proj.explain.cache.is_empty());
+    let _ = app.update(Message::Explain(ExplainMsg::Explain(file.clone())));
+    assert!(app.proj.explain.running, "it is being explained");
+    assert_eq!(
+        app.proj.explain.pass_target.as_ref(),
+        Some(&file),
+        "it alone"
+    );
+    assert!(app.proj.explain.pass_target_new);
+    assert_eq!(app.proj.explain.view.as_ref(), Some(&file), "and shown");
+    assert_eq!(app.status, "Explaining…");
+
+    // Shown again while that pass runs: no second pass.
+    let generation = app.proj.explain.generation;
+    let _ = app.update(Message::Explain(ExplainMsg::Explain(file.clone())));
+    assert_eq!(app.proj.explain.generation, generation);
+}
+
 #[test]
 fn cancel_explain_stops_and_clears_progress() {
     // Fix: a running Explain pass must be cancellable.
@@ -2977,6 +3004,82 @@ fn bookmark_toggle_persists_in_project() {
     let _ = app.update(Message::Reading(ReadingMsg::BookmarkToggled));
     assert!(app.proj.bookmarks.is_empty());
     assert!(!root.join(".clew/bookmarks.json").exists());
+}
+
+/// The code's context menu puts a bookmark on the line it was opened on —
+/// not the caret's — and writes a note for one: the bookmark is put on as
+/// the note is saved, and a note cancelled leaves none. There was no way
+/// to bookmark from it, nor to write a note but from the Bookmarks list.
+#[test]
+fn the_context_menu_bookmarks_its_line_with_a_note() {
+    let mut app = scanned_app("bookmark-menu");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    open_synchronously(&mut app, "src/lib.rs", Some(1));
+    let menu_on = |app: &mut App, line: usize| {
+        app.proj.context_menu = Some(crate::ContextMenu {
+            pane: app.proj.active,
+            line,
+            col: 0,
+            x: 0.0,
+            y: 0.0,
+            insight: None,
+            served: true,
+            by_pointer: true,
+        });
+    };
+    // Toggle Bookmark: on the menu's line (0-based 3: line 4), the caret
+    // on line 1.
+    menu_on(&mut app, 3);
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkFromMenu {
+        note: false,
+    }));
+    assert_eq!(app.proj.bookmarks.len(), 1);
+    assert_eq!(app.proj.bookmarks[0].line, 4);
+    assert!(app.proj.context_menu.is_none(), "the menu goes");
+
+    // Bookmark with Note…, cancelled: nothing put on.
+    menu_on(&mut app, 5);
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkFromMenu {
+        note: true,
+    }));
+    assert_eq!(
+        app.proj
+            .note_edit
+            .as_ref()
+            .map(|(r, l, _)| (r.as_str(), *l)),
+        Some(("src/lib.rs", 6))
+    );
+    assert_eq!(app.proj.bookmarks.len(), 1, "not until it is saved");
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteCancel));
+    assert_eq!(app.proj.bookmarks.len(), 1);
+
+    // Saved: the bookmark, with its note, on disk too.
+    menu_on(&mut app, 5);
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkFromMenu {
+        note: true,
+    }));
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteInput(
+        "why it is here".into(),
+    )));
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteSave));
+    let six = app
+        .proj
+        .bookmarks
+        .iter()
+        .find(|b| b.line == 6)
+        .expect("put on");
+    assert_eq!(six.note.as_deref(), Some("why it is here"));
+    assert_eq!(bookmarks::load(&root), app.proj.bookmarks);
+
+    // On a bookmarked line, the menu says it edits the note.
+    menu_on(&mut app, 5);
+    let menu = app.proj.context_menu.unwrap();
+    let (targets, _) = crate::ui::heard::gather_all_of(|| crate::ui::context_menu(&app, &menu));
+    assert!(
+        targets.iter().any(|t| t.shown == "Edit Bookmark Note…"),
+        "{:?}",
+        targets.iter().map(|t| &t.shown).collect::<Vec<_>>()
+    );
 }
 
 #[test]

@@ -154,7 +154,8 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         keys: None,
         able: true,
     };
-    // In groups: going somewhere, understanding what is here, debugging.
+    // In groups: going somewhere, understanding what is here, marking the
+    // line, debugging.
     let groups = [
         navigate,
         vec![
@@ -184,6 +185,41 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
                 Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
             ),
         ],
+        // A bookmark on this line, and a note to come back to it by.
+        {
+            let marked = app
+                .proj
+                .panes
+                .get(menu.pane)
+                .and_then(Option::as_ref)
+                .is_some_and(|v| {
+                    app.proj
+                        .bookmarks
+                        .iter()
+                        .any(|b| b.rel == v.rel && b.line == menu.line + 1)
+                });
+            vec![
+                Row {
+                    keys: Some(
+                        app.keymap
+                            .chord(crate::keymap::Action::ToggleBookmark)
+                            .caps(),
+                    ),
+                    ..plain(
+                        tr!("Toggle Bookmark"),
+                        Message::Reading(ReadingMsg::BookmarkFromMenu { note: false }),
+                    )
+                },
+                plain(
+                    if marked {
+                        tr!("Edit Bookmark Note…")
+                    } else {
+                        tr!("Bookmark with Note…")
+                    },
+                    Message::Reading(ReadingMsg::BookmarkFromMenu { note: true }),
+                ),
+            ]
+        },
         vec![
             plain(
                 tr!("Toggle Breakpoint"),

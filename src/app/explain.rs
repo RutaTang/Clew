@@ -81,6 +81,7 @@ impl App {
             PassKind::Explicit => explain::Reuse::SamePrompt,
             PassKind::Automatic => explain::Reuse::ChangedSources(reported),
             PassKind::Node(node) => {
+                self.proj.explain.pass_target_new = !self.proj.explain.cache.contains_key(&node);
                 self.proj.explain.pass_target = Some(node.clone());
                 explain::Reuse::Node(node)
             }
@@ -470,6 +471,7 @@ impl App {
                 // the note below says so.
                 0 if not_read => tr!("Nothing re-explained").to_string(),
                 0 => tr!("Nothing to re-explain: it is no longer part of the project").to_string(),
+                1 if self.proj.explain.pass_target_new => tr!("Explained").to_string(),
                 1 => tr!("Re-explained").to_string(),
                 paid => trn!(
                     "Re-explained, along with 1 summary built on it",
@@ -853,6 +855,27 @@ impl App {
     /// (`explain::Reuse::Node`) — it used to run Explain All, which re-billed
     /// every summary an older prompt wrote. Only when the node is already
     /// explained: point the user at the explicit Explain All otherwise.
+    /// The file's Explain: show the node's explanation, and when it has
+    /// none, write it — this node alone, one call: what it quotes keeps
+    /// what it has (`explain::Reuse::Node`). Explain All is the way to
+    /// explain all of it, bottom up.
+    pub(crate) fn on_explain_node(&mut self, node: explain::Node) -> Task<Message> {
+        let shown = self.update_explain(ExplainMsg::Show(node.clone()));
+        if self.proj.explain.cache.contains_key(&node) || self.require_llm().is_err() {
+            return shown;
+        }
+        // One pass at a time: the one running writes it, if it is due.
+        if self.proj.explain.running {
+            self.status = tr!("Explain All is running — this is explained as it goes").into();
+            return shown;
+        }
+        let pass = self.start_explain_pass(PassKind::Node(node));
+        if self.proj.explain.running {
+            self.status = tr!("Explaining…").into();
+        }
+        Task::batch([shown, pass])
+    }
+
     pub(crate) fn on_reexplain_node(&mut self) -> Task<Message> {
         let Some(node) = self.proj.explain.view.clone() else {
             return Task::none();
@@ -1287,6 +1310,7 @@ impl App {
                 }
                 shown
             }
+            ExplainMsg::Explain(node) => self.on_explain_node(node),
             ExplainMsg::ReexplainNode => self.on_reexplain_node(),
             ExplainMsg::Blocks(node) => self.on_explain_blocks(node),
             ExplainMsg::ToggleBlocks => match self.proj.explain.view.clone() {

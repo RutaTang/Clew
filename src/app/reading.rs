@@ -147,20 +147,61 @@ impl App {
     }
 
     pub(crate) fn on_bookmark_toggled(&mut self) -> Task<Message> {
+        let line_height = self.line_height();
+        let Some(line) = self.active_viewer().map(|v| v.current_line(line_height)) else {
+            return Task::none();
+        };
+        self.bookmark_line(self.proj.active, line, None)
+    }
+
+    /// From the code's context menu: the bookmark on the line it was opened
+    /// on put on or taken off — or its note written, the bookmark put on as
+    /// the note is saved ([`Self::on_bookmark_note_save`]): cancelled, there
+    /// is none. A note could only be written from the Bookmarks list, for
+    /// a bookmark already made.
+    pub(crate) fn on_bookmark_from_menu(&mut self, note: bool) -> Task<Message> {
+        let Some(menu) = self.proj.context_menu.take() else {
+            return Task::none();
+        };
+        // menu.line is 0-based; bookmarks are 1-based.
+        let line = menu.line + 1;
+        if !note {
+            return self.bookmark_line(menu.pane, line, None);
+        }
+        if ui::time_travel_pane(self).is_some() {
+            self.status = tr!("Exit Time Travel to add a bookmark").into();
+            return Task::none();
+        }
+        let Some(rel) = self
+            .proj
+            .panes
+            .get(menu.pane)
+            .and_then(Option::as_ref)
+            .map(|v| v.rel.clone())
+        else {
+            return Task::none();
+        };
+        if !self.keeps_reading_state(&rel, Kept::Bookmarks) {
+            return Task::none();
+        }
+        self.on_bookmark_note_edit(rel, line)
+    }
+
+    /// Put a bookmark on 1-based `line` of pane `pane`'s file, or take it
+    /// off: `put` says which, `None` the other of what the line shows.
+    fn bookmark_line(&mut self, pane: usize, line: usize, put: Option<bool>) -> Task<Message> {
         // A past revision on screen: its lines are not the live file's, and
         // the bookmark went on the hidden live file's caret line instead.
         if ui::time_travel_pane(self).is_some() {
             self.status = tr!("Exit Time Travel to add a bookmark").into();
             return Task::none();
         }
-        let line_height = self.line_height();
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
-        let Some(v) = self.active_viewer() else {
+        let Some(v) = self.proj.panes.get(pane).and_then(Option::as_ref) else {
             return Task::none();
         };
-        let line = v.current_line(line_height);
         let mut preview = v.line_text(line).trim().to_string();
         if preview.chars().count() > 80 {
             preview = preview.chars().take(80).collect();
@@ -173,11 +214,15 @@ impl App {
         // a line shown bare, none on one shown marked. Decided by the file
         // instead, a bookmark another window had put on that line was
         // removed by the press meant to add one.
-        let added = !self
+        let marked = self
             .proj
             .bookmarks
             .iter()
             .any(|b| b.rel == rel && b.line == line);
+        let added = put.unwrap_or(!marked);
+        if added == marked {
+            return Task::none();
+        }
         // A remote project's bookmarks persist over the protocol, where the
         // project lives — never in a same-pathed local .clew.
         let saved = if self.local_project_state() {
@@ -296,6 +341,22 @@ impl App {
     pub(crate) fn on_bookmark_note_save(&mut self) -> Task<Message> {
         if self.proj.project.is_none() {
             return Task::none();
+        }
+        // A note written for a line with no bookmark yet (Bookmark with
+        // Note…): the bookmark is put on with it.
+        if let Some((rel, line, _)) = self.proj.note_edit.clone()
+            && !self
+                .proj
+                .bookmarks
+                .iter()
+                .any(|b| b.rel == rel && b.line == line)
+            && let Some(pane) = self
+                .proj
+                .panes
+                .iter()
+                .position(|v| v.as_ref().is_some_and(|v| v.rel == rel))
+        {
+            let _ = self.bookmark_line(pane, line, Some(true));
         }
         if let Some((rel, line, draft)) = self.proj.note_edit.take() {
             if !self.local_project_state() {
@@ -469,6 +530,7 @@ impl App {
             ReadingMsg::BookmarkToggled => self.on_bookmark_toggled(),
             ReadingMsg::BookmarkRemoved { rel, line } => self.on_bookmark_removed(&rel, line),
             ReadingMsg::BookmarkNoteEdit(rel, line) => self.on_bookmark_note_edit(rel, line),
+            ReadingMsg::BookmarkFromMenu { note } => self.on_bookmark_from_menu(note),
             ReadingMsg::BookmarkNoteInput(s) => {
                 if let Some((_, _, draft)) = &mut self.proj.note_edit {
                     *draft = s;
