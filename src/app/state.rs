@@ -1227,6 +1227,10 @@ pub struct App {
     pub show_bottom: bool,
     /// Where the floating Ask window is.
     pub ask_view: AskView,
+    /// Ask opened by F6 on its way round the regions, with this many turns:
+    /// F6 going on puts it away again, nothing typed or asked in it since —
+    /// it was left open over the code.
+    pub(crate) ask_by_f6: Option<usize>,
     /// The menu of Ask's sessions, open under the card's title.
     pub ask_sessions_menu: bool,
     /// What the menu's search looks for; cleared as the menu closes.

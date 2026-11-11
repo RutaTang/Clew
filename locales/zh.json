@@ -987,6 +987,7 @@
  "No graphs for this project.": "此项目没有图。",
  "No imports found in this project.": "此项目中未找到导入。",
  "No inputs suggested: {why}": "未能给出建议输入：{why}",
+ "No language server is running — start one in Settings → Language servers, then retry": "没有正在运行的语言服务器。请在“设置 → 语言服务器”中启动一个，然后重试",
  "No language server ready — open a file to start one, then retry": "没有就绪的语言服务器。请先打开一个文件以启动服务器，然后重试",
  "No macro here, and nothing on this line expands.": "此处没有宏，这一行也没有可展开的内容。",
  "No matches": "没有匹配项",

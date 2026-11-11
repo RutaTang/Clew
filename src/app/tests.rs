@@ -19826,6 +19826,49 @@ fn a_diff_toggle_while_loading_cancels_and_a_git_failure_is_not_no_changes() {
     assert!(app.status.is_empty(), "{}", app.status);
 }
 
+/// What only the language server answers is offered only with it: a Rust
+/// file's Expand Macro, with no server, was pressed and said only that
+/// none was running.
+#[test]
+fn expand_macro_waits_for_the_server() {
+    let mut app = scanned_app("macro-no-server");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let menu = |served| ContextMenu {
+        pane: 0,
+        line: 2,
+        col: 4,
+        x: 10.0,
+        y: 10.0,
+        insight: Some(crate::InsightKind::ExpandMacro),
+        served,
+        by_pointer: true,
+    };
+    let offered = |app: &App| {
+        crate::ui::heard::gather(app)
+            .iter()
+            .any(|t| t.title == "Expand Macro")
+    };
+    // Not asked here whether to download a server: the menu on top.
+    app.proj.pending_lsp_consent = Default::default();
+    app.proj.context_menu = Some(menu(false));
+    assert!(!offered(&app), "no server: not offered");
+    app.proj.context_menu = Some(menu(true));
+    assert!(offered(&app), "its server up: offered");
+}
+
+/// Refine with LSP, no server running and a file open, says where one is
+/// started — not "open a file", with one open.
+#[test]
+fn refine_with_no_server_says_where_to_start_one() {
+    let mut app = scanned_app("refine-no-server");
+    let _ = app.refine_project_calls();
+    assert!(app.status.contains("open a file"), "{}", app.status);
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.refine_project_calls();
+    assert!(app.status.contains("Settings"), "{}", app.status);
+    assert!(!app.status.contains("open a file"), "{}", app.status);
+}
+
 /// The file's Explain, with no note written of it and no model to write
 /// one, goes where a key is added — as every other way to explain does —
 /// rather than show "Not explained yet." and no more.

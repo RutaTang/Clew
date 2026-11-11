@@ -548,11 +548,15 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     let short = full_chips + STATUS_GAP * chips_n as f32 + SAID_MIN_W > room;
     let mut row = row![].spacing(STATUS_GAP).align_y(iced::Center);
     let mut used = 0.0;
-    if let Some(chip) = setup_chip(app, short) {
+    // A chip short of room even shortened is left out: laid out clipped to
+    // nothing, it was a control no one saw that the keyboard's ring still
+    // stopped on (its Set up is in the command bar, its pass's progress in
+    // the margin).
+    if let Some(chip) = setup_chip(app, short).filter(|chip| used + chip.1 <= room) {
         used += chip.1 + STATUS_GAP;
         row = row.push(chip.0);
     }
-    if let Some(chip) = explain_chip(app, short) {
+    if let Some(chip) = explain_chip(app, short).filter(|chip| used + chip.1 <= room) {
         used += chip.1 + STATUS_GAP;
         row = row.push(chip.0);
     }

@@ -246,6 +246,16 @@ impl App {
         };
         let region = regions[next];
         self.region = region;
+        // Going on from the chat F6 opened, nothing typed or asked there:
+        // put away again, not left over the code.
+        if now == Region::Chat
+            && region != Region::Chat
+            && let Some(turns) = self.ask_by_f6.take()
+            && self.proj.ask_input.trim().is_empty()
+            && self.proj.ask_turns.len() == turns
+        {
+            self.ask_view = crate::AskView::Hidden;
+        }
         match region {
             Region::Code => {
                 self.code_focused = true;
@@ -264,6 +274,7 @@ impl App {
                 ])
             }
             Region::Chat => {
+                self.ask_by_f6 = (!self.ask_view.is_open()).then_some(self.proj.ask_turns.len());
                 self.reveal_ask();
                 self.code_focused = false;
                 Task::batch([

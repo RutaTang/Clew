@@ -987,6 +987,7 @@
  "No graphs for this project.": "このプロジェクトのグラフはありません。",
  "No imports found in this project.": "このプロジェクトにインポートが見つかりません。",
  "No inputs suggested: {why}": "入力を提案できませんでした: {why}",
+ "No language server is running — start one in Settings → Language servers, then retry": "実行中の言語サーバーがありません。「設定 → 言語サーバー」で起動してから、もう一度お試しください",
  "No language server ready — open a file to start one, then retry": "準備済みの言語サーバーがありません。ファイルを開いてサーバーを起動してから、もう一度お試しください",
  "No macro here, and nothing on this line expands.": "ここにマクロはなく、この行に展開できるものもありません。",
  "No matches": "一致するものはありません",

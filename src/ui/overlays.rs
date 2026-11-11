@@ -111,23 +111,26 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             able: menu.served,
         },
     ];
-    // The language's own action, for a file whose language has one.
-    if let Some(kind) = menu.insight {
-        navigate.push(Row {
-            label: kind.label(),
-            msg: Message::Hover(HoverMsg::Insight),
-            keys: keys("g e"),
-            able: true,
-        });
-    }
-    // And its others (Rust: a type's memory layout, an item's tests),
-    // which only its language server can answer.
     let lang = app
         .proj
         .panes
         .get(menu.pane)
         .and_then(Option::as_ref)
         .and_then(|v| v.lang_key);
+    // The language's own action, for a file whose language has one: its
+    // language server's to answer — but C and C++'s macros, which Clew
+    // reads itself. It was offered with no server, and pressed said only
+    // that none was running.
+    if let Some(kind) = menu.insight {
+        navigate.push(Row {
+            label: kind.label(),
+            msg: Message::Hover(HoverMsg::Insight),
+            keys: keys("g e"),
+            able: menu.served || matches!(lang, Some("c" | "cpp")),
+        });
+    }
+    // And its others (Rust: a type's memory layout, an item's tests),
+    // which only its language server can answer.
     for &kind in lang.map_or(&[][..], crate::InsightKind::more_for_lang) {
         navigate.push(Row {
             label: kind.label(),
@@ -210,6 +213,20 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         })
         .fold(MENU_W, f32::max)
         .ceil();
+    // Why what only the language server answers is not on offer: as it
+    // is — its download declined, its start failed — and where that is
+    // changed; "isn't ready" said of a server that would never be.
+    let not_served = match lang.and_then(|l| app.proj.link.lsp.get(l)) {
+        Some(crate::LspSlot::Declined(why) | crate::LspSlot::Unsupported(why)) => format!(
+            "{}\n{}",
+            crate::i18n::message(why),
+            tr!("Open Settings → Language servers")
+        ),
+        Some(crate::LspSlot::Failed(error)) => {
+            format!("{error}\n{}", tr!("Open Settings → Language servers"))
+        }
+        _ => tr!("The language server isn't ready").to_string(),
+    };
     let row = |r: Row| -> Element<'a, Message> {
         let words = text(r.label).size(ts::BASE).wrapping(Wrapping::None);
         let words = if r.able {
@@ -239,7 +256,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         } else {
             super::toolbar::tip_at(
                 b,
-                tr!("The language server isn't ready"),
+                not_served.clone(),
                 None,
                 iced::widget::tooltip::Position::Right,
             )

@@ -12209,6 +12209,39 @@ fn the_status_bar_is_one_line_at_any_width() {
     });
 }
 
+/// In a window too narrow for the status bar's chip, the chip is left
+/// out — not laid out clipped to nothing, an invisible control the ring
+/// stopped on (its ring two brackets of a pixel).
+#[test]
+fn a_chip_with_no_room_is_no_stop() {
+    let presses_setup = |width: f32| {
+        let mut app = reader_app();
+        app.window_width = width;
+        app.window_height = 520.0;
+        app.proj.setup_missing = vec![crate::app::setup::SetupServer {
+            language: "rust".into(),
+            name: "rust-analyzer".into(),
+            fetch: crate::app::setup::Fetch::Download,
+            builds: false,
+        }];
+        let mut window = Driven::sized(&app, Size::new(width, 520.0));
+        window.tab(&mut app, false);
+        let (_, count, _) = ring_at(&app);
+        (0..count).any(|_| {
+            let on = matches!(
+                ring_at(&app).2,
+                Some(Message::Project(ProjectMsg::SetupShow(_)))
+            );
+            window.tab(&mut app, false);
+            on
+        })
+    };
+    assert!(presses_setup(1280.0), "a stop where there is room");
+    // Its right side's words — the language, the server, the caret — took
+    // the room a window shows them in; here, the window's own narrowness.
+    assert!(!presses_setup(400.0), "none where there is not");
+}
+
 /// What the status bar lays out for its room — the chip that sets up
 /// missing language servers — is built only when laid out, and is pressed
 /// by voice all the same: gathered as it is drawn. Pressed, it asks first —
@@ -14467,6 +14500,39 @@ fn a_dialog_takes_the_codes_from_what_is_under_it() {
         keyboard::Modifiers::COMMAND,
     );
     assert!(app.jump.is_some());
+}
+
+/// The chat F6 opened on its way round is put away again as F6 goes on,
+/// nothing typed in it — not left over the code — and kept, a question
+/// begun in it. One open before F6 came is left open.
+#[test]
+fn f6_puts_away_the_chat_it_opened() {
+    let mut app = reader_app();
+    app.code_focused = true;
+    let f6 = || keyboard::Key::Named(keyboard::key::Named::F6);
+    let to_chat = |app: &mut App| {
+        for _ in 0..6 {
+            if app.region == crate::app::keys::Region::Chat {
+                return;
+            }
+            type_key(app, f6(), keyboard::Modifiers::empty());
+        }
+        panic!("F6 never reached the chat");
+    };
+    to_chat(&mut app);
+    assert!(app.ask_view.is_open(), "shown to type in");
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert!(!app.ask_view.is_open(), "put away, nothing typed");
+    // A question begun: kept.
+    to_chat(&mut app);
+    app.proj.ask_input = "why".into();
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert!(app.ask_view.is_open(), "kept, a question begun in it");
+    // Open before F6 came: left open.
+    app.proj.ask_input.clear();
+    to_chat(&mut app);
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert!(app.ask_view.is_open(), "it was open before");
 }
 
 /// F6 moves the keys from the code to the sidebar's field, to the chat

@@ -987,6 +987,7 @@
  "No graphs for this project.": "Aucun graphe pour ce projet.",
  "No imports found in this project.": "Aucun import trouvé dans ce projet.",
  "No inputs suggested: {why}": "Aucune entrée proposée : {why}",
+ "No language server is running — start one in Settings → Language servers, then retry": "Aucun serveur de langage n’est lancé — démarrez-en un dans Réglages → Serveurs de langage, puis réessayez",
  "No language server ready — open a file to start one, then retry": "Aucun serveur de langage prêt — ouvrez un fichier pour en démarrer un, puis réessayez",
  "No macro here, and nothing on this line expands.": "Aucune macro ici, et rien ne se développe sur cette ligne.",
  "No matches": "Aucun résultat",

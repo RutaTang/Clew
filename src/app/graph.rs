@@ -2247,8 +2247,16 @@ impl App {
         let mut clients = self.call_hierarchy_clients();
         clients.retain(|lang, _| !leave_out.contains(lang));
         if clients.is_empty() {
-            self.status =
-                tr!("No language server ready — open a file to start one, then retry").into();
+            // With a file open, opening one starts nothing more: its server
+            // was declined, or failed, or there is none — Settings is where
+            // one is started. "Open a file" was said with one open.
+            let open = self.proj.panes.iter().flatten().next().is_some();
+            self.status = if open {
+                tr!("No language server is running — start one in Settings → Language servers, then retry")
+            } else {
+                tr!("No language server ready — open a file to start one, then retry")
+            }
+            .into();
             return Task::none();
         }
         let all = self.refinable_defs(&clients);
