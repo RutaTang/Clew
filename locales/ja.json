@@ -1310,7 +1310,6 @@
  "Sep": "9月",
  "Server log": "サーバーログ",
  "Server programs": "サーバープログラム",
- "Servers you add here are tools for Clew's own agent in Ask. An ACP agent uses its own MCP servers, unless you turn on \"Share my MCP servers\" for it.": "ここで追加したサーバーは、Ask で使う Clew 自身のエージェント用のツールです。ACP エージェントは、そのエージェントで「自分の MCP サーバーを共有」をオンにしない限り、独自の MCP サーバーを使います。",
  "Sessions": "セッション",
  "Sessions in this project": "このプロジェクトの会話",
  "Sessions in {project}": "{project} の会話",

@@ -2765,12 +2765,7 @@ fn registry_group(draft: &crate::app::integrations::IntegrationsDraft) -> Elemen
     .spacing(8)
     .align_y(iced::Center);
     super::heard::field(&reg.query, |v| Message::Integrations(M::RegistryQuery(v)));
-    let mut rows: Vec<Element<'_, Message>> = vec![
-        form::plain(form::note(tr!(
-            "Servers you add here are tools for Clew's own agent in Ask. An ACP agent uses its own MCP servers, unless you turn on \"Share my MCP servers\" for it."
-        ))),
-        form::plain(search),
-    ];
+    let mut rows: Vec<Element<'_, Message>> = vec![form::plain(search)];
     match &reg.found {
         None => {}
         Some(Err(why)) => rows.push(form::plain(

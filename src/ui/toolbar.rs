@@ -1034,7 +1034,7 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
     }))
     .width(Length::Fixed(STRIP_W))
     .height(Fill)
-    .style(theme::chrome)
+    .style(theme::strip)
     .into()
 }
 

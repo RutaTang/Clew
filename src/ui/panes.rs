@@ -424,7 +424,7 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
     )
     .padding([5, 12])
     .width(Fill)
-    .style(theme::statusbar)
+    .style(theme::time_travel_bar)
     .into()
 }
 

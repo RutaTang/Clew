@@ -1310,7 +1310,6 @@
  "Sep": "9月",
  "Server log": "服务器日志",
  "Server programs": "服务器程序",
- "Servers you add here are tools for Clew's own agent in Ask. An ACP agent uses its own MCP servers, unless you turn on \"Share my MCP servers\" for it.": "在这里添加的服务器是 Clew 自己的 Ask 智能体的工具。ACP 智能体使用它自己的 MCP 服务器，除非你为它打开“共享我的 MCP 服务器”。",
  "Sessions": "会话",
  "Sessions in this project": "此项目中的会话",
  "Sessions in {project}": "{project} 中的会话",

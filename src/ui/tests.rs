@@ -10898,6 +10898,19 @@ fn a_diff_in_the_codes_place_leaves_the_margin_its_raised_note_alone() {
     assert!(!other_shown, "a note beside Time Travel's lines");
 }
 
+/// The status bar and the tool strip paint no fill of their own: drawn
+/// after the sheet, theirs cut the sheet's shadow off in a hard line —
+/// under the sheet's rounded bottom corners, and down its right edge. The
+/// window's fill, under everything, is their background.
+#[test]
+fn the_chrome_drawn_after_the_sheet_leaves_its_shadow_whole() {
+    let theme = crate::theme::app_theme();
+    assert!(crate::theme::sheet(&theme).shadow.blur_radius > 0.0);
+    assert!(crate::theme::statusbar(&theme).background.is_none());
+    assert!(crate::theme::strip(&theme).background.is_none());
+    assert!(crate::theme::chrome(&theme).background.is_some());
+}
+
 /// The explanation in blocks has the margin to be read in: the raised card
 /// reaches down it. In the summary's 193 pixels it showed three lines of the
 /// first block, the last cut through, the rest only by scrolling a window
@@ -14733,7 +14746,10 @@ fn the_mcp_registry_is_searched_and_used_from_settings() {
     {
         let mut sim = sim_of(&app);
         assert!(shows(&mut sim, "Find in the MCP registry"));
-        assert!(shows(&mut sim, "tools for Clew's own agent"));
+        assert!(
+            !shows(&mut sim, "tools for Clew's own agent"),
+            "no paragraph saying what the servers are for"
+        );
         assert!(shows(&mut sim, "io.github.acme/notes-mcp"));
         assert!(shows(&mut sim, "npm · 1.2.0"));
         assert!(shows(&mut sim, "Clew can't run it"));

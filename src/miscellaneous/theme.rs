@@ -1727,8 +1727,31 @@ pub fn editor(_theme: &Theme) -> container::Style {
     }
 }
 
-/// Status bar background, its corners as the window's (see [`chrome`]).
+/// The status bar: no fill of its own — the window's ([`chrome`]) is
+/// behind it, corners and all. Its own, painted after the sheet, cut the
+/// sheet's shadow off in a hard line under the sheet's rounded corners.
 pub fn statusbar(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: None,
+        text_color: Some(dim()),
+        ..container::Style::default()
+    }
+}
+
+/// The tool strip down the window's right edge: no fill of its own, as
+/// [`statusbar`] — painted after the sheet, it cut the sheet's shadow off
+/// along the sheet's right edge.
+pub fn strip(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: None,
+        text_color: Some(fg()),
+        ..container::Style::default()
+    }
+}
+
+/// The Time Travel bar along the foot of the sheet: the chrome's tone, its
+/// corners the window's.
+pub fn time_travel_bar(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(bg_panel().into()),
         border: Border {
