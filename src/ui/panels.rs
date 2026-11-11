@@ -514,13 +514,12 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     // Ended without a word: said, where an empty pane read as Clew's
     // failure as much as the program's.
     if session.output.is_empty() && session.status == DebugStatus::Terminated {
-        // With no exit to report, it was stopped: said so, not as if it ran
-        // to its end.
+        // Stopped by the reader: said so, not as if it ran to its end.
         out_rows.push(
-            text(if session.exit_code.is_some() {
-                tr!("The program printed nothing.")
-            } else {
+            text(if app.debug.stopped_by_reader {
                 tr!("Stopped before the program printed anything.")
+            } else {
+                tr!("The program printed nothing.")
             })
             .size(ts::SMALL)
             .color(theme::dim())

@@ -759,6 +759,9 @@ pub(crate) fn heat_color(heat: f32) -> iced::Color {
 const GRAPH_PAD: f32 = 48.0;
 /// Below this cooling factor the force simulation stops stepping.
 const ALPHA_REST: f32 = 0.02;
+
+/// How far a press may move and still be a click, not a drag.
+const CLICK_SLOP: f32 = 5.0;
 /// A label opacity this close to its target counts as arrived.
 const LABEL_EPS: f32 = 0.004;
 /// How much room past the right edge a label moved to its node's left
@@ -1458,8 +1461,11 @@ impl GraphCanvas<'_> {
             st.dim = st.dim_from + (to - st.dim_from) * ease_in_out(st.dim_t);
         }
 
+        // A node held is pinned, and heats the map, once the grab has become
+        // a drag: a click to pick it lasts frames, and the map moved under
+        // the pointer while it did.
         let pinned = match st.drag {
-            Drag::Node(i, sig) if sig == st.sig && i < n => Some(i),
+            Drag::Node(i, sig) if sig == st.sig && i < n && st.moved >= CLICK_SLOP => Some(i),
             _ => None,
         };
         if pinned.is_some() {
@@ -2371,7 +2377,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 // the layout on screen: the first picks it (what it is, over
                 // the map), a second opens it.
                 if let Drag::Node(i, sig) = was
-                    && state.moved < 5.0
+                    && state.moved < CLICK_SLOP
                     && sig == state.sig
                     && sig == layout_sig(self.layout)
                 {
@@ -2392,7 +2398,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 }
                 // A click off the nodes puts the picked one down.
                 if !matches!(was, Drag::Node(..))
-                    && state.moved < 5.0
+                    && state.moved < CLICK_SLOP
                     && self.picked(state).is_some()
                 {
                     state.picked = None;
@@ -3815,6 +3821,70 @@ mod tests {
     /// what it is, over the map — and a second click opens it: a first
     /// click closed the map on a node the reader may only have wanted to
     /// look at. A click off the nodes puts the picked one down.
+    /// A click to pick a node leaves a map at rest at rest: held for a
+    /// few frames, the node heated the map, and the rest moved under the
+    /// pointer. A drag does heat it.
+    #[test]
+    fn a_click_on_a_node_leaves_the_map_at_rest() {
+        let l = layout(3);
+        let c = canvas(&l, false, false);
+        let mut st = GraphState::default();
+        let t0 = std::time::Instant::now();
+        let none = iced::advanced::mouse::Cursor::Unavailable;
+        let _ = c.tick(&mut st, BOUNDS, t0, none);
+        st.alpha = 0.0;
+        let (x, y, _, _) = c.node_screen(1, BOUNDS, &st);
+        let at = iced::advanced::mouse::Cursor::Available(Point::new(x, y));
+        let event = |e: iced::mouse::Event, st: &mut GraphState| {
+            let _ = <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+                &c,
+                st,
+                &iced::Event::Mouse(e),
+                BOUNDS,
+                at,
+            );
+        };
+        event(
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            &mut st,
+        );
+        for frame in 1..=3 {
+            let _ = c.tick(
+                &mut st,
+                BOUNDS,
+                t0 + std::time::Duration::from_millis(16 * frame),
+                at,
+            );
+        }
+        event(
+            iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            &mut st,
+        );
+        assert!(
+            st.alpha <= ALPHA_REST,
+            "a click heated the map: {}",
+            st.alpha
+        );
+        // A drag heats it.
+        event(
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            &mut st,
+        );
+        event(
+            iced::mouse::Event::CursorMoved {
+                position: Point::new(x + 40.0, y + 30.0),
+            },
+            &mut st,
+        );
+        let _ = c.tick(
+            &mut st,
+            BOUNDS,
+            t0 + std::time::Duration::from_millis(100),
+            at,
+        );
+        assert!(st.alpha > ALPHA_REST, "a drag moves the map");
+    }
+
     #[test]
     fn a_click_on_a_node_picks_it_and_a_second_opens_it() {
         let l = layout(3);

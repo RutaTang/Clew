@@ -280,6 +280,7 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
             None,
             tr!("The AI writes a tour of where to start, what to read next, and where to end"),
             (app.proj.walk.generating.as_deref() != Some(guide)).then_some(guide_msg),
+            !has_guide,
         ),
         walk_action(
             Glyph::Diff,
@@ -287,6 +288,7 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
             None,
             tr!("The AI writes a tour of this branch's changes"),
             Some(Message::Walk(WalkMsg::GenerateDiff)),
+            true,
         ),
     ]
     .spacing(4);
@@ -304,6 +306,7 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
             Some(tr!("Walk the last run").to_string()),
             tr!("The AI writes a tour of the path the last run took"),
             Some(Message::Walk(WalkMsg::GenerateTrace)),
+            true,
         ));
     }
     let review = container(actions).padding(Padding {
@@ -2433,16 +2436,19 @@ pub(crate) fn source_chip<'a>(node: &crate::explain::Node) -> Element<'a, Messag
 /// A quick action of the Walkthroughs tab: its icon and words (`spoken`,
 /// when a voice says it otherwise), and on the pointer what it does — each
 /// has the AI write a tour, which a plain button did not say.
+/// `spends`: it calls the model even while it cannot be pressed (its call
+/// under way): marked so then too.
 fn walk_action<'a>(
     glyph: Glyph,
     label: String,
     spoken: Option<String>,
     does: impl Into<String>,
     press: Option<Message>,
+    spends: bool,
 ) -> Element<'a, Message> {
     // One that writes with the model is marked so, as every such control
     // is: "Where to start reading" looked like the free rows beside it.
-    let spends = press.as_ref().is_some_and(crate::app::palette::spends_ai);
+    let spends = press.as_ref().is_some_and(crate::app::palette::spends_ai) || spends;
     let press = press.map(|msg| super::heard::said(spoken.as_deref().unwrap_or(&label), msg));
     let face = row![
         if spends {

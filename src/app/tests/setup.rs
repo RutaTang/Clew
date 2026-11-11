@@ -243,6 +243,11 @@ fn opened_without_setup_no_server_is_asked_about() {
     // others stay left for later.
     let _ = app.update(Message::Lsp(LspMsg::DownloadFor("rust".into())));
     assert!(app.proj.servers_not_now && app.proj.servers_asked.contains("rust"));
+    assert!(!app.server_left_for_later("rust"), "asked for");
+    assert!(
+        app.server_left_for_later("python"),
+        "the others still for later"
+    );
     assert!(
         !app.proj.pending_lsp_consent.is_empty()
             || matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Starting)),

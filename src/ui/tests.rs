@@ -9307,6 +9307,21 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
         assert!(!shows(&mut sim, "terminated"));
     }
     assert!(!stops(&app), "nothing is left to stop");
+    // Ended with nothing printed: said so — and, stopped by the reader,
+    // that it was stopped, not that it ran to its end.
+    let mut quiet = session(crate::DebugStatus::Terminated, None);
+    quiet.output.clear();
+    app.debug.session = Some(quiet);
+    assert!(shows(
+        &mut sim_elem(super::debug_panel(&app)),
+        "The program printed nothing."
+    ));
+    app.debug.stopped_by_reader = true;
+    assert!(shows(
+        &mut sim_elem(super::debug_panel(&app)),
+        "Stopped before the program printed anything."
+    ));
+    app.debug.stopped_by_reader = false;
     app.debug.no_debug = false;
     app.debug.session = Some(session(crate::DebugStatus::Terminated, None));
     {
@@ -11525,6 +11540,37 @@ fn the_raised_note_says_when_its_function_changed() {
         )),
     );
     assert!(shows(&mut sim_of(&app), "2 callers, 4 calls"));
+    // Two callers of one name in one file — `save` in two classes — are two
+    // callers, as the Calls tab lists them: they read as one.
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call("origin", vec![1, 2], vec![]),
+                    call("save", vec![], vec![0]),
+                    clew_protocol::CallGraphNode {
+                        line: 30,
+                        ..call("save", vec![], vec![0])
+                    },
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    let lib = root.join("src/lib.rs");
+    app.proj.calls_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(crate::projectcalls::FileCalls::new(
+            lib,
+            crate::highlight::Lang::Rust,
+            vec![site("save", "origin", 7), site("save", "origin", 31)],
+            &[],
+            Default::default(),
+        )),
+    );
+    assert!(shows(&mut sim_of(&app), "2 callers"));
+    assert!(!shows(&mut sim_of(&app), "1 caller, 2 calls"));
 }
 
 /// The margin, with no note to show, says why, centered under a muted icon

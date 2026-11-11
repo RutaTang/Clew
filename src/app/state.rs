@@ -192,6 +192,9 @@ pub struct PendingAsk {
 pub struct DebugState {
     /// The active debug session (DAP), if any.
     pub session: Option<DebugSession>,
+    /// The session ended by the reader's Stop, not by itself: its output
+    /// says it was stopped, not that the program printed nothing.
+    pub stopped_by_reader: bool,
     /// The session was started by Run, not Debug: the program runs
     /// without the debugger — the adapter is told `noDebug`, and no
     /// breakpoint is set in it, there at the start or added later.
@@ -1345,6 +1348,9 @@ pub struct App {
     pub ask_sessions_menu: bool,
     /// What the menu's search looks for; cleared as the menu closes.
     pub ask_sessions_query: String,
+    /// Whether something was over the window at the last update — the
+    /// tutorial, a dialog — so the sessions menu closes as one comes up.
+    pub(crate) ask_menu_covered: bool,
     /// Voice: listening, the words heard, the speech models.
     pub(crate) voice: crate::app::voice::VoiceState,
     /// EmbeddingGemma's download, for embeddings made on this computer.

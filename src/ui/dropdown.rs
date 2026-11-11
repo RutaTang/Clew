@@ -188,15 +188,27 @@ struct Dropped<'a, 'b, Message> {
     tree: &'b mut Tree,
 }
 
+/// The room a menu opened from `anchor` has under it and over it, in a
+/// window of `window` size, `offset` away from it.
+fn rooms(anchor: Rectangle, offset: Vector, window: Size) -> (f32, f32) {
+    let below = window.height - (anchor.y + anchor.height + offset.y);
+    let above = anchor.y - offset.y;
+    (below.max(0.0), above.max(0.0))
+}
+
 /// Where a menu of `size` goes, opened from `anchor` in a window of
-/// `window` size: `offset` under it — or, with no room below and room
-/// above, as far over it, so it does not cover what opened it (shifted up
-/// over it, the menu hid the toggle that would close it) — then moved just
+/// `window` size: `offset` under it — or, with no room below, as far over
+/// it, so it does not cover what opened it (shifted up over it, the menu
+/// hid the toggle that would close it); fitting neither, on the side with
+/// more room (it was laid out no taller: [`rooms`]) — then moved just
 /// enough to stay inside the window.
 fn dropped_at(anchor: Rectangle, offset: Vector, size: Size, window: Size) -> Point {
+    let (room_below, room_above) = rooms(anchor, offset, window);
     let below = anchor.y + anchor.height + offset.y;
     let above = anchor.y - offset.y - size.height;
-    let y = if below + size.height > window.height && above >= 0.0 {
+    let y = if size.height <= room_below {
+        below
+    } else if size.height <= room_above || room_above > room_below {
         above
     } else {
         below
@@ -209,10 +221,14 @@ fn dropped_at(anchor: Rectangle, offset: Vector, size: Size, window: Size) -> Po
 
 impl<Message> overlay::Overlay<Message, Theme, Renderer> for Dropped<'_, '_, Message> {
     fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
+        // No taller than the larger side's room: a menu fitting neither
+        // side was clamped over what opened it. Its list scrolls.
+        let (below, above) = rooms(self.anchor, self.offset, bounds);
+        let tall = below.max(above);
         let laid = self.menu.as_widget_mut().layout(
             self.tree,
             renderer,
-            &layout::Limits::new(Size::ZERO, bounds),
+            &layout::Limits::new(Size::ZERO, Size::new(bounds.width, tall)),
         );
         let at = dropped_at(self.anchor, self.offset, laid.size(), bounds);
         laid.move_to(at)
@@ -337,9 +353,17 @@ mod tests {
         let at = dropped_at(low, gap, menu, window);
         assert_eq!(at, Point::new(480.0, 450.0 - 6.0 - 340.0));
         assert!(at.y + menu.height <= low.y, "the toggle stays uncovered");
-        // No room either way: kept inside the window.
-        let tall = Size::new(320.0, 580.0);
-        let at = dropped_at(anchor(100.0, 300.0), gap, tall, window);
-        assert_eq!(at.y, 20.0);
+        // Room on neither side: on the side with more, never over the
+        // toggle — laid out no taller than that side's room.
+        let mid = anchor(100.0, 300.0);
+        let (below, above) = rooms(mid, gap, window);
+        assert_eq!((below, above), (266.0, 294.0));
+        let at = dropped_at(mid, gap, Size::new(320.0, above), window);
+        assert!(at.y + above <= mid.y, "over it: {at:?}");
+        let low = anchor(100.0, 250.0);
+        let (below, above) = rooms(low, gap, window);
+        assert!(below > above);
+        let at = dropped_at(low, gap, Size::new(320.0, below), window);
+        assert!(at.y >= low.y + low.height, "under it: {at:?}");
     }
 }

@@ -142,21 +142,54 @@ pub fn code_word_at(lines: &[HlLine], line: usize, col: usize) -> Option<String>
     word_at(lines, line, col)
 }
 
-/// Whether the word at columns `start..end` of `line` sits in braces: the
-/// nearest brace before it opens, the nearest after it closes.
+/// Whether the word at columns `start..end` of `line` sits in an
+/// interpolation: in braces in the same string as the word — a `{`
+/// opening before it and a `}` closing after it, neither doubled (`{{` is a
+/// brace written out) — in a string made for them: an f-string, a `$"…"`
+/// or a template with `${`, a format macro's (`println!(`), or one
+/// `.format(`ted. Braces anywhere on the line made a word in
+/// `{"declined": 0}` a variable's.
 fn interpolated(line: &HlLine, start: usize, end: usize) -> bool {
-    let before = line_window(line, 0, start);
-    let after = line_window(line, end, end + 4 * MAX_WORD_CHARS);
-    let opens = before
+    // The string the word is in: the run of literal spans around it.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut col = 0;
+    for (text, style) in &line.spans {
+        let n = text.chars().count();
+        if is_literal(*style) {
+            match runs.last_mut() {
+                Some(run) if run.1 == col => run.1 = col + n,
+                _ => runs.push((col, col + n)),
+            }
+        }
+        col += n;
+    }
+    let Some(&(from, to)) = runs.iter().find(|(a, b)| *a <= start && end <= *b) else {
+        return false;
+    };
+    let string = line_window(line, from, to);
+    let (at, until) = (start - from, end - from);
+    let open = string[..at]
         .iter()
-        .rev()
-        .find(|c| matches!(c, '{' | '}'))
-        .is_some_and(|&c| c == '{');
-    let closes = after
+        .rposition(|c| matches!(c, '{' | '}'))
+        .filter(|&i| string[i] == '{' && (i == 0 || string[i - 1] != '{'));
+    let close = string[until..]
         .iter()
-        .find(|c| matches!(c, '{' | '}'))
-        .is_some_and(|&c| c == '}');
-    opens && closes
+        .position(|c| matches!(c, '{' | '}'))
+        .map(|i| until + i)
+        .filter(|&i| string[i] == '}' && string.get(i + 1) != Some(&'}'));
+    let (Some(open), Some(_)) = (open, close) else {
+        return false;
+    };
+    let lead: String = string
+        .iter()
+        .take_while(|c| !matches!(c, '"' | '\'' | '`'))
+        .collect();
+    let before: String = line_window(line, 0, from).into_iter().collect();
+    let after: String = line_window(line, to, to + 16).into_iter().collect();
+    lead.contains(['f', 'F', '$'])
+        || (open > 0 && string[open - 1] == '$')
+        || before.contains("!(")
+        || after.trim_start().starts_with(".format(")
 }
 
 /// Whole-word occurrences of `word` across `lines`, as (line, col0, col1) in
@@ -580,6 +613,16 @@ mod tests {
         assert_eq!(code_word_at(&lines, 1, 19), None);
         let lines = highlight_lines("const s = `${total} of ${all}`;\n", Some("javascript"));
         assert_eq!(code_word_at(&lines, 0, 14).as_deref(), Some("total"));
+        // A plain string in braces is no interpolation: its words are its own.
+        let lines = highlight_lines("counts = {\"declined\": 0}\n", Some("python"));
+        assert_eq!(code_word_at(&lines, 0, 13), None);
+        let lines = highlight_lines("notify({ to: \"declined\" });\n", Some("javascript"));
+        assert_eq!(code_word_at(&lines, 0, 17), None);
+        let lines = highlight_lines("fn f() { log(\"declined\"); }\n", Some("rust"));
+        assert_eq!(code_word_at(&lines, 0, 17), None);
+        // Braces written out, doubled, are not an interpolation either.
+        let lines = highlight_lines("println!(\"{{total}}\");\n", Some("rust"));
+        assert_eq!(code_word_at(&lines, 0, 13), None);
     }
 
     /// Reference implementation of bracket matching: the plain per-character

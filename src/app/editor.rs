@@ -246,18 +246,37 @@ impl App {
     /// Make the current visit where the reader is: the caret's line in the
     /// file it is of ([`crate::history::History::settle`]).
     fn settle_visit(&mut self) {
-        let Some((abs, line)) = self
-            .active_viewer()
-            .and_then(|v| v.caret.map(|(l, _)| (v.abs.clone(), l + 1)))
-        else {
+        let Some(v) = self.active_viewer() else {
             return;
         };
-        let here = self.proj.history.current_loc();
-        if here.is_none_or(|loc| loc.path != abs || loc.line == Some(line)) {
+        let Some((l0, _)) = v.caret else {
+            return;
+        };
+        let line = l0 + 1;
+        let Some(here) = self.proj.history.current_loc() else {
+            return;
+        };
+        // A caret still where the visit put it has not moved: a file opened
+        // at its top has it on line 1, and made a visit to line 1 Back
+        // stopped at, the screen as it was.
+        if here.path != v.abs || here.line.unwrap_or(1) == line {
             return;
         }
+        // The function a line is in: the same one, the visit moves with the
+        // reader; another, the place left is a stop of its own. (Not the
+        // symbol named on that very line: a body line has none.)
+        let enclosing = |line1: usize| {
+            v.symbols
+                .iter()
+                .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+                .filter(|s| s.line <= line1 && line1 <= s.end_line)
+                .min_by_key(|s| s.end_line.saturating_sub(s.line))
+                .map(|s| (s.line, s.name.clone()))
+        };
+        let moves = here.line.is_none_or(|at| enclosing(at) == enclosing(line));
+        let abs = v.abs.clone();
         let label = self.symbol_name_at(&abs, line);
-        self.proj.history.settle(line, label);
+        self.proj.history.settle(line, label, moves);
     }
 
     /// How many lines the code view shows from a file's top — what Back,

@@ -27227,6 +27227,65 @@ fn go_to_line_without_a_number_opens_nothing() {
     assert!(app.proj.finder.open, "the finder stays for the number");
 }
 
+/// Back from a jump returns to where the reader was in the file it left,
+/// through the app's own jump: a caret left where the file opened is no
+/// place of its own (Back passes the file's top, its screen unchanged); a
+/// caret moved within a function makes that place the stop, once.
+#[test]
+fn back_from_a_jump_returns_to_where_the_reader_was() {
+    let mut app = scanned_app("back-from-jump");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("shop.py"),
+        "def first():\n    a = 1\n    b = 2\n    return a + b\n\n\ndef second():\n    return 3\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("notes.md"), "notes\n").unwrap();
+    open_synchronously(&mut app, "notes.md", None);
+    open_synchronously(&mut app, "shop.py", None);
+    let lh = app.line_height();
+    {
+        let v = app.active_viewer_mut().unwrap();
+        v.viewport_measured = true;
+        v.viewport_h = 40.0 * lh;
+        v.caret = Some((0, 0));
+    }
+    let jump = |app: &mut App, line: usize| {
+        let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+            rel: "shop.py".into(),
+            line: Some(line),
+        }));
+    };
+    // The caret where the file opened: Back passes the file's top.
+    jump(&mut app, 7);
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    let back = app.proj.history.current_loc().cloned().unwrap();
+    assert!(back.path.ends_with("notes.md"), "{back:?}");
+    // Forward, then into `first` and down its body, and a jump: Back is
+    // to the line left, and once more passes the file's top.
+    let _ = app.update(Message::Reading(ReadingMsg::GoForward));
+    jump(&mut app, 1);
+    app.active_viewer_mut().unwrap().caret = Some((2, 0));
+    jump(&mut app, 7);
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    let back = app.proj.history.current_loc().cloned().unwrap();
+    assert!(
+        back.path.ends_with("shop.py") && back.line == Some(3),
+        "{back:?}"
+    );
+    // One stop in `first` — the line left — then the jump before it, and
+    // past the file's top to where the reading began.
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    let back = app.proj.history.current_loc().cloned().unwrap();
+    assert!(
+        back.path.ends_with("shop.py") && back.line == Some(7),
+        "{back:?}"
+    );
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    let back = app.proj.history.current_loc().cloned().unwrap();
+    assert!(back.path.ends_with("notes.md"), "{back:?}");
+}
+
 /// Go to Line past the end goes to the last line: line 99 of a 5-line
 /// file was gone to, said as the caret's place, and kept as a stop.
 #[test]

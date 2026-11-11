@@ -63,13 +63,16 @@ impl App {
         // Ask's menu of sessions is put away when something comes up over
         // the window: drawn over everything, it stayed above the palette or a
         // question, took its clicks — and, open, held that question's Allow.
-        if self.ask_sessions_menu
-            && (self.tutorial.is_some()
-                || ui::active_overlay(self)
-                    .is_some_and(|o| !matches!(o, ui::ActiveOverlay::Hover(_))))
-        {
+        // As it comes up, not while it is: the tour lets the card be used,
+        // and its toggle opened and shut the menu in one go. Closed, its
+        // search goes too.
+        let covered = self.tutorial.is_some()
+            || ui::active_overlay(self).is_some_and(|o| !matches!(o, ui::ActiveOverlay::Hover(_)));
+        if covered && !self.ask_menu_covered && self.ask_sessions_menu {
             self.ask_sessions_menu = false;
+            self.ask_sessions_query.clear();
         }
+        self.ask_menu_covered = covered;
         // The margin's History lists the commits of the file being read.
         // Batched only when it asks: a batch is a task even of none, and an
         // update that asks for nothing returns none.

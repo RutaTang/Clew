@@ -794,6 +794,17 @@ impl App {
         step: Result<Box<TimeStep>, String>,
     ) -> Task<Message> {
         let line_height = self.line_height();
+        // The view the revision is shown in, as measured on the file's own
+        // pane: unmeasured, a short file's focus line near its end was put
+        // at the top, the file's start scrolled away.
+        let measured = self.proj.time_travel.as_ref().and_then(|tt| {
+            self.proj
+                .panes
+                .iter()
+                .flatten()
+                .find(|v| v.abs == tt.abs)
+                .map(|v| (v.viewport_h, v.viewport_measured, v.bounds_h))
+        });
         // Only the revision the session asks for now: not one it asked for
         // before a later scrub, nor one a session since replaced or left
         // was loading. A start leaves it be — as it did not while every
@@ -834,6 +845,11 @@ impl App {
             viewer::Viewer::new(tt.abs.clone(), tt.rel.clone(), tt.lang, source, step.lines);
         v.symbols = step.symbols;
         v.highlighted = true;
+        if let Some((h, measured, bounds)) = measured {
+            v.viewport_h = h;
+            v.viewport_measured = measured;
+            v.bounds_h = bounds;
+        }
         v.git = Some(std::sync::Arc::new(git::GitInfo {
             blame: Vec::new(),
             status,
@@ -1261,6 +1277,20 @@ impl App {
         if self.proj.project.is_none() {
             return Task::none();
         }
+        // Nothing but blanks and comments: nothing to ask the model about,
+        // nothing paid for — and no key asked for first.
+        if let Some(v) = self.proj.panes.get(pane).and_then(Option::as_ref) {
+            let range = match v.selection_ordered() {
+                Some(((a, _), (b, _))) => Some((a, b)),
+                None => menu_line.or(v.caret.map(|(l, _)| l)).map(|l| (l, l)),
+            };
+            if let Some((a, b)) = range
+                && !(a..=b).any(|l| v.has_code(l))
+            {
+                self.status = tr!("Put the cursor on a line of code to ask why it is there").into();
+                return Task::none();
+            }
+        }
         let cfg = match self.require_llm() {
             Ok(cfg) => cfg,
             Err(ask_for_key) => return ask_for_key,
@@ -1284,12 +1314,6 @@ impl App {
                 None => return Task::none(),
             },
         };
-        // Nothing but blanks and comments: nothing to ask the model about,
-        // and nothing paid for.
-        if !(l0..=l1).any(|l| v.has_code(l)) {
-            self.status = tr!("Put the cursor on a line of code to ask why it is there").into();
-            return Task::none();
-        }
         // Distinct committed commits touching the range (a few at most).
         let mut seen = HashSet::new();
         let mut commits: Vec<(String, String)> = Vec::new();

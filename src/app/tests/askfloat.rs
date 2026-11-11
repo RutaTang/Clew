@@ -294,8 +294,10 @@ fn ask_keeps_its_sessions() {
     // over it: it stayed on top, and took the palette's clicks.
     let _ = app.update(Message::Ask(AskMsg::SessionsMenu(true)));
     assert!(app.ask_sessions_menu);
+    app.ask_sessions_query = "host".into();
     let _ = app.update(Message::Nav(crate::NavMsg::PaletteOpened));
     assert!(!app.ask_sessions_menu, "closed under the palette");
+    assert!(app.ask_sessions_query.is_empty(), "and its search with it");
     dismiss_overlays(&mut app);
 
     // Back to the first: its questions and answers on the card.

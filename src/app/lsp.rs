@@ -60,6 +60,13 @@ pub(crate) const MAX_LINE_CHIPS: usize = 256;
 pub(crate) const MAX_LINE_CHIP_CHARS: usize = 4096;
 
 impl App {
+    /// Whether `language`'s server is left "not set up" when it would ask:
+    /// the first open left the servers for later, and the reader has not
+    /// asked for this one since ("Ask again" asks about that one only).
+    pub(crate) fn server_left_for_later(&self, language: &str) -> bool {
+        self.proj.servers_not_now && !self.proj.servers_asked.contains(language)
+    }
+
     /// Read every READY language server's state once per update — one lock
     /// each — for the view that follows: the status bar, the diagnostic
     /// underlines, the hover's diagnostic and the server panel all take their
@@ -261,7 +268,7 @@ impl App {
                 return Task::none();
             }
         };
-        if self.proj.servers_not_now && !self.proj.servers_asked.contains(language) {
+        if self.server_left_for_later(language) {
             self.leave_server_for_later(language);
             return Task::none();
         }
@@ -700,7 +707,7 @@ impl App {
                     .trust
                     .is_build_trusted(None, &root, &server.server_name)
             {
-                if self.proj.servers_not_now && !self.proj.servers_asked.contains(language) {
+                if self.server_left_for_later(language) {
                     self.leave_server_for_later(language);
                     return Task::none();
                 }

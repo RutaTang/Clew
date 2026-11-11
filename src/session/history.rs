@@ -208,14 +208,14 @@ impl History {
     }
 
     /// The reader, at the current visit, has moved to `line` (labelled
-    /// `label`, the function there) — and is about to leave: the visit is
-    /// made where they are, so that Back returns there. Read further in the
-    /// same place (a file opened with no line, the function it named), the
-    /// visit moves with them; gone on to another function, that is a visit
-    /// of its own. A jump from line 20 to a definition in the same file,
-    /// Back went to the file's top — the place it was opened at — and the
-    /// call the reader jumped from was lost.
-    pub fn settle(&mut self, line: usize, label: Option<String>) {
+    /// `label`, the symbol named there, if any) — and is about to leave:
+    /// the visit is made where they are, so that Back returns there. Read
+    /// further in the same place (`moves`: a file opened with no line, the
+    /// function it went to), the visit moves with them; gone on to another
+    /// function, that is a visit of its own. A jump from line 20 to a
+    /// definition in the same file, Back went to the file's top — the place
+    /// it was opened at — and the call the reader jumped from was lost.
+    pub fn settle(&mut self, line: usize, label: Option<String>, moves: bool) {
         let Some(cur) = self.current else {
             return;
         };
@@ -224,7 +224,7 @@ impl History {
         if node.loc.line == Some(line) {
             return;
         }
-        if node.loc.line.is_none() || node.label == label {
+        if moves {
             node.loc.line = Some(line);
             node.label = label;
         } else {
@@ -1122,23 +1122,23 @@ mod tests {
 
     /// Where the reader went in a visit is where Back returns: a file
     /// opened at its top, read down to line 20, then a definition in it
-    /// gone to — Back is to line 20. Gone on to another function first,
-    /// that is a stop of its own.
+    /// gone to — Back is to line 20. Read further in the same function, the
+    /// stop moves; gone on to another, that is a stop of its own.
     #[test]
     fn a_jump_leaves_from_where_the_reader_was() {
         let mut h = History::default();
         push(&mut h, "main", None);
         push(&mut h, "pricing", None);
-        h.settle(20, Some("discounts".into()));
+        h.settle(20, None, true);
         h.push(loc("pricing", Some(5)), Some("cents".into()));
         assert_eq!(h.back_showing(40), Some(loc("pricing", Some(20))));
         // In the same function, read further: the stop moves with it.
-        h.settle(24, Some("discounts".into()));
+        h.settle(24, None, true);
         h.push(loc("pricing", Some(5)), Some("cents".into()));
         assert_eq!(h.back_showing(40), Some(loc("pricing", Some(24))));
         // Gone on to another function: a stop of its own, and the one
         // before it kept.
-        h.settle(40, Some("total".into()));
+        h.settle(40, None, false);
         h.push(loc("pricing", Some(5)), Some("cents".into()));
         assert_eq!(h.back_showing(40), Some(loc("pricing", Some(40))));
         assert_eq!(h.back_showing(40), Some(loc("pricing", Some(24))));

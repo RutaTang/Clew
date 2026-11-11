@@ -127,13 +127,21 @@ impl App {
             .filter(|v| v.abs == file)
             .map(|v| v.source.clone());
         let lines: Option<Vec<&str>> = text.as_deref().map(|t| t.lines().collect());
+        // Judged by the statement's first line: a call on the second line of
+        // `TAX = Decimal(\n    str(0.08)\n)` is the constant's value.
+        let starts = lines.as_deref().map(statement_starts);
         calls.calls.iter().any(|s| {
             s.caller.is_none()
-                && lines.as_ref().is_none_or(|lines| {
-                    lines
-                        .get(s.line.saturating_sub(1))
-                        .is_none_or(|l| is_call_statement(l))
-                })
+                && lines
+                    .as_ref()
+                    .zip(starts.as_ref())
+                    .is_none_or(|(lines, starts)| {
+                        let at = s.line.saturating_sub(1);
+                        starts
+                            .get(at)
+                            .and_then(|&first| lines.get(first))
+                            .is_none_or(|l| is_call_statement(l))
+                    })
         })
     }
 
@@ -277,6 +285,7 @@ impl App {
         let (tab, ended) = self.tab_for_new_run(&program, no_debug);
         self.debug.tab = tab;
         self.run_shown = Some(crate::app::state::RunTab::Real(tab));
+        self.debug.stopped_by_reader = false;
         self.debug.session = Some(DebugSession {
             client: None,
             status: DebugStatus::Launching,
@@ -939,6 +948,7 @@ impl App {
         // The teardown itself is shared with the project switch, which used to
         // carry its own copy of it (see `stop_debug_session`).
         let ended = self.stop_debug_session();
+        self.debug.stopped_by_reader = kept.is_some();
         self.debug.session = kept;
         self.debug.said = None;
         ended
@@ -2771,6 +2781,36 @@ pub(crate) struct Closing {
     pub(crate) teardown: Task<Message>,
 }
 
+/// For each line of `lines`, the line its statement starts on: a line
+/// inside brackets left open, or after one ending in `\`, continues the
+/// statement above it. A line at the left edge that is no closing bracket
+/// or chained call starts one whatever came before — a bracket in a string
+/// miscounted stops at the next statement.
+fn statement_starts(lines: &[&str]) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(lines.len());
+    let (mut depth, mut start, mut continued) = (0i32, 0usize, false);
+    for (i, line) in lines.iter().enumerate() {
+        let fresh = line
+            .chars()
+            .next()
+            .is_some_and(|c| !c.is_whitespace() && !matches!(c, ')' | ']' | '}' | '.'));
+        if fresh || (depth <= 0 && !continued) {
+            start = i;
+            depth = 0;
+        }
+        starts.push(start);
+        for c in line.chars() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        continued = line.trim_end().ends_with('\\');
+    }
+    starts
+}
+
 /// Whether `line` is a statement that does something when its file runs: a
 /// call, or a block that calls (`if __name__ == "__main__":`) — not a
 /// declaration, an import, an assignment or a decorator, whose calls only
@@ -2778,12 +2818,26 @@ pub(crate) struct Closing {
 fn is_call_statement(line: &str) -> bool {
     let t = line.trim_start();
     let t = t.strip_prefix("await ").unwrap_or(t);
-    // The name it starts with: `app.run`, `Foo::bar`, `$obj`.
+    // The name it starts with: `app.run`, `Foo::bar`, `$app->run`,
+    // `App.run!`, `handlers[0].run`.
     let mut head_len = 0;
     while head_len < t.len() {
         let rest = &t[head_len..];
-        if rest.starts_with("::") {
+        if rest.starts_with("::") || rest.starts_with("->") {
             head_len += 2;
+        } else if rest.starts_with('[') && head_len > 0 {
+            // An index, as part of the name: `handlers[0].run()`, and
+            // `counts[k] = f()` still an assignment after it.
+            match rest.find(']') {
+                Some(close) => head_len += close + 1,
+                None => break,
+            }
+        } else if (rest.starts_with('!') || rest.starts_with('?'))
+            && head_len > 0
+            && !rest[1..].starts_with('=')
+        {
+            // Ruby's `run!`, `ready?`: part of the name, not an operator.
+            head_len += 1;
         } else if let Some(c) = rest
             .chars()
             .next()
@@ -2900,6 +2954,11 @@ mod tests {
             "await main()",
             "puts \"hi\"",
             "console.log(total);",
+            "$app->run();",
+            "$kernel->terminate($request, $response);",
+            "Sinatra::Application.run!",
+            "App.run!",
+            "handlers[0].run()",
         ] {
             assert!(is_call_statement(line), "{line}");
         }
@@ -2914,9 +2973,30 @@ mod tests {
             "def helper(x=f()):",
             "counts[k] = f()",
             "x += f()",
+            "$app = new App();",
+            "ok = ready? ",
         ] {
             assert!(!is_call_statement(line), "{line}");
         }
+    }
+
+    /// A line inside a statement's brackets belongs to the statement: the
+    /// call on a constant's second line is the constant's value.
+    #[test]
+    fn a_statement_spans_its_open_brackets() {
+        let lines = [
+            "TAX = Decimal(",
+            "    str(0.08)",
+            ")",
+            "urlpatterns = [",
+            "    path(\"a\", view),",
+            "]",
+            "if __name__ == \"__main__\":",
+            "    main()",
+            "x = 1 + \\",
+            "    f()",
+        ];
+        assert_eq!(statement_starts(&lines), [0, 0, 0, 3, 3, 3, 6, 7, 8, 8]);
     }
 
     /// A program evidently starts in a `main` or `__main__` file outside its

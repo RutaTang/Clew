@@ -2748,10 +2748,27 @@ fn gutter_marks(
         });
     }
     if let Some(bp) = breakpoint {
-        let d = (lh * 0.55).min(9.0);
+        // Right of the ribbon, and short of the numbers, in one column for
+        // the whole file: smaller where a file's numbers are long (five
+        // digits left 13 px). Past what even that leaves, a line with no
+        // ribbon has its dot where the ribbon would be, off the digits.
+        let lead = BOOKMARK_X + BOOKMARK_RIBBON_W + 1.0;
+        let full = (lh * 0.55).min(9.0);
+        let fits = room - lead - 0.5;
+        let d = if fits < full && fits >= 5.0 {
+            fits
+        } else {
+            full
+        };
+        let column = ((room - d) / 2.0).max(lead);
+        let at = if column + d <= room || bookmark {
+            column
+        } else {
+            ((room - d) / 2.0).max(GIT_BAR_W + 0.5)
+        };
         marks.push(GutterMark {
             bounds: Rectangle {
-                x: x + ((room - d) / 2.0).max(BOOKMARK_X + BOOKMARK_RIBBON_W + 1.0),
+                x: x + at,
                 y: y + (lh - d) / 2.0,
                 width: d,
                 height: d,
@@ -3218,6 +3235,22 @@ mod tests {
             ribbon[0].bounds.x >= super::GIT_BAR_W,
             "beside the git change bar, not on it"
         );
+        // A file of five-digit line numbers leaves 13.5 px left of them:
+        // the dot keeps to it, clear of the ribbon.
+        let tight = gutter_marks(
+            true,
+            Some(BreakpointMark {
+                conditional: false,
+                refused: false,
+            }),
+            0.0,
+            0.0,
+            20.0,
+            13.5,
+        );
+        let (ribbon, dot) = (tight[0].bounds, tight[1].bounds);
+        assert!(dot.x + dot.width <= 13.5, "over the numbers: {dot:?}");
+        assert!(dot.x >= ribbon.x + ribbon.width, "over the ribbon: {dot:?}");
         let dot = gutter_marks(false, Some(plain), 0.0, 0.0, 20.0, 0.0)[0];
         let square = gutter_marks(
             false,

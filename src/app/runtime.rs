@@ -115,6 +115,7 @@ impl App {
             ask_view: AskView::Hidden,
             ask_by_f6: None,
             ask_sessions_menu: false,
+            ask_menu_covered: false,
             ask_sessions_query: String::new(),
             voice: crate::app::voice::VoiceState::new(),
             local_embedding: crate::app::embedding::LocalEmbedding {
