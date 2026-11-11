@@ -543,6 +543,22 @@ impl<'a> ActiveOverlay<'a> {
         !matches!(self, Self::Hover(_))
     }
 
+    /// Whether it is a menu: a list of rows, one pressed and it goes —
+    /// the arrows walk it.
+    pub(crate) fn is_menu(&self) -> bool {
+        matches!(
+            self,
+            Self::ToolsMenu
+                | Self::RunMenu
+                | Self::TargetMenu
+                | Self::AppMenu
+                | Self::ViewMenu
+                | Self::ViewsMenu
+                | Self::ContextMenu(_)
+                | Self::TreeMenu(_)
+        )
+    }
+
     fn view(self, app: &'a App) -> Element<'a, Message> {
         match self {
             // Each Allow is drawn enabled once its question has been within

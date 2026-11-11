@@ -433,6 +433,16 @@ pub(crate) fn setup_sheet<'a>(
             None,
             iced::widget::tooltip::Position::Top,
         )
+    } else if gated && !asked.ready {
+        // Held a moment, so it is not pressed before the sheet is read —
+        // or while the window is behind another: a press then did nothing,
+        // with no word why.
+        super::toolbar::tip_at(
+            accept_button,
+            tr!("Ready in a moment, once the sheet is in front"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        )
     } else {
         accept_button
     };

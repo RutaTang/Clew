@@ -685,11 +685,22 @@ impl App {
 
     /// A key the overlay on top (`ui::active_overlay`) takes for itself,
     /// besides the Esc every overlay takes: the finder's ↑/↓, which move its
-    /// selection. `None` when the key is not the overlay's to take.
+    /// selection; a menu's, which put the keyboard's ring on its first row
+    /// (↓) or its last (↑), from where the arrows walk its rows and Enter
+    /// presses one — they did nothing, and a menu was the mouse's alone.
+    /// `None` when the key is not the overlay's to take.
     fn overlay_key(&mut self, key: &keyboard::Key) -> Option<Task<Message>> {
         use keyboard::Key;
         use keyboard::key::Named;
-        let delta = match (ui::active_overlay(self)?, key.as_ref()) {
+        let overlay = ui::active_overlay(self)?;
+        if overlay.is_menu() && self.ring.is_none() {
+            return match key.as_ref() {
+                Key::Named(Named::ArrowDown) => Some(self.on_tab(true, false)),
+                Key::Named(Named::ArrowUp) => Some(self.on_tab(false, false)),
+                _ => None,
+            };
+        }
+        let delta = match (overlay, key.as_ref()) {
             (ui::ActiveOverlay::Finder, Key::Named(Named::ArrowDown)) => 1,
             (ui::ActiveOverlay::Finder, Key::Named(Named::ArrowUp)) => -1,
             _ => return None,

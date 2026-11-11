@@ -1611,6 +1611,9 @@ struct State<P> {
     last_hover: Option<(usize, usize)>,
     /// Row the mouse currently hovers, to reveal the fold arrow on that line.
     hover_row: Option<usize>,
+    /// The gutter row the pointer is over, where a click sets a breakpoint:
+    /// redrawn as it moves, for the dot shown there before it is set.
+    breakpoint_row: Option<usize>,
     /// True while dragging the minimap to scroll.
     minimap_drag: bool,
     cache: RefCell<LineCache<P>>,
@@ -1640,6 +1643,7 @@ impl<P> Default for State<P> {
             cmd_held: false,
             last_hover: None,
             hover_row: None,
+            breakpoint_row: None,
             minimap_drag: false,
             cache: RefCell::new(LineCache::default()),
             sticky_cache: RefCell::new(StickyCache::default()),
@@ -1847,6 +1851,15 @@ where
                 shell.capture_event();
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let breakpoint_row = self.on_breakpoint.as_ref().and_then(|_| {
+                    let p = cursor.position_in(bounds)?;
+                    (p.x < FOLD_ARROW_COL as f32 * state.char_width)
+                        .then(|| (p.y / self.line_height) as usize)
+                });
+                if state.breakpoint_row != breakpoint_row {
+                    state.breakpoint_row = breakpoint_row;
+                    shell.request_redraw();
+                }
                 // Track the hovered row so the fold arrow can appear on it.
                 if self.fold_headers.is_some()
                     && let Some(p) = cursor.position_in(bounds)
@@ -2030,6 +2043,13 @@ where
         let indent_step = self.indent_guides.then(|| {
             indent_step((0..self.lines.len().min(INDENT_SAMPLE_LINES)).map(|l| self.indent_of(l)))
         });
+        // The row of the gutter the pointer is over, where a click sets a
+        // breakpoint: shown there, faintly, before it is set — with nothing
+        // to see, click-to-set was found only by chance.
+        let hover_gutter_row = self.on_breakpoint.as_ref().and_then(|_| {
+            let point = cursor.position_in(bounds)?;
+            (point.x < FOLD_ARROW_COL as f32 * state.char_width).then(|| (point.y / lh) as usize)
+        });
         for row in first..last {
             if row < first_shown_row {
                 continue;
@@ -2089,12 +2109,13 @@ where
             }
             // Its marks at the gutter's left: a bookmark's ribbon, then a
             // breakpoint — each a shape, not a colour alone (`gutter_marks`).
-            for mark in gutter_marks(
+            for mark in line_marks(
                 self.bookmarks.contains(&(i + 1)),
                 self.breakpoints.contains(&(i + 1)).then(|| BreakpointMark {
                     conditional: self.cond_breakpoints.contains(&(i + 1)),
                     refused: self.unverified_breakpoints.contains(&(i + 1)),
                 }),
+                hover_gutter_row == Some(row),
                 bounds.x,
                 y,
                 lh,
@@ -2785,6 +2806,31 @@ fn gutter_marks(
     marks
 }
 
+/// A line's gutter marks ([`gutter_marks`]), and where the pointer is over
+/// its gutter (`hovered`) with no breakpoint set there, the one a click
+/// would set: its dot, faint. With nothing shown before it was set,
+/// click-to-set was found only by chance.
+fn line_marks(
+    bookmark: bool,
+    breakpoint: Option<BreakpointMark>,
+    hovered: bool,
+    x: f32,
+    y: f32,
+    lh: f32,
+    room: f32,
+) -> Vec<GutterMark> {
+    let ghost = hovered && breakpoint.is_none();
+    let shown = breakpoint.or(ghost.then_some(BreakpointMark {
+        conditional: false,
+        refused: false,
+    }));
+    let mut marks = gutter_marks(bookmark, shown, x, y, lh, room);
+    if ghost && let Some(dot) = marks.last_mut() {
+        dot.color = theme::with_alpha(dot.color, 0.35);
+    }
+    marks
+}
+
 /// The box a text the code view draws is clipped to: its own, `width`
 /// across and a row `lh` tall from `(x, y)`. Never the whole viewport: the
 /// software renderer masks a text to its layer only when the box it is
@@ -3217,6 +3263,33 @@ mod tests {
     /// line number tinted was all it had), the conditional breakpoint a
     /// rounded square beside the plain one's dot, a refused one a ring. And
     /// both on one line, side by side.
+    /// The gutter shows, faintly, the breakpoint a click there would set —
+    /// only where none is set, and not over a bookmark's ribbon.
+    #[test]
+    fn a_hovered_gutter_shows_the_breakpoint_a_click_would_set() {
+        use super::{BreakpointMark, line_marks};
+        let set = BreakpointMark {
+            conditional: false,
+            refused: false,
+        };
+        assert!(line_marks(false, None, false, 0.0, 0.0, 20.0, 0.0).is_empty());
+        let ghost = line_marks(false, None, true, 0.0, 0.0, 20.0, 0.0);
+        assert_eq!(ghost.len(), 1, "the dot a click would set");
+        assert!(ghost[0].color.a < 0.5 && ghost[0].filled, "{ghost:?}");
+        let real = line_marks(false, Some(set), true, 0.0, 0.0, 20.0, 0.0);
+        assert_eq!(real.len(), 1);
+        assert_eq!(
+            real[0].color.a, 1.0,
+            "a set breakpoint is not faint: {real:?}"
+        );
+        assert_eq!(real[0].bounds, ghost[0].bounds, "where it would be set");
+        // With a bookmark: its ribbon as it is, the faint dot beside it.
+        let both = line_marks(true, None, true, 0.0, 0.0, 20.0, 0.0);
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[0].color.a, 1.0, "the ribbon is not faint");
+        assert!(both[1].color.a < 0.5);
+    }
+
     #[test]
     fn gutter_marks_are_shapes_not_only_colours() {
         use super::{BreakpointMark, gutter_marks};

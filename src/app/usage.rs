@@ -588,12 +588,37 @@ pub(crate) fn tokens(n: u64) -> String {
         // Below what rounds to a thousand thousand: 999,500 read "1000k".
         let k = n as f64 / 1_000.0;
         if k < 10.0 {
-            format!("{:.1}k", k).replace(".0k", "k")
+            one_place(k, "k")
         } else {
             format!("{}k", k.round() as u64)
         }
     } else {
-        format!("{:.1}M", n as f64 / 1_000_000.0).replace(".0M", "M")
+        one_place(n as f64 / 1_000_000.0, "M")
+    }
+}
+
+/// `x` to one place, its decimal mark the reader's ("1.4k", "1,4k"), with
+/// no ".0", and `unit` after it.
+fn one_place(x: f64, unit: &str) -> String {
+    let text = crate::i18n::decimal(x, 1);
+    let whole = text
+        .strip_suffix(".0")
+        .or_else(|| text.strip_suffix(",0"))
+        .unwrap_or(&text);
+    format!("{whole}{unit}")
+}
+
+/// An amount in dollars as the reader writes one: "$0.30"; in French
+/// "0,30 $", the mark a comma and the sign after it.
+pub(crate) fn dollars_said(amount: f64, places: usize) -> String {
+    let figures = if places == 0 && amount == amount.trunc() {
+        format!("{}", amount as u64)
+    } else {
+        crate::i18n::decimal(amount, places)
+    };
+    match crate::i18n::current() {
+        crate::i18n::Lang::Fr => format!("{figures}\u{a0}$"),
+        _ => format!("${figures}"),
     }
 }
 
@@ -601,13 +626,13 @@ pub(crate) fn tokens(n: u64) -> String {
 /// figures that tell it ($0.0031), nothing as $0.
 pub(crate) fn money(dollars: f64) -> String {
     if dollars <= 0.0 {
-        "$0".into()
+        dollars_said(0.0, 0)
     } else if dollars >= 0.01 {
-        format!("${dollars:.2}")
+        dollars_said(dollars, 2)
     } else if dollars >= 0.0001 {
-        format!("${dollars:.4}")
+        dollars_said(dollars, 4)
     } else {
-        "<$0.0001".into()
+        format!("<{}", dollars_said(0.0001, 4))
     }
 }
 
@@ -619,9 +644,9 @@ pub(crate) fn money_in_column(dollars: f64, fine: bool) -> String {
         return money(dollars);
     }
     if dollars > 0.0 && dollars < 0.0001 {
-        "<$0.0001".into()
+        format!("<{}", dollars_said(0.0001, 4))
     } else {
-        format!("${:.4}", dollars.max(0.0))
+        dollars_said(dollars.max(0.0), 4)
     }
 }
 
@@ -1185,6 +1210,15 @@ mod tests {
         assert_eq!(money(0.00001), "<$0.0001");
         assert_eq!(price_text(0.15), "0.15");
         assert_eq!(price_text(2.0), "2");
+        // In French: a comma for the mark, the sign after the amount.
+        crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
+            assert_eq!(money(0.0), "0\u{a0}$");
+            assert_eq!(money(12.5), "12,50\u{a0}$");
+            assert_eq!(money(0.00001), "<0,0001\u{a0}$");
+            assert_eq!(tokens(1_450), "1,4k");
+            assert_eq!(tokens(1_000), "1k");
+            assert_eq!(tokens(1_400_000), "1,4M");
+        });
     }
 
     /// A line torn by a crash, or a newer Clew's, is skipped; the rest read.

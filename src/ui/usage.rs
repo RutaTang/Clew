@@ -218,7 +218,14 @@ pub(crate) fn balance_said(amounts: &[(String, String)]) -> String {
 fn amount(currency: &str, value: &str) -> String {
     match currency {
         "CNY" => format!("CN¥{value}"),
-        "USD" => format!("${value}"),
+        // As every other amount on the page is said (in French "3,10 $").
+        "USD" => value.trim().parse::<f64>().map_or_else(
+            |_| format!("${value}"),
+            |v| {
+                let places = value.split_once('.').map_or(0, |(_, cents)| cents.len());
+                usage::dollars_said(v, places)
+            },
+        ),
         other => format!("{value} {other}"),
     }
 }
@@ -369,8 +376,13 @@ fn calls_count(t: &Totals) -> String {
     trn!("1 call", "{n} calls", t.calls as usize)
 }
 
-/// "12 calls, 48k tokens".
+/// "12 calls, 48k tokens"; "No calls" where there were none ("0 calls, 0
+/// tokens" read as a sum to make, and in French mixed the singular with
+/// the plural).
 fn calls_line(t: &Totals) -> String {
+    if t.calls == 0 {
+        return tr!("No calls").to_string();
+    }
     trn!(
         "1 call, {tokens} tokens",
         "{n} calls, {tokens} tokens",
@@ -563,10 +575,11 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
 /// A price per million tokens as the line says it: "$0.30", "$0.006".
 fn price_said(dollars: f64) -> String {
     let text = usage::price_text(dollars);
-    // Cents kept to two places: "$0.3" read as thirty cents to no one.
-    match text.split_once('.') {
-        Some((_, cents)) if cents.len() == 1 => format!("${text}0"),
-        Some(_) => format!("${text}"),
-        None => format!("${text}.00"),
-    }
+    // Cents kept to two places: "$0.3" read as thirty cents to no one —
+    // and more where the price has them, in the reader's own way.
+    let places = text
+        .split_once('.')
+        .map_or(0, |(_, cents)| cents.len())
+        .max(2);
+    usage::dollars_said(dollars, places)
 }

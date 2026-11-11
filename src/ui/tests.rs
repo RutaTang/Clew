@@ -5294,6 +5294,33 @@ fn open_sheet(
     super::setup::setup_sheet(app, root, None, asked)
 }
 
+/// A first open's Open, held a moment so the sheet is read before it is
+/// pressed (or while the window is behind another), says why where the
+/// pointer rests: a press then did nothing, with no word why. Once it
+/// counts, nothing is said.
+#[test]
+fn a_held_open_says_why_it_waits() {
+    let root = std::path::Path::new("/nonexistent/clew-held");
+    let why = "Ready in a moment, once the sheet is in front";
+    let says_why = |ready: bool| {
+        let at = {
+            let mut sim = sim_elem(open_sheet(root, ready));
+            text_at(&mut sim, |t| t == "Open", 0)
+                .expect("Open")
+                .center()
+        };
+        super::tip::warm_now();
+        let mut sim = sim_elem(open_sheet(root, ready));
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        shows(&mut sim, why)
+    };
+    assert!(says_why(false), "a held Open says nothing of why");
+    assert!(!says_why(true), "a ready Open says it waits");
+}
+
 /// The setup sheet says, in a line each, where clew keeps its data, what
 /// its servers take and what explaining costs; its ticks and buttons send
 /// what they say.
@@ -17707,6 +17734,46 @@ fn a_right_click_on_a_tree_row_opens_its_menu_at_the_pointer() {
     let mut sim = sim_sized(&app, size);
     assert!(shows(&mut sim, "Expand Folder"));
     assert!(!shows(&mut sim, "Open to the Side"));
+}
+
+/// A menu is the keyboard's too: ↓ puts the ring on its first row (↑ on
+/// its last), the arrows walk its rows, saying each, and Enter presses the
+/// one it is on. They did nothing: a menu was the mouse's alone.
+#[test]
+fn the_arrows_walk_a_menu_and_enter_presses_its_row() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: Vec::new(),
+        files: vec!["README.md".into()],
+    };
+    app.proj.tree_menu = Some(crate::app::state::TreeMenu {
+        rel: "README.md".into(),
+        dir: false,
+        x: 120.0,
+        y: 120.0,
+    });
+    let none = keyboard::Modifiers::empty();
+    let mut driven = Driven::sized(&app, size);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert!(app.ring.is_some(), "the ring is up on the menu");
+    assert_eq!(app.status, "Open", "on its first row");
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert_eq!(app.status, "Open to the Side");
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
+    assert_eq!(app.status, "Open");
+    assert!(app.proj.tree_menu.is_some(), "walked, not pressed");
+    // ↑ first: its last row.
+    app.ring = None;
+    let mut driven = Driven::sized(&app, size);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
+    assert_eq!(app.status, "Show in File Manager", "on its last row");
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
+    let row = app.status.clone();
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.proj.tree_menu.is_none(), "{row:?} was not pressed");
 }
 
 /// With a menu up, a right-click on another row puts it away and opens
