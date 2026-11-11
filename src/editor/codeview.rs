@@ -83,7 +83,7 @@ const MINIMAP_WIDTH: f32 = 56.0;
 const MINIMAP_LANE: f32 = 8.0;
 /// The gap between the code and the minimap band.
 const MINIMAP_GAP: f32 = 6.0;
-const MINIMAP_MIN_ROWS: usize = 40;
+pub(crate) const MINIMAP_MIN_ROWS: usize = 40;
 /// Display columns a full-width minimap bar represents.
 const MINIMAP_FULL_COLS: f32 = 100.0;
 /// Finite layout width for a single unwrapped line. Large enough for any line,

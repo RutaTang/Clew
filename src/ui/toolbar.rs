@@ -1759,8 +1759,26 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
                 check(on),
                 enabled.then(|| r.message()),
             );
+            // The minimap on, on a file too short for one: said why there is
+            // none, where the tick alone looked broken.
+            let short_file = r == ViewRow::Minimap
+                && app.show_minimap
+                && app
+                    .active_viewer()
+                    .is_some_and(|v| v.content_rows() < crate::codeview::MINIMAP_MIN_ROWS);
             // Inert, it says why where the pointer rests.
-            if enabled {
+            if short_file {
+                tip_at(
+                    item,
+                    trn!(
+                        "Shown for files over 1 line",
+                        "Shown for files over {n} lines",
+                        crate::codeview::MINIMAP_MIN_ROWS
+                    ),
+                    None,
+                    tooltip::Position::Right,
+                )
+            } else if enabled {
                 item
             } else {
                 tip_at(

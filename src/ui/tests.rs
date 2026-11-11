@@ -16915,3 +16915,16 @@ fn a_local_call_is_counted_where_it_is_shown() {
         "the answer shows what it cost"
     );
 }
+
+/// A folder's change dot counts only what the tree shows inside it: a
+/// dot for `__pycache__/*.pyc`, hidden by the tree, led nowhere.
+#[test]
+fn a_folder_marks_only_the_changes_the_tree_shows() {
+    use super::sidebar::shown_in_tree;
+    assert!(shown_in_tree("shop/cart.py"));
+    assert!(!shown_in_tree("shop/__pycache__/cart.cpython-313.pyc"));
+    assert!(!shown_in_tree("web/node_modules/x/index.js"));
+    assert!(!shown_in_tree(".clew/bookmarks.json"));
+    assert!(shown_in_tree(".clew/launch.json"));
+    assert!(shown_in_tree("README.md"));
+}

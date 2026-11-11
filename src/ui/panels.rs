@@ -66,13 +66,20 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
     };
     // A borderless "hide" affordance — no button box, just a chevron that
     // brightens on hover.
-    let collapse = button(glyph::icon(Glyph::ChevronDown, theme::fg_muted(), 12.0))
-        .style(theme::list_row(false))
-        .padding([3, 10])
-        .on_press(super::heard::said(
-            tr!("Hide panel"),
-            Message::Window(WindowMsg::CollapseBottom),
-        ));
+    // Named where the pointer rests, with the way back: hidden, the panel
+    // left nothing on screen to bring it back by.
+    let collapse = super::toolbar::tip_at(
+        button(glyph::icon(Glyph::ChevronDown, theme::fg_muted(), 12.0))
+            .style(theme::list_row(false))
+            .padding([3, 10])
+            .on_press(super::heard::said(
+                tr!("Hide panel"),
+                Message::Window(WindowMsg::CollapseBottom),
+            )),
+        tr!("Hide the panel. Run or Debug shows it again."),
+        None,
+        tooltip::Position::Left,
+    );
     let mut top = row![].spacing(2).align_y(iced::Center);
     top = if faces.is_empty() {
         top.push(head).push(space().width(Fill))

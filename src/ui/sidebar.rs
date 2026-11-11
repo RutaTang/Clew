@@ -800,19 +800,40 @@ pub(crate) fn file_change_mark<'a>(app: &App, rel: &str) -> Element<'a, Message>
 /// A folder holding a change: a dot, as editors mark one.
 fn dir_change_mark<'a>(app: &App, rel: &str) -> Element<'a, Message> {
     let inside = format!("{rel}/");
-    if app
+    // Only what the tree shows inside: a dot for `__pycache__/*.pyc`, which
+    // the tree hides, led nowhere when the folder was opened.
+    let changed = app
         .proj
         .git_status
         .keys()
-        .any(|changed| changed.starts_with(&inside))
-    {
+        .filter(|changed| changed.starts_with(&inside) && shown_in_tree(changed))
+        .count();
+    if changed == 0 {
+        return space().width(0).into();
+    }
+    super::toolbar::tip_at(
         text("●")
             .size(ts::CAPTION)
-            .color(theme::with_alpha(theme::warning(), 0.8))
-            .into()
-    } else {
-        space().width(0).into()
+            .color(theme::with_alpha(theme::warning(), 0.8)),
+        trn!("1 changed file inside", "{n} changed files inside", changed),
+        None,
+        iced::widget::tooltip::Position::Right,
+    )
+}
+
+/// Whether the file tree shows the file at `rel`: none in a folder it
+/// leaves out (`__pycache__`, `node_modules`, `.clew` but for the files of
+/// it that are shown).
+pub(crate) fn shown_in_tree(rel: &str) -> bool {
+    use clew_core::fs_scan::{NOISE_DIRS, VISIBLE_CLEW_FILES};
+    let parts: Vec<&str> = rel.split('/').collect();
+    let Some((_, dirs)) = parts.split_last() else {
+        return true;
+    };
+    if let [".clew", name] = parts.as_slice() {
+        return VISIBLE_CLEW_FILES.contains(name);
     }
+    !dirs.iter().any(|d| NOISE_DIRS.contains(d))
 }
 
 /// The colour of a change's letter.

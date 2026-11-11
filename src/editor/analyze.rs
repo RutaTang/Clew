@@ -128,6 +128,18 @@ pub fn word_at(lines: &[HlLine], line: usize, col: usize) -> Option<String> {
     Some(line_window(l, start, end).into_iter().collect())
 }
 
+/// [`word_at`], for a word of the code itself: none inside a string or a
+/// comment. Clicked inside "declined@example.com", every `declined`
+/// variable of the function lit up, as if the text named it.
+pub fn code_word_at(lines: &[HlLine], line: usize, col: usize) -> Option<String> {
+    let (start, _) = word_range_at(lines, line, col)?;
+    let (_, _, _, style) = locate(lines, line, start)?;
+    if is_literal(style) {
+        return None;
+    }
+    word_at(lines, line, col)
+}
+
 /// Whole-word occurrences of `word` across `lines`, as (line, col0, col1) in
 /// display columns. `cap` bounds how many matches are returned, not how much is
 /// scanned: every line is still visited, so the per-line cost has to stay low.
@@ -530,6 +542,11 @@ mod tests {
         let lines = highlight_lines(src, Some("rust"));
         let occ = occurrences("foo", &lines, 100);
         assert_eq!(occ, vec![(0, 4, 7)]);
+        // And the caret in the string's or the comment's `foo` lights
+        // nothing: the word there is not the variable's.
+        assert_eq!(code_word_at(&lines, 0, 5).as_deref(), Some("foo"));
+        assert_eq!(code_word_at(&lines, 1, 10), None);
+        assert_eq!(code_word_at(&lines, 2, 4), None);
     }
 
     /// Reference implementation of bracket matching: the plain per-character

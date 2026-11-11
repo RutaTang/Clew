@@ -1923,8 +1923,9 @@ impl App {
             return out;
         };
 
-        // Occurrences of the identifier under the cursor (2+ to be useful).
-        if let Some(word) = analyze::word_at(&v.lines, line, col) {
+        // Occurrences of the identifier under the cursor (2+ to be useful) —
+        // one of the code's, not a word in a string or a comment.
+        if let Some(word) = analyze::code_word_at(&v.lines, line, col) {
             let occ = v.occurrences(&word, 500);
             if occ.len() > 1 {
                 for (l, c0, c1) in occ {
