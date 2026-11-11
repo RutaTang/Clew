@@ -1536,12 +1536,31 @@ impl App {
     /// (Skim near its end) showed nothing but its last line.
     fn fold_in(&mut self, pane: usize, fold: impl FnOnce(&mut Viewer)) -> Task<Message> {
         let line_height = self.line_height();
+        // Time Travel shows its own view in this pane's place, by this
+        // pane's scroll id: the live file's rows are not its.
+        let in_time_travel = ui::time_travel_pane(self) == Some(pane);
         let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) else {
             return Task::none();
         };
         let caret = v.caret;
+        let rows = v.content_rows();
         let top = v.line_at_row((v.scroll_y / line_height.max(1.0)) as usize);
         fold(v);
+        // Scrolled by the code's rows only where the view is them, and only
+        // when the fold changed them: a notebook's cells and a rendered
+        // document scroll by their own measure, and a fold that changed
+        // nothing (`za` off a fold, `zR` with none closed) snapped the view
+        // to a row.
+        let by_rows = !in_time_travel
+            && v.notebook.is_none()
+            && (v.md.is_none() || v.show_source)
+            && v.content_rows() != rows;
+        if !by_rows {
+            if v.caret != caret {
+                self.reader_moved_caret(pane);
+            }
+            return Task::none();
+        }
         let row = v.row_of(top);
         // Folded away: its fold's header, the visible line before it.
         let row = if v.line_at_row(row) == top {

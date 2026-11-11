@@ -138,8 +138,10 @@ impl App {
         if !give_back {
             return None;
         }
-        let held_above =
-            ui::active_overlay(self).is_some_and(|o| o.holds_keys()) || self.tutorial.is_some();
+        // Ask made large holds them too, as a dialog does.
+        let held_above = ui::active_overlay(self).is_some_and(|o| o.holds_keys())
+            || self.tutorial.is_some()
+            || self.ask_view == crate::AskView::Expanded;
         self.code_focused = self.ring_code && !held_above;
         if self.ring_code {
             return None;
@@ -188,10 +190,41 @@ impl App {
                 Some(task)
             }
             Key::Named(Named::Escape) => Some(self.end_ring(true).unwrap_or_else(Task::none)),
-            // Any other key puts the ring away and does what it does — but
-            // for one given back to the field the ring came up from: it
-            // went to no field, and the field has the keys again.
-            _ => self.end_ring(true),
+            // Any other key puts the ring away and does what it does. Given
+            // back to the field the ring came up from, what is typed is the
+            // field's to have, and went to no field; a shortcut (with a
+            // modifier, or a function key) does what it does once the field
+            // has the keys again — it only put the ring away, and had to be
+            // pressed twice.
+            _ => {
+                let give_back = self.end_ring(true)?;
+                let shortcut = !plain
+                    || matches!(
+                        key.as_ref(),
+                        Key::Named(
+                            Named::F1
+                                | Named::F2
+                                | Named::F3
+                                | Named::F4
+                                | Named::F5
+                                | Named::F6
+                                | Named::F7
+                                | Named::F8
+                                | Named::F9
+                                | Named::F10
+                                | Named::F11
+                                | Named::F12
+                        )
+                    );
+                Some(if shortcut {
+                    give_back.chain(Task::done(Message::Editor(EditorMsg::KeyPressed(
+                        key.clone(),
+                        modifiers,
+                    ))))
+                } else {
+                    give_back
+                })
+            }
         }
     }
 
@@ -254,7 +287,8 @@ impl App {
             && self.proj.ask_input.trim().is_empty()
             && self.proj.ask_turns.len() == turns
         {
-            self.ask_view = crate::AskView::Hidden;
+            // As its × puts it away: its menu of sessions with it.
+            self.put_ask_away();
         }
         match region {
             Region::Code => {
@@ -512,6 +546,26 @@ impl App {
                 }
                 self.reader_moved_caret(self.proj.active);
                 Task::none()
+            }
+            // A page, the line's ends and — with ⌘ (Ctrl) — the file's: the
+            // keys every editor reads by, which did nothing here. Only while
+            // the code has the keys, as the motions below.
+            Key::Named(named @ (Named::PageUp | Named::PageDown | Named::Home | Named::End))
+                if self.code_focused
+                    && !self.proj.finder.open
+                    && self.proj.context_menu.is_none()
+                    && self.active_viewer().is_some() =>
+            {
+                self.pending_g = false;
+                self.pending_z = false;
+                match (named, cmd) {
+                    (Named::PageDown, _) => self.scroll_pages(1),
+                    (Named::PageUp, _) => self.scroll_pages(-1),
+                    (Named::Home, true) => self.move_cursor(viewer::Motion::FileStart),
+                    (Named::End, true) => self.move_cursor(viewer::Motion::FileEnd),
+                    (Named::Home, false) => self.move_cursor(viewer::Motion::LineStart),
+                    _ => self.move_cursor(viewer::Motion::LineEnd),
+                }
             }
             // -------- Vim-style read-only cursor (only when the code view has
             // focus, so it never steals keys from a text input) --------

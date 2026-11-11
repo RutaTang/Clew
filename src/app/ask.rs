@@ -320,10 +320,18 @@ impl App {
     /// Hide the card to its pill in the corner, the keyboard back with the
     /// code; the conversation is kept, a click on the pill away.
     pub(crate) fn hide_ask(&mut self) {
+        self.put_ask_away();
+        self.code_focused = true;
+    }
+
+    /// Ask hidden to its pill, its menu of sessions closed and emptied —
+    /// and no longer F6's to put away: opened again by hand after, F6
+    /// going on from it hid the Ask the reader had opened.
+    pub(crate) fn put_ask_away(&mut self) {
         self.ask_sessions_menu = false;
         self.ask_sessions_query.clear();
         self.ask_view = AskView::Hidden;
-        self.code_focused = true;
+        self.ask_by_f6 = None;
     }
 
     /// Esc's step down for the Ask window: large to a card, a card hidden to

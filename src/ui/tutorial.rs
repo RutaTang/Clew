@@ -87,6 +87,17 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
                 2.0 * TOOL_HOLE_HALF,
             )
         }
+        // The four ways to run, from Run to Fake Debug; folded into the
+        // bug, the bug.
+        Anchor::RunTools => {
+            let (first, last) = run_tools_span(app);
+            rect(
+                first.x - TOOL_HOLE_HALF,
+                first.y - TOOL_HOLE_HALF,
+                2.0 * TOOL_HOLE_HALF,
+                last.y - first.y + 2.0 * TOOL_HOLE_HALF,
+            )
+        }
         // A row (or run of rows) in the opened ⋯ menu. The hole hugs the item
         // column exactly (no bleed past the panel edge), so the inset outline
         // frames it evenly without catching a neighbour.
@@ -110,6 +121,21 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
             main_bot - main_top,
         ),
         _ => None,
+    }
+}
+
+/// Centres of the first and last of the strip's ways to run: Run and Fake
+/// Debug, or — folded into the bug's menu where the strip is short — the
+/// bug, twice.
+fn run_tools_span(app: &App) -> (iced::Point, iced::Point) {
+    if super::toolbar::runs_on_strip(app) {
+        (
+            strip_tool_center(app, StripTool::Run),
+            strip_tool_center(app, StripTool::FakeDebug),
+        )
+    } else {
+        let bug = strip_tool_center(app, StripTool::RunMenu);
+        (bug, bug)
     }
 }
 
@@ -415,6 +441,20 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
                 ..Padding::ZERO
             },
         ),
+        // The four ways to run: the card just left of them, level with
+        // their middle.
+        Anchor::RunTools => {
+            let (first, last) = run_tools_span(app);
+            (
+                Horizontal::Right,
+                Vertical::Top,
+                Padding {
+                    top: ((first.y + last.y) / 2.0 - 60.0).clamp(lo, hi),
+                    right: STRIP_W + gap,
+                    ..Padding::ZERO
+                },
+            )
+        }
         // A tool on the strip: the card just left of it, level with it.
         Anchor::Strip(tool) => (
             Horizontal::Right,

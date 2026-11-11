@@ -18,6 +18,7 @@ pub(crate) fn button<'a>(content: impl Into<Element<'a, Message>>) -> Press<'a> 
     Press {
         inner: iced_button(content),
         press: None,
+        name: None,
     }
 }
 
@@ -26,12 +27,17 @@ pub(crate) struct Press<'a> {
     inner: iced_button::Button<'a, Message>,
     /// Its press, kept only while a mark wants it ([`super::jump::wanted`]).
     press: Option<Message>,
+    /// What it is called, as its control said when it was given its press.
+    name: Option<String>,
 }
 
 impl<'a> Press<'a> {
     /// What pressing it sends.
     pub(crate) fn on_press(mut self, message: Message) -> Self {
         if super::jump::wanted() {
+            self.name = super::jump::naming()
+                .then(|| super::heard::name_of(&message))
+                .flatten();
             self.press = Some(message.clone());
         }
         self.inner = self.inner.on_press(message);
@@ -45,6 +51,7 @@ impl<'a> Press<'a> {
             None => Press {
                 inner: self.inner.on_press_maybe(None),
                 press: None,
+                name: None,
             },
         }
     }
@@ -76,7 +83,7 @@ impl<'a> Press<'a> {
 impl<'a> From<Press<'a>> for Element<'a, Message> {
     fn from(press: Press<'a>) -> Self {
         match press.press {
-            Some(message) => super::jump::mark(press.inner, message),
+            Some(message) => super::jump::mark_named(press.inner, message, press.name),
             None => press.inner.into(),
         }
     }

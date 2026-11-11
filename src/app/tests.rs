@@ -29643,11 +29643,16 @@ fn an_overlay_over_a_time_travel_session_takes_its_keys_first() {
     let _ = app.update(esc_press());
     assert!(!app.show_tools_menu);
     assert_eq!(revision(&app), Some(0));
+    // The bug's Run menu: there where the strip is too short for the four
+    // ways to run.
+    let tall = app.window_height;
+    app.window_height = 540.0;
     let _ = app.update(Message::Window(WindowMsg::ToggleRunMenu));
     assert!(app.show_run_menu);
     let _ = app.update(esc_press());
     assert!(!app.show_run_menu, "the Run menu takes Esc");
     assert_eq!(revision(&app), Some(0));
+    app.window_height = tall;
 
     // The shortcuts panel takes every key, the session's chords included.
     let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));

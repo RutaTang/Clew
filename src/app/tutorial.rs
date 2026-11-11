@@ -58,6 +58,9 @@ pub enum Anchor {
     AskCorner,
     /// A tool on the strip down the window's right edge.
     Strip(StripTool),
+    /// The strip's four ways to run (Run, Fake Run, Debug, Fake Debug) —
+    /// or the bug they fold into where the strip is short.
+    RunTools,
     /// A row (or a run of `count` rows) in the opened ⋯ menu, by index from the
     /// top. Steps using this open the menu so its items are visible.
     ToolbarMenu { first: usize, count: usize },
@@ -354,8 +357,8 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::Run,
             tr!("Run and debug"),
-            tr!("The bug runs main.py: Run to its end, or Debug to stop at a breakpoint in checkout() and see its variables and its stack. Fake Run and Fake Debug have the AI work a function out on inputs you give, without running anything."),
-            Anchor::Strip(StripTool::Debug),
+            tr!("Run main.py to its end, or Debug it to stop at a breakpoint in checkout() and see its variables and its stack. Fake Run and Fake Debug, each under its twin, have the AI work a function out on inputs you give, without running anything."),
+            Anchor::RunTools,
         )
         .demo(Message::Window(WindowMsg::ShowDebugPanel)),
         TutStep::new(

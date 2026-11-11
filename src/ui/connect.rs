@@ -2596,11 +2596,19 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
     }
 
     // Read-only reading motions (not part of the customizable keymap).
-    let motions: [(&str, &str); 19] = [
+    // The keys as they are named on the keyboard: Return on a Mac's,
+    // Enter on others'.
+    let press_keys = if cfg!(target_os = "macos") {
+        "Return   Space"
+    } else {
+        "Enter   Space"
+    };
+    let motions: [(&str, &str); 20] = [
         (tr!("Move left / down / up / right"), "h j k l   ← ↓ ↑ →"),
         (tr!("Word forward / back"), "w   b"),
-        (tr!("Line start / end"), "0   $"),
-        (tr!("File start / end"), "gg   G"),
+        (tr!("Line start / end"), "0   $   Home   End"),
+        (tr!("File start / end"), "gg   G   ⌘Home   ⌘End"),
+        (tr!("Page up / down"), "PgUp   PgDn"),
         (tr!("Go to definition"), "gd"),
         (tr!("Find references"), "gr"),
         (tr!("Go to implementation"), "gi"),
@@ -2611,14 +2619,14 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
         (tr!("Open all folds"), "zR"),
         (tr!("Close all folds"), "zM"),
         (tr!("Time Travel: older / newer commit"), "⌘←   ⌘→"),
-        (tr!("Next / previous control or field"), "tab   ⇧tab"),
-        (tr!("Press the control the ring is on"), "return   space"),
+        (tr!("Next / previous control or field"), "Tab   ⇧Tab"),
+        (tr!("Press the control the ring is on"), press_keys),
         (tr!("Code / sidebar / file tree / Ask"), "F6   ⇧F6"),
         (
             tr!("File tree: walk it, open a folder / close it"),
             "↑ ↓ → ←   j k l h",
         ),
-        (tr!("Close the top panel / clear selection"), "esc"),
+        (tr!("Close the top panel / clear selection"), "Esc"),
     ];
     let vim = motions
         .into_iter()

@@ -727,7 +727,10 @@ impl App {
                 Task::none()
             }
             WindowMsg::ToggleRunMenu => {
-                let open = !self.show_run_menu;
+                // The four ways to run on the strip, there is no bug to
+                // open their menu from: one opened then hung under a button
+                // not there.
+                let open = !self.show_run_menu && !crate::ui::runs_on_strip(self);
                 self.close_menus();
                 self.show_run_menu = open;
                 Task::none()

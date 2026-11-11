@@ -287,6 +287,13 @@ fn start(forward: bool, n: usize) -> usize {
     if forward { 0 } else { n - 1 }
 }
 
+/// Where the ring was on a layer another came up over: the layer, the
+/// place, and the stop there — found again by it once the layer is back on
+/// top, the place only when it is gone. By place alone, a window changed
+/// under a dialog (a file opened from the finder) gave the ring back on
+/// another control: the title bar's Close, at the end.
+pub(crate) type Saved = (Layer, usize, Option<StopKey>);
+
 /// Where the ring was last placed in a window, and what is kept for a
 /// layer under the one on top.
 #[derive(Debug, Clone)]
@@ -299,7 +306,7 @@ pub(crate) struct Placed {
     pub(crate) top: Layer,
     /// Where it was on each layer a layer came up over: where it goes back
     /// to when that layer goes.
-    pub(crate) saved: Vec<(Layer, usize)>,
+    pub(crate) saved: Vec<Saved>,
     pub(crate) target: Option<StopKind>,
     /// The stop it is on, as found again once the window changes.
     pub(crate) key: Option<StopKey>,
@@ -309,6 +316,10 @@ pub(crate) struct Placed {
     /// The field that held the keys when the ring came up from it, by its
     /// id: they go back to it when the ring is put away by a key.
     pub(crate) from: Option<Id>,
+    /// Whether that field is among the stops the ring reaches now: one a
+    /// dialog came up over is not, and is not given the keys back — what
+    /// was typed went into it, behind the dialog.
+    pub(crate) from_here: bool,
     /// What pressing the stop it is on sends, for a mark.
     pub(crate) press: Option<crate::Message>,
     /// What the stop it is on is called.
@@ -330,7 +341,7 @@ pub(crate) fn resolve(
     top: Layer,
     scene: Option<&str>,
     last: Option<&Placed>,
-) -> (Option<usize>, Vec<(Layer, usize)>) {
+) -> (Option<usize>, Vec<Saved>) {
     let n = stops.len();
     let mut saved = last.map(|l| l.saved.clone()).unwrap_or_default();
     if n == 0 {
@@ -341,16 +352,21 @@ pub(crate) fn resolve(
     {
         if top > last.top {
             if let Some(at) = last.at {
-                saved.push((last.top, at));
+                saved.push((last.top, at, last.key.clone()));
             }
             return (Some(0), saved);
         }
         let back = saved
             .iter()
-            .rposition(|(layer, _)| *layer == top)
-            .map(|i| saved.remove(i).1);
-        saved.retain(|(layer, _)| *layer < top);
-        return (Some(back.unwrap_or(0).min(n - 1)), saved);
+            .rposition(|(layer, ..)| *layer == top)
+            .map(|i| saved.remove(i));
+        saved.retain(|(layer, ..)| *layer < top);
+        let at = back.map_or(0, |(_, at, key)| {
+            key.as_ref()
+                .and_then(|key| find(stops, key))
+                .unwrap_or(at.min(n - 1))
+        });
+        return (Some(at), saved);
     }
     // Another dialog in the place of the one it was in: its first stop.
     if let Some(last) = last
@@ -500,7 +516,7 @@ mod tests {
         assert_eq!(dialog.len(), 1);
     }
 
-    fn placed(ask: RingAsk, at: usize, top: Layer, saved: Vec<(Layer, usize)>) -> Placed {
+    fn placed(ask: RingAsk, at: usize, top: Layer, saved: Vec<Saved>) -> Placed {
         Placed {
             ask,
             at: Some(at),
@@ -511,6 +527,7 @@ mod tests {
             key: None,
             scene: None,
             from: None,
+            from_here: false,
             press: None,
             name: None,
             announce: false,
@@ -564,7 +581,7 @@ mod tests {
         let under = placed(RingAsk::Kept, 6, Layer::Window, vec![]);
         let (at, saved) = resolve(RingAsk::Kept, &stops, Layer::Overlay, None, Some(&under));
         assert_eq!(at, Some(0));
-        assert_eq!(saved, [(Layer::Window, 6)]);
+        assert_eq!(saved, [(Layer::Window, 6, None)]);
         let over = placed(RingAsk::Kept, 2, Layer::Overlay, saved);
         let (at, saved) = resolve(RingAsk::Kept, &stops, Layer::Window, None, Some(&over));
         assert_eq!(at, Some(6), "back on what opened it");

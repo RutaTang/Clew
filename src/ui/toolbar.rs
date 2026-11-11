@@ -682,7 +682,17 @@ pub(crate) enum StripTool {
     Stats,
     /// The weak spots page.
     WeakSpots,
+    /// The program run to its end, for real.
+    Run,
+    /// A function worked out by the model to its end, on inputs given.
+    FakeRun,
+    /// The program run under the debugger.
     Debug,
+    /// A function worked out by the model, stepped through from its first line.
+    FakeDebug,
+    /// The four above in one menu, from the bug: where the strip is too
+    /// short for them ([`strip_slots`]).
+    RunMenu,
     CallGraph,
     ImportGraph,
     TypeMap,
@@ -695,12 +705,12 @@ pub(crate) enum StripTool {
 
 /// The strip's tools from the top, in their groups, in the order a project
 /// is come to know: the whole of it (Overview, Stats, its weak spots), how its parts
-/// connect (its graphs and maps), running it (Debug) — and More. A rule
-/// stands before each group but the first ([`STRIP_RULE_BEFORE`]). The
+/// connect (its graphs and maps), running it ([`RUN_TOOLS`]) — and More. A
+/// rule stands before each group but the first ([`STRIP_RULE_BEFORE`]). The
 /// strip holds what opens over the code or below it; what opens in the
 /// sidebar is the sidebar's to show ([`super::SIDEBAR_TABS`]). Settings
 /// stands apart, at the strip's foot.
-pub(crate) const STRIP_TOP: [StripTool; 9] = [
+pub(crate) const STRIP_TOP: [StripTool; 12] = [
     StripTool::Overview,
     StripTool::Stats,
     StripTool::WeakSpots,
@@ -708,11 +718,24 @@ pub(crate) const STRIP_TOP: [StripTool; 9] = [
     StripTool::ImportGraph,
     StripTool::TypeMap,
     StripTool::ProjectMaps,
+    StripTool::Run,
+    StripTool::FakeRun,
     StripTool::Debug,
+    StripTool::FakeDebug,
     StripTool::More,
 ];
 /// The [`STRIP_TOP`] positions a group rule stands before.
-const STRIP_RULE_BEFORE: [usize; 3] = [3, 7, 8];
+const STRIP_RULE_BEFORE: [usize; 3] = [3, 7, 11];
+/// The four ways to run, each a button of its own: for real or worked out
+/// by the model, each beside its twin. Behind one bug, Fake Run and Fake
+/// Debug were not found. Where the strip is too short for all four, they
+/// fold back into the bug's menu ([`StripTool::RunMenu`]).
+pub(crate) const RUN_TOOLS: [StripTool; 4] = [
+    StripTool::Run,
+    StripTool::FakeRun,
+    StripTool::Debug,
+    StripTool::FakeDebug,
+];
 
 /// Where the strip's body starts: under the top bar and the update banner.
 pub(crate) fn body_top(app: &App) -> f32 {
@@ -735,22 +758,28 @@ const STRIP_FOOT_GAP: f32 = 12.0;
 /// The strip's slots from the top (Settings, at its foot, apart). Where the
 /// strip is tall enough, the ⋯ menu's rows are laid on it too, in their
 /// groups, and the ⋯ is not there: a menu of what the strip had room to
-/// show was a click more for each of them. Shorter, they stay in the menu.
+/// show was a click more for each of them. Shorter, they stay in the menu;
+/// shorter still, the four ways to run fold into the bug's menu too.
 pub(crate) fn strip_slots(app: &App) -> Vec<StripSlot> {
-    let top = |with_more: bool| {
+    let top = |with_more: bool, runs_folded: bool| {
         let mut slots = Vec::new();
         for (i, t) in STRIP_TOP.iter().enumerate() {
             if *t == StripTool::More && !with_more {
                 continue;
             }
+            let t = match *t {
+                StripTool::Run if runs_folded => StripTool::RunMenu,
+                t if runs_folded && RUN_TOOLS.contains(&t) => continue,
+                t => t,
+            };
             if STRIP_RULE_BEFORE.contains(&i) {
                 slots.push(StripSlot::Rule);
             }
-            slots.push(StripSlot::Tool(*t));
+            slots.push(StripSlot::Tool(t));
         }
         slots
     };
-    let mut inline = top(false);
+    let mut inline = top(false, false);
     for (i, row) in TOOLS_MENU_ROWS.iter().enumerate() {
         if i == 0 || TOOLS_MENU_SEPARATORS.contains(&i) {
             inline.push(StripSlot::Rule);
@@ -775,10 +804,20 @@ pub(crate) fn strip_slots(app: &App) -> Vec<StripSlot> {
         - ICON_BTN
         - STRIP_FOOT_GAP;
     if height(&inline) <= room {
-        inline
-    } else {
-        top(true)
+        return inline;
     }
+    let with_runs = top(true, false);
+    if height(&with_runs) <= room {
+        with_runs
+    } else {
+        top(true, true)
+    }
+}
+
+/// Whether the four ways to run are buttons on the strip, not the bug's
+/// menu (see [`strip_slots`]).
+pub(crate) fn runs_on_strip(app: &App) -> bool {
+    strip_slots(app).contains(&StripSlot::Tool(StripTool::Run))
 }
 
 /// Whether the ⋯ menu's rows are on the strip (see [`strip_slots`]).
@@ -846,8 +885,34 @@ pub(crate) fn strip_tool(
             Message::Weak(crate::WeakMsg::Show),
         ),
         // Running it, four ways: for real or worked out by the model, run
-        // to its end or stepped through — one button, its menu the four.
+        // to its end or stepped through. Each is named as the menu bar
+        // names it.
+        StripTool::Run => (
+            Glyph::Play,
+            tr!("Run Without Debugging"),
+            caps(Action::Run),
+            Message::Debug(DebugMsg::Run),
+        ),
+        StripTool::FakeRun => (
+            Glyph::FakeRun,
+            tr!("Fake Run…"),
+            caps(Action::FakeRun),
+            Message::Fake(crate::FakeMsg::AtCaret { debug: false }),
+        ),
         StripTool::Debug => (
+            Glyph::Debug,
+            tr!("Start Debugging"),
+            caps(Action::StartDebug),
+            Message::Debug(DebugMsg::Start),
+        ),
+        StripTool::FakeDebug => (
+            Glyph::FakeDebug,
+            tr!("Fake Debug…"),
+            caps(Action::FakeDebug),
+            Message::Fake(crate::FakeMsg::AtCaret { debug: true }),
+        ),
+        // The four in one menu, where the strip is short.
+        StripTool::RunMenu => (
             Glyph::Debug,
             tr!("Run and Debug"),
             None,
@@ -892,6 +957,18 @@ pub(crate) fn strip_tool(
     }
 }
 
+/// Whether a tool of the strip can do anything now. What reads a project
+/// does nothing with none open: drawn so, and pressed, nothing — they
+/// looked as ready as the rest. Fake Run and Fake Debug work out code in
+/// view, so they need a file open, as their rows in the bug's menu did.
+pub(crate) fn strip_tool_able(app: &App, tool: StripTool) -> bool {
+    match tool {
+        StripTool::More | StripTool::Settings => true,
+        StripTool::FakeRun | StripTool::FakeDebug => app.active_viewer().is_some(),
+        _ => app.proj.project.is_some(),
+    }
+}
+
 /// The tool strip: the project's tools down the window's right edge, each
 /// naming itself (and its shortcut) to the left on hover.
 pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
@@ -901,12 +978,9 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
         // Its menu open, the ⋯ is lit: drawn in the text's colour. So is
         // the bug, its Run menu open.
         let on = (tool == StripTool::More && app.show_tools_menu)
-            || (tool == StripTool::Debug && app.show_run_menu);
+            || (tool == StripTool::RunMenu && app.show_run_menu);
         let tint = if on { theme::fg() } else { theme::fg_muted() };
-        // What reads a project does nothing with none open: drawn so, and
-        // pressed, nothing — they looked as ready as the rest.
-        let able =
-            app.proj.project.is_some() || matches!(tool, StripTool::More | StripTool::Settings);
+        let able = strip_tool_able(app, tool);
         tip_at(
             strip_button(glyph, tint, on, able)
                 .on_press_maybe(able.then(|| super::heard::said(label, msg))),
@@ -1347,8 +1421,9 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
     )
 }
 
-/// A row of the strip's Run menu: the program run for real, or worked out
-/// by the model ("fake"), to its end or stepped through.
+/// A row of the bug's Run menu, where the strip is too short for the four
+/// buttons ([`RUN_TOOLS`]): the program run for real, or worked out by the
+/// model ("fake"), to its end or stepped through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunRow {
     Run,
@@ -1393,12 +1468,12 @@ pub(crate) fn run_row(app: &App, row: RunRow) -> (Glyph, &'static str, Option<Me
     match row {
         RunRow::Run => (
             Glyph::Play,
-            tr!("Run"),
+            tr!("Run Without Debugging"),
             project.then_some(Message::Debug(DebugMsg::Run)),
         ),
         RunRow::Debug => (
             Glyph::Debug,
-            tr!("Debug"),
+            tr!("Start Debugging"),
             project.then_some(Message::Debug(DebugMsg::Start)),
         ),
         RunRow::FakeRun => (
@@ -1454,7 +1529,7 @@ fn run_menu_h() -> f32 {
 /// Distance of the Run menu panel from the window's top edge: level with
 /// the bug it opens from, or raised to end above the window's foot.
 pub(crate) fn run_menu_top(app: &App) -> f32 {
-    let at_button = strip_tool_center(app, StripTool::Debug).y - ICON_BTN / 2.0;
+    let at_button = strip_tool_center(app, StripTool::RunMenu).y - ICON_BTN / 2.0;
     let ends_at_foot = app.window_height - MENU_EDGE - run_menu_h();
     at_button.min(ends_at_foot).max(TOOLBAR_H + MENU_EDGE)
 }
@@ -1913,20 +1988,96 @@ mod tests {
             assert!(slots.contains(&StripSlot::Row(row)), "{row:?}");
         }
         let center = |slot| strip_slot_center(&app, slot).unwrap().y;
-        let debug = center(StripSlot::Tool(StripTool::Debug));
+        let fake_debug = center(StripSlot::Tool(StripTool::FakeDebug));
         let first = center(StripSlot::Row(ToolsRow::ExplainAll));
         let last = center(StripSlot::Row(ToolsRow::Tutorial));
-        assert!(first > debug);
+        assert!(first > fake_debug);
         let settings = center(StripSlot::Tool(StripTool::Settings));
         assert!(last + ICON_BTN / 2.0 + STRIP_FOOT_GAP <= settings - ICON_BTN / 2.0);
         let hole = tools_menu_rows_rect(&app, ToolsRow::Glossary.index(), 1);
         let glossary = strip_slot_center(&app, StripSlot::Row(ToolsRow::Glossary)).unwrap();
         assert!(hole.contains(glossary), "{hole:?} {glossary:?}");
 
-        app.window_height = 520.0;
+        app.window_height = 620.0;
         assert!(!tools_on_strip(&app));
+        assert!(
+            runs_on_strip(&app),
+            "the four ways to run keep their buttons"
+        );
         assert!(strip_slots(&app).contains(&StripSlot::Tool(StripTool::More)));
         assert!(strip_slot_center(&app, StripSlot::Row(ToolsRow::Glossary)).is_none());
+    }
+
+    /// The four ways to run are buttons of their own, each beside its twin
+    /// — Run, Fake Run, Debug, Fake Debug — each named and keyed as the
+    /// menu bar has it, and sending what its key does. In the shortest
+    /// window they fold into the bug's menu, and the strip still ends
+    /// clear of Settings at its foot.
+    #[test]
+    fn the_four_ways_to_run_are_buttons_and_fold_into_the_bug_when_short() {
+        let mut app = crate::app::tests::blank_app();
+        app.window_width = 1280.0;
+        app.window_height = 860.0;
+        let slots = strip_slots(&app);
+        let at = |t| {
+            slots
+                .iter()
+                .position(|s| *s == StripSlot::Tool(t))
+                .unwrap_or_else(|| panic!("{t:?} is not on the strip"))
+        };
+        assert_eq!(
+            [
+                at(StripTool::Run),
+                at(StripTool::FakeRun),
+                at(StripTool::Debug),
+                at(StripTool::FakeDebug)
+            ],
+            [
+                at(StripTool::Run),
+                at(StripTool::Run) + 1,
+                at(StripTool::Run) + 2,
+                at(StripTool::Run) + 3
+            ]
+        );
+        assert!(!slots.contains(&StripSlot::Tool(StripTool::RunMenu)));
+        for (tool, action) in [
+            (StripTool::Run, Action::Run),
+            (StripTool::FakeRun, Action::FakeRun),
+            (StripTool::Debug, Action::StartDebug),
+            (StripTool::FakeDebug, Action::FakeDebug),
+        ] {
+            let (_, label, keys, _) = strip_tool(&app, tool);
+            assert_eq!(label, crate::i18n::lookup(action.menu().title), "{tool:?}");
+            assert_eq!(keys, Some(app.keymap.chord(action).caps()), "{tool:?}");
+        }
+        assert!(matches!(
+            strip_tool(&app, StripTool::Run).3,
+            Message::Debug(DebugMsg::Run)
+        ));
+        assert!(matches!(
+            strip_tool(&app, StripTool::Debug).3,
+            Message::Debug(DebugMsg::Start)
+        ));
+        assert!(matches!(
+            strip_tool(&app, StripTool::FakeRun).3,
+            Message::Fake(crate::FakeMsg::AtCaret { debug: false })
+        ));
+        assert!(matches!(
+            strip_tool(&app, StripTool::FakeDebug).3,
+            Message::Fake(crate::FakeMsg::AtCaret { debug: true })
+        ));
+
+        // The window at its least: the four in the bug's menu.
+        app.window_height = 520.0;
+        assert!(!runs_on_strip(&app));
+        let slots = strip_slots(&app);
+        assert!(slots.contains(&StripSlot::Tool(StripTool::RunMenu)));
+        for t in RUN_TOOLS {
+            assert!(!slots.contains(&StripSlot::Tool(t)), "{t:?}");
+        }
+        let more = strip_slot_center(&app, StripSlot::Tool(StripTool::More)).unwrap();
+        let settings = strip_slot_center(&app, StripSlot::Tool(StripTool::Settings)).unwrap();
+        assert!(more.y + ICON_BTN / 2.0 + STRIP_FOOT_GAP <= settings.y - ICON_BTN / 2.0);
     }
 
     /// The strip's slots go down one pitch apart, a rule's slot more after
@@ -1936,7 +2087,7 @@ mod tests {
         let mut app = crate::app::tests::blank_app();
         app.window_width = 1280.0;
         // Short enough for the ⋯ to be on the strip.
-        app.window_height = 520.0;
+        app.window_height = 620.0;
         let y = |app: &App, t| strip_tool_center(app, t).y;
         let pitch = ICON_BTN + STRIP_SPACING;
         let rule = STRIP_RULE_H + STRIP_SPACING;
@@ -1957,11 +2108,20 @@ mod tests {
             pitch
         );
         assert_eq!(
-            y(&app, StripTool::Debug) - y(&app, StripTool::ProjectMaps),
+            y(&app, StripTool::Run) - y(&app, StripTool::ProjectMaps),
             pitch + rule
         );
+        assert_eq!(y(&app, StripTool::FakeRun) - y(&app, StripTool::Run), pitch);
         assert_eq!(
-            y(&app, StripTool::More) - y(&app, StripTool::Debug),
+            y(&app, StripTool::Debug) - y(&app, StripTool::FakeRun),
+            pitch
+        );
+        assert_eq!(
+            y(&app, StripTool::FakeDebug) - y(&app, StripTool::Debug),
+            pitch
+        );
+        assert_eq!(
+            y(&app, StripTool::More) - y(&app, StripTool::FakeDebug),
             pitch + rule
         );
         let x = strip_tool_center(&app, StripTool::Overview).x;

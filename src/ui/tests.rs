@@ -2528,6 +2528,261 @@ fn the_ring_put_away_gives_a_field_its_keys_back() {
     );
 }
 
+/// The ring come up from a field, and a dialog over the field since: Esc
+/// puts the ring away without giving the keys back to the field behind the
+/// dialog — what was typed next went into it, unseen.
+#[test]
+fn esc_on_the_ring_gives_no_field_under_a_dialog_the_keys() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.focus(&app, super::file_filter_id());
+    app.code_focused = false;
+    window.tab(&mut app, true);
+    assert_eq!(window.focused(&app), None, "on a control: no field");
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let _ = window.send(&mut app, &[]);
+    window.key(
+        &mut app,
+        Key::Named(Named::Escape),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.ring, None);
+    assert_ne!(
+        window.focused(&app),
+        Some(super::file_filter_id()),
+        "the filter is under the dialog"
+    );
+}
+
+/// The window changed under a dialog — the sidebar put away, its controls
+/// with it — the ring is given back on the control it was on, found by
+/// what it is, not on whatever came to stand at its old place.
+#[test]
+fn a_dialog_gone_gives_the_ring_back_on_the_same_control() {
+    let mut app = tree_app();
+    app.show_left_sidebar = true;
+    let mut window = Driven::new(&app);
+    // From the end: a control after the sidebar's.
+    window.tab(&mut app, true);
+    window.tab(&mut app, true);
+    let (under, _, press) = ring_at(&app);
+    assert!(press.is_some());
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let _ = window.send(&mut app, &[]);
+    app.show_left_sidebar = false;
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Close));
+    let _ = window.send(&mut app, &[]);
+    let (back, _, back_press) = ring_at(&app);
+    assert_ne!(back, under, "the sidebar's stops are gone: it moved up");
+    assert_eq!(format!("{back_press:?}"), format!("{press:?}"));
+}
+
+/// A shortcut pressed with the ring up from a field puts the ring away and
+/// does what it does, at once: Ctrl-P opened nothing, and had to be pressed
+/// again.
+#[test]
+fn a_shortcut_with_the_ring_up_does_what_it_does() {
+    use keyboard::Key;
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.focus(&app, super::file_filter_id());
+    app.code_focused = false;
+    window.tab(&mut app, true);
+    assert!(app.ring.is_some());
+    let p = Key::Character("p".into());
+    let task = app.update(Message::Editor(EditorMsg::KeyPressed(
+        p,
+        keyboard::Modifiers::COMMAND,
+    )));
+    assert_eq!(app.ring, None);
+    let next = task_sends(task);
+    assert!(
+        next.iter().any(|m| matches!(
+            m,
+            Message::Editor(EditorMsg::KeyPressed(Key::Character(c), mods))
+                if c.as_str() == "p" && mods.command()
+        )),
+        "{next:?}"
+    );
+    for m in next {
+        let _ = app.update(m);
+    }
+    assert!(app.proj.finder.open, "the command bar is up");
+}
+
+/// Page Up and Page Down, Home and End — and with Ctrl (Cmd) the file's
+/// start and end — move in the code, as every editor reads by.
+#[test]
+fn page_home_and_end_keys_move_in_the_code() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = reader_app();
+    app.code_focused = true;
+    app.active_viewer_mut().unwrap().caret = Some((5, 3));
+    let key = |app: &mut App, named: Named, modifiers: keyboard::Modifiers| {
+        let _ = app.update(Message::Editor(EditorMsg::KeyPressed(
+            Key::Named(named),
+            modifiers,
+        )));
+    };
+    let none = keyboard::Modifiers::empty();
+    let caret = |app: &App| app.active_viewer().unwrap().caret.unwrap();
+    let line_len = app.active_viewer().unwrap().line_len(5);
+    key(&mut app, Named::End, none);
+    assert_eq!(caret(&app), (5, line_len));
+    key(&mut app, Named::Home, none);
+    assert_eq!(caret(&app), (5, 0));
+    let top = app.active_viewer().unwrap().scroll_y;
+    key(&mut app, Named::PageDown, none);
+    assert!(app.active_viewer().unwrap().scroll_y > top, "a page down");
+    key(&mut app, Named::PageUp, none);
+    assert_eq!(app.active_viewer().unwrap().scroll_y, top, "and back");
+    key(&mut app, Named::End, keyboard::Modifiers::COMMAND);
+    let last = app.active_viewer().unwrap().lines.len() - 1;
+    assert_eq!(caret(&app).0, last, "the file's end");
+    key(&mut app, Named::Home, keyboard::Modifiers::COMMAND);
+    assert_eq!(caret(&app).0, 0, "the file's start");
+    // Not while a field has the keys: they are its.
+    app.code_focused = false;
+    key(&mut app, Named::End, keyboard::Modifiers::COMMAND);
+    assert_eq!(caret(&app).0, 0);
+}
+
+/// A fold key that folds nothing (`za` off any fold) leaves the view where
+/// it was: it snapped the view to a row.
+#[test]
+fn a_fold_key_that_folds_nothing_leaves_the_view() {
+    use keyboard::Key;
+    let mut app = reader_app();
+    app.code_focused = true;
+    app.active_viewer_mut().unwrap().caret = Some((40, 0));
+    app.active_viewer_mut().unwrap().scroll_y = 333.0;
+    for c in ["z", "a"] {
+        let _ = app.update(Message::Editor(EditorMsg::KeyPressed(
+            Key::Character(c.into()),
+            keyboard::Modifiers::empty(),
+        )));
+    }
+    assert_eq!(app.active_viewer().unwrap().scroll_y, 333.0);
+}
+
+/// Ask made large holds the keys as a dialog does: the ring put away from
+/// over it does not give them to the code under it.
+#[test]
+fn the_ring_put_away_over_a_large_ask_leaves_the_code_without_the_keys() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = reader_app();
+    app.code_focused = true;
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let _ = app.update(Message::Ask(AskMsg::Toggle));
+    app.ask_view = crate::AskView::Expanded;
+    let _ = window.send(&mut app, &[]);
+    window.key(
+        &mut app,
+        Key::Named(Named::Escape),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.ring, None);
+    assert!(!app.code_focused, "Ask, large, has them");
+}
+
+/// F6 opened the chat, then its × put it away: opened again by hand, F6
+/// going on from it leaves it open — it put away the Ask the reader had
+/// opened.
+#[test]
+fn f6_leaves_an_ask_opened_by_hand() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = reader_app();
+    app.code_focused = true;
+    let f6 = |app: &mut App| {
+        let _ = app.update(Message::Editor(EditorMsg::KeyPressed(
+            Key::Named(Named::F6),
+            keyboard::Modifiers::empty(),
+        )));
+    };
+    for _ in 0..6 {
+        if app.ask_view.is_open() {
+            break;
+        }
+        f6(&mut app);
+    }
+    assert!(app.ask_view.is_open(), "F6 came to the chat");
+    let _ = app.update(Message::Ask(AskMsg::Hide));
+    assert!(!app.ask_view.is_open());
+    // Opened by hand, its field clicked into.
+    let _ = app.update(Message::Ask(AskMsg::Toggle));
+    app.code_focused = false;
+    assert!(app.ask_view.is_open());
+    f6(&mut app);
+    assert!(app.ask_view.is_open(), "the reader's Ask stays");
+}
+
+/// A control made an element after another was named keeps its own name:
+/// the ring on it said none (the other's press was the one named last).
+#[test]
+fn a_control_made_an_element_late_keeps_its_own_name() {
+    use iced::widget::{column, text};
+    let view = |ask: super::RingAsk| -> Element<'static, Message> {
+        super::jump::begin(true);
+        let alpha = super::heard::said("Alpha", Message::Nav(NavMsg::PaletteOpened));
+        let early = super::press::button(text("one")).on_press(alpha);
+        let beta = super::heard::said("Beta", Message::Project(ProjectMsg::SetUpMissing));
+        let second: Element<'static, Message> =
+            super::press::button(text("two")).on_press(beta).into();
+        let first: Element<'static, Message> = early.into();
+        super::jump::root(
+            column![first, second].into(),
+            Some(super::jump::Up::Ring(ask)),
+            false,
+            None,
+            true,
+            super::jump::OnTop {
+                layer: super::heard::Layer::Ask,
+                scene: None,
+            },
+        )
+    };
+    let mut renderer = renderer();
+    let size = Size::new(400.0, 300.0);
+    super::jump::forget(None);
+    let ui = UserInterface::build(
+        view(super::RingAsk::Start { forward: false }),
+        size,
+        Cache::default(),
+        &mut renderer,
+    );
+    let mut ui = UserInterface::build(
+        view(super::RingAsk::Kept),
+        size,
+        ui.into_cache(),
+        &mut renderer,
+    );
+    let tab = keyboard::Key::Named(keyboard::key::Named::Tab);
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &[press(tab.clone(), tab, keyboard::Modifiers::empty())],
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    assert_eq!(super::jump::ring_placed(None).unwrap().0, Some(0));
+    let said: Vec<Option<String>> = sent
+        .iter()
+        .filter_map(|m| match m {
+            Message::Window(WindowMsg::RingMoved(_, name)) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, [Some("Alpha".to_string())]);
+    super::jump::forget(None);
+}
+
 /// A dialog with no control of its own — the finder with nothing found —
 /// keeps the ring in it, as one with controls does: Tab does not go on to
 /// the window under it.
@@ -3024,7 +3279,7 @@ fn the_chrome_geometry_matches_what_is_drawn() {
     /// Whether a message is the one a tool sends.
     type Sends = fn(&Message) -> bool;
     let app = reader_app();
-    let expected: [(StripTool, Sends); 10] = [
+    let expected: [(StripTool, Sends); 14] = [
         (StripTool::Overview, |m| {
             matches!(m, Message::Overview(crate::OverviewMsg::Show))
         }),
@@ -3034,7 +3289,19 @@ fn the_chrome_geometry_matches_what_is_drawn() {
         (StripTool::WeakSpots, |m| {
             matches!(m, Message::Weak(crate::WeakMsg::Show))
         }),
+        (StripTool::Run, |m| {
+            matches!(m, Message::Debug(DebugMsg::Run))
+        }),
+        (StripTool::FakeRun, |m| {
+            matches!(m, Message::Fake(crate::FakeMsg::AtCaret { debug: false }))
+        }),
         (StripTool::Debug, |m| {
+            matches!(m, Message::Debug(DebugMsg::Start))
+        }),
+        (StripTool::FakeDebug, |m| {
+            matches!(m, Message::Fake(crate::FakeMsg::AtCaret { debug: true }))
+        }),
+        (StripTool::RunMenu, |m| {
             matches!(m, Message::Window(WindowMsg::ToggleRunMenu))
         }),
         (StripTool::CallGraph, |m| {
@@ -3075,9 +3342,13 @@ fn the_chrome_geometry_matches_what_is_drawn() {
         sent_by(sim).into_iter().collect::<Vec<_>>()
     };
     for (tool, is_expected) in expected {
-        // The ⋯ is not on a strip tall enough for the menu's own tools.
+        // The ⋯ is not on a strip tall enough for the menu's own tools,
+        // nor the bug on one tall enough for the four ways to run.
         let Some(at) = super::strip_slot_center(&app, super::StripSlot::Tool(tool)) else {
-            assert_eq!(tool, StripTool::More, "{tool:?} is not on the strip");
+            assert!(
+                matches!(tool, StripTool::More | StripTool::RunMenu),
+                "{tool:?} is not on the strip"
+            );
             continue;
         };
         let sent = click_at(at);
@@ -3840,28 +4111,36 @@ fn the_proof_panel_marks_what_each_tactic_did() {
     assert!(shows(&mut sim_of(&app), "No goals left: proved."));
 }
 
-/// The bug opens the Run menu beside the strip, level with it: Run and
-/// Debug, then Fake Run and Fake Debug, each with its keys. A row sends
-/// its run, and picked, the menu goes; the bug is lit while it is open.
+/// In a window too short for the four ways to run, they fold into the bug,
+/// whose Run menu opens beside the strip, level with it: Run and Debug,
+/// then Fake Run and Fake Debug, each named as the menu bar names it, with
+/// its keys. A row sends its run, and picked, the menu goes; the bug is
+/// lit while it is open.
 #[test]
-fn the_bug_opens_a_menu_of_the_four_runs() {
+fn in_a_short_window_the_bug_opens_a_menu_of_the_four_runs() {
     use crate::keymap::Action;
     use crate::ui::StripTool;
+    let short = Size {
+        width: 1280.0,
+        height: 540.0,
+    };
     let mut app = reader_app();
-    let (.., open) = super::strip_tool(&app, StripTool::Debug);
+    app.window_height = short.height;
+    assert!(!super::runs_on_strip(&app));
+    let (.., open) = super::strip_tool(&app, StripTool::RunMenu);
     assert!(matches!(open, Message::Window(WindowMsg::ToggleRunMenu)));
     let _ = app.update(open);
     assert!(app.show_run_menu);
-    let bug = super::strip_tool_center(&app, StripTool::Debug);
+    let bug = super::strip_tool_center(&app, StripTool::RunMenu);
     assert_eq!(
         super::toolbar::run_menu_top(&app),
         bug.y - super::ICON_BTN / 2.0,
         "level with the bug"
     );
-    let mut sim = sim_of(&app);
+    let mut sim = sim_sized(&app, short);
     for (label, action) in [
-        ("Run", Action::Run),
-        ("Debug", Action::StartDebug),
+        ("Run Without Debugging", Action::Run),
+        ("Start Debugging", Action::StartDebug),
         ("Fake Run…", Action::FakeRun),
         ("Fake Debug…", Action::FakeDebug),
     ] {
@@ -3878,7 +4157,7 @@ fn the_bug_opens_a_menu_of_the_four_runs() {
         );
     }
     drop(sim);
-    let sent = click(sim_of(&app), "Run");
+    let sent = click(sim_sized(&app, short), "Run Without Debugging");
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Debug(DebugMsg::Run))),
@@ -3889,10 +4168,71 @@ fn the_bug_opens_a_menu_of_the_four_runs() {
     }
     assert!(!app.show_run_menu, "picked, it goes");
     let _ = app.update(Message::Window(WindowMsg::ToggleRunMenu));
-    let sent = click(sim_of(&app), "Fake Debug…");
+    let sent = click(sim_sized(&app, short), "Fake Debug…");
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Fake(crate::FakeMsg::AtCaret { debug: true }))),
+        "{sent:?}"
+    );
+
+    // The window made taller with the menu open: the four are buttons
+    // again, and no menu hangs from a bug that is not there.
+    assert!(app.show_run_menu);
+    app.window_height = WINDOW.height;
+    assert!(super::runs_on_strip(&app));
+    assert!(
+        !matches!(
+            super::active_overlay(&app),
+            Some(super::ActiveOverlay::RunMenu)
+        ),
+        "no menu hangs from a bug that is not there"
+    );
+}
+
+/// In a window of the usual size, Run, Fake Run, Debug and Fake Debug are
+/// buttons of their own on the strip, each beside its twin, and there is no
+/// bug to open their menu from: its message opens nothing. Fake Run and
+/// Fake Debug work out code in view: with no file open they are drawn off
+/// and press nothing, as Run and Debug are with no project.
+#[test]
+fn the_four_ways_to_run_are_buttons_on_the_strip() {
+    use crate::ui::StripTool;
+    let mut app = reader_app();
+    assert!(super::runs_on_strip(&app));
+    assert!(super::strip_slot_center(&app, super::StripSlot::Tool(StripTool::RunMenu)).is_none());
+    let _ = app.update(Message::Window(WindowMsg::ToggleRunMenu));
+    assert!(!app.show_run_menu, "no bug, no menu");
+    for tool in super::RUN_TOOLS {
+        assert!(super::strip_tool_able(&app, tool), "{tool:?}");
+    }
+    let sent = {
+        let mut sim = sim_of(&app);
+        sim.point_at(super::strip_tool_center(&app, StripTool::FakeRun));
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+    };
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Fake(crate::FakeMsg::AtCaret { debug: false }))),
+        "{sent:?}"
+    );
+
+    // No file open: the model has nothing to work out.
+    app.proj.panes = Default::default();
+    assert!(app.active_viewer().is_none());
+    assert!(!super::strip_tool_able(&app, StripTool::FakeRun));
+    assert!(!super::strip_tool_able(&app, StripTool::FakeDebug));
+    assert!(super::strip_tool_able(&app, StripTool::Run));
+    let sent = {
+        let mut sim = sim_of(&app);
+        sim.point_at(super::strip_tool_center(&app, StripTool::FakeDebug));
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+    };
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Fake(crate::FakeMsg::AtCaret { .. }))),
         "{sent:?}"
     );
 }
@@ -3909,7 +4249,7 @@ fn every_tool_on_the_strip_has_a_shortcut() {
     for tool in super::STRIP_TOP
         .into_iter()
         .chain([StripTool::Settings])
-        .filter(|t| !matches!(t, StripTool::More | StripTool::Debug))
+        .filter(|t| !matches!(t, StripTool::More | StripTool::RunMenu))
     {
         let (_, label, keys, _) = super::strip_tool(&app, tool);
         assert!(keys.is_some(), "{label} has no shortcut");
@@ -3970,10 +4310,14 @@ fn the_tutorial_points_at_each_tool_and_leaves_no_field_holding_its_keys() {
                 | StripTool::CallGraph
                 | StripTool::TypeMap
                 | StripTool::ImportGraph
-                | StripTool::Debug
         );
         assert_eq!(on.len(), usize::from(reads), "{tool:?}: {on:?}");
     }
+    // The four ways to run have one step, over the four of them.
+    assert_eq!(
+        all.iter().filter(|s| s.anchor == Anchor::RunTools).count(),
+        1
+    );
     let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
     assert!(all[at("Types and their kinds")].anchor == Anchor::Strip(StripTool::TypeMap));
     assert!(all.iter().any(|s| s.anchor == Anchor::AskCorner));
@@ -14298,7 +14642,6 @@ fn audited_states() -> Vec<(String, App)> {
             "the tools menu",
             Message::Window(WindowMsg::ToggleToolsMenu),
         ),
-        ("the run menu", Message::Window(WindowMsg::ToggleRunMenu)),
         ("the overview", Message::Overview(crate::OverviewMsg::Show)),
         (
             "the stats",
@@ -14311,6 +14654,13 @@ fn audited_states() -> Vec<(String, App)> {
         let _ = app.update(message);
         states.push((name.to_string(), app));
     }
+    // The bug's Run menu is there only where the strip is too short for
+    // the four ways to run.
+    let mut app = base_clone(&base);
+    app.window_height = 540.0;
+    let _ = app.update(Message::Window(WindowMsg::ToggleRunMenu));
+    assert!(app.show_run_menu);
+    states.push(("the run menu, the window short".into(), app));
     let mut app = base_clone(&base);
     let _ = app.update(Message::Ask(AskMsg::Toggle));
     app.ask_view = crate::AskView::Expanded;

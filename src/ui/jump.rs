@@ -155,13 +155,24 @@ pub(crate) fn mark<'a>(
     content: impl Into<Element<'a, Message>>,
     message: Message,
 ) -> Element<'a, Message> {
+    mark_named(content, message, None)
+}
+
+/// [`mark`], `name` what its control was called when it was given its
+/// press — a button kept aside and made an element after others were
+/// built had another's name, or none, looked up only now.
+pub(crate) fn mark_named<'a>(
+    content: impl Into<Element<'a, Message>>,
+    message: Message,
+    name: Option<String>,
+) -> Element<'a, Message> {
     let content = content.into();
     if !wanted() {
         return content;
     }
     heard::marked(&message);
     // The name its control offered as it was built, just now.
-    let name = naming().then(|| heard::name_of(&message)).flatten();
+    let name = name.or_else(|| naming().then(|| heard::name_of(&message)).flatten());
     let (layer, id) = BUILD.with(|b| {
         let mut b = b.borrow_mut();
         let layer = b.layer.unwrap_or(Layer::Window);
@@ -258,11 +269,13 @@ pub(crate) fn ring_press(window: Option<window::Id>) -> Option<Message> {
     })
 }
 
-/// The field that held the keys in `window` when its ring came up from it.
+/// The field that held the keys in `window` when its ring came up from it
+/// — while the ring reaches it still: not under a dialog come up since.
 pub(crate) fn ring_from(window: Option<window::Id>) -> Option<iced::widget::Id> {
     PLACED.with(|p| {
         p.borrow()
             .get(&window)
+            .filter(|placed| placed.from_here)
             .and_then(|placed| placed.from.clone())
     })
 }
@@ -548,11 +561,14 @@ impl Root<'_> {
         ask: RingAsk,
         at: Option<usize>,
         stops: &[ring::Stop],
-        saved: Vec<(Layer, usize)>,
+        saved: Vec<ring::Saved>,
         from: Option<iced::widget::Id>,
         announce: bool,
     ) {
         let stop = at.and_then(|at| stops.get(at));
+        let from_here = from
+            .as_ref()
+            .is_some_and(|id| stops.iter().any(|s| s.id.as_ref() == Some(id)));
         let placed = ring::Placed {
             ask,
             at,
@@ -564,6 +580,7 @@ impl Root<'_> {
             key: at.and_then(|at| ring::key_at(stops, at)),
             scene: self.scene.clone(),
             from,
+            from_here,
             press: stop.and_then(|s| s.press.clone()),
             name: stop.and_then(|s| s.name.clone()),
             announce,
@@ -630,7 +647,12 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Root<'_> {
         let moved = last
             .as_ref()
             .is_none_or(|l| l.key != key || (ask != RingAsk::Kept && l.ask != ask));
-        if moved && let Some(stop) = place.and_then(|i| stops.get(i)).cloned() {
+        // The same stop at another place (rows came in above it in a list
+        // scrolled to it): brought into view again, not said again.
+        let shifted = last.as_ref().is_some_and(|l| l.at != place);
+        if (moved || shifted)
+            && let Some(stop) = place.and_then(|i| stops.get(i)).cloned()
+        {
             self.put_on(tree, at, renderer, &stop);
         }
         // Come up from a field: the keys go back to it when the ring is put
