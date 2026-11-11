@@ -1820,10 +1820,18 @@ impl App {
                 }
                 Task::none()
             }
+            // Asked as a queued question is: a draft being typed stays in
+            // the field. (Try again on a failed answer put the question in
+            // its place, and the draft was gone.)
             AskMsg::Suggested(q) => {
-                self.proj.ask_input = q;
-                self.proj.ask_spoken = false;
-                Task::done(Message::Ask(AskMsg::Submit))
+                let draft = std::mem::replace(&mut self.proj.ask_input, q);
+                let draft_spoken = std::mem::replace(&mut self.proj.ask_spoken, false);
+                let task = self.on_ask_submit();
+                if !draft.trim().is_empty() {
+                    self.proj.ask_input = draft;
+                    self.proj.ask_spoken = draft_spoken;
+                }
+                task
             }
             AskMsg::Submit => self.on_ask_submit(),
             // (Retrieval ranks against the current embed index; an answer for

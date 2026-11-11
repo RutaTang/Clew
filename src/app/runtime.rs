@@ -126,6 +126,7 @@ impl App {
             debug_hover_eval: false,
             llm_available: llm::Config::available(),
             llm_config_cache: None,
+            model_check: Default::default(),
             show_tools_menu: false,
             show_run_menu: false,
             show_target_menu: false,
@@ -541,9 +542,10 @@ impl App {
             || calls.refine_full_wait.is_some()
     }
 
-    /// Say that an AI action failed: on the status line, standing until it
-    /// is dismissed or something else is said, with `retry` to try it again
-    /// (`App::failure_notice`).
+    /// Say that an AI action failed: on the status line, in a place of its
+    /// own that other messages do not take, standing until it is dismissed,
+    /// tried again, or the same work succeeds (`forget_failure_of`) — with
+    /// `retry` to try it again (`App::failure_notice`).
     pub(crate) fn say_failure(
         &mut self,
         said: String,

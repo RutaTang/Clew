@@ -858,7 +858,7 @@ impl App {
                 (
                     tr_noop!("Go to End of File"),
                     Some("G"),
-                    EditorMsg::MoveCaret(viewer::Motion::FileEnd),
+                    EditorMsg::MoveCaret(viewer::Motion::LastLine),
                 ),
                 (tr_noop!("Fold All"), Some("zM"), EditorMsg::FoldAll(true)),
                 (

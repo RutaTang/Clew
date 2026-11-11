@@ -466,11 +466,12 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         .filter(|(_, wt)| matches(wt))
         .collect();
 
-    // The scope currently generating, and — if it's a brand-new scope not yet in
-    // the library — the label for a temporary "pending" row at the top.
+    // The scope currently generating, and — if no row below shows it (a
+    // brand-new scope, or one a search hides) — a temporary "pending" row at
+    // the top, so what is being made, and its Stop, are always in sight.
     let gen_scope = app.proj.walk.generating.as_deref();
     let pending_new: Option<&str> =
-        gen_scope.filter(|s| !app.proj.walk.library.iter().any(|w| w.scope.as_str() == *s));
+        gen_scope.filter(|s| !visible.iter().any(|(_, w)| w.scope.as_str() == *s));
 
     // A generation that failed, for a scope with no tour yet: its row stays,
     // saying why, with a way to try again.
@@ -505,20 +506,46 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
     let mut list = Column::new().spacing(2).padding(8);
 
     // A new tour being generated shows a pending row until it lands in the library.
+    // Stoppable as a regenerated row is: a first tour, a change review and a
+    // first narration are made here, and had no control at all.
     if let Some(scope) = pending_new {
         let label = scope_label(scope);
+        let stop = super::toolbar::tip_at(
+            button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
+                .style(theme::toolbar_button)
+                .padding([7, 9])
+                .on_press(super::heard::said_to(
+                    tr!("Stop"),
+                    &label,
+                    Message::Walk(WalkMsg::Cancel),
+                )),
+            tr!("Stop generating it"),
+            None,
+            tooltip::Position::Bottom,
+        );
         list = list.push(
             container(
-                column![
-                    text(label).size(ts::BASE).color(theme::fg()),
-                    text(tr!("Generating…"))
-                        .size(ts::CAPTION)
-                        .color(theme::accent()),
+                row![
+                    column![
+                        text(label).size(ts::BASE).color(theme::fg()),
+                        text(tr!("Generating…"))
+                            .size(ts::CAPTION)
+                            .color(theme::accent()),
+                    ]
+                    .spacing(1)
+                    .width(Fill),
+                    stop,
                 ]
-                .spacing(1),
+                .spacing(4)
+                .align_y(iced::Center),
             )
             .width(Fill)
-            .padding([6, 8]),
+            .padding(Padding {
+                top: 6.0,
+                right: 0.0,
+                bottom: 6.0,
+                left: 8.0,
+            }),
         );
     }
 

@@ -77,9 +77,12 @@ impl App {
         self.proj.explain.pass_sources = reported.clone();
         self.proj.explain.pass_automatic = matches!(kind, PassKind::Automatic);
         self.proj.explain.pass_target = None;
-        // Asked for again: what the last attempt said is not the news.
+        // Asked for again: what the last attempt said is not the news — nor
+        // its Try again, which beside the pass now running would start it
+        // twice.
         if !matches!(kind, PassKind::Automatic) {
             self.proj.explain.node_failed = None;
+            self.forget_failure_of(crate::app::state::FailureOf::Explain);
         }
         let reuse = match kind {
             PassKind::Explicit => explain::Reuse::SamePrompt,
@@ -397,6 +400,12 @@ impl App {
         self.proj.explain.failed = failures.failed;
         let automatic = std::mem::take(&mut self.proj.explain.pass_automatic);
         let reexplained = self.proj.explain.pass_target.take();
+        // Whether the node asked for was written: only what builds on it may
+        // have failed — said of the pass then, not of the node, which "Couldn't
+        // explain helper()" said in red beside helper's new note.
+        let target_written = reexplained
+            .as_ref()
+            .is_some_and(|t| written.contains_key(t));
         // What the pass changed is this window's to save, and nothing else
         // (`explain::merge_unsaved`): every other stored entry is at least as
         // fresh as this window's copy — another window's Refresh All
@@ -493,13 +502,28 @@ impl App {
         }
         let mut status = if let Some(stopped) = &failures.stopped {
             tr!("Explain stopped: {reason}", reason = stopped.describe())
-        } else if let Some(target) = reexplained.as_ref().filter(|_| failures.failed > 0) {
+        } else if let Some(target) = reexplained
+            .as_ref()
+            .filter(|_| failures.failed > 0 && !target_written)
+        {
             // One function or file asked for: said of it, not of the whole
             // project ("Explained 345 functions, files and folders; 1
             // failed" for an Explain that explained nothing).
             let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
             tr!(
                 "Couldn't explain {name}: {reasons}",
+                name = node_said(target),
+                reasons = why.join("; ")
+            )
+        } else if let Some(target) = reexplained.as_ref().filter(|_| failures.failed > 0) {
+            // It was explained; what builds on it was not. Said of it — not
+            // "Couldn't explain helper()" beside helper's new note, nor
+            // "Explained 345 functions…" of the whole project.
+            let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
+            trn!(
+                "Explained {name}; 1 summary built on it failed: {reasons}",
+                "Explained {name}; {n} summaries built on it failed: {reasons}",
+                failures.failed,
                 name = node_said(target),
                 reasons = why.join("; ")
             )
@@ -628,8 +652,12 @@ impl App {
             };
             self.say_failure(status, retry, crate::app::state::FailureOf::Explain);
         } else {
-            // Done again, and done: the failure it stood for is past.
-            self.forget_failure_of(crate::app::state::FailureOf::Explain);
+            // Done again, and done: the failure it stood for is past — once
+            // the model answered. A pass that asked it nothing (every note
+            // up to date) proves nothing of a key it rejected.
+            if tally.regenerated > 0 {
+                self.forget_failure_of(crate::app::state::FailureOf::Explain);
+            }
             self.status = status;
         }
 
@@ -644,8 +672,12 @@ impl App {
         // explain, and paid for with the AI that just failed, the index and
         // the overview would say "Building semantic index…" over the failure
         // the reader is to see, and likely fail the same way. The next pass
-        // that completes brings them up to date.
-        let fell_short = failures.stopped.is_some() || failures.failed > 0;
+        // that completes brings them up to date. Only a pass that stopped,
+        // or whose calls failed for a while (the provider down, out of reach)
+        // fell short so: one that will fail the same way every time — a
+        // function too long for the model — held the index back for good.
+        let fell_short = failures.stopped.is_some()
+            || (failures.failed > 0 && failures.calls.iter().any(ExplainFailure::may_pass_later));
         let downstream = (!automatic || tally.regenerated > 0) && !fell_short;
         // The search index follows what was asked for: built after a pass
         // someone started (the cost they agreed to says so), kept fresh

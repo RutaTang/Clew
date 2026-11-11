@@ -260,10 +260,7 @@ impl App {
         let Some(here) = self.proj.history.current_loc() else {
             return;
         };
-        // A caret still where the visit put it has not moved: a file opened
-        // at its top has it on line 1, and made a visit to line 1 Back
-        // stopped at, the screen as it was.
-        if here.path != v.abs || here.line.unwrap_or(1) == line {
+        if here.path != v.abs {
             return;
         }
         // The function a line is in: the same one, the visit moves with the
@@ -277,6 +274,21 @@ impl App {
                 .min_by_key(|s| s.end_line.saturating_sub(s.line))
                 .map(|s| (s.line, s.name.clone()))
         };
+        // A caret still where the visit put it has not moved: a file opened
+        // at its top has it on line 1, and made a visit to line 1 Back
+        // stopped at, the screen as it was. The stop's function is noted
+        // all the same: a jump to a body line lands before the file has
+        // loaded, so this is the first time it is known, and the trail would
+        // say "lib.rs:4" once the file is closed.
+        if here.line.unwrap_or(1) == line {
+            // (An outline not in yet says nothing either way.)
+            if let Some(at) = here.line.filter(|_| !v.symbols.is_empty()) {
+                let around = enclosing(at).map(|(_, name)| name);
+                let abs = v.abs.clone();
+                self.note_trail_fn(&abs, at, around);
+            }
+            return;
+        }
         let moves = here.line.is_none_or(|at| enclosing(at) == enclosing(line));
         let abs = v.abs.clone();
         // The function the stop is in, kept with it while it is known.

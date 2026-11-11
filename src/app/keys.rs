@@ -678,7 +678,7 @@ impl App {
             Key::Character("b") => self.move_cursor(viewer::Motion::WordBack),
             Key::Character("0") => self.move_cursor(viewer::Motion::LineStart),
             Key::Character("$") => self.move_cursor(viewer::Motion::LineEnd),
-            Key::Character("G") => self.move_cursor(viewer::Motion::FileEnd),
+            Key::Character("G") => self.move_cursor(viewer::Motion::LastLine),
             _ => Task::none(),
         }
     }

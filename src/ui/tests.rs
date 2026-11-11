@@ -3175,6 +3175,54 @@ fn the_trail_row_does_not_move_the_code_when_the_trail_begins() {
     assert!(shows(&mut sim, "line_39"));
 }
 
+/// A stop named for what is on its line — a type gone to — keeps its name
+/// while the caret is on that line: it read "lib.rs", where it read
+/// "Point". Left, the crumb says where the caret is: the file.
+#[test]
+fn a_types_stop_keeps_its_name_while_the_caret_is_on_it() {
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let loc = |line| crate::history::Loc {
+        path: abs.clone(),
+        line: Some(line),
+    };
+    app.proj.history.push(loc(1), Some("line_0".into()));
+    app.proj.history.push(loc(40), Some("Point".into()));
+    app.proj.panes[0].as_mut().unwrap().caret = Some((39, 0));
+    assert!(shows(&mut sim_of(&app), "Point"));
+    app.proj.panes[0].as_mut().unwrap().caret = Some((60, 0));
+    let mut sim = sim_of(&app);
+    assert!(!shows(&mut sim, "Point"));
+    assert!(text_at(&mut sim, |t| t == "lib.rs", 1).is_some());
+}
+
+/// A new walkthrough being made — a first tour, a change review — can be
+/// stopped from its row, as one being made again can: its row had no
+/// control at all.
+#[test]
+fn a_new_walkthrough_being_made_has_a_stop() {
+    let mut app = reader_app();
+    for (scope, library) in [("checkout", None), ("@diff changes", Some("@diff main"))] {
+        app.proj.walk.library = library
+            .map(|scope: &str| {
+                vec![crate::walkthrough::Walkthrough {
+                    title: "Review".into(),
+                    scope: scope.into(),
+                    steps: Vec::new(),
+                }]
+            })
+            .unwrap_or_default();
+        app.proj.walk.generating = Some(scope.into());
+        app.proj.walk.pending = Some(1);
+        let sent = click_right_of(
+            || sim_elem(super::sidebar::walk_library(&app)),
+            "Generating…",
+            |m| matches!(m, Message::Walk(crate::WalkMsg::Cancel)),
+        );
+        assert!(!sent.is_empty(), "{scope}: no Stop");
+    }
+}
+
 /// A path too long for its row is cut at its start — "…" and its last
 /// folders — not run past the row's end, under the finder's scrollbar, and
 /// clipped mid-letter at the panel's edge.
@@ -12162,17 +12210,30 @@ fn the_tour_sheet_says_all_set_only_of_a_model_that_answered() {
             words,
         )
     };
-    app.settings.connection_test = ConnectionTest::Untried;
+    app.model_check.result = ConnectionTest::Untried;
     assert!(says(&app, "Key added."));
     assert!(says(&app, "Test connection"));
     assert!(!says(&app, "All set."));
-    app.settings.connection_test =
+    // Not ticked, so the step to do — and Start waits for it.
+    assert_eq!(prep.current(&app), Some(crate::app::tutorial::Need::Model));
+    assert!(!prep.ready(&app));
+    app.model_check.result =
         ConnectionTest::Failed("Couldn't reach 127.0.0.1:9 (nothing answered at that address). Check the base URL and your network.".into());
     assert!(says(&app, "Couldn't reach 127.0.0.1:9"));
     assert!(!says(&app, "All set."));
-    app.settings.connection_test = ConnectionTest::Answered("m".into());
+    assert_eq!(prep.current(&app), Some(crate::app::tutorial::Need::Model));
+    app.model_check.result = ConnectionTest::Answered("m".into());
     assert!(says(&app, "All set."));
     assert!(!says(&app, "Test connection"));
+    assert_ne!(prep.current(&app), Some(crate::app::tutorial::Need::Model));
+    // Settings, opened from the sheet's next step, tests its own form: the
+    // sheet's check stands. It went back to "Check that it answers".
+    let _ = app.update(Message::Tutorial(crate::TutorialMsg::SetUp(
+        crate::SettingsPage::Embeddings,
+    )));
+    assert!(says(&app, "All set."));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::TestConnection));
+    assert!(says(&app, "All set."));
 }
 
 /// What voice could not do is said in the reader's language: on the card,

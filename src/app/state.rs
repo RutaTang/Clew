@@ -638,6 +638,10 @@ pub struct WalkState {
     /// Stops that request (`WalkMsg::Cancel`): while a tour was "Generating…"
     /// its row had no control at all, and nothing could stop it.
     pub abort: Option<iced::task::Handle>,
+    /// The request last stopped: its answer, if it was on its way already,
+    /// is not kept — Stop said "nothing it would have brought is kept", and
+    /// it was saved, "finished in the background".
+    pub cancelled: Option<u64>,
     /// Mints generation requests.
     pub seq: u64,
     /// True while a walkthrough generation is on its one automatic retry (the LLM
@@ -870,6 +874,31 @@ pub enum ConnectionTest {
     /// Why it could not be reached, in English: said in the language spoken
     /// when it is shown (`i18n::message`).
     Failed(String),
+}
+
+/// Test connection of the model as saved (the tour's sheet asks for it):
+/// kept apart from Settings' form, whose test is of fields not yet saved and
+/// is forgotten each time Settings opens — the sheet's "All set." went back
+/// to "Check that it answers" on a visit to Settings for embeddings. Kept
+/// with what it was of, so a change to the saved model makes it untried.
+#[derive(Debug, Clone, Default)]
+pub struct ModelCheck {
+    pub result: ConnectionTest,
+    /// The provider, model, endpoint and key the check was of.
+    pub of: Option<(llm::Provider, String, String, String)>,
+}
+
+impl ModelCheck {
+    /// What a check of `cfg` is known by: changed, the check is of
+    /// something else.
+    pub fn of_config(cfg: &llm::Config) -> (llm::Provider, String, String, String) {
+        (
+            cfg.provider,
+            cfg.model.clone(),
+            cfg.base_url.clone(),
+            cfg.api_key.clone(),
+        )
+    }
 }
 
 /// The LLM settings modal: whether it's open, plus its draft chat / embedding
@@ -1409,6 +1438,8 @@ pub struct App {
     /// when a project opens, and when the window regains focus (another
     /// window may have saved Settings meanwhile). See `App::llm_config`.
     pub llm_config_cache: Option<Option<llm::Config>>,
+    /// Test connection of the saved model, as the tour's sheet asked for it.
+    pub model_check: ModelCheck,
     /// Whether the toolbar's "More" overflow menu is open.
     pub show_tools_menu: bool,
     /// Whether the strip's Run menu is open: Run, Debug, Fake Run and Fake

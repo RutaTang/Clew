@@ -406,7 +406,15 @@ impl TourPrep {
     /// over).
     pub fn met(&self, app: &App, need: Need) -> bool {
         match need {
-            Need::Model => app.llm_available,
+            // A key, and the model it is for answered: a key alone set up
+            // the tour's calls, and every one failed where nothing answered.
+            Need::Model => {
+                app.llm_available
+                    && matches!(
+                        app.model_check.result,
+                        crate::app::state::ConnectionTest::Answered(_)
+                    )
+            }
             Need::Embeddings => app.embed_available || self.skip_embeddings,
             // Nothing to ask: what the server takes is fetched as the tour
             // starts. Met once the look says what that is.

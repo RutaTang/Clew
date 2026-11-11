@@ -2087,9 +2087,21 @@ pub enum ExplainFailure {
     /// The provider could not serve it now: a 5xx, an overload or a rate
     /// limit (408, 429), or a failure it reported mid-answer.
     Unavailable(String),
-    /// No answer came: the connection to the provider — or, for a remote
-    /// project, to the clew-server that calls it — broke, or went quiet.
+    /// The provider said so, and kept saying so through the waits every
+    /// request makes (`llm::send_with_retry`): a status it is sent again
+    /// for — 408, 429, 500, 503, 529 — that came back each time. Said as
+    /// [`ExplainFailure::Unavailable`] is; unlike a 502 or a stream cut off,
+    /// which come back at once, it counts toward stopping a pass
+    /// ([`Unanswered`]): out of credit, or down, every later call answers
+    /// the same.
+    Busy(String),
+    /// No answer came: the connection to the provider broke, or went quiet.
     Network(String),
+    /// For a project on another machine, the link to the clew-server that
+    /// makes the calls is gone ("not connected to a server"): every later
+    /// call goes the same way, so it counts toward stopping a pass
+    /// ([`Unanswered`]) — said as the server's, not the provider's.
+    ServerLost(String),
     /// No connection to the provider could be made at all, after the
     /// attempts every request makes (`llm::send_with_retry`): an address
     /// that refuses connections, a name that does not resolve, a network
@@ -2153,7 +2165,7 @@ impl ExplainFailure {
             CallError::Rpc(RpcError {
                 code: None,
                 message,
-            }) => ExplainFailure::Network(first_line(message)),
+            }) => ExplainFailure::ServerLost(first_line(message)),
             CallError::Rpc(RpcError {
                 code: Some(code),
                 message,
@@ -2211,7 +2223,8 @@ impl ExplainFailure {
         model: &str,
     ) -> ExplainFailure {
         let what = match code {
-            408 | 429 | 500..=599 => return ExplainFailure::Unavailable(detail),
+            408 | 429 | 500 | 503 | 529 => return ExplainFailure::Busy(detail),
+            500..=599 => return ExplainFailure::Unavailable(detail),
             401 | 403 => Rejection::Key,
             404 if is_about_the_model(kind, message, model) => Rejection::Model(model.to_string()),
             404 => Rejection::Endpoint,
@@ -2263,7 +2276,7 @@ impl ExplainFailure {
                 "the request was refused ({detail}) — check the model and endpoint in Settings",
                 detail = detail
             ),
-            ExplainFailure::Unavailable(detail) => {
+            ExplainFailure::Unavailable(detail) | ExplainFailure::Busy(detail) => {
                 tr!(
                     "the provider was unavailable ({detail}) — try again later",
                     detail = detail
@@ -2271,12 +2284,22 @@ impl ExplainFailure {
             }
             // Said once, the same way everywhere a call failed so: what
             // to check, not "try again" beside a Try again.
-            ExplainFailure::Network(detail) | ExplainFailure::Unreached(detail) => {
+            ExplainFailure::Unreached(detail) => {
                 tr!(
                     "couldn't reach the AI provider ({detail}) — check the base URL in Settings",
                     detail = plain_detail(detail)
                 )
             }
+            // Reached, and lost: mid-answer, a model too slow to answer, the
+            // link to the clew-server — none of them the base URL's fault.
+            ExplainFailure::Network(detail) => tr!(
+                "the connection to the AI was lost ({detail})",
+                detail = plain_detail(detail)
+            ),
+            ExplainFailure::ServerLost(detail) => tr!(
+                "the connection to the server was lost ({detail})",
+                detail = plain_detail(detail)
+            ),
             ExplainFailure::Unusable(detail) => tr!(
                 "the provider's answer could not be used ({detail}) — check the model and \
                  endpoint in Settings",
@@ -2302,11 +2325,13 @@ impl ExplainFailure {
     /// answer that could not be used is answered again, and a cancellation
     /// was asked for. The pass sends such a call again, once (see
     /// [`explain_pass`]); failing again, a later pass retries the group.
-    fn may_pass_later(&self) -> bool {
+    pub(crate) fn may_pass_later(&self) -> bool {
         matches!(
             self,
             ExplainFailure::Unavailable(_)
+                | ExplainFailure::Busy(_)
                 | ExplainFailure::Network(_)
+                | ExplainFailure::ServerLost(_)
                 | ExplainFailure::Unreached(_)
                 | ExplainFailure::Internal(_)
         )
@@ -2339,10 +2364,10 @@ impl ExplainFailure {
 
     /// Whether `other` is worded as this one is, whatever its detail.
     fn same_kind(&self, other: &ExplainFailure) -> bool {
-        use ExplainFailure::{Network, Unreached};
+        use ExplainFailure::{Busy, Unavailable};
         match (self, other) {
-            // Said in the same words: one failed connection is enough.
-            (Network(_) | Unreached(_), Network(_) | Unreached(_)) => true,
+            // Said in the same words: one is enough.
+            (Unavailable(_) | Busy(_), Unavailable(_) | Busy(_)) => true,
             (
                 ExplainFailure::Rejected { what: a, .. },
                 ExplainFailure::Rejected { what: b, .. },
@@ -2489,9 +2514,10 @@ type CallOutcome = Result<String, ExplainFailure>;
 /// its bar filling for a minute of work that all failed. Before anything is
 /// answered, an answer that is no provider's (a page where JSON was due:
 /// a captive portal, a web server at the base URL) or a request refused as
-/// it stands counts too. Once calls have been answered, only unreached
-/// calls count, and only as many in a row as the pass makes at once stop
-/// it: the network lost mid-pass.
+/// it stands counts too. Once calls have been answered, only calls that
+/// reached nothing count — no connection, a provider busy or out of credit
+/// through every wait, the link to the clew-server gone — and only as many
+/// in a row as the pass makes at once stop it: the network lost mid-pass.
 ///
 /// Calls end in the order they finish, not the order they were sent, so
 /// only failures that took their retries count: a 502 or a connection
@@ -2516,7 +2542,11 @@ impl Unanswered {
                 self.answered = true;
                 self.in_a_row = 0;
             }
-            Err(ExplainFailure::Unreached(_)) => self.in_a_row += 1,
+            Err(
+                ExplainFailure::Unreached(_)
+                | ExplainFailure::Busy(_)
+                | ExplainFailure::ServerLost(_),
+            ) => self.in_a_row += 1,
             Err(
                 ExplainFailure::Unusable(_)
                 | ExplainFailure::Rejected {
@@ -4358,6 +4388,59 @@ mod pass_tests {
             );
             assert!(outcome.written.is_empty(), "{:?}", outcome.written);
         }
+        // Out of credit, down through every wait, or the link to the
+        // clew-server gone: every later call answers the same, and the
+        // pass ran all of them, each resent, for an hour of failing work.
+        for gone in [
+            CallError::Llm(status(
+                429,
+                Some("insufficient_quota"),
+                "You exceeded your current quota",
+            )),
+            CallError::Llm(status(503, None, "Service Unavailable")),
+            CallError::Rpc(RpcError {
+                code: None,
+                message: "not connected to a server".into(),
+            }),
+        ] {
+            let failure = gone.clone();
+            let (outcome, calls) = pass_with(project(&files), explain::Cache::new(), "m-gone", {
+                move |_| Err(failure.clone())
+            });
+            assert!(
+                calls <= EXPLAIN_CONCURRENCY && outcome.failures.stopped.is_some(),
+                "{gone:?}: {calls} calls, {:?}",
+                outcome.failures
+            );
+        }
+    }
+
+    /// Only a connection that could not be made is said to be the base
+    /// URL's: one lost mid-answer, a model too slow to answer, the link to
+    /// the clew-server are none of its doing.
+    #[test]
+    fn only_an_unreached_provider_is_sent_to_the_base_url() {
+        for lost in [
+            ExplainFailure::Network("timed out reading response".into()),
+            ExplainFailure::Network("connection reset".into()),
+            ExplainFailure::ServerLost("not connected to a server".into()),
+        ] {
+            assert!(!lost.describe().contains("base URL"), "{lost:?}");
+        }
+        assert!(
+            ExplainFailure::Unreached("Connection refused (os error 111)".into())
+                .describe()
+                .contains("check the base URL in Settings")
+        );
+        let remote = CallError::Rpc(RpcError {
+            code: None,
+            message: "not connected to a server".into(),
+        });
+        assert!(
+            ExplainFailure::of_call(&remote, "m")
+                .describe()
+                .starts_with("the connection to the server was lost")
+        );
     }
 
     /// Once calls are answered, a few unanswered ones do not stop the
@@ -4611,7 +4694,7 @@ mod pass_tests {
             for call in [CallError::Llm(limited.clone()), from_server(&limited)] {
                 let failure = ExplainFailure::of_call(&call, "m");
                 assert!(
-                    matches!(failure, ExplainFailure::Unavailable(_)),
+                    matches!(failure, ExplainFailure::Busy(_)),
                     "{call:?}: {failure:?}"
                 );
                 assert!(!failure.stops_the_pass(), "{call:?}");
@@ -4770,7 +4853,10 @@ mod pass_tests {
             assert_eq!(rejected(&call), Some(Rejection::Request), "{call:?}");
         }
 
-        let unavailable = [408, 429, 500, 502, 503, 504, 529]
+        // What comes back at once, and what came back through every wait
+        // (`llm::send_with_retry`): only the second counts toward stopping
+        // a pass.
+        let unavailable = [502, 504]
             .map(|code| status(code, None, "try later"))
             .into_iter()
             .chain([LlmError::Stream("overloaded".into())]);
@@ -4779,6 +4865,12 @@ mod pass_tests {
                 matches!(of(&call), ExplainFailure::Unavailable(_)),
                 "{call:?}"
             );
+        }
+        let busy = [408, 429, 500, 503, 529]
+            .map(|code| status(code, None, "try later"))
+            .into_iter();
+        for call in busy.flat_map(both) {
+            assert!(matches!(of(&call), ExplainFailure::Busy(_)), "{call:?}");
         }
 
         // No connection made at all: unreached, which stops a pass.
@@ -4790,19 +4882,23 @@ mod pass_tests {
         }
         let network = [LlmError::Transport("timed out after 4013 ms".into())]
             .into_iter()
-            .flat_map(both)
-            .chain(
-                [
-                    "server gone",
-                    "server dropped the request",
-                    "no reply from the server within 600s",
-                    "the server took no requests for 600s",
-                    "not connected to a server",
-                ]
-                .map(|words| rpc(None, words)),
-            );
+            .flat_map(both);
         for call in network {
             assert!(matches!(of(&call), ExplainFailure::Network(_)), "{call:?}");
+        }
+        // The clew-server's own words, with no code: the link to it.
+        for words in [
+            "server gone",
+            "server dropped the request",
+            "no reply from the server within 600s",
+            "the server took no requests for 600s",
+            "not connected to a server",
+        ] {
+            let call = rpc(None, words);
+            assert!(
+                matches!(of(&call), ExplainFailure::ServerLost(_)),
+                "{call:?}"
+            );
         }
 
         let unusable = [

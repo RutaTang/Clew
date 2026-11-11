@@ -1338,14 +1338,6 @@ pub(crate) fn file_banner<'a>(summary: String, file: crate::explain::Node) -> El
 /// the width.
 pub(crate) const RIGHT_PANEL_MIN_WINDOW_W: f32 = 950.0;
 
-/// Whether the right panel is drawn: asked for, and room and a file for it.
-/// The one test the view and the tutorial's spotlight both use — the
-/// spotlight used to take `show_right_panel` alone and framed a panel the
-/// view had hidden (a split, a narrow window, no file).
-///
-/// Not beside a page that covers the panes (the Overview, Stats, Glossary,
-/// a Docs page): its notes are of the file under it, and the sheet's
-/// header, whose View menu shows and hides it, is not drawn there either.
 /// The least the code keeps beside the margin before the margin gives up
 /// its width, and the least the margin keeps.
 const CODE_MIN_W: f32 = 560.0;
@@ -1360,6 +1352,14 @@ pub(crate) fn margin_w(app: &App) -> f32 {
     app.right_width.min(spare.max(MARGIN_MIN_W))
 }
 
+/// Whether the right panel is drawn: asked for, and room and a file for it.
+/// The one test the view and the tutorial's spotlight both use — the
+/// spotlight used to take `show_right_panel` alone and framed a panel the
+/// view had hidden (a split, a narrow window, no file).
+///
+/// Not beside a page that covers the panes (the Overview, Stats, Glossary,
+/// a Docs page): its notes are of the file under it, and the sheet's
+/// header, whose View menu shows and hides it, is not drawn there either.
 pub(crate) fn right_panel_shown(app: &App) -> bool {
     app.show_right_panel
         && !app.proj.split

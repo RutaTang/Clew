@@ -700,17 +700,21 @@ fn trail_row(app: &App) -> Element<'_, Message> {
     }
     // Where the reader is now: the function the caret is in, when it is in
     // one of the current stop's file's — or that file, the caret in it but
-    // in no function: after Ctrl+Home the crumb still said "main():24".
+    // in no function: after Ctrl+Home the crumb still said "main():24". A
+    // stop named for what is on its line (a type gone to) keeps its name
+    // while the caret is on that line: it read "lib.rs", not "Point".
     let here = match (app.cursor_target(), stops.last()) {
         (Some(crate::explain::Node::Function { file, name, .. }), Some((_, loc, _)))
             if file == loc.path =>
         {
             Some(Some(name))
         }
-        (_, Some((_, loc, _)))
-            if app
-                .active_viewer()
-                .is_some_and(|v| v.abs == loc.path && v.caret.is_some()) =>
+        (_, Some((_, loc, label)))
+            if app.active_viewer().is_some_and(|v| {
+                v.abs == loc.path
+                    && v.caret
+                        .is_some_and(|(l0, _)| label.is_none() || loc.line != Some(l0 + 1))
+            }) =>
         {
             Some(None)
         }

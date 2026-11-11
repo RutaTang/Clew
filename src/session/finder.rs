@@ -49,12 +49,19 @@ impl Finder {
 
     /// A `file:N` query — "pricing.py:37", as a compiler or a stack trace
     /// writes a place: the file part, and the 1-based line to open it at.
-    /// It found "No matches", the `:37` taken as part of the name.
+    /// It found "No matches", the `:37` taken as part of the name. A column
+    /// after the line ("main.rs:12:5", as rustc, gcc and tsc write it) is
+    /// let go: it read as file "main.rs:12", line 5.
     pub fn file_line(&self) -> Option<(&str, usize)> {
-        let (file, line) = self.query.trim().rsplit_once(':')?;
-        let n: usize = line.trim().parse().ok()?;
+        let number = |s: &str| s.trim().parse::<usize>().ok().filter(|n| *n > 0);
+        let (head, last) = self.query.trim().rsplit_once(':')?;
+        let last = number(last)?;
+        let (file, line) = match head.rsplit_once(':') {
+            Some((file, line)) if number(line).is_some() => (file, number(line)?),
+            _ => (head, last),
+        };
         let file = file.trim();
-        (n > 0 && !file.is_empty()).then_some((file, n))
+        (!file.is_empty()).then_some((file, line))
     }
 
     /// What files are matched by: the query, less a `:N` line after it.
@@ -336,8 +343,13 @@ mod tests {
         assert_eq!(f.results.first(), Some(&0), "{:?}", f.results);
         f.refresh_bar(&["Open Folder…"], &files);
         assert!(f.results.contains(&1), "{:?}", f.results);
+        // A column after the line, as compilers write a place, is let go.
+        f.query = "pricing.py:37:5".into();
+        assert_eq!(f.file_line(), Some(("pricing.py", 37)));
+        f.query = r"C:\shop\pricing.py:37".into();
+        assert_eq!(f.file_line(), Some((r"C:\shop\pricing.py", 37)));
         // A line alone, or no line, is not a file at a line.
-        for query in [":37", "pricing.py", "pricing.py:", "pricing.py:0"] {
+        for query in [":37", "pricing.py", "pricing.py:", "pricing.py:0", ":37:5"] {
             f.query = query.into();
             assert_eq!(f.file_line(), None, "{query}");
         }

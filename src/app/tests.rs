@@ -26550,9 +26550,10 @@ fn a_connection_that_failed_is_said_to_have_failed() {
         calls, 2,
         "a request the provider had read was not sent again, once: {status}"
     );
+    // Reached, then lost: not the base URL's doing.
     assert!(
-        status.contains("1 failed: couldn't reach the AI provider (")
-            && status.ends_with("— check the base URL in Settings")
+        status.contains("1 failed: the connection to the AI was lost (")
+            && !status.contains("base URL")
             && !status.contains("request failed"),
         "{status}"
     );
@@ -36806,7 +36807,7 @@ fn a_failed_explain_stands_until_dismissed_with_a_way_to_try_again() {
         cache: explain::Cache::new(),
         failures: PassFailures {
             failed: 1,
-            stopped: Some(ExplainFailure::Network(
+            stopped: Some(ExplainFailure::Unreached(
                 "request failed: Connection refused (os error 111)".into(),
             )),
             ..PassFailures::default()
@@ -36935,7 +36936,7 @@ fn a_failed_explain_is_not_buried_by_what_follows_it() {
     }));
     assert!(
         app.status
-            .starts_with("Couldn't explain helper(): couldn't reach the AI provider"),
+            .starts_with("Couldn't explain helper(): the connection to the AI was lost"),
         "{}",
         app.status
     );
@@ -36971,10 +36972,171 @@ fn a_failed_explain_is_not_buried_by_what_follows_it() {
             ..PassFailures::default()
         },
         tally: Default::default(),
-        written: Default::default(),
+        written: [(node("helper"), None)].into_iter().collect(),
     }));
     let notice = app.failure_shown().expect("said as a failure");
     assert!(notice.retry.is_none(), "{:?}", notice.retry);
+    // Said of what failed, not of helper(), whose note is there: "Couldn't
+    // explain helper()" stood in red beside it.
+    assert!(
+        app.status
+            .starts_with("Explained helper(); 1 summary built on it failed:"),
+        "{}",
+        app.status
+    );
+}
+
+/// A failure that will fail again whatever is tried — a prompt too long for
+/// the model — says nothing of the provider or the embedding service: what
+/// follows a pass (the search index, the overview) still follows it. One
+/// function too big for a small model kept the index from ever being built.
+#[test]
+fn a_failure_that_will_recur_does_not_hold_up_what_follows_the_pass() {
+    let mut app = scanned_app("explain-failure-recurs");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let mut cache = explain::Cache::new();
+    cache.insert(
+        explain::Node::Function {
+            file: root.join("src/lib.rs"),
+            name: "origin".into(),
+            ordinal: 0,
+        },
+        explain::Cached {
+            summary: "makes a point".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    app.embed_available = true;
+    app.proj.explain.running = true;
+    let done = app.update(Message::Explain(ExplainMsg::Done {
+        stamp: app.stamp(),
+        generation: app.proj.explain.generation,
+        cache,
+        failures: PassFailures {
+            failed: 1,
+            calls: vec![ExplainFailure::Rejected {
+                what: crate::app::tasks::Rejection::Length,
+                detail: "context length exceeded".into(),
+            }],
+            ..PassFailures::default()
+        },
+        tally: Default::default(),
+        written: Default::default(),
+    }));
+    assert!(
+        run_task(done)
+            .iter()
+            .any(|m| matches!(m, Message::Semantic(SemanticMsg::BuildIndex))),
+        "no index built after a failure that will recur"
+    );
+}
+
+/// A failure stands for the project it happened in: opening another one,
+/// it went along, and its Try again made a paid call there.
+#[test]
+fn a_failure_does_not_follow_the_reader_to_another_project() {
+    let mut app = scanned_app("fail-switch-a");
+    app.say_failure(
+        "Walkthrough failed: no".into(),
+        Some(Message::Walk(WalkMsg::Generate("checkout".into()))),
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    assert!(app.failure_shown().is_some());
+    scan_synchronously(&mut app, fixture_project("fail-switch-b"));
+    assert!(app.failure_shown().is_none(), "{:?}", app.failure_notice);
+    assert_ne!(app.status, "Walkthrough failed: no");
+}
+
+/// Asked for again another way (the row's Try again, Generate), a failure
+/// goes: its own Try again, still standing, minted a second paid request,
+/// and the first ran on out of reach of Stop.
+#[test]
+fn a_walkthrough_asked_for_again_takes_its_failure_away() {
+    let mut app = scanned_app("walk-failure-again");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    app.say_failure(
+        "Walkthrough failed: no".into(),
+        Some(Message::Walk(WalkMsg::Generate("checkout".into()))),
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    let _ = app.update(Message::Walk(WalkMsg::Generate("checkout".into())));
+    assert!(app.failure_shown().is_none(), "{:?}", app.failure_notice);
+    assert!(app.proj.walk.abort.is_some());
+    // A second request stops the first: one in flight at a time.
+    let (_, first) = Task::<Message>::none().abortable();
+    let watch = first.clone();
+    app.proj.walk.abort = Some(first);
+    let _ = app.update(Message::Walk(WalkMsg::Generate("checkout".into())));
+    assert!(watch.is_aborted());
+    // Left for another project, it is stopped too: dropped, it ran on and
+    // was billed.
+    let (_, running) = Task::<Message>::none().abortable();
+    let watch = running.clone();
+    app.proj.walk.abort = Some(running);
+    scan_synchronously(&mut app, fixture_project("walk-failure-again-b"));
+    assert!(watch.is_aborted());
+}
+
+/// With no tour yet the header shows New: the first one landing keeps it
+/// there, its field and Generate, where it turned into "Search
+/// walkthroughs…" by itself.
+#[test]
+fn the_first_walkthrough_keeps_the_header_on_new() {
+    let mut app = scanned_app("walk-first-new");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    assert!(app.proj.walk.library.is_empty());
+    assert_eq!(app.walk_ui.mode, crate::WalkMode::Search);
+    let _ = app.update(Message::Walk(WalkMsg::Generate(String::new())));
+    assert_eq!(app.walk_ui.mode, crate::WalkMode::Walk);
+}
+
+/// Stopped, a tour's answer already on its way is not kept: it was saved,
+/// "finished in the background", over "Walkthrough stopped".
+#[test]
+fn a_stopped_walkthroughs_late_answer_is_not_kept() {
+    let mut app = scanned_app("walk-cancel-late");
+    app.proj.walk.seq += 1;
+    let seq = app.proj.walk.seq;
+    app.proj.walk.pending = Some(seq);
+    app.proj.walk.generating = Some("checkout".into());
+    let _ = app.update(Message::Walk(WalkMsg::Cancel));
+    let mut tours = walk_tour("origin", Some(5));
+    let _ = app.update(Message::Walk(WalkMsg::Done {
+        stamp: app.stamp(),
+        seq,
+        scope: "checkout".into(),
+        result: Ok(tours.remove(0)),
+    }));
+    assert!(app.proj.walk.library.is_empty());
+    assert_eq!(app.status, "Walkthrough stopped");
+}
+
+/// Try again on an answer that failed keeps the question being typed: it
+/// put the old question in its place, and the draft was gone.
+#[test]
+fn asking_again_keeps_the_draft_being_typed() {
+    let mut app = scanned_app("ask-again-draft");
+    app.proj.ask_input = "my draft".into();
+    let task = app.update(Message::Ask(AskMsg::Suggested("why?".into())));
+    let _ = run_task(task);
+    assert_eq!(app.proj.ask_input, "my draft");
+}
+
+/// A stop made by a jump to a line in another file keeps its function's
+/// name once that file is closed: noted only at the jump, before the file
+/// had loaded, it said "lib.rs:4" again.
+#[test]
+fn a_jumped_to_stop_keeps_its_function_once_its_file_is_closed() {
+    let mut app = scanned_app("trail-fn-jump");
+    let lib = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");
+    open_synchronously(&mut app, "notes.txt", None);
+    open_synchronously(&mut app, "src/lib.rs", Some(4));
+    assert_eq!(app.function_around(&lib, 4).as_deref(), Some("origin"));
+    open_synchronously(&mut app, "notes.txt", None);
+    assert!(app.proj.panes.iter().flatten().all(|v| v.abs != lib));
+    assert_eq!(app.function_around(&lib, 4).as_deref(), Some("origin"));
 }
 
 /// A walkthrough that failed keeps its row where it was asked for, saying

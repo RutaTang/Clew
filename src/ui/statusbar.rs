@@ -773,16 +773,20 @@ fn session_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
         return None;
     }
     let session = app.debug.session.as_ref()?;
-    let file = session
-        .program
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    // A remote run's program is the project's folder there, not a file: no
+    // name (as the status line says it), where it said "Debugging Clew".
+    let file = Some(&session.program)
+        .filter(|_| !app.connection.is_remote())
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned());
     let paused = session.status == crate::DebugStatus::Stopped;
-    let said = match (app.debug.no_debug, paused) {
-        (true, _) => tr!("Running {file}", file = file),
-        (false, true) => tr!("Debugging {file} — paused", file = file),
-        (false, false) => tr!("Debugging {file}", file = file),
+    let said = match (app.debug.no_debug, paused, file) {
+        (true, _, Some(file)) => tr!("Running {file}", file = file),
+        (false, true, Some(file)) => tr!("Debugging {file} — paused", file = file),
+        (false, false, Some(file)) => tr!("Debugging {file}", file = file),
+        (true, _, None) => tr!("Running").to_string(),
+        (false, true, None) => tr!("Debugging — paused").to_string(),
+        (false, false, None) => tr!("Debugging").to_string(),
     };
     let width = super::steady::width_of(&said, ts::SMALL, crate::fonts::UI) + CHIP_EXTRA_W;
     let chip = button(

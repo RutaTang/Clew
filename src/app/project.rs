@@ -586,6 +586,14 @@ impl App {
     /// line already held read as no notice at all.
     pub(crate) fn forget_project_state(&mut self) -> Option<String> {
         let left = std::mem::take(&mut self.proj);
+        // A failure standing on the status bar is the project's: its Try
+        // again acted on the next one — a walkthrough of the project left,
+        // generated (and paid for) in the one opened.
+        if let Some(notice) = self.failure_notice.take()
+            && notice.said == self.status
+        {
+            self.status.clear();
+        }
         // What the project left still waits for is forgotten with it: its
         // answers, arriving late, are nobody's (`App::session_first_req`).
         self.session_first_req = self.next_req_id.load(std::sync::atomic::Ordering::Relaxed);
@@ -675,6 +683,11 @@ impl App {
         // client AI endpoint the calls already handed to `spawn_blocking`
         // still finish.
         if let Some(handle) = self.proj.explain.abort.take() {
+            handle.abort();
+        }
+        // A walkthrough being generated, the same: its request runs on, and
+        // is billed, after its project is gone.
+        if let Some(handle) = self.proj.walk.abort.take() {
             handle.abort();
         }
         // The LSP refine holds CLONES of the old project's language-server

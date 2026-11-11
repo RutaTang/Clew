@@ -57,8 +57,13 @@ fn the_tour_is_got_ready_a_step_at_a_time_and_waits_for_a_model() {
         Some(crate::ui::ActiveOverlay::TourPrep(_))
     ));
 
-    // A key saved: the next step, which can be skipped.
+    // A key saved: checked first — the tour's calls all failed where
+    // nothing answered it.
     app.llm_available = true;
+    assert_eq!(prep(&app).current(&app), Some(Need::Model));
+    assert!(!prep(&app).ready(&app));
+    // It answered: the next step, which can be skipped.
+    app.model_check.result = crate::app::state::ConnectionTest::Answered("m".into());
     assert_eq!(prep(&app).current(&app), Some(Need::Embeddings));
     assert!(prep(&app).ready(&app), "Find by meaning is not needed");
     let _ = app.update(Message::Tutorial(TutorialMsg::SkipEmbeddings));
@@ -87,6 +92,7 @@ fn a_window_with_a_project_begins_the_tour_in_another() {
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let _env = data_dir_override(&dir);
     app.llm_available = true;
+    app.model_check.result = crate::app::state::ConnectionTest::Answered("m".into());
     let sample = prepared(&mut app);
     let go = app.update(Message::Tutorial(TutorialMsg::Go));
     let sent = run_task(go);

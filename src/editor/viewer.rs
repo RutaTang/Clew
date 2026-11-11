@@ -121,6 +121,9 @@ pub enum Motion {
     WordBack,
     FileStart,
     FileEnd,
+    /// The last line's first non-blank column, as vim's `G` goes (Ctrl+End
+    /// goes to its end, [`Motion::FileEnd`]).
+    LastLine,
 }
 
 /// The most sticky headers pinned over the top of a code view: the innermost
@@ -954,6 +957,15 @@ impl Viewer {
                 line = self.visible.last().copied().unwrap_or(last_line);
                 col = self.line_len(line);
             }
+            Motion::LastLine => {
+                line = self.visible.last().copied().unwrap_or(last_line);
+                col = self
+                    .line_text(line + 1)
+                    .chars()
+                    .take_while(|c| c.is_whitespace())
+                    .count()
+                    .min(self.line_len(line));
+            }
             Motion::WordForward => (line, col) = self.word_forward(line, col, last_line),
             Motion::WordBack => (line, col) = self.word_back(line, col),
         }
@@ -1648,6 +1660,8 @@ mod tests {
         assert_eq!(v.caret, Some((1, 0)));
         v.move_caret(Motion::Left); // clamped at col 0
         assert_eq!(v.caret, Some((1, 0)));
+        v.move_caret(Motion::LastLine); // vim's G: the last line, where its text starts
+        assert_eq!(v.caret, Some((9, 0)));
         v.move_caret(Motion::FileEnd); // the end of the last line
         assert_eq!(v.caret, Some((9, 6)));
         v.move_caret(Motion::Down); // clamped at last line

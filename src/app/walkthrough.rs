@@ -189,14 +189,11 @@ impl App {
     /// (`WalkMsg::Unnarrated`): said, standing, with a way to try again —
     /// unless another generation has started since.
     fn on_walkthrough_unnarrated(&mut self, seq: u64, why: String) -> Task<Message> {
-        // Said only of a run's tour that is shown: its Done may have kept
-        // nothing ("no valid steps"), and that is what the line says then.
-        let shown = self
-            .proj
-            .walk
-            .open
-            .as_deref()
-            .is_some_and(|scope| scope.starts_with("@trace "));
+        // Said only of this run's tour, shown: its Done may have kept nothing
+        // ("no valid steps"), and that is what the line says then — over
+        // another run's tour open, it said "showing its stops as recorded".
+        let program = self.debug.trace_program.as_deref().unwrap_or("program");
+        let shown = self.proj.walk.open.as_deref() == Some(format!("@trace {program}").as_str());
         if self.proj.walk.seq != seq || !shown {
             return Task::none();
         }
@@ -222,7 +219,12 @@ impl App {
             return task;
         }
         let (task, abort) = task.abortable();
-        self.proj.walk.abort = Some(abort);
+        // The generation it replaces is stopped: left running, it was
+        // billed, could no longer be stopped, and landed as "finished in the
+        // background".
+        if let Some(earlier) = self.proj.walk.abort.replace(abort) {
+            earlier.abort();
+        }
         task
     }
 
@@ -230,6 +232,9 @@ impl App {
         self.proj.walk.seq += 1;
         self.proj.walk.pending = Some(self.proj.walk.seq);
         self.proj.walk.failed = None;
+        // Asked for again: the failure's Try again, beside it, would ask a
+        // second time.
+        self.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
         self.proj.walk.generating = Some(scope);
         self.proj.walk.seq
     }
@@ -367,6 +372,10 @@ impl App {
         // running, nor spend its retry, nor pull the reader into its tour; a
         // finished one is still saved (it was paid for), just not opened.
         let awaited = self.proj.walk.pending == Some(seq);
+        // Stopped: what it brings is not kept, whenever it lands.
+        if self.proj.walk.cancelled == Some(seq) {
+            return Task::none();
+        }
         if awaited {
             self.proj.walk.pending = None;
             self.proj.walk.generating = None;
@@ -894,6 +903,13 @@ impl App {
     pub(crate) fn update_walk(&mut self, message: WalkMsg) -> Task<Message> {
         match message {
             WalkMsg::Generate(scope) => {
+                // With no tour yet the header shows New whatever the mode
+                // is: made New in fact, so the first tour landing does not
+                // turn the field into "Search walkthroughs…" and take its
+                // Generate away.
+                if self.proj.walk.library.is_empty() {
+                    self.walk_ui.mode = WalkMode::Walk;
+                }
                 let before = self.proj.walk.seq;
                 let task = self.on_generate_walkthrough(scope);
                 self.stoppable_walk(before, task)
@@ -917,7 +933,8 @@ impl App {
                 if let Some(abort) = self.proj.walk.abort.take() {
                     abort.abort();
                 }
-                if self.proj.walk.pending.take().is_some() {
+                if let Some(seq) = self.proj.walk.pending.take() {
+                    self.proj.walk.cancelled = Some(seq);
                     self.status = tr!("Walkthrough stopped").into();
                 }
                 self.proj.walk.generating = None;

@@ -2156,8 +2156,11 @@ pub enum SettingsMsg {
     /// tutorial's check before its tour spends calls on it).
     TestSavedConnection,
     /// What Test connection `number` found: the model's name, or why not.
+    /// `saved`: of the model as saved ([`SettingsMsg::TestSavedConnection`]),
+    /// not the form's fields.
     ConnectionTested {
         number: u64,
+        saved: bool,
         result: Result<String, String>,
     },
     /// LLM settings draft edits.

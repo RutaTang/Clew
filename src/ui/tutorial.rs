@@ -610,8 +610,8 @@ pub(crate) fn tour_prep_sheet<'a>(
     // the one to do, else dim), its name, what it is for, and its buttons.
     // A model is ticked once it answered: a key alone is checked first.
     use crate::app::state::ConnectionTest;
-    let tested = &app.settings.connection_test;
-    let model_ok = app.llm_available && matches!(tested, ConnectionTest::Answered(_));
+    let tested = &app.model_check.result;
+    let model_ok = prep.met(app, Need::Model);
     let step = |number: usize,
                 need: Need,
                 name: &'a str,
@@ -619,7 +619,7 @@ pub(crate) fn tour_prep_sheet<'a>(
                 about: String,
                 actions: Vec<Element<'a, Message>>|
      -> Element<'a, Message> {
-        let done = prep.met(app, need) && (need != Need::Model || model_ok);
+        let done = prep.met(app, need);
         let on = current == Some(need);
         // Tea Shop ready, with a model to explain it: what is ready is a
         // spend the tour starts, not a thing done — ticked quietly, where
@@ -819,10 +819,12 @@ pub(crate) fn tour_prep_sheet<'a>(
     } else {
         super::toolbar::tip_at(
             start,
-            if app.llm_available {
-                tr!("Ready once Tea Shop is")
-            } else {
+            if !app.llm_available {
                 tr!("Needs a language model first")
+            } else if !prep.met(app, Need::Model) {
+                tr!("Ready once the model answers a test")
+            } else {
+                tr!("Ready once Tea Shop is")
             },
             None,
             iced::widget::tooltip::Position::Top,

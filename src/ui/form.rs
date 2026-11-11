@@ -377,8 +377,15 @@ pub(crate) fn action<'a>(label: &str, msg: Option<Message>) -> Press<'a> {
 /// [`action`] that spends an AI call: marked with the sparkle, as every
 /// such control is.
 pub(crate) fn ai_action<'a>(label: &str, msg: Option<Message>) -> Press<'a> {
+    // Faded, words and mark, while it can do nothing (a test on its way):
+    // the mark stayed lit and the control looked live.
+    let color = if msg.is_some() {
+        theme::fg()
+    } else {
+        theme::dim()
+    };
     let msg = msg.map(|m| super::heard::said(label, m));
-    button(super::toolbar::ai_words(label, ts::BODY, theme::fg()))
+    button(super::toolbar::ai_words(label, ts::BODY, color))
         .style(theme::secondary_button)
         .padding([5, 12])
         .on_press_maybe(msg)

@@ -26,6 +26,13 @@ impl App {
     pub(crate) fn invalidate_llm_config(&mut self) {
         self.llm_config_cache = None;
         self.llm_available = llm::Config::available();
+        // The saved model changed: a check of the one before is not of it.
+        if self.model_check.of.is_some() {
+            let now = self.llm_config();
+            if now.as_ref().map(crate::app::state::ModelCheck::of_config) != self.model_check.of {
+                self.model_check = Default::default();
+            }
+        }
         // What estimates and the Usage page read prices for, and the prices
         // as they are now (another window may have changed them).
         crate::app::usage::forget_own_prices();
@@ -58,24 +65,34 @@ impl App {
             self.settings.model.clone(),
             self.settings.base_url.clone(),
         );
-        self.test_connection_of(cfg)
+        self.test_connection_of(cfg, false)
     }
 
     /// Test connection of the model as saved: what every call uses.
     pub(crate) fn on_test_saved_connection(&mut self) -> Task<Message> {
         match self.llm_config() {
-            Some(cfg) => self.test_connection_of(cfg),
+            Some(cfg) => {
+                self.model_check.of = Some(crate::app::state::ModelCheck::of_config(&cfg));
+                self.test_connection_of(cfg, true)
+            }
             None => Task::done(Message::Settings(SettingsMsg::NeedKey)),
         }
     }
 
     /// One word asked of the model `cfg` names: what Test connection finds
-    /// (`SettingsDraft::connection_test`).
-    fn test_connection_of(&mut self, cfg: llm::Config) -> Task<Message> {
+    /// — of the form's fields (`SettingsDraft::connection_test`), or
+    /// `saved`, of the model as saved (`App::model_check`).
+    fn test_connection_of(&mut self, cfg: llm::Config, saved: bool) -> Task<Message> {
+        use crate::app::state::ConnectionTest;
         self.settings.connection_tests += 1;
         let number = self.settings.connection_tests;
+        let found = if saved {
+            &mut self.model_check.result
+        } else {
+            &mut self.settings.connection_test
+        };
         if cfg.base_url.is_empty() || cfg.model.is_empty() {
-            self.settings.connection_test = crate::app::state::ConnectionTest::Failed(
+            *found = ConnectionTest::Failed(
                 tr_noop!("Name the model and its endpoint first.").to_string(),
             );
             return Task::none();
@@ -83,12 +100,10 @@ impl App {
         // No key, for a service that takes one: said as that, not as the
         // server's "no AI chat config". A custom endpoint may need none.
         if cfg.api_key.trim().is_empty() && cfg.provider != llm::Provider::Custom {
-            self.settings.connection_test = crate::app::state::ConnectionTest::Failed(
-                tr_noop!("Enter the API key first.").to_string(),
-            );
+            *found = ConnectionTest::Failed(tr_noop!("Enter the API key first.").to_string());
             return Task::none();
         }
-        self.settings.connection_test = crate::app::state::ConnectionTest::Testing(number);
+        *found = ConnectionTest::Testing(number);
         // Asked the way every call is made: through the server, for a
         // project on another machine.
         let ai = self.ai_client();
@@ -106,7 +121,13 @@ impl App {
                 .map(|_| model)
                 .map_err(|e| connection_failure(&e, &cfg))
             },
-            move |result| Message::Settings(SettingsMsg::ConnectionTested { number, result }),
+            move |result| {
+                Message::Settings(SettingsMsg::ConnectionTested {
+                    number,
+                    saved,
+                    result,
+                })
+            },
         )
     }
 
@@ -710,13 +731,21 @@ impl App {
             }
             SettingsMsg::TestConnection => self.on_test_connection(),
             SettingsMsg::TestSavedConnection => self.on_test_saved_connection(),
-            SettingsMsg::ConnectionTested { number, result } => {
-                if self.settings.connection_test
-                    == crate::app::state::ConnectionTest::Testing(number)
-                {
-                    self.settings.connection_test = match result {
-                        Ok(model) => crate::app::state::ConnectionTest::Answered(model),
-                        Err(e) => crate::app::state::ConnectionTest::Failed(e),
+            SettingsMsg::ConnectionTested {
+                number,
+                saved,
+                result,
+            } => {
+                use crate::app::state::ConnectionTest;
+                let found = if saved {
+                    &mut self.model_check.result
+                } else {
+                    &mut self.settings.connection_test
+                };
+                if *found == ConnectionTest::Testing(number) {
+                    *found = match result {
+                        Ok(model) => ConnectionTest::Answered(model),
+                        Err(e) => ConnectionTest::Failed(e),
                     };
                 }
                 Task::none()
@@ -765,11 +794,15 @@ fn connection_failure(err: &crate::app::rpc::CallError, cfg: &llm::Config) -> St
         ),
         // A 429 for the account, not the moment: out of credit, over a
         // quota. "Try again in a minute" was never true of it.
-        ExplainFailure::Unavailable(detail) if is_about_billing(&detail) => tr!(
-            "The provider refused for your account's quota or credit ({detail}). Check your plan.",
-            detail = detail
-        ),
-        ExplainFailure::Unavailable(detail) => tr!(
+        ExplainFailure::Unavailable(detail) | ExplainFailure::Busy(detail)
+            if is_about_billing(&detail) =>
+        {
+            tr!(
+                "The provider refused for your account's quota or credit ({detail}). Check your plan.",
+                detail = detail
+            )
+        }
+        ExplainFailure::Unavailable(detail) | ExplainFailure::Busy(detail) => tr!(
             "The provider is busy or down right now ({detail}). Try again in a minute.",
             detail = detail
         ),
@@ -785,12 +818,25 @@ fn connection_failure(err: &crate::app::rpc::CallError, cfg: &llm::Config) -> St
 }
 
 /// Whether a provider's words are about the account's money rather than
-/// its load: OpenAI's `insufficient_quota`, a billing limit, no credit.
+/// its load: OpenAI's `insufficient_quota`, a billing limit, no credit. A
+/// quota per minute, a rate, a lack of capacity is load, and passes: Gemini's
+/// "Quota exceeded for quota metric '… per minute'" read as out of credit.
 fn is_about_billing(words: &str) -> bool {
     let words = words.to_ascii_lowercase();
-    ["quota", "billing", "credit", "insufficient", "payment"]
-        .iter()
-        .any(|w| words.contains(w))
+    let load = [
+        "per minute",
+        "per second",
+        "per day",
+        "rate limit",
+        "rate_limit",
+        "capacity",
+    ]
+    .iter()
+    .any(|w| words.contains(w));
+    !load
+        && ["quota", "billing", "credit", "insufficient", "payment"]
+            .iter()
+            .any(|w| words.contains(w))
 }
 
 /// The host and port a base URL names: what a connection that could not
