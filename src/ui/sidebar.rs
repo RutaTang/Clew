@@ -2269,6 +2269,19 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
                 ))
                 .into(),
         );
+        // What in particular is missing, when it is more than "set one
+        // up" (the model chosen, not yet downloaded): said under it.
+        if !app.embed_missing.is_empty()
+            && app.embed_missing != tr!("Configure an embedding endpoint in Settings")
+        {
+            rows.push(
+                text(app.embed_missing.clone())
+                    .size(ts::SMALL)
+                    .color(theme::dim())
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .into(),
+            );
+        }
     } else {
         rows.push(
             row![build, space().width(Fill), info]

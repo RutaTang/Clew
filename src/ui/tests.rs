@@ -12951,8 +12951,9 @@ fn repeated_actions_are_icons_that_do_what_they_did() {
             .any(|m| matches!(m, Message::Semantic(SemanticMsg::BuildIndex)))
     });
     assert!(rebuilt, "the index is rebuilt from its icon");
-    // The first build is asked for in words.
+    // The first build is asked for in words (with a model to build with).
     app.proj.embed_index = crate::embed::Index::default();
+    app.embed_available = true;
     assert!(shows(
         &mut sim_elem(super::semantic_tab(&app)),
         "Build index"
