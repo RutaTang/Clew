@@ -629,6 +629,9 @@ pub struct WalkState {
     pub generating: Option<String>,
     /// The request `generating` belongs to (see `WalkMsg::Done::seq`).
     pub pending: Option<u64>,
+    /// Stops that request (`WalkMsg::Cancel`): while a tour was "Generating…"
+    /// its row had no control at all, and nothing could stop it.
+    pub abort: Option<iced::task::Handle>,
     /// Mints generation requests.
     pub seq: u64,
     /// True while a walkthrough generation is on its one automatic retry (the LLM

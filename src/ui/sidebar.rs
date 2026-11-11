@@ -604,7 +604,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         .width(Fill)
         .padding(Padding {
             top: 6.0,
-            right: if busy { 8.0 } else { 62.0 },
+            right: if busy { 36.0 } else { 62.0 },
             bottom: 6.0,
             left: 8.0,
         })
@@ -616,40 +616,83 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                 Message::Walk(WalkMsg::Open(wt.scope.clone()))
             },
         ));
-        let tour_row: Element<'_, Message> = if busy {
-            title.into()
+        // Each control says what it does where the pointer rests: ↻ (paid)
+        // and × (gone for good) looked alike, and said nothing.
+        let tip = |control: Element<'static, Message>, words: &'static str| {
+            super::toolbar::tip_at(control, words, None, tooltip::Position::Bottom)
+        };
+        let controls: Element<'_, Message> = if busy {
+            // Stoppable while it is made: the row had no control at all.
+            tip(
+                button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
+                    .style(theme::toolbar_button)
+                    .padding([7, 9])
+                    .on_press(super::heard::said_to(
+                        tr!("Stop"),
+                        &scope_label(&wt.scope),
+                        Message::Walk(WalkMsg::Cancel),
+                    ))
+                    .into(),
+                tr!("Stop generating it"),
+            )
         } else {
-            let controls = container(
-                row![
-                    button(text("↻").size(ts::BASE))
-                        .style(theme::toolbar_button)
-                        .padding([6, 9])
-                        .on_press(super::heard::said_to(
-                            tr!("Regenerate"),
-                            &scope_label(&wt.scope),
-                            Message::Walk(WalkMsg::Regenerate(wt.scope.clone()))
-                        )),
+            // A debug run's tour is made again only from the run it records.
+            let again = app.can_regenerate(&wt.scope);
+            let regenerate = button(glyph::icon(
+                Glyph::Refresh,
+                if again { theme::accent() } else { theme::dim() },
+                13.0,
+            ))
+            .style(theme::toolbar_button)
+            .padding([6, 9])
+            .on_press_maybe(again.then(|| {
+                super::heard::said_to(
+                    tr!("Regenerate"),
+                    &scope_label(&wt.scope),
+                    Message::Walk(WalkMsg::Regenerate(wt.scope.clone())),
+                )
+            }));
+            row![
+                tip(
+                    regenerate.into(),
+                    if !again {
+                        tr!(
+                            "This walkthrough records a debug run — debug the program again to record a new one"
+                        )
+                    } else if wt.scope.starts_with("@trace ") {
+                        tr!("Narrate the last run again with AI (one AI call)")
+                    } else {
+                        tr!("Regenerate with AI (one AI call)")
+                    },
+                ),
+                tip(
                     button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
                         .style(theme::toolbar_button)
                         .padding([7, 9])
                         .on_press(super::heard::said_to(
                             tr!("Delete"),
                             &scope_label(&wt.scope),
-                            Message::Walk(WalkMsg::Delete(wt.scope.clone()))
-                        )),
-                ]
-                .spacing(2),
-            )
-            .width(Fill)
-            .height(Fill)
-            .align_x(iced::Right)
-            .align_y(iced::Center)
-            .padding(Padding {
-                top: 0.0,
-                right: 6.0,
-                bottom: 0.0,
-                left: 0.0,
-            });
+                            Message::Walk(WalkMsg::Delete(wt.scope.clone())),
+                        ))
+                        .into(),
+                    tr!("Delete this walkthrough"),
+                ),
+            ]
+            .spacing(2)
+            .into()
+        };
+        let tour_row: Element<'_, Message> = {
+            let controls = container(controls)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::Right)
+                .align_y(iced::Center)
+                .padding(Padding {
+                    top: 0.0,
+                    right: 6.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                });
             stack![title, controls].into()
         };
         list = list.push(tour_row);
@@ -2350,11 +2393,11 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     // (No model and no index is said below, in a sentence and a button.)
     let info: Element<'_, Message> = if n == 0 && app.proj.explain.cache.is_empty() {
         // The step that gets there, as a link.
-        button(
-            text(tr!("Explain All…"))
-                .size(ts::CAPTION)
-                .color(theme::accent()),
-        )
+        button(super::toolbar::ai_words(
+            tr!("Explain All…"),
+            ts::CAPTION,
+            theme::accent(),
+        ))
         .style(theme::icon_button(false))
         .padding([2, 6])
         .on_press(super::heard::said(

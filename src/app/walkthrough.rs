@@ -214,6 +214,18 @@ impl App {
     /// Mark a walkthrough generation for `scope` as the one in flight and mint
     /// its request id: only that request's `WalkMsg::Done` may clear the busy
     /// row, retry, or open the tour.
+    /// `task`, stoppable with `WalkMsg::Cancel` when it is a generation that
+    /// began (one more request minted since `before`); as it is otherwise —
+    /// a key asked for, nothing to do.
+    fn stoppable_walk(&mut self, before: u64, task: Task<Message>) -> Task<Message> {
+        if self.proj.walk.seq == before {
+            return task;
+        }
+        let (task, abort) = task.abortable();
+        self.proj.walk.abort = Some(abort);
+        task
+    }
+
     fn begin_walkthrough_generation(&mut self, scope: String) -> u64 {
         self.proj.walk.seq += 1;
         self.proj.walk.pending = Some(self.proj.walk.seq);
@@ -358,6 +370,7 @@ impl App {
         if awaited {
             self.proj.walk.pending = None;
             self.proj.walk.generating = None;
+            self.proj.walk.abort = None;
         } else if result.is_err() {
             return Task::none();
         }
@@ -573,6 +586,20 @@ impl App {
         Task::none()
     }
 
+    /// Whether the tour with `scope` can be made again: any tour the AI
+    /// wrote; a debug run's only from the last run of its program, still
+    /// recorded.
+    pub(crate) fn can_regenerate(&self, scope: &str) -> bool {
+        if !scope.starts_with("@trace ") {
+            return true;
+        }
+        self.debug
+            .trace_program
+            .as_ref()
+            .is_some_and(|program| scope == format!("@trace {program}"))
+            && !self.debug.trace.is_empty()
+    }
+
     pub(crate) fn on_walkthrough_regenerate(&mut self, scope: String) -> Task<Message> {
         if !self.proj.walk.library.iter().any(|w| w.scope == scope) {
             return Task::none();
@@ -586,13 +613,7 @@ impl App {
         // anew, it was a paid model call on the literal text "@trace app",
         // whose made-up tour replaced the recording under the run's label.
         if scope.starts_with("@trace ") {
-            let last_run = self
-                .debug
-                .trace_program
-                .as_ref()
-                .is_some_and(|program| scope == format!("@trace {program}"))
-                && !self.debug.trace.is_empty();
-            if last_run {
+            if self.can_regenerate(&scope) {
                 return Task::done(Message::Walk(WalkMsg::GenerateTrace));
             }
             self.status = tr!(
@@ -870,10 +891,37 @@ impl App {
     /// (after its one ownership check and the menu bookkeeping).
     pub(crate) fn update_walk(&mut self, message: WalkMsg) -> Task<Message> {
         match message {
-            WalkMsg::Generate(scope) => self.on_generate_walkthrough(scope),
-            WalkMsg::GenerateDiff => self.on_generate_diff_walkthrough(),
-            WalkMsg::GenerateTrace => self.on_generate_trace_walkthrough(),
-            WalkMsg::Regenerate(scope) => self.on_walkthrough_regenerate(scope),
+            WalkMsg::Generate(scope) => {
+                let before = self.proj.walk.seq;
+                let task = self.on_generate_walkthrough(scope);
+                self.stoppable_walk(before, task)
+            }
+            WalkMsg::GenerateDiff => {
+                let before = self.proj.walk.seq;
+                let task = self.on_generate_diff_walkthrough();
+                self.stoppable_walk(before, task)
+            }
+            WalkMsg::GenerateTrace => {
+                let before = self.proj.walk.seq;
+                let task = self.on_generate_trace_walkthrough();
+                self.stoppable_walk(before, task)
+            }
+            WalkMsg::Regenerate(scope) => {
+                let before = self.proj.walk.seq;
+                let task = self.on_walkthrough_regenerate(scope);
+                self.stoppable_walk(before, task)
+            }
+            WalkMsg::Cancel => {
+                if let Some(abort) = self.proj.walk.abort.take() {
+                    abort.abort();
+                }
+                if self.proj.walk.pending.take().is_some() {
+                    self.status = tr!("Walkthrough stopped").into();
+                }
+                self.proj.walk.generating = None;
+                self.proj.walk.retried = false;
+                Task::none()
+            }
             WalkMsg::Delete(scope) => self.on_walkthrough_delete(&scope),
             // (A tour generated for another project must not be saved into
             // this one's library — the save also writes to its disk: dropped

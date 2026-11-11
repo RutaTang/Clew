@@ -1230,6 +1230,9 @@ pub enum WalkMsg {
     /// Take the failed generation's row out of the list
     /// (`WalkState::failed`).
     ForgetFailure,
+    /// Stop the generation under way (`WalkState::generating`): its request
+    /// is dropped, and nothing it would have brought is kept.
+    Cancel,
     /// Open the library tour with this scope for reading.
     Open(String),
     /// Return from a tour to the library list.
@@ -2903,6 +2906,7 @@ impl WalkMsg {
             | WalkMsg::Regenerate(..)
             | WalkMsg::Delete(..)
             | WalkMsg::ForgetFailure
+            | WalkMsg::Cancel
             | WalkMsg::Open(..)
             | WalkMsg::Back
             | WalkMsg::ToggleMode

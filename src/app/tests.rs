@@ -36949,6 +36949,37 @@ fn a_failed_walkthrough_keeps_its_row_with_a_way_to_try_again() {
     ));
 }
 
+/// A walkthrough being made can be stopped from its row: the request goes,
+/// the row is no longer "Generating…", and a late answer to it opens
+/// nothing. While generating, its row had no control at all.
+#[test]
+fn a_walkthrough_being_made_can_be_stopped() {
+    let mut app = scanned_app("walk-cancel");
+    app.proj.walk.seq += 1;
+    let seq = app.proj.walk.seq;
+    app.proj.walk.pending = Some(seq);
+    app.proj.walk.generating = Some("checkout".into());
+    let (_, abort) = Task::<Message>::none().abortable();
+    app.proj.walk.abort = Some(abort);
+    let _ = app.update(Message::Walk(WalkMsg::Cancel));
+    assert!(app.proj.walk.generating.is_none());
+    assert!(app.proj.walk.pending.is_none());
+    assert!(app.proj.walk.abort.is_none());
+    assert_eq!(app.status, "Walkthrough stopped");
+    // Its failure, coming late, is not said.
+    let _ = app.update(Message::Walk(WalkMsg::Done {
+        stamp: app.stamp(),
+        seq,
+        scope: "checkout".into(),
+        result: Err(walkthrough::Failure::Other("cancelled".into())),
+    }));
+    assert!(app.proj.walk.failed.is_none());
+    assert!(app.failure_shown().is_none());
+    // A debug run's tour is made again only from the run it records.
+    assert!(app.can_regenerate("checkout"));
+    assert!(!app.can_regenerate("@trace app.py"));
+}
+
 /// Ctrl+Home goes to the file's very start — its first column too — and
 /// Ctrl+G, Go to Line in other editors, opens Go to Line where nothing
 /// else holds it.

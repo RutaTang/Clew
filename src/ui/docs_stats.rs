@@ -652,7 +652,13 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         // What it is written from, and the one step that gets there — a
         // way each: the page was a dead end ("Run Explain All first.").
         let step = |label: &'static str, msg: Message| {
-            button(text(label).size(ts::BODY))
+            // Explain All spends AI calls: marked so, as everywhere.
+            let face: Element<'_, Message> = if label == tr!("Explain All…") {
+                super::toolbar::ai_words(label, ts::BODY, theme::on_accent())
+            } else {
+                text(label).size(ts::BODY).into()
+            };
+            button(face)
                 .style(theme::primary_button)
                 .padding([5, 14])
                 .on_press(super::heard::said(label, msg))

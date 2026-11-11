@@ -91,13 +91,28 @@ pub(crate) fn fake_sheet<'a>(sheet: &'a Sheet) -> Element<'a, Message> {
     } else {
         tr!("Suggest inputs")
     };
+    // Both ask the AI: marked so, each with what it costs where the
+    // pointer rests.
     let suggest =
-        button(text(suggest_label).size(ts::BODY))
+        super::toolbar::tip_at(
+            button(super::toolbar::ai_words(
+                suggest_label,
+                ts::BODY,
+                if sheet.suggesting.is_some() {
+                    theme::dim()
+                } else {
+                    theme::fg()
+                },
+            ))
             .style(theme::toolbar_button)
             .padding([4, 12])
             .on_press_maybe(sheet.suggesting.is_none().then(|| {
                 super::heard::said(tr!("Suggest inputs"), Message::Fake(FakeMsg::Suggest))
-            }));
+            })),
+            tr!("Suggest inputs with AI (one AI call)"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        );
     let cancel_b = button(text(tr!("Cancel")).size(ts::BODY))
         .style(theme::toolbar_button)
         .padding([4, 12])
@@ -113,14 +128,21 @@ pub(crate) fn fake_sheet<'a>(sheet: &'a Sheet) -> Element<'a, Message> {
     } else {
         (tr!("Fake run"), tr!("Run"))
     };
-    let run_b = button(text(go).size(ts::BODY))
-        .style(theme::primary_button)
-        .padding([4, 12])
-        .on_press(super::heard::answer(
-            go,
-            super::heard::Answer::Yes,
-            run.clone(),
-        ));
+    let run_b = super::toolbar::tip_at(
+        button(super::toolbar::ai_words(go, ts::BODY, theme::on_accent()))
+            .style(theme::primary_button)
+            .padding([4, 12])
+            .on_press(super::heard::answer(
+                go,
+                super::heard::Answer::Yes,
+                run.clone(),
+            )),
+        tr!(
+            "Work out what it does with AI, without running it (a few AI calls: it reads the code it calls first)"
+        ),
+        None,
+        iced::widget::tooltip::Position::Top,
+    );
     let title = row![
         text(heading).size(ts::EMPHASIS).color(theme::fg()),
         text(sheet.target.name.clone())

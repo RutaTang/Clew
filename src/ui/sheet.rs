@@ -383,7 +383,13 @@ fn file_tool<'a>(
     short: bool,
 ) -> Element<'a, Message> {
     let tint = if on { theme::fg() } else { theme::fg_muted() };
-    let mut face = row![glyph::icon(glyph, tint, FILE_TOOL_GLYPH)]
+    // What spends an AI call carries its mark in the accent, as everywhere.
+    let mark = if glyph == Glyph::Sparkle {
+        theme::accent()
+    } else {
+        tint
+    };
+    let mut face = row![glyph::icon(glyph, mark, FILE_TOOL_GLYPH)]
         .spacing(FILE_TOOL_SPACING)
         .align_y(iced::Center);
     if !short {
@@ -553,8 +559,10 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             .as_ref()
             .is_some_and(|g| g.status.iter().all(Option::is_none) && g.deleted_at.is_empty());
     let tools = row![
+        // The sparkle, as every control that spends an AI call has: with
+        // lines for its mark, the one most likely to cost looked free.
         file_tool(
-            Glyph::TextLines,
+            Glyph::Sparkle,
             tr!("Explain"),
             Some(tr!(
                 "Explain this file with AI (an AI call for each part not yet explained)"

@@ -1945,7 +1945,9 @@ fn active_note<'a>(
         // button's height to sit in the middle of.
         button(
             row![
-                glyph::icon(glyph, tint, 13.0),
+                container(glyph::icon(glyph, tint, 13.0))
+                    .width(Length::Fixed(13.0))
+                    .height(Length::Fixed(13.0)),
                 text(label)
                     .size(NOTE_ACTION_SIZE)
                     .font(font(accent))

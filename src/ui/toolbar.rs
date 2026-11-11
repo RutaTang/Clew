@@ -103,9 +103,22 @@ pub(crate) fn search_field_rect(app: &App) -> iced::Rectangle {
 /// before them, as every such control has. Links that spent a call looked
 /// like the free links beside them.
 pub(crate) fn ai_words<'a>(label: &str, size: f32, color: iced::Color) -> Element<'a, Message> {
+    // No smaller than 12: at the caption's size it drew as a dot. In a box
+    // of its own size, so the words beside it never squeeze it.
+    let mark = (size + 1.0).max(12.0);
+    // In the accent, whatever colour the words are: in the words' white on
+    // Test connection, it was not the mark every other AI control carries.
+    // Faded with words that can do nothing now.
+    // On the accent itself (a primary button), in the words' colour.
+    let tint = if color == theme::dim() || color == theme::on_accent() {
+        color
+    } else {
+        theme::accent()
+    };
     iced::widget::row![
-        // No smaller than 12: at the caption's size it drew as a dot.
-        glyph::icon(Glyph::Sparkle, color, (size + 1.0).max(12.0)),
+        iced::widget::container(glyph::icon(Glyph::Sparkle, tint, mark))
+            .width(iced::Length::Fixed(mark))
+            .height(iced::Length::Fixed(mark)),
         text(label.to_string()).size(size).color(color),
     ]
     .spacing(4)
@@ -1323,6 +1336,8 @@ fn menu_item<'a>(
     msg: Option<Message>,
 ) -> Element<'a, Message> {
     let gutter: Element<'a, Message> = match glyph {
+        // What spends an AI call, in the accent as everywhere.
+        Some(Glyph::Sparkle) => glyph::icon(Glyph::Sparkle, theme::accent(), 15.0),
         Some(g) => glyph::icon(g, theme::fg_muted(), 15.0),
         None => space().width(15).into(),
     };
@@ -1932,11 +1947,15 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
             if placed.section != section {
                 continue;
             }
+            let msg = Message::Editor(EditorMsg::RunAction(action));
+            // What spends AI calls carries the sparkle here too: Explain
+            // All and the fake runs looked like the free rows around them.
+            let mark = crate::app::palette::spends_ai(&msg).then_some(Glyph::Sparkle);
             items.push(menu_item(
-                None,
+                mark,
                 crate::i18n::lookup(placed.title).to_string(),
                 menu_chord(app, action),
-                Some(Message::Editor(EditorMsg::RunAction(action))),
+                Some(msg),
             ));
         }
     }

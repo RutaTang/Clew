@@ -232,12 +232,13 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M4 6.5 L9.5 4.5 L14.5 6.5 L20 4.5 V17.5 L14.5 19.5 L9.5 17.5 L4 19.5 Z'/>\
              <path d='M9.5 4.5 V17.5'/><path d='M14.5 6.5 V19.5'/>"
         }
-        // Filled, its points full width: drawn in outline, the four thin
-        // points closed up at 12 px into a dot, read as a list's bullet
-        // before "Why is this line here?" — the one sign that a control
-        // spends an AI call, not recognised as one.
+        // Filled, its points full width and its body broad: drawn in
+        // outline, the four thin points closed up at 12 px into a dot, read
+        // as a list's bullet before "Why is this line here?" — the one sign
+        // that a control spends an AI call, not recognised as one; filled
+        // thin, it read at 11 px as a narrow diamond.
         Sparkle => {
-            "<path d='M12 2.5 C12.7 9.2 14.8 11.3 21.5 12 C14.8 12.7 12.7 14.8 12 21.5 C11.3 14.8 9.2 12.7 2.5 12 C9.2 11.3 11.3 9.2 12 2.5 Z' fill='STROKE' stroke-width='1.2'/>"
+            "<path d='M12 1.5 C12.9 8.4 15.6 11.1 22.5 12 C15.6 12.9 12.9 15.6 12 22.5 C11.1 15.6 8.4 12.9 1.5 12 C8.4 11.1 11.1 8.4 12 1.5 Z' fill='STROKE' stroke-width='2.2'/>"
         }
         // A triangle with a mark in it: look here.
         WeakSpots => {
