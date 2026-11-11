@@ -617,7 +617,21 @@ pub(crate) fn tour_prep_sheet<'a>(
      -> Element<'a, Message> {
         let done = prep.met(app, need);
         let on = current == Some(need);
-        let marker: Element<'a, Message> = if done {
+        // Tea Shop ready, with a model to explain it: what is ready is a
+        // spend the tour starts, not a thing done — ticked quietly, where
+        // a green tick read "nothing to think about".
+        let spends = need == Need::Server && app.llm_available;
+        let marker: Element<'a, Message> = if done && spends {
+            container(glyph::icon(Glyph::Check, theme::fg_muted(), 12.0))
+                .center(22)
+                .style(|_: &iced::Theme| container::Style {
+                    border: iced::border::rounded(11)
+                        .width(1.0)
+                        .color(theme::hairline()),
+                    ..container::Style::default()
+                })
+                .into()
+        } else if done {
             container(glyph::icon(Glyph::Check, theme::bg(), 12.0))
                 .center(22)
                 .style(|_: &iced::Theme| container::Style {
@@ -698,7 +712,12 @@ pub(crate) fn tour_prep_sheet<'a>(
     let shop = match sample {
         None => tr!("Getting Tea Shop ready…").to_string(),
         Some(Err(e)) => e.clone(),
-        Some(Ok((_, census))) => tea_shop_line(census, app.llm_available, app.embed_available),
+        Some(Ok((_, census))) => tea_shop_line(
+            census,
+            app.llm_available,
+            app.embed_available,
+            census.calls.and_then(|n| app.explain_estimate(n)),
+        ),
     };
 
     let steps = column![
@@ -795,6 +814,7 @@ pub(crate) fn tea_shop_line(
     census: &crate::app::setup::Census,
     llm_available: bool,
     embed_available: bool,
+    estimate: Option<crate::app::usage::Estimate>,
 ) -> String {
     let servers = if census.servers.is_empty() {
         tr!("Its language server is ready.").to_string()
@@ -807,7 +827,20 @@ pub(crate) fn tea_shop_line(
     if !llm_available {
         return servers;
     }
-    let calls = crate::app::setup::explain_line(true, Some(census.calls), embed_available);
+    // What explaining it takes, as the Explain sheet says it: the calls,
+    // their tokens and their money — not a count alone, the one estimate
+    // in the app that left the money out.
+    let calls = match (census.calls, estimate) {
+        (Some(n), Some(e)) if n > 0 => {
+            let said = e.said(n);
+            if embed_available {
+                format!("{said} {}", tr!("Also builds the semantic index."))
+            } else {
+                said
+            }
+        }
+        _ => crate::app::setup::explain_line(true, Some(census.calls), embed_available),
+    };
     format!("{servers} {calls}")
 }
 
@@ -830,11 +863,21 @@ mod tests {
             }],
             calls: Some(12),
         };
-        let without = tea_shop_line(&census, false, false);
+        let without = tea_shop_line(&census, false, false, None);
         assert!(without.contains("pyright"), "{without}");
         assert!(!without.contains("API key"), "{without}");
-        let with = tea_shop_line(&census, true, false);
+        let with = tea_shop_line(&census, true, false, None);
         assert!(with.contains("AI call"), "what explaining takes: {with}");
+        // With an estimate, its tokens and money too, as the Explain sheet
+        // says them.
+        let estimate = crate::app::usage::Estimate {
+            tokens: 20_400,
+            cost: Some(0.0123),
+            from_history: false,
+        };
+        let priced = tea_shop_line(&census, true, false, Some(estimate));
+        assert!(priced.contains(&estimate.said(12)), "{priced}");
+        assert!(priced.contains("tokens"), "{priced}");
     }
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> iced::Rectangle {
