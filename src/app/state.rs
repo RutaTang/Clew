@@ -2375,6 +2375,9 @@ pub struct ProjectSession {
     /// is left "not set up" instead of asking, and the status bar offers to
     /// set it up. Cleared by any set-up the user asks for.
     pub servers_not_now: bool,
+    /// The languages whose server the reader has asked for since ("Ask
+    /// again"): asked about as ever, the others still left for later.
+    pub servers_asked: std::collections::HashSet<String>,
     /// Files git TRACKS that the ignore rules (or a build-directory name)
     /// would have hidden, listed anyway by the scan — a local one's report,
     /// or the server's `Event::Tree` — marked in the file tree (see
@@ -2635,6 +2638,7 @@ impl Default for ProjectSession {
             remote_lsp_init: Default::default(),
             pending_lsp_consent: Default::default(),
             servers_not_now: false,
+            servers_asked: Default::default(),
             tracked_ignored: Default::default(),
             tree_rescans: (0, 0),
             adapter_install_cancel: Default::default(),

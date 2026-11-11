@@ -83,6 +83,11 @@ pub struct ProjectSetup {
     pub mode: SetupMode,
     pub root: PathBuf,
     pub servers: bool,
+    /// The reader said no to the servers: unticked them, or chose Open
+    /// without setup. Not the same as `servers` off, which a look that
+    /// found nothing to set up also leaves — a later server that needs a
+    /// download is asked about then.
+    pub servers_declined: bool,
     pub explain: bool,
     pub census: Option<Census>,
 }
@@ -391,6 +396,7 @@ impl App {
             // money, so it waits for a tick — except where the sheet is
             // Explain All asking first.
             servers: true,
+            servers_declined: false,
             explain: mode == SetupMode::Explain,
             // A project on another machine cannot be looked at from here:
             // its servers run there and ask there, as they need.
@@ -484,7 +490,7 @@ impl App {
             .map(|s| (s.language.clone(), s.fetch.clone()))
             .collect();
         let explain = setup.explain && self.llm_available;
-        let servers_not_now = !setup.servers;
+        let servers_not_now = setup.servers_declined;
         if !fetch.is_empty() || explain || servers_not_now {
             self.pending_setup = Some(SetupIntent {
                 root: root.to_path_buf(),
@@ -520,6 +526,7 @@ impl App {
         // Asked for now: the servers left for later at the first open are
         // asked about again as they start.
         self.proj.servers_not_now = false;
+        self.proj.servers_asked.clear();
         self.allow_builds(root, servers);
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for server in servers {

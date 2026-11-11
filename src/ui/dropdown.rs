@@ -155,12 +155,15 @@ impl<Message> Widget<Message, Theme, Renderer> for Dropdown<'_, Message> {
             viewport,
             translation,
         );
-        let bounds = layout.bounds();
-        let at = Point::new(bounds.x, bounds.y + bounds.height) + translation + self.offset;
+        let anchor = layout.bounds() + translation;
+        let offset = self.offset;
         let menu = match (self.menu.as_mut(), menu_tree) {
-            (Some(menu), Some(tree)) => {
-                Some(overlay::Element::new(Box::new(Dropped { at, menu, tree })))
-            }
+            (Some(menu), Some(tree)) => Some(overlay::Element::new(Box::new(Dropped {
+                anchor,
+                offset,
+                menu,
+                tree,
+            }))),
             _ => None,
         };
         if anchors.is_none() && menu.is_none() {
@@ -176,19 +179,31 @@ impl<'a, Message: 'a> From<Dropdown<'a, Message>> for Element<'a, Message> {
     }
 }
 
-/// The menu, dropped: at its point, kept inside the window.
+/// The menu, dropped: under what opened it, kept inside the window.
 struct Dropped<'a, 'b, Message> {
-    at: Point,
+    /// What opened it, in the window.
+    anchor: Rectangle,
+    offset: Vector,
     menu: &'b mut Element<'a, Message>,
     tree: &'b mut Tree,
 }
 
-/// Where a menu of `size` goes, asked for at `at` in a window of `window`
-/// size: there, or moved left and up just enough to stay inside it.
-fn dropped_at(at: Point, size: Size, window: Size) -> Point {
+/// Where a menu of `size` goes, opened from `anchor` in a window of
+/// `window` size: `offset` under it — or, with no room below and room
+/// above, as far over it, so it does not cover what opened it (shifted up
+/// over it, the menu hid the toggle that would close it) — then moved just
+/// enough to stay inside the window.
+fn dropped_at(anchor: Rectangle, offset: Vector, size: Size, window: Size) -> Point {
+    let below = anchor.y + anchor.height + offset.y;
+    let above = anchor.y - offset.y - size.height;
+    let y = if below + size.height > window.height && above >= 0.0 {
+        above
+    } else {
+        below
+    };
     Point::new(
-        at.x.clamp(0.0, (window.width - size.width).max(0.0)),
-        at.y.clamp(0.0, (window.height - size.height).max(0.0)),
+        (anchor.x + offset.x).clamp(0.0, (window.width - size.width).max(0.0)),
+        y.clamp(0.0, (window.height - size.height).max(0.0)),
     )
 }
 
@@ -199,7 +214,7 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Dropped<'_, '_, Mes
             renderer,
             &layout::Limits::new(Size::ZERO, bounds),
         );
-        let at = dropped_at(self.at, laid.size(), bounds);
+        let at = dropped_at(self.anchor, self.offset, laid.size(), bounds);
         laid.move_to(at)
     }
 
@@ -252,6 +267,16 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Dropped<'_, '_, Mes
             shell,
             &layout.bounds(),
         );
+        // The menu is the pointer's over all of it, its rim too: a press or
+        // a wheel there reached the code or the card under it.
+        if cursor.is_over(layout.bounds())
+            && matches!(
+                event,
+                Event::Mouse(mouse::Event::ButtonPressed(_) | mouse::Event::WheelScrolled { .. })
+            )
+        {
+            shell.capture_event();
+        }
     }
 
     fn mouse_interaction(
@@ -260,13 +285,19 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Dropped<'_, '_, Mes
         cursor: mouse::Cursor,
         renderer: &Renderer,
     ) -> mouse::Interaction {
-        self.menu.as_widget().mouse_interaction(
+        let over = self.menu.as_widget().mouse_interaction(
             self.tree,
             layout,
             cursor,
             &layout.bounds(),
             renderer,
-        )
+        );
+        // Over its rim too, the pointer is the menu's, not what is under it.
+        if over == mouse::Interaction::None && cursor.is_over(layout.bounds()) {
+            mouse::Interaction::Idle
+        } else {
+            over
+        }
     }
 
     fn overlay<'c>(
@@ -288,19 +319,27 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Dropped<'_, '_, Mes
 mod tests {
     use super::*;
 
-    /// A menu drops where it is asked, or as near as keeps it inside the
-    /// window.
+    /// A menu drops under what opened it; with no room below it opens
+    /// above it, never over it; and it stays inside the window.
     #[test]
-    fn a_menu_stays_inside_the_window() {
+    fn a_menu_drops_under_its_anchor_or_above_it() {
         let window = Size::new(800.0, 600.0);
         let menu = Size::new(320.0, 340.0);
+        let gap = Vector::new(-6.0, 6.0);
+        let anchor = |x: f32, y: f32| Rectangle::new(Point::new(x, y), Size::new(120.0, 28.0));
+        // Room below: under it.
         assert_eq!(
-            dropped_at(Point::new(100.0, 50.0), menu, window),
-            Point::new(100.0, 50.0)
+            dropped_at(anchor(100.0, 50.0), gap, menu, window),
+            Point::new(94.0, 84.0)
         );
-        assert_eq!(
-            dropped_at(Point::new(700.0, 500.0), menu, window),
-            Point::new(480.0, 260.0)
-        );
+        // An Ask card's header near the window's foot: above it, clear of it.
+        let low = anchor(700.0, 450.0);
+        let at = dropped_at(low, gap, menu, window);
+        assert_eq!(at, Point::new(480.0, 450.0 - 6.0 - 340.0));
+        assert!(at.y + menu.height <= low.y, "the toggle stays uncovered");
+        // No room either way: kept inside the window.
+        let tall = Size::new(320.0, 580.0);
+        let at = dropped_at(anchor(100.0, 300.0), gap, tall, window);
+        assert_eq!(at.y, 20.0);
     }
 }

@@ -407,11 +407,15 @@ impl App {
         let line_height = self.line_height();
         let old_viewport = self.proj.panes[pane]
             .as_ref()
-            .map(|v| (v.viewport_h, v.viewport_measured));
+            .map(|v| (v.viewport_h, v.viewport_measured, v.bounds_h));
         let mut v = Viewer::new(abs.clone(), rel, lang_key, source.clone(), lines);
-        if let Some((h, measured)) = old_viewport {
+        // The view's measured height too: without it, a jump that opened
+        // a file fell back to "the last line at the top", and a short
+        // file's start was scrolled away again.
+        if let Some((h, measured, bounds)) = old_viewport {
             v.viewport_h = h;
             v.viewport_measured = measured;
+            v.bounds_h = bounds;
         }
         v.target_line = target;
         // Put the block cursor on the jump target (or the top of the file).
@@ -710,7 +714,7 @@ impl App {
             .panes
             .get(pane)
             .and_then(|s| s.as_ref())
-            .map(|v| (v.viewport_h, v.viewport_measured));
+            .map(|v| (v.viewport_h, v.viewport_measured, v.bounds_h));
 
         let mut v = Viewer::new(abs.clone(), rel, lang_key, source.clone(), lines);
         v.symbols = symbols;
@@ -724,9 +728,13 @@ impl App {
         };
         v.set_inactive_lines(dimmed);
         v.highlighted = true;
-        if let Some((h, measured)) = old_viewport {
+        // The view's measured height too: without it, a jump that opened
+        // a file fell back to "the last line at the top", and a short
+        // file's start was scrolled away again.
+        if let Some((h, measured, bounds)) = old_viewport {
             v.viewport_h = h;
             v.viewport_measured = measured;
+            v.bounds_h = bounds;
         }
         v.target_line = target;
         let l0 = target.map(|t| t.saturating_sub(1)).unwrap_or(0);
@@ -2054,22 +2062,10 @@ impl App {
                     v.scroll_x = viewport.absolute_offset().x;
                     v.viewport_h = viewport.bounds().height;
                     v.viewport_measured = true;
-                    let grew = v.bounds_h > 0.0 && viewport.bounds().height > v.bounds_h + 0.5;
-                    v.bounds_h = viewport.bounds().height;
-                    // The view made taller (the window enlarged, a panel
-                    // shut): code it now has room for is brought back down
-                    // from above, where a file that fits started at line 9
-                    // with empty space under its end. Only then — a reader
-                    // scrolling past the end on purpose is left there.
-                    let most = v.most_scroll(line_height);
-                    if grew && v.scroll_y > most + 0.5 {
-                        v.scroll_y = most;
+                    if let Some(y) = v.measured(viewport.bounds().height, line_height) {
                         return operation::scroll_to(
                             ui::code_scroll_id(pane),
-                            AbsoluteOffset {
-                                x: v.scroll_x,
-                                y: most,
-                            },
+                            AbsoluteOffset { x: v.scroll_x, y },
                         );
                     }
                 }

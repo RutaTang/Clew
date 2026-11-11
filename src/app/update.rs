@@ -60,6 +60,16 @@ impl App {
         self.note_status();
         // The question's field holds the question, however it was set.
         self.sync_ask_editor();
+        // Ask's menu of sessions is put away when something comes up over
+        // the window: drawn over everything, it stayed above the palette or a
+        // question, took its clicks — and, open, held that question's Allow.
+        if self.ask_sessions_menu
+            && (self.tutorial.is_some()
+                || ui::active_overlay(self)
+                    .is_some_and(|o| !matches!(o, ui::ActiveOverlay::Hover(_))))
+        {
+            self.ask_sessions_menu = false;
+        }
         // The margin's History lists the commits of the file being read.
         // Batched only when it asks: a batch is a task even of none, and an
         // update that asks for nothing returns none.

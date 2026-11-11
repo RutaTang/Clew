@@ -348,6 +348,7 @@ impl App {
         self.pending_consent = None;
         if !with_setup && let Some(setup) = self.setup.as_mut().filter(|s| s.root == root) {
             setup.servers = false;
+            setup.servers_declined = true;
             setup.explain = false;
         }
         // Consent is recorded outside the project (see `request_open`): a
@@ -1226,6 +1227,7 @@ impl App {
             ProjectMsg::SetupServers(on) => {
                 if let Some(setup) = self.setup.as_mut() {
                     setup.servers = on;
+                    setup.servers_declined = !on;
                 }
                 Task::none()
             }

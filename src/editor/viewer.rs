@@ -766,11 +766,31 @@ impl Viewer {
     pub fn most_scroll(&self, line_height: f32) -> f32 {
         let rows = self.content_rows();
         let last_at_top = rows.saturating_sub(1) as f32 * line_height;
-        if self.bounds_h > 0.0 {
+        // A notebook's rendered cells are not its lines' height: no view-
+        // based limit is right for it.
+        if self.bounds_h > 0.0 && self.notebook.is_none() {
             last_at_top.min((rows as f32 * line_height - self.bounds_h).max(0.0))
         } else {
             last_at_top.max(0.0)
         }
+    }
+
+    /// The view's height, `height`, as just measured: kept, and where the
+    /// view must scroll to now, if anywhere. Made taller (the window
+    /// enlarged, a panel shut) until the whole file fits, the file is
+    /// brought back to its start: one that fit began at line 9, with empty
+    /// space under its end. Only then — a long file the reader scrolled past
+    /// its end stays so, and a notebook's rendered cells are not its lines'
+    /// height.
+    pub fn measured(&mut self, height: f32, line_height: f32) -> Option<f32> {
+        let grew = self.bounds_h > 0.0 && height > self.bounds_h + 0.5;
+        self.bounds_h = height;
+        let fits = self.notebook.is_none() && self.content_rows() as f32 * line_height <= height;
+        let most = self.most_scroll(line_height);
+        (grew && fits && self.scroll_y > most + 0.5).then(|| {
+            self.scroll_y = most;
+            most
+        })
     }
 
     /// Selection endpoints in document order (start ≤ end), if non-empty.
@@ -1470,6 +1490,27 @@ mod tests {
         v.bounds_h = 40.0 * LH;
         assert_eq!(v.most_scroll(LH), 0.0);
         assert_eq!(v.scroll_offset_for(Some(33), LH), 0.0);
+    }
+
+    /// The view made taller until the file fits brings it back to its
+    /// start; a long file scrolled past its end, a view that shrank, a
+    /// first measure and a notebook are left where they are.
+    #[test]
+    fn a_view_grown_to_fit_the_file_shows_it_from_its_start() {
+        let mut v = viewer_with_lines(28);
+        assert_eq!(v.measured(10.0 * LH, LH), None, "a first measure");
+        v.scroll_y = 8.0 * LH;
+        assert_eq!(v.measured(30.0 * LH, LH), Some(0.0));
+        assert_eq!(v.scroll_y, 0.0);
+        // Shrinking moves nothing.
+        v.scroll_y = 5.0 * LH;
+        assert_eq!(v.measured(12.0 * LH, LH), None);
+        // A long file past its end, the view grown but still too short.
+        let mut long = viewer_with_lines(2000);
+        long.measured(20.0 * LH, LH);
+        long.scroll_y = 1999.0 * LH;
+        assert_eq!(long.measured(25.0 * LH, LH), None);
+        assert_eq!(long.scroll_y, 1999.0 * LH);
     }
 
     #[test]

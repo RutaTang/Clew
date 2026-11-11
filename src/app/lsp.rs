@@ -261,7 +261,7 @@ impl App {
                 return Task::none();
             }
         };
-        if self.proj.servers_not_now {
+        if self.proj.servers_not_now && !self.proj.servers_asked.contains(language) {
             self.leave_server_for_later(language);
             return Task::none();
         }
@@ -700,7 +700,7 @@ impl App {
                     .trust
                     .is_build_trusted(None, &root, &server.server_name)
             {
-                if self.proj.servers_not_now {
+                if self.proj.servers_not_now && !self.proj.servers_asked.contains(language) {
                     self.leave_server_for_later(language);
                     return Task::none();
                 }
@@ -1782,8 +1782,9 @@ impl App {
             LspMsg::Remove { name, version } => self.on_lsp_remove(name, version),
             LspMsg::DownloadFor(language) => {
                 // Force a fresh provisioning attempt for this language —
-                // asked about, whatever the first open left for later.
-                self.proj.servers_not_now = false;
+                // asked about, whatever the first open left for later; the
+                // other languages stay left for later.
+                self.proj.servers_asked.insert(language.clone());
                 self.proj.link.lsp.remove(&language);
                 self.ensure_lsp(&language)
             }

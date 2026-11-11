@@ -5232,6 +5232,7 @@ fn the_setup_sheet_says_what_each_choice_takes() {
         mode: SetupMode::Open,
         root: root.clone(),
         servers: true,
+        servers_declined: false,
         explain: false,
         census: Some(Census {
             servers: vec![SetupServer {
@@ -5320,6 +5321,7 @@ fn the_setup_sheet_holds_still_while_it_looks() {
         mode: SetupMode::Open,
         root: root.clone(),
         servers: true,
+        servers_declined: false,
         explain: false,
         census: None,
     });
@@ -13523,6 +13525,7 @@ fn settings_opened_from_the_projects_sheet_is_over_it() {
         root,
         mode: SetupMode::Manage,
         servers: true,
+        servers_declined: false,
         explain: false,
         census: None,
     });

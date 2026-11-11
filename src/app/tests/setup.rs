@@ -239,14 +239,47 @@ fn opened_without_setup_no_server_is_asked_about() {
         "{:?}",
         app.proj.link.lsp.get("rust")
     );
-    // Asked for: the question comes, as ever.
+    // Asked for: the question comes, as ever — for this language; the
+    // others stay left for later.
     let _ = app.update(Message::Lsp(LspMsg::DownloadFor("rust".into())));
-    assert!(!app.proj.servers_not_now);
+    assert!(app.proj.servers_not_now && app.proj.servers_asked.contains("rust"));
     assert!(
         !app.proj.pending_lsp_consent.is_empty()
             || matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Starting)),
         "{:?}",
         app.proj.link.lsp.get("rust")
+    );
+}
+
+/// Open on a project the look found no server to set up for: nothing was
+/// declined, so a server that turns up later (a file of another language,
+/// a download it needs) is asked about as ever, not left "not set up".
+#[test]
+fn opening_with_nothing_to_set_up_declines_nothing() {
+    let data = test_dir("setup-data-nothing");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let root = fixture_project("setup-nothing");
+    let mut app = blank_app();
+    app.llm_available = true;
+    let _ = app.update(Message::Project(ProjectMsg::FolderPicked(Some(
+        root.clone(),
+    ))));
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root: root.clone(),
+        census: Census {
+            servers: vec![],
+            calls: Some(42),
+        },
+    }));
+    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(root.clone())));
+    assert!(app.setup.is_none(), "answered");
+    assert!(
+        app.pending_setup
+            .as_ref()
+            .is_none_or(|intent| !intent.servers_not_now),
+        "nothing declined"
     );
 }
 

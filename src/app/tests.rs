@@ -27963,6 +27963,32 @@ fn run_starts_the_program_without_the_debugger() {
     assert!(app.status.contains("Starting debugger"), "{}", app.status);
 }
 
+/// A jump that opens another file near its end keeps the file's start in
+/// view when it fits: the view's measured height goes with the pane to the
+/// file it opens. Opened with the guess a new pane starts with, the 33rd
+/// line of a 38-line file was put near the top and the 30 before it
+/// scrolled away.
+#[test]
+fn a_jump_into_another_short_file_keeps_its_start() {
+    let mut app = scanned_app("jump-short-file");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let body: String = (1..=38).map(|i| format!("x{i} = {i}\n")).collect();
+    std::fs::write(root.join("short.py"), body).unwrap();
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let lh = app.line_height();
+    {
+        let v = app.proj.panes[app.proj.active].as_mut().unwrap();
+        v.viewport_h = 20.0 * lh;
+        v.viewport_measured = true;
+        v.bounds_h = 20.0 * lh;
+    }
+    open_synchronously(&mut app, "short.py", Some(33));
+    let v = app.active_viewer().unwrap();
+    assert!(v.abs.ends_with("short.py"));
+    assert_eq!(v.bounds_h, 20.0 * lh, "the measured height goes with it");
+    assert_eq!(v.scroll_y, 18.0 * lh, "its last line at the foot");
+}
+
 /// Run on a module that only defines things runs the project's one
 /// program start instead — Run on `pricing.py` beside a `main.py` printed
 /// nothing and exited 0 — and the status line names what runs. A file that
