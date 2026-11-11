@@ -626,7 +626,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
 /// the reader came from, each a click back to it; the file on the sheet
 /// alone before there is a way back.
 fn trail_row(app: &App) -> Element<'_, Message> {
-    let stops = app.proj.history.recent_path(TRAIL_STOPS);
+    let stops = merged_stops(app.proj.history.recent_path(TRAIL_STOPS));
     let last = stops.len().saturating_sub(1);
     // Its icon says what the row is where the pointer rests: read as a
     // breadcrumb, "lib.rs › Frame" over another file was taken for that
@@ -671,7 +671,19 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         }
         _ => None,
     };
-    let names = trail_names(&stops, here);
+    // A function's stop reads as one — "discounts()" — so it is not taken
+    // for the module of the same name ("discounts.py") beside it.
+    let is_function = |path: &std::path::Path, name: &str| {
+        app.proj
+            .symbol_index_by_file
+            .get(path)
+            .is_some_and(|symbols| {
+                symbols
+                    .iter()
+                    .any(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))
+            })
+    };
+    let names = trail_names(&stops, here, is_function);
     for (i, ((id, loc, _), name)) in stops.into_iter().zip(names).enumerate() {
         if i > 0 {
             line = line.push(glyph::icon(Glyph::ChevronRight, theme::dim(), 11.0));
@@ -718,14 +730,38 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// The trail's stops as the row shows them: a file's stop followed by one
+/// in a function of that file is that one — "main.py › main" was one place
+/// said twice, and Back from the second seemed to do nothing.
+fn merged_stops<'a>(
+    stops: Vec<(usize, &'a crate::history::Loc, Option<&'a str>)>,
+) -> Vec<(usize, &'a crate::history::Loc, Option<&'a str>)> {
+    let keep: Vec<bool> = (0..stops.len())
+        .map(|i| {
+            let (_, loc, label) = stops[i];
+            let into_it = stops
+                .get(i + 1)
+                .is_some_and(|(_, next, next_label)| next.path == loc.path && next_label.is_some());
+            !(label.is_none() && into_it)
+        })
+        .collect();
+    stops
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(stop, keep)| keep.then_some(stop))
+        .collect()
+}
+
 /// What each trail stop is called: the function it was in, else its file's
 /// name — with its line when a stop beside it has the same name, which two
 /// visits to one file outside any function otherwise read as ("cart.py ›
 /// cart.py"). `here` names the current (last) stop when the caret is in a
-/// function of its file.
+/// function of its file. A function's name is said with `()`
+/// (`is_function` says which names in a file are functions).
 fn trail_names(
     stops: &[(usize, &crate::history::Loc, Option<&str>)],
     here: Option<String>,
+    is_function: impl Fn(&std::path::Path, &str) -> bool,
 ) -> Vec<String> {
     let last = stops.len().saturating_sub(1);
     let mut here = here;
@@ -734,7 +770,10 @@ fn trail_names(
         .enumerate()
         .map(
             |(i, (_, loc, label))| match (here.take_if(|_| i == last), label) {
-                (Some(here), _) => (here, true),
+                (Some(here), _) => (format!("{here}()"), true),
+                (None, Some(label)) if is_function(&loc.path, label) => {
+                    (format!("{label}()"), true)
+                }
                 (None, Some(label)) => (label.to_string(), true),
                 (None, None) => (
                     loc.path
@@ -783,15 +822,41 @@ mod tests {
             (2, &a18, None),
             (3, &a1, None),
         ];
+        let function = |_: &std::path::Path, name: &str| name == "subtotal";
         assert_eq!(
-            trail_names(&stops, None),
-            ["main.py", "subtotal", "cart.py:18", "cart.py:1"]
+            trail_names(&stops, None, function),
+            ["main.py", "subtotal()", "cart.py:18", "cart.py:1"]
         );
         // The caret in a function names the current stop.
         assert_eq!(
-            trail_names(&stops, Some("total".into())),
-            ["main.py", "subtotal", "cart.py", "total"]
+            trail_names(&stops, Some("total".into()), function),
+            ["main.py", "subtotal()", "cart.py", "total()"]
         );
+        // A name that is no function (a class) is said as it is.
+        assert_eq!(trail_names(&stops, None, |_, _| false)[1], "subtotal");
+    }
+
+    /// A file's stop followed by one in a function of that file is shown as
+    /// that one: "main.py › main" was one place said twice.
+    #[test]
+    fn a_files_stop_merges_into_its_functions() {
+        let loc = |p: &str, line| crate::history::Loc {
+            path: std::path::PathBuf::from(p),
+            line,
+        };
+        let (main_top, main_fn, cart) = (
+            loc("main.py", Some(1)),
+            loc("main.py", Some(12)),
+            loc("cart.py", Some(3)),
+        );
+        let stops = vec![
+            (0, &main_top, None),
+            (1, &main_fn, Some("main")),
+            (2, &cart, None),
+            (3, &cart, None),
+        ];
+        let ids: Vec<usize> = merged_stops(stops).iter().map(|s| s.0).collect();
+        assert_eq!(ids, [1, 2, 3], "two file stops in a row both stay");
     }
 
     /// The divider over the margin's edge, held by its middle and not yet

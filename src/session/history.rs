@@ -207,12 +207,25 @@ impl History {
         self.renumbered = renumbered;
     }
 
+    /// Go back to the visit before this one — past any that would leave the
+    /// screen as it is: the file the reader is in, visited with no line (a
+    /// file opened, then a function in it gone to). Back to it changed
+    /// nothing on screen, and seemed broken.
     pub fn back(&mut self) -> Option<Loc> {
-        let cur = self.current?;
-        let parent = self.nodes[cur].parent?;
-        self.nodes[parent].preferred = Some(cur); // forward returns to where we were
-        self.current = Some(parent);
-        Some(self.nodes[parent].loc.clone())
+        let mut cur = self.current?;
+        let here = self.nodes[cur].loc.clone();
+        let stays =
+            |loc: &Loc| loc.path == here.path && (loc.line.is_none() || loc.line == here.line);
+        loop {
+            let parent = self.nodes[cur].parent?;
+            self.nodes[parent].preferred = Some(cur); // forward returns to where we were
+            cur = parent;
+            if !stays(&self.nodes[cur].loc) || self.nodes[cur].parent.is_none() {
+                break;
+            }
+        }
+        self.current = Some(cur);
+        Some(self.nodes[cur].loc.clone())
     }
 
     pub fn forward(&mut self) -> Option<Loc> {
@@ -1011,6 +1024,24 @@ mod tests {
         assert_eq!(h.back(), None);
         assert_eq!(h.forward(), Some(loc("b", Some(10))));
         assert!(h.can_forward());
+    }
+
+    /// Back skips a visit that would leave the screen as it is — the file
+    /// the reader is in, opened with no line — and goes to the one before.
+    #[test]
+    fn back_skips_a_visit_that_would_change_nothing() {
+        let mut h = History::default();
+        push(&mut h, "cart", Some(3));
+        push(&mut h, "main", None);
+        h.push(loc("main", Some(12)), Some("main".into()));
+        assert_eq!(h.back(), Some(loc("cart", Some(3))));
+        // Forward comes back the way it went.
+        assert_eq!(h.forward(), Some(loc("main", None)));
+        // At the trail's start it stops there.
+        let mut h = History::default();
+        push(&mut h, "main", None);
+        h.push(loc("main", Some(12)), Some("main".into()));
+        assert_eq!(h.back(), Some(loc("main", None)));
     }
 
     #[test]
