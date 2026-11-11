@@ -5,6 +5,10 @@ use super::*;
 // iced's column!/row! from the prelude macros of the same name.
 use iced::widget::{column, row};
 
+/// The height of the picked node's row over the map: its name, its place
+/// and Open.
+const PICKED_ROW_H: f32 = 28.0;
+
 /// Modal frame shared by the project-graph overlays: a titled panel with a
 /// List/Map toggle, over a dismissable backdrop.
 #[allow(clippy::too_many_arguments)]
@@ -134,7 +138,16 @@ pub(crate) fn graph_modal_frame<'a>(
     let height = (window.height - 2.0 * GRAPH_MODAL_EDGE)
         .max(GRAPH_MODAL_MAX_H.min(window.height - 2.0 * MODAL_MARGIN));
     let mut parts = column![header].spacing(12);
-    if let Some(picked) = picked {
+    // On the map, the picked node's row has its place whether a node is
+    // picked or not: coming as one was clicked, it pushed the map down and
+    // every node moved from under the pointer.
+    if graph_mode {
+        parts = parts.push(
+            container(picked.unwrap_or_else(|| space().into()))
+                .height(PICKED_ROW_H)
+                .align_y(iced::Center),
+        );
+    } else if let Some(picked) = picked {
         parts = parts.push(picked);
     }
     let panel = container(parts.push(body))
@@ -2125,10 +2138,17 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
     ) -> Vec<iced::widget::canvas::Geometry> {
         use iced::widget::canvas::Frame;
         let proj = self.project_all(bounds, state);
+        // The node under the pointer — else the one picked, lit as long as
+        // it is: clicked, nothing on the map said which.
+        let picked = state
+            .picked
+            .filter(|&(_, sig)| sig == state.sig)
+            .map(|(i, _)| i);
         let hovered = cursor
             .position_in(bounds)
             .and_then(|c| self.hit(c, bounds, state))
-            .or(state.hold);
+            .or(state.hold)
+            .or(picked);
         // The scene is cached: a settled map redraws (another widget animating,
         // the cursor moving elsewhere) without re-tessellating a single edge.
         // `tick` and every interaction clear it; so does a change of the hovered
