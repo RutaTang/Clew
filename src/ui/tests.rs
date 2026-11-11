@@ -476,6 +476,7 @@ fn a_time_travel_scrub_keeps_the_place_on_both_axes() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: app.proj.time_gen,
         session: 0,
@@ -618,6 +619,7 @@ fn leaving_a_view_that_replaced_the_code_puts_the_reader_back() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: 0,
         session: 0,
@@ -753,6 +755,7 @@ fn split_with_history() -> App {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: app.proj.time_gen,
         session: 0,
@@ -9220,12 +9223,27 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
     app.debug.no_debug = false;
     app.debug.session = Some(session(crate::DebugStatus::Terminated, None));
     {
+        // A debug run that ended without ever stopping: still a debug run,
+        // but its output has the panel — its stack and variables were empty.
         let mut sim = sim_elem(super::debug_panel(&app));
         assert!(shows(&mut sim, "Debug"));
         assert!(shows(&mut sim, "terminated"));
-        assert!(shows(&mut sim, "CALL STACK"));
+        assert!(shows(&mut sim, "↻ Debug Again"));
+        assert!(!shows(&mut sim, "CALL STACK"));
     }
     assert!(!stops(&app));
+    // One that stopped keeps its columns.
+    let mut stopped = session(crate::DebugStatus::Terminated, None);
+    stopped.frames = vec![crate::dap::StackFrame {
+        id: 1,
+        name: "main".into(),
+        path: Some(root.join("main.py")),
+        line: 3,
+        column: 1,
+    }];
+    app.debug.session = Some(stopped);
+    let mut sim = sim_elem(super::debug_panel(&app));
+    assert!(shows(&mut sim, "CALL STACK"));
 }
 
 #[test]
@@ -10006,6 +10024,7 @@ fn time_travel_shows_the_commit_being_read() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: true,
         generation: 0,
         session: 0,
@@ -10194,7 +10213,7 @@ fn the_glossary_page_lists_terms_by_kind() {
     app.proj.docs.generation += 1;
     app.explain_cache_mut().clear();
     let _ = app.update(Message::Glossary(GlossaryMsg::Open));
-    assert!(on_page(&app, "No terms yet"));
+    assert!(on_page(&app, "No terms found"));
     assert!(!on_page(&app, "Rebuild"));
     let sent = click(sim_of(&app), "Look again");
     assert!(
@@ -10964,6 +10983,7 @@ fn a_diff_in_the_codes_place_leaves_the_margin_its_raised_note_alone() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: 0,
         session: 0,
@@ -13095,7 +13115,8 @@ fn the_files_name_keeps_its_room_in_the_header() {
 
 /// A note not explained yet offers what explains it, there in the note: it
 /// named "the ⋯ menu", which was no menu on screen once its tools were laid
-/// on the strip.
+/// on the strip — and it explains this note's file or function, in one
+/// call, not the whole project.
 #[test]
 fn an_unexplained_note_offers_explain_all() {
     let mut app = reader_app();
@@ -13108,12 +13129,27 @@ fn an_unexplained_note_offers_explain_all() {
     let said = format!("{:?}", app.proj.explain.prepared);
     assert!(said.contains("Not explained yet."), "{said}");
     assert!(!said.contains('⋯'), "{said}");
-    let sent = click(sim_of(&app), "Explain All");
+    // Every "Explain" on screen (the file's header has one too): the
+    // note's is the rightmost, in the margin.
+    let explains = |app: &App| -> Vec<Rectangle> {
+        let mut sim = sim_of(app);
+        (0..6)
+            .map_while(|n| text_at(&mut sim, |t| t == "Explain", n))
+            .collect()
+    };
+    let before = explains(&app);
+    let note_explain = *before
+        .iter()
+        .max_by(|a, b| a.center_x().total_cmp(&b.center_x()))
+        .expect("an Explain on the note");
+    let mut sim = sim_of(&app);
+    sim.point_at(note_explain.center());
+    let _ = sim.simulate(iced_test::simulator::click());
+    let sent: Vec<Message> = sent_by(sim);
     assert!(
         sent.iter().any(|m| matches!(
             m,
-            Message::Settings(crate::SettingsMsg::NeedKey)
-                | Message::Project(crate::ProjectMsg::SetupShow(_))
+            Message::Explain(crate::ExplainMsg::Explain(crate::explain::Node::File(_)))
         )),
         "{sent:?}"
     );
@@ -13129,7 +13165,11 @@ fn an_unexplained_note_offers_explain_all() {
         },
     );
     let _ = app.show_explanation(node);
-    assert!(!shows(&mut sim_of(&app), "Explain All"));
+    assert_eq!(
+        explains(&app).len(),
+        before.len() - 1,
+        "not offered once explained"
+    );
 }
 
 /// The Overview not generated yet says what it is written from and offers
@@ -13833,6 +13873,7 @@ fn time_travel_says_each_thing_once_and_counts_as_its_slider_runs() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: app.proj.time_gen,
         session: 0,
@@ -14215,14 +14256,46 @@ fn the_search_fields_words_end_in_an_ellipsis_when_cut() {
 fn an_empty_docs_view_offers_to_look_again() {
     let mut app = reader_app();
     app.proj.docs.files.clear();
+    app.proj.docs.generation = 0;
     assert!(!app.docs_loading(), "precondition");
-    let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
-    assert!(shows(&mut sim, "No documentation"));
-    assert!(!shows(&mut sim, "Rebuild"));
+    {
+        let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
+        assert!(shows(&mut sim, "No documentation"));
+        assert!(!shows(&mut sim, "Rebuild"));
+    }
     assert!(matches!(
         click(sim_elem(super::docs_stats::docs_tab(&app)), "Look again").as_slice(),
         [Message::Docs(DocsMsg::Refresh)]
     ));
+    // A build that came back empty says so, not "No documentation" again.
+    app.proj.docs.generation = 1;
+    let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
+    assert!(shows(&mut sim, "Nothing documented"));
+    assert!(shows(&mut sim, "Look again"));
+}
+
+/// M10 (round 6): working without clew-server, the Docs view and the
+/// Glossary said "No documentation" / "No terms yet" on a documented project
+/// and offered a Look again that did nothing. They say what they need and
+/// why it is missing.
+#[test]
+fn docs_without_their_server_say_what_they_need() {
+    let mut app = reader_app();
+    app.proj.docs.files.clear();
+    app.explain_cache_mut().clear();
+    let why = "No clew-server binary was found beside Clew or on PATH; working without it.";
+    app.handshake_failure = Some(why.into());
+    {
+        let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
+        assert!(shows(&mut sim, "API docs need clew-server"));
+        assert!(shows(&mut sim, why));
+        assert!(!shows(&mut sim, "Look again"));
+    }
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    let on_page = |app: &App, shown: &str| sim_of(app).find(shown).is_ok();
+    assert!(on_page(&app, "The glossary needs clew-server"));
+    assert!(on_page(&app, why));
+    assert!(!on_page(&app, "Look again"));
 }
 
 /// L21: the View menu's row that is inert — blocks, with no function
@@ -16275,6 +16348,37 @@ fn history_opens_answer_the_next_file_only() {
     assert!(app.proj.diff_after_open.is_none());
 }
 
+/// M4 (round 6): a compiled file among the uncommitted changes was pressed
+/// like the rest — it closed what was open for "binary file" and became a
+/// stop on the trail. It is listed, quiet and inert; a text file still
+/// opens.
+#[test]
+fn a_binary_uncommitted_file_is_listed_but_not_opened() {
+    use crate::HistoryMsg;
+    assert!(super::history::binary_name(
+        "teashop/__pycache__/a.cpython-313.pyc"
+    ));
+    assert!(super::history::binary_name("logo.PNG"));
+    assert!(!super::history::binary_name("teashop/pricing.py"));
+    assert!(!super::history::binary_name("Makefile"));
+    let mut app = history_shown(reader_app());
+    app.proj.git_status = [
+        ("src/widget.rs".to_string(), 'M'),
+        ("src/__pycache__/widget.cpython-313.pyc".to_string(), 'U'),
+    ]
+    .into_iter()
+    .collect();
+    app.proj.git_log.changes_open = true;
+    assert!(click(sim_of(&app), "widget.cpython-313.pyc").is_empty());
+    let sent = click(sim_of(&app), "widget.rs");
+    assert!(
+        sent.iter().any(
+            |m| matches!(m, Message::History(HistoryMsg::OpenChanged(r)) if r == "src/widget.rs")
+        ),
+        "{sent:?}"
+    );
+}
+
 /// A commit whose read failed is read again when opened again; it was
 /// cached, failed, for good.
 #[test]
@@ -16304,4 +16408,25 @@ fn only_the_pressed_check_ends_checking() {
     }));
     assert!(app.update.checking);
     assert!(app.update.last_check.is_none());
+}
+
+/// The Diff of a file git does not track is the file, every line added —
+/// it said only "No diff … not tracked by git".
+#[test]
+fn an_untracked_files_diff_is_every_line_added() {
+    let mut app = reader_app();
+    let (abs, rel, total) = {
+        let v = app.active_viewer().unwrap();
+        (v.abs.clone(), v.rel.clone(), v.source.lines().count())
+    };
+    app.proj.diff_pending = Some((7, abs.clone()));
+    let _ = app.on_diff_loaded(7, abs.clone(), rel, Ok(None));
+    let diff = app.proj.diff.as_ref().expect("a diff shown");
+    assert_eq!(diff.abs, abs);
+    let added = diff
+        .lines
+        .iter()
+        .filter(|l| l.kind == crate::git::DiffKind::Add)
+        .count();
+    assert_eq!(added, total);
 }

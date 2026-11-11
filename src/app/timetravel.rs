@@ -589,6 +589,7 @@ impl App {
             scroll_x,
             caret,
             focus_line: None,
+            reveal_change: false,
             loading: true,
             // The start's own number until the session asks for a revision:
             // one the session it replaces was still loading is not this
@@ -633,6 +634,9 @@ impl App {
                 .iter()
                 .position(|c| c.sha == *sha)
         });
+        if let Some(tt) = self.proj.time_travel.as_mut() {
+            tt.reveal_change = found.is_some();
+        }
         if let (Some(sha), None) = (&asked, found) {
             self.status = tr!(
                 "Time Travel does not reach {sha} (a merge, another branch's commit, or an old one): at the newest instead",
@@ -831,9 +835,14 @@ impl App {
             deleted_at: HashSet::new(),
         }));
         let last_line = v.lines.len().saturating_sub(1);
+        // A start at a commit asked for: its first revision opens on the
+        // first line that commit added, once.
+        let reveal = std::mem::take(&mut tt.reveal_change)
+            .then(|| step.added.iter().min().copied())
+            .flatten();
         // Block scope: bring the block into view. File scope: keep the
         // reader's caret and scroll position (carried from entry).
-        if let Some(fl) = step.focus_line {
+        if let Some(fl) = step.focus_line.or(reveal) {
             let head = (fl.saturating_sub(1), 0);
             v.caret = Some(head);
             tt.caret = Some(head);

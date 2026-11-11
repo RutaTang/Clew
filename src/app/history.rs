@@ -76,7 +76,8 @@ pub(crate) fn log_filter(query: &str) -> LogFilter {
     }
     let join = |w: Vec<&str>| (!w.is_empty()).then(|| w.join(" "));
     let id = match words.as_slice() {
-        [one] if (7..=40).contains(&one.len()) && one.bytes().all(|b| b.is_ascii_hexdigit()) => {
+        // As short as git takes one (4 digits), as long as a SHA-256 id.
+        [one] if (4..=64).contains(&one.len()) && one.bytes().all(|b| b.is_ascii_hexdigit()) => {
             Some(one.to_ascii_lowercase())
         }
         _ => None,
@@ -416,6 +417,14 @@ impl App {
                 self.proj.diff_after_open = Some(abs);
                 open
             }
+            HistoryMsg::Refresh => {
+                self.proj.git_status_stale = true;
+                self.proj.git_log.details.clear();
+                Task::batch([
+                    self.refresh_history(),
+                    self.sync_git_status().unwrap_or_else(Task::none),
+                ])
+            }
             HistoryMsg::CopyId(sha) => {
                 self.status = tr!("Copied the commit id").into();
                 iced::clipboard::write(sha)
@@ -684,7 +693,9 @@ mod tests {
         let f = log_filter("A1B2C3D");
         assert_eq!(f.id.as_deref(), Some("a1b2c3d"));
         assert_eq!(f.grep.as_deref(), Some("A1B2C3D"));
-        assert_eq!(log_filter("cafe").id, None, "too short to be an id");
+        // As short as git takes one: four hex digits.
+        assert_eq!(log_filter("cafe").id.as_deref(), Some("cafe"));
+        assert_eq!(log_filter("caf").id, None, "too short to be an id");
         assert_eq!(log_filter("@").author, None);
     }
 

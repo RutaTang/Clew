@@ -13389,6 +13389,27 @@ fn a_scrub_keeps_the_readers_place_on_both_axes() {
     land(&mut app, 0, Some(20));
     let ((x, _), (vx, _)) = place(&app);
     assert_eq!((x, vx), (0.0, 0.0));
+
+    // A start at a commit asked for (the History view): its first revision
+    // opens on the first line that commit added — once.
+    app.proj.time_travel.as_mut().unwrap().reveal_change = true;
+    let content = "pub struct Point { x: f64 }\n".repeat(40);
+    let msg = Message::TimeTravel(TimeTravelMsg::Step {
+        stamp: app.stamp(),
+        generation: app.proj.time_gen,
+        idx: 1,
+        step: Ok(Box::new(TimeStep {
+            lines: highlight::plain_lines(&content),
+            content,
+            symbols: Vec::new(),
+            added: [31, 32, 30].into_iter().collect(),
+            focus_line: None,
+        })),
+    });
+    let _ = app.update(msg);
+    let tt = app.proj.time_travel.as_ref().unwrap();
+    assert_eq!(tt.caret, Some((29, 0)), "at the first line it added");
+    assert!(!tt.reveal_change, "once");
 }
 
 /// Every editor, popup and match set that anchors to a path, a pane or a trail
@@ -13416,6 +13437,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: app.proj.time_gen,
         session: app.proj.time_gen,
@@ -14790,6 +14812,7 @@ fn bookmarks_and_traces_wait_out_a_past_revision_on_screen() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: app.proj.time_gen,
         session: app.proj.time_gen,
@@ -27023,6 +27046,7 @@ fn time_travel_steps_with_the_arrow_chords_only() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: app.proj.time_gen,
         session: app.proj.time_gen,

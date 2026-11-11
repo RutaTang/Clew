@@ -627,6 +627,11 @@ impl App {
                     self.proj.git_status_stale = true;
                     self.proj.head_stale = true;
                     self.proj.repo_tip_stale = true;
+                    // The History view on screen is read again: a branch or
+                    // a tag deleted elsewhere moves no HEAD, and stayed.
+                    if self.sidebar == SidebarTab::History && self.show_left_sidebar {
+                        self.proj.git_log.asked = false;
+                    }
                     self.follow_system_appearance();
                     // Another window may have saved Settings while this one was
                     // in the background: re-read the AI config on next use.

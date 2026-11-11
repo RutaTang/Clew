@@ -1298,9 +1298,18 @@ impl App {
                     error = e
                 )
             }
-            Ok(None) => {
-                self.status = tr!("No diff for {file} — it is not tracked by git", file = rel);
-            }
+            // Not tracked: every line of it is new — the diff of a file
+            // added, which it will be. It said only that there was none.
+            Ok(None) => match self.active_viewer().filter(|v| v.abs == abs) {
+                Some(v) => {
+                    let lines = untracked_diff(&v.source);
+                    self.status.clear();
+                    self.proj.diff = Some(DiffState::new(abs, rel, lines));
+                }
+                None => {
+                    self.status = tr!("No diff for {file} — it is not tracked by git", file = rel);
+                }
+            },
             Ok(Some(lines)) => {
                 // Show the diff only if the active pane still shows that file —
                 // a slow diff must not display against another file.
@@ -2179,4 +2188,19 @@ pub(crate) enum FileView {
     Skim,
     Diff,
     TimeTravel,
+}
+
+/// The diff of a file git does not track yet: its every line added, under
+/// the one hunk a new file's diff has.
+fn untracked_diff(source: &str) -> Vec<git::DiffLine> {
+    let n = source.lines().count();
+    let mut lines = vec![git::DiffLine {
+        kind: git::DiffKind::Hunk,
+        text: format!("@@ -0,0 +1,{n} @@"),
+    }];
+    lines.extend(source.lines().map(|line| git::DiffLine {
+        kind: git::DiffKind::Add,
+        text: line.to_string(),
+    }));
+    lines
 }

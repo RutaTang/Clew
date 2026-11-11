@@ -131,6 +131,16 @@ impl Finder {
                 .take(FILE_FINDER_SYMBOLS)
                 .map(|i| i + n),
             );
+            // What the query names leads: "tot" listed every file under
+            // `teashop/` (t…o…t through the folder) above the function
+            // `total`. Files and symbols each keep their rank within a tier.
+            let tier = |i: usize| match i.checked_sub(n) {
+                Some(s) => symbols
+                    .get(s)
+                    .map_or(4, |s| if contains_words(&s.name, query) { 1 } else { 3 }),
+                None => files.get(i).map_or(4, |f| file_tier(&f.rel, query)),
+            };
+            results.sort_by_key(|&i| tier(i));
         }
         self.results = results;
     }
@@ -177,16 +187,15 @@ impl Finder {
         let query = self.query.trim();
         let mut results = rank(query, titles.iter().copied(), BAR_COMMANDS, false);
         let n = titles.len();
-        results.extend(
-            rank(
-                query,
-                files.iter().map(|f| f.rel.as_str()),
-                MAX_RESULTS,
-                true,
-            )
-            .into_iter()
-            .map(|i| i + n),
+        let mut ranked = rank(
+            query,
+            files.iter().map(|f| f.rel.as_str()),
+            MAX_RESULTS,
+            true,
         );
+        // Files the query names ahead of those it reaches through a folder.
+        ranked.sort_by_key(|&i| files.get(i).map_or(4, |f| file_tier(&f.rel, query)));
+        results.extend(ranked.into_iter().map(|i| i + n));
         self.results = results;
     }
 
@@ -197,6 +206,42 @@ impl Finder {
         }
         let len = self.results.len() as i32;
         self.selected = (self.selected as i32 + delta).rem_euclid(len) as usize;
+    }
+}
+
+/// Whether `name` holds every word of `query` as it is spelled (case
+/// aside): a name that says what was typed, not one that merely has its
+/// letters in order.
+fn contains_words(name: &str, query: &str) -> bool {
+    let name = name.to_lowercase();
+    let mut words = query.split_whitespace().peekable();
+    words.peek().is_some() && words.all(|w| name.contains(&w.to_lowercase()))
+}
+
+/// How well a file's path answers `query`, best first: 0 when its name
+/// holds the query's words, 2 when its name has the query's letters in
+/// order, 4 when only its path does (the query reached it through a
+/// folder). Between them sit a symbol named by the query (1) and one
+/// matched by its letters (3). A query with a `/` asks for a path, and
+/// every file it matches is of one tier, ranked by the match alone.
+fn file_tier(rel: &str, query: &str) -> u8 {
+    if query.contains('/') || query.contains('\\') {
+        return 0;
+    }
+    let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
+    if contains_words(name, query) {
+        return 0;
+    }
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    let mut buf = Vec::new();
+    if pattern
+        .score(Utf32Str::new(name, &mut buf), &mut matcher)
+        .is_some()
+    {
+        2
+    } else {
+        4
     }
 }
 
@@ -397,6 +442,49 @@ mod tests {
             .map(|i| i - 1)
             .collect();
         assert!(named[..2].iter().all(|&i| !symbols[i].is_test), "{named:?}");
+    }
+
+    /// "tot" reached every file under `teashop/` through its folder, and
+    /// those were listed above the function `total`, which it names.
+    #[test]
+    fn what_the_query_names_leads_what_it_reaches_through_a_folder() {
+        let files = files(&[
+            "teashop/catalog.py",
+            "teashop/checkout.py",
+            "teashop/totals.py",
+            "teashop/top_list.py",
+        ]);
+        let symbol = |name: &str| SymbolEntry {
+            name: name.into(),
+            kind: "function".into(),
+            rel: "teashop/checkout.py".into(),
+            abs: "/p/teashop/checkout.py".into(),
+            line: 1,
+            is_test: false,
+            entry: None,
+        };
+        let symbols = [symbol("total"), symbol("to_text")];
+        let mut f = Finder {
+            query: "tot".into(),
+            ..Default::default()
+        };
+        f.refresh_files(&files, &symbols, &[]);
+        let n = files.len();
+        // totals.py names it; then `total`; then the file whose name has its
+        // letters (top_list.py); then `to_text`; the folder matches last.
+        assert_eq!(f.results[0], 2, "{:?}", f.results);
+        assert_eq!(f.results[1], n, "{:?}", f.results);
+        assert_eq!(f.results[2], 3, "{:?}", f.results);
+        assert_eq!(f.results[3], n + 1, "{:?}", f.results);
+        assert!(f.results[4..].iter().all(|&i| i < 2), "{:?}", f.results);
+        // A path asks for the path: its files keep the match's order.
+        f.query = "teashop/ch".into();
+        f.refresh_files(&files, &symbols, &[]);
+        assert_eq!(f.results.first(), Some(&1), "{:?}", f.results);
+        // The command bar's files are ordered the same way.
+        f.query = "tot".into();
+        f.refresh_bar(&[], &files);
+        assert_eq!(f.results[..2], [2, 3], "{:?}", f.results);
     }
 
     #[test]

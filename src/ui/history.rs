@@ -42,16 +42,24 @@ pub(crate) fn history_tab(app: &App) -> Element<'_, Message> {
             None if h.loading || !h.asked => (tr!("Reading the history…"), String::new()),
             None if !h.query.trim().is_empty() || h.path.is_some() => (
                 tr!("No commit matches"),
-                tr!("Try other words, or every branch.").into(),
+                // In the switch's own words, and not when it is already on.
+                if h.all {
+                    tr!("Try other words.").into()
+                } else {
+                    tr!("Try other words, or All branches.").into()
+                },
             ),
             None => (
                 tr!("No commits yet"),
                 tr!("Commits show here once there are some.").into(),
             ),
         };
-        let mut col = column![
-            changes_rows(app, h),
-            by_id_row(app, h),
+        // A commit the filter names by its id, found: that is the match —
+        // "No commit matches" under it contradicted it.
+        let found_by_id = matches!(&h.by_id, Some((_, Ok(Some(_)))));
+        let note: Element<'_, Message> = if found_by_id && h.error.is_none() {
+            space().height(0).into()
+        } else {
             container(
                 column![
                     text(title).size(ts::BODY).color(theme::fg_muted()),
@@ -60,10 +68,12 @@ pub(crate) fn history_tab(app: &App) -> Element<'_, Message> {
                         .color(theme::dim())
                         .wrapping(Wrapping::WordOrGlyph),
                 ]
-                .spacing(4)
+                .spacing(4),
             )
-            .padding([12, 12]),
-        ];
+            .padding([12, 12])
+            .into()
+        };
+        let mut col = column![changes_rows(app, h), by_id_row(app, h), note];
         col = col.spacing(2);
         col.into()
     } else {
@@ -74,11 +84,17 @@ pub(crate) fn history_tab(app: &App) -> Element<'_, Message> {
 
 /// The filter, the branches it reads, and the path it is about.
 fn header<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
-    let field = text_input(tr!("Message, @author or commit id"), &h.query)
-        .on_input(|q| Message::History(HistoryMsg::Query(q)))
-        .style(theme::input)
-        .size(ts::BASE)
-        .padding(7);
+    // The filter every sidebar view has: its mark, its ✕, and Esc that
+    // clears it — a plain field let Esc go on to close Time Travel.
+    let field = super::sidebar::filter_field(
+        tr!("Message, @author or commit id"),
+        &h.query,
+        None,
+        |q| Message::History(HistoryMsg::Query(q)),
+        None,
+        Message::History(HistoryMsg::Query(String::new())),
+        None,
+    );
     let scope = super::form::segmented_across([
         (
             tr!("This branch").to_string(),
@@ -91,6 +107,16 @@ fn header<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
             Message::History(HistoryMsg::AllBranches(true)),
         ),
     ]);
+    // Read again, by hand: what changed elsewhere and moved no HEAD.
+    let refresh = super::toolbar::busy_action(
+        Glyph::Refresh,
+        tr!("Refresh"),
+        Some(Message::History(HistoryMsg::Refresh)),
+        h.loading,
+    );
+    let field = row![container(field).width(Fill), refresh]
+        .spacing(4)
+        .align_y(iced::Center);
     let mut head = column![field, scope].spacing(6);
     // The path the log is narrowed to, under the switch: a chip that says
     // so and lets the whole project back.
@@ -294,7 +320,7 @@ fn ref_badge(kind: RefKind, name: String) -> Element<'static, Message> {
         RefKind::Head => (theme::accent(), None),
         RefKind::Branch => (theme::fg_muted(), None),
         RefKind::Remote => (theme::dim(), None),
-        RefKind::Tag => (theme::warning(), Some(Glyph::Bookmark)),
+        RefKind::Tag => (theme::warning(), Some(Glyph::Tag)),
     };
     let mut line = row![].spacing(3).align_y(iced::Center);
     if let Some(g) = mark {
@@ -350,15 +376,22 @@ fn commit_detail<'a>(
 
 fn detail_of(d: &CommitDetail, room: f32, now: i64) -> Element<'_, Message> {
     let mut col = column![].spacing(6);
-    // The body: what follows the subject.
-    let body = d
+    // The whole message: its subject — the row cuts it to one line, and an
+    // opened commit never said it whole — and its body, its paragraphs
+    // joined again where git broke them at 72 columns.
+    let (subject, body) = d
         .message
         .split_once('\n')
-        .map(|(_, rest)| rest.trim())
-        .unwrap_or("");
+        .map_or((d.message.as_str(), ""), |(s, rest)| (s, rest.trim()));
+    col = col.push(
+        text(subject.trim().to_string())
+            .size(ts::BODY)
+            .color(theme::fg())
+            .wrapping(Wrapping::WordOrGlyph),
+    );
     if !body.is_empty() {
         col = col.push(
-            text(body.to_string())
+            text(reflow(body))
                 .size(ts::SMALL)
                 .color(theme::fg_muted())
                 .wrapping(Wrapping::WordOrGlyph),
@@ -409,6 +442,31 @@ fn detail_of(d: &CommitDetail, room: f32, now: i64) -> Element<'_, Message> {
         files = files.push(file_row(&d.sha, f, room));
     }
     col.push(files).into()
+}
+
+/// A commit message's body as prose: the lines of each paragraph joined
+/// (git wraps them at 72 columns, and the panel wraps them again), a list's
+/// items and indented lines kept as written.
+fn reflow(body: &str) -> String {
+    body.split("\n\n")
+        .map(|paragraph| {
+            let lines: Vec<&str> = paragraph.lines().collect();
+            let kept = lines.iter().any(|line| {
+                let t = line.trim_start();
+                line.starts_with([' ', '\t'])
+                    || t.starts_with(['-', '*', '+', '>', '|'])
+                    || t.split_once(['.', ')']).is_some_and(|(n, _)| {
+                        !n.is_empty() && n.len() <= 3 && n.bytes().all(|b| b.is_ascii_digit())
+                    })
+            });
+            if kept {
+                paragraph.to_string()
+            } else {
+                lines.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// A file a commit changed: its status, its path (folder quieter), the
@@ -513,7 +571,10 @@ fn changes_rows<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
     if changed.is_empty() || !h.query.trim().is_empty() {
         return space().height(0).into();
     }
-    changed.sort();
+    // What git tracks first, then the files it does not: one real change
+    // came last, under nine untracked build files.
+    changed.sort_by_key(|(rel, letter)| (**letter == 'U', rel.as_str()));
+    let room = (app.sidebar_width - 34.0 - 12.0 - 12.0 - 4.0 - 2.0).max(0.0);
     let head = button(
         row![
             glyph::icon(Glyph::Clock, theme::accent(), 13.0),
@@ -546,36 +607,136 @@ fn changes_rows<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
             _ => theme::accent(),
         };
         let gone = *letter == 'D';
-        col = col.push(
-            button(
-                row![
-                    text(letter.to_string())
-                        .size(ts::SMALL)
-                        .font(crate::fonts::CODE)
-                        .color(color)
-                        .width(12),
-                    text(rel.clone())
-                        .size(ts::SMALL)
-                        .color(if gone { theme::dim() } else { theme::fg() })
-                        .wrapping(Wrapping::None),
-                ]
-                .spacing(4)
-                .align_y(iced::Center),
+        // A compiled or packed file (`__pycache__/*.pyc`, an image) has no
+        // text to show: pressed, it closed what was open for "binary file"
+        // and became a stop on the trail. Quiet and inert, it says why.
+        let binary = binary_name(rel);
+        // Its name, then its folder quieter — as a commit's files read —
+        // each cut with an ellipsis.
+        let (dir, name) = match rel.rsplit_once('/') {
+            Some((dir, name)) => (format!("{dir}/"), name),
+            None => (String::new(), rel.as_str()),
+        };
+        let name = super::steady::cut(name, room, ts::SMALL, crate::fonts::UI);
+        let dir_room = room - super::steady::width_of(&name, ts::SMALL, crate::fonts::UI) - 6.0;
+        let dir = if dir_room < 24.0 {
+            String::new()
+        } else {
+            super::steady::cut(&dir, dir_room, ts::CAPTION, crate::fonts::UI)
+        };
+        let row = button(
+            row![
+                text(letter.to_string())
+                    .size(ts::SMALL)
+                    .font(crate::fonts::CODE)
+                    .color(if binary { theme::dim() } else { color })
+                    .width(12),
+                text(name)
+                    .size(ts::SMALL)
+                    .color(if gone || binary {
+                        theme::dim()
+                    } else {
+                        theme::fg()
+                    })
+                    .wrapping(Wrapping::None),
+                text(dir)
+                    .size(ts::CAPTION)
+                    .color(theme::dim())
+                    .wrapping(Wrapping::None),
+            ]
+            .spacing(4)
+            .align_y(iced::Center),
+        )
+        .style(theme::menu_row)
+        .padding(Padding {
+            top: 3.0,
+            right: 12.0,
+            bottom: 3.0,
+            left: 34.0,
+        })
+        .width(Fill)
+        .on_press_maybe((!gone && !binary).then(|| {
+            super::heard::said(rel, Message::History(HistoryMsg::OpenChanged(rel.clone())))
+        }));
+        col = col.push(if binary {
+            let bubble = container(
+                text(tr!("A binary file: Clew shows text files only."))
+                    .size(ts::SMALL)
+                    .color(theme::fg()),
             )
-            .style(theme::menu_row)
-            .padding(Padding {
-                top: 3.0,
-                right: 12.0,
-                bottom: 3.0,
-                left: 34.0,
-            })
-            .width(Fill)
-            .on_press_maybe((!gone).then(|| {
-                super::heard::said(rel, Message::History(HistoryMsg::OpenChanged(rel.clone())))
-            })),
-        );
+            .padding([4, 8])
+            .max_width(super::TIP_MAX_W)
+            .style(theme::modal_panel);
+            Element::from(super::tip::tip(
+                row,
+                bubble,
+                iced::widget::tooltip::Position::Bottom,
+            ))
+        } else {
+            row.into()
+        });
     }
     col.into()
+}
+
+/// Whether `rel` names a file with no text to read — compiled, packed or
+/// media — by its extension: the uncommitted list shows these without
+/// reading them.
+pub(crate) fn binary_name(rel: &str) -> bool {
+    let Some((_, ext)) = rel.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "pyc"
+            | "pyo"
+            | "pyd"
+            | "so"
+            | "dylib"
+            | "dll"
+            | "exe"
+            | "o"
+            | "a"
+            | "obj"
+            | "lib"
+            | "class"
+            | "jar"
+            | "war"
+            | "wasm"
+            | "zip"
+            | "gz"
+            | "tgz"
+            | "bz2"
+            | "xz"
+            | "zst"
+            | "7z"
+            | "rar"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "ico"
+            | "tiff"
+            | "pdf"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "otf"
+            | "mp3"
+            | "mp4"
+            | "wav"
+            | "ogg"
+            | "mov"
+            | "db"
+            | "sqlite"
+            | "bin"
+            | "onnx"
+            | "pt"
+            | "npy"
+            | "pkl"
+    )
 }
 
 /// The commit the filter names by its id, found: above the list, to open.
@@ -748,5 +909,22 @@ impl iced::widget::canvas::Program<Message> for Lanes {
             Stroke::default().with_width(1.5).with_color(theme::bg()),
         );
         vec![frame.into_geometry()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reflow;
+
+    /// A body's paragraphs read as prose, git's 72-column breaks joined; a
+    /// list keeps its lines.
+    #[test]
+    fn a_commit_body_is_reflowed_but_lists_are_kept() {
+        let body = "Tax the discounted amount, not the\nsubtotal before it.\n\n- one\n- two";
+        assert_eq!(
+            reflow(body),
+            "Tax the discounted amount, not the subtotal before it.\n\n- one\n- two"
+        );
+        assert_eq!(reflow("1. first\n2. second"), "1. first\n2. second");
     }
 }

@@ -228,6 +228,13 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
     }
 }
 
+/// Why this window cannot build the project's docs, when it cannot: it is
+/// working without its clew-server (the binary is missing, or the link gave
+/// up), which is what reads the project for doc comments.
+fn docs_unbuildable(app: &App) -> Option<&str> {
+    app.handshake_failure.as_deref()
+}
+
 /// The DOCS sidebar tab: a filterable tree of files → public API items. Clicking
 /// an item opens its doc page in the main pane.
 pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
@@ -235,6 +242,18 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     if app.proj.docs.files.is_empty() {
         return if app.docs_loading() {
             empty_state(Glyph::Sparkle, tr!("Building docs…"), "", None)
+        } else if let Some(why) = docs_unbuildable(app) {
+            // Without its clew-server the window cannot read the project for
+            // doc comments: "No documentation" and a Look again that did
+            // nothing read as a documented project with no docs.
+            empty_state(Glyph::Note, tr!("API docs need clew-server"), why, None)
+        } else if app.proj.docs.generation > 0 {
+            empty_state(
+                Glyph::Note,
+                tr!("Nothing documented"),
+                tr!("No doc comments were found in this project's code."),
+                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
+            )
         } else {
             // Nothing was built to build again: the project is read for its
             // doc comments once more.
@@ -1100,6 +1119,16 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
                 tr!("Building the glossary…"),
                 tr!("Reading the project's doc comments."),
                 None,
+            )
+        } else if let Some(why) = docs_unbuildable(app) {
+            (tr!("The glossary needs clew-server"), why, None)
+        } else if app.proj.docs.generation > 0 {
+            (
+                tr!("No terms found"),
+                tr!(
+                    "The glossary is made from doc comments and explanations; this project has none yet."
+                ),
+                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
             )
         } else {
             (

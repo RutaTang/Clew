@@ -1925,17 +1925,22 @@ fn active_note<'a>(
         (NoteOf::File, Some(v)) => Some(crate::explain::Node::File(v.abs.clone())),
         _ => None,
     };
-    let unexplained =
-        !app.proj.explain.running && node.is_some_and(|n| !app.proj.explain.cache.contains_key(&n));
+    let unexplained = !app.proj.explain.running
+        && node
+            .as_ref()
+            .is_some_and(|n| !app.proj.explain.cache.contains_key(n));
     let mut actions = row![].spacing(2).align_y(iced::Center);
-    if unexplained {
+    // This function or file, in one call — the card offered only the whole
+    // project's Explain All, about 45 calls asked of a reader who wanted
+    // one note.
+    if unexplained && let Some(node) = node {
         actions = actions.push(action(
             Glyph::TextLines,
-            tr!("Explain All").into(),
+            tr!("Explain").into(),
             true,
             None,
             true,
-            super::toolbar::explain_all_message(app),
+            Message::Explain(ExplainMsg::Explain(node)),
         ));
     }
     // A function's calls: a file's card had the way in too, to a margin
@@ -2104,6 +2109,17 @@ fn margin_history(app: &App) -> Element<'_, Message> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
+            // Whose commits these are: the file's — with the caret in a
+            // function they read as the function's own, and some never
+            // touched it.
+            if uncommitted.is_none()
+                && let Some(name) = app
+                    .active_viewer()
+                    .and_then(|v| v.abs.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+            {
+                rows = rows.push(note(tr!("Commits to {file}", file = name)));
+            }
             for c in commits {
                 let short = short_sha(&c.sha);
                 rows = rows.push(
@@ -2159,7 +2175,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
     // own list, with what each changed beside this file.
     if let Some(rel) = app.active_viewer().map(|v| v.rel.clone()) {
         links = links.push(link(
-            tr!("All of this file's commits"),
+            tr!("History of this file"),
             Message::History(crate::HistoryMsg::Show { path: Some(rel) }),
         ));
     }

@@ -68,6 +68,9 @@ pub enum Glyph {
     Circle,
     Search,
     Bookmark,
+    /// A git tag on a commit: the Bookmark it wore read as "you
+    /// bookmarked this".
+    Tag,
     // Graph-map header
     List,
     Cube,
@@ -295,6 +298,10 @@ fn body(g: Glyph) -> &'static str {
         // The design's own magnifier.
         Search => "<circle cx='11' cy='11' r='8'/><path d='m21 21-4.3-4.3'/>",
         Bookmark => "<path d='m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z'/>",
+        Tag => {
+            "<path d='M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z'/>\
+             <circle cx='7.5' cy='7.5' r='1.2' fill='STROKE' stroke='none'/>"
+        }
         List => {
             "<circle cx='5.5' cy='7' r='1' fill='STROKE' stroke='none'/><path d='M9 7 H19'/>\
              <circle cx='5.5' cy='12' r='1' fill='STROKE' stroke='none'/><path d='M9 12 H19'/>\

@@ -273,6 +273,14 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     // A plain run (Run, not Debug) never stops: no stack, no variables, no
     // watches, nothing to step — its output, and how it ended.
     let plain = app.debug.no_debug;
+    // A debug run that ended without ever stopping is laid out the same —
+    // its empty stack and variables took half the panel from its output —
+    // though it is still a debug run, to run again as one.
+    let output_only = plain
+        || (session.status == DebugStatus::Terminated
+            && session.frames.is_empty()
+            && session.scopes.is_empty()
+            && app.debug.trace.is_empty());
     let (status_txt, status_color) = match (session.status, session.exit_code) {
         (DebugStatus::Launching, _) => (tr!("launching…").to_string(), theme::dim()),
         (DebugStatus::Running, _) => (tr!("running").to_string(), theme::success()),
@@ -315,7 +323,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     } else {
         ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), true)
     };
-    let controls = if plain {
+    let controls = if output_only {
         row![stop]
     } else {
         row![
@@ -448,6 +456,11 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 .into(),
         );
     }
+    // The pill floats over the panel's foot at its right, where the output
+    // is: scrolled to its end, the last lines are clear of it.
+    if app.ask_view == crate::AskView::Hidden {
+        out_rows.push(super::askfloat::pill_foot());
+    }
 
     // Watch — expressions re-evaluated each stop, with an add box + remove.
     let mut watch_rows: Vec<Element<'_, Message>> = vec![
@@ -499,7 +512,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 
     // The output takes the room a run's lines need: half the panel beside
     // the debugger's three columns, all of it for a plain run.
-    let panels = if plain {
+    let panels = if output_only {
         row![debug_col(out_rows)]
     } else {
         row![

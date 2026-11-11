@@ -851,6 +851,8 @@ pub enum HistoryMsg {
     OpenChanged(String),
     /// Copy commit `sha`'s whole id.
     CopyId(String),
+    /// Read the history again from its top.
+    Refresh,
     /// The project's newest commit read (`App::sync_repo_tip`).
     TipRead {
         stamp: Stamp,
@@ -2640,7 +2642,8 @@ impl HistoryMsg {
             | HistoryMsg::ToggleChanges
             | HistoryMsg::OpenAt { .. }
             | HistoryMsg::OpenChanged(_)
-            | HistoryMsg::CopyId(_) => None,
+            | HistoryMsg::CopyId(_)
+            | HistoryMsg::Refresh => None,
         }
     }
 }

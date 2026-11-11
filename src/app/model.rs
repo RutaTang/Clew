@@ -846,6 +846,10 @@ pub struct TimeTravel {
     pub caret: Option<(usize, usize)>,
     /// The line to bring into view (symbol scope: the function's line).
     pub focus_line: Option<usize>,
+    /// Started at a commit asked for (the History view, the margin's
+    /// History): its first revision lands on the first line that commit
+    /// added — it opened at line 1, the change off screen.
+    pub reveal_change: bool,
     pub loading: bool,
     /// Bumped on every enter/step so stale async results are dropped.
     pub generation: u64,

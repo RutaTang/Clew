@@ -181,7 +181,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             plain(tr!("Explain"), Message::Explain(ExplainMsg::FromMenu)),
             plain(tr!("Add to Ask"), Message::Ask(AskMsg::AboutSelection)),
             plain(
-                tr!("Why is this here?"),
+                tr!("Why Is This Here?"),
                 Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
             ),
         ],

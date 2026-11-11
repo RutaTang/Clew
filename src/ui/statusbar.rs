@@ -147,19 +147,20 @@ fn branch_item(app: &App) -> Option<Element<'_, Message>> {
         ),
     };
     // Set apart from the scan's state before it: "Up to date main" read
-    // as the branch's sync with its remote.
+    // as the branch's sync with its remote. Outside the button: its hover
+    // took the rule in, and stood wider before the branch than after it.
+    let rule = container(space().width(1).height(12)).style(|_: &iced::Theme| container::Style {
+        background: Some(theme::border().into()),
+        ..container::Style::default()
+    });
     let shown = row![
-        container(space().width(1).height(12)).style(|_: &iced::Theme| container::Style {
-            background: Some(theme::border().into()),
-            ..container::Style::default()
-        }),
-        space().width(6),
         glyph::icon(Glyph::Branch, theme::dim(), 12.0),
         status_text(head_shown(head)),
     ]
     .spacing(5)
     .align_y(iced::Center);
-    // Pressed, the branch's history: its commits, in the History view.
+    // Pressed, the branch's history: its commits, in the History view —
+    // which its tooltip says, as it named only the branch.
     let shown = button(shown)
         .style(theme::icon_button(false))
         .padding([2, 4])
@@ -167,15 +168,25 @@ fn branch_item(app: &App) -> Option<Element<'_, Message>> {
             tr!("History"),
             Message::History(crate::HistoryMsg::Show { path: None }),
         ));
+    let tip = iced::widget::column![
+        text(about).size(ts::SMALL).color(theme::tip_text()),
+        text(tr!("Click for its history"))
+            .size(ts::SMALL)
+            .color(theme::tip_text()),
+    ]
+    .spacing(2);
     Some(
-        super::tip::tip(
-            shown,
-            container(text(about).size(ts::SMALL).color(theme::tip_text()))
-                .padding([3, 7])
-                .style(theme::tip),
-            tooltip::Position::Top,
-        )
-        .gap(5.0)
+        row![
+            rule,
+            super::tip::tip(
+                shown,
+                container(tip).padding([3, 7]).style(theme::tip),
+                tooltip::Position::Top,
+            )
+            .gap(5.0),
+        ]
+        .spacing(4)
+        .align_y(iced::Center)
         .into(),
     )
 }
@@ -218,12 +229,33 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     // Scanning, indexing, up to date: after the button, in a slot as wide
     // as the widest of them, so what Clew says beside it stays where it is.
     let sync: Element<'_, Message> = match sync_state(app) {
-        Some(state) => super::steady::slot(
-            status_text(state),
-            state,
-            &[tr!("Scanning…"), tr!("Indexing…"), tr!("Up to date")],
-            ts::SMALL,
-        ),
+        Some(state) => {
+            let slot = super::steady::slot(
+                status_text(state),
+                state,
+                &[tr!("Scanning…"), tr!("Indexing…"), tr!("Up to date")],
+                ts::SMALL,
+            );
+            // What is up to date: the Updates page's "Clew is up to date"
+            // is of the app, this of the project's files.
+            if state == tr!("Up to date") {
+                super::tip::tip(
+                    slot,
+                    container(
+                        text(tr!("Every file is scanned and indexed"))
+                            .size(ts::SMALL)
+                            .color(theme::tip_text()),
+                    )
+                    .padding([3, 7])
+                    .style(theme::tip),
+                    tooltip::Position::Top,
+                )
+                .gap(5.0)
+                .into()
+            } else {
+                slot
+            }
+        }
         None => space().width(0).into(),
     };
     // A chevron after it, as the target picker has: it opens something —
