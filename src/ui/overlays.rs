@@ -162,6 +162,26 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         able: true,
         ai: false,
     };
+    // What is selected, copied: the menu had no Copy, with text selected.
+    let selected = app
+        .proj
+        .panes
+        .get(menu.pane)
+        .and_then(Option::as_ref)
+        .is_some_and(|v| v.selection_ordered().is_some_and(|(a, b)| a != b));
+    if selected {
+        navigate.insert(
+            0,
+            Row {
+                keys: Some(
+                    app.keymap
+                        .chord(crate::keymap::Action::CopySelection)
+                        .caps(),
+                ),
+                ..plain(tr!("Copy"), Message::Editor(EditorMsg::CopySelection))
+            },
+        );
+    }
     // In groups: going somewhere, understanding what is here, marking the
     // line, debugging.
     let groups = [

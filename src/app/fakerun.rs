@@ -232,8 +232,12 @@ impl App {
         match target {
             Some(target) => self.open_fake_sheet(target, debug),
             None => {
-                self.status =
-                    tr!("Put the caret in a function, class or struct to fake-run it").into();
+                self.status = if debug {
+                    tr!("Put the caret in a function, class or struct to fake-debug it")
+                } else {
+                    tr!("Put the caret in a function, class or struct to fake-run it")
+                }
+                .into();
                 Task::none()
             }
         }

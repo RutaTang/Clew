@@ -8591,7 +8591,7 @@ fn the_margin_history_lists_the_files_commits() {
     app.margin_tab = crate::MarginTab::History;
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Reading the file's history"));
-    assert!(shows(&mut sim, "Why is this line here?"));
+    assert!(shows(&mut sim, "Why Is This Here?"));
     assert!(!shows(&mut sim, "Changes since the last commit"));
     assert!(!shows(&mut sim, "This file through time"));
     drop(sim);
@@ -8718,16 +8718,16 @@ fn the_margin_history_says_a_new_function_is_not_committed() {
     // Its own history is not offered — but its link keeps its place,
     // inert, so the paid one never comes under a click aimed at it.
     assert!(click(sim_of(&app), "This function through time").is_empty());
-    assert!(shows(&mut sim_of(&app), "Why is this line here?"));
+    assert!(shows(&mut sim_of(&app), "Why Is This Here?"));
     // On a blank line there is nothing to ask why of: nothing to pay for.
     {
         let v = app.proj.panes[0].as_mut().unwrap();
         Arc::make_mut(&mut v.lines)[3] = crate::highlight::plain_lines("    \n")[0].clone();
     }
-    assert!(click(sim_of(&app), "Why is this line here?").is_empty());
+    assert!(click(sim_of(&app), "Why Is This Here?").is_empty());
     app.proj.panes[0].as_mut().unwrap().caret = Some((4, 0));
     assert!(matches!(
-        click(sim_of(&app), "Why is this line here?").as_slice(),
+        click(sim_of(&app), "Why Is This Here?").as_slice(),
         [Message::TimeTravel(crate::TimeTravelMsg::WhyIsThisHere)]
     ));
 }

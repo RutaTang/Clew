@@ -37114,13 +37114,42 @@ fn a_stopped_walkthroughs_late_answer_is_not_kept() {
 }
 
 /// Try again on an answer that failed keeps the question being typed: it
-/// put the old question in its place, and the draft was gone.
+/// put the old question in its place, and the draft was gone. And it asks
+/// in the failed turn's place: a second copy of the question and its
+/// failure went under the first.
 #[test]
 fn asking_again_keeps_the_draft_being_typed() {
     let mut app = scanned_app("ask-again-draft");
     app.proj.ask_input = "my draft".into();
     let task = app.update(Message::Ask(AskMsg::Suggested("why?".into())));
     let _ = run_task(task);
+    assert_eq!(app.proj.ask_input, "my draft");
+
+    app.proj.ask_turns.clear();
+    let mut failed = AskTurn {
+        stream: 1,
+        question: "what does origin do?".into(),
+        spoken: false,
+        answer_md: "*Couldn't answer*".into(),
+        answer: Vec::new(),
+        settled: 0,
+        draft_from: None,
+        sources: Vec::new(),
+        steps: Vec::new(),
+        streaming: false,
+        extras: Default::default(),
+    };
+    failed.extras.failed = true;
+    app.proj.ask_turns.push(failed);
+    let task = app.update(Message::Ask(AskMsg::AskAgain(0)));
+    let _ = run_task(task);
+    assert!(
+        app.proj
+            .ask_turns
+            .iter()
+            .all(|t| !(t.extras.failed && t.question == "what does origin do?" && t.stream == 1)),
+        "the failed turn stayed"
+    );
     assert_eq!(app.proj.ask_input, "my draft");
 }
 

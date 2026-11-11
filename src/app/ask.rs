@@ -1823,6 +1823,19 @@ impl App {
             // Asked as a queued question is: a draft being typed stays in
             // the field. (Try again on a failed answer put the question in
             // its place, and the draft was gone.)
+            AskMsg::AskAgain(n) => {
+                let failed = self
+                    .proj
+                    .ask_turns
+                    .get(n)
+                    .filter(|t| t.extras.failed && !t.streaming)
+                    .map(|t| t.question.clone());
+                let Some(question) = failed else {
+                    return Task::none();
+                };
+                self.proj.ask_turns.remove(n);
+                self.update_ask(AskMsg::Suggested(question))
+            }
             AskMsg::Suggested(q) => {
                 let draft = std::mem::replace(&mut self.proj.ask_input, q);
                 let draft_spoken = std::mem::replace(&mut self.proj.ask_spoken, false);

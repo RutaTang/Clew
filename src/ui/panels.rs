@@ -339,8 +339,13 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), true)
     };
     // Each says what it does and its function key where the pointer rests
-    // (`App::debug_key`): the keys were there, and nothing said so.
+    // (`App::debug_key`): the keys were there, and nothing said so. Not
+    // while it can do nothing: a tip over a greyed control offered a key
+    // that did nothing either.
     let keyed = |control: Element<'static, Message>, name: &'static str, key: &str| {
+        if !stopped {
+            return control;
+        }
         super::toolbar::tip_at(
             control,
             name,
@@ -351,8 +356,25 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     let stop: Element<'_, Message> = if ended {
         stop.into()
     } else {
-        keyed(stop.into(), tr!("Stop"), "⇧F5")
+        super::toolbar::tip_at(
+            stop,
+            tr!("Stop"),
+            Some(crate::keymap::local_keys("⇧F5")),
+            iced::widget::tooltip::Position::Top,
+        )
     };
+    // In a slot as wide as the widest it becomes: Stop turning into Debug
+    // Again moved Continue, Over, In and Out some 50 px under the pointer.
+    let again = if plain {
+        tr!("↻ Run Again")
+    } else {
+        tr!("↻ Debug Again")
+    };
+    let stop_w = super::steady::widest(&[tr!("■ Stop"), again], ts::BODY, crate::fonts::UI) + 16.0;
+    let stop: Element<'_, Message> = container(stop)
+        .width(Length::Fixed(stop_w.ceil() + 2.0))
+        .align_x(iced::alignment::Horizontal::Right)
+        .into();
     let controls = if output_only {
         row![stop]
     } else {
@@ -415,13 +437,32 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 .wrapping(Wrapping::None),
             // Picked for the file being read, which does not run itself:
             // said here, with the run, for as long as it is shown.
+            // What ran instead, named: the reader had to work it out from
+            // the tab's name.
             match app.debug.ran_for.as_deref() {
-                Some(file) => Element::from(
-                    text(tr!("{file} does not run on its own", file = file))
-                        .size(ts::SMALL)
-                        .color(theme::dim())
-                        .wrapping(Wrapping::None),
-                ),
+                Some(file) => {
+                    let program = app
+                        .debug
+                        .session
+                        .as_ref()
+                        .filter(|_| !app.connection.is_remote())
+                        .and_then(|s| s.program.file_name())
+                        .map(|n| n.to_string_lossy().into_owned());
+                    let said = match program {
+                        Some(program) => tr!(
+                            "{file} does not run on its own, so {program} ran",
+                            file = file,
+                            program = program
+                        ),
+                        None => tr!("{file} does not run on its own", file = file),
+                    };
+                    Element::from(
+                        text(said)
+                            .size(ts::SMALL)
+                            .color(theme::dim())
+                            .wrapping(Wrapping::None),
+                    )
+                }
                 None => Element::from(space().width(0)),
             },
             space().width(Fill),
@@ -984,7 +1025,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .align_y(iced::Center)
         .into()
     });
-    for turn in &app.proj.ask_turns {
+    for (n, turn) in app.proj.ask_turns.iter().enumerate() {
         // A question said rather than typed is marked so, over it (with
         // the design's 4 between them; a typed one has neither).
         let mut asked = Column::new()
@@ -1144,7 +1185,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 .padding([2, 8])
                 .on_press(super::heard::said(
                     tr!("Try again"),
-                    Message::Ask(AskMsg::Suggested(turn.question.clone())),
+                    Message::Ask(AskMsg::AskAgain(n)),
                 )),
                 tr!("Ask the same question again"),
                 None,

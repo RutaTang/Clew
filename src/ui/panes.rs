@@ -576,12 +576,30 @@ pub(crate) fn diff_view<'a>(
     .width(Fill);
 
     if d.lines.is_empty() {
+        // Nothing changed since the last commit: the way to what changed
+        // before it, where the reader stood at a dead end.
+        let history = button(
+            text(tr!("See its history in Time Travel"))
+                .size(ts::BODY)
+                .color(theme::accent()),
+        )
+        .style(theme::toolbar_button)
+        .padding([4, 10])
+        .on_press(super::heard::said(
+            tr!("See its history in Time Travel"),
+            Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),
+        ));
         return column![
             header,
             center(
-                text(tr!("No uncommitted changes in {file}", file = d.rel))
-                    .size(ts::BASE)
-                    .color(theme::dim()),
+                column![
+                    text(tr!("No uncommitted changes in {file}", file = d.rel))
+                        .size(ts::BASE)
+                        .color(theme::dim()),
+                    history,
+                ]
+                .spacing(10)
+                .align_x(iced::Center),
             )
         ]
         .width(Fill)
@@ -2461,8 +2479,9 @@ fn margin_history(app: &App) -> Element<'_, Message> {
             Some(((a, _), (b, _))) => (a..=b).any(|l| v.has_code(l)),
             None => v.caret.is_some_and(|(l, _)| v.has_code(l)),
         });
+    // Named as the code's menu and the command bar name it.
     let why = button(super::toolbar::ai_words(
-        tr!("Why is this line here?"),
+        tr!("Why Is This Here?"),
         ts::SMALL,
         if has_code {
             theme::accent()
@@ -2474,7 +2493,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
     .padding([3, 6])
     .on_press_maybe(has_code.then(|| {
         super::heard::said(
-            tr!("Why is this line here?"),
+            tr!("Why Is This Here?"),
             Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
         )
     }));

@@ -170,8 +170,10 @@ fn file_tool_w(label: &str, short: bool) -> f32 {
 /// width, up to this.
 const TITLE_MIN_W: f32 = 160.0;
 
-/// The least room the file's folder keeps beside its name before the
-/// header's tools give up their words: its width, up to this.
+/// The least room the file's folder is shown in, cut short from its start:
+/// its width, up to this. With less, it gives way whole — before the
+/// header's tools give up their words, which at 1100 px went to glyphs
+/// alone for a folder's sake; and rather than as a stub ("…op").
 const FOLDER_MIN_W: f32 = 96.0;
 
 /// Width of the header's tools, Explain through View, labelled or `short`.
@@ -192,16 +194,10 @@ fn file_tools_short(app: &App) -> bool {
     let Some(v) = app.active_viewer() else {
         return false;
     };
-    let (name, folder) = title_parts(v);
-    // The name, and enough of its folder to say where it is: the tools'
-    // words go first. In French, "Voyage dans le temps" and "Affichage"
-    // left the folder "…op".
-    let folder = if folder.is_empty() {
-        0.0
-    } else {
-        TITLE_SPACING + text_width(&folder, ts::BODY, crate::fonts::UI).min(FOLDER_MIN_W)
-    };
-    let title = text_width(&name, ts::EMPHASIS, TITLE_FONT).min(TITLE_MIN_W) + folder;
+    let (name, _) = title_parts(v);
+    // The name: its folder gives way before the tools' words do
+    // (`folder_shown`), the tools being what a reader new to Clew reads.
+    let title = text_width(&name, ts::EMPHASIS, TITLE_FONT).min(TITLE_MIN_W);
     let room = header_right(app) - HEADER_PAD_RIGHT - (sheet_content_left(app) + HEADER_PAD_X);
     room - TITLE_GAP / 2.0 - file_tools_w(false) < title
 }
@@ -228,7 +224,8 @@ fn folder_shown(app: &App, name: &str, folder: &str) -> String {
         - text_width(name, ts::EMPHASIS, TITLE_FONT)
         - TITLE_SPACING
         - toggle;
-    if room < text_width("…", ts::BODY, crate::fonts::UI) {
+    let whole = text_width(folder, ts::BODY, crate::fonts::UI);
+    if room < whole.min(FOLDER_MIN_W) {
         return String::new();
     }
     super::steady::elide_start(folder, ts::BODY, crate::fonts::UI, room)
@@ -750,7 +747,11 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         .zip(&around)
         .map(|((id, loc, label), around)| (id, loc, label.or(around.as_deref())))
         .collect();
-    let names = trail_names(&stops, here, is_function);
+    let caret = app
+        .active_viewer()
+        .and_then(|v| v.caret)
+        .map(|(l0, _)| l0 + 1);
+    let names = trail_names(&stops, here, caret, is_function);
     for (i, ((id, loc, _), name)) in stops.into_iter().zip(names).enumerate() {
         if i > 0 {
             line = line.push(glyph::icon(Glyph::ChevronRight, theme::dim(), 11.0));
@@ -826,12 +827,18 @@ fn merged_stops<'a>(
 /// cart.py"). `here` names the current (last) stop where the caret is in its
 /// file: the function it is in, or none — the file. A function's name is
 /// said with `()` (`is_function` says which names in a file are functions).
+///
+/// The current stop's line, where it says one, is the caret's (`caret`,
+/// 1-based) while the caret is in its file: it said the line the visit
+/// began on, "main.py:15" with the caret on line 1.
 fn trail_names(
     stops: &[(usize, &crate::history::Loc, Option<&str>)],
     here: Option<Option<String>>,
+    caret: Option<usize>,
     is_function: impl Fn(&std::path::Path, &str) -> bool,
 ) -> Vec<String> {
     let last = stops.len().saturating_sub(1);
+    let caret = caret.filter(|_| here.is_some());
     let mut here = here;
     let file_name = |loc: &crate::history::Loc| {
         loc.path
@@ -863,7 +870,12 @@ fn trail_names(
         })
         .collect();
     for (i, twin) in twins.into_iter().enumerate() {
-        if twin && let Some(line) = stops[i].1.line {
+        let line = if i == last {
+            caret.or(stops[i].1.line)
+        } else {
+            stops[i].1.line
+        };
+        if twin && let Some(line) = line {
             names[i].0 = format!("{}:{line}", names[i].0);
         }
     }
@@ -895,28 +907,34 @@ mod tests {
         ];
         let function = |_: &std::path::Path, name: &str| name == "subtotal";
         assert_eq!(
-            trail_names(&stops, None, function),
+            trail_names(&stops, None, None, function),
             ["main.py", "subtotal()", "cart.py:18", "cart.py:1"]
+        );
+        // The caret in the current stop's file: its line, not the one the
+        // visit began on.
+        assert_eq!(
+            trail_names(&stops, Some(None), Some(7), function),
+            ["main.py", "subtotal()", "cart.py:18", "cart.py:7"]
         );
         // The caret in a function names the current stop.
         assert_eq!(
-            trail_names(&stops, Some(Some("total".into())), function),
+            trail_names(&stops, Some(Some("total".into())), None, function),
             ["main.py", "subtotal()", "cart.py", "total()"]
         );
         // The caret in the file, in no function: the file is where it is.
         let in_fn = vec![(0, &b, None), (1, &a18, Some("subtotal"))];
         assert_eq!(
-            trail_names(&in_fn, Some(None), function),
+            trail_names(&in_fn, Some(None), None, function),
             ["main.py", "cart.py"]
         );
         // A name that is no function (a class) is said as it is.
-        assert_eq!(trail_names(&stops, None, |_, _| false)[1], "subtotal");
+        assert_eq!(trail_names(&stops, None, None, |_, _| false)[1], "subtotal");
         // One function twice in a row, at two places in it: its lines,
         // not "subtotal() › subtotal()".
         let a24 = loc("src/cart.py", Some(24));
         let twice = vec![(0, &a18, Some("subtotal")), (1, &a24, Some("subtotal"))];
         assert_eq!(
-            trail_names(&twice, None, function),
+            trail_names(&twice, None, None, function),
             ["subtotal():18", "subtotal():24"]
         );
     }

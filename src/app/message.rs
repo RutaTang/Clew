@@ -1324,6 +1324,10 @@ pub enum AskMsg {
     Submit,
     /// Ask a suggested (context-aware) question: fill the input and submit it.
     Suggested(String),
+    /// Try again: ask the question of turn `n`, whose answer failed, in its
+    /// place — the failed turn goes, rather than a second copy of the
+    /// question and its failure under it.
+    AskAgain(usize),
     /// The model's questions for "Try asking" came, for where the reader
     /// was (`app::suggest`).
     SuggestionsCame {
@@ -2979,6 +2983,7 @@ impl AskMsg {
             | AskMsg::Edit(..)
             | AskMsg::Submit
             | AskMsg::Suggested(..)
+            | AskMsg::AskAgain(..)
             | AskMsg::Stop
             | AskMsg::SendQueuedNow(..)
             | AskMsg::DropQueued(..)

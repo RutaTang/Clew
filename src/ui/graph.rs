@@ -205,8 +205,10 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
             // In words, with what it does said where the pointer rests:
             // "Refine with LSP" was an acronym and no more.
             super::toolbar::tip_at(
+                // A button that looks like one: as plain words it read as a
+                // caption until the pointer found it.
                 button(text(tr!("Check calls with the language server")).size(ts::SMALL))
-                    .style(theme::toolbar_button)
+                    .style(theme::secondary_button)
                     .padding([3, 10])
                     .on_press_maybe(app.proj.project.is_some().then(|| {
                         super::heard::said(
