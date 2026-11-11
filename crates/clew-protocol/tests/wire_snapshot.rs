@@ -174,6 +174,7 @@ const COVERED: &[&str] = &[
     "ProviderFailure",
     "PythonEnvKind",
     "PythonSource",
+    "RefKind",
     "Refusal",
     "Request",
     "ServerMessage",
@@ -436,6 +437,8 @@ fn git_op_index(op: &GitOp) -> usize {
         GitOp::Churn { .. } => 11,
         GitOp::WorkingStatus => 12,
         GitOp::Head => 13,
+        GitOp::Log { .. } => 14,
+        GitOp::CommitDetail { .. } => 15,
     }
 }
 
@@ -455,6 +458,8 @@ fn git_result_index(r: &GitResult) -> usize {
         GitResult::Churn(_) => 11,
         GitResult::WorkingStatus(_) => 12,
         GitResult::Head(_) => 13,
+        GitResult::Log(_) => 14,
+        GitResult::CommitDetail(_) => 15,
     }
 }
 
@@ -529,6 +534,15 @@ fn server_message_index(m: &ServerMessage) -> usize {
     match m {
         ServerMessage::Reply { .. } => 0,
         ServerMessage::Notification { .. } => 1,
+    }
+}
+
+fn ref_kind_index(k: &RefKind) -> usize {
+    match k {
+        RefKind::Head => 0,
+        RefKind::Branch => 1,
+        RefKind::Remote => 2,
+        RefKind::Tag => 3,
     }
 }
 
@@ -629,6 +643,15 @@ fn git_ops() -> Vec<GitOp> {
         GitOp::Churn { commits: 300 },
         GitOp::WorkingStatus,
         GitOp::Head,
+        GitOp::Log {
+            all: true,
+            rel: Some("src".into()),
+            author: Some("ada".into()),
+            grep: Some("fix".into()),
+            skip: 100,
+            limit: 100,
+        },
+        GitOp::CommitDetail { sha: "abc".into() },
     ]
 }
 
@@ -696,6 +719,53 @@ fn git_results() -> Vec<GitResult> {
         GitResult::Head(Some(HeadName::Branch("main".into()))),
         GitResult::Head(Some(HeadName::Detached("abc".into()))),
         GitResult::Head(None),
+        GitResult::Log(LogPage {
+            commits: vec![LogCommit {
+                sha: "abc".into(),
+                parents: vec!["def".into(), "fed".into()],
+                author: "Ada".into(),
+                time: 1,
+                subject: "Merge".into(),
+                refs: [
+                    RefKind::Head,
+                    RefKind::Branch,
+                    RefKind::Remote,
+                    RefKind::Tag,
+                ]
+                .into_iter()
+                .map(|kind| LogRef {
+                    kind,
+                    name: "main".into(),
+                })
+                .collect(),
+            }],
+            more: true,
+        }),
+        GitResult::CommitDetail(Some(CommitDetail {
+            sha: "abc".into(),
+            parents: vec!["def".into()],
+            author: "Ada".into(),
+            time: 1,
+            message: "Fix\n\nWhy.".into(),
+            files: vec![
+                CommitFile {
+                    rel: "b.rs".into(),
+                    old: Some("a.rs".into()),
+                    status: 'R',
+                    added: Some(1),
+                    removed: Some(2),
+                },
+                CommitFile {
+                    rel: "logo.png".into(),
+                    old: None,
+                    status: 'A',
+                    added: None,
+                    removed: None,
+                },
+            ],
+            more_files: 3,
+        })),
+        GitResult::CommitDetail(None),
         GitResult::RangePatch(String::new()),
         GitResult::Churn(vec![FileChurn {
             rel: "a.rs".into(),
@@ -1600,6 +1670,17 @@ fn every_variant_has_a_sample() {
         })
         .collect();
     assert_covers("HeadName", &head_names, head_name_index);
+    let ref_kinds: Vec<RefKind> = git_results()
+        .into_iter()
+        .filter_map(|r| match r {
+            GitResult::Log(page) => Some(page.commits),
+            _ => None,
+        })
+        .flatten()
+        .flat_map(|c| c.refs)
+        .map(|r| r.kind)
+        .collect();
+    assert_covers("RefKind", &ref_kinds, ref_kind_index);
     let change_kinds: Vec<ChangeKind> = events
         .iter()
         .filter_map(|e| match e {
@@ -1914,6 +1995,9 @@ fn only_the_pinned_fields_may_be_left_out() {
         "Reply.event.Docs.files[].items[].refs",
         "Reply.event.Error.code.Provider.Status.kind",
         "Reply.event.GitInfo.info",
+        "Reply.event.GitResult.result.CommitDetail.files[].added",
+        "Reply.event.GitResult.result.CommitDetail.files[].old",
+        "Reply.event.GitResult.result.CommitDetail.files[].removed",
         "Reply.event.LanguageOptions.options.c",
         "Reply.event.LanguageOptions.options.go",
         "Reply.event.LanguageOptions.options.python",
@@ -1964,6 +2048,9 @@ fn only_the_pinned_fields_may_be_left_out() {
         "request.BuildFacts.choices.typescript",
         "request.BuildFacts.choices.zig",
         "request.EditState.merge.edit.Patch.insert",
+        "request.Git.op.Log.author",
+        "request.Git.op.Log.grep",
+        "request.Git.op.Log.rel",
         "request.Hello.fingerprint",
         "request.LanguageOptions.choices.c",
         "request.LanguageOptions.choices.c.compile_commands",

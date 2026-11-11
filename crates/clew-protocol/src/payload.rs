@@ -119,6 +119,87 @@ pub enum GitResult {
     WorkingStatus(Vec<(Rel, char)>),
     /// What HEAD is (`GitOp::Head`); `None` when it names nothing.
     Head(Option<HeadName>),
+    /// A page of the project's commits (`GitOp::Log`).
+    Log(LogPage),
+    /// The commit whole (`GitOp::CommitDetail`); `None` when the id names
+    /// no commit.
+    CommitDetail(Option<CommitDetail>),
+}
+
+/// A page of the project's log (`GitOp::Log`): its commits, newest first,
+/// and whether more come after them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogPage {
+    pub commits: Vec<LogCommit>,
+    pub more: bool,
+}
+
+/// One commit of the project's log: its full id, its parents' (none for a
+/// root commit, two or more for a merge), author, authored time (unix
+/// seconds), subject, and the names that point at it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogCommit {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub time: i64,
+    pub subject: String,
+    pub refs: Vec<LogRef>,
+}
+
+/// A name pointing at a commit, short (`main`, `origin/main`, `v1.0`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogRef {
+    pub kind: RefKind,
+    pub name: String,
+}
+
+/// What a [`LogRef`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RefKind {
+    /// HEAD: the branch checked out (by its name), or `HEAD` itself when
+    /// detached.
+    Head,
+    /// Another local branch.
+    Branch,
+    /// A remote-tracking branch (`origin/main`).
+    Remote,
+    Tag,
+}
+
+/// The most files a [`CommitDetail`] lists: a commit that vendors a
+/// library or reformats a tree changes thousands, and a list that long is
+/// read by no one.
+pub const MAX_COMMIT_FILES: usize = 1000;
+
+/// One commit whole (`GitOp::CommitDetail`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitDetail {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub time: i64,
+    /// Subject and body, as written.
+    pub message: String,
+    /// The files it changed under the project, against its first parent
+    /// (against nothing for a root commit), in git's order — at most
+    /// [`MAX_COMMIT_FILES`] of them.
+    pub files: Vec<CommitFile>,
+    /// How many more it changed than are listed.
+    pub more_files: usize,
+}
+
+/// A file a commit changed: its path after the commit (before it, for one
+/// deleted), the path it had before when renamed or copied, git's status
+/// letter (`A`dded, `M`odified, `D`eleted, `R`enamed, `C`opied, `T`ype
+/// changed), and its lines added and removed — `None` for a binary file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitFile {
+    pub rel: Rel,
+    pub old: Option<Rel>,
+    pub status: char,
+    pub added: Option<u32>,
+    pub removed: Option<u32>,
 }
 
 /// What HEAD is: a branch, or, detached, a commit.
@@ -151,6 +232,8 @@ impl GitResult {
                 | (GitResult::Churn(_), GitOp::Churn { .. })
                 | (GitResult::WorkingStatus(_), GitOp::WorkingStatus)
                 | (GitResult::Head(_), GitOp::Head)
+                | (GitResult::Log(_), GitOp::Log { .. })
+                | (GitResult::CommitDetail(_), GitOp::CommitDetail { .. })
         )
     }
 
@@ -171,6 +254,8 @@ impl GitResult {
             GitResult::Churn(_) => "Churn",
             GitResult::WorkingStatus(_) => "WorkingStatus",
             GitResult::Head(_) => "Head",
+            GitResult::Log(_) => "Log",
+            GitResult::CommitDetail(_) => "CommitDetail",
         }
     }
 }

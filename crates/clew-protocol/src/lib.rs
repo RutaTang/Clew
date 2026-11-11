@@ -135,7 +135,11 @@ pub use payload::*;
 ///
 /// v24: [`GitOp::Head`] reads what HEAD is ([`HeadName`]): the branch the
 /// status bar names, or the commit a detached HEAD is at.
-pub const PROTOCOL_VERSION: u32 = 24;
+///
+/// v25: [`GitOp::Log`] pages through the project's commits ([`LogPage`]),
+/// and [`GitOp::CommitDetail`] reads one whole ([`CommitDetail`]): the
+/// History view.
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -435,6 +439,26 @@ pub enum GitOp {
     /// What HEAD is: the branch checked out, or the commit a detached HEAD
     /// is at — what the status bar names.
     Head,
+    /// The project's commits, newest first, a page at a time: those HEAD
+    /// reaches (`all` false), or those of every branch, remote branch and
+    /// tag; that touched `rel` (a file or a folder), or anything in the
+    /// project; whose author holds `author` and whose message holds `grep`
+    /// (plain text, any case; both, when both are given). The first `skip`
+    /// are passed over, and at most `limit` come back.
+    Log {
+        all: bool,
+        rel: Option<Rel>,
+        author: Option<String>,
+        grep: Option<String>,
+        skip: usize,
+        limit: usize,
+    },
+    /// One commit whole ([`CommitDetail`]): its message, its parents, and the
+    /// files it changed under the project — against its first parent — with
+    /// the lines each gained and lost. `sha` may be any unambiguous prefix.
+    CommitDetail {
+        sha: String,
+    },
 }
 
 /// One file's entry in a `ProjectSymbols` snapshot.

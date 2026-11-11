@@ -2508,3 +2508,171 @@ fn head_names_the_branch_or_the_detached_commit() {
     let plain = TempDir::new("git-head-none");
     assert!(head_name(plain.path()).is_err(), "not a repository");
 }
+
+/// The project's log: its commits newest first, with their parents and the
+/// names pointing at them; a page at a time; under the project directory
+/// only; filtered by author and message as plain text; every branch's with
+/// `all`. A merge has two parents; a repository with no commit has no log.
+#[test]
+fn the_project_log_pages_through_its_commits() {
+    use clew_protocol::RefKind;
+    let dir = repo_dir("git-log");
+    let empty = project_log(&dir, false, None, None, None, 0, 10).unwrap();
+    assert!(empty.commits.is_empty() && !empty.more, "no commit yet");
+
+    sh_git(&dir, &["checkout", "-q", "-b", "main"]);
+    std::fs::create_dir_all(dir.join("proj/src")).unwrap();
+    std::fs::create_dir_all(dir.join("other")).unwrap();
+    std::fs::write(dir.join("proj/src/a.rs"), "a\n").unwrap();
+    std::fs::write(dir.join("other/o.txt"), "o\n").unwrap();
+    commit_all(&dir, "Start the reader");
+    std::fs::write(dir.join("other/o.txt"), "o2\n").unwrap();
+    commit_all(&dir, "Outside the project");
+    sh_git(&dir, &["tag", "v1.0"]);
+    sh_git(&dir, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(dir.join("proj/src/side.rs"), "s\n").unwrap();
+    sh_git(&dir, &["add", "-A"]);
+    sh_git(
+        &dir,
+        &["-c", "user.name=Grace", "commit", "-qm", "Side work (a+b)"],
+    );
+    sh_git(&dir, &["checkout", "-q", "main"]);
+    std::fs::write(dir.join("proj/src/a.rs"), "a2\n").unwrap();
+    commit_all(&dir, "Fix the parser");
+    sh_git(
+        &dir,
+        &["merge", "-q", "--no-ff", "-m", "Merge side", "side"],
+    );
+
+    let proj = dir.join("proj");
+    let page = project_log(&proj, false, None, None, None, 0, 10).unwrap();
+    let subjects: Vec<&str> = page.commits.iter().map(|c| c.subject.as_str()).collect();
+    // Under the project directory only: the commit to `other/` is not its.
+    assert_eq!(subjects.len(), 4, "{subjects:?}");
+    assert!(!subjects.contains(&"Outside the project"));
+    assert_eq!(subjects[0], "Merge side");
+    assert_eq!(page.commits[0].parents.len(), 2, "a merge has two parents");
+    assert!(
+        page.commits[0]
+            .refs
+            .iter()
+            .any(|r| r.kind == RefKind::Head && r.name == "main"),
+        "{:?}",
+        page.commits[0].refs
+    );
+    assert!(!page.more);
+    assert!(page.commits.iter().all(|c| c.time > 0 && c.sha.len() == 40));
+
+    // A page at a time.
+    let first = project_log(&proj, false, None, None, None, 0, 2).unwrap();
+    let second = project_log(&proj, false, None, None, None, 2, 2).unwrap();
+    assert!(first.more && !second.more);
+    let paged: Vec<&str> = first
+        .commits
+        .iter()
+        .chain(&second.commits)
+        .map(|c| c.subject.as_str())
+        .collect();
+    assert_eq!(paged, subjects);
+
+    // Filtered: the message as plain text, any case — "(a+b)" is no regex.
+    let grep = project_log(&proj, false, None, None, Some("(A+B)"), 0, 10).unwrap();
+    assert_eq!(grep.commits.len(), 1);
+    assert_eq!(grep.commits[0].subject, "Side work (a+b)");
+    let author = project_log(&proj, false, None, Some("grace"), None, 0, 10).unwrap();
+    assert_eq!(author.commits.len(), 1);
+    assert_eq!(author.commits[0].author, "Grace");
+    // Both: both must hold.
+    let both = project_log(&proj, false, None, Some("grace"), Some("parser"), 0, 10).unwrap();
+    assert!(both.commits.is_empty());
+    // Under one file.
+    let side = project_log(&proj, false, Some("src/side.rs"), None, None, 0, 10).unwrap();
+    assert_eq!(side.commits.len(), 1);
+
+    // Every branch's: the tag's commit is outside the project, so the tag
+    // shows nowhere; a branch ahead of HEAD shows with `all` only.
+    sh_git(&dir, &["checkout", "-q", "-b", "later", "side"]);
+    std::fs::write(dir.join("proj/src/later.rs"), "l\n").unwrap();
+    commit_all(&dir, "Later work");
+    sh_git(&dir, &["checkout", "-q", "main"]);
+    let head = project_log(&proj, false, None, None, None, 0, 10).unwrap();
+    assert!(head.commits.iter().all(|c| c.subject != "Later work"));
+    let all = project_log(&proj, true, None, None, None, 0, 10).unwrap();
+    let later = all
+        .commits
+        .iter()
+        .find(|c| c.subject == "Later work")
+        .expect("another branch's commit, with all");
+    assert!(
+        later
+            .refs
+            .iter()
+            .any(|r| r.kind == RefKind::Branch && r.name == "later")
+    );
+
+    // Refused: what would not be plain text.
+    assert!(project_log(&proj, false, None, Some("a\nb"), None, 0, 10).is_err());
+    assert!(project_log(&proj, false, None, None, Some(" "), 0, 10).is_err());
+    assert!(project_log(&proj, false, Some("../other"), None, None, 0, 10).is_err());
+    assert!(project_log(&proj, false, None, None, None, MAX_LOG_SKIP + 1, 10).is_err());
+    // An option-shaped filter is the value of `--grep=`, not an option.
+    let dashed = project_log(&proj, false, None, None, Some("--output=x"), 0, 10).unwrap();
+    assert!(dashed.commits.is_empty());
+    assert!(!proj.join("x").exists());
+}
+
+/// One commit whole: its message, parents and the files it changed under
+/// the project — renames with their old path, binary files without counts,
+/// a root commit against nothing, a merge against its first parent.
+#[test]
+fn a_commit_is_read_whole() {
+    let dir = repo_dir("git-detail");
+    std::fs::create_dir_all(dir.join("proj/src")).unwrap();
+    std::fs::create_dir_all(dir.join("other")).unwrap();
+    std::fs::write(dir.join("proj/src/a.rs"), "one\ntwo\nthree\nfour\n").unwrap();
+    std::fs::write(dir.join("proj/logo.png"), [0u8, 1, 2]).unwrap();
+    std::fs::write(dir.join("other/o.txt"), "o\n").unwrap();
+    commit_all(&dir, "Start\n\nWhy it starts.");
+    let root_sha = sh_git_out(&dir, &["rev-parse", "HEAD"]);
+    sh_git(&dir, &["mv", "proj/src/a.rs", "proj/src/b.rs"]);
+    std::fs::write(dir.join("proj/src/b.rs"), "one\ntwo\nthree\nfour\nfive\n").unwrap();
+    std::fs::write(dir.join("proj/logo.png"), [0u8, 9, 9]).unwrap();
+    std::fs::write(dir.join("other/o.txt"), "o2\n").unwrap();
+    commit_all(&dir, "Rename a to b");
+    let sha = sh_git_out(&dir, &["rev-parse", "HEAD"]);
+    let proj = dir.join("proj");
+
+    let d = commit_detail(&proj, &sha[..10])
+        .unwrap()
+        .expect("found by prefix");
+    assert_eq!(d.sha, sha);
+    assert_eq!(d.parents, vec![root_sha.clone()]);
+    assert_eq!(d.message, "Rename a to b");
+    assert_eq!(d.more_files, 0);
+    let b = d.files.iter().find(|f| f.rel == "src/b.rs").expect("{d:?}");
+    assert_eq!(b.status, 'R');
+    assert_eq!(b.old.as_deref(), Some("src/a.rs"));
+    assert_eq!((b.added, b.removed), (Some(1), Some(0)));
+    let logo = d.files.iter().find(|f| f.rel == "logo.png").unwrap();
+    assert_eq!((logo.status, logo.added, logo.removed), ('M', None, None));
+    assert!(
+        d.files.iter().all(|f| !f.rel.contains("o.txt")),
+        "outside the project: {:?}",
+        d.files
+    );
+
+    let root = commit_detail(&proj, &root_sha).unwrap().unwrap();
+    assert!(root.parents.is_empty());
+    assert_eq!(root.message, "Start\n\nWhy it starts.");
+    let a = root.files.iter().find(|f| f.rel == "src/a.rs").unwrap();
+    assert_eq!((a.status, a.added, a.removed), ('A', Some(4), Some(0)));
+
+    // Nothing by that id; not an id at all.
+    assert_eq!(commit_detail(&proj, "abcdef1234").unwrap(), None);
+    assert!(commit_detail(&proj, "--output=x").is_err());
+    // The op the client sends answers the same.
+    assert!(matches!(
+        run_op(&proj, clew_protocol::GitOp::CommitDetail { sha }).unwrap(),
+        clew_protocol::GitResult::CommitDetail(Some(_))
+    ));
+}

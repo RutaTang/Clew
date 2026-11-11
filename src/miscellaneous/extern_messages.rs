@@ -79,6 +79,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("a `{kind}` token, which MCP does not use"),
     tr_noop!("a body that is not JSON: {e}"),
     tr_noop!("a command set by the project must be approved first"),
+    tr_noop!("a filter longer than {MAX_LOG_TEXT} bytes"),
     tr_noop!("a header line exceeds {MAX_HEADER_LINE_BYTES} bytes"),
     tr_noop!(
         "a header's name holds characters a header name cannot (letters, digits and !#$%&'*+-.^_`|~) — write each as `Name: value`"
@@ -95,6 +96,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("an attention node without {which}"),
     tr_noop!("an empty `command`"),
     tr_noop!("an index must be a whole number"),
+    tr_noop!("an offset past {MAX_LOG_SKIP} commits"),
     tr_noop!("an x-mcp-header outside the schema's plain properties"),
     tr_noop!("answered the CONNECT to {authority} with {status_line}: {what}"),
     tr_noop!("answered with address type {other}"),

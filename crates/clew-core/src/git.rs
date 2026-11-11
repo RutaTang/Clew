@@ -3294,8 +3294,28 @@ pub fn run_op(root: &Path, op: clew_protocol::GitOp) -> Result<clew_protocol::Gi
         GitOp::RangePatch { base, max_bytes } => {
             GitResult::RangePatch(range_patch(root, &base, max_bytes)?)
         }
+        GitOp::Log {
+            all,
+            rel,
+            author,
+            grep,
+            skip,
+            limit,
+        } => GitResult::Log(project_log(
+            root,
+            all,
+            rel.as_deref(),
+            author.as_deref(),
+            grep.as_deref(),
+            skip,
+            limit,
+        )?),
+        GitOp::CommitDetail { sha } => GitResult::CommitDetail(commit_detail(root, &sha)?),
     })
 }
+
+mod history;
+pub use history::{MAX_LOG_SKIP, check_log_text, commit_detail, project_log};
 
 #[cfg(test)]
 mod tests;
