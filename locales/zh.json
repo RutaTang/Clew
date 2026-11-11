@@ -2454,6 +2454,7 @@
  "not looking up {name}: the system's resolver has yet to answer the lookups of {arg1} other names": "暂不解析 {name}：系统解析器还有 {arg1} 个其他名称的查询尚未答复",
  "not running git in this repository: {why}": "已拒绝在此仓库中运行 git：{why}",
  "not sent again: clew-server took no request": "未重新发送：clew-server 没有接收请求",
+ "not set up": "未设置",
  "not started": "未启动",
  "not supported for this language": "不支持此语言",
  "not valid JSON: {e}": "不是有效的 JSON：{e}",

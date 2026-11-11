@@ -2454,6 +2454,7 @@
  "not looking up {name}: the system's resolver has yet to answer the lookups of {arg1} other names": "résolution de {name} non tentée : le résolveur du système n’a toujours pas répondu pour {arg1} autres noms",
  "not running git in this repository: {why}": "git ne sera pas exécuté dans ce dépôt : {why}",
  "not sent again: clew-server took no request": "non renvoyée : clew-server n’acceptait aucune requête",
+ "not set up": "non configuré",
  "not started": "non démarré",
  "not supported for this language": "non pris en charge pour ce langage",
  "not valid JSON: {e}": "JSON invalide : {e}",

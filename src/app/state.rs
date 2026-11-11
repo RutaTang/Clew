@@ -2369,6 +2369,12 @@ pub struct ProjectSession {
     /// The language-server (and debug-adapter) provisionings awaiting the
     /// user's consent, asked one at a time (see [`ConsentQueue`]).
     pub pending_lsp_consent: ConsentQueue,
+    /// The project was opened without setting its language servers up
+    /// (the setup sheet's servers unticked, or Open without setup): a
+    /// server that would need a download, an install or the leave to build
+    /// is left "not set up" instead of asking, and the status bar offers to
+    /// set it up. Cleared by any set-up the user asks for.
+    pub servers_not_now: bool,
     /// Files git TRACKS that the ignore rules (or a build-directory name)
     /// would have hidden, listed anyway by the scan — a local one's report,
     /// or the server's `Event::Tree` — marked in the file tree (see
@@ -2628,6 +2634,7 @@ impl Default for ProjectSession {
             build_facts: Default::default(),
             remote_lsp_init: Default::default(),
             pending_lsp_consent: Default::default(),
+            servers_not_now: false,
             tracked_ignored: Default::default(),
             tree_rescans: (0, 0),
             adapter_install_cancel: Default::default(),

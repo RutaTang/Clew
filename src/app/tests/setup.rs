@@ -89,10 +89,15 @@ fn not_now_opens_the_project_with_nothing_set_up() {
     let trust = clew_core::trust::Trust::load();
     assert!(trust.is_root_trusted(None, &root), "not asked again");
     assert!(!trust.is_build_trusted(None, &root, "rust-analyzer"));
+    let intent = app
+        .pending_setup
+        .as_ref()
+        .expect("the answer, for the open");
     assert!(
-        app.pending_setup.is_none(),
+        intent.fetch.is_empty() && !intent.explain,
         "nothing downloaded, nothing explained"
     );
+    assert!(intent.servers_not_now, "and no server asked about");
 }
 
 /// Not now answers the sheet's question as Open does: pressed before the
@@ -163,8 +168,9 @@ fn opening_records_the_leave_to_build_and_queues_the_downloads() {
     assert!(!intent.explain);
 }
 
-/// Servers unticked: nothing recorded, nothing queued — they ask as ever,
-/// when a file of their language opens.
+/// Servers unticked: nothing recorded, nothing fetched — and none asked
+/// about when a file of its language opens (see
+/// `opened_without_setup_no_server_is_asked_about`).
 #[test]
 fn servers_unticked_leave_the_questions_for_later() {
     let data = test_dir("setup-data-unticked");
@@ -186,7 +192,62 @@ fn servers_unticked_leave_the_questions_for_later() {
     let _ = app.update(Message::Project(ProjectMsg::SetupServers(false)));
     let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(root.clone())));
     assert!(!clew_core::trust::Trust::load().is_build_trusted(None, &root, "rust-analyzer"));
-    assert!(app.pending_setup.is_none());
+    let intent = app
+        .pending_setup
+        .as_ref()
+        .expect("the answer, for the open");
+    assert!(intent.fetch.is_empty() && intent.servers_not_now);
+}
+
+/// Opened without setup (Not now, or the servers unticked), a file of the
+/// language does not pop the question the sheet just had answered: its
+/// server is left "not set up", for the status bar's Set up — and asked
+/// about again once the user asks for it ("Ask again").
+#[test]
+fn opened_without_setup_no_server_is_asked_about() {
+    let data = test_dir("setup-data-later");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let root = fixture_project("setup-later");
+    let mut app = blank_app();
+    let _ = app.update(Message::Project(ProjectMsg::FolderPicked(Some(
+        root.clone(),
+    ))));
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root: root.clone(),
+        census: Census {
+            servers: vec![builds_and_downloads()],
+            calls: Some(42),
+        },
+    }));
+    let _ = app.update(Message::Project(ProjectMsg::OpenWithoutSetup(root.clone())));
+    app.scanning = true;
+    app.pending_scan_root = Some(root.clone());
+    let _ = app.update(Message::Project(ProjectMsg::ScanDone {
+        stamp: app.transport_stamp(),
+        result: fs_scan::scan(root.clone()),
+        report: Default::default(),
+    }));
+    assert!(app.proj.servers_not_now);
+    open_synchronously(&mut app, "src/lib.rs", None);
+    load_state_synchronously(&mut app);
+    assert!(app.pending_setup.is_none(), "carried out");
+    assert!(app.proj.pending_lsp_consent.is_empty(), "not asked");
+    assert!(
+        matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Declined(_))),
+        "{:?}",
+        app.proj.link.lsp.get("rust")
+    );
+    // Asked for: the question comes, as ever.
+    let _ = app.update(Message::Lsp(LspMsg::DownloadFor("rust".into())));
+    assert!(!app.proj.servers_not_now);
+    assert!(
+        !app.proj.pending_lsp_consent.is_empty()
+            || matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Starting)),
+        "{:?}",
+        app.proj.link.lsp.get("rust")
+    );
 }
 
 /// Without an AI key, explaining cannot be ticked; a look that found

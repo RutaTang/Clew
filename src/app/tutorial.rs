@@ -539,6 +539,7 @@ impl App {
             root: root.clone(),
             fetch: start.fetch,
             explain: self.llm_available,
+            servers_not_now: false,
         });
         self.tour_sample = Some(start.sample);
         self.request_open(root)

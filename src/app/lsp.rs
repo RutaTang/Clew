@@ -261,6 +261,10 @@ impl App {
                 return Task::none();
             }
         };
+        if self.proj.servers_not_now {
+            self.leave_server_for_later(language);
+            return Task::none();
+        }
         self.proj
             .link
             .lsp
@@ -314,6 +318,16 @@ impl App {
                 None => Message::Noop,
             },
         )
+    }
+
+    /// The project was opened without its servers set up: `language`'s is
+    /// not asked about, and stays "not set up" — the status bar offers to
+    /// set it up, the Languages page to ask again.
+    fn leave_server_for_later(&mut self, language: &str) {
+        self.proj.link.lsp.insert(
+            language.to_string(),
+            LspSlot::Declined(tr_noop!("not set up").into()),
+        );
     }
 
     /// The program the download question for `language` would fetch was
@@ -686,6 +700,10 @@ impl App {
                     .trust
                     .is_build_trusted(None, &root, &server.server_name)
             {
+                if self.proj.servers_not_now {
+                    self.leave_server_for_later(language);
+                    return Task::none();
+                }
                 self.proj
                     .link
                     .lsp
@@ -1763,7 +1781,9 @@ impl App {
             }
             LspMsg::Remove { name, version } => self.on_lsp_remove(name, version),
             LspMsg::DownloadFor(language) => {
-                // Force a fresh provisioning attempt for this language.
+                // Force a fresh provisioning attempt for this language —
+                // asked about, whatever the first open left for later.
+                self.proj.servers_not_now = false;
                 self.proj.link.lsp.remove(&language);
                 self.ensure_lsp(&language)
             }

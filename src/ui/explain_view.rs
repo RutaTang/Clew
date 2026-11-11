@@ -835,6 +835,7 @@ pub(crate) fn lsp_consent_modal(
 ) -> Element<'_, Message> {
     let asked = asked.into();
     let ready = asked.ready;
+    let use_path = consent.on_path.is_some();
     use crate::LspProvision;
     let server_blurb = tr!("Clew installs it in its own folder, not system-wide:");
     let (title, blurb, action) = match consent.provision {
@@ -931,28 +932,39 @@ pub(crate) fn lsp_consent_modal(
                         Message::Lsp(LspMsg::ConsentDismissed(number))
                     )),
                 // Each Allow offered to the voice only once it can be
-                // pressed: read first, said yes to after.
-                consent.on_path.as_ref().map(|_| crate::ui::fresh::allow(
-                    ready,
-                    button(text(tr!("Use that one")).size(ts::BASE))
-                        .style(theme::toolbar_button)
-                        .padding([6, 16])
-                        .on_press_maybe(ready.then(|| heard::said(
-                            tr!("Use that one"),
-                            Message::Lsp(LspMsg::ConsentUsePath(number))
-                        )))
-                )),
+                // pressed: read first, said yes to after. The server's own
+                // program already here is the better answer — no download,
+                // the version the user keeps up to date — so it is the
+                // primary one when there is one, and the one a "yes" picks.
                 crate::ui::fresh::allow(
                     ready,
                     button(text(action.clone()).size(ts::BASE))
+                        .style(if use_path {
+                            theme::toolbar_button
+                        } else {
+                            theme::primary_button
+                        })
+                        .padding([6, 16])
+                        .on_press_maybe(ready.then(|| {
+                            let allowed = Message::Lsp(LspMsg::ConsentAllowed(number));
+                            if use_path {
+                                heard::said(&action, allowed)
+                            } else {
+                                heard::answer(&action, heard::Answer::Yes, allowed)
+                            }
+                        }))
+                ),
+                use_path.then(|| crate::ui::fresh::allow(
+                    ready,
+                    button(text(tr!("Use that one")).size(ts::BASE))
                         .style(theme::primary_button)
                         .padding([6, 16])
                         .on_press_maybe(ready.then(|| heard::answer(
-                            &action,
+                            tr!("Use that one"),
                             heard::Answer::Yes,
-                            Message::Lsp(LspMsg::ConsentAllowed(number))
+                            Message::Lsp(LspMsg::ConsentUsePath(number))
                         )))
-                ),
+                )),
             ]
             .spacing(10)
             .align_y(iced::Center),

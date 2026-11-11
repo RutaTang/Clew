@@ -95,6 +95,10 @@ pub struct SetupIntent {
     /// The languages whose servers to set up now, and how.
     pub fetch: Vec<(String, Fetch)>,
     pub explain: bool,
+    /// The sheet's servers were left unticked (or the answer was Open
+    /// without setup): no language server is asked about on this open —
+    /// each is left "not set up", for the status bar's Set up to offer.
+    pub servers_not_now: bool,
 }
 
 /// Most files the estimate reads; past it, the rest are taken to be like
@@ -480,11 +484,13 @@ impl App {
             .map(|s| (s.language.clone(), s.fetch.clone()))
             .collect();
         let explain = setup.explain && self.llm_available;
-        if !fetch.is_empty() || explain {
+        let servers_not_now = !setup.servers;
+        if !fetch.is_empty() || explain || servers_not_now {
             self.pending_setup = Some(SetupIntent {
                 root: root.to_path_buf(),
                 fetch,
                 explain,
+                servers_not_now,
             });
         }
     }
@@ -511,6 +517,9 @@ impl App {
     /// recorded, and each fetched — or, in hand and declined before,
     /// started afresh.
     fn set_up_servers(&mut self, root: &Path, servers: &[SetupServer]) -> Task<Message> {
+        // Asked for now: the servers left for later at the first open are
+        // asked about again as they start.
+        self.proj.servers_not_now = false;
         self.allow_builds(root, servers);
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for server in servers {

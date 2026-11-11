@@ -411,6 +411,11 @@ impl App {
         {
             self.pending_setup = None;
         }
+        // Opened without its servers set up: none is asked about now.
+        self.proj.servers_not_now = self
+            .pending_setup
+            .as_ref()
+            .is_some_and(|intent| intent.servers_not_now);
         // Tracked files the ignore rules hid, listed anyway: marked in the tree.
         self.proj.tracked_ignored = report.tracked_ignored.into_iter().collect();
         // Persisted project state (`.clew/`) lives WITH the project. For a

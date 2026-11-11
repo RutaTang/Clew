@@ -2454,6 +2454,7 @@
  "not looking up {name}: the system's resolver has yet to answer the lookups of {arg1} other names": "{name} 주소를 조회하지 않음: 시스템 리졸버가 아직 다른 이름 {arg1}개의 조회에 응답하지 않음",
  "not running git in this repository: {why}": "이 저장소에서는 Git을 실행하지 않음: {why}",
  "not sent again: clew-server took no request": "다시 보내지 않음: clew-server가 요청을 받지 않음",
+ "not set up": "설정 안 됨",
  "not started": "시작되지 않음",
  "not supported for this language": "이 언어에서는 지원하지 않음",
  "not valid JSON: {e}": "올바른 JSON이 아님: {e}",

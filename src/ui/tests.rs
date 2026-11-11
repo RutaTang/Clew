@@ -5146,6 +5146,26 @@ fn the_download_question_offers_the_program_already_here() {
         click(sim, "Use that one").as_slice(),
         [Message::Lsp(crate::LspMsg::ConsentUsePath(4))]
     ));
+    // The program already here is the primary answer: a spoken "yes" picks
+    // it, and the download stays one press (or its name) away.
+    let yes: Vec<Message> =
+        crate::ui::heard::gather_of(|| super::lsp_consent_modal(&consent, 4, 0, true))
+            .into_iter()
+            .filter(|t| t.answer == Some(crate::ui::heard::Answer::Yes))
+            .map(|t| t.message)
+            .collect();
+    assert!(
+        matches!(
+            yes.as_slice(),
+            [Message::Lsp(crate::LspMsg::ConsentUsePath(4))]
+        ),
+        "{yes:?}"
+    );
+    let sim = sim_elem(super::lsp_consent_modal(&consent, 4, 0, true));
+    assert!(matches!(
+        click(sim, "Download").as_slice(),
+        [Message::Lsp(crate::LspMsg::ConsentAllowed(4))]
+    ));
     let sim = sim_elem(super::lsp_consent_modal(&consent, 4, 0, false));
     assert!(click(sim, "Use that one").is_empty(), "not yet read");
 }
