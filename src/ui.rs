@@ -91,6 +91,7 @@ pub(crate) use notebook::*;
 mod overlays;
 pub(crate) use overlays::*;
 mod updater;
+mod usage;
 pub(crate) use updater::*;
 mod askfloat;
 mod form;

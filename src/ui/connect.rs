@@ -275,6 +275,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         ]),
         SettingsPage::Languages => languages_section(app),
         SettingsPage::Shortcuts => shortcuts_body(app),
+        SettingsPage::Usage => super::usage::usage_page(app),
     };
 
     let mut header = row![
@@ -412,6 +413,7 @@ fn settings_glyph(page: SettingsPage) -> Glyph {
         SettingsPage::Integrations => Glyph::Plug,
         SettingsPage::Languages => Glyph::Braces,
         SettingsPage::Shortcuts => Glyph::Shortcuts,
+        SettingsPage::Usage => Glyph::Stats,
     }
 }
 

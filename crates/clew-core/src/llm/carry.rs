@@ -103,6 +103,7 @@ pub fn carry_on(
                 done.text.push_str(&added);
                 done.truncated = more.truncated;
                 done.stop_reason = more.stop_reason;
+                done.usage += more.usage;
             }
             Err(LlmError::Cancelled) => return Err(LlmError::Cancelled),
             // What was written stands — the reader has seen it — cut.
@@ -301,6 +302,7 @@ mod tests {
             text: text.into(),
             truncated: true,
             stop_reason: Some("length".into()),
+            usage: super::super::Usage::default(),
         }
     }
 
@@ -309,6 +311,7 @@ mod tests {
             text: text.into(),
             truncated: false,
             stop_reason: Some("stop".into()),
+            usage: super::super::Usage::default(),
         }
     }
 

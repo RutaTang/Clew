@@ -943,13 +943,14 @@ pub enum SettingsPage {
     Integrations,
     Languages,
     Shortcuts,
+    Usage,
     Updates,
 }
 
 impl SettingsPage {
     /// In the order the Settings list shows them: what a reader sets up
     /// first, Clew's own updates last.
-    pub const ALL: [SettingsPage; 8] = [
+    pub const ALL: [SettingsPage; 9] = [
         SettingsPage::Appearance,
         SettingsPage::LanguageModel,
         SettingsPage::Embeddings,
@@ -957,6 +958,7 @@ impl SettingsPage {
         SettingsPage::Integrations,
         SettingsPage::Languages,
         SettingsPage::Shortcuts,
+        SettingsPage::Usage,
         SettingsPage::Updates,
     ];
 
@@ -971,6 +973,7 @@ impl SettingsPage {
             SettingsPage::Integrations => tr_noop!("Integrations"),
             SettingsPage::Languages => tr_noop!("Language servers"),
             SettingsPage::Shortcuts => tr_noop!("Keyboard shortcuts"),
+            SettingsPage::Usage => tr_noop!("Usage and cost"),
         }
     }
 }
@@ -1431,6 +1434,9 @@ pub struct App {
     /// Auto-update state: the available release plus any in-progress download /
     /// install (see [`UpdateState`]).
     pub update: UpdateState,
+    /// What the AI key spends: the ledger as last read, the balance, the
+    /// prices being typed (`app::usage`).
+    pub usage: crate::app::usage::UsageState,
     /// Overlay view: `true` shows the node-link map, `false` the list.
     pub graph_mode: bool,
     /// Map projection: `true` renders the force graph in 3D (orbit + depth),

@@ -878,6 +878,7 @@ impl App {
                     system,
                     messages: msgs,
                     max_tokens: ANSWER_TOKENS,
+                    purpose: crate::app::usage::ASK.into(),
                 },
             });
             // Not handed over: no `ChatStreamDone` will ever come for it.
@@ -920,14 +921,24 @@ impl App {
                         // The same typed ending a server stream reports: the
                         // stop this poll answers is a Stop, not a failure —
                         // whatever text the provider layer gives it.
-                        let outcome = match llm::complete_chat_stream_full(
-                            &cfg,
-                            &system,
-                            &messages,
-                            ANSWER_TOKENS,
-                            &mut forward,
-                            &move || listening.is_closed(),
-                        ) {
+                        // What it used goes to the ledger from here: no
+                        // server tells.
+                        let answered = llm::metered(
+                            crate::App::local_meter(),
+                            crate::app::usage::ASK,
+                            0,
+                            || {
+                                llm::complete_chat_stream_full(
+                                    &cfg,
+                                    &system,
+                                    &messages,
+                                    ANSWER_TOKENS,
+                                    &mut forward,
+                                    &move || listening.is_closed(),
+                                )
+                            },
+                        );
+                        let outcome = match answered {
                             Ok(done) => {
                                 if done.truncated {
                                     let _ = tx.send(ChatStreamPiece::Delta(

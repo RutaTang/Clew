@@ -260,6 +260,7 @@ fn event_index(e: &Event) -> usize {
         Event::MacroExpansion { .. } => 35,
         Event::AgentDraft { .. } => 36,
         Event::AgentDraftEnd { .. } => 37,
+        Event::Usage { .. } => 38,
     }
 }
 
@@ -1109,6 +1110,7 @@ fn request_samples() -> Vec<Request> {
             system: "s".into(),
             messages: vec![chat_msg()],
             max_tokens: 64,
+            purpose: "explain".into(),
         },
         Request::Embed {
             texts: vec!["t".into()],
@@ -1118,6 +1120,7 @@ fn request_samples() -> Vec<Request> {
             system: "s".into(),
             messages: vec![chat_msg()],
             max_tokens: 64,
+            purpose: "ask".into(),
         },
         Request::AgentAsk {
             stream: 1,
@@ -1549,6 +1552,14 @@ fn notification_samples() -> Vec<Event> {
         },
         Event::Status {
             message: "file watching is unavailable".into(),
+        },
+        Event::Usage {
+            work: 1,
+            purpose: "ask".into(),
+            model: "deepseek-v4-flash".into(),
+            input: 1200,
+            cached: 800,
+            output: 300,
         },
     ]);
     samples

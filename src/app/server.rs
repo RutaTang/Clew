@@ -947,6 +947,27 @@ impl App {
                     let _ = tx.send(AgentPiece::Done(outcome));
                 }
             }
+            // A model call made for this window: what it used, for the
+            // ledger and the answer it was for.
+            Event::Usage {
+                work,
+                purpose,
+                model,
+                input,
+                cached,
+                output,
+            } => {
+                task = self.on_spent(
+                    work,
+                    purpose,
+                    model,
+                    clew_core::llm::Usage {
+                        input,
+                        cached,
+                        output,
+                    },
+                );
+            }
             // An unsolicited notice about the connection's background work
             // (the watcher, a process that died, withheld lsp.toml options).
             Event::Status { message } => {

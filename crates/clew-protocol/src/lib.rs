@@ -139,7 +139,11 @@ pub use payload::*;
 /// v25: [`GitOp::Log`] pages through the project's commits ([`LogPage`]),
 /// and [`GitOp::CommitDetail`] reads one whole ([`CommitDetail`]): the
 /// History view.
-pub const PROTOCOL_VERSION: u32 = 25;
+///
+/// v26: every model call the server makes for the client says what it used
+/// ([`Event::Usage`]), and [`Request::Chat`] / [`Request::ChatStream`] say
+/// what they are for (`purpose`): the client's ledger of what its key spent.
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -860,6 +864,9 @@ pub enum Request {
         system: String,
         messages: Vec<AiChatMsg>,
         max_tokens: u32,
+        /// What the completion is for, as the client's ledger names it
+        /// (`explain`, `walkthrough`, …): told back on its [`Event::Usage`].
+        purpose: String,
     },
     /// Embed texts with the server's stored embedding config. Reply:
     /// `Embeddings`. Cancellable by its request id.
@@ -872,6 +879,8 @@ pub enum Request {
         system: String,
         messages: Vec<AiChatMsg>,
         max_tokens: u32,
+        /// As [`Request::Chat`]'s.
+        purpose: String,
     },
     /// Run an agent turn for the Ask panel: the server explores the project with
     /// tools (search / read / outline / …) and streams its progress back —
@@ -1390,6 +1399,20 @@ pub enum Event {
     },
     /// An agent turn ended (a notification), and how.
     AgentDone { stream: u64, outcome: StreamOutcome },
+    /// One model call the server made for the client used this much (a
+    /// notification), as its provider reported it: `work` is the request id
+    /// of the `Chat`, or the `stream` of the `ChatStream` or `AgentAsk`, it
+    /// was made for, and `purpose` what that said it was for (`ask` for an
+    /// agent turn). A call stopped part way says nothing: its provider did
+    /// not tell.
+    Usage {
+        work: u64,
+        purpose: String,
+        model: String,
+        input: u64,
+        cached: u64,
+        output: u64,
+    },
     /// A one-line notice for the status bar about the connection's background
     /// work — never a reply, never about one request: the project cannot be
     /// watched (or the watcher reported trouble, so external changes may be

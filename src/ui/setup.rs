@@ -60,6 +60,13 @@ pub(crate) fn setup_sheet<'a>(
     let census = setup.and_then(|s| s.census.as_ref());
     let calls = setup.map(|s| s.census.as_ref().map(|c| c.calls));
     let explain_says = explain_line(app.llm_available, calls.flatten(), app.embed_available);
+    // What those calls are likely to cost, under the count of them: said
+    // before anything is spent, not after.
+    let estimate = calls
+        .flatten()
+        .flatten()
+        .and_then(|n| app.explain_estimate(n))
+        .unwrap_or_default();
 
     let title = match mode {
         SetupMode::Open => tr!("Open {name}", name = name),
@@ -122,7 +129,8 @@ pub(crate) fn setup_sheet<'a>(
                   on: bool,
                   toggle: Option<fn(bool) -> Message>,
                   detail: String,
-                  lines: f32|
+                  lines: f32,
+                  more: Option<String>|
      -> Element<'a, Message> {
         let tick = checkbox(on)
             .style(theme::check)
@@ -133,7 +141,7 @@ pub(crate) fn setup_sheet<'a>(
         if let Some(toggle) = toggle {
             super::heard::switch(label, on, toggle);
         }
-        column![
+        let col = column![
             // A tick is pressed by its jump code and the keyboard's ring as
             // by a click.
             match toggle {
@@ -152,9 +160,24 @@ pub(crate) fn setup_sheet<'a>(
                 left: DETAIL_INDENT - 1.0,
                 ..Padding::ZERO
             }),
-        ]
-        .spacing(3)
-        .into()
+        ];
+        // A line of its own under the detail, kept while it is empty.
+        let col = match more {
+            Some(more) => col.push(
+                container(row![
+                    space()
+                        .width(1)
+                        .height(text::LineHeight::default().to_absolute(ts::SMALL.into()).0),
+                    text(more).size(ts::SMALL).color(theme::dim()),
+                ])
+                .padding(Padding {
+                    left: DETAIL_INDENT - 1.0,
+                    ..Padding::ZERO
+                }),
+            ),
+            None => col,
+        };
+        col.spacing(3).into()
     };
 
     match mode {
@@ -165,16 +188,26 @@ pub(crate) fn setup_sheet<'a>(
                 let toggle = changeable.then_some(
                     (|on| Message::Project(ProjectMsg::SetupServers(on))) as fn(bool) -> Message,
                 );
-                body = body.push(choice(tr!("Language servers"), on, toggle, detail, 2.0));
+                body = body.push(choice(
+                    tr!("Language servers"),
+                    on,
+                    toggle,
+                    detail,
+                    2.0,
+                    None,
+                ));
             }
             let can_explain =
                 app.llm_available && !matches!(census.map(|c| c.calls), Some(Some(0)));
+            // Its line, and the estimate's under it: room for both kept
+            // while the count is still coming.
             body = body.push(choice(
                 tr!("Explain the project"),
                 setup.is_some_and(|s| s.explain),
                 can_explain.then_some(|on| Message::Project(ProjectMsg::SetupExplain(on))),
                 explain_says,
                 1.0,
+                Some(estimate),
             ));
             // No key: where one is added, a click away — the line said
             // "in Settings" and left the reader to find it.
@@ -203,7 +236,13 @@ pub(crate) fn setup_sheet<'a>(
             }
         }
         SetupMode::Explain => {
-            body = body.push(text(explain_says).size(ts::BODY).color(theme::fg_muted()));
+            body = body.push(
+                column![
+                    text(explain_says).size(ts::BODY).color(theme::fg_muted()),
+                    text(estimate).size(ts::SMALL).color(theme::dim()),
+                ]
+                .spacing(4),
+            );
         }
     }
 

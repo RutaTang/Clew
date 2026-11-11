@@ -1079,7 +1079,14 @@ impl App {
                     })
                     .await?;
                 let prompt = time_why_prompt(&path, &msg, &diff);
-                ai.complete(cfg, TIME_WHY_SYSTEM, prompt, 220).await
+                ai.complete(
+                    cfg,
+                    crate::app::usage::TIME_TRAVEL,
+                    TIME_WHY_SYSTEM,
+                    prompt,
+                    220,
+                )
+                .await
             },
             move |result| {
                 Message::TimeTravel(TimeTravelMsg::WhyDone {
@@ -1187,7 +1194,14 @@ impl App {
                     steps.push((sha, subject, diff));
                 }
                 let prompt = story_prompt(&name, &steps);
-                ai.complete(cfg, TIME_STORY_SYSTEM, prompt, 900).await
+                ai.complete(
+                    cfg,
+                    crate::app::usage::TIME_TRAVEL,
+                    TIME_STORY_SYSTEM,
+                    prompt,
+                    900,
+                )
+                .await
             },
             move |result| {
                 Message::TimeTravel(TimeTravelMsg::StoryDone {
@@ -1354,7 +1368,8 @@ impl App {
                     history.push((sha, msg, diff));
                 }
                 let prompt = why_prompt(&rel, (l0 + 1, last + 1), &code, &history);
-                ai.complete(cfg, WHY_SYSTEM, prompt, 512).await
+                ai.complete(cfg, crate::app::usage::TIME_TRAVEL, WHY_SYSTEM, prompt, 512)
+                    .await
             },
             move |result| {
                 Message::TimeTravel(TimeTravelMsg::BlameWhyDone {

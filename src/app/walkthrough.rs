@@ -63,7 +63,9 @@ impl App {
         let stamp = self.stamp();
         Task::perform(
             async move {
-                let resp = ai.complete(cfg, system, prompt, 4096).await?;
+                let resp = ai
+                    .complete(cfg, crate::app::usage::WALKTHROUGH, system, prompt, 4096)
+                    .await?;
                 let mut wt = walkthrough::parse(&resp)?;
                 if guide {
                     walkthrough::shape_guide(&mut wt);
@@ -129,7 +131,13 @@ impl App {
         Task::perform(
             async move {
                 let narrated = ai
-                    .complete(cfg, walkthrough::TRACE_SYSTEM, prompt, 4096)
+                    .complete(
+                        cfg,
+                        crate::app::usage::WALKTHROUGH,
+                        walkthrough::TRACE_SYSTEM,
+                        prompt,
+                        4096,
+                    )
                     .await
                     .map_err(walkthrough::Failure::from)
                     .and_then(|r| walkthrough::parse(&r));
@@ -272,7 +280,7 @@ impl App {
                         &patch,
                     );
                     let resp = ai
-                        .complete(cfg, walkthrough::DIFF_SYSTEM, prompt, 4096)
+                        .complete(cfg, crate::app::usage::WALKTHROUGH, walkthrough::DIFF_SYSTEM, prompt, 4096)
                         .await?;
                     walkthrough::parse(&resp)
                 }

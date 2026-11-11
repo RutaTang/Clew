@@ -45,7 +45,11 @@ impl App {
         };
         // Silently check for a newer release in the background (once per process).
         let check = app.startup_update_check();
-        (app, Task::batch([open_task, check]))
+        // What the AI key has spent so far, and on which model: estimates
+        // draw on both.
+        app.refresh_usage_model();
+        let ledger = app.read_ledger();
+        (app, Task::batch([open_task, check, ledger]))
     }
 
     /// The transport this window starts on. `CLEW_SSH` selects a remote host
@@ -156,6 +160,7 @@ impl App {
                 auto_check: updater::auto_check_enabled(),
                 ..UpdateState::default()
             },
+            usage: Default::default(),
             graph_mode: true,
             graph_3d: true,
             graph_spin: true,

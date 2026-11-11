@@ -26,6 +26,8 @@ impl App {
     pub(crate) fn invalidate_llm_config(&mut self) {
         self.llm_config_cache = None;
         self.llm_available = llm::Config::available();
+        // What estimates and the Usage page read prices for.
+        self.refresh_usage_model();
     }
 
     /// The one gate every flow that needs a chat model goes through: the
@@ -79,6 +81,7 @@ impl App {
                 let model = cfg.model.clone();
                 ai.complete(
                     cfg,
+                    crate::app::usage::KEY_TEST,
                     "Reply with the single word OK.",
                     "OK?".into(),
                     CONNECTION_TEST_TOKENS,
@@ -562,11 +565,13 @@ impl App {
             | SettingsMsg::EmbedModelRemoved(..)) => self.on_local_embedding(msg),
             SettingsMsg::Open => {
                 let opened = self.on_open_settings();
-                Task::batch([opened, self.sync_server_listing()])
+                let usage = self.on_usage_page();
+                Task::batch([opened, self.sync_server_listing(), usage])
             }
             SettingsMsg::OpenAt(page) => {
                 self.settings.page = page;
                 let opened = self.on_open_settings();
+                let usage = self.on_usage_page();
                 // "Add an API Key…": the keyboard in the field it is added
                 // to, while there is none.
                 let key =
@@ -576,7 +581,13 @@ impl App {
                     } else {
                         Task::none()
                     };
-                Task::batch([opened, self.sync_server_listing(), settings_to_top(), key])
+                Task::batch([
+                    opened,
+                    self.sync_server_listing(),
+                    settings_to_top(),
+                    key,
+                    usage,
+                ])
             }
             SettingsMsg::NeedKey => {
                 self.settings.page = SettingsPage::LanguageModel;
@@ -605,7 +616,12 @@ impl App {
                 } else {
                     Task::none()
                 };
-                Task::batch([self.sync_server_listing(), top])
+                let usage = if other {
+                    self.on_usage_page()
+                } else {
+                    Task::none()
+                };
+                Task::batch([self.sync_server_listing(), top, usage])
             }
             SettingsMsg::Close => self.close_settings(),
             SettingsMsg::Discard => {

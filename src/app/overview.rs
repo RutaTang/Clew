@@ -183,7 +183,16 @@ impl App {
         Task::perform(
             // Raw LLM prose only; the module map is folded in fresh at
             // prepare time so it always reflects the live imports.
-            async move { ai.complete(cfg, overview::SYSTEM, prompt, 2048).await },
+            async move {
+                ai.complete(
+                    cfg,
+                    crate::app::usage::OVERVIEW,
+                    overview::SYSTEM,
+                    prompt,
+                    2048,
+                )
+                .await
+            },
             move |result| {
                 Message::Overview(OverviewMsg::Done {
                     stamp: stamp.clone(),

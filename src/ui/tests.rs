@@ -5209,6 +5209,9 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     ] {
         assert!(shows(&mut sim, said), "{said:?}");
     }
+    // And what those calls are likely to cost, under their count.
+    let estimate = app.explain_estimate(3617).expect("an estimate");
+    assert!(shows(&mut sim, &estimate), "{estimate:?}");
     assert!(matches!(
         click(sim_elem(sheet(&app, &root)), "Language servers").as_slice(),
         [Message::Project(ProjectMsg::SetupServers(false))]
@@ -16090,6 +16093,99 @@ fn updates_is_the_last_settings_page() {
         Some(&crate::SettingsPage::Updates)
     );
     assert_eq!(crate::SettingsPage::ALL[0], crate::SettingsPage::Appearance);
+}
+
+/// Settings → Usage and cost: what the key spent today and this month, by
+/// feature and by call, at the model's price — read from the ledger as the
+/// page opens.
+#[test]
+fn the_usage_page_says_what_the_key_spent() {
+    use crate::app::usage::{ASK, EXPLAIN, Entry};
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Usage,
+    )));
+    assert!(shows(&mut sim_of(&app), "Reading the ledger…"));
+    let now = crate::app::usage::now_secs();
+    let call = |purpose: &str, input: u64, output: u64| Entry {
+        at: now,
+        purpose: purpose.into(),
+        model: "gpt-4o-mini".into(),
+        input,
+        cached: 0,
+        output,
+    };
+    let _ = app.update(Message::Usage(crate::UsageMsg::Read(vec![
+        call(EXPLAIN, 1_000_000, 0),
+        call(ASK, 0, 1_000_000),
+    ])));
+    let mut sim = sim_of(&app);
+    for said in [
+        "Today",
+        "This month",
+        "2 calls, 2M tokens",
+        "$0.75",
+        "This month by feature",
+        "Explanations",
+        "Latest calls",
+    ] {
+        assert!(shows(&mut sim, said), "{said:?}");
+    }
+    drop(sim);
+    // Down the page, the prices the money is worked out at.
+    let mut page = sim_elem(super::usage::usage_page(&app));
+    assert!(shows(&mut page, "Prices"));
+}
+
+/// A model call the server made says what it used: kept, and counted to
+/// the Ask answer it was for, whose cost is then said under it.
+#[test]
+fn a_reported_call_is_kept_and_counted_to_its_answer() {
+    let mut app = reader_app();
+    app.usage.entries = Some(Vec::new());
+    for _ in 0..2 {
+        let _ = app.handle_server_event(clew_protocol::Event::Usage {
+            work: 42,
+            purpose: crate::app::usage::ASK.into(),
+            model: "gpt-4o-mini".into(),
+            input: 1_000,
+            cached: 0,
+            output: 500,
+        });
+    }
+    assert_eq!(app.usage.entries.as_ref().map(Vec::len), Some(2));
+    assert_eq!(app.answer_cost(42).as_deref(), Some("3k tokens, $0.0009"));
+    assert!(app.answer_cost(7).is_none(), "another answer spent nothing");
+    // A call that said nothing of what it used is no entry.
+    let _ = app.handle_server_event(clew_protocol::Event::Usage {
+        work: 43,
+        purpose: crate::app::usage::EXPLAIN.into(),
+        model: "gpt-4o-mini".into(),
+        input: 0,
+        cached: 0,
+        output: 0,
+    });
+    assert_eq!(app.usage.entries.as_ref().map(Vec::len), Some(2));
+}
+
+/// Explaining says what it is likely to cost before it is asked for: the
+/// count of calls, and under it their tokens and money.
+#[test]
+fn explaining_says_what_it_will_likely_cost() {
+    let mut app = reader_app();
+    app.llm_available = true;
+    let estimate = app.explain_estimate(45).expect("an estimate");
+    assert!(
+        estimate.starts_with("About ") && estimate.contains("tokens"),
+        "{estimate:?}"
+    );
+    assert_eq!(
+        app.explain_estimate(0),
+        None,
+        "nothing to explain, nothing to say"
+    );
+    app.llm_available = false;
+    assert_eq!(app.explain_estimate(45), None, "no key, no estimate");
 }
 
 /// "Check now" says what it is doing, on the page it was pressed on: its

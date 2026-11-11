@@ -1019,7 +1019,13 @@ impl App {
                     // A failed call says what failed and what to do, as a
                     // pass does (`ExplainFailure`).
                     Ok(p) => ai
-                        .complete_typed(cfg, EXPLAIN_BLOCKS_SYSTEM, p, 1024)
+                        .complete_typed(
+                            cfg,
+                            crate::app::usage::EXPLAIN,
+                            EXPLAIN_BLOCKS_SYSTEM,
+                            p,
+                            1024,
+                        )
                         .await
                         .map_err(|e| ExplainFailure::of_call(&e, &model).describe()),
                     Err(e) => Err(e),

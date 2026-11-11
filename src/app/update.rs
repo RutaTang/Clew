@@ -446,6 +446,7 @@ impl App {
             Message::Export(message) => self.update_export(message),
             Message::Settings(message) => self.update_settings(message),
             Message::Updater(message) => self.update_updater(message),
+            Message::Usage(message) => self.update_usage(message),
             Message::Window(message) => self.update_window(message),
             Message::Tutorial(message) => self.update_tutorial(message),
             Message::Voice(message) => self.update_voice(message),

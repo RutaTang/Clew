@@ -259,16 +259,24 @@ impl AiClient {
         }
     }
 
-    /// A single-prompt completion.
+    /// A single-prompt completion, for `purpose` (one of `app::usage`'s:
+    /// what the ledger says the call was for).
     pub async fn complete(
         &self,
         cfg: llm::Config,
+        purpose: &'static str,
         system: &str,
         prompt: String,
         max_tokens: u32,
     ) -> Result<String, String> {
-        self.complete_chat(cfg, system, vec![llm::ChatMsg::user(prompt)], max_tokens)
-            .await
+        self.complete_chat(
+            cfg,
+            purpose,
+            system,
+            vec![llm::ChatMsg::user(prompt)],
+            max_tokens,
+        )
+        .await
     }
 
     /// [`complete`](AiClient::complete), failing with why, typed
@@ -276,23 +284,31 @@ impl AiClient {
     pub(crate) async fn complete_typed(
         &self,
         cfg: llm::Config,
+        purpose: &'static str,
         system: &str,
         prompt: String,
         max_tokens: u32,
     ) -> Result<String, CallError> {
-        self.chat_typed(cfg, system, vec![llm::ChatMsg::user(prompt)], max_tokens)
-            .await
+        self.chat_typed(
+            cfg,
+            purpose,
+            system,
+            vec![llm::ChatMsg::user(prompt)],
+            max_tokens,
+        )
+        .await
     }
 
     /// A multi-turn completion.
     pub async fn complete_chat(
         &self,
         cfg: llm::Config,
+        purpose: &'static str,
         system: &str,
         messages: Vec<llm::ChatMsg>,
         max_tokens: u32,
     ) -> Result<String, String> {
-        self.chat_typed(cfg, system, messages, max_tokens)
+        self.chat_typed(cfg, purpose, system, messages, max_tokens)
             .await
             .map_err(String::from)
     }
@@ -301,6 +317,7 @@ impl AiClient {
     async fn chat_typed(
         &self,
         cfg: llm::Config,
+        purpose: &'static str,
         system: &str,
         messages: Vec<llm::ChatMsg>,
         max_tokens: u32,
@@ -316,6 +333,7 @@ impl AiClient {
                     })
                     .collect(),
                 max_tokens,
+                purpose: purpose.to_string(),
             };
             return match self.rpc(tx, req).await.map_err(CallError::Rpc)? {
                 clew_protocol::Event::ChatResult { text } => Ok(text),
@@ -336,8 +354,11 @@ impl AiClient {
         let abandoned = RaiseOnDrop::default();
         let stop = abandoned.flag();
         tokio::task::spawn_blocking(move || {
-            llm::complete_chat_full(&cfg, &system, &messages, max_tokens, &|| {
-                stop.load(std::sync::atomic::Ordering::Relaxed)
+            // What it used goes to the ledger from here: no server tells.
+            llm::metered(crate::App::local_meter(), purpose, 0, || {
+                llm::complete_chat_full(&cfg, &system, &messages, max_tokens, &|| {
+                    stop.load(std::sync::atomic::Ordering::Relaxed)
+                })
             })
             .map(llm::Completion::into_text_with_note)
             .map_err(CallError::Llm)
@@ -444,6 +465,7 @@ pub(crate) fn event_name(event: &clew_protocol::Event) -> &'static str {
         Event::ChatResult { .. } => "ChatResult",
         Event::ChatDelta { .. } => "ChatDelta",
         Event::ChatStreamDone { .. } => "ChatStreamDone",
+        Event::Usage { .. } => "Usage",
         Event::Embeddings { .. } => "Embeddings",
         Event::DirListing { .. } => "DirListing",
         Event::Docs { .. } => "Docs",
@@ -842,8 +864,14 @@ mod tests {
         let chat = |ai: AiClient| {
             let cfg = cfg();
             tokio::spawn(async move {
-                ai.complete_chat(cfg, "system", vec![crate::llm::ChatMsg::user("q")], 16)
-                    .await
+                ai.complete_chat(
+                    cfg,
+                    "test",
+                    "system",
+                    vec![crate::llm::ChatMsg::user("q")],
+                    16,
+                )
+                .await
             })
         };
 

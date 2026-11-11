@@ -2801,7 +2801,10 @@ pub(crate) async fn explain_stream(
     let complete = move |prompt: String| {
         let ai = ai.clone();
         let cfg = cfg.clone();
-        async move { ai.complete_typed(cfg, EXPLAIN_SYSTEM, prompt, 400).await }
+        async move {
+            ai.complete_typed(cfg, crate::app::usage::EXPLAIN, EXPLAIN_SYSTEM, prompt, 400)
+                .await
+        }
     };
     let outcome = match gathered {
         Ok((inputs, prev)) => {

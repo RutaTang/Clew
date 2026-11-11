@@ -865,6 +865,7 @@ impl App {
         // Each page of Settings, by its name.
         for (title, page) in [
             (tr_noop!("Settings: Appearance"), SettingsPage::Appearance),
+            (tr_noop!("Settings: Usage and cost"), SettingsPage::Usage),
             (tr_noop!("Settings: Updates"), SettingsPage::Updates),
             (
                 tr_noop!("Settings: Language Model"),

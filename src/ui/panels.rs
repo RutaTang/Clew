@@ -1011,6 +1011,13 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 turn.sources.iter().map(|(n, _)| source_chip(n)).collect();
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
         }
+        // What the answer used, and cost, under it once it is whole: the
+        // spend seen where it was spent.
+        if !turn.streaming
+            && let Some(cost) = app.answer_cost(turn.stream)
+        {
+            convo.push(text(cost).size(ts::CAPTION).color(theme::dim()).into());
+        }
     }
     if let Some(notice) = notice {
         convo.push(notice);

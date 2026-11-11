@@ -628,6 +628,7 @@ impl Turn<'_> {
             text: out.text,
             truncated: out.truncated,
             stop_reason: out.stop_reason,
+            usage: out.usage,
         };
         let done = llm::carry_on(
             done,
@@ -692,6 +693,7 @@ impl Turn<'_> {
             text: out.text,
             truncated: out.truncated,
             stop_reason: out.stop_reason,
+            usage: out.usage,
         })
     }
 

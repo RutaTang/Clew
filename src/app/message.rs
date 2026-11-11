@@ -89,6 +89,9 @@ pub enum Message {
     /// Auto-update: checking, downloading and installing a release. Handled in `app::updater`
     /// (`App::update_updater`).
     Updater(UpdaterMsg),
+    /// What the AI key spends: the Usage page, its ledger and balance.
+    /// Handled in `app::usage` (`App::update_usage`).
+    Usage(UsageMsg),
     /// The window and its chrome: controls, layout, panels, menus, the shortcuts modal. Handled
     /// in `app::runtime` (`App::update_window`).
     Window(WindowMsg),
@@ -2137,6 +2140,25 @@ pub enum SettingsMsg {
     Saved,
 }
 
+/// What the AI key spends: Settings → Usage.
+#[derive(Debug, Clone)]
+pub enum UsageMsg {
+    /// The ledger, read back.
+    Read(Vec<crate::app::usage::Entry>),
+    /// A call's line was kept in the ledger — or why not.
+    Written(Option<String>),
+    /// Read the account's balance again.
+    RefreshBalance,
+    /// The balance, as the provider told it (`None`: it tells nothing).
+    BalanceRead(Result<Option<Vec<(String, String)>>, String>),
+    /// Open the provider's billing page.
+    OpenBilling,
+    /// A price field of the model in use, typed in.
+    Price(crate::app::usage::PriceField, String),
+    /// Back to Clew's own price for the model in use.
+    ResetPrice,
+}
+
 /// Auto-update: checking, downloading and installing a release.
 #[derive(Debug, Clone)]
 pub enum UpdaterMsg {
@@ -2390,6 +2412,7 @@ impl Message {
             Message::Export(m) => m.origin(),
             Message::Settings(m) => m.origin(),
             Message::Updater(m) => m.origin(),
+            Message::Usage(m) => m.origin(),
             Message::Window(m) => m.origin(),
             Message::Tutorial(m) => m.origin(),
             Message::Voice(m) => m.origin(),
@@ -3151,6 +3174,22 @@ impl SettingsMsg {
             | SettingsMsg::ModelChanged(..)
             | SettingsMsg::BaseUrlChanged(..)
             | SettingsMsg::Saved => None,
+        }
+    }
+}
+
+impl UsageMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            UsageMsg::Read(..)
+            | UsageMsg::Written(..)
+            | UsageMsg::RefreshBalance
+            | UsageMsg::BalanceRead(..)
+            | UsageMsg::OpenBilling
+            | UsageMsg::Price(..)
+            | UsageMsg::ResetPrice => None,
         }
     }
 }

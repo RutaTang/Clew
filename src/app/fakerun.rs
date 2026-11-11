@@ -298,7 +298,16 @@ impl App {
         let ai = self.ai_client();
         let stamp = self.stamp();
         let call = Task::perform(
-            async move { ai.complete(cfg, fr::SYSTEM, prompt, ANSWER_TOKENS).await },
+            async move {
+                ai.complete(
+                    cfg,
+                    crate::app::usage::FAKE_RUN,
+                    fr::SYSTEM,
+                    prompt,
+                    ANSWER_TOKENS,
+                )
+                .await
+            },
             move |result| {
                 Message::Fake(FakeMsg::Answered {
                     stamp: stamp.clone(),
@@ -659,7 +668,15 @@ impl App {
         let stamp = self.stamp();
         Task::perform(
             async move {
-                let text = ai.complete(cfg, SUGGEST_SYSTEM, prompt, 1_500).await?;
+                let text = ai
+                    .complete(
+                        cfg,
+                        crate::app::usage::FAKE_RUN,
+                        SUGGEST_SYSTEM,
+                        prompt,
+                        1_500,
+                    )
+                    .await?;
                 parse_suggestion(&text, n)
             },
             move |result| {

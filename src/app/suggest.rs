@@ -130,7 +130,10 @@ impl App {
         let ai = self.ai_client();
         let stamp = self.stamp();
         Task::perform(
-            async move { ai.complete(cfg, SUGGEST_SYSTEM, prompt, 300).await },
+            async move {
+                ai.complete(cfg, crate::app::usage::SUGGEST, SUGGEST_SYSTEM, prompt, 300)
+                    .await
+            },
             move |result| {
                 Message::Ask(AskMsg::SuggestionsCame {
                     stamp: stamp.clone(),

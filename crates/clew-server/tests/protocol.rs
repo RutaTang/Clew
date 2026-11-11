@@ -3168,6 +3168,7 @@ async fn a_chat_the_provider_refused_says_what_failed_typed() {
             content: "hi".into(),
         }],
         max_tokens: 64,
+        purpose: "explain".into(),
     };
     assert!(server.handle(71, chat).await.is_none());
     let reply = wait_for(&mut rx, "the chat's reply", WAIT, |msg| match msg {
@@ -3229,6 +3230,7 @@ async fn cancel_stops_a_streamed_chat() {
                         content: "hi".into(),
                     }],
                     max_tokens: 64,
+                    purpose: "explain".into(),
                 },
             )
             .await
@@ -3287,6 +3289,7 @@ async fn cancel_answers_a_blocking_chat_at_once() {
                         content: "hi".into(),
                     }],
                     max_tokens: 64,
+                    purpose: "explain".into(),
                 },
             )
             .await
