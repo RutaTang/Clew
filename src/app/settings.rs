@@ -52,14 +52,28 @@ impl App {
     /// Test connection: one word asked of the model the Language model
     /// page's fields name, as they stand — saved or not.
     pub(crate) fn on_test_connection(&mut self) -> Task<Message> {
-        self.settings.connection_tests += 1;
-        let number = self.settings.connection_tests;
         let cfg = llm::Config::from_form(
             self.settings.provider,
             self.settings.key.clone(),
             self.settings.model.clone(),
             self.settings.base_url.clone(),
         );
+        self.test_connection_of(cfg)
+    }
+
+    /// Test connection of the model as saved: what every call uses.
+    pub(crate) fn on_test_saved_connection(&mut self) -> Task<Message> {
+        match self.llm_config() {
+            Some(cfg) => self.test_connection_of(cfg),
+            None => Task::done(Message::Settings(SettingsMsg::NeedKey)),
+        }
+    }
+
+    /// One word asked of the model `cfg` names: what Test connection finds
+    /// (`SettingsDraft::connection_test`).
+    fn test_connection_of(&mut self, cfg: llm::Config) -> Task<Message> {
+        self.settings.connection_tests += 1;
+        let number = self.settings.connection_tests;
         if cfg.base_url.is_empty() || cfg.model.is_empty() {
             self.settings.connection_test = crate::app::state::ConnectionTest::Failed(
                 tr_noop!("Name the model and its endpoint first.").to_string(),
@@ -695,6 +709,7 @@ impl App {
                 Task::none()
             }
             SettingsMsg::TestConnection => self.on_test_connection(),
+            SettingsMsg::TestSavedConnection => self.on_test_saved_connection(),
             SettingsMsg::ConnectionTested { number, result } => {
                 if self.settings.connection_test
                     == crate::app::state::ConnectionTest::Testing(number)

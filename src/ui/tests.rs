@@ -12142,6 +12142,36 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
     let _ = std::fs::remove_dir_all(store.dir());
 }
 
+/// The tour's sheet says a language model is "All set" only once it has
+/// answered: a key alone is checked first, with one tiny call; a provider
+/// that could not be reached is said as such. With a key and nothing
+/// reachable it said "All set", and the tour then set up 45 calls that
+/// failed.
+#[test]
+fn the_tour_sheet_says_all_set_only_of_a_model_that_answered() {
+    use crate::app::state::ConnectionTest;
+    let mut app = reader_app();
+    app.llm_available = true;
+    let prep = crate::app::tutorial::TourPrep::default();
+    let says = |app: &App, words: &str| {
+        shows(
+            &mut sim_elem(super::tutorial::tour_prep_sheet(app, &prep)),
+            words,
+        )
+    };
+    app.settings.connection_test = ConnectionTest::Untried;
+    assert!(says(&app, "Key added."));
+    assert!(says(&app, "Test connection"));
+    assert!(!says(&app, "All set."));
+    app.settings.connection_test =
+        ConnectionTest::Failed("Couldn't reach 127.0.0.1:9 (nothing answered at that address). Check the base URL and your network.".into());
+    assert!(says(&app, "Couldn't reach 127.0.0.1:9"));
+    assert!(!says(&app, "All set."));
+    app.settings.connection_test = ConnectionTest::Answered("m".into());
+    assert!(says(&app, "All set."));
+    assert!(!says(&app, "Test connection"));
+}
+
 /// What voice could not do is said in the reader's language: on the card,
 /// on the pill, and under a model in Settings.
 #[test]

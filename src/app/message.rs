@@ -2152,6 +2152,9 @@ pub enum SettingsMsg {
     /// Ask the model the Language model page's fields name for a word, to
     /// see that they reach it.
     TestConnection,
+    /// The same, of the model as saved — where no form is open (the
+    /// tutorial's check before its tour spends calls on it).
+    TestSavedConnection,
     /// What Test connection `number` found: the model's name, or why not.
     ConnectionTested {
         number: u64,
@@ -3207,6 +3210,7 @@ impl SettingsMsg {
         match self {
             SettingsMsg::SetThemePref(..)
             | SettingsMsg::TestConnection
+            | SettingsMsg::TestSavedConnection
             | SettingsMsg::ConnectionTested { .. }
             | SettingsMsg::SetLanguage(..)
             | SettingsMsg::SystemAppearanceChanged

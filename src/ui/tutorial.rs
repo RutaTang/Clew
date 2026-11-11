@@ -608,6 +608,10 @@ pub(crate) fn tour_prep_sheet<'a>(
 
     // One step: its marker (a tick when done, its number lit when it is
     // the one to do, else dim), its name, what it is for, and its buttons.
+    // A model is ticked once it answered: a key alone is checked first.
+    use crate::app::state::ConnectionTest;
+    let tested = &app.settings.connection_test;
+    let model_ok = app.llm_available && matches!(tested, ConnectionTest::Answered(_));
     let step = |number: usize,
                 need: Need,
                 name: &'a str,
@@ -615,7 +619,7 @@ pub(crate) fn tour_prep_sheet<'a>(
                 about: String,
                 actions: Vec<Element<'a, Message>>|
      -> Element<'a, Message> {
-        let done = prep.met(app, need);
+        let done = prep.met(app, need) && (need != Need::Model || model_ok);
         let on = current == Some(need);
         // Tea Shop ready, with a model to explain it: what is ready is a
         // spend the tour starts, not a thing done — ticked quietly, where
@@ -696,11 +700,21 @@ pub(crate) fn tour_prep_sheet<'a>(
             .into()
     };
 
-    let model = if app.llm_available {
-        tr!("All set.").to_string()
-    } else {
-        tr!("Clew explains code and answers questions with a language model you choose. Add its API key.")
-            .to_string()
+    // "All set" only once the model answered: with a key and a provider
+    // that could not be reached, it said "All set", and the tour then set
+    // up some 45 calls that failed.
+    let model = match (app.llm_available, tested) {
+        (false, _) => tr!(
+            "Clew explains code and answers questions with a language model you choose. Add its API key."
+        )
+        .to_string(),
+        (true, ConnectionTest::Answered(_)) => tr!("All set.").to_string(),
+        (true, ConnectionTest::Testing(_)) => tr!("Checking that it answers…").to_string(),
+        (true, ConnectionTest::Failed(why)) => crate::i18n::message(why),
+        (true, ConnectionTest::Untried) => {
+            tr!("Key added. Check that it answers before the tour spends calls on it.")
+                .to_string()
+        }
     };
     let embeddings = if app.embed_available {
         tr!("All set.").to_string()
@@ -727,11 +741,38 @@ pub(crate) fn tour_prep_sheet<'a>(
             tr!("A language model"),
             false,
             model,
-            vec![action(
-                Need::Model,
-                tr!("Add an API Key…"),
-                Message::Tutorial(TutorialMsg::SetUp(crate::SettingsPage::LanguageModel)),
-            )],
+            if app.llm_available && !model_ok {
+                // One tiny call, as Settings' Test connection makes; and
+                // the settings it may be about.
+                vec![
+                    super::toolbar::tip_at(
+                        super::form::ai_action(
+                            tr!("Test connection"),
+                            (!matches!(tested, ConnectionTest::Testing(_)))
+                                .then_some(Message::Settings(SettingsMsg::TestSavedConnection)),
+                        ),
+                        tr!("Sends one tiny AI request to check the key (a fraction of a cent)"),
+                        None,
+                        iced::widget::tooltip::Position::Top,
+                    ),
+                    button(text(tr!("Settings…")).size(ts::BODY))
+                        .style(theme::toolbar_button)
+                        .padding([4, 12])
+                        .on_press(super::heard::said(
+                            tr!("Settings…"),
+                            Message::Tutorial(TutorialMsg::SetUp(
+                                crate::SettingsPage::LanguageModel,
+                            )),
+                        ))
+                        .into(),
+                ]
+            } else {
+                vec![action(
+                    Need::Model,
+                    tr!("Add an API Key…"),
+                    Message::Tutorial(TutorialMsg::SetUp(crate::SettingsPage::LanguageModel)),
+                )]
+            },
         ),
         step(
             2,
@@ -760,12 +801,19 @@ pub(crate) fn tour_prep_sheet<'a>(
     .spacing(18);
 
     let ready = prep.ready(app);
-    let start = button(text(tr!("Start the Tour")).size(ts::BASE))
-        .style(theme::primary_button)
-        .padding([6, 16])
-        .on_press_maybe(ready.then(|| {
-            super::heard::said(tr!("Start the Tour"), Message::Tutorial(TutorialMsg::Go))
-        }));
+    // The tour explains Tea Shop with the model: marked as what spends AI
+    // calls, as every such control is.
+    let start = button(super::toolbar::ai_words(
+        tr!("Start the Tour"),
+        ts::BASE,
+        theme::on_accent(),
+    ))
+    .style(theme::primary_button)
+    .padding([6, 16])
+    .on_press_maybe(
+        ready
+            .then(|| super::heard::said(tr!("Start the Tour"), Message::Tutorial(TutorialMsg::Go))),
+    );
     let start = if ready {
         start.into()
     } else {
