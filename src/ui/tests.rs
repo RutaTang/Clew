@@ -16586,8 +16586,15 @@ fn an_untracked_files_diff_is_every_line_added() {
         let v = app.active_viewer().unwrap();
         (v.abs.clone(), v.rel.clone(), v.source.lines().count())
     };
+    // One git ignores — or a project that is no repository — is answered
+    // as an untracked file is: it was shown against a HEAD there is not.
+    app.proj.diff_pending = Some((6, abs.clone()));
+    let _ = app.on_diff_loaded(6, abs.clone(), rel.clone(), Ok(None));
+    assert!(app.proj.diff.is_none(), "not shown as about to be added");
+    assert!(app.status.contains("not tracked"), "{}", app.status);
+    app.proj.git_status.insert(rel.clone(), 'U');
     app.proj.diff_pending = Some((7, abs.clone()));
-    let _ = app.on_diff_loaded(7, abs.clone(), rel, Ok(None));
+    let _ = app.on_diff_loaded(7, abs.clone(), rel.clone(), Ok(None));
     let diff = app.proj.diff.as_ref().expect("a diff shown");
     assert_eq!(diff.abs, abs);
     let added = diff
@@ -16616,6 +16623,19 @@ fn an_untracked_files_diff_is_every_line_added() {
             .all(|r| r.kind != crate::git::DiffKind::Hunk)
     );
     assert!(!diff.hides_tail());
+    // Read again after a save made elsewhere, it is still every line added:
+    // it said "No uncommitted changes".
+    app.proj.diff_refresh = Some(8);
+    let _ = app.on_diff_loaded(8, abs.clone(), rel, Ok(None));
+    let again = app.proj.diff.as_ref().expect("still shown");
+    assert_eq!(
+        again
+            .lines
+            .iter()
+            .filter(|l| l.kind == crate::git::DiffKind::Add)
+            .count(),
+        total
+    );
 }
 
 /// A search result longer than its row is cut with an ellipsis, each piece

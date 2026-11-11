@@ -461,14 +461,23 @@ fn reflow(body: &str) -> String {
     body.split("\n\n")
         .map(|paragraph| {
             let lines: Vec<&str> = paragraph.lines().collect();
-            let kept = lines.iter().any(|line| {
-                let t = line.trim_start();
-                line.starts_with([' ', '\t'])
-                    || t.starts_with(['-', '*', '+', '>', '|'])
-                    || t.split_once(['.', ')']).is_some_and(|(n, _)| {
-                        !n.is_empty() && n.len() <= 3 && n.bytes().all(|b| b.is_ascii_digit())
-                    })
-            });
+            // Trailers ("Signed-off-by: …", "Co-Authored-By: …") are a line
+            // each: they were joined into one.
+            let trailer = |line: &&str| {
+                line.split_once(": ").is_some_and(|(key, _)| {
+                    key.starts_with(|c: char| c.is_ascii_alphabetic())
+                        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                })
+            };
+            let kept = lines.iter().all(trailer)
+                || lines.iter().any(|line| {
+                    let t = line.trim_start();
+                    line.starts_with([' ', '\t'])
+                        || t.starts_with(['-', '*', '+', '>', '|'])
+                        || t.split_once(['.', ')']).is_some_and(|(n, _)| {
+                            !n.is_empty() && n.len() <= 3 && n.bytes().all(|b| b.is_ascii_digit())
+                        })
+                });
             if kept {
                 paragraph.to_string()
             } else {
@@ -953,5 +962,8 @@ mod tests {
             "Tax the discounted amount, not the subtotal before it.\n\n- one\n- two"
         );
         assert_eq!(reflow("1. first\n2. second"), "1. first\n2. second");
+        // Trailers keep a line each.
+        let trailers = "Fix it.\n\nSigned-off-by: A <a@x>\nReviewed-by: B <b@x>";
+        assert_eq!(reflow(trailers), trailers);
     }
 }

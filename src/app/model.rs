@@ -1230,8 +1230,15 @@ impl DiffState {
         // and removed) — a string or a comment over several lines coloured as
         // one. A very long diff is drawn plain.
         let lang = crate::highlight::detect(&abs);
+        // Git's "\ No newline at end of file" is no line of the file: drawn
+        // as one, numbered, every line after it was numbered one too high.
+        let marker = |l: &git::DiffLine| l.text.starts_with('\\');
         let side = |keep: fn(DiffKind) -> bool| -> Vec<crate::highlight::HlLine> {
-            let src: Vec<String> = shown.iter().filter(|l| keep(l.kind)).map(code).collect();
+            let src: Vec<String> = shown
+                .iter()
+                .filter(|l| keep(l.kind) && !marker(l))
+                .map(code)
+                .collect();
             let src = src.join("\n");
             if shown.len() > DIFF_HIGHLIGHT_MAX {
                 crate::highlight::plain_lines(&src)
@@ -1253,6 +1260,9 @@ impl DiffState {
         let mut rows: Vec<Row> = Vec::new();
         let mut last_new = 0usize;
         for l in shown {
+            if marker(l) {
+                continue;
+            }
             let text = crate::ui::diff_display_text(&code(l));
             let plain = || vec![(text.clone(), None)];
             let row = match l.kind {

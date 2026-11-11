@@ -311,18 +311,6 @@ reading.toml
 cache/
 ";
 
-/// What clew wrote as [`CLEW_GITIGNORE`] before it listed itself: a copy
-/// left just so is brought up to date; one changed by anyone is left alone.
-const CLEW_GITIGNORE_BEFORE: &str = "\
-# Written by clew: per-reader state that does not belong in the repository.
-# Bookmarks, notes, lsp.toml and launch.json stay trackable on purpose.
-history.json
-reading.toml
-*.lock
-*.tmp
-cache/
-";
-
 /// The `.clew` directory `path` lies under, if any (the first `.clew`
 /// component, inclusive).
 fn clew_dir_of(path: &Path) -> Option<std::path::PathBuf> {
@@ -348,17 +336,11 @@ fn ensure_clew_gitignore(path: &Path) {
         return;
     };
     let ignore = dir.join(".gitignore");
-    match std::fs::symlink_metadata(&ignore) {
-        // Clew's own earlier copy, untouched: replaced by the current one.
-        // Removed first (a link at the name is removed, never followed), then
-        // created anew as below.
-        Ok(m)
-            if m.is_file()
-                && std::fs::read_to_string(&ignore).is_ok_and(|s| s == CLEW_GITIGNORE_BEFORE)
-                && std::fs::remove_file(&ignore).is_ok() => {}
-        Ok(_) => return,
-        Err(_) if !dir.is_dir() => return,
-        Err(_) => {}
+    // One already there is left as it is, clew's own earlier one too: it may
+    // be committed, and rewritten it showed as a change in every reader's
+    // tree.
+    if std::fs::symlink_metadata(&ignore).is_ok() || !dir.is_dir() {
+        return;
     }
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .write(true)
@@ -1781,26 +1763,6 @@ mod tests {
         // It keeps itself out of `git status`: opening a project showed
         // `.clew/.gitignore` as a change the reader never made.
         assert!(ignore.lines().any(|l| l == ".gitignore"), "{ignore:?}");
-
-        // Clew's earlier copy, untouched, is brought up to date; one the
-        // reader changed is not.
-        let older = d.join("older");
-        std::fs::create_dir_all(older.join(".clew")).unwrap();
-        std::fs::write(older.join(".clew/.gitignore"), CLEW_GITIGNORE_BEFORE).unwrap();
-        write_atomic(&older.join(".clew/history.json"), b"{}").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(older.join(".clew/.gitignore")).unwrap(),
-            CLEW_GITIGNORE
-        );
-        let edited = d.join("edited");
-        std::fs::create_dir_all(edited.join(".clew")).unwrap();
-        let theirs = format!("{CLEW_GITIGNORE_BEFORE}notes.json\n");
-        std::fs::write(edited.join(".clew/.gitignore"), &theirs).unwrap();
-        write_atomic(&edited.join(".clew/history.json"), b"{}").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(edited.join(".clew/.gitignore")).unwrap(),
-            theirs
-        );
     }
 
     #[test]

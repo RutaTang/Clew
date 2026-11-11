@@ -1776,9 +1776,11 @@ pub(crate) fn short_date(time: i64, now: i64) -> String {
         let y = yoe + era * 400 + i64::from(m <= 2);
         (y, m, d)
     }
-    let (y, m, d) = civil(time);
+    // On the reader's calendar, not UTC's.
+    let local = crate::app::usage::local_secs;
+    let (y, m, d) = civil(local(time));
     let month = crate::i18n::lookup(SHORT_MONTHS[(m - 1) as usize]);
-    if y == civil(now).0 {
+    if y == civil(local(now)).0 {
         tr!("{month} {day}", month = month, day = d)
     } else {
         tr!("{month} {day}, {year}", month = month, day = d, year = y)
@@ -2691,6 +2693,23 @@ mod tests {
         assert!(!top().hides_tail(), "the file's length unknown");
         assert!(!top().of_file("a\nb\nc\n").hides_tail());
         assert!(top().of_file("a\nb\nc\nd\ne\n").hides_tail());
+        // Git's "\ No newline at end of file" is no line: not drawn, and
+        // the lines after it keep their numbers.
+        let marked = crate::DiffState::new(
+            std::path::PathBuf::from("/p/a.txt"),
+            "a.txt".into(),
+            vec![
+                line(DiffKind::Hunk, "@@ -1,2 +1,3 @@"),
+                line(DiffKind::Context, " a"),
+                line(DiffKind::Remove, "-b"),
+                line(DiffKind::Context, "\\ No newline at end of file"),
+                line(DiffKind::Add, "+b"),
+                line(DiffKind::Add, "+c"),
+            ],
+        );
+        assert!(marked.runs.iter().all(|r| !r.text.contains("No newline")));
+        assert!(marked.runs.last().unwrap().gutter.ends_with('3'));
+        assert_eq!(marked.last_new, 3);
     }
 
     /// The advance is measured by the text engine, not assumed at 0.6 em —

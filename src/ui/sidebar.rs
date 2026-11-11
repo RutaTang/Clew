@@ -1513,11 +1513,11 @@ pub(crate) fn fit_pieces(
     shown: &str,
     room: f32,
 ) -> Vec<(String, Option<u8>, bool)> {
-    let font = crate::fonts::UI;
-    if super::steady::width_of(shown, ts::BODY, font) <= room {
+    // One look-up a row once cut: the cut is kept (`steady::cut`).
+    let cut = super::steady::cut(shown, room, ts::BODY, crate::fonts::UI);
+    if cut == shown {
         return pieces;
     }
-    let cut = super::steady::cut(shown, room, ts::BODY, font);
     let mut keep = cut.chars().count().saturating_sub(1);
     let mut out = Vec::new();
     for (piece, style, marked) in pieces {

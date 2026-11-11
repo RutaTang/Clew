@@ -12,6 +12,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::app::prelude::*;
 use crate::*;
@@ -214,11 +215,15 @@ const fn p(input: f64, cached: f64, output: f64) -> Price {
 /// Clew's own price for `model`, if it knows one.
 pub(crate) fn builtin_price(model: &str) -> Option<Price> {
     let model = model.trim().to_ascii_lowercase();
-    // `openrouter`-style ids name their maker first: `anthropic/claude-…`.
+    // OpenRouter's ids name their maker first, write a version with dots,
+    // and may carry a variant: `anthropic/claude-opus-4.5:beta`. Dotted, it
+    // was priced as `claude-opus-4`, three times over, and `claude-haiku-4.5`
+    // not at all.
     let model = model.rsplit('/').next().unwrap_or(&model);
+    let model = model.split(':').next().unwrap_or(model).replace('.', "-");
     PRICES
         .iter()
-        .find(|(start, _)| model.starts_with(start))
+        .find(|(start, _)| model.starts_with(&start.replace('.', "-")))
         .map(|(_, price)| *price)
 }
 
@@ -254,10 +259,51 @@ pub(crate) fn price_of(model: &str) -> Option<Price> {
 
 /// Keep `price` as the reader's for `model` (`None`: back to Clew's).
 pub(crate) fn save_own_price(model: &str, price: Option<Price>) -> Result<(), String> {
-    let model = model.trim().to_string();
-    // Read again on the next look, whatever the write did.
+    let turn = PRICE_SAVES.fetch_add(1, Ordering::SeqCst) + 1;
+    save_own_price_if_latest(model, price, turn)
+}
+
+/// The price the form's three fields say, once they read as one: Input and
+/// Output prices, and a Cached one — the Input's where it is left blank, as
+/// a price kept without one reads. Input and Output typed alone were never
+/// saved, and nothing said so.
+pub(crate) fn draft_price(draft: &[String; 3]) -> Option<Price> {
+    let field = |f: PriceField| {
+        let v = draft[f as usize].trim();
+        (!v.is_empty()).then(|| v.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0))
+    };
+    let input = field(PriceField::Input)??;
+    let output = field(PriceField::Output)??;
+    let cached = match field(PriceField::Cached) {
+        None => input,
+        Some(cached) => cached?,
+    };
+    Some(Price {
+        input,
+        cached,
+        output,
+    })
+}
+
+/// The latest price save asked for: one asked before it, still writing,
+/// writes nothing — the saves run off the window's thread, and an older
+/// keystroke's would otherwise land last.
+static PRICE_SAVES: AtomicU64 = AtomicU64::new(0);
+
+/// Forget the reader's own prices as last read: read again on the next look
+/// (the config was changed, maybe in another window).
+pub(crate) fn forget_own_prices() {
     *OWN_PRICES.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    clew_core::globalconfig::edit(|config| {
+}
+
+/// [`save_own_price`], as save number `turn`: kept only while no later one
+/// was asked for.
+fn save_own_price_if_latest(model: &str, price: Option<Price>, turn: u64) -> Result<(), String> {
+    let model = model.trim().to_string();
+    let written = clew_core::globalconfig::edit(|config| {
+        if PRICE_SAVES.load(Ordering::SeqCst) != turn {
+            return;
+        }
         let prices = config
             .entry("prices")
             .or_insert_with(|| toml::Value::Table(toml::Table::new()));
@@ -276,7 +322,10 @@ pub(crate) fn save_own_price(model: &str, price: Option<Price>) -> Result<(), St
                 prices.remove(&model);
             }
         }
-    })
+    });
+    // Read again on the next look, whatever the write did.
+    forget_own_prices();
+    written
 }
 
 /// Calls and tokens added up, with what they cost where every one of them
@@ -332,7 +381,25 @@ pub(crate) const RECENT: usize = 8;
 
 /// `entries` summed up as of `now` (days and months in UTC).
 pub(crate) fn summarize(entries: &[Entry], now: u64) -> Summary {
-    let day = |t: u64| t / 86_400;
+    summarize_in(entries, now, |t| local_secs(t as i64).max(0) as u64)
+}
+
+/// `t` (seconds since the epoch) as the reader's clock reads it: moved by
+/// their time zone's offset at that moment. Days were cut at UTC midnight,
+/// "Today" running 09:00 to 09:00 in Tokyo.
+pub(crate) fn local_secs(t: i64) -> i64 {
+    use chrono::TimeZone;
+    let offset = chrono::Local
+        .timestamp_opt(t, 0)
+        .single()
+        .map_or(0, |d| d.offset().local_minus_utc());
+    t + i64::from(offset)
+}
+
+/// [`summarize`], its days and months those of `local` (a moment as the
+/// reader's clock reads it).
+fn summarize_in(entries: &[Entry], now: u64, local: impl Fn(u64) -> u64) -> Summary {
+    let day = |t: u64| local(t) / 86_400;
     let today = day(now);
     let month_of = |t: u64| {
         let (y, m, _) = civil(day(t) as i64);
@@ -480,7 +547,8 @@ impl Estimate {
 pub(crate) fn tokens(n: u64) -> String {
     if n < 1_000 {
         crate::i18n::number(n)
-    } else if n < 1_000_000 {
+    } else if n < 999_500 {
+        // Below what rounds to a thousand thousand: 999,500 read "1000k".
         let k = n as f64 / 1_000.0;
         if k < 10.0 {
             format!("{:.1}k", k).replace(".0k", "k")
@@ -690,31 +758,33 @@ impl App {
                     })
                 });
                 draft[field as usize] = value;
-                let parsed: Vec<Option<f64>> = draft
-                    .iter()
-                    .map(|v| {
-                        v.trim()
-                            .parse::<f64>()
-                            .ok()
-                            .filter(|n| n.is_finite() && *n >= 0.0)
-                    })
-                    .collect();
-                if let [Some(input), Some(cached), Some(output)] = parsed[..] {
-                    let price = Price {
-                        input,
-                        cached,
-                        output,
-                    };
-                    // Kept as typed, once all three read as prices.
-                    if price_of(&model) != Some(price)
-                        && let Err(e) = save_own_price(&model, Some(price))
-                    {
-                        self.status = e;
+                let typed = draft_price(&draft);
+                self.usage.price_draft = Some(draft);
+                if let Some(price) = typed {
+                    // Kept as typed, once all three read as prices — off the
+                    // window's thread: each keystroke wrote, and synced, the
+                    // file holding the keys while the window waited.
+                    if price_of(&model) != Some(price) {
+                        let turn = PRICE_SAVES.fetch_add(1, Ordering::SeqCst) + 1;
+                        return Task::perform(
+                            async move {
+                                tokio::task::spawn_blocking(move || {
+                                    save_own_price_if_latest(&model, Some(price), turn)
+                                })
+                                .await
+                                .unwrap_or_else(|e| Err(e.to_string()))
+                            },
+                            |r| Message::Usage(UsageMsg::PriceSaved(r)),
+                        );
                     }
                 }
-                self.usage.price_draft = Some(draft);
                 Task::none()
             }
+            UsageMsg::PriceSaved(Err(e)) => {
+                self.status = e;
+                Task::none()
+            }
+            UsageMsg::PriceSaved(Ok(())) => Task::none(),
             UsageMsg::ResetPrice => {
                 let model = self.usage.model.clone();
                 if let Err(e) = save_own_price(&model, None) {
@@ -812,6 +882,23 @@ mod tests {
         );
         assert!(builtin_price("deepseek-v4-flash").is_some());
         assert!(builtin_price("llama3.2").is_none());
+        // OpenRouter's ids: the maker first, the version dotted, a variant.
+        assert_eq!(
+            builtin_price("anthropic/claude-opus-4.5").unwrap().input,
+            5.0
+        );
+        assert_eq!(
+            builtin_price("anthropic/claude-haiku-4.5").unwrap().input,
+            1.0
+        );
+        assert_eq!(
+            builtin_price("anthropic/claude-3.5-haiku:beta")
+                .unwrap()
+                .input,
+            0.8
+        );
+        assert_eq!(builtin_price("openai/gpt-4.1-mini").unwrap().input, 0.4);
+        assert_eq!(builtin_price("gpt-4.1").unwrap().input, 2.0);
         // Cached tokens bill at the cache's rate; never more than the prompt.
         let price = Price {
             input: 1.0,
@@ -847,6 +934,28 @@ mod tests {
         assert_eq!(s.recent[0].model, "no-such-model", "newest first");
     }
 
+    /// Days are the reader's: in Tokyo (UTC+9) at 08:20 on Nov 12, a call a
+    /// minute before is today's, and one at 14:20 UTC on Nov 11 (23:20
+    /// there) is yesterday's. Cut at UTC midnight, both were today's.
+    #[test]
+    fn days_are_the_readers_own() {
+        let tokyo = |t: u64| t + 9 * 3_600;
+        // 2026-11-11 23:20 UTC: 08:20 on Nov 12 in Tokyo.
+        let now = 1_794_439_200;
+        let entries = vec![
+            entry(now - 9 * 3_600, EXPLAIN, "gpt-4o-mini", 1, 1),
+            entry(now - 60, EXPLAIN, "gpt-4o-mini", 1, 1),
+        ];
+        let s = summarize_in(&entries, now, tokyo);
+        assert_eq!(
+            s.today.calls, 1,
+            "08:00 Tokyo: only the call since midnight there"
+        );
+        assert_eq!(s.days[DAYS - 2].calls, 1, "the other was yesterday there");
+        let utc = summarize_in(&entries, now, |t| t);
+        assert_eq!(utc.today.calls, 2, "by UTC both were the 11th");
+    }
+
     /// An estimate draws on what such calls have used lately, or on a
     /// typical one until there are enough; a model with no price is said in
     /// tokens alone.
@@ -875,6 +984,25 @@ mod tests {
         );
     }
 
+    /// The price form's fields read as a price once Input and Output do; a
+    /// blank Cached is the Input's, and one that is no number is no price.
+    #[test]
+    fn the_price_form_reads_its_fields() {
+        let draft = |a: &str, b: &str, c: &str| [a.to_string(), b.to_string(), c.to_string()];
+        assert_eq!(
+            draft_price(&draft("1", "", "2")),
+            Some(Price {
+                input: 1.0,
+                cached: 1.0,
+                output: 2.0
+            })
+        );
+        assert_eq!(draft_price(&draft("1", "0.1", "2")).unwrap().cached, 0.1);
+        assert_eq!(draft_price(&draft("1", "x", "2")), None);
+        assert_eq!(draft_price(&draft("", "0.1", "2")), None);
+        assert_eq!(draft_price(&draft("1", "0.1", "-2")), None);
+    }
+
     #[test]
     fn tokens_and_money_read_as_a_reader_writes_them() {
         assert_eq!(tokens(950), "950");
@@ -882,6 +1010,8 @@ mod tests {
         assert_eq!(tokens(1_450), "1.4k");
         assert_eq!(tokens(72_400), "72k");
         assert_eq!(tokens(1_400_000), "1.4M");
+        assert_eq!(tokens(999_499), "999k");
+        assert_eq!(tokens(999_500), "1M");
         assert_eq!(money(0.0), "$0");
         assert_eq!(money(0.00312), "$0.0031");
         assert_eq!(money(0.042), "$0.04");

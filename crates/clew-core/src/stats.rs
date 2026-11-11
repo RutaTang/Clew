@@ -166,14 +166,6 @@ fn compute_files_capped(root: &Path, files: &[FileEntry], max_bytes: u64) -> Sta
     }
 }
 
-/// The tokei language of `path` from its NAME alone: `Some(Some(lang))` for a
-/// known filename or extension, `Some(None)` for a file without an extension
-/// (decided by its shebang once read), `None` for a file tokei does not count.
-///
-/// Tokei's own `from_path` falls back to opening the file to read a shebang —
-/// by path, following symlinks, blocking on a FIFO, reading an unbounded first
-/// line — so it is handed a path that cannot be opened (same name, nonexistent
-/// directory) and the shebang is read from the capped bytes instead.
 /// Whether `lang` is written prose or its markup (a README, notes, a
 /// manual), not code: left out of the counts.
 fn is_prose(lang: LanguageType) -> bool {
@@ -187,6 +179,14 @@ fn is_prose(lang: LanguageType) -> bool {
     )
 }
 
+/// The tokei language of `path` from its NAME alone: `Some(Some(lang))` for a
+/// known filename or extension, `Some(None)` for a file without an extension
+/// (decided by its shebang once read), `None` for a file tokei does not count.
+///
+/// Tokei's own `from_path` falls back to opening the file to read a shebang —
+/// by path, following symlinks, blocking on a FIFO, reading an unbounded first
+/// line — so it is handed a path that cannot be opened (same name, nonexistent
+/// directory) and the shebang is read from the capped bytes instead.
 fn language_of(path: &Path) -> Option<Option<LanguageType>> {
     let name = path.file_name()?;
     let probe = Path::new("/nonexistent-clew-stats-probe").join(name);

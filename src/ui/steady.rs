@@ -71,8 +71,17 @@ pub(crate) fn elide_end(content: &str, size: f32, font: Font, room: f32) -> Stri
         .unwrap_or_else(|| "…".to_string())
 }
 
-/// How many widths [`width_of`] keeps before it forgets them all.
-const MEASURED_CAP: usize = 512;
+/// How many widths [`width_of`] keeps before it forgets them all: more
+/// than a search's results (2,000), each measured to be cut — at 512 the
+/// cache was wiped several times over within one frame.
+const MEASURED_CAP: usize = 8192;
+
+thread_local! {
+    /// Texts [`cut`] to fit, by text, size, font and room: a list of
+    /// results redrawn each frame cut each of its rows again, a search of
+    /// the measuring each.
+    static CUT: RefCell<HashMap<(String, u32, Font, u32), String>> = RefCell::new(HashMap::new());
+}
 
 /// The width `content` is set in at `size` in `font`, on one line, to the
 /// whole pixel above.
@@ -131,6 +140,23 @@ pub(crate) fn slot<'a, Message: 'a>(
 /// `content` as it fits in `room` at `size` in `font`: whole, or cut short
 /// with an ellipsis where it would run past.
 pub(crate) fn cut(content: &str, room: f32, size: f32, font: Font) -> String {
+    let key = (content.to_string(), size.to_bits(), font, room.to_bits());
+    if let Some(cut) = CUT.with(|m| m.borrow().get(&key).cloned()) {
+        return cut;
+    }
+    let cut = cut_measured(content, room, size, font);
+    CUT.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= MEASURED_CAP {
+            m.clear();
+        }
+        m.insert(key, cut.clone());
+    });
+    cut
+}
+
+/// [`cut`], measured.
+fn cut_measured(content: &str, room: f32, size: f32, font: Font) -> String {
     if width_of(content, size, font) <= room {
         return content.to_string();
     }

@@ -830,6 +830,7 @@ name = "clew"
 version = "0.2.2"
 dependencies = [
  "ab_glyph",
+ "chrono",
  "clew-core",
  "clew-protocol",
  "clew-voice",

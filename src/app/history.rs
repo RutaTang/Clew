@@ -419,7 +419,10 @@ impl App {
             }
             HistoryMsg::Refresh => {
                 self.proj.git_status_stale = true;
-                self.proj.git_log.details.clear();
+                // A commit's detail never changes: only what failed to read
+                // is read again. All of it cleared, the commit open closed
+                // (it is drawn once read) and took two clicks to see again.
+                self.proj.git_log.details.retain(|_, d| d.is_ok());
                 Task::batch([
                     self.refresh_history(),
                     self.sync_git_status().unwrap_or_else(Task::none),

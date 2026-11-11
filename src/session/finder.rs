@@ -140,7 +140,8 @@ impl Finder {
                     .map_or(4, |s| if contains_words(&s.name, query) { 1 } else { 3 }),
                 None => files.get(i).map_or(4, |f| file_tier(&f.rel, query)),
             };
-            results.sort_by_key(|&i| tier(i));
+            // Each key worked out once: a file's builds a matcher.
+            results.sort_by_cached_key(|&i| tier(i));
         }
         self.results = results;
     }

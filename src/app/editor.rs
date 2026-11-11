@@ -1282,8 +1282,13 @@ impl App {
             if let Ok(lines) = result
                 && self.proj.diff.as_ref().is_some_and(|d| d.abs == abs)
             {
-                let d = DiffState::new(abs, rel, lines.unwrap_or_default());
-                self.proj.diff = Some(self.with_file_length(d));
+                // Untracked still: every line added, as the first load showed
+                // it — it turned into "No uncommitted changes" at the first
+                // save made elsewhere.
+                self.proj.diff = match lines {
+                    Some(lines) => Some(self.with_file_length(DiffState::new(abs, rel, lines))),
+                    None => self.all_added(abs, rel),
+                };
             }
             return Task::none();
         }
@@ -1301,12 +1306,10 @@ impl App {
             }
             // Not tracked: every line of it is new — the diff of a file
             // added, which it will be. It said only that there was none.
-            Ok(None) => match self.active_viewer().filter(|v| v.abs == abs) {
-                Some(v) => {
-                    let source = std::sync::Arc::clone(&v.source);
-                    let lines = untracked_diff(&source);
+            Ok(None) => match self.all_added(abs, rel.clone()) {
+                Some(d) => {
                     self.status.clear();
-                    self.proj.diff = Some(DiffState::new(abs, rel, lines).of_file(&source));
+                    self.proj.diff = Some(d);
                 }
                 None => {
                     self.status = tr!("No diff for {file} — it is not tracked by git", file = rel);
@@ -1325,6 +1328,20 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// The diff of a file git will add — untracked, or in a repository with
+    /// no commit yet — as every line added, where the active pane shows it.
+    /// `None` for one git ignores or a project that is no repository: git
+    /// answers those as it does an untracked file, and they were shown
+    /// "compared with HEAD", every line added, against a HEAD there is not.
+    fn all_added(&self, abs: PathBuf, rel: String) -> Option<DiffState> {
+        let v = self.active_viewer().filter(|v| v.abs == abs)?;
+        if !matches!(self.proj.git_status.get(&rel), Some('U' | 'A')) {
+            return None;
+        }
+        let source = std::sync::Arc::clone(&v.source);
+        Some(DiffState::new(abs, rel, untracked_diff(&source)).of_file(&source))
     }
 
     /// `d`, knowing how long its file is where the active pane shows it: a

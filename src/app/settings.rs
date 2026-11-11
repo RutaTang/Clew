@@ -26,7 +26,9 @@ impl App {
     pub(crate) fn invalidate_llm_config(&mut self) {
         self.llm_config_cache = None;
         self.llm_available = llm::Config::available();
-        // What estimates and the Usage page read prices for.
+        // What estimates and the Usage page read prices for, and the prices
+        // as they are now (another window may have changed them).
+        crate::app::usage::forget_own_prices();
         self.refresh_usage_model();
     }
 
