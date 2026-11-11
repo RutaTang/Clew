@@ -624,11 +624,11 @@ const ASK_HEADER_PAD: Padding = Padding {
 /// approval is given up to half the card, the conversation over it what is
 /// left, so the input stays in view under them however long either runs.
 fn card_fits(app: &App) -> bool {
-    // With its menu of sessions open, the card is as tall as it may be, so
-    // the menu is inside it. While an answer comes in, too: fitted, the
-    // card grew up the window a line at a time, its header moving with
-    // every line said.
-    ask_is_card(app) && !app.ask_sessions_menu && !app.ask_stream_active()
+    // While an answer comes in, the card is as tall as it may be: fitted,
+    // it grew up the window a line at a time, its header moving with every
+    // line said. (Its menu of sessions drops over the window, and leaves
+    // the card as it was.)
+    ask_is_card(app) && !app.ask_stream_active()
 }
 
 /// The card: its header (what it is, what is being read, size, close),
@@ -687,6 +687,14 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         tr!("Sessions"),
         Message::Ask(AskMsg::SessionsMenu(!menu_open)),
     ));
+    // The sessions drop from the name, over the window: held inside the
+    // card, the card grew to its full height to hold them, and its header —
+    // and the menu — jumped 290 px up from where the pointer was.
+    let title = super::dropdown::dropdown(
+        title,
+        menu_open.then(|| sessions_menu(app)),
+        iced::Vector::new(-6.0, 6.0),
+    );
     let mut header = row![glyph::icon(Glyph::Message, theme::accent(), 15.0), title]
         .spacing(6)
         .align_y(iced::Center);
@@ -747,18 +755,7 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     ]
     .height(if fit { Length::Shrink } else { Fill })
     .into();
-    if !menu_open {
-        return card;
-    }
-    stack![
-        card,
-        container(sessions_menu(app)).padding(Padding {
-            top: ASK_HEADER_H - 4.0,
-            left: 10.0,
-            ..Padding::ZERO
-        }),
-    ]
-    .into()
+    card
 }
 
 /// Widest the session's name is drawn in the large window, where the

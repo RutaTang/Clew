@@ -28,6 +28,7 @@ mod anchored;
 mod baseline;
 mod clipped;
 mod corner_safe;
+mod dropdown;
 mod escape_clears;
 mod ring;
 mod tree_keys;

@@ -11794,6 +11794,8 @@ fn the_card_names_its_session_and_lists_the_others() {
         },
     ];
     app.proj.ask_session = Some(1);
+    let name_at = |app: &App| text_at(&mut sim_of(app), |t| t == "Where is the origin?", 0);
+    let shut = name_at(&app);
     {
         let mut sim = sim_of(&app);
         assert!(shows(&mut sim, "Where is the origin?"), "the card's name");
@@ -11809,6 +11811,11 @@ fn the_card_names_its_session_and_lists_the_others() {
         "{sent:?}"
     );
     app.ask_sessions_menu = true;
+    // The menu drops over the window: the card, and its name, stay where
+    // they were — the card grew to its full height to hold the menu, and
+    // its header jumped up the window from under the pointer.
+    assert!(shut.is_some());
+    assert_eq!(name_at(&app), shut, "the card's header stays put");
     {
         let mut sim = sim_of(&app);
         // A new session is the header's +, beside the menu: not a second
