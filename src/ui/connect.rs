@@ -557,6 +557,15 @@ pub(crate) fn model_field_hints(provider: crate::llm::Provider) -> (&'static str
     }
 }
 
+/// `s` begun with a capital, as a line of its own begins.
+fn sentence_start(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     if app.proj.project.is_none() {
         return space().height(0).into();
@@ -589,8 +598,10 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             crate::highlight::lang_name(language)
                 .map(str::to_string)
                 .unwrap_or_else(|| language.clone()),
-            // The server, and under it how it stands.
-            Some(format!("{server}\n{status}")),
+            // The server, and under it how it stands — a line of its own,
+            // so begun as a sentence is: the status bar's "pyright: ready"
+            // read here as a bare "ready".
+            Some(format!("{server}\n{}", sentence_start(&status))),
             action,
         ));
     }
@@ -756,7 +767,7 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             |c, path| c.zig = path,
         ));
     }
-    parts.push(servers_block(app));
+    parts.extend(servers_block(app));
     parts.push(installed_servers(app));
     parts.push(server_log(app));
     form::page(parts)
@@ -1427,9 +1438,11 @@ fn toolchain_block<'a>(
     form::group(title, Some(about), None, rows)
 }
 
-/// The server programs the user chose, and the form to choose one — for a
-/// language clew serves (another build, another server) or one it does not.
-fn servers_block(app: &App) -> Element<'_, Message> {
+/// The server programs the user chose, and, apart, the form to add one —
+/// for a language clew serves (another build, another server) or one it
+/// does not. The form sat in the chosen list's card with no heading, its
+/// Use on the Arguments row as though it applied to them.
+fn servers_block(app: &App) -> Vec<Element<'_, Message>> {
     use crate::{LangField as F, LanguagesMsg as L};
     let choices = &app.proj.lang_choices;
     let remote = app.connection.is_remote();
@@ -1458,6 +1471,11 @@ fn servers_block(app: &App) -> Element<'_, Message> {
             .align_y(iced::Center),
         ));
     }
+    let mut groups = Vec::new();
+    if !rows.is_empty() {
+        groups.push(form::group(tr!("Server programs"), None, None, rows));
+    }
+    let mut rows = Vec::new();
     let mut languages = app.proj.file_languages.clone();
     languages.extend(app.proj.project_languages.iter().cloned());
     languages.sort();
@@ -1494,19 +1512,21 @@ fn servers_block(app: &App) -> Element<'_, Message> {
     rows.push(form::field(
         tr!("Arguments"),
         None,
+        draft_field(app, tr!("Optional"), F::ServerArgs),
+    ));
+    rows.push(form::plain(
         row![
-            draft_field(app, tr!("Optional"), F::ServerArgs),
-            form::action(
-                tr!("Use"),
+            space().width(Fill),
+            form::primary(
+                tr!("Add"),
                 (ready && !drafts.server_command.trim().is_empty())
                     .then_some(Message::Languages(L::UseDraft(F::ServerCommand)))
             ),
         ]
-        .spacing(6)
         .align_y(iced::Center),
     ));
-    form::group(
-        tr!("Server programs"),
+    groups.push(form::group(
+        tr!("Add a server program"),
         Some(
             tr!(
                 "Your own server program for a language: a different build, or a server Clew doesn't support."
@@ -1515,7 +1535,8 @@ fn servers_block(app: &App) -> Element<'_, Message> {
         ),
         None,
         rows,
-    )
+    ));
+    groups
 }
 
 /// An MCP server's approval policy as its picker lists it: clew-core's

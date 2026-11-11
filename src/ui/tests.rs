@@ -10373,7 +10373,7 @@ fn the_languages_section_offers_each_languages_build_choices() {
         "The toolchain the language server runs from.",
         "The lake found on the PATH",
         "elan (set by the project)",
-        "Server programs",
+        "Add a server program",
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
     }
@@ -16663,4 +16663,30 @@ fn the_overview_map_takes_room_from_the_window() {
     assert!(overview_map_h(860.0) > 450.0, "{}", overview_map_h(860.0));
     assert_eq!(overview_map_h(400.0), super::chrome::OVERVIEW_MAP_H);
     assert_eq!(overview_map_h(4000.0), 640.0);
+}
+
+/// A server program of the reader's own is added from a form of its own,
+/// headed as such, its Add on a row of its own — it sat in the chosen
+/// list's card with no heading, its Use on the Arguments row.
+#[test]
+fn a_server_program_is_added_from_a_form_of_its_own() {
+    let mut app = reader_app();
+    app.proj.lang_drafts.server_language = Some("python".into());
+    app.proj.lang_drafts.server_command = "pyright-langserver".into();
+    let mut sim = sim_tall(super::connect::languages_section(&app));
+    assert!(sim.find("Add a server program").is_ok());
+    assert!(
+        sim.find("Server programs").is_err(),
+        "no list while none is chosen"
+    );
+    let _ = sim.click("Add");
+    assert!(
+        sim.into_messages().any(|m| matches!(
+            m,
+            Message::Languages(crate::LanguagesMsg::UseDraft(
+                crate::LangField::ServerCommand
+            ))
+        )),
+        "Add uses the draft"
+    );
 }

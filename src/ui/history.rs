@@ -175,7 +175,10 @@ fn commit_list<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
     for (c, g) in h.commits.iter().zip(&h.graph) {
         let open = h.open.as_deref() == Some(c.sha.as_str());
         rows.push(commit_row(c, g, lanes_w, room, open, now));
-        if open {
+        // Opened once it has been read: it opened on "Reading the commit…"
+        // and then a moment later on the whole detail, everything below
+        // moving twice. (A commit is read in well under a second.)
+        if open && h.details.contains_key(c.sha.as_str()) {
             rows.push(
                 row![
                     canvas_of(g, false, lanes_w, Length::Fill),

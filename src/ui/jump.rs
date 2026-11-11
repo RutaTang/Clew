@@ -946,7 +946,9 @@ const RING_OUT: f32 = 2.0;
 /// `room` (what of the window is seen).
 fn ring_round(renderer: &mut iced::Renderer, at: Rectangle, room: Rectangle) {
     let palette = crate::theme::active();
-    let bounds = at.expand(RING_OUT);
+    // Kept within what is seen: on the first row of a list it stood out
+    // past the list's top edge and was cut off there.
+    let bounds = ring_bounds(at, room);
     let Some(seen) = bounds.expand(1.0).intersection(&room) else {
         return;
     };
@@ -964,6 +966,22 @@ fn ring_round(renderer: &mut iced::Renderer, at: Rectangle, room: Rectangle) {
             Color::TRANSPARENT,
         );
     });
+}
+
+/// The ring's bounds round `at`: [`RING_OUT`] outside it, drawn in from
+/// any edge of `room` it would cross.
+fn ring_bounds(at: Rectangle, room: Rectangle) -> Rectangle {
+    let out = at.expand(RING_OUT);
+    let left = out.x.max(room.x);
+    let top = out.y.max(room.y);
+    let right = (out.x + out.width).min(room.x + room.width);
+    let bottom = (out.y + out.height).min(room.y + room.height);
+    Rectangle {
+        x: left,
+        y: top,
+        width: (right - left).max(0.0),
+        height: (bottom - top).max(0.0),
+    }
 }
 
 /// Where the badge of a `letters`-long code goes for the control at `at`:
@@ -1048,6 +1066,32 @@ fn badge(renderer: &mut iced::Renderer, at: Rectangle, room: Rectangle, code: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ring is drawn in from the edges of what is seen: round the
+    /// first row of a list it stood out past the list's top and was cut.
+    #[test]
+    fn the_ring_stays_within_what_is_seen() {
+        let room = Rectangle {
+            x: 0.0,
+            y: 100.0,
+            width: 300.0,
+            height: 400.0,
+        };
+        let first = Rectangle {
+            x: 10.0,
+            y: 100.0,
+            width: 200.0,
+            height: 24.0,
+        };
+        let ring = ring_bounds(first, room);
+        assert_eq!(ring.y, 100.0, "inside the list's top");
+        assert_eq!(
+            ring.x,
+            10.0 - RING_OUT,
+            "out from the row where there is room"
+        );
+        assert_eq!(ring.y + ring.height, 124.0 + RING_OUT);
+    }
 
     /// A badge comes down over its control by no more than a sliver —
     /// most of it stands above — and stays in the window: pinned to its
