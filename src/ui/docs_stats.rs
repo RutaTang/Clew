@@ -584,153 +584,138 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         .into()
 }
 
-/// The architecture-overview "home": the generated overview, a prompt to
-/// generate it, or a generation-in-progress note.
+/// The architecture-overview "home": the module map and, under it, the
+/// written overview — or what it is waiting for. Writing it, and writing it
+/// again, is one icon beside the close button, as the chrome's actions are:
+/// a primary button floated alone under the map, and the page was replaced
+/// by a line of words while it wrote.
 pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     let close = || Message::Overview(OverviewMsg::Close);
-    if app.proj.overview.generating {
-        return closable_center(
-            text(tr!("Generating architecture overview…"))
-                .size(ts::EMPHASIS)
-                .color(theme::dim()),
-            close(),
+    let generated = app.proj.overview.markdown.is_some();
+    let generating = app.proj.overview.generating;
+    let ready = app.llm_available && !app.proj.explain.cache.is_empty();
+
+    // Named by its tooltip, turning while it writes; the height of the
+    // header's title line, so the page below sits where it did.
+    let write = (generated || generating || ready).then(|| {
+        let (glyph, name) = if generated {
+            (Glyph::Refresh, tr!("Regenerate overview"))
+        } else {
+            (Glyph::Sparkle, tr!("Generate overview"))
+        };
+        super::toolbar::busy_action(
+            glyph,
+            name,
+            Some(Message::Overview(OverviewMsg::Generate)),
+            generating,
+        )
+    });
+    let header = row![
+        text(tr!("Architecture Overview"))
+            .size(ts::HEADING)
+            .color(theme::fg()),
+        space().width(Fill),
+    ]
+    .push(write)
+    .push(super::chrome::close_button(close()))
+    .spacing(8)
+    .align_y(iced::Center);
+
+    // The architecture, drawn from the imports, before any prose about it.
+    let mut items: Vec<Element<'_, Message>> = Vec::new();
+    let map = module_map(app);
+    let has_map = map.is_some();
+    items.extend(map);
+    if generated {
+        items.extend(render_prepared(app, &app.proj.overview.prepared));
+        items.push(super::askfloat::pill_foot());
+    } else if generating {
+        items.push(
+            container(
+                text(tr!("Generating architecture overview…"))
+                    .size(ts::BODY)
+                    .color(theme::dim()),
+            )
+            .center_x(Fill)
+            .into(),
+        );
+    } else if !ready {
+        // What it is written from, and the one step that gets there — a
+        // way each: the page was a dead end ("Run Explain All first.").
+        let step = |label: &'static str, msg: Message| {
+            button(text(label).size(ts::BODY))
+                .style(theme::primary_button)
+                .padding([5, 14])
+                .on_press(super::heard::said(label, msg))
+        };
+        let (why, action) = if !app.llm_available {
+            (
+                tr!("The overview is written by the AI model you choose in Settings."),
+                step(
+                    tr!("Add an API Key…"),
+                    Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
+                ),
+            )
+        } else {
+            (
+                tr!(
+                    "The overview is written from the project's explanations, which Explain All writes."
+                ),
+                step(
+                    tr!("Explain All…"),
+                    super::toolbar::explain_all_message(app),
+                ),
+            )
+        };
+        items.push(
+            container(
+                column![
+                    text(why)
+                        .size(ts::BODY)
+                        .color(theme::fg_muted())
+                        .align_x(iced::Center),
+                    action,
+                ]
+                .spacing(12)
+                .align_x(iced::Center)
+                .max_width(560),
+            )
+            .center_x(Fill)
+            .into(),
+        );
+    } else if !has_map {
+        // Nothing drawn and nothing written yet: the page says so, and
+        // the icon above writes it.
+        items.push(
+            container(
+                text(tr!("No overview yet."))
+                    .size(ts::BODY)
+                    .color(theme::dim()),
+            )
+            .center_x(Fill)
+            .into(),
         );
     }
 
-    if app.proj.overview.markdown.is_some() {
-        let header = row![
-            text(tr!("Architecture Overview"))
-                .size(ts::HEADING)
-                .color(theme::fg()),
-            space().width(Fill),
-            // An icon, as the chrome's actions are, named by its tooltip —
-            // the height of the header's title line: the page below sits
-            // where it did.
-            super::toolbar::busy_action(
-                Glyph::Refresh,
-                tr!("Regenerate"),
-                Some(Message::Overview(OverviewMsg::Generate)),
-                app.proj.overview.generating,
-            ),
-            super::chrome::close_button(close()),
-        ]
-        .spacing(8)
-        .align_y(iced::Center);
-        // The module map, drawn natively (same engine as the Import Graph
-        // overlay), sits at the top; the LLM prose follows.
-        let mut items: Vec<Element<'_, Message>> = Vec::new();
-        if let Some(map) = module_map(app) {
-            items.push(map);
-        }
-        items.extend(render_prepared(app, &app.proj.overview.prepared));
-        items.push(super::askfloat::pill_foot());
-        return container(
-            column![
-                header,
-                scrollable(
-                    Column::with_children(items)
-                        .spacing(10)
-                        .width(Fill)
-                        .max_width(860)
-                )
-                .direction(thin_scroll())
-                .style(theme::overlay_scrollbar)
-                .height(Fill),
-            ]
-            .spacing(14),
-        )
-        .width(Fill)
-        .height(Fill)
-        .padding([20, 28])
-        .into();
-    }
-
-    // Not generated yet: what it is written from, and the one step that
-    // gets there — a button, each of them. They were words alone ("Run
-    // Explain All first."), and the page a dead end.
-    let step = |label: &'static str, msg: Message| {
-        button(text(label).size(ts::BODY))
-            .style(theme::primary_button)
-            .padding([5, 14])
-            .on_press(super::heard::said(label, msg))
-    };
-    let (why, action) = if !app.llm_available {
-        (
-            Some(tr!(
-                "The overview is written by the AI model you choose in Settings."
-            )),
-            step(
-                tr!("Add an API Key…"),
-                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
-            ),
-        )
-    } else if app.proj.explain.cache.is_empty() {
-        (
-            Some(tr!(
-                "The overview is written from the project's explanations, which Explain All writes."
-            )),
-            step(
-                tr!("Explain All…"),
-                super::toolbar::explain_all_message(app),
-            ),
-        )
-    } else {
-        // Ready to be written: the button says what it does.
-        (
-            None,
-            step(
-                tr!("Generate overview"),
-                Message::Overview(OverviewMsg::Generate),
-            ),
-        )
-    };
-    let ask = column![
-        why.map(|why| {
-            text(why)
-                .size(ts::BODY)
-                .color(theme::fg_muted())
-                .align_x(iced::Center)
-        }),
-        action,
-    ]
-    .spacing(12)
-    .align_x(iced::Center)
-    .max_width(560);
-    // The architecture, drawn from the imports, before any prose about it:
-    // the map first, what writes the prose under it.
-    if let Some(map) = module_map(app) {
-        return container(
-            column![
-                row![
-                    text(tr!("Architecture Overview"))
-                        .size(ts::HEADING)
-                        .color(theme::fg()),
-                    space().width(Fill),
-                    super::chrome::close_button(close()),
-                ]
-                .align_y(iced::Center),
-                container(map).width(Fill).max_width(860),
-                container(ask).center_x(Fill),
-            ]
-            .spacing(16),
-        )
-        .width(Fill)
-        .height(Fill)
-        .padding([20, 28])
-        .into();
-    }
-    closable_center(
+    container(
         column![
-            text(tr!("Architecture Overview"))
-                .size(ts::HEADING)
-                .color(theme::fg()),
-            ask,
+            header,
+            scrollable(
+                Column::with_children(items)
+                    .spacing(10)
+                    .width(Fill)
+                    .max_width(860)
+            )
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Fill),
         ]
-        .spacing(12)
-        .align_x(iced::Center)
-        .max_width(560),
-        close(),
+        .spacing(14),
     )
+    .width(Fill)
+    .height(Fill)
+    .padding([20, 28])
+    .into()
 }
 
 /// The overview's module map — the project's most connected files and the

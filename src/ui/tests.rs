@@ -13227,14 +13227,27 @@ fn the_overview_offers_its_next_step() {
             basis: None,
         },
     );
-    let sent = click(sim_elem(super::overview_home(&app)), "Generate overview");
+    // Ready: written by the icon beside the close button, not by a button
+    // floated alone under the map.
+    let mut sim = sim_elem(super::overview_home(&app));
+    assert!(!shows(&mut sim, "Generate overview"), "a word, not an icon");
+    drop(sim);
+    let sent = click_right_of(
+        || sim_elem(super::overview_home(&app)),
+        "Architecture Overview",
+        |m| matches!(m, Message::Overview(crate::OverviewMsg::Generate)),
+    );
     assert!(
-        matches!(
-            sent.as_slice(),
-            [Message::Overview(crate::OverviewMsg::Generate)]
-        ),
+        sent.iter()
+            .any(|m| matches!(m, Message::Overview(crate::OverviewMsg::Generate))),
         "{sent:?}"
     );
+    // Writing it keeps the page and turns the icon: the page was swapped
+    // for a line of words.
+    app.proj.overview.generating = true;
+    let mut sim = sim_elem(super::overview_home(&app));
+    assert!(shows(&mut sim, "Architecture Overview"));
+    assert!(shows(&mut sim, "Generating architecture overview…"));
 }
 
 /// An empty type map says why: an API index never built — and, without
