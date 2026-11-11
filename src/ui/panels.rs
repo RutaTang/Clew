@@ -2408,13 +2408,29 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     // Its rows counted from 1, as voice picks them.
     super::heard::list();
     let Some(tree) = &app.proj.call_graph else {
-        // How to fill it: the tab alone gave no way in.
-        return empty_state(
-            Glyph::CallGraph,
-            tr!("No call hierarchy yet"),
-            tr!("Right-click a function and choose Call Hierarchy."),
-            None,
-        );
+        // How to fill it: the tab alone gave no way in. With the caret in a
+        // function, its hierarchy a click away.
+        let here = match &app.proj.explain.view {
+            Some(crate::explain::Node::Function { name, .. }) => Some(name.as_str()),
+            _ => None,
+        };
+        return match here {
+            Some(name) => super::sidebar::empty_state_saying(
+                Glyph::CallGraph,
+                tr!("No call hierarchy yet"),
+                tr!("Right-click a function and choose Call Hierarchy."),
+                Some((
+                    tr!("Show for {name}()", name = name),
+                    Message::Calls(CallsMsg::OfFunction),
+                )),
+            ),
+            None => empty_state(
+                Glyph::CallGraph,
+                tr!("No call hierarchy yet"),
+                tr!("Right-click a function and choose Call Hierarchy."),
+                None,
+            ),
+        };
     };
 
     use crate::graph::callgraph::Direction;

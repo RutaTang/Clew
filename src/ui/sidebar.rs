@@ -1195,6 +1195,17 @@ pub(crate) fn empty_state<'a>(
     subtitle: &'a str,
     action: Option<(&'a str, Message)>,
 ) -> Element<'a, Message> {
+    empty_state_saying(g, title, subtitle, action.map(|(l, m)| (l.to_string(), m)))
+}
+
+/// [`empty_state`] whose action's label is made as it is drawn ("Show for
+/// total()").
+pub(crate) fn empty_state_saying<'a>(
+    g: Glyph,
+    title: &'a str,
+    subtitle: &'a str,
+    action: Option<(String, Message)>,
+) -> Element<'a, Message> {
     let mut col = column![
         glyph::icon(g, theme::empty_state_icon(), 42.0),
         space().height(6),
@@ -1218,10 +1229,10 @@ pub(crate) fn empty_state<'a>(
     if let Some((label, msg)) = action {
         col = col.push(space().height(10));
         col = col.push(
-            button(text(label.to_string()).size(ts::BASE))
+            button(text(label.clone()).size(ts::BASE))
                 .style(theme::toolbar_button)
                 .padding([7, 16])
-                .on_press(super::heard::said(label, msg)),
+                .on_press(super::heard::said(&label, msg)),
         );
     }
     center(col).padding(20).into()

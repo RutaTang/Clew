@@ -16137,6 +16137,28 @@ fn the_usage_page_says_what_the_key_spent() {
     assert!(shows(&mut page, "Prices"));
 }
 
+/// An empty call hierarchy, with the caret in a function, offers that
+/// function's: it only said to right-click one (round-6 L17).
+#[test]
+fn an_empty_call_hierarchy_offers_the_carets_function() {
+    let mut app = reader_app();
+    app.proj.call_graph = None;
+    app.proj.explain.view = None;
+    assert!(!shows(
+        &mut sim_elem(super::panels::calls_tab(&app)),
+        "Show for total()"
+    ));
+    app.proj.explain.view = Some(crate::explain::Node::Function {
+        file: "src/lib.rs".into(),
+        name: "total".into(),
+        ordinal: 0,
+    });
+    assert!(matches!(
+        click(sim_elem(super::panels::calls_tab(&app)), "Show for total()").as_slice(),
+        [Message::Calls(CallsMsg::OfFunction)]
+    ));
+}
+
 /// The balance says what is left: an empty currency beside one with money
 /// is left out; with none, the empty one is said.
 #[test]
