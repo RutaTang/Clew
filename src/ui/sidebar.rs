@@ -464,10 +464,26 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
     let pending_new: Option<&str> =
         gen_scope.filter(|s| !app.proj.walk.library.iter().any(|w| w.scope.as_str() == *s));
 
-    if app.proj.walk.library.is_empty() && pending_new.is_none() {
+    // A generation that failed, for a scope with no tour yet: its row stays,
+    // saying why, with a way to try again.
+    let failed = app
+        .proj
+        .walk
+        .failed
+        .as_ref()
+        .filter(|_| gen_scope.is_none());
+    let failed_new = failed.filter(|(scope, _)| {
+        !app.proj
+            .walk
+            .library
+            .iter()
+            .any(|w| w.scope.as_str() == scope.as_str())
+    });
+
+    if app.proj.walk.library.is_empty() && pending_new.is_none() && failed_new.is_none() {
         return empty_state(Glyph::Compass, tr!("No walkthroughs yet"), "", None);
     }
-    if visible.is_empty() && pending_new.is_none() {
+    if visible.is_empty() && pending_new.is_none() && failed_new.is_none() {
         return empty_state(Glyph::Search, tr!("No matches"), "", None);
     }
 
@@ -498,11 +514,66 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         );
     }
 
+    if let Some((scope, why)) = failed_new {
+        let label = scope_label(scope);
+        let retry = button(
+            text(tr!("Try again"))
+                .size(ts::SMALL)
+                .color(theme::accent()),
+        )
+        .style(theme::toolbar_button)
+        .padding([4, 8])
+        .on_press(super::heard::said_to(
+            tr!("Try again"),
+            &label,
+            Message::Walk(WalkMsg::again(scope)),
+        ));
+        let forget = button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
+            .style(theme::toolbar_button)
+            .padding([7, 9])
+            .on_press(super::heard::said_to(
+                tr!("Dismiss"),
+                &label,
+                Message::Walk(WalkMsg::ForgetFailure),
+            ));
+        list = list.push(
+            container(
+                row![
+                    column![
+                        text(label).size(ts::BASE).color(theme::fg()),
+                        text(tr!("Failed: {reason}", reason = why))
+                            .size(ts::CAPTION)
+                            .color(theme::danger())
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                    ]
+                    .spacing(1)
+                    .width(Fill),
+                    retry,
+                    forget,
+                ]
+                .spacing(2)
+                .align_y(iced::Center),
+            )
+            .width(Fill)
+            .padding([6, 8]),
+        );
+    }
+
     for (_, wt) in visible {
         let is_open = app.proj.walk.open.as_deref() == Some(wt.scope.as_str());
         let busy = gen_scope == Some(wt.scope.as_str());
+        // Its regeneration failed: said under its title until it is asked
+        // for again (the tour it had is kept).
+        let failed_here = failed
+            .filter(|(scope, _)| scope.as_str() == wt.scope.as_str())
+            .map(|(_, why)| why);
         let (subtitle, sub_color) = if busy {
             (tr!("Generating…").to_string(), theme::accent())
+        } else if let Some(why) = failed_here {
+            (
+                tr!("Couldn't regenerate it: {reason}", reason = why),
+                theme::danger(),
+            )
         } else {
             (scope_label(&wt.scope), theme::dim())
         };
@@ -1630,6 +1701,15 @@ pub(crate) fn stop_label(app: &App, loc: &crate::history::Loc, label: Option<&st
         {
             format!("{name}()")
         }
+        // A stop recorded by its line: the function it was in, and the
+        // line — "pricing.py:20" did not say it was inside discounts().
+        None => match loc
+            .line
+            .and_then(|line| Some((app.function_around(&loc.path, line)?, line)))
+        {
+            Some((name, line)) => format!("{name}():{line}"),
+            None => loc_label(loc, label),
+        },
         _ => loc_label(loc, label),
     }
 }

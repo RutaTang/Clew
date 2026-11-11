@@ -706,14 +706,17 @@ pub(crate) fn finder_command_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, M
             Some(keys) => super::toolbar::row_keycap(keys.clone()),
             None => slot(),
         };
+        // What spends an AI call carries the sparkle here as in the
+        // command bar: ">" listed Explain and Explain All as plain commands.
+        let title: Element<'_, Message> = if command.spends_ai() {
+            super::toolbar::ai_words(command.shown(), ts::READING, theme::fg())
+        } else {
+            text(command.shown().to_string()).size(ts::READING).into()
+        };
         rows.push(finder_row(
-            row![
-                text(command.shown().to_string()).size(ts::READING),
-                space().width(Fill),
-                keys,
-            ]
-            .spacing(10)
-            .align_y(iced::Center),
+            row![title, space().width(Fill), keys,]
+                .spacing(10)
+                .align_y(iced::Center),
             pos == app.proj.finder.selected,
             command.shown().to_string(),
             Message::Nav(NavMsg::PaletteRun(command.title.clone())),

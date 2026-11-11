@@ -128,6 +128,7 @@ impl App {
         self.status = tr!("Narrating the run…").into();
         let ai = self.ai_client();
         let stamp = self.stamp();
+        let said = stamp.clone();
         Task::perform(
             async move {
                 let narrated = ai
@@ -145,6 +146,9 @@ impl App {
                 // — a step's file, symbol and line are what happened, not
                 // the model's to change — when it kept every step; else the
                 // plain tour, which is the run as it happened.
+                //
+                // The plain tour is said to be one: opened without a word,
+                // it read as the AI's story of the run, and a thin one.
                 match narrated {
                     Ok(mut wt) if wt.steps.len() == plain.steps.len() => {
                         for (step, own) in wt.steps.iter_mut().zip(&plain.steps) {
@@ -152,20 +156,50 @@ impl App {
                             step.symbol = own.symbol.clone();
                             step.line = own.line;
                         }
-                        Ok(wt)
+                        (Ok(wt), None)
                     }
-                    _ => Ok(plain),
+                    Ok(_) => (
+                        Ok(plain),
+                        Some(tr!("its narration skipped some of the stops").to_string()),
+                    ),
+                    Err(why) => (Ok(plain), Some(why.to_string())),
                 }
             },
-            move |result| {
-                Message::Walk(WalkMsg::Done {
-                    stamp: stamp.clone(),
-                    seq,
-                    scope: scope.clone(),
-                    result,
-                })
-            },
+            std::convert::identity,
         )
+        .then(move |(result, unnarrated)| {
+            let done = Task::done(Message::Walk(WalkMsg::Done {
+                stamp: stamp.clone(),
+                seq,
+                scope: scope.clone(),
+                result,
+            }));
+            match unnarrated {
+                Some(why) => done.chain(Task::done(Message::Walk(WalkMsg::Unnarrated {
+                    stamp: said.clone(),
+                    seq,
+                    why,
+                }))),
+                None => done,
+            }
+        })
+    }
+
+    /// The run's tour was opened as recorded, its narration having failed
+    /// (`WalkMsg::Unnarrated`): said, standing, with a way to try again —
+    /// unless another generation has started since.
+    fn on_walkthrough_unnarrated(&mut self, seq: u64, why: String) -> Task<Message> {
+        if self.proj.walk.seq != seq {
+            return Task::none();
+        }
+        self.say_failure(
+            tr!(
+                "Couldn't narrate the run with AI ({reason}) — showing its stops as recorded",
+                reason = why
+            ),
+            Some(Message::Walk(WalkMsg::GenerateTrace)),
+        );
+        Task::none()
     }
 
     /// Mark a walkthrough generation for `scope` as the one in flight and mint
@@ -174,6 +208,7 @@ impl App {
     fn begin_walkthrough_generation(&mut self, scope: String) -> u64 {
         self.proj.walk.seq += 1;
         self.proj.walk.pending = Some(self.proj.walk.seq);
+        self.proj.walk.failed = None;
         self.proj.walk.generating = Some(scope);
         self.proj.walk.seq
     }
@@ -431,7 +466,13 @@ impl App {
                     };
                 }
                 self.proj.walk.retried = false;
-                self.status = tr!("Walkthrough failed: {error}", error = e);
+                // Kept where it was asked for, and on the status line until
+                // it is read, each with a way to try again.
+                self.proj.walk.failed = Some((scope.clone(), e.to_string()));
+                self.say_failure(
+                    tr!("Walkthrough failed: {error}", error = e),
+                    Some(Message::Walk(WalkMsg::again(&scope))),
+                );
                 Task::none()
             }
         }
@@ -825,6 +866,11 @@ impl App {
             WalkMsg::Done {
                 seq, scope, result, ..
             } => self.on_walkthrough_done(seq, scope, result),
+            WalkMsg::Unnarrated { seq, why, .. } => self.on_walkthrough_unnarrated(seq, why),
+            WalkMsg::ForgetFailure => {
+                self.proj.walk.failed = None;
+                Task::none()
+            }
             WalkMsg::Open(scope) => {
                 if !self.proj.walk.library.iter().any(|w| w.scope == scope) {
                     return Task::none();

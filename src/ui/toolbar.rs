@@ -217,6 +217,35 @@ pub(crate) fn tip_at<'a>(
     super::tip::tip(control, bubble, side).gap(TIP_GAP).into()
 }
 
+/// [`tip_at`] for words that may run long — a value, a path: wrapped, in a
+/// bubble no wider than [`TIP_WRAP_W`]. On one line, a long value ran off
+/// the window's edge, and the whole of it the tip was for was not seen.
+pub(crate) fn tip_wrapped<'a>(
+    control: impl Into<Element<'a, Message>>,
+    words: String,
+    side: tooltip::Position,
+) -> Element<'a, Message> {
+    let bubble = container(
+        text(words)
+            .size(TIP_SIZE)
+            .font(crate::fonts::UI_MEDIUM)
+            .color(theme::tip_text())
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+    )
+    .max_width(TIP_WRAP_W)
+    .padding(Padding {
+        top: 7.0,
+        right: 9.0,
+        bottom: 7.0,
+        left: 11.0,
+    })
+    .style(theme::tip);
+    super::tip::tip(control, bubble, side).gap(TIP_GAP).into()
+}
+
+/// The widest a [`tip_wrapped`] bubble grows before its words wrap.
+pub(crate) const TIP_WRAP_W: f32 = 520.0;
+
 /// A tooltip's shortcut, as its keys: each a cap of its own on the bubble,
 /// the design's 17 wide at least and 18 high, 4 either side of its words.
 fn tip_keys<'a>(caps: &str) -> Element<'a, Message> {

@@ -346,7 +346,7 @@ pub(crate) fn sheet(app: &App) -> Element<'_, Message> {
                 Message::Window(WindowMsg::ResizeBottom(v - frame))
             })
             .panel(crate::resize::Panel::Within),
-            container(bottom_panel(app)).height(Length::Fixed(app.bottom_height)),
+            container(bottom_panel(app)).height(Length::Fixed(app.bottom_shown_height())),
         ]
         .into()
     } else {
@@ -707,6 +707,21 @@ fn trail_row(app: &App) -> Element<'_, Message> {
                     .any(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))
             })
     };
+    // A stop recorded by its line, not at a definition, named by the
+    // function it was in, where that is known: "discounts()" became
+    // "pricing.py:20" once the reader left it.
+    let around: Vec<Option<String>> = stops
+        .iter()
+        .map(|(_, loc, label)| match (label, loc.line) {
+            (None, Some(line)) => app.function_around(&loc.path, line),
+            _ => None,
+        })
+        .collect();
+    let stops: Vec<_> = stops
+        .into_iter()
+        .zip(&around)
+        .map(|((id, loc, label), around)| (id, loc, label.or(around.as_deref())))
+        .collect();
     let names = trail_names(&stops, here, is_function);
     for (i, ((id, loc, _), name)) in stops.into_iter().zip(names).enumerate() {
         if i > 0 {
@@ -810,10 +825,12 @@ fn trail_names(
             },
         )
         .collect();
+    // Beside a stop of the same name, a stop says its line: a file's or a
+    // function's twice in a row read as a loop ("main() › main()").
     let twins: Vec<bool> = (0..names.len())
         .map(|i| {
             let same = |j: usize| names.get(j).is_some_and(|(n, _)| *n == names[i].0);
-            !names[i].1 && ((i > 0 && same(i - 1)) || same(i + 1))
+            (i > 0 && same(i - 1)) || same(i + 1)
         })
         .collect();
     for (i, twin) in twins.into_iter().enumerate() {
@@ -859,6 +876,14 @@ mod tests {
         );
         // A name that is no function (a class) is said as it is.
         assert_eq!(trail_names(&stops, None, |_, _| false)[1], "subtotal");
+        // One function twice in a row, at two places in it: its lines,
+        // not "subtotal() › subtotal()".
+        let a24 = loc("src/cart.py", Some(24));
+        let twice = vec![(0, &a18, Some("subtotal")), (1, &a24, Some("subtotal"))];
+        assert_eq!(
+            trail_names(&twice, None, function),
+            ["subtotal():18", "subtotal():24"]
+        );
     }
 
     /// A file's stop followed by one near its top is shown as that one:

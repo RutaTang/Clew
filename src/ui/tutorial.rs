@@ -44,7 +44,7 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
     // The margin's divider lies over its edge, taking no room of its own.
     let right_edge = right;
     let bottom = if app.show_bottom {
-        app.bottom_height + divider
+        app.bottom_shown_height() + divider
     } else {
         0.0
     };

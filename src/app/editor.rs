@@ -2120,6 +2120,20 @@ impl App {
                 }
                 Task::none()
             }
+            EditorMsg::ViewMeasured { pane, height } => {
+                let line_height = self.line_height();
+                if let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) {
+                    v.viewport_h = height;
+                    v.viewport_measured = true;
+                    if let Some(y) = v.measured(height, line_height) {
+                        return operation::scroll_to(
+                            ui::code_scroll_id(pane),
+                            AbsoluteOffset { x: v.scroll_x, y },
+                        );
+                    }
+                }
+                Task::none()
+            }
             EditorMsg::PaneFocused(pane) => {
                 if pane == 0 || self.proj.split {
                     self.proj.active = pane;

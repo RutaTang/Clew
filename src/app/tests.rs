@@ -36705,3 +36705,142 @@ fn the_caret_keeps_clear_of_the_ask_pill() {
         caret_foot(&app)
     );
 }
+
+/// An Explain that failed stands on the status line — in its own place, read
+/// or not — with a way to try the same Explain again, and goes when it is
+/// dismissed. The function asked for says why on its note. Said only as a
+/// notice, the failure was gone in ten seconds, and the note still said
+/// "Not explained yet." as if Explain had never been pressed.
+#[test]
+fn a_failed_explain_stands_until_dismissed_with_a_way_to_try_again() {
+    use crate::app::runtime::STATUS_LIFETIME;
+    use std::time::{Duration, Instant};
+    let mut app = scanned_app("explain-failure-stands");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let node = explain::Node::Function {
+        file: root.join("src/lib.rs"),
+        name: "helper".into(),
+        ordinal: 0,
+    };
+    // A pass for this function alone, under way.
+    app.proj.explain.running = true;
+    app.proj.explain.pass_target = Some(node.clone());
+    app.proj.explain.pass_target_new = true;
+    let _ = app.update(Message::Explain(ExplainMsg::Done {
+        stamp: app.stamp(),
+        generation: app.proj.explain.generation,
+        cache: explain::Cache::new(),
+        failures: PassFailures {
+            failed: 1,
+            stopped: Some(ExplainFailure::Network(
+                "request failed: Connection refused (os error 111)".into(),
+            )),
+            ..PassFailures::default()
+        },
+        tally: Default::default(),
+        written: Default::default(),
+    }));
+    let said = app.status.clone();
+    assert!(said.contains("connection failed"), "{said}");
+    let notice = app.failure_shown().expect("said as a failure");
+    assert!(
+        matches!(
+            &notice.retry,
+            Some(Message::Explain(ExplainMsg::Explain(n))) if *n == node
+        ),
+        "{:?}",
+        notice.retry
+    );
+    // Its note says why.
+    assert!(
+        app.proj
+            .explain
+            .node_failed
+            .as_ref()
+            .is_some_and(|(n, why)| *n == node && why.contains("connection failed")),
+        "{:?}",
+        app.proj.explain.node_failed
+    );
+    // Read or not, it stands.
+    app.status_since = Some(Instant::now() - STATUS_LIFETIME - Duration::from_secs(1));
+    let _ = app.update(Message::Tick);
+    assert_eq!(app.status, said, "it went before it was dealt with");
+    // Dismissed, it goes.
+    let _ = app.update(Message::Window(WindowMsg::DismissFailure));
+    assert!(app.status.is_empty(), "{}", app.status);
+    assert!(app.failure_shown().is_none());
+    // Something else said takes its place, and it is not said again.
+    app.say_failure("Walkthrough failed: no".into(), None);
+    app.status = "Copied 3 lines".into();
+    let _ = app.update(Message::Noop);
+    assert!(app.failure_notice.is_none(), "{:?}", app.failure_notice);
+}
+
+/// A walkthrough that failed keeps its row where it was asked for, saying
+/// why, with a way to try again — and stands on the status line. The
+/// "Generating…" row just went away, as if nothing had been asked.
+#[test]
+fn a_failed_walkthrough_keeps_its_row_with_a_way_to_try_again() {
+    let mut app = scanned_app("walk-failure-row");
+    app.proj.walk.seq += 1;
+    app.proj.walk.pending = Some(app.proj.walk.seq);
+    app.proj.walk.generating = Some("checkout".into());
+    let _ = app.update(Message::Walk(WalkMsg::Done {
+        stamp: app.stamp(),
+        seq: app.proj.walk.seq,
+        scope: "checkout".into(),
+        result: Err(walkthrough::Failure::Other(
+            "request failed: Connection refused".into(),
+        )),
+    }));
+    assert_eq!(
+        app.proj.walk.failed.as_ref().map(|(s, _)| s.as_str()),
+        Some("checkout")
+    );
+    assert!(
+        matches!(
+            app.failure_shown().and_then(|f| f.retry.clone()),
+            Some(Message::Walk(WalkMsg::Generate(scope))) if scope == "checkout"
+        ),
+        "{:?}",
+        app.failure_notice
+    );
+    // Dismissed from its row, it goes; a change review is tried again by
+    // its diff, a run's tour by the last run.
+    let _ = app.update(Message::Walk(WalkMsg::ForgetFailure));
+    assert!(app.proj.walk.failed.is_none());
+    assert!(matches!(
+        WalkMsg::again("@diff main"),
+        WalkMsg::GenerateDiff
+    ));
+    assert!(matches!(
+        WalkMsg::again("@trace app"),
+        WalkMsg::GenerateTrace
+    ));
+}
+
+/// Ctrl+Home goes to the file's very start — its first column too — and
+/// Ctrl+G, Go to Line in other editors, opens Go to Line where nothing
+/// else holds it.
+#[test]
+fn ctrl_home_goes_to_the_start_and_ctrl_g_to_a_line() {
+    let mut app = scanned_app("ctrl-home-ctrl-g");
+    let rel = app.proj.project.as_ref().unwrap().files[0].rel.clone();
+    open_synchronously(&mut app, &rel, None);
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.caret = Some((0, 5));
+    }
+    let _ = app.move_cursor(viewer::Motion::FileStart);
+    assert_eq!(app.active_viewer().unwrap().caret, Some((0, 0)));
+    if !crate::keymap::MAC_KEYS {
+        assert_eq!(
+            crate::keymap::alias_for(&crate::keymap::Chord::cmd('g')),
+            Some(crate::keymap::Action::GotoLine)
+        );
+        assert!(
+            app.keymap
+                .action_for(&crate::keymap::Chord::cmd('g'))
+                .is_none()
+        );
+    }
+}

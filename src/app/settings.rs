@@ -81,8 +81,8 @@ impl App {
         Task::perform(
             async move {
                 let model = cfg.model.clone();
-                ai.complete(
-                    cfg,
+                ai.complete_typed(
+                    cfg.clone(),
                     crate::app::usage::KEY_TEST,
                     "Reply with the single word OK.",
                     "OK?".into(),
@@ -90,6 +90,7 @@ impl App {
                 )
                 .await
                 .map(|_| model)
+                .map_err(|e| connection_failure(&e, &cfg))
             },
             move |result| Message::Settings(SettingsMsg::ConnectionTested { number, result }),
         )
@@ -708,6 +709,56 @@ impl App {
             SettingsMsg::Saved => self.on_settings_saved(),
         }
     }
+}
+
+/// What Test connection says of a call that failed: what went wrong and
+/// what to check, in plain words. It said the connection's own words —
+/// "request failed: Connection refused (os error 111)" — which named
+/// neither the address it could not reach nor the field that holds it.
+fn connection_failure(err: &crate::app::rpc::CallError, cfg: &llm::Config) -> String {
+    use crate::app::tasks::{ExplainFailure, Rejection};
+    match ExplainFailure::of_call(err, &cfg.model) {
+        ExplainFailure::Network(_) => tr!(
+            "Couldn't reach {host}. Check the base URL and your network.",
+            host = host_of(&cfg.base_url)
+        ),
+        ExplainFailure::Rejected {
+            what: Rejection::Key,
+            ..
+        } => tr!("The provider rejected the API key. Check it, or paste a new one.").to_string(),
+        ExplainFailure::Rejected {
+            what: Rejection::Model(model),
+            ..
+        } => tr!(
+            "The provider has no model “{model}” at this address. Check the model's name.",
+            model = model
+        ),
+        ExplainFailure::Rejected {
+            what: Rejection::Endpoint,
+            ..
+        } => tr!("Nothing answers at this base URL. Check it.").to_string(),
+        ExplainFailure::Unavailable(_) => {
+            tr!("The provider is busy or down right now. Try again in a minute.").to_string()
+        }
+        other => {
+            let said = other.describe();
+            let mut chars = said.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}.", first.to_uppercase(), chars.as_str()),
+                None => said,
+            }
+        }
+    }
+}
+
+/// The host and port a base URL names: what a connection that could not
+/// be made was made to.
+fn host_of(base_url: &str) -> &str {
+    let rest = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if host.is_empty() { base_url } else { host }
 }
 
 /// The Settings page's scroll back at its top.

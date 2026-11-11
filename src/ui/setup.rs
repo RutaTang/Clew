@@ -143,7 +143,8 @@ pub(crate) fn setup_sheet<'a>(
                   toggle: Option<fn(bool) -> Message>,
                   detail: String,
                   lines: f32,
-                  more: Option<String>|
+                  more: Option<String>,
+                  ai: bool|
      -> Element<'a, Message> {
         let tick = checkbox(on)
             .style(theme::check)
@@ -157,9 +158,23 @@ pub(crate) fn setup_sheet<'a>(
         let col = column![
             // A tick is pressed by its jump code and the keyboard's ring as
             // by a click.
-            match toggle {
-                Some(toggle) => super::jump::mark(tick.on_toggle(toggle), toggle(!on)),
-                None => tick.into(),
+            {
+                let tick: Element<'a, Message> = match toggle {
+                    Some(toggle) => super::jump::mark(tick.on_toggle(toggle), toggle(!on)),
+                    None => tick.into(),
+                };
+                // What spends AI calls is marked so, as everywhere else.
+                if ai {
+                    row![
+                        tick,
+                        crate::glyph::icon(crate::glyph::Glyph::Sparkle, theme::accent(), 13.0),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Center)
+                    .into()
+                } else {
+                    tick
+                }
             },
             container(row![
                 // The room the line keeps, whatever it says for now: a pixel
@@ -208,6 +223,7 @@ pub(crate) fn setup_sheet<'a>(
                     detail,
                     2.0,
                     None,
+                    false,
                 ));
             }
             let can_explain =
@@ -221,6 +237,7 @@ pub(crate) fn setup_sheet<'a>(
                 explain_says,
                 1.0,
                 Some(explain_also),
+                true,
             ));
             // No key: where one is added, a click away — the line said
             // "in Settings" and left the reader to find it.

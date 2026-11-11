@@ -301,6 +301,12 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 theme::danger()
             },
         ),
+        // Stopped with Stop: said so, Run and Debug alike — "finished" said
+        // the program ran to its end beside "Stopped before the program
+        // printed anything", and Debug said "terminated" of the same act.
+        (DebugStatus::Terminated, None) if app.debug.stopped_by_reader => {
+            (tr!("stopped by you").to_string(), theme::dim())
+        }
         (DebugStatus::Terminated, None) if plain => (tr!("finished").to_string(), theme::dim()),
         (DebugStatus::Terminated, None) => (tr!("terminated").to_string(), theme::dim()),
     };
@@ -672,7 +678,8 @@ pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
         .session
         .as_ref()
         .is_none_or(|s| s.status == crate::DebugStatus::Terminated);
-    if app.debug.hover_safe || ended {
+    // A plain run has no debugger to ask: nothing is evaluated.
+    if app.debug.hover_safe || ended || app.debug.no_debug {
         return space().into();
     }
     super::tip::tip(
@@ -912,9 +919,11 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                                 || strip_backticks(&q),
                                 Message::Ask(AskMsg::Suggested(q.clone())),
                             )),
-                        tr!("Ask this, with AI"),
+                        // Above it: under it, the tip covered the chips
+                        // that wrapped beneath, the other choices.
+                        tr!("Ask this with AI (one answer)"),
                         None,
-                        iced::widget::tooltip::Position::Bottom,
+                        iced::widget::tooltip::Position::Top,
                     )
                 })
                 .collect();
@@ -2883,10 +2892,9 @@ fn push_var_rows<'a>(
         const SHOWN: usize = 24;
         out.push(if v.value.chars().count() > SHOWN {
             let whole: String = v.value.chars().take(600).collect();
-            super::toolbar::tip_at(
+            super::toolbar::tip_wrapped(
                 row,
                 format!("{} = {}", v.name, whole),
-                None,
                 iced::widget::tooltip::Position::Top,
             )
         } else {

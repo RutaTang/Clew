@@ -312,11 +312,28 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned());
         self.debug.pending_reason.clear();
+        // What runs, named — and, when it is not the file being read, that
+        // it was picked for it: Run on pricing.py ran main.py, and said
+        // only "Starting the program — Python (debugpy)…", naming a
+        // debugger for a run without one.
+        let program_name = program
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let reading = self
+            .active_viewer()
+            .filter(|v| v.abs != program)
+            .and_then(|v| v.abs.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
         self.status = match lang {
-            Some(lang) if no_debug => tr!(
-                "Starting the program — {adapter}…",
-                adapter = crate::i18n::lookup(lang.label())
-            ),
+            Some(_) if no_debug => match reading {
+                Some(reading) => tr!(
+                    "Running {program} ({file} does not run on its own)…",
+                    program = program_name,
+                    file = reading
+                ),
+                None => tr!("Running {file}…", file = program_name),
+            },
             Some(lang) => tr!(
                 "Starting debugger — {adapter}…",
                 adapter = crate::i18n::lookup(lang.label())

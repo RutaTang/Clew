@@ -1019,6 +1019,19 @@ impl App {
             .find_map(|s| (s.line == line1 && names_trail_stops(&s.kind)).then(|| s.name.clone()))
     }
 
+    /// The innermost function or method around `(file, line1)`, where the
+    /// file is open and its outline says how far each runs: what a stop
+    /// recorded by its line, not at a definition, was inside.
+    pub(crate) fn function_around(&self, file: &Path, line1: usize) -> Option<String> {
+        let v = self.proj.panes.iter().flatten().find(|v| v.abs == file)?;
+        v.symbols
+            .iter()
+            .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+            .filter(|s| s.line <= line1 && line1 <= s.end_line)
+            .min_by_key(|s| s.end_line.saturating_sub(s.line))
+            .map(|s| s.name.clone())
+    }
+
     /// Whether `(file, name)` is a test function, per the symbol index.
     pub fn is_test_symbol(&self, file: &Path, name: &str) -> bool {
         self.proj

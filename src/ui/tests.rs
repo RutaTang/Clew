@@ -14868,7 +14868,7 @@ fn the_status_bars_place_shows_it_opens_something() {
     let app = reader_app();
     let mut sim = sim_of(&app);
     let place = text_at(&mut sim, |t| t == "Local", 0).expect("the place");
-    let state = text_at(&mut sim, |t| t == "Up to date", 0).expect("the scan's state");
+    let state = text_at(&mut sim, |t| t == "Indexed", 0).expect("the scan's state");
     let opens = |at: Point| {
         let mut sim = sim_of(&app);
         sim.point_at(at);
@@ -14904,7 +14904,7 @@ fn the_status_bar_names_the_branch_checked_out() {
     app.proj.head = Some(HeadName::Branch("main".into()));
     {
         let mut sim = sim_of(&app);
-        let state = text_at(&mut sim, |t| t == "Up to date", 0).expect("the scan's state");
+        let state = text_at(&mut sim, |t| t == "Indexed", 0).expect("the scan's state");
         let branch = text_at(&mut sim, |t| t == "main", 0).expect("the branch");
         assert!(branch.x > state.x, "after the scan's state");
         assert!(
@@ -17027,4 +17027,36 @@ fn a_folder_marks_only_the_changes_the_tree_shows() {
     assert!(!tree_holds(&shop, "gone.py"), "deleted: not in the tree");
     assert!(tree_holds(&shop, "node_modules/pkg/index.js"), "tracked");
     assert!(!tree_holds(&shop, "node_modules/pkg/other.js"));
+}
+
+/// A walkthrough that failed keeps its row, saying why, with Try again; a
+/// function's own Explain that failed says why on its note, and the
+/// explaining chip names the function a single Explain is for, not the
+/// project's count ("Explaining 0/45" beside "one AI call").
+#[test]
+fn ai_failures_are_said_where_the_action_was_taken() {
+    let mut app = reader_app();
+    app.proj.walk.failed = Some((
+        "checkout".into(),
+        "request failed: Connection refused".into(),
+    ));
+    {
+        let mut sim = sim_elem(super::sidebar::walk_library(&app));
+        assert!(
+            shows(&mut sim, "Connection refused"),
+            "the failed row is gone"
+        );
+        assert!(shows(&mut sim, "Try again"));
+    }
+
+    let node = crate::explain::Node::Function {
+        file: std::path::PathBuf::from("/p/src/lib.rs"),
+        name: "helper".into(),
+        ordinal: 0,
+    };
+    app.proj.explain.running = true;
+    app.proj.explain.progress = Some((0, 45));
+    app.proj.explain.pass_target = Some(node);
+    let (said, _) = super::statusbar::explain_label_for_tests(&app).unwrap();
+    assert_eq!(said, "Explaining helper()…");
 }

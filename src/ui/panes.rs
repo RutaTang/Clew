@@ -251,7 +251,10 @@ pub(crate) fn time_travel_code<'a>(
     hv: &'a Viewer,
 ) -> Element<'a, Message> {
     let lh = app.line_height();
-    let row0 = (tt.scroll_y / lh) as usize;
+    // The top row as shown: no further down than the view can scroll (a
+    // jump's offset past it is drawn at the most), or the sticky band named
+    // a function well below the top line in view.
+    let row0 = (tt.scroll_y.min(hv.most_scroll(lh)).max(0.0) / lh) as usize;
     let sticky = hv.sticky_at_row(row0);
     // Read-only, but clicking still places a caret and dragging selects (for
     // reading / copying). Right-click has no menu in a historical view.
@@ -1217,6 +1220,18 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
             .height(Fill),
         reader_scroll_report(app, pane, &v.abs),
     );
+    // Its height, as it is shown and whenever it changes: the scroll says
+    // nothing while the code fits, and a view grown until it did kept the
+    // scroll that showed its last lines, over an empty view.
+    let measure = move |size: iced::Size| {
+        Message::Editor(EditorMsg::ViewMeasured {
+            pane,
+            height: size.height,
+        })
+    };
+    let scroller = iced::widget::sensor(scroller)
+        .on_show(measure)
+        .on_resize(measure);
 
     // File TL;DR banner: a one-line "what is this file" from the explain cache,
     // pinned above the code. Dismissable (toggle back via the More menu). Its
@@ -2009,24 +2024,67 @@ fn active_note<'a>(
         && node
             .as_ref()
             .is_some_and(|n| !app.proj.explain.cache.contains_key(n));
+    // Being explained on its own: said where Explain was pressed, which
+    // went away and left the card saying "Not explained yet." as before.
+    let explaining = app.proj.explain.running
+        && node.is_some()
+        && app.proj.explain.pass_target.as_ref() == node.as_ref();
+    // Its own Explain failed: why, on the card, and a way to try again.
+    let failed = node
+        .as_ref()
+        .filter(|n| !app.proj.explain.cache.contains_key(*n))
+        .and_then(|n| {
+            app.proj
+                .explain
+                .node_failed
+                .as_ref()
+                .filter(|(of, _)| of == n)
+        })
+        .map(|(_, why)| why.as_str());
     let mut actions = row![].spacing(2).align_y(iced::Center);
     // This function or file, in one call — the card offered only the whole
     // project's Explain All, about 45 calls asked of a reader who wanted
     // one note.
     if unexplained && let Some(node) = node {
         // Marked as what spends an AI call is: the sparkle, and a tip.
+        let (label, tip) = if failed.is_some() {
+            (
+                tr!("Try again"),
+                tr!("Explain this again with AI (one AI call)"),
+            )
+        } else {
+            (tr!("Explain"), tr!("Explain this with AI (one AI call)"))
+        };
         actions = actions.push(chrome_tip(
             action(
                 Glyph::Sparkle,
-                tr!("Explain").into(),
+                label.into(),
                 true,
                 None,
                 true,
                 Message::Explain(ExplainMsg::Explain(node)),
             ),
-            tr!("Explain this with AI (one AI call)"),
+            tip,
             None,
         ));
+    } else if explaining {
+        actions = actions.push(
+            container(
+                row![
+                    glyph::icon(Glyph::Sparkle, theme::dim(), 13.0),
+                    text(tr!("Explaining…"))
+                        .size(NOTE_ACTION_SIZE)
+                        .font(font(false))
+                        .color(theme::dim())
+                        .wrapping(Wrapping::None),
+                ]
+                .spacing(6)
+                .height(Fill)
+                .align_y(iced::Center),
+            )
+            .height(NOTE_ACTION_H)
+            .padding([0.0, NOTE_ACTION_PAD_X]),
+        );
     }
     // A function's calls: a file's card had the way in too, to a margin
     // tab that follows the function the caret is in and said only "Move
@@ -2078,17 +2136,20 @@ fn active_note<'a>(
                 file = app.active_viewer().map_or("", |v| v.rel.as_str())
             ))),
         ));
-    let said = scrollable(
-        Column::with_children(super::explain_view::render_note(
-            app,
-            &app.proj.explain.prepared,
-        ))
-        .spacing(6)
-        .width(Fill),
-    )
-    .direction(thin_scroll())
-    .style(theme::overlay_scrollbar)
-    .height(Fill);
+    let mut note = super::explain_view::render_note(app, &app.proj.explain.prepared);
+    if let Some(why) = failed {
+        note.push(
+            text(tr!("Couldn't explain it: {reason}", reason = why))
+                .size(ts::SMALL)
+                .color(theme::danger())
+                .wrapping(Wrapping::WordOrGlyph)
+                .into(),
+        );
+    }
+    let said = scrollable(Column::with_children(note).spacing(6).width(Fill))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Fill);
     // The actions run on to a second line when the card is too narrow for
     // them on one. Their icons line up with the text above: the buttons
     // reach out into the card's padding by their own.

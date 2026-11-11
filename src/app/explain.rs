@@ -77,6 +77,10 @@ impl App {
         self.proj.explain.pass_sources = reported.clone();
         self.proj.explain.pass_automatic = matches!(kind, PassKind::Automatic);
         self.proj.explain.pass_target = None;
+        // Asked for again: what the last attempt said is not the news.
+        if !matches!(kind, PassKind::Automatic) {
+            self.proj.explain.node_failed = None;
+        }
         let reuse = match kind {
             PassKind::Explicit => explain::Reuse::SamePrompt,
             PassKind::Automatic => explain::Reuse::ChangedSources(reported),
@@ -467,6 +471,26 @@ impl App {
         // that kept or left summaries says which, and names the files it
         // could not read or can no longer explain.
         let n = self.proj.explain.cache.len();
+        // A node asked for on its own and still without a note: why, on
+        // its card, until it is asked for again.
+        if let Some(target) = reexplained
+            .as_ref()
+            .filter(|t| !self.proj.explain.cache.contains_key(*t))
+        {
+            let why = match &failures.stopped {
+                Some(stopped) => Some(stopped.describe()),
+                None if failures.failed > 0 => Some(
+                    failures
+                        .calls
+                        .iter()
+                        .map(|f| f.describe())
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
+                None => None,
+            };
+            self.proj.explain.node_failed = why.map(|why| (target.clone(), why));
+        }
         let mut status = if let Some(stopped) = &failures.stopped {
             tr!("Explain stopped: {reason}", reason = stopped.describe())
         } else if let Some(target) = reexplained.as_ref().filter(|_| failures.failed == 0) {
@@ -487,11 +511,16 @@ impl App {
                 ),
             }
         } else {
-            let mut status = trn!(
-                "Explained 1 function, file or folder",
-                "Explained {n} functions, files and folders",
-                n
-            );
+            // Nothing to name as explained: not "Explained 0 functions".
+            let mut status = if n == 0 {
+                tr!("Nothing explained").to_string()
+            } else {
+                trn!(
+                    "Explained 1 function, file or folder",
+                    "Explained {n} functions, files and folders",
+                    n
+                )
+            };
             // Each clause after a "; " says one thing whole.
             if failures.failed > 0 {
                 let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
@@ -566,7 +595,23 @@ impl App {
         if completed && let Some(note) = self.dropped_note(&tally.dropped) {
             status.push_str(&format!("; {note}"));
         }
-        self.status = status;
+        // A pass that fell short stands on the status line until it is
+        // read, with a way to try it again: the same pass, asked for again.
+        if failures.stopped.is_some() || failures.failed > 0 {
+            // A re-explain is asked for again from its note, which may no
+            // longer be the one shown: no way back to it from here.
+            let retry = match &reexplained {
+                Some(node) if self.proj.explain.pass_target_new => {
+                    Some(ExplainMsg::Explain(node.clone()))
+                }
+                Some(_) => None,
+                None if automatic => Some(ExplainMsg::Refresh),
+                None => Some(ExplainMsg::Project),
+            };
+            self.say_failure(status, retry.map(Message::Explain));
+        } else {
+            self.status = status;
+        }
 
         // Propagate the refreshed summaries to the downstream artifacts already in
         // use, each guarded so an unchanged input stays cheap. These run in the

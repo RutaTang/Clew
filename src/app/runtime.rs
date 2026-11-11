@@ -201,6 +201,7 @@ impl App {
             status_seen: tr!("Open a folder to start reading").to_string(),
             status_since: None,
             waiting_said: None,
+            failure_notice: None,
             main_window: None,
             tutorial: None,
             tutorial_layout: None,
@@ -224,6 +225,7 @@ impl App {
             sidebar_width: 254.0,
             right_width: 272.0,
             bottom_height: 340.0,
+            bottom_sized: false,
             font_size: DEFAULT_FONT_SIZE,
             #[cfg(test)]
             stale_dropped: 0,
@@ -356,6 +358,19 @@ impl App {
         self.sidebar_width = self.sidebar_width.clamp(160.0, (w * 0.5).max(200.0));
         self.right_width = self.right_width.clamp(240.0, (w * 0.6).max(280.0));
         self.bottom_height = self.bottom_height.clamp(100.0, (h * 0.75).max(160.0));
+    }
+
+    /// The bottom panel's height as laid out: the reader's, once they set
+    /// it; till then no more than about a third of the window — at 700
+    /// high, its 340 took over half the editor, and 6 lines of code showed
+    /// over a run.
+    pub(crate) fn bottom_shown_height(&self) -> f32 {
+        if self.bottom_sized {
+            self.bottom_height
+        } else {
+            self.bottom_height
+                .min((self.window_height * BOTTOM_SHARE).max(BOTTOM_LEAST))
+        }
     }
 
     /// The code's line height: airy, as the design sets code — 24 for the
@@ -507,6 +522,14 @@ impl App {
     /// time it began to (see `status_since`).
     pub(crate) fn note_status(&mut self) {
         if self.status != self.status_seen {
+            // Something else said: the failure it stood for is said no more.
+            if self
+                .failure_notice
+                .as_ref()
+                .is_some_and(|f| f.said != self.status)
+            {
+                self.failure_notice = None;
+            }
             self.status_seen.clone_from(&self.status);
             self.status_since = (!self.status.is_empty()).then(std::time::Instant::now);
         }
@@ -522,8 +545,24 @@ impl App {
             || self.waiting_said.is_some()
             || self.says_not_saved()
             || self.handshake_failure.as_deref() == Some(self.status.as_str())
+            || self.failure_shown().is_some()
             || calls.refine_wait.is_some()
             || calls.refine_full_wait.is_some()
+    }
+
+    /// Say that an AI action failed: on the status line, standing until it
+    /// is dismissed or something else is said, with `retry` to try it again
+    /// (`App::failure_notice`).
+    pub(crate) fn say_failure(&mut self, said: String, retry: Option<Message>) {
+        self.status = said.clone();
+        self.failure_notice = Some(crate::app::state::FailureNotice { said, retry });
+    }
+
+    /// The failure the status line says now, if it says one.
+    pub(crate) fn failure_shown(&self) -> Option<&crate::app::state::FailureNotice> {
+        self.failure_notice
+            .as_ref()
+            .filter(|f| !f.said.is_empty() && f.said == self.status)
     }
 
     /// Whether the status line says a notice that will be taken away.
@@ -679,6 +718,13 @@ impl App {
                 self.controls_hovered = over;
                 Task::none()
             }
+            WindowMsg::DismissFailure => {
+                if self.failure_shown().is_some() {
+                    self.status.clear();
+                }
+                self.failure_notice = None;
+                Task::none()
+            }
             // Closing is the shell's (`Shell::CloseRequested`): it asks about
             // edits the window cannot send before it lets the window go, and
             // it tears the window down. It takes this message before it
@@ -757,6 +803,7 @@ impl App {
             }
             WindowMsg::ResizeBottom(y) => {
                 self.bottom_height = self.window_height - y;
+                self.bottom_sized = true;
                 self.clamp_panel_sizes();
                 Task::none()
             }
@@ -983,6 +1030,11 @@ impl App {
 /// minimap or blame turned on is there next launch (they were this
 /// session's only, unlike the theme).
 /// How long a notice stays on the status line: long enough to be read.
+/// The share of the window's height the bottom panel takes until the
+/// reader sizes it, and the least it is then.
+const BOTTOM_SHARE: f32 = 0.36;
+const BOTTOM_LEAST: f32 = 200.0;
+
 pub(crate) const STATUS_LIFETIME: std::time::Duration = std::time::Duration::from_secs(12);
 /// How often a notice on the status line is looked at to see whether its
 /// time is up.

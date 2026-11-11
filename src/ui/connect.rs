@@ -92,11 +92,16 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     );
     // What it costs, said where the pointer rests: it is an AI call, as
     // the Usage page then lists it.
-    let test = form::item(
+    let failed = matches!(
+        app.settings.connection_test,
+        crate::app::state::ConnectionTest::Failed(_)
+    );
+    let test = form::item_saying(
         tr!("Connection"),
         tested,
+        failed,
         super::toolbar::tip_at(
-            form::action(
+            form::ai_action(
                 tr!("Test connection"),
                 (!testing).then_some(Message::Settings(SettingsMsg::TestConnection)),
             ),

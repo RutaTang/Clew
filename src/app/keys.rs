@@ -526,7 +526,10 @@ impl App {
         // the single-key reading motions and text input below stay untouched.
         if (cmd || modifiers.alt() || modifiers.control())
             && let Some(chord) = keymap::Chord::from_event(&key, modifiers)
-            && let Some(action) = self.keymap.action_for(&chord)
+            && let Some(action) = self
+                .keymap
+                .action_for(&chord)
+                .or_else(|| keymap::alias_for(&chord))
             && let Some(task) = self.run_command_action(action)
         {
             return task;

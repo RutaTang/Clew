@@ -131,8 +131,20 @@ pub(crate) fn item<'a>(
     about: Option<String>,
     control: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
+    item_saying(name, about, false, control)
+}
+
+/// [`item`] whose `about` says what went wrong (`wrong`): in the danger
+/// colour, as [`field_wrong`] says it — a failure said in the grey of a
+/// hint read as one.
+pub(crate) fn item_saying<'a>(
+    name: impl Into<String>,
+    about: Option<String>,
+    wrong: bool,
+    control: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
     row![
-        container(label(name.into(), about)).width(Fill),
+        container(label_saying(name.into(), about, wrong)).width(Fill),
         control.into(),
     ]
     .spacing(16)
@@ -357,6 +369,16 @@ pub(crate) fn toggle<'a>(
 pub(crate) fn action<'a>(label: &str, msg: Option<Message>) -> Press<'a> {
     let msg = msg.map(|m| super::heard::said(label, m));
     button(text(label.to_string()).size(ts::BODY))
+        .style(theme::secondary_button)
+        .padding([5, 12])
+        .on_press_maybe(msg)
+}
+
+/// [`action`] that spends an AI call: marked with the sparkle, as every
+/// such control is.
+pub(crate) fn ai_action<'a>(label: &str, msg: Option<Message>) -> Press<'a> {
+    let msg = msg.map(|m| super::heard::said(label, m));
+    button(super::toolbar::ai_words(label, ts::BODY, theme::fg()))
         .style(theme::secondary_button)
         .padding([5, 12])
         .on_press_maybe(msg)

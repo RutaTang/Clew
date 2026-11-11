@@ -61,7 +61,7 @@ fn sync_state(app: &App) -> Option<&'static str> {
     } else if app.proj.indexing {
         tr!("Indexing…")
     } else {
-        tr!("Up to date")
+        tr!("Indexed")
     })
 }
 
@@ -233,12 +233,12 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             let slot = super::steady::slot(
                 status_text(state),
                 state,
-                &[tr!("Scanning…"), tr!("Indexing…"), tr!("Up to date")],
+                &[tr!("Scanning…"), tr!("Indexing…"), tr!("Indexed")],
                 ts::SMALL,
             );
             // What is up to date: the Updates page's "Clew is up to date"
             // is of the app, this of the project's files.
-            if state == tr!("Up to date") {
+            if state == tr!("Indexed") {
                 super::tip::tip(
                     slot,
                     container(
@@ -629,17 +629,27 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         })
     };
     let left = room - used;
+    // A failure stands, in the danger colour, with what to do about it.
+    let failure = app.failure_shown().map(failure_controls);
     if let Some(said) = said
         && left >= SAID_MIN_W / 2.0
     {
-        let shown = super::steady::cut(&said, left, ts::SMALL, font);
-        let line = status_text(shown.clone()).wrapping(iced::widget::text::Wrapping::None);
+        let controls_w = failure.as_ref().map_or(0.0, |(_, w)| *w + STATUS_GAP);
+        let words = (left - controls_w).max(SAID_MIN_W / 2.0);
+        let shown = super::steady::cut(&said, words, ts::SMALL, font);
+        let mut line = status_text(shown.clone()).wrapping(iced::widget::text::Wrapping::None);
+        if failure.is_some() {
+            line = line.color(theme::danger());
+        }
         row = row.push(if shown == said {
             line.into()
         } else {
             // Cut short: said whole where the pointer rests.
             super::toolbar::tip_at(line, said, None, tooltip::Position::Top)
         });
+        if let Some((controls, _)) = failure {
+            row = row.push(controls);
+        }
     }
     container(row)
         .width(Fill)
@@ -647,6 +657,54 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         .align_y(iced::Center)
         .clip(true)
         .into()
+}
+
+/// What a failure on the status line offers (`App::failure_notice`): try
+/// it again, where it can be; the settings it may be about; and a way to
+/// take it off the line. With their width.
+fn failure_controls(failure: &crate::app::state::FailureNotice) -> (Element<'_, Message>, f32) {
+    let font = crate::fonts::UI_MEDIUM;
+    let link = |label: &str, msg: Message| {
+        button(
+            text(label.to_string())
+                .size(ts::SMALL)
+                .font(font)
+                .color(theme::accent())
+                .wrapping(iced::widget::text::Wrapping::None),
+        )
+        .style(theme::icon_button(false))
+        .padding([1, 6])
+        .on_press(super::heard::said(label, msg))
+    };
+    let link_w = |label: &str| super::steady::width_of(label, ts::SMALL, font) + 12.0;
+    let mut row = row![].spacing(2).align_y(iced::Center);
+    let mut width = 0.0;
+    if let Some(retry) = &failure.retry {
+        row = row.push(link(tr!("Try again"), retry.clone()));
+        width += link_w(tr!("Try again")) + 2.0;
+    }
+    row = row.push(link(
+        tr!("Settings"),
+        Message::Settings(SettingsMsg::OpenAt(
+            crate::app::state::SettingsPage::LanguageModel,
+        )),
+    ));
+    width += link_w(tr!("Settings")) + 2.0;
+    let dismiss = button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
+        .style(theme::icon_button(false))
+        .padding([1, 4])
+        .on_press(super::heard::said(
+            tr!("Dismiss"),
+            Message::Window(WindowMsg::DismissFailure),
+        ));
+    row = row.push(super::toolbar::tip_at(
+        dismiss,
+        tr!("Dismiss"),
+        None,
+        tooltip::Position::Top,
+    ));
+    width += 11.0 + 8.0;
+    (row.into(), width)
 }
 
 /// What the setting-up chip says, and whether it is a button: setting up,
@@ -737,6 +795,13 @@ fn explain_label(app: &App) -> Option<(String, String)> {
     if !app.proj.explain.running {
         return None;
     }
+    // One function or file asked for: named, not counted against the
+    // whole project — "Explaining 0/45" beside an Explain that said "one
+    // AI call" read as 45 paid calls started.
+    if let Some(node) = &app.proj.explain.pass_target {
+        let said = tr!("Explaining {name}…", name = node_name(node));
+        return Some((said.clone(), said));
+    }
     Some(match app.proj.explain.progress {
         Some((done, total)) if total > 0 => {
             let at = |done| tr!("Explaining {done}/{total}", done = done, total = total);
@@ -756,11 +821,35 @@ fn explain_label(app: &App) -> Option<(String, String)> {
     })
 }
 
+#[cfg(test)]
+pub(crate) fn explain_label_for_tests(app: &App) -> Option<(String, String)> {
+    explain_label(app)
+}
+
+/// A node as the explaining chip names it: a function with its brackets,
+/// a file or folder by its own name.
+fn node_name(node: &crate::explain::Node) -> String {
+    use crate::explain::Node;
+    match node {
+        Node::Function { name, .. } => format!("{name}()"),
+        Node::File(path) | Node::Folder(path) => path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        ),
+    }
+}
+
 /// The explaining chip, `short` (its counter alone, no word, no bar) or
 /// whole, and its width.
 fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
     let (whole, widest_whole) = explain_label(app)?;
-    let (label, widest) = match app.proj.explain.progress {
+    // One node's pass has no count to show: its progress is the project's.
+    let progress = app
+        .proj
+        .explain
+        .progress
+        .filter(|_| app.proj.explain.pass_target.is_none());
+    let (label, widest) = match progress {
         Some((done, total)) if short && total > 0 => {
             (format!("{done}/{total}"), format!("{total}/{total}"))
         }
@@ -790,7 +879,7 @@ fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
     let mut chip = row![sparkle, counter].spacing(5).align_y(iced::Center);
     // A short determinate bar once the total is known, so progress reads at
     // a glance instead of by parsing the counter.
-    if let Some((done, total)) = app.proj.explain.progress
+    if let Some((done, total)) = progress
         && total > 0
         && !short
     {
@@ -805,7 +894,7 @@ fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
     }
     // A cancel control right on the always-visible chip, so a long pass can
     // be stopped without hunting through menus.
-    chip = chip.push(
+    chip = chip.push(super::toolbar::tip_at(
         button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
             .style(theme::icon_button(false))
             .padding([1, 4])
@@ -813,7 +902,10 @@ fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
                 tr!("Stop explaining"),
                 Message::Explain(ExplainMsg::Cancel),
             )),
-    );
+        tr!("Stop explaining (what is explained so far is kept)"),
+        None,
+        tooltip::Position::Top,
+    ));
     let chip: Element<'_, Message> = if short {
         super::toolbar::tip_at(chip, whole, None, tooltip::Position::Top)
     } else {

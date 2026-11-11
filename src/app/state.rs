@@ -634,6 +634,10 @@ pub struct WalkState {
     /// True while a walkthrough generation is on its one automatic retry (the LLM
     /// occasionally emits malformed JSON); prevents an endless retry loop.
     pub retried: bool,
+    /// The scope whose generation failed last, and why: kept in the list
+    /// where it was asked for, with a way to try again, until it is asked
+    /// for again. The row said "Generating…" and then was simply gone.
+    pub failed: Option<(String, String)>,
     /// The current step's narration, prepared for rich display (markdown, plus
     /// mermaid diagrams and math rendered as inline SVGs — same pipeline as the
     /// overview and explanations).
@@ -779,6 +783,12 @@ pub struct ExplainState {
     /// That node had no explanation: the pass writes its first
     /// (`ExplainMsg::Explain`), said so when it is done.
     pub pass_target_new: bool,
+    /// The node a pass was asked to explain on its own, and why that pass
+    /// failed: said on its note, with a way to try again, until it is
+    /// explained or asked for again. Said only on the status line, a
+    /// failure was gone in seconds, and the card where Explain was pressed
+    /// still said "Not explained yet." as if it had never been.
+    pub node_failed: Option<(explain::Node, String)>,
     /// The functions whose blocks are being explained (`ExplainMsg::Blocks`)
     /// until the answer lands: asked again meanwhile, each click made one
     /// more paid call for the same answer.
@@ -819,6 +829,14 @@ pub struct ExplainState {
 }
 
 /// What the Language model page's Test connection found, for the fields as
+/// An AI action's failure, standing on the status line
+/// (`App::failure_notice`): what it says there, and what tries it again.
+#[derive(Debug, Clone)]
+pub struct FailureNotice {
+    pub said: String,
+    pub retry: Option<Message>,
+}
+
 /// they stood when it was asked.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum ConnectionTest {
@@ -1547,6 +1565,12 @@ pub struct App {
     /// and for an empty line.
     pub status_seen: String,
     pub status_since: Option<std::time::Instant>,
+    /// An AI action that failed, as the status line says it: it stands —
+    /// in the danger colour, with a way to try again and a way to the
+    /// settings — until it is dismissed or something else is said. A
+    /// failure that went with the other notices was missed by anyone who
+    /// looked away for ten seconds.
+    pub failure_notice: Option<FailureNotice>,
     /// What the status line said last, in the wait a close or a quit is in,
     /// of the window waiting for its host (`App::show_waiting`): said once,
     /// it is not said again over what the line says since, unless that is
@@ -1602,6 +1626,10 @@ pub struct App {
     pub sidebar_width: f32,
     pub right_width: f32,
     pub bottom_height: f32,
+    /// Whether the reader set the bottom panel's height (dragged its
+    /// divider): until then it takes no more than a share of a short
+    /// window ([`App::bottom_shown_height`]).
+    pub bottom_sized: bool,
     pub font_size: f32,
     /// How many asynchronous messages `dispatch` dropped at its one ownership
     /// check (see `Message::origin`). Test instrumentation: it is how a test

@@ -776,18 +776,32 @@ impl Viewer {
     }
 
     /// The view's height, `height`, as just measured: kept, and where the
-    /// view must scroll to now, if anywhere. Made taller (the window
-    /// enlarged, a panel shut) until the whole file fits, the file is
-    /// brought back to its start: one that fit began at line 9, with empty
-    /// space under its end. Only then — a long file the reader scrolled past
-    /// its end stays so, and a notebook's rendered cells are not its lines'
-    /// height.
+    /// view must scroll to now, if anywhere — no further than puts the last
+    /// line at the view's foot ([`Self::most_scroll`]):
+    ///
+    /// - made taller (the window enlarged, a panel shut) while the reader
+    ///   was not past the file's end: a file that then fit began at line 9,
+    ///   and a longer one at the foot of a short view kept its last lines
+    ///   at the top over an empty view;
+    /// - measured for the first time, where a jump scrolled before the view
+    ///   had a height to keep the last line at its foot by.
+    ///
+    /// A long file the reader scrolled past its end stays so, a view that
+    /// shrank moves nothing, and a notebook's rendered cells are not its
+    /// lines' height.
     pub fn measured(&mut self, height: f32, line_height: f32) -> Option<f32> {
-        let grew = self.bounds_h > 0.0 && height > self.bounds_h + 0.5;
+        let first = self.bounds_h <= 0.0;
+        let grew = !first && height > self.bounds_h + 0.5;
+        // Where the foot was before: the reader at or above it was not
+        // past the end.
+        let was_most = self.most_scroll(line_height);
         self.bounds_h = height;
-        let fits = self.notebook.is_none() && self.content_rows() as f32 * line_height <= height;
+        if self.notebook.is_some() {
+            return None;
+        }
         let most = self.most_scroll(line_height);
-        (grew && fits && self.scroll_y > most + 0.5).then(|| {
+        let moves = first || (grew && self.scroll_y <= was_most + 0.5);
+        (moves && self.scroll_y > most + 0.5).then(|| {
             self.scroll_y = most;
             most
         })
@@ -920,9 +934,12 @@ impl Viewer {
             }
             Motion::LineStart => col = 0,
             Motion::LineEnd => col = self.line_len(line),
+            // The file's very start, as Ctrl+Home goes in any editor: the
+            // column kept from where the caret was put it at column 23 of
+            // line 1.
             Motion::FileStart => {
                 line = 0;
-                col = col.min(self.line_len(line));
+                col = 0;
             }
             Motion::FileEnd => {
                 line = self.visible.last().copied().unwrap_or(last_line);
@@ -1504,8 +1521,8 @@ mod tests {
     }
 
     /// The view made taller until the file fits brings it back to its
-    /// start; a long file scrolled past its end, a view that shrank, a
-    /// first measure and a notebook are left where they are.
+    /// start; a long file scrolled past its end, a view that shrank and a
+    /// notebook are left where they are.
     #[test]
     fn a_view_grown_to_fit_the_file_shows_it_from_its_start() {
         let mut v = viewer_with_lines(28);
@@ -1522,6 +1539,28 @@ mod tests {
         long.scroll_y = 1999.0 * LH;
         assert_eq!(long.measured(25.0 * LH, LH), None);
         assert_eq!(long.scroll_y, 1999.0 * LH);
+    }
+
+    /// A longer file read at its foot, the view grown — a panel shut —
+    /// keeps its last line at the foot: its last lines stayed at the top
+    /// over an empty view. A jump made before the view was measured comes
+    /// down to the foot once it is.
+    #[test]
+    fn a_view_grown_at_the_files_foot_keeps_the_last_line_there() {
+        let mut v = viewer_with_lines(38);
+        v.measured(10.0 * LH, LH);
+        // At the foot: lines 29 to 38 in view.
+        v.scroll_y = 28.0 * LH;
+        assert_eq!(v.measured(22.0 * LH, LH), Some(16.0 * LH));
+        assert_eq!(v.scroll_y, 16.0 * LH);
+        // Above the foot and still above it: left where it is.
+        v.scroll_y = 4.0 * LH;
+        assert_eq!(v.measured(25.0 * LH, LH), None);
+        // A jump to line 34, the view not yet measured: the last line at
+        // its top, until it is.
+        let mut jumped = viewer_with_lines(38);
+        jumped.scroll_y = 33.0 * LH;
+        assert_eq!(jumped.measured(20.0 * LH, LH), Some(18.0 * LH));
     }
 
     #[test]

@@ -76,6 +76,22 @@ impl App {
         if hover_gen != self.proj.hover_gen || self.proj.hover_pinned {
             return Task::none(); // cursor moved on, or is inside the tooltip
         }
+        // Rested past the line's end, over nothing: no word is under the
+        // pointer, and none is peeked at — the hit there is the line's end,
+        // and the peek of its last word opened over the blank space beside
+        // it, covering the code below. What was peeked at goes once the
+        // pointer rests here, as when it leaves the code; until then it
+        // stays, for the pointer crossing blank space on its way into it.
+        let past_end = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .is_some_and(|v| col >= v.line_len(line));
+        if past_end {
+            self.proj.hover = None;
+            return Task::none();
+        }
         let stamp = self.stamp();
         self.proj.hover = Some(HoverState {
             line,

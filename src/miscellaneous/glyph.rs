@@ -200,7 +200,7 @@ fn body(g: Glyph) -> &'static str {
         // alone read as "align left").
         TextLines => {
             "<path d='M3 6h8'/><path d='M3 12h18'/><path d='M3 18h14'/>\
-             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z'/>"
+             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
         }
         // A plug: what a language server is to clew.
         Plug => {
@@ -232,8 +232,12 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M4 6.5 L9.5 4.5 L14.5 6.5 L20 4.5 V17.5 L14.5 19.5 L9.5 17.5 L4 19.5 Z'/>\
              <path d='M9.5 4.5 V17.5'/><path d='M14.5 6.5 V19.5'/>"
         }
+        // Filled, its points full width: drawn in outline, the four thin
+        // points closed up at 12 px into a dot, read as a list's bullet
+        // before "Why is this line here?" — the one sign that a control
+        // spends an AI call, not recognised as one.
         Sparkle => {
-            "<path d='M12 4 C12.6 10 14 11.4 20 12 C14 12.6 12.6 14 12 20 C11.4 14 10 12.6 4 12 C10 11.4 11.4 10 12 4 Z'/>"
+            "<path d='M12 2.5 C12.7 9.2 14.8 11.3 21.5 12 C14.8 12.7 12.7 14.8 12 21.5 C11.3 14.8 9.2 12.7 2.5 12 C9.2 11.3 11.3 9.2 12 2.5 Z' fill='STROKE' stroke-width='1.2'/>"
         }
         // A triangle with a mark in it: look here.
         WeakSpots => {
@@ -243,7 +247,7 @@ fn body(g: Glyph) -> &'static str {
         // Play, and the spark of what the AI writes (as on TextLines).
         FakeRun => {
             "<path d='M5 7 L14 13 L5 19 Z'/>\
-             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z'/>"
+             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
         }
         // Debug's own bug, and the spark — as Fake Run is Run's play and
         // the spark: each fake one its real twin, worked out by the AI.
@@ -256,7 +260,7 @@ fn body(g: Glyph) -> &'static str {
              <path d='M12 20v-9'/><path d='M6.53 9C4.6 8.8 3 7.1 3 5'/><path d='M6 13H2'/>\
              <path d='M3 21c0-2.1 1.7-3.9 3.8-4'/><path d='M20.97 5c0 2.1-1.6 3.8-3.5 4'/>\
              <path d='M22 13h-4'/><path d='M17.2 17c2.1.1 3.8 1.9 3.8 4'/></g>\
-             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z'/>"
+             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
         }
         Compass => "<circle cx='12' cy='12' r='8'/><path d='M12 6 L14.2 12 L12 18 L9.8 12 Z'/>",
         // Folded together: the bodies skimmed over.

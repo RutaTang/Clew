@@ -476,6 +476,14 @@ pub enum EditorMsg {
         info: Result<Option<Arc<git::GitInfo>>, String>,
     },
     Scrolled(usize, scrollable::Viewport),
+    /// The code view of `pane` is shown, or took a new height: measured by
+    /// itself, as the scroll reports it only while the code overflows —
+    /// grown until the code fit, the view was never told so, and kept a
+    /// scroll that left it empty under the last lines.
+    ViewMeasured {
+        pane: usize,
+        height: f32,
+    },
     PaneFocused(usize),
     ToggleSplit,
     SelectStart {
@@ -1216,6 +1224,12 @@ pub enum WalkMsg {
         /// answer being one a generation is retried once for.
         result: Result<walkthrough::Walkthrough, walkthrough::Failure>,
     },
+    /// The run's walkthrough was opened as recorded, without the AI's
+    /// narration, which failed (`why`): said, with a way to try again.
+    Unnarrated { stamp: Stamp, seq: u64, why: String },
+    /// Take the failed generation's row out of the list
+    /// (`WalkState::failed`).
+    ForgetFailure,
     /// Open the library tour with this scope for reading.
     Open(String),
     /// Return from a tour to the library list.
@@ -2264,6 +2278,9 @@ pub enum WindowMsg {
     FocusChanged(bool),
     /// The pointer entered or left the traffic-light cluster (shows the icons).
     ControlsHover(bool),
+    /// Take the failure the status line stands for off it
+    /// (`App::failure_notice`): read, and nothing more to do about it.
+    DismissFailure,
     /// Custom window controls (frameless window has no OS buttons).
     Close,
     Minimize,
@@ -2544,6 +2561,7 @@ impl EditorMsg {
             | EditorMsg::OpenAbs { .. }
             | EditorMsg::OpenHit { .. }
             | EditorMsg::Scrolled(..)
+            | EditorMsg::ViewMeasured { .. }
             | EditorMsg::PaneFocused(..)
             | EditorMsg::ToggleSplit
             | EditorMsg::SelectStart { .. }
@@ -2856,16 +2874,32 @@ impl FlowMsg {
 }
 
 impl WalkMsg {
+    /// What generates the tour of `scope` again: a change review re-runs
+    /// the diff, a run's tour narrates the last run, any other is generated
+    /// anew.
+    pub(crate) fn again(scope: &str) -> WalkMsg {
+        if scope.starts_with("@diff") {
+            WalkMsg::GenerateDiff
+        } else if scope.starts_with("@trace ") {
+            WalkMsg::GenerateTrace
+        } else {
+            WalkMsg::Generate(scope.to_string())
+        }
+    }
+
     /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
     /// new variant cannot compile until it is classified here.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            WalkMsg::Done { stamp, .. } => Some(Origin::Stamped(stamp)),
+            WalkMsg::Done { stamp, .. } | WalkMsg::Unnarrated { stamp, .. } => {
+                Some(Origin::Stamped(stamp))
+            }
             WalkMsg::Generate(..)
             | WalkMsg::GenerateDiff
             | WalkMsg::GenerateTrace
             | WalkMsg::Regenerate(..)
             | WalkMsg::Delete(..)
+            | WalkMsg::ForgetFailure
             | WalkMsg::Open(..)
             | WalkMsg::Back
             | WalkMsg::ToggleMode
@@ -3250,6 +3284,7 @@ impl WindowMsg {
             | WindowMsg::ResizeDragged(..)
             | WindowMsg::FocusChanged(..)
             | WindowMsg::ControlsHover(..)
+            | WindowMsg::DismissFailure
             | WindowMsg::Close
             | WindowMsg::Minimize
             | WindowMsg::ToggleFullscreen

@@ -326,6 +326,14 @@ impl Action {
     }
 }
 
+/// A chord other editors use for an action, taken as that action while no
+/// action of the keymap is bound to it: Ctrl+G is Go to Line in VS Code,
+/// JetBrains and Sublime, and did nothing here — and gave no sign — where
+/// Go to Line is ⌘L. Not on macOS, where ⌘G is Find Next.
+pub fn alias_for(chord: &Chord) -> Option<Action> {
+    (!MAC_KEYS && *chord == Chord::cmd('g')).then_some(Action::GotoLine)
+}
+
 /// Whether shortcuts are spelled the Mac's way (`⇧⌘P`) rather than in words
 /// (`Ctrl+Shift+P`, Windows and Linux).
 pub const MAC_KEYS: bool = cfg!(target_os = "macos");

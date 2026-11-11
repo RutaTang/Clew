@@ -2430,6 +2430,47 @@ fn was_rejected(model: &str, hash: incremental::Version) -> bool {
 /// ([`ExplainFailure::may_pass_later`]).
 type CallOutcome = Result<String, ExplainFailure>;
 
+/// Calls of a pass that got no answer, one after another: the connection
+/// to the provider failed, or the provider was unavailable, each after the
+/// attempts every request makes (`llm::send_with_retry`). With nothing
+/// answered yet, a few such calls in a row mean the provider cannot be
+/// reached — an endpoint that refuses connections, a network that is down
+/// — and every later call would fail as they did: a pass whose every call
+/// failed so ran each of them in turn, its bar filling for a minute of
+/// work that all failed. Once calls have been answered, only as many in a
+/// row as the pass makes at once stop it: the network lost mid-pass.
+#[derive(Debug, Default)]
+struct Unanswered {
+    in_a_row: usize,
+    answered: bool,
+}
+
+/// Unanswered calls in a row that stop a pass none of whose calls was
+/// answered (see [`Unanswered`]).
+const UNANSWERED_FIRST: usize = 3;
+
+impl Unanswered {
+    /// Note how a call ended: whether the pass stops for it.
+    fn note(&mut self, outcome: &CallOutcome) -> bool {
+        match outcome {
+            Ok(_) => {
+                self.answered = true;
+                self.in_a_row = 0;
+            }
+            Err(ExplainFailure::Network(_) | ExplainFailure::Unavailable(_)) => {
+                self.in_a_row += 1;
+            }
+            Err(_) => {}
+        }
+        let limit = if self.answered {
+            EXPLAIN_CONCURRENCY
+        } else {
+            UNANSWERED_FIRST
+        };
+        self.in_a_row >= limit
+    }
+}
+
 /// How long after a call failed in a way that may pass the pass sends it
 /// again (see [`explain_pass`]): time for a gateway that lost one answer,
 /// a connection that dropped or a provider that was busy to be past it —
@@ -2601,6 +2642,7 @@ where
     let total = pass.total();
     let pass = Arc::new(Mutex::new(pass));
     let mut failures = PassFailures::default();
+    let mut unanswered = Unanswered::default();
 
     // Show a determinate 0/total at once so the bar appears immediately, then
     // update as items land (see the throttle below).
@@ -2669,6 +2711,14 @@ where
             }))
             .buffer_unordered(EXPLAIN_CONCURRENCY);
             while let Some((job, outcome)) = calls.next().await {
+                // A provider that cannot be reached fails every call the
+                // same way: the pass stops, saying so, instead of making
+                // each of them fail in turn (`Unanswered`).
+                if unanswered.note(&outcome)
+                    && let Err(why) = &outcome
+                {
+                    failures.stopped.get_or_insert_with(|| why.clone());
+                }
                 // Settled counts reused and skipped groups too, so the bar
                 // reaches the total.
                 let (done, failed) = {
@@ -4206,6 +4256,72 @@ mod pass_tests {
             }
             assert_eq!(outcome.tally.retry.len(), files.len(), "{refusal:?}");
         }
+    }
+
+    /// A provider that cannot be reached — an endpoint that refuses
+    /// connections — stops the pass after a few calls, saying why: it ran
+    /// every call of the project in turn, its bar filling for a minute, to
+    /// say "0 explained; 42 failed" at the end. What it had is kept.
+    #[test]
+    fn a_provider_that_cannot_be_reached_stops_the_pass() {
+        let bodies: Vec<String> = (0..30).map(|i| format!("pub fn f{i}() {{}}\n")).collect();
+        let files: Vec<(String, &str)> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| (format!("src/f{i}.rs"), body.as_str()))
+            .collect();
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(rel, body)| (rel.as_str(), *body))
+            .collect();
+        for gone in [
+            llm::LlmError::Connect("Connection refused (os error 111)".into()),
+            status(503, None, "Service Unavailable"),
+        ] {
+            let failure = gone.clone();
+            let (outcome, calls) = pass_with(project(&files), explain::Cache::new(), "m-gone", {
+                move |_| Err(CallError::Llm(failure.clone()))
+            });
+            assert!(calls <= EXPLAIN_CONCURRENCY, "{calls} calls: {gone:?}");
+            assert!(
+                matches!(
+                    outcome.failures.stopped,
+                    Some(ExplainFailure::Network(_) | ExplainFailure::Unavailable(_))
+                ),
+                "{gone:?}: {:?}",
+                outcome.failures
+            );
+            assert!(outcome.written.is_empty(), "{:?}", outcome.written);
+        }
+    }
+
+    /// Once calls are answered, a few unanswered ones do not stop the
+    /// pass — a call lost now and then is sent again — but as many in a row
+    /// as the pass makes at once do: the network went away mid-pass.
+    #[test]
+    fn unanswered_calls_stop_a_pass_only_in_a_row() {
+        let lost = || Err(ExplainFailure::Network("connection reset".into()));
+        let mut fresh = Unanswered::default();
+        assert!(!fresh.note(&lost()));
+        assert!(!fresh.note(&Err(ExplainFailure::Unusable("no text".into()))));
+        assert!(!fresh.note(&lost()));
+        assert!(
+            fresh.note(&lost()),
+            "nothing answered: a few in a row stop it"
+        );
+        let mut going = Unanswered::default();
+        assert!(!going.note(&Ok("does a".into())));
+        for _ in 1..EXPLAIN_CONCURRENCY {
+            assert!(!going.note(&lost()));
+        }
+        assert!(
+            !going.note(&Ok("does b".into())),
+            "an answer starts the count again"
+        );
+        for _ in 1..EXPLAIN_CONCURRENCY {
+            assert!(!going.note(&lost()));
+        }
+        assert!(going.note(&lost()));
     }
 
     /// Bodies come off the syntax tree: a C prototype has none and is not an
