@@ -12499,7 +12499,7 @@ fn a_diff_tints_its_rows_across_the_pane() {
         PathBuf::from("/p/src/main.py"),
         "src/main.py".into(),
         vec![
-            line(DiffKind::Hunk, "@@ -1,1 +1,2 @@"),
+            line(DiffKind::Hunk, "@@ -4,1 +4,2 @@"),
             line(DiffKind::Context, " main()"),
             line(DiffKind::Add, "+# local change"),
         ],
@@ -16565,6 +16565,26 @@ fn an_untracked_files_diff_is_every_line_added() {
         .filter(|l| l.kind == crate::git::DiffKind::Add)
         .count();
     assert_eq!(added, total);
+    // Drawn as the file reads: indented lines keep their indent.
+    let source = app.active_viewer().unwrap().source.clone();
+    let drawn: Vec<&str> = diff
+        .runs
+        .iter()
+        .filter(|r| r.kind == crate::git::DiffKind::Add)
+        .flat_map(|r| r.text.lines())
+        .collect();
+    let want: Vec<String> = source
+        .lines()
+        .map(super::panes::diff_display_text)
+        .collect();
+    assert_eq!(drawn, want);
+    // Nothing is hidden before its first line, nor after its last.
+    assert!(
+        diff.runs
+            .iter()
+            .all(|r| r.kind != crate::git::DiffKind::Hunk)
+    );
+    assert!(!diff.hides_tail());
 }
 
 /// A search result longer than its row is cut with an ellipsis, each piece

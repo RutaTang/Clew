@@ -534,32 +534,33 @@ pub(crate) fn diff_view<'a>(
         // line: the same picture (runs stack with no gap) at a fraction of the
         // layout work on a long diff — prepared once, borrowed here.
         let mut rows: Vec<Element<'a, Message>> = Vec::new();
+        let code_text = |t: &'a str, color: iced::Color| {
+            text(t)
+                .font(crate::fonts::CODE)
+                .size(app.font_size)
+                .color(color)
+                .wrapping(Wrapping::None)
+        };
+        // Where a hunk is, lines hidden before it: a quiet line naming the
+        // place, not git's `@@ -12,7 +12,9 @@`.
+        let hidden = |said: &'a str| -> Element<'a, Message> {
+            container(code_text(said, theme::dim()))
+                .width(Length::Fixed(run_width))
+                .padding(Padding {
+                    top: 6.0,
+                    right: DIFF_PAD_RIGHT,
+                    bottom: 2.0,
+                    left: gutter_w + mark_w,
+                })
+                .style(|_: &iced::Theme| container::Style {
+                    background: Some(theme::with_alpha(theme::accent(), 0.06).into()),
+                    ..container::Style::default()
+                })
+                .into()
+        };
         for run in &d.runs {
-            let code_text = |t: &'a str, color: iced::Color| {
-                text(t)
-                    .font(crate::fonts::CODE)
-                    .size(app.font_size)
-                    .color(color)
-                    .wrapping(Wrapping::None)
-            };
-            // Where a hunk is: a quiet line naming the place, not git's
-            // `@@ -12,7 +12,9 @@`.
             if run.kind == DiffKind::Hunk {
-                rows.push(
-                    container(code_text(run.text.as_str(), theme::dim()))
-                        .width(Length::Fixed(run_width))
-                        .padding(Padding {
-                            top: 6.0,
-                            right: DIFF_PAD_RIGHT,
-                            bottom: 2.0,
-                            left: gutter_w + mark_w,
-                        })
-                        .style(|_: &iced::Theme| container::Style {
-                            background: Some(theme::with_alpha(theme::accent(), 0.06).into()),
-                            ..container::Style::default()
-                        })
-                        .into(),
-                );
+                rows.push(hidden(run.text.as_str()));
                 continue;
             }
             let (bg, mark_color) = match run.kind {
@@ -613,6 +614,11 @@ pub(crate) fn diff_view<'a>(
                 });
             }
             rows.push(cell.into());
+        }
+        // The file goes on after its last change: the lines after it were
+        // hidden with no mark, where a `⋯` stood over line 1 instead.
+        if d.hides_tail() && d.lines.len() <= MAX_DIFF_ROWS {
+            rows.push(hidden(crate::app::model::HIDDEN));
         }
         if d.lines.len() > MAX_DIFF_ROWS {
             rows.push(
@@ -2649,17 +2655,42 @@ mod tests {
             "{:?}",
             d.runs[3].spans
         );
-        // A hunk git names no place for.
+        // A hunk git names no place for: lines hidden before it.
         let bare = crate::DiffState::new(
             std::path::PathBuf::from("/p/a.txt"),
             "a.txt".into(),
             vec![
-                line(DiffKind::Hunk, "@@ -1 +1 @@"),
+                line(DiffKind::Hunk, "@@ -12 +12 @@"),
                 line(DiffKind::Add, "+x"),
             ],
         );
         assert_eq!(bare.runs[0].text, "⋯");
-        assert_eq!(bare.runs[1].gutter, "  1");
+        assert_eq!(bare.runs[1].gutter, "   12");
+        // One from the first line hides nothing before it, so says nothing:
+        // a `⋯` sat over line 1. Lines after its last change are hidden
+        // where the file goes on — and only then.
+        let top = || {
+            crate::DiffState::new(
+                std::path::PathBuf::from("/p/a.txt"),
+                "a.txt".into(),
+                vec![
+                    line(DiffKind::Hunk, "@@ -1,2 +1,3 @@"),
+                    line(DiffKind::Context, " a"),
+                    line(DiffKind::Add, "+b"),
+                    line(DiffKind::Context, " c"),
+                ],
+            )
+        };
+        assert_eq!(
+            top().runs[0].kind,
+            DiffKind::Context,
+            "{:?}",
+            top().runs[0].text
+        );
+        assert_eq!(top().last_new, 3);
+        assert!(!top().hides_tail(), "the file's length unknown");
+        assert!(!top().of_file("a\nb\nc\n").hides_tail());
+        assert!(top().of_file("a\nb\nc\nd\ne\n").hides_tail());
     }
 
     /// The advance is measured by the text engine, not assumed at 0.6 em —

@@ -1282,7 +1282,8 @@ impl App {
             if let Ok(lines) = result
                 && self.proj.diff.as_ref().is_some_and(|d| d.abs == abs)
             {
-                self.proj.diff = Some(DiffState::new(abs, rel, lines.unwrap_or_default()));
+                let d = DiffState::new(abs, rel, lines.unwrap_or_default());
+                self.proj.diff = Some(self.with_file_length(d));
             }
             return Task::none();
         }
@@ -1302,9 +1303,10 @@ impl App {
             // added, which it will be. It said only that there was none.
             Ok(None) => match self.active_viewer().filter(|v| v.abs == abs) {
                 Some(v) => {
-                    let lines = untracked_diff(&v.source);
+                    let source = std::sync::Arc::clone(&v.source);
+                    let lines = untracked_diff(&source);
                     self.status.clear();
-                    self.proj.diff = Some(DiffState::new(abs, rel, lines));
+                    self.proj.diff = Some(DiffState::new(abs, rel, lines).of_file(&source));
                 }
                 None => {
                     self.status = tr!("No diff for {file} — it is not tracked by git", file = rel);
@@ -1317,11 +1319,24 @@ impl App {
                     // No changes is said by the diff's own pane; the status
                     // line said it again under it.
                     self.status.clear();
-                    self.proj.diff = Some(DiffState::new(abs, rel, lines));
+                    let d = DiffState::new(abs, rel, lines);
+                    self.proj.diff = Some(self.with_file_length(d));
                 }
             }
         }
         Task::none()
+    }
+
+    /// `d`, knowing how long its file is where the active pane shows it: a
+    /// `⋯` then follows a last change the file goes on after.
+    fn with_file_length(&self, d: DiffState) -> DiffState {
+        match self.active_viewer().filter(|v| v.abs == d.abs) {
+            Some(v) => {
+                let source = std::sync::Arc::clone(&v.source);
+                d.of_file(&source)
+            }
+            None => d,
+        }
     }
 
     pub(crate) fn on_toggle_split(&mut self) -> Task<Message> {
@@ -2198,9 +2213,11 @@ fn untracked_diff(source: &str) -> Vec<git::DiffLine> {
         kind: git::DiffKind::Hunk,
         text: format!("@@ -0,0 +1,{n} @@"),
     }];
+    // Each with git's own `+`, which the view takes off: a line of its own
+    // beginning with a space, `-` or `+` lost that character.
     lines.extend(source.lines().map(|line| git::DiffLine {
         kind: git::DiffKind::Add,
-        text: line.to_string(),
+        text: format!("+{line}"),
     }));
     lines
 }

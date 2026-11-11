@@ -1170,6 +1170,11 @@ pub struct DiffState {
     /// Display columns of the widest drawn line, which sizes every run so
     /// the tints span the content and long lines scroll into reach.
     pub max_cols: usize,
+    /// The last line of the file as it is now that the diff shows.
+    pub last_new: usize,
+    /// How many lines the file has now, where it is known: lines after
+    /// [`last_new`](Self::last_new) are hidden, and a `⋯` says so.
+    pub total_new: Option<usize>,
 }
 
 /// The node of a map the reader clicked: what it is called, the file it is
@@ -1246,6 +1251,7 @@ impl DiffState {
             spans: Vec<(String, Option<u8>)>,
         }
         let mut rows: Vec<Row> = Vec::new();
+        let mut last_new = 0usize;
         for l in shown {
             let text = crate::ui::diff_display_text(&code(l));
             let plain = || vec![(text.clone(), None)];
@@ -1254,6 +1260,11 @@ impl DiffState {
                 DiffKind::Hunk => {
                     let (old, new, place) = hunk_header(&l.text);
                     (old_no, new_no) = (old, new);
+                    // A hunk from the first line hides nothing above it: its
+                    // `⋯` sat over line 1. Kept where git names its place.
+                    if old <= 1 && new <= 1 && place == HIDDEN {
+                        continue;
+                    }
                     Row {
                         kind: DiffKind::Hunk,
                         text: place.clone(),
@@ -1271,6 +1282,7 @@ impl DiffState {
                         text,
                         gutter: (Some(old_no), Some(new_no)),
                     };
+                    last_new = new_no;
                     old_no += 1;
                     new_no += 1;
                     row
@@ -1284,6 +1296,7 @@ impl DiffState {
                         text,
                         gutter: (None, Some(new_no)),
                     };
+                    last_new = new_no;
                     new_no += 1;
                     row
                 }
@@ -1364,9 +1377,26 @@ impl DiffState {
             lines,
             runs,
             max_cols,
+            last_new,
+            total_new: None,
         }
     }
+
+    /// With the file's own length: what follows the last change is marked
+    /// as hidden.
+    pub fn of_file(mut self, source: &str) -> Self {
+        self.total_new = Some(source.lines().count());
+        self
+    }
+
+    /// Whether lines of the file follow the last one shown.
+    pub fn hides_tail(&self) -> bool {
+        self.last_new > 0 && self.total_new.is_some_and(|n| n > self.last_new)
+    }
 }
+
+/// What a hunk's row says where git names no place: lines are hidden here.
+pub(crate) const HIDDEN: &str = "⋯";
 
 /// Past this many lines a diff is drawn without colouring it: preparing it
 /// is done as it arrives, on the window's own thread.
@@ -1388,9 +1418,9 @@ fn hunk_header(header: &str) -> (usize, usize, String) {
             .unwrap_or(1)
     };
     let place = if place.is_empty() {
-        "⋯".to_string()
+        HIDDEN.to_string()
     } else {
-        format!("⋯  {place}")
+        format!("{HIDDEN}  {place}")
     };
     (start('-'), start('+'), place)
 }
