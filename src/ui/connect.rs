@@ -2380,6 +2380,19 @@ pub(crate) fn connect_picker<'a>(
             .spacing(8),
         Message::Connect(ConnectMsg::ToggleAiKeys(!ui.send_ai_keys)),
     ));
+    // What the box decides, said: whether the reader's paid keys leave this
+    // computer. Under its label (the box's 14 px and its 8 px gap).
+    col = col.push(
+        container(
+            text(tr!(
+                "Lets Clew on that computer call your AI provider, so Ask and Explain run there. The keys go over the SSH connection and are kept in memory only, never written to disk."
+            ))
+            .size(ts::SMALL)
+            .color(theme::fg_muted())
+            .wrapping(Wrapping::WordOrGlyph),
+        )
+        .padding(Padding::default().left(22.0)),
+    );
     let said: Element<'a, Message> = match error {
         Some(why) => text(crate::i18n::quoted(why).into_owned())
             .size(ts::BODY)

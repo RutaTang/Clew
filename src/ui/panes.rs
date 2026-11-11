@@ -1711,22 +1711,37 @@ enum NoteOf<'a> {
 /// How the note on a function counts what leans on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Leaning {
-    /// The places in the project that call it: each call site naming it in
-    /// a function the graph has calling it.
-    References(usize),
+    /// The functions the graph has calling it, and the call sites naming
+    /// it in them (and at the top of its own file, in no function).
+    References { callers: usize, sites: usize },
     /// The functions that call it, when their call sites are not known
     /// here (a remote project's graph comes without them).
     Callers(usize),
 }
 
 impl Leaning {
-    /// What the note says: "Called from 21 places", "1 caller". Not
-    /// "references": the editor's word for every use of a name, both ways,
-    /// where this counts only the calls to it.
+    /// What the note says: "2 callers", the unit the Calls tab, the call
+    /// graph and Call hierarchy count in — and the calls too when there are
+    /// more of them than callers ("2 callers, 3 calls": one caller calls it
+    /// twice), so the reader counting the Calls tab's rows finds the same
+    /// number. Not "references": the editor's word for every use of a
+    /// name, both ways, where this counts only the calls to it.
     pub(crate) fn label(self) -> String {
+        let callers = |n: usize| match n {
+            0 => tr!("No callers").to_string(),
+            n => trn!("1 caller", "{n} callers", n),
+        };
         match self {
-            Leaning::References(n) => trn!("Called from 1 place", "Called from {n} places", n),
-            Leaning::Callers(n) => trn!("1 caller", "{n} callers", n),
+            Leaning::References { callers: 0, sites } if sites > 0 => {
+                trn!("Called once", "Called {n} times", sites)
+            }
+            Leaning::References { callers: n, sites } if sites > n => tr!(
+                "{callers}, {calls}",
+                callers = callers(n),
+                calls = trn!("1 call", "{n} calls", sites)
+            )
+            .to_string(),
+            Leaning::References { callers: n, .. } | Leaning::Callers(n) => callers(n),
         }
     }
 }
@@ -1778,7 +1793,10 @@ pub(crate) fn leaning_on(
             .filter(|s| s.callee == name && s.caller.is_none() && !s.method)
             .count();
     }
-    Some(Leaning::References(sites))
+    Some(Leaning::References {
+        callers: callers.len(),
+        sites,
+    })
 }
 
 /// When lines `first..=last` (1-based) of the open file were last
@@ -1960,7 +1978,16 @@ fn active_note<'a>(
     let calls_room = super::steady::widest(
         &[
             tr!("Calls"),
-            &Leaning::References(88).label(),
+            &Leaning::References {
+                callers: 88,
+                sites: 888,
+            }
+            .label(),
+            &Leaning::References {
+                callers: 0,
+                sites: 88,
+            }
+            .label(),
             &Leaning::Callers(88).label(),
         ],
         NOTE_ACTION_SIZE,

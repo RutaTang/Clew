@@ -11478,7 +11478,9 @@ fn the_raised_note_says_when_its_function_changed() {
             Default::default(),
         )),
     );
-    assert!(shows(&mut sim_of(&app), "Called from 3 places"));
+    // Callers, as the Calls tab lists them, and the calls when one caller
+    // makes more than one: `a` calls it twice.
+    assert!(shows(&mut sim_of(&app), "2 callers, 3 calls"));
     // A call at the top of its file, in no function (Python's `if __name__
     // == "__main__": main()`), is a reference too: such a `main` read "0
     // references". A method call of that name is not one.
@@ -11506,7 +11508,7 @@ fn the_raised_note_says_when_its_function_changed() {
             Default::default(),
         )),
     );
-    assert!(shows(&mut sim_of(&app), "Called from 4 places"));
+    assert!(shows(&mut sim_of(&app), "2 callers, 4 calls"));
 }
 
 /// The margin, with no note to show, says why, centered under a muted icon
