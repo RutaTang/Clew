@@ -222,6 +222,7 @@
  "Ask every time": "Toujours demander",
  "Ask failed: the question's context could not be assembled": "Échec de la question : impossible de réunir son contexte",
  "Ask failed: {error}": "Échec de la question : {error}",
+ "Ask the same question again": "Poser à nouveau la même question",
  "Ask this with AI (one answer)": "Poser cette question à l’IA (une réponse)",
  "Ask unless read-only": "Demander sauf en lecture seule",
  "Ask why": "Demander pourquoi",

@@ -14997,7 +14997,7 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
     }));
     let t = app.proj.time_travel.as_ref().unwrap();
     assert_eq!(
-        t.why.get("aaaa1111").map(String::as_str),
+        t.why.get("aaaa1111").and_then(|r| r.as_deref().ok()),
         Some("because"),
         "a summary that outlived a scrub was dropped"
     );
@@ -15015,6 +15015,19 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
     }));
     assert!(!tt(&app).0, "a failed summary left its spinner up");
     assert!(app.status.contains("rate limited"), "{}", app.status);
+    // Kept with its commit, to be said in its band and asked again.
+    assert_eq!(
+        app.proj.time_travel.as_ref().unwrap().why.get("bbbb2222"),
+        Some(&Err("rate limited".to_string()))
+    );
+    let _again = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    assert!(tt(&app).0, "a failed summary is asked again");
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
+        stamp: app.stamp(),
+        session,
+        sha: "bbbb2222".into(),
+        result: Err("rate limited".into()),
+    }));
 
     // A reply from another session is not this one's.
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
@@ -15023,14 +15036,10 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         sha: "bbbb2222".into(),
         result: Ok("stale".into()),
     }));
-    assert!(
-        !app.proj
-            .time_travel
-            .as_ref()
-            .unwrap()
-            .why
-            .contains_key("bbbb2222")
-    );
+    assert!(!matches!(
+        app.proj.time_travel.as_ref().unwrap().why.get("bbbb2222"),
+        Some(Ok(_))
+    ));
 
     // The story: a failure after a scrub clears its spinner; a success shows.
     let _story = app.update(Message::TimeTravel(TimeTravelMsg::Story));
@@ -27477,6 +27486,13 @@ fn a_stopped_server_stream_reads_as_stopped_not_failed() {
         assert!(!turn.streaming);
         assert_eq!(app.status, status);
         assert!(turn.answer_md.contains(shown), "{}", turn.answer_md);
+        // A failure offers to ask again, and lists no sources; a Stop,
+        // asked for, does neither.
+        assert_eq!(
+            turn.extras.failed,
+            status.starts_with("Ask failed"),
+            "{status}"
+        );
     }
 
     let turns = app.proj.ask_turns.len();
@@ -31958,7 +31974,7 @@ fn a_scope_toggle_still_loading_stands_with_a_summary_and_says_when_it_gives_way
                 }));
                 let tt = app.proj.time_travel.as_ref().unwrap();
                 assert_eq!(
-                    tt.why.get(&sha).map(String::as_str),
+                    tt.why.get(&sha).and_then(|r| r.as_deref().ok()),
                     Some("It adds `origin`."),
                     "the summary was dropped as the new scope landed"
                 );

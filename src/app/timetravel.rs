@@ -1057,8 +1057,9 @@ impl App {
             let Some(c) = tt.commits.get(tt.idx) else {
                 return Task::none();
             };
-            // Already have it, or it is already being written.
-            if tt.why.contains_key(&c.sha) || tt.why_pending.contains(&c.sha) {
+            // Already have it, or it is already being written. One that
+            // failed is asked again.
+            if matches!(tt.why.get(&c.sha), Some(Ok(_))) || tt.why_pending.contains(&c.sha) {
                 return Task::none();
             }
             (c.sha.clone(), c.path.clone(), c.subject.clone(), tt.session)
@@ -1149,13 +1150,12 @@ impl App {
         tt.why_pending.remove(&sha);
         match result {
             Ok(text) => {
-                tt.why.insert(sha, text.trim().to_string());
+                tt.why.insert(sha, Ok(text.trim().to_string()));
             }
             Err(e) => {
-                self.status = tr!(
-                    "Couldn't summarize: {error}",
-                    error = crate::app::tasks::plain_detail(&e)
-                )
+                let why = crate::app::tasks::plain_detail(&e);
+                tt.why.insert(sha, Err(why.clone()));
+                self.status = tr!("Couldn't summarize: {error}", error = why)
             }
         }
         if let Some(tt) = self.proj.time_travel.as_mut() {

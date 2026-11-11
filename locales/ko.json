@@ -222,6 +222,7 @@
  "Ask every time": "매번 묻기",
  "Ask failed: the question's context could not be assembled": "질문 실패: 질문 컨텍스트를 구성할 수 없습니다",
  "Ask failed: {error}": "질문 실패: {error}",
+ "Ask the same question again": "같은 질문을 다시 하기",
  "Ask this with AI (one answer)": "이 질문을 AI에게 묻습니다(답변 1개)",
  "Ask unless read-only": "읽기 전용이 아니면 묻기",
  "Ask why": "이유 묻기",

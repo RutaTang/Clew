@@ -468,6 +468,10 @@ pub struct TurnExtras {
     /// Which step chip a tool call is: an ACP tool call by its id, an MCP
     /// call as `mcp:<call>`.
     pub step_ids: HashMap<String, usize>,
+    /// The answer failed before a word of it came: the turn says why, with
+    /// a way to ask again, and lists no sources for an answer that never
+    /// came.
+    pub failed: bool,
 }
 
 /// What an approval card answers.
@@ -866,8 +870,11 @@ pub struct TimeTravel {
     /// of the scope it was asked in, so one asked before a re-scope is
     /// dropped as it lands, not shown under the new scope's name.
     pub scoped: u64,
-    /// LLM "what & why" summary per commit sha (cached across steps).
-    pub why: HashMap<String, String>,
+    /// LLM "what & why" summary per commit sha (cached across steps) — or,
+    /// where it failed, why: said in the commit's band with a way to try
+    /// again. Said only on the status line, the failure was gone in ten
+    /// seconds and the band offered "What & why?" as if never asked.
+    pub why: HashMap<String, Result<String, String>>,
     /// Whether a "what & why" for the commit ON SCREEN is being generated
     /// (derived from `why_pending`; the view reads this).
     pub why_loading: bool,

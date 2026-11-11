@@ -1336,6 +1336,7 @@ impl App {
             if let Some(reason) = empty_reason
                 && turn.answer_md.trim().is_empty()
             {
+                turn.extras.failed = matches!(outcome, StreamOutcome::Failed(_));
                 // In place of what was there (blank lines, settled as they
                 // came): drawn from its start.
                 turn.answer_md = reason;

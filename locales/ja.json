@@ -222,6 +222,7 @@
  "Ask every time": "毎回確認",
  "Ask failed: the question's context could not be assembled": "質問に失敗しました: 質問のコンテキストを組み立てられませんでした",
  "Ask failed: {error}": "質問に失敗しました: {error}",
+ "Ask the same question again": "同じ質問をもう一度する",
  "Ask this with AI (one answer)": "この質問を AI に聞きます（回答 1 件）",
  "Ask unless read-only": "読み取り専用以外は確認",
  "Ask why": "理由を聞く",

@@ -1114,9 +1114,30 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         } else {
             convo.extend(super::explain_view::render_answer(app, &turn.answer));
         }
+        // Failed: a way to ask the same again, where it failed — the reason
+        // stood alone, and the question had to be typed again.
+        if turn.extras.failed && !turn.streaming {
+            convo.push(super::toolbar::tip_at(
+                button(super::toolbar::ai_words(
+                    tr!("Try again"),
+                    ts::SMALL,
+                    theme::accent(),
+                ))
+                .style(theme::toolbar_button)
+                .padding([2, 8])
+                .on_press(super::heard::said(
+                    tr!("Try again"),
+                    Message::Ask(AskMsg::Suggested(turn.question.clone())),
+                )),
+                tr!("Ask the same question again"),
+                None,
+                iced::widget::tooltip::Position::Top,
+            ));
+        }
         // What grounded the answer, under it once it is whole: they stood
-        // under half an answer, the reader's eye drawn from the words.
-        if !turn.sources.is_empty() && !turn.streaming {
+        // under half an answer, the reader's eye drawn from the words. None
+        // for an answer that never came.
+        if !turn.sources.is_empty() && !turn.streaming && !turn.extras.failed {
             convo.push(
                 text(tr!("Sources"))
                     .size(ts::CAPTION)

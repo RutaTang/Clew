@@ -203,13 +203,41 @@ pub(crate) fn time_travel_banner<'a>(
             .size(ts::SMALL)
             .color(theme::dim())
             .into()
-    } else if let Some(w) = tt.why.get(&c.sha) {
+    } else if let Some(Ok(w)) = tt.why.get(&c.sha) {
         // Plain text: a model's code marks would show as they are.
         text(strip_backticks(w))
             .size(ts::SMALL)
             .color(theme::fg_muted())
             .wrapping(Wrapping::Word)
             .into()
+    } else if let Some(Err(why)) = tt.why.get(&c.sha) {
+        // Failed: why, where it was asked for, and a way to ask again.
+        let again = button(super::toolbar::ai_words(
+            tr!("Try again"),
+            ts::SMALL,
+            theme::accent(),
+        ))
+        .style(theme::toolbar_button)
+        .padding([2, 8])
+        .on_press(super::heard::said(
+            tr!("Try again"),
+            Message::TimeTravel(TimeTravelMsg::Why),
+        ));
+        row![
+            text(tr!("Couldn't summarize: {error}", error = why.as_str()))
+                .size(ts::SMALL)
+                .color(theme::danger())
+                .wrapping(Wrapping::Word)
+                .width(Fill),
+            chrome_tip(
+                again,
+                tr!("Say what this commit changed and why, with AI (one AI call)"),
+                None,
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into()
     } else {
         let what_why = button(super::toolbar::ai_words(
             tr!("What & why?"),

@@ -222,6 +222,7 @@
  "Ask every time": "每次都询问",
  "Ask failed: the question's context could not be assembled": "提问失败：无法组织问题的上下文",
  "Ask failed: {error}": "提问失败：{error}",
+ "Ask the same question again": "再问一次同样的问题",
  "Ask this with AI (one answer)": "用 AI 问这个问题（一个回答）",
  "Ask unless read-only": "仅在非只读时询问",
  "Ask why": "问为什么",
