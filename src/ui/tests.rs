@@ -17326,3 +17326,67 @@ fn a_right_click_on_a_tree_row_opens_its_menu_at_the_pointer() {
     assert!(shows(&mut sim, "Expand Folder"));
     assert!(!shows(&mut sim, "Open to the Side"));
 }
+
+/// A function's card and a file's lay out their actions alike: what is
+/// known (the date, and a function's callers) on one row, what to do
+/// (Explain, Ask) on the row under it — and right under what the card
+/// says, with no room held for words it does not have.
+#[test]
+fn every_note_card_has_one_layout_under_its_words() {
+    use crate::git::{BlameLine, GitInfo};
+    let size = iced::Size::new(1100.0, 700.0);
+    let mut app = reader_app();
+    let _ = app.on_window_resized(size);
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.symbols = vec![crate::outline::Symbol {
+            name: "origin".into(),
+            kind: "function".into(),
+            line: 3,
+            end_line: 5,
+        }];
+        v.git = Some(std::sync::Arc::new(GitInfo {
+            blame: vec![
+                BlameLine {
+                    commit: "c".into(),
+                    author: "a".into(),
+                    time: 1_741_600_000,
+                    summary: "s".into(),
+                    uncommitted: false,
+                };
+                400
+            ],
+            status: Vec::new(),
+            deleted_at: Default::default(),
+        }));
+    }
+    let function = crate::explain::Node::Function {
+        file: abs.clone(),
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    let file = crate::explain::Node::File(abs);
+    for (node, calls, kind) in [(function, true, "function, line 3"), (file, false, "file")] {
+        let _ = app.show_explanation(node);
+        assert!(format!("{:?}", app.proj.explain.prepared).contains("Not explained yet"));
+        let mut sim = sim_sized(&app, size);
+        let head = text_at(&mut sim, |t| t == kind, 0).expect("its head");
+        let date = text_at(&mut sim, |t| t.contains("2025"), 0).expect("its date");
+        let explain = text_at(&mut sim, |t| t == "Explain", 1).expect("its Explain");
+        let ask = text_at(&mut sim, |t| t == "Ask", 0).expect("its Ask");
+        // Facts over actions, each pair on one line.
+        assert!((explain.y - ask.y).abs() < 1.0, "{explain:?} {ask:?}");
+        assert!(explain.y > date.y + 20.0, "{explain:?} under {date:?}");
+        if calls {
+            let count = text_at(&mut sim, |t| t == "Calls", 1).expect("its callers");
+            assert!((count.y - date.y).abs() < 1.0, "{count:?} {date:?}");
+            assert!(count.x > date.x, "the date first");
+        }
+        // Under its one line of words (20 pixels, and the 6 and 10 round
+        // it), not four lines' room down.
+        let under = date.y - (head.y + head.height);
+        assert!(under < 50.0, "{under} under {head:?}: {date:?}");
+    }
+}

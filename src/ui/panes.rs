@@ -1442,46 +1442,73 @@ pub(crate) fn right_panel(app: &App) -> Option<Element<'_, Message>> {
 /// of what it says. Every note is as tall, so each can be placed level
 /// with its function before it is drawn.
 const NOTE_H: f32 = 104.0;
-/// Height of the note raised as a card: the one on what the caret is in.
-const ACTIVE_NOTE_H: f32 = 193.0;
+/// The raised card less what it says: its padding (13 above and below),
+/// its head (16) and the 6 under it, the 10 over its rows, and its two
+/// rows of facts and actions (26 each, 2 apart).
+const RAISED_CARD_CHROME: f32 = 13.0 + 16.0 + 6.0 + 10.0 + 26.0 + 2.0 + 26.0 + 13.0;
 /// Room kept between notes that would otherwise overlap.
 const NOTE_GAP: f32 = 8.0;
 /// The least the raised card is given for the explanation in blocks, where
 /// the margin has it.
 const WALKTHROUGH_NOTE_MIN_H: f32 = 420.0;
+/// The least margin the explanation in blocks is given, however short the
+/// margin: the 193 pixels a summary's card had.
+const WALKTHROUGH_NOTE_LEAST_ROOM: f32 = 193.0;
 
-/// The lines of what the raised card says that its 193 pixels hold.
-const ACTIVE_NOTE_LINES: f32 = 4.0;
 /// How much narrower the card's words are than the margin: the margin's
 /// padding and the card's, on both sides.
 const ACTIVE_NOTE_TEXT_INSET: f32 = 44.0;
 
-/// Height of the raised card for a function's explanation, `summary`: the
-/// whole of it, where it runs past the four lines of [`ACTIVE_NOTE_H`] —
-/// up to `room`, the margin's height above its foot, past which it
-/// scrolls. Measured as plain words at the margin's `width`, with a
-/// quarter of a line more for what is set as code, a little wider than
-/// words. Four lines
-/// were shown and the rest scrolled out of a window that size, cut through
-/// a line.
-fn summary_note_h(summary: Option<&str>, width: f32, room: f32) -> f32 {
+/// Height of the raised card on `node`: as tall as what it says — its
+/// summary, why its Explain failed, or that it is not explained yet — over
+/// its two rows of facts and actions, up to `room` (the margin's foot),
+/// where what it says scrolls. A card of one line of words was given four
+/// lines' height, and stood half empty over its actions.
+fn raised_card_h(app: &App, node: &crate::explain::Node, width: f32, room: f32) -> f32 {
     use super::explain_view::{NOTE_LINE_HEIGHT, NOTE_SIZE};
-    let Some(summary) = summary else {
-        return ACTIVE_NOTE_H;
-    };
-    let words: String = summary
-        .chars()
-        .filter(|c| !matches!(c, '`' | '*'))
-        .collect();
+    use iced::widget::text::LineHeight;
     let line = NOTE_SIZE * NOTE_LINE_HEIGHT;
-    let said = super::sheet::text_height_spaced(
-        &words,
-        NOTE_SIZE,
-        iced::widget::text::LineHeight::Relative(NOTE_LINE_HEIGHT),
-        crate::fonts::UI,
-        width - ACTIVE_NOTE_TEXT_INSET,
-    ) + line / 4.0;
-    (ACTIVE_NOTE_H + said - ACTIVE_NOTE_LINES * line).clamp(ACTIVE_NOTE_H, room.max(ACTIVE_NOTE_H))
+    let text_w = width - ACTIVE_NOTE_TEXT_INSET;
+    let said = if let Some(cached) = app.proj.explain.cache.get(node) {
+        // As the card sets it (`explanation_text`), less the marks that
+        // take no room.
+        let words: String = crate::app::explanation_text(Some(cached))
+            .chars()
+            .filter(|c| !matches!(c, '`' | '*'))
+            .collect();
+        super::sheet::text_height_spaced(
+            &words,
+            NOTE_SIZE,
+            LineHeight::Relative(NOTE_LINE_HEIGHT),
+            crate::fonts::UI,
+            text_w,
+        ) + line / 4.0
+    } else if let Some(why) = explain_failed(app, node) {
+        super::sheet::text_height_spaced(
+            why,
+            ts::SMALL,
+            LineHeight::default(),
+            crate::fonts::UI,
+            text_w,
+        )
+    } else {
+        line
+    };
+    let least = RAISED_CARD_CHROME + line;
+    (RAISED_CARD_CHROME + said).clamp(least, room.max(least))
+}
+
+/// Why the Explain of `node` failed, while it has no note.
+fn explain_failed<'a>(app: &'a App, node: &crate::explain::Node) -> Option<&'a str> {
+    if app.proj.explain.cache.contains_key(node) {
+        return None;
+    }
+    app.proj
+        .explain
+        .node_failed
+        .as_ref()
+        .filter(|(of, _)| of == node)
+        .map(|(_, why)| why.as_str())
 }
 
 /// Height of the raised card while it shows the explanation in blocks: a
@@ -1491,7 +1518,7 @@ fn summary_note_h(summary: Option<&str>, width: f32, room: f32) -> f32 {
 /// summary's 193 pixels it showed three lines of the first block, the last
 /// cut through.
 fn walkthrough_note_h(room: f32, top: f32) -> f32 {
-    let room = room.max(ACTIVE_NOTE_H);
+    let room = room.max(WALKTHROUGH_NOTE_LEAST_ROOM);
     (room - top.max(0.0)).max(WALKTHROUGH_NOTE_MIN_H).min(room)
 }
 /// How far the raised card reaches above its function's first line: the
@@ -1592,13 +1619,12 @@ fn notes_beside_code<'a>(
             // As tall as what it says, up to the margin's foot, as a
             // function's card is: it was four lines, the fifth cut through
             // its letters, over half a margin left empty.
-            let summary = app
-                .proj
-                .explain
-                .cache
-                .get(&Node::File(v.abs.clone()))
-                .map(|c| crate::app::shown_summary(c));
-            let h = summary_note_h(summary.as_deref(), size.width, size.height - foot);
+            let h = raised_card_h(
+                app,
+                &Node::File(v.abs.clone()),
+                size.width,
+                size.height - foot,
+            );
             notes.push((
                 0.0,
                 h,
@@ -1638,8 +1664,7 @@ fn notes_beside_code<'a>(
                 let h = if app.proj.explain.showing_detail {
                     walkthrough_note_h(room, y - ACTIVE_NOTE_LIFT)
                 } else {
-                    let summary = cached.map(|c| crate::app::shown_summary(c));
-                    summary_note_h(summary.as_deref(), size.width, room)
+                    raised_card_h(app, &node, size.width, room)
                 };
                 (h, ACTIVE_NOTE_LIFT)
             } else {
@@ -2082,26 +2107,6 @@ fn active_note<'a>(
         font(false),
     )
     .max(widest_short_date(NOTE_ACTION_SIZE, font(false)));
-    // As wide as "Calls", or a count of two figures — what it says before
-    // the call graph is built, and after.
-    let calls_room = super::steady::widest(
-        &[
-            tr!("Calls"),
-            &Leaning::References {
-                callers: 88,
-                sites: 888,
-            }
-            .label(),
-            &Leaning::References {
-                callers: 0,
-                sites: 88,
-            }
-            .label(),
-            &Leaning::Callers(88).label(),
-        ],
-        NOTE_ACTION_SIZE,
-        font(false),
-    );
     // Not explained yet: what explains it, first, where the note says so.
     let node = match (of, v) {
         (NoteOf::Function { sym, ordinal }, Some(v)) => Some(crate::explain::Node::Function {
@@ -2122,17 +2127,14 @@ fn active_note<'a>(
         && node.is_some()
         && app.proj.explain.pass_target.as_ref() == node.as_ref();
     // Its own Explain failed: why, on the card, and a way to try again.
-    let failed = node
-        .as_ref()
-        .filter(|n| !app.proj.explain.cache.contains_key(*n))
-        .and_then(|n| {
-            app.proj
-                .explain
-                .node_failed
-                .as_ref()
-                .filter(|(of, _)| of == n)
-        })
-        .map(|(_, why)| why.as_str());
+    let failed = node.as_ref().and_then(|n| explain_failed(app, n));
+    // One layout for every card, a function's or a file's: what is known
+    // of it on one row — when it last changed, and for a function who calls
+    // it — and what to do with it on the row under that: Explain while it
+    // is not explained, and Ask. They wrapped as the words fell: a
+    // function's Explain alone, its callers alone, its date with Ask; a
+    // file's Explain with its date, Ask alone.
+    let mut facts = row![].spacing(2).align_y(iced::Center);
     let mut actions = row![].spacing(2).align_y(iced::Center);
     // This function or file, in one call — the card offered only the whole
     // project's Explain All, about 45 calls asked of a reader who wanted
@@ -2191,56 +2193,57 @@ fn active_note<'a>(
             .padding([0.0, NOTE_ACTION_PAD_X]),
         );
     }
-    // A function's calls: a file's card had the way in too, to a margin
-    // tab that follows the function the caret is in and said only "Move
-    // the cursor into a function" — on a README as on a module.
     // A count and a date read as facts, not controls: their tips say
     // where each leads.
     let tipped = |control, tip: &str| {
         super::toolbar::tip_at(control, tip.to_string(), None, tooltip::Position::Top)
     };
+    let history_tip = match changed {
+        Some(Some(_)) => tr!("When it last changed. Click for this file's commits"),
+        Some(None) => tr!("Changed since the last commit. Click for this file's commits"),
+        None => tr!("This file's commits"),
+    };
+    // The date first, in a room as wide as any: the count after it may
+    // change its width as the call graph comes in, and moves nothing.
+    facts = facts.push(tipped(
+        action(
+            Glyph::Clock,
+            history_label,
+            false,
+            Some(history_room),
+            !date_coming,
+            Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::History)),
+        ),
+        history_tip,
+    ));
+    // A function's calls: a file's card had the way in too, to a margin
+    // tab that follows the function the caret is in and said only "Move
+    // the cursor into a function" — on a README as on a module.
     if matches!(of, NoteOf::Function { .. }) {
-        actions = actions.push(tipped(
+        facts = facts.push(tipped(
             action(
                 Glyph::Network,
                 calls_label,
                 false,
-                Some(calls_room),
+                None,
                 true,
                 Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Calls)),
             ),
             tr!("Who calls it, and what it calls"),
         ));
     }
-    let history_tip = match changed {
-        Some(Some(_)) => tr!("When it last changed. Click for this file's commits"),
-        Some(None) => tr!("Changed since the last commit. Click for this file's commits"),
-        None => tr!("This file's commits"),
-    };
-    let actions = actions
-        .push(tipped(
-            action(
-                Glyph::Clock,
-                history_label,
-                false,
-                Some(history_room),
-                !date_coming,
-                Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::History)),
-            ),
-            history_tip,
-        ))
-        .push(action(
-            Glyph::Message,
-            tr!("Ask").into(),
-            true,
-            None,
-            true,
-            Message::Ask(AskMsg::Suggested(tr!(
-                "What does `{name}` in {file} do, and why is it written this way?",
-                name = name,
-                file = app.active_viewer().map_or("", |v| v.rel.as_str())
-            ))),
-        ));
+    let actions = actions.push(action(
+        Glyph::Message,
+        tr!("Ask").into(),
+        true,
+        None,
+        true,
+        Message::Ask(AskMsg::Suggested(tr!(
+            "What does `{name}` in {file} do, and why is it written this way?",
+            name = name,
+            file = app.active_viewer().map_or("", |v| v.rel.as_str())
+        ))),
+    ));
     // Its Explain failed: why, in its place — "Not explained yet." above it
     // took the room the reason needed, and said what the failure says.
     let mut note = if failed.is_some() {
@@ -2269,9 +2272,10 @@ fn active_note<'a>(
         .direction(thin_scroll())
         .style(theme::overlay_scrollbar)
         .height(Fill);
-    // The actions run on to a second line when the card is too narrow for
-    // them on one. Their icons line up with the text above: the buttons
+    // Each row runs on to a second line only where the margin is too
+    // narrow for it. Their icons line up with the text above: the buttons
     // reach out into the card's padding by their own.
+    let facts = facts.wrap().vertical_spacing(2);
     let actions = actions.wrap().vertical_spacing(2);
     let inset = iced::padding::left(NOTE_ACTION_PAD_X);
     container(
@@ -2279,7 +2283,7 @@ fn active_note<'a>(
             container(column![note_head(name, meta, code, true), said].spacing(6))
                 .padding(inset)
                 .height(Fill),
-            actions,
+            column![facts, actions].spacing(2),
         ]
         .spacing(10),
     )
