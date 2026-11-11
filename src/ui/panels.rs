@@ -2800,24 +2800,29 @@ fn push_var_rows<'a>(
     }
 }
 
-/// A question to try, as the reader reads it: names from the code (written
-/// in backticks) set in the code font, the rest as prose.
-fn question_text<'a>(q: &str) -> Element<'a, Message> {
+/// A question to try in pieces: each with whether it is a name from the
+/// code (written in backticks), to be set in the code font. A backtick with
+/// no pair sets nothing apart: the question is one plain piece, without it.
+pub(crate) fn question_pieces(q: &str) -> Vec<(String, bool)> {
     if q.matches('`').count() % 2 == 1 {
-        // A backtick with no pair: nothing to set apart.
-        return text(strip_backticks(q))
-            .size(ts::SMALL)
-            .color(theme::accent())
-            .into();
+        return vec![(strip_backticks(q), false)];
     }
-    let spans: Vec<iced::widget::text::Span<'a, Message>> = q
-        .split('`')
+    q.split('`')
         .enumerate()
         .filter(|(_, piece)| !piece.is_empty())
-        .map(|(i, piece)| {
-            let span = iced::widget::span(piece.to_string()).color(theme::accent());
-            // Odd pieces sat between a pair of backticks.
-            if i % 2 == 1 {
+        // Odd pieces sat between a pair of backticks.
+        .map(|(i, piece)| (piece.to_string(), i % 2 == 1))
+        .collect()
+}
+
+/// A question to try, as the reader reads it: names from the code set in
+/// the code font, the rest as prose ([`question_pieces`]).
+fn question_text<'a>(q: &str) -> Element<'a, Message> {
+    let spans: Vec<iced::widget::text::Span<'a, Message>> = question_pieces(q)
+        .into_iter()
+        .map(|(piece, code)| {
+            let span = iced::widget::span(piece).color(theme::accent());
+            if code {
                 span.font(crate::fonts::CODE)
             } else {
                 span

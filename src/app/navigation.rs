@@ -545,6 +545,7 @@ impl App {
         self.proj.search.typed += 1;
         let seq = self.proj.search_seq;
         let mut to_read: Vec<(usize, PathBuf, usize, usize)> = Vec::new();
+        let mut at: Vec<(usize, viewer::PositionEncoding)> = Vec::new();
         let hits: Vec<SearchHit> = targets
             .into_iter()
             .take(search::MAX_HITS)
@@ -568,6 +569,7 @@ impl App {
                 if from_pane.is_none() {
                     to_read.push((i, t.path.clone(), t.line, t.character));
                 }
+                at.push((t.character, enc));
                 SearchHit {
                     abs: t.path,
                     rel,
@@ -588,6 +590,7 @@ impl App {
         // A location list is not a search: nothing was skipped.
         self.proj.search.skipped.clear();
         self.proj.search.hits = hits;
+        self.proj.search.at = at;
         self.sidebar = SidebarTab::Search;
         self.code_focused = false;
         // The preview comes from the file itself, so it may only be read where
@@ -778,6 +781,7 @@ impl App {
         };
         self.proj.search.said = Some(self.status.clone());
         self.proj.search.hits = report.hits;
+        self.proj.search.at.clear();
         self.proj.search.skipped = report.skipped;
         self.style_search_previews()
     }

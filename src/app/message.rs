@@ -411,11 +411,13 @@ pub enum EditorMsg {
         line: Option<usize>,
         push: bool,
     },
-    /// Open a search result, line `line` (1-based) of `abs`, on what the
-    /// search matched in it.
+    /// Open a search result, line `line` (1-based) of `abs`: at `at` (a
+    /// language server's place on the line) where it has one, else on what
+    /// the search matched in it.
     OpenHit {
         abs: PathBuf,
         line: usize,
+        at: Option<(usize, crate::viewer::PositionEncoding)>,
     },
     FileLoaded {
         stamp: Stamp,

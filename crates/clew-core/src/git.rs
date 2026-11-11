@@ -1895,6 +1895,10 @@ pub fn diff_lines(root: &Path, abs: &Path) -> Result<Option<Vec<DiffLine>>, GitE
         OsStr::new("--no-color"),
         OsStr::new("--no-ext-diff"),
         OsStr::new("--no-textconv"),
+        // Three lines of context whatever the reader's git config says: the
+        // view counts the lines hidden between hunks from their shape, and
+        // `diff.context=0` drew pure deletions as hunks after a line.
+        OsStr::new("--unified=3"),
         // A submodule's working tree is never examined (module docs).
         OsStr::new("--ignore-submodules=dirty"),
         OsStr::new("HEAD"),

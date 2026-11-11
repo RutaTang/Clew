@@ -846,7 +846,8 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
             false,
         )
     } else if app.proj.refresh_pending {
-        // Seconds left before the auto pass fires (click to skip the wait).
+        // Seconds left before the auto pass fires (a click opens the Explain
+        // sheet, as the chip always does).
         let secs = app
             .proj
             .last_auto_refresh

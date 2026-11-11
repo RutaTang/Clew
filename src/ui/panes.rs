@@ -2706,6 +2706,42 @@ mod tests {
             ],
         );
         assert_eq!(bare.runs[0].text, "⋯ 11 unchanged lines");
+        // Between two hunks: the lines after the first one's last and before
+        // the second's first.
+        let two = crate::DiffState::new(
+            std::path::PathBuf::from("/p/a.txt"),
+            "a.txt".into(),
+            vec![
+                line(DiffKind::Hunk, "@@ -2,3 +2,3 @@"),
+                line(DiffKind::Context, " b"),
+                line(DiffKind::Remove, "-c"),
+                line(DiffKind::Add, "+C"),
+                line(DiffKind::Context, " d"),
+                line(DiffKind::Hunk, "@@ -20,2 +20,2 @@"),
+                line(DiffKind::Remove, "-t"),
+                line(DiffKind::Add, "+T"),
+                line(DiffKind::Context, " u"),
+            ],
+        );
+        let gaps: Vec<&str> = two
+            .runs
+            .iter()
+            .filter(|r| r.kind == DiffKind::Hunk)
+            .map(|r| r.text.as_str())
+            .collect();
+        assert_eq!(gaps, ["⋯ 1 unchanged line", "⋯ 15 unchanged lines"]);
+        // A hunk with nothing of the file now in it ("+3,0") sits after line
+        // 3: lines 1 to 3 are what it hides.
+        let after = crate::DiffState::new(
+            std::path::PathBuf::from("/p/a.txt"),
+            "a.txt".into(),
+            vec![
+                line(DiffKind::Hunk, "@@ -4,2 +3,0 @@"),
+                line(DiffKind::Remove, "-d"),
+                line(DiffKind::Remove, "-e"),
+            ],
+        );
+        assert_eq!(after.runs[0].text, "⋯ 3 unchanged lines");
         assert_eq!(bare.runs[1].gutter, "   12");
         // One from the first line hides nothing before it, so says nothing:
         // a `⋯` sat over line 1. Lines after its last change are hidden

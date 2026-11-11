@@ -1488,8 +1488,7 @@ impl App {
                 if symbol {
                     let (scope, refused) = self.time_travel_scope(true);
                     if matches!(scope, TimeScope::File) && !refused {
-                        self.status =
-                            tr!("Put the caret in a function or class to follow only it").into();
+                        self.status = tr!("No function or class to follow at the caret").into();
                         return Task::none();
                     }
                 }

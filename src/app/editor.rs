@@ -26,14 +26,22 @@ pub(crate) fn open_status(rel: &str, lang_key: Option<&str>) -> String {
 }
 
 impl App {
-    /// Open a search result, line `line` of `abs`, on what matched in it.
-    pub(crate) fn open_search_hit(&mut self, abs: PathBuf, line: usize) -> Task<Message> {
-        if let Some(matcher) = self.proj.search.matcher.clone() {
-            self.proj.landing_next = Some((
-                abs.clone(),
-                line.saturating_sub(1),
-                crate::app::state::LandingAt::Match(matcher),
-            ));
+    /// Open a search result, line `line` of `abs`: at the place a language
+    /// server named (`at`), else on what the search matched in it.
+    pub(crate) fn open_search_hit(
+        &mut self,
+        abs: PathBuf,
+        line: usize,
+        at: Option<(usize, crate::viewer::PositionEncoding)>,
+    ) -> Task<Message> {
+        use crate::app::state::LandingAt;
+        let landing = match (at, self.proj.search.matcher.clone()) {
+            (Some((character, encoding)), _) => Some(LandingAt::Char(character, encoding)),
+            (None, Some(matcher)) => Some(LandingAt::Match(matcher)),
+            (None, None) => None,
+        };
+        if let Some(landing) = landing {
+            self.proj.landing_next = Some((abs.clone(), line.saturating_sub(1), landing));
         }
         self.open_file(abs, Some(line), true)
     }
@@ -1359,7 +1367,13 @@ impl App {
     /// `d`, knowing how long its file is where the active pane shows it: a
     /// `⋯` then follows a last change the file goes on after.
     fn with_file_length(&self, d: DiffState) -> DiffState {
-        match self.active_viewer().filter(|v| v.abs == d.abs) {
+        // Not a notebook's: its pane holds the cells as a script, while the
+        // diff numbers the lines of its JSON — a count of one from the
+        // other's length meant nothing.
+        match self
+            .active_viewer()
+            .filter(|v| v.abs == d.abs && v.notebook.is_none())
+        {
             Some(v) => {
                 let source = std::sync::Arc::clone(&v.source);
                 d.of_file(&source)
@@ -2005,7 +2019,7 @@ impl App {
         match message {
             EditorMsg::OpenRel { rel, line } => self.on_open_rel(rel, line),
             EditorMsg::OpenAbs { abs, line, push } => self.open_file(abs, line, push),
-            EditorMsg::OpenHit { abs, line } => self.open_search_hit(abs, line),
+            EditorMsg::OpenHit { abs, line, at } => self.open_search_hit(abs, line, at),
             EditorMsg::FileLoaded {
                 req,
                 pane,

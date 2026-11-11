@@ -670,6 +670,8 @@ impl App {
             || self.proj.explain.cache.is_empty()
             || !self.keep_explanations_fresh
         {
+            // Nothing is left queued to fire on a later tick.
+            self.proj.refresh_pending = false;
             return Task::none();
         }
         // Let any running pass finish, then re-check on completion / next tick.

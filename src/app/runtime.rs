@@ -493,13 +493,8 @@ impl App {
     /// wherever it is.
     pub(crate) fn trail_to_current(&self) -> Task<Message> {
         let visits = self.proj.history.flatten_with(&self.proj.trail_collapsed);
-        let Some(i) = visits.iter().position(|v| v.is_current) else {
+        let Some(y) = trail_offset(&visits, &self.proj.history.current_path()) else {
             return Task::none();
-        };
-        let y = if visits.len() > 1 {
-            i as f32 / (visits.len() - 1) as f32
-        } else {
-            0.0
         };
         iced::widget::operation::snap_to(
             ui::trail_scroll_id(),
@@ -594,7 +589,10 @@ impl App {
         }
         // A change queued during the auto-refresh cooldown: fire it once
         // the window has lifted and nothing is running.
+        // Not once switched off (Settings → Usage and cost): a change queued
+        // before then spends nothing after.
         let refresh = if self.proj.refresh_pending
+            && self.keep_explanations_fresh
             && !self.proj.explain.running
             && !self.proj.overview.generating
             && !self.proj.building_embeddings
@@ -997,6 +995,21 @@ pub(crate) const VIEW_BLAME: &str = "view_inline_blame";
 pub(crate) const VIEW_INDENT_GUIDES: &str = "view_indent_guides";
 /// Whether explanations are refreshed by themselves as code changes.
 pub(crate) const KEEP_EXPLANATIONS_FRESH: &str = "keep_explanations_fresh";
+/// How far down the trail's list to scroll for the place being read: its
+/// row's share of the way down the list (so on screen, wherever it is) —
+/// or, inside a folded branch, the share of the fold that holds it. `path`
+/// is the current visit's id and its ancestors'; `None` with no trail.
+pub(crate) fn trail_offset(visits: &[crate::history::Visit], path: &[usize]) -> Option<f32> {
+    let i = path
+        .iter()
+        .find_map(|id| visits.iter().position(|v| v.id == *id))?;
+    Some(if visits.len() > 1 {
+        i as f32 / (visits.len() - 1) as f32
+    } else {
+        0.0
+    })
+}
+
 /// [`App::suggest_questions`], kept between launches.
 pub(crate) const SUGGEST_QUESTIONS: &str = "suggest_questions";
 

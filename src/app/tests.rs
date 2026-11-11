@@ -3331,6 +3331,63 @@ fn explanations_kept_fresh_only_when_switched_on() {
     );
 }
 
+/// Switched off, a refresh queued before (a change during the cooldown)
+/// does not fire on a later tick, and an automatic pass under way is
+/// stopped: nothing more is spent by itself.
+#[test]
+fn a_queued_refresh_does_not_fire_once_switched_off() {
+    use std::time::{Duration, Instant};
+    let mut app = blank_app();
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    app.proj.explain.cache.insert(
+        explain::Node::File(PathBuf::from("a.rs")),
+        explain::Cached {
+            summary: "s".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    app.proj.last_auto_refresh = Some(Instant::now());
+    app.proj
+        .explain
+        .changed_sources
+        .insert(PathBuf::from("a.rs"));
+    let _ = app.request_auto_refresh();
+    assert!(app.proj.refresh_pending, "queued inside the cooldown");
+    let _ = app.update(Message::Usage(UsageMsg::KeepFresh(false)));
+    assert!(!app.proj.refresh_pending);
+    app.proj.last_auto_refresh = Some(Instant::now() - Duration::from_secs(31));
+    // Queued again by some other path: the tick still holds it.
+    app.proj.refresh_pending = true;
+    let fired = run_task(app.on_tick());
+    assert!(
+        !fired
+            .iter()
+            .any(|m| matches!(m, Message::Explain(ExplainMsg::Refresh))),
+        "switched off, a queued refresh still ran: {fired:?}"
+    );
+    // An automatic pass under way is stopped as the switch goes off, its
+    // files left as changed.
+    let _ = app.update(Message::Usage(UsageMsg::KeepFresh(true)));
+    app.proj.explain.running = true;
+    app.proj.explain.pass_automatic = true;
+    app.proj.explain.pass_sources = [PathBuf::from("b.rs")].into_iter().collect();
+    let _ = app.update(Message::Usage(UsageMsg::KeepFresh(false)));
+    assert!(!app.proj.explain.running, "the automatic pass goes on");
+    assert!(
+        app.proj
+            .explain
+            .changed_sources
+            .contains(&PathBuf::from("b.rs"))
+    );
+    // Switched on with nothing changed, nothing starts.
+    app.proj.explain.changed_sources.clear();
+    app.proj.last_auto_refresh = None;
+    assert!(run_task(app.update(Message::Usage(UsageMsg::KeepFresh(true)))).is_empty());
+}
+
 #[test]
 fn search_flow_message_wiring() {
     let mut app = scanned_app("search");
@@ -3372,6 +3429,7 @@ fn search_flow_message_wiring() {
     let _ = app.update(Message::Editor(EditorMsg::OpenHit {
         abs: hit.abs.clone(),
         line: hit.line,
+        at: None,
     }));
     let content = read_text_file(&hit.abs).unwrap();
     let at = content
@@ -3426,6 +3484,27 @@ fn the_reading_trail_opens_on_the_current_stop() {
         1,
         "the list is not brought to the current stop"
     );
+    // The newest of thirty is the list's foot; one back, a share above it.
+    let offset = |app: &App| {
+        crate::app::runtime::trail_offset(
+            &app.proj.history.flatten_with(&app.proj.trail_collapsed),
+            &app.proj.history.current_path(),
+        )
+    };
+    assert_eq!(offset(&app), Some(1.0));
+    let _ = app.proj.history.back();
+    assert_eq!(offset(&app), Some(28.0 / 29.0));
+    // Inside a folded branch, the fold that holds it.
+    let path = app.proj.history.current_path();
+    let fold = path[5];
+    app.proj.trail_collapsed.insert(fold);
+    let visits = app.proj.history.flatten_with(&app.proj.trail_collapsed);
+    let at = visits.iter().position(|v| v.id == fold).unwrap();
+    assert_eq!(
+        offset(&app),
+        Some(at as f32 / (visits.len() - 1).max(1) as f32)
+    );
+    assert!(at < 29, "the fold hides the current stop");
 }
 
 /// A module opened from a map leaves the sidebar as the reader had it: it
@@ -35380,6 +35459,71 @@ fn try_asking_offers_questions_written_for_here() {
         app.suggested_questions()
             .iter()
             .any(|q| q.contains("entry point")),
+        "{:?}",
+        app.suggested_questions()
+    );
+}
+
+/// "Suggest questions in Ask" switched off offers the general questions
+/// even where the model's are kept, waits for nothing, and asks nothing;
+/// a reply that lands meanwhile is kept for its place, not shown; switched
+/// back on, what came is offered with no second request. A reply for a
+/// place the reader has left does not replace the questions for where
+/// they are, and a short pool shows all it has.
+#[test]
+fn suggested_questions_follow_their_switch_and_their_place() {
+    let mut app = scanned_app("ask-suggest-off");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    let here = app.proj.suggest_asked.clone().expect("asked for here");
+    // Off while the request is out: the general questions, nothing awaited.
+    let _ = app.update(Message::Usage(UsageMsg::SuggestQuestions(false)));
+    assert!(!app.suggestions_coming());
+    assert!(
+        app.suggested_questions()
+            .iter()
+            .any(|q| q.contains("entry point")),
+        "{:?}",
+        app.suggested_questions()
+    );
+    let _ = app.update(Message::Ask(AskMsg::SuggestionsCame {
+        stamp: app.stamp(),
+        key: here.clone(),
+        result: Ok("Question 1?\nQuestion 2?\nQuestion 3?\n".into()),
+    }));
+    assert!(
+        !app.suggested_questions()
+            .iter()
+            .any(|q| q.starts_with("Question")),
+        "the model's questions offered with the setting off"
+    );
+    // Back on: what came is offered, and nothing is asked again.
+    let _ = app.update(Message::Usage(UsageMsg::SuggestQuestions(true)));
+    let _ = app.update(Message::Ask(AskMsg::Close));
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    assert!(app.proj.suggest_asked.is_none(), "asked a second time");
+    assert_eq!(
+        app.suggested_questions(),
+        vec!["Question 1?", "Question 2?", "Question 3?"],
+        "a pool of three shows three"
+    );
+    // A late reply for another place leaves these as they are.
+    let elsewhere = crate::app::suggest::SuggestKey {
+        file: Some("notes.txt".into()),
+        function: None,
+    };
+    let _ = app.update(Message::Ask(AskMsg::SuggestionsCame {
+        stamp: app.stamp(),
+        key: elsewhere,
+        result: Ok("Other 1?\n".into()),
+    }));
+    assert!(
+        app.suggested_questions()
+            .iter()
+            .all(|q| q.starts_with("Question")),
         "{:?}",
         app.suggested_questions()
     );

@@ -1127,6 +1127,10 @@ pub struct SearchState {
     /// the line could not be had (a remote file not open here), whose
     /// preview is marked as matched in itself.
     pub marks: Vec<Option<Vec<(usize, usize)>>>,
+    /// Where each hit of a language server's list is on its line, as the
+    /// server said it: a click lands there, not on the name's first use on
+    /// the line. Empty for a text search, whose hit lands on what matched.
+    pub at: Vec<(usize, crate::viewer::PositionEncoding)>,
     /// Bumped as the previews are given out to be coloured: only the last
     /// colouring asked for is taken.
     pub styled_gen: u64,
@@ -1270,7 +1274,7 @@ impl DiffState {
             let row = match l.kind {
                 DiffKind::Header => continue,
                 DiffKind::Hunk => {
-                    let (old, new, place) = hunk_header(&l.text);
+                    let (old, new, new_count, place) = hunk_header(&l.text);
                     (old_no, new_no) = (old, new);
                     // A hunk from the first line hides nothing above it: its
                     // `⋯` sat over line 1. Kept where git names its place.
@@ -1280,7 +1284,15 @@ impl DiffState {
                     // How many lines it hides, said: a bare `⋯` said nothing
                     // of it, and the place git names is where the next change
                     // is, not what is hidden.
-                    let hides = new.saturating_sub(last_new + 1);
+                    // "+N,0" (nothing of the file now in it) sits after line
+                    // N: lines up to N are what it hides.
+                    let hides = if new_count == 0 {
+                        let hides = new.saturating_sub(last_new);
+                        last_new = last_new.max(new);
+                        hides
+                    } else {
+                        new.saturating_sub(last_new + 1)
+                    };
                     let place = match (hides, place) {
                         (0, Some(place)) => place,
                         (0, None) => HIDDEN.to_string(),
@@ -1439,7 +1451,9 @@ fn hidden_said(n: usize) -> String {
     )
 }
 
-fn hunk_header(header: &str) -> (usize, usize, Option<String>) {
+/// A hunk header's old start, new start, new line count, and the place git
+/// names for it.
+fn hunk_header(header: &str) -> (usize, usize, usize, Option<String>) {
     let mut parts = header.splitn(3, "@@");
     let _ = parts.next();
     let ranges = parts.next().unwrap_or("");
@@ -1453,7 +1467,16 @@ fn hunk_header(header: &str) -> (usize, usize, Option<String>) {
             .unwrap_or(1)
     };
     let place = (!place.is_empty()).then(|| place.to_string());
-    (start('-'), start('+'), place)
+    // "+12,4": four lines; "+12" alone: one.
+    let new_count = ranges
+        .split_whitespace()
+        .find_map(|r| r.strip_prefix('+'))
+        .map_or(1, |r| {
+            r.split_once(',')
+                .and_then(|(_, n)| n.parse::<usize>().ok())
+                .unwrap_or(1)
+        });
+    (start('-'), start('+'), new_count, place)
 }
 
 /// State of the language server for one language.

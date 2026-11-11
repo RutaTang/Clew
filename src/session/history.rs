@@ -365,6 +365,18 @@ impl History {
 
     // Iterative, not recursive: the tree is user-shaped (and its persisted
     // form repo-shaped), so its depth must never translate into stack depth.
+    /// The current visit's id, then its parent's, up to its root: where the
+    /// trail stands, and the branches it stands in.
+    pub fn current_path(&self) -> Vec<usize> {
+        let mut path = Vec::new();
+        let mut at = self.current;
+        while let Some(id) = at {
+            path.push(id);
+            at = self.nodes.get(id).and_then(|n| n.parent);
+        }
+        path
+    }
+
     fn dfs(&self, id: usize, depth: usize, collapsed: &HashSet<usize>, out: &mut Vec<Visit>) {
         let mut stack = vec![(id, depth, 0)];
         while let Some((id, depth, indent)) = stack.pop() {

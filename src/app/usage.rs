@@ -680,6 +680,13 @@ impl App {
         let cfg = llm::Config::current_or_default();
         self.usage.tells_balance = llm::balance_url(&cfg).is_some();
         self.usage.provider = Some(cfg.provider);
+        // Another model now (chosen in another window, say): prices typed
+        // for the last one are not this one's to save.
+        if self.usage.model != cfg.model {
+            self.usage.price_draft = None;
+            self.usage.price_saved = false;
+            self.usage.editing_prices = false;
+        }
         self.usage.model = cfg.model;
     }
 
@@ -857,7 +864,14 @@ impl App {
                 Task::none()
             }
             UsageMsg::PriceSaved(Ok(())) => {
-                self.usage.price_saved = true;
+                // Said only while what the fields say is what was kept: a
+                // field turned to no number since is not "Saved.".
+                self.usage.price_saved = self
+                    .usage
+                    .price_draft
+                    .as_ref()
+                    .and_then(draft_price)
+                    .is_some();
                 Task::none()
             }
             UsageMsg::EditPrices(on) => {
@@ -869,22 +883,34 @@ impl App {
                 Task::none()
             }
             UsageMsg::SuggestQuestions(on) => {
+                // Off, the general questions are offered and nothing more is
+                // asked for. A request already out is still marked as out, so
+                // switching back on before it lands asks no second time.
                 self.suggest_questions = on;
                 self.keep_view_pref(crate::app::runtime::SUGGEST_QUESTIONS, on);
-                if !on {
-                    // Off, what was asked is not waited for.
-                    self.proj.suggest_asked = None;
-                }
                 Task::none()
             }
             UsageMsg::KeepFresh(on) => {
                 self.keep_explanations_fresh = on;
                 self.keep_view_pref(crate::app::runtime::KEEP_EXPLANATIONS_FRESH, on);
-                // Turned on with code changed meanwhile: refreshed now.
                 if on {
-                    self.request_auto_refresh()
+                    // Turned on with code changed meanwhile: refreshed now —
+                    // and only then: nothing changed, nothing to pay for.
+                    if self.proj.explain.changed_sources.is_empty() {
+                        Task::none()
+                    } else {
+                        self.request_auto_refresh()
+                    }
                 } else {
-                    Task::none()
+                    // Off, nothing more is spent by itself: a refresh
+                    // queued is dropped, and one under way stopped (what it
+                    // had not reached waits, as changed, for one asked for).
+                    self.proj.refresh_pending = false;
+                    if self.proj.explain.running && self.proj.explain.pass_automatic {
+                        self.on_cancel_explain()
+                    } else {
+                        Task::none()
+                    }
                 }
             }
             UsageMsg::ResetPrice => {

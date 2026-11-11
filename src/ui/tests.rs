@@ -11589,14 +11589,28 @@ fn a_question_to_try_sets_its_names_as_code() {
     let mut app = reader_app();
     app.llm_available = false;
     let q = "What does `total()` return?".to_string();
-    app.proj.suggestions = Some(crate::app::suggest::Suggestions {
-        key: app.suggest_key(),
-        pool: vec![q.clone()],
-    });
+    app.proj
+        .suggestions
+        .insert(app.suggest_key(), vec![q.clone()]);
     let _ = app.update(Message::Ask(AskMsg::Open));
     let mut sim = sim_of(&app);
     let caption = text_at(&mut sim, |t| t == "Try asking", 0).expect("Try asking");
     assert!(!shows(&mut sim, "`"), "a backtick is shown to the reader");
+    // Its name in the code font, its backticks not drawn (rich text is not
+    // seen by the simulator, so the pieces are checked as they are made); a
+    // lone backtick sets nothing apart.
+    assert_eq!(
+        super::panels::question_pieces(&q),
+        vec![
+            ("What does ".to_string(), false),
+            ("total()".to_string(), true),
+            (" return?".to_string(), false),
+        ]
+    );
+    assert_eq!(
+        super::panels::question_pieces("Why `x?"),
+        vec![("Why x?".to_string(), false)]
+    );
     let at = Point::new(caption.x + 24.0, caption.y + caption.height + 14.0);
     let mut sim = sim_of(&app);
     sim.point_at(at);
@@ -16233,7 +16247,7 @@ fn the_usage_page_says_what_the_key_spent() {
     assert!(shows(&mut page, "Prices"));
     // The chart says what a bar measures and when it runs; each call says
     // when, to the minute.
-    for said in ["Cost per day", "30 days ago", "Today, "] {
+    for said in ["Cost per day", "Today, "] {
         assert!(shows(&mut page, said), "{said:?}");
     }
     drop(page);

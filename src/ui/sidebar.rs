@@ -1396,6 +1396,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                 Message::Editor(EditorMsg::OpenHit {
                     abs: hit.abs.clone(),
                     line: hit.line,
+                    at: app.proj.search.at.get(i).copied(),
                 }),
             ))
             .into(),
@@ -1740,12 +1741,21 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
 /// "teashop/pricing.py" said its name twice.
 fn trail_caption(app: &App, v: &crate::history::Visit) -> String {
     let rel = rel_of(app, &v.loc.path);
-    if v.label.is_some() || v.loc.line.is_some() {
+    // A named place says its file; one its name already gives ("pricing.py",
+    // "pricing.py:42") says the folder the file is in — the project's own,
+    // by its name, for one at its root.
+    if v.label.is_some() {
         return rel;
     }
     match rel.rsplit_once('/') {
         Some((dir, _)) => format!("{dir}/"),
-        None => String::new(),
+        None => app
+            .proj
+            .project
+            .as_ref()
+            .and_then(|p| p.root.file_name())
+            .map(|n| format!("{}/", n.to_string_lossy()))
+            .unwrap_or_default(),
     }
 }
 

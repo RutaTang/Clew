@@ -71,7 +71,7 @@ pub(crate) fn weak_home(app: &App) -> Element<'_, Message> {
             column![
                 header,
                 text(tr!(
-                    "Nothing stands out: no function is over {lines} lines, nests more than {depth} levels deep, has more than {branches} branches, or makes a risky call such as eval or a shell command.",
+                    "Nothing stands out: no function is over {lines} lines, nests {depth} or more levels deep, has more than {branches} branches, or makes a risky call such as eval or a shell command.",
                     lines = clew_core::weakspots::LONG_LINES,
                     depth = clew_core::weakspots::DEEP_NESTING,
                     branches = clew_core::weakspots::MANY_BRANCHES

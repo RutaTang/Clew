@@ -292,8 +292,10 @@ fn spent_group<'a>(s: &usage::Summary) -> Element<'a, Message> {
                 tr!("Tokens per day")
             }),
             bars,
+            // The first bar's day, said as its tooltip says it ("30 days
+            // ago" was one more than the chart holds).
             row![
-                caption(tr!("30 days ago")),
+                caption(&day_said(last, now)),
                 space().width(Fill),
                 caption(tr!("Today")),
             ],

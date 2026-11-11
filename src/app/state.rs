@@ -2319,9 +2319,10 @@ pub struct ProjectSession {
     /// Why the last question could not be asked, said in the card where it
     /// was (and on the status line): cleared by the next.
     pub ask_notice: Option<String>,
-    /// The model's questions for "Try asking", and for where
-    /// (`app::suggest`).
-    pub suggestions: Option<crate::app::suggest::Suggestions>,
+    /// The model's questions for "Try asking", by where they were written
+    /// for (`app::suggest`): a reply for a place the reader has left is
+    /// kept for it, not put in place of the questions for where they are.
+    pub suggestions: std::collections::HashMap<crate::app::suggest::SuggestKey, Vec<String>>,
     /// Where questions were last asked for, while the request is out.
     pub suggest_asked: Option<crate::app::suggest::SuggestKey>,
     /// This session's draw of which of them are offered.
@@ -2611,7 +2612,7 @@ impl Default for ProjectSession {
             ask_spoken: false,
             ask_unread: false,
             ask_notice: None,
-            suggestions: None,
+            suggestions: Default::default(),
             suggest_asked: None,
             suggest_draw: 0,
             ask_turns: Default::default(),
