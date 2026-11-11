@@ -17219,3 +17219,110 @@ fn ai_failures_are_said_where_the_action_was_taken() {
     let (said, _) = super::statusbar::explain_label_for_tests(&app).unwrap();
     assert_eq!(said, "Explaining helper()…");
 }
+
+/// A right-click on a row of the file tree opens its menu where the
+/// pointer is — the row named first, then where — and the menu's rows say
+/// what they do.
+#[test]
+fn a_right_click_on_a_tree_row_opens_its_menu_at_the_pointer() {
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: Vec::new(),
+                files: vec!["main.rs".into()],
+            },
+        )],
+        files: vec!["README.md".into()],
+    };
+    let row = {
+        let mut sim = sim_sized(&app, size);
+        text_at(&mut sim, |t| t == "README.md", 0).expect("the file's row is on screen")
+    };
+    let at = row.center();
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(crate::ui::view(&app), size, Cache::default(), &mut renderer);
+    let mut messages = Vec::new();
+    for event in [
+        mouse::Event::CursorMoved { position: at },
+        mouse::Event::ButtonPressed(mouse::Button::Right),
+        mouse::Event::ButtonReleased(mouse::Button::Right),
+    ] {
+        let _ = ui.update(
+            &[Event::Mouse(event)],
+            mouse::Cursor::Available(at),
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+    }
+    drop(ui);
+    let menu: Vec<&Message> = messages
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                Message::Project(ProjectMsg::TreeMenuFor { .. } | ProjectMsg::TreeMenuAt { .. })
+            )
+        })
+        .collect();
+    assert!(
+        matches!(
+            menu.as_slice(),
+            [
+                Message::Project(ProjectMsg::TreeMenuFor { rel, dir: false }),
+                Message::Project(ProjectMsg::TreeMenuAt { x, y }),
+            ] if rel == "README.md" && (x - at.x).abs() < 0.5 && (y - at.y).abs() < 0.5
+        ),
+        "{messages:?}"
+    );
+    for message in messages {
+        let _ = app.update(message);
+    }
+    let tree_menu = app.proj.tree_menu.as_ref().expect("the menu is up");
+    assert_eq!(
+        (tree_menu.rel.as_str(), tree_menu.dir),
+        ("README.md", false)
+    );
+    let mut sim = sim_sized(&app, size);
+    for label in [
+        "Open",
+        "Open to the Side",
+        "Copy Path",
+        "Copy Relative Path",
+    ] {
+        assert!(shows(&mut sim, label), "{label} is in the menu");
+    }
+    // It opens where the pointer was: its first row just below and right
+    // of it.
+    let open = text_at(&mut sim, |t| t == "Open", 0).unwrap();
+    assert!(
+        open.x > at.x && open.x < at.x + 40.0 && open.y > at.y && open.y < at.y + 40.0,
+        "{open:?} vs {at:?}"
+    );
+    let sent = click_nth(sim_sized(&app, size), "Copy Relative Path", 0);
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Project(ProjectMsg::TreeMenuAct(
+                crate::app::state::TreeAct::CopyRelativePath
+            ))
+        )),
+        "{sent:?}"
+    );
+    drop(sim);
+
+    // A folder's menu expands or collapses it in place of opening it.
+    app.proj.expanded.remove("src");
+    app.proj.tree_menu = Some(crate::app::state::TreeMenu {
+        rel: "src".into(),
+        dir: true,
+        x: at.x,
+        y: at.y,
+    });
+    let mut sim = sim_sized(&app, size);
+    assert!(shows(&mut sim, "Expand Folder"));
+    assert!(!shows(&mut sim, "Open to the Side"));
+}

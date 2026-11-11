@@ -913,6 +913,26 @@ pub enum ConnectionTest {
     Failed(String),
 }
 
+/// The file tree's right-click menu: the file or folder it is of
+/// (project-relative), and where in the window it opens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TreeMenu {
+    pub rel: String,
+    pub dir: bool,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// What the file tree's menu does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeAct {
+    Open,
+    OpenToSide,
+    CopyPath,
+    CopyRelativePath,
+    Reveal,
+}
+
 /// Test connection of the model as saved (the tour's sheet asks for it):
 /// kept apart from Settings' form, whose test is of fields not yet saved and
 /// is forgotten each time Settings opens — the sheet's "All set." went back
@@ -2180,6 +2200,11 @@ pub struct ProjectSession {
     pub hover_pinned: bool,
     /// An open right-click navigation menu: (pane, line, col, window x, y).
     pub context_menu: Option<ContextMenu>,
+    /// The file tree's right-click: the row it was on — said before where
+    /// it was (`ui::right_press`) — and the menu then open. Right-click did
+    /// nothing in the tree: no Copy path, no Open to the side.
+    pub tree_menu_for: Option<(String, bool)>,
+    pub tree_menu: Option<TreeMenu>,
     /// When set, the active pane shows this file's diff against `HEAD`.
     pub diff: Option<DiffState>,
     /// The diff load in flight: its request stamp and the file. A second
@@ -2665,6 +2690,8 @@ impl Default for ProjectSession {
             hover_gen: Default::default(),
             hover_pinned: Default::default(),
             context_menu: Default::default(),
+            tree_menu_for: None,
+            tree_menu: None,
             diff: Default::default(),
             diff_pending: Default::default(),
             diff_refresh: None,

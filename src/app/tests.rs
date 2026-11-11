@@ -30882,6 +30882,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::Graph(_) => "graph",
             O::Finder => "finder",
             O::ContextMenu(_) => "context menu",
+            O::TreeMenu(_) => "tree menu",
             O::Hover(_) => "hover",
         }
     }
@@ -30909,6 +30910,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         app.server_panel = false;
         app.proj.finder.open = false;
         app.proj.context_menu = None;
+        app.proj.tree_menu = None;
         app.proj.hover = None;
     }
     let mut app = scanned_app("tt-overlays-hold-chords");
@@ -31012,6 +31014,14 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 by_pointer: true,
             })
         }),
+        Box::new(|a| {
+            a.proj.tree_menu = Some(crate::app::state::TreeMenu {
+                rel: "src/lib.rs".into(),
+                dir: false,
+                x: 10.0,
+                y: 10.0,
+            })
+        }),
     ];
     let revision = |app: &App| app.proj.time_travel.as_ref().map(|t| t.idx);
     let mut raised = Vec::new();
@@ -31033,7 +31043,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (22, 22),
+        (23, 23),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 
@@ -37354,4 +37364,93 @@ fn ctrl_home_goes_to_the_start_and_ctrl_g_to_a_line() {
     let v = app.active_viewer().unwrap();
     let last = v.lines.len() - 1;
     assert_eq!(v.caret, Some((last, v.line_len(last))));
+}
+
+/// The file tree's right-click menu: opened for the row the click named,
+/// at where it was; each act closes it and does what it says.
+#[test]
+fn the_tree_menu_opens_beside_copies_and_closes() {
+    use crate::app::state::TreeAct;
+    let mut app = scanned_app("tree-menu-acts");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let raise = |app: &mut App, rel: &str, dir: bool| {
+        let _ = app.update(Message::Project(ProjectMsg::TreeMenuFor {
+            rel: rel.into(),
+            dir,
+        }));
+        let _ = app.update(Message::Project(ProjectMsg::TreeMenuAt {
+            x: 40.0,
+            y: 120.0,
+        }));
+    };
+
+    // A click on no row (the room under the last) opens nothing.
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAt {
+        x: 40.0,
+        y: 500.0,
+    }));
+    assert!(app.proj.tree_menu.is_none());
+
+    raise(&mut app, "notes.txt", false);
+    let menu = app.proj.tree_menu.as_ref().expect("the menu is up");
+    assert_eq!(
+        (menu.rel.as_str(), menu.x, menu.y),
+        ("notes.txt", 40.0, 120.0)
+    );
+    assert_eq!(app.proj.tree_cursor.as_deref(), Some("notes.txt"));
+
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAct(
+        TreeAct::CopyRelativePath,
+    )));
+    assert!(app.proj.tree_menu.is_none());
+    assert_eq!(app.status, "Copied notes.txt");
+
+    raise(&mut app, "notes.txt", false);
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAct(TreeAct::CopyPath)));
+    assert_eq!(
+        app.status,
+        format!("Copied {}", root.join("notes.txt").display())
+    );
+
+    // Beside what is read: the split opens, the file in its second half.
+    raise(&mut app, "notes.txt", false);
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAct(
+        TreeAct::OpenToSide,
+    )));
+    assert!(app.proj.tree_menu.is_none());
+    assert!(app.proj.split);
+    assert_eq!(app.proj.active, 1);
+    land_active_load(&mut app, root.join("notes.txt"), None);
+    let rel_in = |app: &App, pane: usize| {
+        app.proj.panes[pane]
+            .as_ref()
+            .map(|v| v.rel.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        (rel_in(&app, 0), rel_in(&app, 1)),
+        ("src/lib.rs".to_string(), "notes.txt".to_string())
+    );
+
+    // A folder's first row folds it.
+    app.proj.expanded.insert("src".into());
+    raise(&mut app, "src", true);
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAct(TreeAct::Open)));
+    assert!(!app.proj.expanded.contains("src"));
+
+    // The code's own menu takes the tree's place: one menu at a time,
+    // nor does the tree's come back when that one closes.
+    raise(&mut app, "notes.txt", false);
+    let _ = app.update(Message::Hover(HoverMsg::ContextMenuOpened {
+        pane: 0,
+        line: 0,
+        col: 0,
+        x: 300.0,
+        y: 200.0,
+    }));
+    assert!(app.proj.context_menu.is_some());
+    assert!(app.proj.tree_menu.is_none());
+    let _ = app.update(Message::Hover(HoverMsg::ContextMenuClosed));
+    assert!(app.proj.context_menu.is_none() && app.proj.tree_menu.is_none());
 }

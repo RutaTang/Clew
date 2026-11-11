@@ -943,6 +943,11 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)
     .height(Fill);
+    // A right-click on a row opens its menu where the click was: the row
+    // says which (`mouse_area`), this says where, in the window.
+    let tree = super::RightPress::new(tree, |at| {
+        Message::Project(ProjectMsg::TreeMenuAt { x: at.x, y: at.y })
+    });
     // Something over the tree holding the keys takes them from it.
     let held_above =
         super::active_overlay(app).is_some_and(|o| o.holds_keys()) || app.tutorial.is_some();
@@ -1150,39 +1155,46 @@ fn filtered_file_rows<'a>(
     for f in filtered_files(project, filter) {
         let (folder, name) = f.rel.rsplit_once('/').unwrap_or(("", f.rel.as_str()));
         let is_current = app.active_viewer().is_some_and(|v| v.rel == f.rel);
+        let menu = Message::Project(ProjectMsg::TreeMenuFor {
+            rel: f.rel.clone(),
+            dir: false,
+        });
         rows.push(
-            button(
-                row![
-                    quiet_icon(Glyph::File, theme::dim()),
-                    text(crate::highlight::in_order(name))
-                        .size(ts::BASE)
-                        .color(if is_current {
-                            theme::fg_bright()
-                        } else {
-                            theme::fg()
-                        })
-                        .wrapping(Wrapping::None),
-                    text(crate::highlight::in_order(folder))
-                        .size(ts::SMALL)
-                        .color(theme::dim())
-                        .wrapping(Wrapping::None),
-                    space().width(Fill),
-                    file_change_mark(app, &f.rel),
-                ]
-                .spacing(6)
-                .align_y(iced::Center),
+            mouse_area(
+                button(
+                    row![
+                        quiet_icon(Glyph::File, theme::dim()),
+                        text(crate::highlight::in_order(name))
+                            .size(ts::BASE)
+                            .color(if is_current {
+                                theme::fg_bright()
+                            } else {
+                                theme::fg()
+                            })
+                            .wrapping(Wrapping::None),
+                        text(crate::highlight::in_order(folder))
+                            .size(ts::SMALL)
+                            .color(theme::dim())
+                            .wrapping(Wrapping::None),
+                        space().width(Fill),
+                        file_change_mark(app, &f.rel),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Center),
+                )
+                .style(theme::tree_row(is_current, cursor == Some(f.rel.as_str())))
+                .width(Fill)
+                .height(Length::Fixed(TREE_ROW_H))
+                .padding([0, 8])
+                .on_press(super::heard::row(
+                    || f.rel.clone(),
+                    Message::Editor(EditorMsg::OpenRel {
+                        rel: f.rel.clone(),
+                        line: None,
+                    }),
+                )),
             )
-            .style(theme::tree_row(is_current, cursor == Some(f.rel.as_str())))
-            .width(Fill)
-            .height(Length::Fixed(TREE_ROW_H))
-            .padding([0, 8])
-            .on_press(super::heard::row(
-                || f.rel.clone(),
-                Message::Editor(EditorMsg::OpenRel {
-                    rel: f.rel.clone(),
-                    line: None,
-                }),
-            ))
+            .on_right_press(menu)
             .into(),
         );
     }
@@ -1254,16 +1266,22 @@ pub(crate) fn append_tree_rows<'a>(
         .height(Fill)
         .align_y(iced::Center);
         rows.push(
-            button(content)
-                .style(theme::tree_row(false, cursor == Some(rel.as_str())))
-                .width(Fill)
-                .height(Length::Fixed(TREE_ROW_H))
-                .padding(pad)
-                .on_press(super::heard::row(
-                    || name.to_string(),
-                    Message::Project(ProjectMsg::ToggleDir(rel.clone())),
-                ))
-                .into(),
+            mouse_area(
+                button(content)
+                    .style(theme::tree_row(false, cursor == Some(rel.as_str())))
+                    .width(Fill)
+                    .height(Length::Fixed(TREE_ROW_H))
+                    .padding(pad)
+                    .on_press(super::heard::row(
+                        || name.to_string(),
+                        Message::Project(ProjectMsg::ToggleDir(rel.clone())),
+                    )),
+            )
+            .on_right_press(Message::Project(ProjectMsg::TreeMenuFor {
+                rel: rel.clone(),
+                dir: true,
+            }))
+            .into(),
         );
         if expanded {
             append_tree_rows(rows, child, &rel, depth + 1, app, cursor);
@@ -1319,17 +1337,24 @@ pub(crate) fn append_tree_rows<'a>(
         .height(Fill)
         .align_y(iced::Center);
         let style = theme::tree_row(is_current, cursor == Some(rel.as_str()));
+        let menu = Message::Project(ProjectMsg::TreeMenuFor {
+            rel: rel.clone(),
+            dir: false,
+        });
         rows.push(
-            button(content)
-                .style(style)
-                .width(Fill)
-                .height(Length::Fixed(TREE_ROW_H))
-                .padding(pad)
-                .on_press(super::heard::row(
-                    || name.to_string(),
-                    Message::Editor(EditorMsg::OpenRel { rel, line: None }),
-                ))
-                .into(),
+            mouse_area(
+                button(content)
+                    .style(style)
+                    .width(Fill)
+                    .height(Length::Fixed(TREE_ROW_H))
+                    .padding(pad)
+                    .on_press(super::heard::row(
+                        || name.to_string(),
+                        Message::Editor(EditorMsg::OpenRel { rel, line: None }),
+                    )),
+            )
+            .on_right_press(menu)
+            .into(),
         );
     }
 }

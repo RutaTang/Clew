@@ -30,6 +30,8 @@ mod clipped;
 mod corner_safe;
 mod dropdown;
 mod escape_clears;
+mod right_press;
+pub(crate) use right_press::RightPress;
 mod ring;
 mod tree_keys;
 pub(crate) use anchored::*;
@@ -398,6 +400,7 @@ pub(crate) enum ActiveOverlay<'a> {
     Graph(crate::Overlay),
     Finder,
     ContextMenu(&'a crate::ContextMenu),
+    TreeMenu(&'a crate::app::state::TreeMenu),
     Hover(&'a crate::HoverState),
 }
 
@@ -462,6 +465,8 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::Finder
     } else if let Some(menu) = &app.proj.context_menu {
         O::ContextMenu(menu)
+    } else if let Some(menu) = &app.proj.tree_menu {
+        O::TreeMenu(menu)
     } else if let Some(hover) = app
         .proj
         .hover
@@ -502,6 +507,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::ViewsMenu => "views-menu",
             Self::Graph(_) => "graph",
             Self::ContextMenu(_) => "context-menu",
+            Self::TreeMenu(_) => "tree-menu",
             Self::BpCondition(_)
             | Self::FakeRun(_)
             | Self::BookmarkNote(_)
@@ -581,6 +587,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Graph(overlay) => project_graph_modal(app, overlay),
             Self::Finder => finder_modal(app),
             Self::ContextMenu(menu) => context_menu(app, menu),
+            Self::TreeMenu(menu) => overlays::tree_menu(app, menu),
             Self::Hover(hover) => hover_tooltip(hover),
         }
     }
@@ -631,6 +638,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Graph(_) => Message::Graph(GraphMsg::CloseOverlay),
             Self::Finder => Message::Nav(NavMsg::FinderClosed),
             Self::ContextMenu(_) => Message::Hover(HoverMsg::ContextMenuClosed),
+            Self::TreeMenu(_) => Message::Project(ProjectMsg::TreeMenuClosed),
             // Not `HoverMsg::Cleared`: that one keeps a peek the pointer rests in.
             // Unpinning drops the peek wherever the pointer is.
             Self::Hover(_) => Message::Hover(HoverMsg::Pin(false)),

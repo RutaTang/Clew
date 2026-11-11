@@ -467,6 +467,73 @@ impl App {
     }
 }
 
+/// `path` as people write it: without Windows' `\\?\` long-path prefix,
+/// which a canonical path carries and Explorer does not read.
+pub(crate) fn plain_path(path: &std::path::Path) -> String {
+    let shown = path.display().to_string();
+    if let Some(share) = shown.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{share}")
+    } else if let Some(local) = shown.strip_prefix(r"\\?\") {
+        local.to_string()
+    } else {
+        shown
+    }
+}
+
+/// Show `path` in the system's file manager: selected in its folder where
+/// the manager can (Finder, Explorer), else its folder opened. On this
+/// computer only — a remote project's files are not here.
+pub(crate) fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut open = {
+        let mut open = clew_core::spawn::command("/usr/bin/open");
+        open.arg("-R").arg(path);
+        open
+    };
+    #[cfg(windows)]
+    let mut open = {
+        let program = clew_core::linerpc::resolve_program("explorer").ok_or_else(|| {
+            tr!(
+                "Couldn't show it: {program} was not found",
+                program = "explorer"
+            )
+        })?;
+        let mut open = clew_core::spawn::command(program);
+        // Explorer reads `/select,"…"` itself: std's quoting of the whole
+        // argument would hide a path with a space from it.
+        std::os::windows::process::CommandExt::raw_arg(
+            &mut open,
+            format!("/select,\"{}\"", plain_path(path)),
+        );
+        open
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut open = {
+        // The folder it is in: Linux's file managers have no common way
+        // to select a file.
+        let folder = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        let program = clew_core::linerpc::resolve_program("xdg-open").ok_or_else(|| {
+            tr!(
+                "Couldn't show it: {program} was not found",
+                program = "xdg-open"
+            )
+        })?;
+        let mut open = clew_core::spawn::command(program);
+        open.arg(folder);
+        open
+    };
+    open.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    spawn_reaped(open)
+        .map(|_| ())
+        .map_err(|e| tr!("Couldn't show it: {error}", error = e))
+}
+
 /// Hand a plain http(s) URL to the system's opener — never `file://`,
 /// `javascript:`, a leading `-` (flag injection), an embedded line break.
 pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {

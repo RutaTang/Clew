@@ -391,7 +391,76 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         Anchoring::Corner,
     );
     // A full-size backdrop closes the menu on any outside click.
-    opaque(mouse_area(placed).on_press(Message::Hover(HoverMsg::ContextMenuClosed)))
+    // A click of either button outside it puts it away.
+    opaque(
+        mouse_area(placed)
+            .on_press(Message::Hover(HoverMsg::ContextMenuClosed))
+            .on_right_press(Message::Hover(HoverMsg::ContextMenuClosed)),
+    )
+}
+
+/// The file tree's right-click menu, at the click: open the file (beside
+/// what is read, too), copy its path, show it in the system's file manager.
+pub(crate) fn tree_menu<'a>(
+    app: &'a App,
+    menu: &'a crate::app::state::TreeMenu,
+) -> Element<'a, Message> {
+    use crate::app::state::TreeAct;
+    let act = |label: &'static str, what: TreeAct| -> Element<'a, Message> {
+        button(text(label).size(ts::BASE).wrapping(Wrapping::None))
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding([5, 12])
+            .on_press(super::heard::said(
+                label,
+                Message::Project(ProjectMsg::TreeMenuAct(what)),
+            ))
+            .into()
+    };
+    let mut rows: Vec<Element<'a, Message>> = Vec::new();
+    if menu.dir {
+        let open = app.proj.expanded.contains(&menu.rel);
+        rows.push(act(
+            if open {
+                tr!("Collapse Folder")
+            } else {
+                tr!("Expand Folder")
+            },
+            TreeAct::Open,
+        ));
+    } else {
+        rows.push(act(tr!("Open"), TreeAct::Open));
+        rows.push(act(tr!("Open to the Side"), TreeAct::OpenToSide));
+    }
+    rows.push(act(tr!("Copy Path"), TreeAct::CopyPath));
+    rows.push(act(tr!("Copy Relative Path"), TreeAct::CopyRelativePath));
+    // Only a file on this computer is there to show.
+    if !app.connection.is_remote() {
+        rows.push(act(
+            if cfg!(target_os = "macos") {
+                tr!("Show in Finder")
+            } else if cfg!(target_os = "windows") {
+                tr!("Show in Explorer")
+            } else {
+                tr!("Show in File Manager")
+            },
+            TreeAct::Reveal,
+        ));
+    }
+    let panel = container(Column::with_children(rows).spacing(1))
+        .width(Length::Fixed(MENU_W))
+        .padding(4)
+        .style(theme::modal_panel);
+    let placed = Anchored::new(
+        opaque(panel),
+        iced::Point::new(menu.x, menu.y),
+        Anchoring::Corner,
+    );
+    opaque(
+        mouse_area(placed)
+            .on_press(Message::Project(ProjectMsg::TreeMenuClosed))
+            .on_right_press(Message::Project(ProjectMsg::TreeMenuClosed)),
+    )
 }
 
 // ---------------------------------------------------------------- server panel

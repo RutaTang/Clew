@@ -1030,6 +1030,60 @@ impl App {
         self.reresolve_import_graph()
     }
 
+    /// What the file tree's right-click menu does, on its file or folder.
+    fn on_tree_menu_act(&mut self, act: crate::app::state::TreeAct) -> Task<Message> {
+        use crate::app::state::TreeAct;
+        let Some(menu) = self.proj.tree_menu.take() else {
+            return Task::none();
+        };
+        let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let abs = root.join(&menu.rel);
+        match act {
+            TreeAct::Open if menu.dir => self.on_toggle_dir(menu.rel),
+            TreeAct::Open => self.update(Message::Editor(EditorMsg::OpenRel {
+                rel: menu.rel,
+                line: None,
+            })),
+            // Beside what is read: in the split's other half, opened if
+            // it is not.
+            TreeAct::OpenToSide => {
+                let split = if self.proj.split {
+                    self.proj.active = 1;
+                    Task::none()
+                } else {
+                    self.on_toggle_split()
+                };
+                let open = self.update(Message::Editor(EditorMsg::OpenRel {
+                    rel: menu.rel,
+                    line: None,
+                }));
+                Task::batch([split, open])
+            }
+            TreeAct::CopyPath => {
+                // A remote project's path as its host writes it.
+                let path = if self.connection.is_remote() {
+                    crate::ui::remote_join(&root.display().to_string(), &menu.rel)
+                } else {
+                    crate::app::content::plain_path(&abs)
+                };
+                self.status = tr!("Copied {path}", path = path.clone());
+                iced::clipboard::write(path)
+            }
+            TreeAct::CopyRelativePath => {
+                self.status = tr!("Copied {path}", path = menu.rel.clone());
+                iced::clipboard::write(menu.rel)
+            }
+            TreeAct::Reveal => {
+                if let Err(why) = crate::app::content::reveal_in_file_manager(&abs) {
+                    self.status = why;
+                }
+                Task::none()
+            }
+        }
+    }
+
     pub(crate) fn on_toggle_dir(&mut self, rel: String) -> Task<Message> {
         // Cmd+click a folder shows its architectural explanation instead
         // of expanding it.
@@ -1304,6 +1358,23 @@ impl App {
                 ..
             } => self.on_tree_updated(seq, result, report),
             ProjectMsg::ToggleDir(rel) => self.on_toggle_dir(rel),
+            ProjectMsg::TreeMenuFor { rel, dir } => {
+                self.proj.tree_menu_for = Some((rel, dir));
+                Task::none()
+            }
+            ProjectMsg::TreeMenuAt { x, y } => {
+                if let Some((rel, dir)) = self.proj.tree_menu_for.take() {
+                    self.proj.context_menu = None;
+                    self.proj.tree_cursor = Some(rel.clone());
+                    self.proj.tree_menu = Some(crate::app::state::TreeMenu { rel, dir, x, y });
+                }
+                Task::none()
+            }
+            ProjectMsg::TreeMenuClosed => {
+                self.proj.tree_menu = None;
+                Task::none()
+            }
+            ProjectMsg::TreeMenuAct(act) => self.on_tree_menu_act(act),
         }
     }
 }

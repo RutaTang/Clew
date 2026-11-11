@@ -406,6 +406,8 @@ impl App {
             .and_then(|v| v.lang_key)
             .and_then(InsightKind::for_lang);
         let served = self.served(pane);
+        // One menu at a time: the tree's would come back when this closes.
+        self.proj.tree_menu = None;
         self.proj.context_menu = Some(ContextMenu {
             pane,
             line,

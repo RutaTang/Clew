@@ -346,6 +346,18 @@ pub enum ProjectMsg {
         report: fs_scan::ScanReport,
     },
     ToggleDir(String),
+    /// A tree row was right-clicked: the file or folder (`dir`) it is.
+    TreeMenuFor {
+        rel: String,
+        dir: bool,
+    },
+    /// Where, in the window: the tree's menu opens there.
+    TreeMenuAt {
+        x: f32,
+        y: f32,
+    },
+    TreeMenuClosed,
+    TreeMenuAct(crate::app::state::TreeAct),
 }
 
 /// Keeping the index current: watcher batches, the symbol and structure indexes.
@@ -2548,7 +2560,11 @@ impl ProjectMsg {
             | ProjectMsg::SetupApply
             | ProjectMsg::SetUpMissing
             | ProjectMsg::SetupClose
-            | ProjectMsg::ToggleDir(..) => None,
+            | ProjectMsg::ToggleDir(..)
+            | ProjectMsg::TreeMenuFor { .. }
+            | ProjectMsg::TreeMenuAt { .. }
+            | ProjectMsg::TreeMenuClosed
+            | ProjectMsg::TreeMenuAct(..) => None,
         }
     }
 }
