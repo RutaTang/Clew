@@ -1461,7 +1461,14 @@ fn the_files_explain_writes_its_missing_explanation() {
     );
     assert!(app.proj.explain.pass_target_new);
     assert_eq!(app.proj.explain.view.as_ref(), Some(&file), "and shown");
-    assert_eq!(app.status, "Explaining…");
+    // Said by its chip, by name — not again on the status line beside it.
+    assert_ne!(app.status, "Explaining…");
+    let chip = crate::ui::explain_label_for_tests(&app);
+    assert!(
+        chip.as_ref()
+            .is_some_and(|(label, _)| label.starts_with("Explaining lib.rs")),
+        "{chip:?}"
+    );
 
     // Shown again while that pass runs: no second pass.
     let generation = app.proj.explain.generation;
@@ -14249,7 +14256,12 @@ fn a_question_that_fails_comes_back_and_a_draft_stays() {
     let stream = retrieving(&mut app);
     let _ = app.on_ask_retrieved(stream, "why?".into(), false, None, Err("timed out".into()));
     assert_eq!(app.proj.ask_input, "why?", "the failed question comes back");
-    assert!(app.status.contains("timed out"), "{}", app.status);
+    // Said plainly (`tasks::plain_detail`).
+    assert!(
+        app.status.contains("no answer came in time"),
+        "{}",
+        app.status
+    );
 
     app.proj.ask_input = "a draft".into();
     let stream = retrieving(&mut app);

@@ -1346,6 +1346,20 @@ pub(crate) const RIGHT_PANEL_MIN_WINDOW_W: f32 = 950.0;
 /// Not beside a page that covers the panes (the Overview, Stats, Glossary,
 /// a Docs page): its notes are of the file under it, and the sheet's
 /// header, whose View menu shows and hides it, is not drawn there either.
+/// The least the code keeps beside the margin before the margin gives up
+/// its width, and the least the margin keeps.
+const CODE_MIN_W: f32 = 560.0;
+const MARGIN_MIN_W: f32 = 240.0;
+
+/// The margin's width as laid out: the width chosen, given up — down to
+/// [`MARGIN_MIN_W`] — where the code would otherwise have less than
+/// [`CODE_MIN_W`]. At 1100 px the margin kept its full width and the code
+/// had 445 px: most lines cut, the cut shown only by a scrollbar.
+pub(crate) fn margin_w(app: &App) -> f32 {
+    let spare = super::sheet::sheet_room(app) - CODE_MIN_W;
+    app.right_width.min(spare.max(MARGIN_MIN_W))
+}
+
 pub(crate) fn right_panel_shown(app: &App) -> bool {
     app.show_right_panel
         && !app.proj.split
@@ -1369,7 +1383,7 @@ pub(crate) fn right_panel(app: &App) -> Option<Element<'_, Message>> {
     };
     Some(
         container(body)
-            .width(Length::Fixed(app.right_width))
+            .width(Length::Fixed(margin_w(app)))
             .height(Fill)
             .style(theme::on_sheet)
             .into(),

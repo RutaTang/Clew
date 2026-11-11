@@ -233,11 +233,13 @@ fn run_tab<'a>(
             .into(),
         None => space().width(6).into(),
     };
+    // Said with its kind — "Run main.py", "Debug main.py": a run and a debug
+    // of one program read the same, "main.py", told apart only by an icon.
     let said = run_tab_said(face, &label);
     let pick = button(
         row![
             glyph::icon(g, color, 13.0),
-            text(label)
+            text(said.clone())
                 .size(ts::SMALL)
                 .color(color)
                 .wrapping(Wrapping::None),
@@ -993,8 +995,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         convo.push(
             container(
                 asked.push(
+                    // Its code marks as the reader's quotation marks: a
+                    // suggested question showed "What calls `cents`?".
                     container(
-                        text(turn.question.as_str())
+                        text(crate::i18n::quoted(&turn.question).into_owned())
                             .size(ts::BASE)
                             .line_height(1.5)
                             .color(theme::fg()),

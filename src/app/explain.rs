@@ -979,10 +979,9 @@ impl App {
             self.status = tr!("Explain All is running — this is explained as it goes").into();
             return shown;
         }
+        // Its chip says "Explaining pricing.py…" while it runs: the status
+        // line said "Explaining…" beside it, the same thing twice.
         let pass = self.start_explain_pass(PassKind::Node(node));
-        if self.proj.explain.running {
-            self.status = tr!("Explaining…").into();
-        }
         Task::batch([shown, pass])
     }
 

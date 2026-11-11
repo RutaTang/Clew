@@ -4201,9 +4201,12 @@ fn the_panel_has_a_tab_for_each_run() {
     app.debug.tab = 2;
     app.run_shown = Some(RunTab::Real(2));
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "main.py (2)"), "two Debugs of one program");
+    assert!(
+        shows(&mut sim, "Debug main.py (2)"),
+        "two Debugs of one program, each said with its kind"
+    );
     drop(sim);
-    let sent = click(sim_of(&app), "main.py");
+    let sent = click(sim_of(&app), "Debug main.py");
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Debug(DebugMsg::ShowTab(RunTab::Real(1))))),

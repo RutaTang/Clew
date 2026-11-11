@@ -37,7 +37,7 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
     // The sidebar's divider lies over its edge, taking no room of its own.
     let sidebar_edge = if app.show_left_sidebar { sidebar } else { 0.0 };
     let right = if right_panel_shown(app) {
-        app.right_width
+        super::panes::margin_w(app)
     } else {
         0.0
     };
@@ -514,7 +514,7 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
             Vertical::Top,
             Padding {
                 top: body_top + 34.0,
-                right: STRIP_W + SHEET_GAP + app.right_width + gap,
+                right: STRIP_W + SHEET_GAP + super::panes::margin_w(app) + gap,
                 ..Padding::ZERO
             },
         ),

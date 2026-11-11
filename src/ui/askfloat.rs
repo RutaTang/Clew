@@ -880,7 +880,7 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
             row![dot, {
                 let mut lines = column![
                     text(cut_to_width(
-                        crate::app::ask_sessions::shown_title(&session.title),
+                        &crate::app::ask_sessions::shown_title(&session.title),
                         SESSIONS_MENU_NAME_W,
                         ts::BASE,
                         crate::fonts::UI
@@ -924,7 +924,7 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
                     .padding(0)
                     .on_press(super::heard::said_to(
                         tr!("Forget"),
-                        crate::app::ask_sessions::shown_title(&session.title),
+                        &crate::app::ask_sessions::shown_title(&session.title),
                         Message::Ask(AskMsg::DeleteSession(session.id)),
                     )),
                 tr!("Forget this session"),

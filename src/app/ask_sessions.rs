@@ -71,12 +71,13 @@ pub(crate) fn title_of(question: &str) -> String {
 }
 
 /// A session's name as the menu and the card show it: as kept, but for
-/// [`UNTITLED`], said in the reader's language.
-pub(crate) fn shown_title(title: &str) -> &str {
+/// [`UNTITLED`], said in the reader's language — and its code marks as the
+/// reader's quotation marks ("What calls “cents”?"), not backticks.
+pub(crate) fn shown_title(title: &str) -> std::borrow::Cow<'_, str> {
     if title == UNTITLED {
-        crate::i18n::lookup(UNTITLED)
+        std::borrow::Cow::Borrowed(crate::i18n::lookup(UNTITLED))
     } else {
-        title
+        crate::i18n::quoted(title)
     }
 }
 

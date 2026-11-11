@@ -113,11 +113,16 @@ pub(crate) fn margin_width_at(window_width: f32, x: f32) -> f32 {
     sheet_content_right(window_width) - (x - crate::resize::THICKNESS / 2.0)
 }
 
+/// The sheet's content's width: what the code and the margin share.
+pub(crate) fn sheet_room(app: &App) -> f32 {
+    sheet_content_right(app.window_width) - sheet_content_left(app)
+}
+
 /// Right edge of the header's file row, in window coordinates: the sheet's
 /// content, less the margin's tabs beside it.
 fn header_right(app: &App) -> f32 {
     let tabs = if super::panes::right_panel_shown(app) {
-        app.right_width
+        super::panes::margin_w(app)
     } else {
         0.0
     };
@@ -639,7 +644,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     let tabs: Element<'_, Message> = if right_panel(app).is_some() {
         // At the row's top, as the design has them: 14 down.
         container(margin_tabs(app))
-            .width(Length::Fixed(app.right_width))
+            .width(Length::Fixed(super::panes::margin_w(app)))
             .height(Length::Fixed(SHEET_HEADER_ROW_H))
             .align_y(iced::Top)
             .padding(Padding {
