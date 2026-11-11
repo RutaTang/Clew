@@ -637,7 +637,7 @@ mod tests {
                 other => panic!("not bridged: {other:?}"),
             }
         }
-        match entry(&model, "Explain All") {
+        match entry(&model, "Explain All…") {
             Entry::Bridged { key, .. } => {
                 assert_eq!(key, &Some(KeyEquivalent::of(Chord::cmd_shift('e'))));
             }

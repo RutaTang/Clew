@@ -73,10 +73,12 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     let (model_hint, base_hint) = model_field_hints(app.settings.provider);
     let model = input(model_hint, &app.settings.model, |v| {
         Message::Settings(SettingsMsg::ModelChanged(v))
-    });
+    })
+    .id(super::settings_model_id());
     let base = input(base_hint, &app.settings.base_url, |v| {
         Message::Settings(SettingsMsg::BaseUrlChanged(v))
-    });
+    })
+    .id(super::settings_base_url_id());
     // What Test connection found, under its button.
     let tested = match &app.settings.connection_test {
         crate::app::state::ConnectionTest::Untried => None,

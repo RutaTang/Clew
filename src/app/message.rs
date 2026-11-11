@@ -2159,6 +2159,9 @@ pub enum SettingsMsg {
     /// The same, of the model as saved — where no form is open (the
     /// tutorial's check before its tour spends calls on it).
     TestSavedConnection,
+    /// Settings, at the Language model field a failure is about, the
+    /// keyboard in it (a failure's Settings on the status line).
+    Fix(crate::app::state::LlmField),
     /// What Test connection `number` found: the model's name, or why not.
     /// `saved`: of the model as saved ([`SettingsMsg::TestSavedConnection`]),
     /// not the form's fields.
@@ -3219,6 +3222,7 @@ impl SettingsMsg {
             SettingsMsg::SetThemePref(..)
             | SettingsMsg::TestConnection
             | SettingsMsg::TestSavedConnection
+            | SettingsMsg::Fix(..)
             | SettingsMsg::ConnectionTested { .. }
             | SettingsMsg::SetLanguage(..)
             | SettingsMsg::SystemAppearanceChanged

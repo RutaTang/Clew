@@ -715,7 +715,13 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     }
     // Not explained yet: what explains it, where the note says so.
     if !app.proj.explain.running && !app.proj.explain.cache.contains_key(node) {
-        actions.push(act(tr!("Explain All"), super::toolbar::explain_all_message(app)).into());
+        actions.push(
+            act(
+                tr!("Explain All…"),
+                super::toolbar::explain_all_message(app),
+            )
+            .into(),
+        );
     } else if app.llm_available {
         actions.push(
             act(

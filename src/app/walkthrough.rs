@@ -197,11 +197,13 @@ impl App {
         if self.proj.walk.seq != seq || !shown {
             return Task::none();
         }
-        self.say_failure(
-            tr!(
-                "Couldn't narrate the run with AI ({reason}) — showing its stops as recorded",
-                reason = crate::app::tasks::plain_detail(&why)
-            ),
+        self.say_failure_again(
+            move || {
+                tr!(
+                    "Couldn't narrate the run with AI ({reason}) — showing its stops as recorded",
+                    reason = crate::app::tasks::plain_detail(&why)
+                )
+            },
             Some(Message::Walk(WalkMsg::GenerateTrace)),
             crate::app::state::FailureOf::Walkthrough,
         );
@@ -502,14 +504,23 @@ impl App {
                 }
                 self.proj.walk.retried = false;
                 // Kept where it was asked for, and on the status line until
-                // it is read, each with a way to try again.
-                let why = crate::app::tasks::ai_reason(&e.to_string());
-                self.proj.walk.failed = Some((scope.clone(), why.clone()));
-                self.say_failure(
-                    tr!("Walkthrough failed: {error}", error = why),
+                // it is read, each with a way to try again — as it failed,
+                // said in the language spoken when it is shown.
+                let raw = e.to_string();
+                let about = crate::app::tasks::unreached(&raw)
+                    .then_some(crate::app::state::LlmField::BaseUrl);
+                self.proj.walk.failed = Some((scope.clone(), raw.clone()));
+                self.say_failure_again(
+                    move || {
+                        tr!(
+                            "Walkthrough failed: {error}",
+                            error = crate::app::tasks::ai_reason(&raw)
+                        )
+                    },
                     Some(Message::Walk(WalkMsg::again(&scope))),
                     crate::app::state::FailureOf::Walkthrough,
                 );
+                self.failure_about(about);
                 Task::none()
             }
         }

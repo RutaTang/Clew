@@ -2454,15 +2454,35 @@ pub(crate) fn plain_detail(raw: &str) -> String {
     }
 }
 
-/// What an AI call that failed with `raw` says to the reader, wherever it
-/// failed: no connection to the provider at all — nothing at the address,
-/// no such address — in the one sentence Explain says, naming the AI
-/// provider and where its address is set (a walkthrough, Ask, a fake run
-/// said only "nothing answered at that address", and three places the
-/// OS's own words); anything else in plain words ([`plain_detail`]).
-pub(crate) fn ai_reason(raw: &str) -> String {
+impl ExplainFailure {
+    /// The Language model field this failure is about, if one is: where
+    /// its Settings puts the keyboard.
+    pub(crate) fn field(&self) -> Option<crate::app::state::LlmField> {
+        use crate::app::state::LlmField;
+        match self {
+            ExplainFailure::Unreached(_)
+            | ExplainFailure::Rejected {
+                what: Rejection::Endpoint,
+                ..
+            } => Some(LlmField::BaseUrl),
+            ExplainFailure::Rejected {
+                what: Rejection::Key,
+                ..
+            } => Some(LlmField::Key),
+            ExplainFailure::Rejected {
+                what: Rejection::Model(_),
+                ..
+            } => Some(LlmField::Model),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a failed AI call's `raw` words say no connection to the
+/// provider could be made at all — what the base URL is to blame for.
+pub(crate) fn unreached(raw: &str) -> bool {
     let lower = raw.to_lowercase();
-    let unreached = [
+    [
         "connection refused",
         "dns error",
         "failed to lookup address",
@@ -2471,8 +2491,17 @@ pub(crate) fn ai_reason(raw: &str) -> String {
         "no such host",
     ]
     .iter()
-    .any(|w| lower.contains(w));
-    if unreached {
+    .any(|w| lower.contains(w))
+}
+
+/// What an AI call that failed with `raw` says to the reader, wherever it
+/// failed: no connection to the provider at all — nothing at the address,
+/// no such address — in the one sentence Explain says, naming the AI
+/// provider and where its address is set (a walkthrough, Ask, a fake run
+/// said only "nothing answered at that address", and three places the
+/// OS's own words); anything else in plain words ([`plain_detail`]).
+pub(crate) fn ai_reason(raw: &str) -> String {
+    if unreached(raw) {
         ExplainFailure::Unreached(raw.to_string()).describe()
     } else {
         plain_detail(raw)

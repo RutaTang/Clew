@@ -542,18 +542,47 @@ impl App {
             || calls.refine_full_wait.is_some()
     }
 
-    /// Say that an AI action failed: on the status line, in a place of its
-    /// own that other messages do not take, standing until it is dismissed,
-    /// tried again, or the same work succeeds (`forget_failure_of`) — with
-    /// `retry` to try it again (`App::failure_notice`).
+    /// [`Self::say_failure_again`] of words already said — as tests put a
+    /// failure on the line.
+    #[cfg(test)]
     pub(crate) fn say_failure(
         &mut self,
         said: String,
         retry: Option<Message>,
         of: crate::app::state::FailureOf,
     ) {
+        self.say_failure_again(move || said.clone(), retry, of);
+    }
+
+    /// Say that an AI action failed: on the status line, in a place of its
+    /// own that other messages do not take, standing until it is dismissed,
+    /// tried again, or the same work succeeds (`forget_failure_of`) — with
+    /// `retry` to try it again (`App::failure_notice`). What `say` makes of
+    /// it is said again in the language spoken whenever it is shown: a
+    /// change of language says it anew.
+    pub(crate) fn say_failure_again(
+        &mut self,
+        say: impl Fn() -> String + Send + Sync + 'static,
+        retry: Option<Message>,
+        of: crate::app::state::FailureOf,
+    ) {
+        let said = say();
         self.status = said.clone();
-        self.failure_notice = Some(crate::app::state::FailureNotice { said, retry, of });
+        self.failure_notice = Some(crate::app::state::FailureNotice {
+            said,
+            retry,
+            of,
+            again: Some(crate::app::state::SayAgain(std::sync::Arc::new(say))),
+            about: None,
+        });
+    }
+
+    /// Say which Language model field the failure standing now is about
+    /// (`FailureNotice::about`).
+    pub(crate) fn failure_about(&mut self, field: Option<crate::app::state::LlmField>) {
+        if let Some(notice) = self.failure_notice.as_mut() {
+            notice.about = field;
+        }
     }
 
     /// The failure the status line stands, if it stands one.

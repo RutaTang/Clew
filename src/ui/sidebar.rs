@@ -576,10 +576,14 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                 row![
                     column![
                         text(label).size(ts::BASE).color(theme::fg()),
-                        text(tr!("Failed: {reason}", reason = why))
-                            .size(ts::CAPTION)
-                            .color(theme::danger())
-                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                        // Kept as it failed, said in the language spoken now.
+                        text(tr!(
+                            "Failed: {reason}",
+                            reason = crate::app::tasks::ai_reason(why)
+                        ))
+                        .size(ts::CAPTION)
+                        .color(theme::danger())
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                     ]
                     .spacing(1)
                     .width(Fill),
@@ -606,7 +610,10 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
             (tr!("Generating…").to_string(), theme::accent())
         } else if let Some(why) = failed_here {
             (
-                tr!("Couldn't regenerate it: {reason}", reason = why),
+                tr!(
+                    "Couldn't regenerate it: {reason}",
+                    reason = crate::app::tasks::ai_reason(why)
+                ),
                 theme::danger(),
             )
         } else {

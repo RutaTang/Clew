@@ -248,10 +248,11 @@ pub(crate) enum Waiting {
 }
 
 impl Waiting {
-    /// What it is called, in the reader's language.
+    /// What it is called, in the reader's language — less a menu title's
+    /// "…", which said in a sentence read "Didn't run Explain All…".
     pub(crate) fn said(&self) -> &str {
         match self {
-            Waiting::Command(title) => crate::i18n::lookup(title),
+            Waiting::Command(title) => crate::i18n::lookup(title).trim_end_matches('…'),
             Waiting::Press { shown, .. } => shown,
         }
     }
@@ -260,7 +261,7 @@ impl Waiting {
     /// the pill shows translated, or what was pressed as it was shown.
     fn done(&self) -> String {
         match self {
-            Waiting::Command(title) => title.clone(),
+            Waiting::Command(title) => title.trim_end_matches('…').to_string(),
             Waiting::Press { shown, .. } => shown.clone(),
         }
     }
@@ -1873,7 +1874,7 @@ impl App {
                 self.status = tr!(
                     "“{text}” → {command}?",
                     text = text,
-                    command = crate::i18n::lookup(&said)
+                    command = crate::i18n::lookup(&said).trim_end_matches('…')
                 );
                 self.voice.confirm = Some(Waiting::Command(title));
                 self.voice.hear(Heard {

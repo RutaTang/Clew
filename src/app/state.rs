@@ -847,9 +847,46 @@ pub struct ExplainState {
 /// what it is of — what doing that again successfully takes it away.
 #[derive(Debug, Clone)]
 pub struct FailureNotice {
+    /// What it said when it was said (and the status line with it).
     pub said: String,
     pub retry: Option<Message>,
     pub of: FailureOf,
+    /// It, said again in the language spoken now: changed in Settings, the
+    /// failure stood on in the language it was said in, beside "Réessayer"
+    /// and "Réglages". `None`: `said` as it is.
+    pub again: Option<SayAgain>,
+    /// The Language model field it is about, where its Settings puts the
+    /// keyboard: "check the base URL in Settings" opened the page and left
+    /// the reader to find the field.
+    pub about: Option<LlmField>,
+}
+
+/// A field of Settings' Language model page a failure can be about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmField {
+    Key,
+    Model,
+    BaseUrl,
+}
+
+impl FailureNotice {
+    /// What it says now, in the language spoken now.
+    pub fn shown(&self) -> String {
+        self.again
+            .as_ref()
+            .map_or_else(|| self.said.clone(), |again| (again.0)())
+    }
+}
+
+/// A failure's words, made again in the language spoken when they are
+/// shown (`FailureNotice::again`).
+#[derive(Clone)]
+pub struct SayAgain(pub std::sync::Arc<dyn Fn() -> String + Send + Sync>);
+
+impl std::fmt::Debug for SayAgain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SayAgain(..)")
+    }
 }
 
 /// What a standing failure is of (`FailureNotice::of`).

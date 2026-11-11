@@ -37218,6 +37218,18 @@ fn a_failed_walkthrough_keeps_its_row_with_a_way_to_try_again() {
         "{:?}",
         app.failure_notice
     );
+    // Nothing answered at the base URL: its Settings goes to that field,
+    // the keyboard in it.
+    assert_eq!(
+        app.failure_shown().and_then(|f| f.about),
+        Some(crate::app::state::LlmField::BaseUrl)
+    );
+    let _ = app.update(Message::Settings(SettingsMsg::Fix(
+        crate::app::state::LlmField::BaseUrl,
+    )));
+    assert!(app.settings.open);
+    assert_eq!(app.settings.page, crate::SettingsPage::LanguageModel);
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
     // Dismissed from its row, it goes; a change review is tried again by
     // its diff, a run's tour by the last run.
     let _ = app.update(Message::Walk(WalkMsg::ForgetFailure));

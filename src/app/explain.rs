@@ -505,135 +505,35 @@ impl App {
             };
             self.proj.explain.node_failed = why.map(|why| (target.clone(), why));
         }
-        let mut status = if let Some(stopped) = &failures.stopped {
-            tr!("Explain stopped: {reason}", reason = stopped.describe())
-        } else if let Some(target) = reexplained
-            .as_ref()
-            .filter(|_| failures.failed > 0 && !target_written)
-        {
-            // One function or file asked for: said of it, not of the whole
-            // project ("Explained 345 functions, files and folders; 1
-            // failed" for an Explain that explained nothing).
-            let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
-            tr!(
-                "Couldn't explain {name}: {reasons}",
-                name = node_said(target),
-                reasons = why.join("; ")
-            )
-        } else if let Some(target) = reexplained.as_ref().filter(|_| failures.failed > 0) {
-            // It was explained; what builds on it was not. Said of it — not
-            // "Couldn't explain helper()" beside helper's new note, nor
-            // "Explained 345 functions…" of the whole project.
-            let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
-            trn!(
-                "Explained {name}; 1 summary built on it failed: {reasons}",
-                "Explained {name}; {n} summaries built on it failed: {reasons}",
-                failures.failed,
-                name = node_said(target),
-                reasons = why.join("; ")
-            )
-        } else if let Some(target) = reexplained.as_ref().filter(|_| failures.failed == 0) {
-            let file = target.path();
-            let not_read = tally.unread.iter().any(|p| p == file)
-                || tally.dropped.iter().any(|(p, _)| p == file);
-            match tally.regenerated {
-                // Its file could not be read, or can no longer be explained:
-                // the note below says so.
-                0 if not_read => tr!("Nothing re-explained").to_string(),
-                0 => tr!("Nothing to re-explain: it is no longer part of the project").to_string(),
-                1 if self.proj.explain.pass_target_new => tr!("Explained").to_string(),
-                1 => tr!("Re-explained").to_string(),
-                paid => trn!(
-                    "Re-explained, along with 1 summary built on it",
-                    "Re-explained, along with {n} summaries built on it",
-                    paid - 1
-                ),
-            }
-        } else {
-            // Nothing to name as explained: not "Explained 0 functions".
-            let mut status = if n == 0 {
-                tr!("Nothing explained").to_string()
+        let said = PassSaid {
+            failures: failures.clone(),
+            target: reexplained.clone(),
+            target_written,
+            target_new: self.proj.explain.pass_target_new,
+            not_read: reexplained.as_ref().is_some_and(|target| {
+                let file = target.path();
+                tally.unread.iter().any(|p| p == file)
+                    || tally.dropped.iter().any(|(p, _)| p == file)
+            }),
+            regenerated: tally.regenerated,
+            n,
+            unquoted: tally.unquoted,
+            waiting: tally.waiting.len(),
+            outdated: tally.outdated,
+            unverified: tally.unverified,
+            unexplained: tally.unexplained,
+            held: tally.held.iter().map(|p| self.shown_path(p)).collect(),
+            dropped: if completed {
+                tally
+                    .dropped
+                    .iter()
+                    .map(|(p, why)| (self.shown_path(p), *why))
+                    .collect()
             } else {
-                trn!(
-                    "Explained 1 function, file or folder",
-                    "Explained {n} functions, files and folders",
-                    n
-                )
-            };
-            // Each clause after a "; " says one thing whole.
-            if failures.failed > 0 {
-                let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
-                status.push_str("; ");
-                status.push_str(&trn!(
-                    "1 failed: {reasons}",
-                    "{n} failed: {reasons}",
-                    failures.failed,
-                    reasons = why.join("; ")
-                ));
-            }
-            if tally.unquoted > 0 {
-                status.push_str("; ");
-                status.push_str(&trn!(
-                    "1 explained without the failed summaries it builds on",
-                    "{n} explained without the failed summaries they build on",
-                    tally.unquoted
-                ));
-            }
-            if !tally.waiting.is_empty() {
-                status.push_str("; ");
-                status.push_str(&trn!(
-                    "1 left for the next refresh",
-                    "{n} left for the next refresh",
-                    tally.waiting.len()
-                ));
-            }
-            let mut left = Vec::new();
-            if tally.outdated > 0 {
-                left.push(trn!(
-                    "1 out of date, kept",
-                    "{n} out of date, kept",
-                    tally.outdated
-                ));
-            }
-            if tally.unverified > 0 {
-                left.push(trn!(
-                    "1 from an earlier version of Clew, kept but not rechecked",
-                    "{n} from an earlier version of Clew, kept but not rechecked",
-                    tally.unverified
-                ));
-            }
-            if tally.unexplained > 0 {
-                left.push(trn!(
-                    "1 not explained yet",
-                    "{n} not explained yet",
-                    tally.unexplained
-                ));
-            }
-            if !left.is_empty() {
-                status.push_str("; ");
-                status.push_str(&tr!(
-                    "{list} — Explain All brings them up to date",
-                    list = left.join(", ")
-                ));
-            }
-            status
+                Vec::new()
+            },
         };
-        // Named where they hold something: a file that could not be read and
-        // holds no summary loses nothing by it.
-        let held: Vec<String> = tally.held.iter().map(|p| self.shown_path(p)).collect();
-        if !held.is_empty() {
-            status.push_str("; ");
-            status.push_str(&trn!(
-                "1 file could not be read ({files}) — its summaries are kept until it can be",
-                "{n} files could not be read ({files}) — their summaries are kept until they can be",
-                held.len(),
-                files = some_of(&held)
-            ));
-        }
-        // Dropped only by a pass that ran to its end.
-        if completed && let Some(note) = self.dropped_note(&tally.dropped) {
-            status.push_str(&format!("; {note}"));
-        }
+        let status = pass_said(&said);
         // A pass that fell short stands on the status line until it is
         // read, with a way to try it again: the same pass, asked for again.
         if failures.stopped.is_some() || failures.failed > 0 {
@@ -655,7 +555,17 @@ impl App {
                 None if automatic => Some(Message::Explain(ExplainMsg::Refresh)),
                 None => Some(crate::ui::explain_all_message(self)),
             };
-            self.say_failure(status, retry, crate::app::state::FailureOf::Explain);
+            let about = failures
+                .stopped
+                .iter()
+                .chain(&failures.calls)
+                .find_map(ExplainFailure::field);
+            self.say_failure_again(
+                move || pass_said(&said),
+                retry,
+                crate::app::state::FailureOf::Explain,
+            );
+            self.failure_about(about);
         } else {
             // Done again, and done: the failure it stood for is past — once
             // the model answered. A pass that asked it nothing (every note
@@ -723,46 +633,6 @@ impl App {
             });
         }
         Task::batch(tasks)
-    }
-
-    /// What the status line says of the files whose summaries a pass drops
-    /// because they can no longer be explained (`explain::Tally::dropped`):
-    /// each by name — a few of several — with why.
-    fn dropped_note(&self, dropped: &[(PathBuf, explain::Unexplainable)]) -> Option<String> {
-        use explain::Unexplainable::{Refused, TooLarge};
-        let size = |bytes: u64| crate::ui::human_size(bytes);
-        match dropped {
-            [] => None,
-            [(path, TooLarge(bytes))] => Some(tr!(
-                "{file} is too large to explain ({size}) — its summaries are dropped",
-                file = self.shown_path(path),
-                size = size(*bytes)
-            )),
-            [(path, Refused(why))] => Some(refused_note(*why, &self.shown_path(path))),
-            several => {
-                let named: Vec<String> = several
-                    .iter()
-                    .map(|(path, why)| match why {
-                        TooLarge(bytes) => {
-                            tr!(
-                                "{file} (too large, {size})",
-                                file = self.shown_path(path),
-                                size = size(*bytes)
-                            )
-                        }
-                        Refused(why) => {
-                            format!("{} ({})", self.shown_path(path), refusal_words(*why))
-                        }
-                    })
-                    .collect();
-                Some(trn!(
-                    "1 file can no longer be explained ({files}) — its summaries are dropped",
-                    "{n} files can no longer be explained ({files}) — their summaries are dropped",
-                    several.len(),
-                    files = some_of(&named)
-                ))
-            }
-        }
     }
 
     /// `path` as the status line names a file: relative to the project.
@@ -1534,6 +1404,207 @@ pub(crate) mod gather_faults {
             .any(|r| r == root);
         if armed {
             panic!("injected fault reading {}", root.display());
+        }
+    }
+}
+
+/// What a pass said when it ended, kept: said again in the language spoken
+/// whenever it is shown while it stands as a failure
+/// (`FailureNotice::again`) — after Display language changed, it stood on
+/// in the language it was said in, beside buttons in the new one.
+#[derive(Debug, Clone)]
+struct PassSaid {
+    failures: PassFailures,
+    /// The node asked for on its own, if it was.
+    target: Option<explain::Node>,
+    target_written: bool,
+    target_new: bool,
+    /// Its file could not be read, or can no longer be explained.
+    not_read: bool,
+    regenerated: usize,
+    /// Notes the project has.
+    n: usize,
+    unquoted: usize,
+    waiting: usize,
+    outdated: usize,
+    unverified: usize,
+    unexplained: usize,
+    /// Files that could not be read and hold summaries, as named.
+    held: Vec<String>,
+    /// Files whose summaries the pass dropped, as named (only a pass that
+    /// ran to its end drops any).
+    dropped: Vec<(String, explain::Unexplainable)>,
+}
+
+/// What a pass that ended says on the status line ([`PassSaid`]).
+fn pass_said(said: &PassSaid) -> String {
+    let failures = &said.failures;
+    let reexplained = &said.target;
+    let mut status = if let Some(stopped) = &failures.stopped {
+        tr!("Explain stopped: {reason}", reason = stopped.describe())
+    } else if let Some(target) = reexplained
+        .as_ref()
+        .filter(|_| failures.failed > 0 && !said.target_written)
+    {
+        // One function or file asked for: said of it, not of the whole
+        // project ("Explained 345 functions, files and folders; 1
+        // failed" for an Explain that explained nothing).
+        let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
+        tr!(
+            "Couldn't explain {name}: {reasons}",
+            name = node_said(target),
+            reasons = why.join("; ")
+        )
+    } else if let Some(target) = reexplained.as_ref().filter(|_| failures.failed > 0) {
+        // It was explained; what builds on it was not. Said of it — not
+        // "Couldn't explain helper()" beside helper's new note, nor
+        // "Explained 345 functions…" of the whole project.
+        let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
+        trn!(
+            "Explained {name}; 1 summary built on it failed: {reasons}",
+            "Explained {name}; {n} summaries built on it failed: {reasons}",
+            failures.failed,
+            name = node_said(target),
+            reasons = why.join("; ")
+        )
+    } else if reexplained.is_some() && failures.failed == 0 {
+        match said.regenerated {
+            // Its file could not be read, or can no longer be explained:
+            // the note below says so.
+            0 if said.not_read => tr!("Nothing re-explained").to_string(),
+            0 => tr!("Nothing to re-explain: it is no longer part of the project").to_string(),
+            1 if said.target_new => tr!("Explained").to_string(),
+            1 => tr!("Re-explained").to_string(),
+            paid => trn!(
+                "Re-explained, along with 1 summary built on it",
+                "Re-explained, along with {n} summaries built on it",
+                paid - 1
+            ),
+        }
+    } else {
+        // Nothing to name as explained: not "Explained 0 functions".
+        let mut status = if said.n == 0 {
+            tr!("Nothing explained").to_string()
+        } else {
+            trn!(
+                "Explained 1 function, file or folder",
+                "Explained {n} functions, files and folders",
+                said.n
+            )
+        };
+        // Each clause after a "; " says one thing whole.
+        if failures.failed > 0 {
+            let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
+            status.push_str("; ");
+            status.push_str(&trn!(
+                "1 failed: {reasons}",
+                "{n} failed: {reasons}",
+                failures.failed,
+                reasons = why.join("; ")
+            ));
+        }
+        if said.unquoted > 0 {
+            status.push_str("; ");
+            status.push_str(&trn!(
+                "1 explained without the failed summaries it builds on",
+                "{n} explained without the failed summaries they build on",
+                said.unquoted
+            ));
+        }
+        if said.waiting > 0 {
+            status.push_str("; ");
+            status.push_str(&trn!(
+                "1 left for the next refresh",
+                "{n} left for the next refresh",
+                said.waiting
+            ));
+        }
+        let mut left = Vec::new();
+        if said.outdated > 0 {
+            left.push(trn!(
+                "1 out of date, kept",
+                "{n} out of date, kept",
+                said.outdated
+            ));
+        }
+        if said.unverified > 0 {
+            left.push(trn!(
+                "1 from an earlier version of Clew, kept but not rechecked",
+                "{n} from an earlier version of Clew, kept but not rechecked",
+                said.unverified
+            ));
+        }
+        if said.unexplained > 0 {
+            left.push(trn!(
+                "1 not explained yet",
+                "{n} not explained yet",
+                said.unexplained
+            ));
+        }
+        if !left.is_empty() {
+            status.push_str("; ");
+            status.push_str(&tr!(
+                "{list} — Explain All brings them up to date",
+                list = left.join(", ")
+            ));
+        }
+        status
+    };
+    // Named where they hold something: a file that could not be read and
+    // holds no summary loses nothing by it.
+    let held = &said.held;
+    if !held.is_empty() {
+        status.push_str("; ");
+        status.push_str(&trn!(
+            "1 file could not be read ({files}) — its summaries are kept until it can be",
+            "{n} files could not be read ({files}) — their summaries are kept until they can be",
+            held.len(),
+            files = some_of(held)
+        ));
+    }
+    // Dropped only by a pass that ran to its end.
+    if let Some(note) = dropped_note(&said.dropped) {
+        status.push_str(&format!("; {note}"));
+    }
+    status
+}
+
+/// What the status line says of the files whose summaries a pass drops
+/// because they can no longer be explained (`explain::Tally::dropped`):
+/// each by name — a few of several — with why.
+fn dropped_note(dropped: &[(String, explain::Unexplainable)]) -> Option<String> {
+    use explain::Unexplainable::{Refused, TooLarge};
+    let size = |bytes: u64| crate::ui::human_size(bytes);
+    match dropped {
+        [] => None,
+        [(path, TooLarge(bytes))] => Some(tr!(
+            "{file} is too large to explain ({size}) — its summaries are dropped",
+            file = path.clone(),
+            size = size(*bytes)
+        )),
+        [(path, Refused(why))] => Some(refused_note(*why, path)),
+        several => {
+            let named: Vec<String> = several
+                .iter()
+                .map(|(path, why)| match why {
+                    TooLarge(bytes) => {
+                        tr!(
+                            "{file} (too large, {size})",
+                            file = path.clone(),
+                            size = size(*bytes)
+                        )
+                    }
+                    Refused(why) => {
+                        format!("{} ({})", path.clone(), refusal_words(*why))
+                    }
+                })
+                .collect();
+            Some(trn!(
+                "1 file can no longer be explained ({files}) — its summaries are dropped",
+                "{n} files can no longer be explained ({files}) — their summaries are dropped",
+                several.len(),
+                files = some_of(&named)
+            ))
         }
     }
 }

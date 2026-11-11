@@ -1195,7 +1195,7 @@ pub(crate) fn tools_row_action(row: ToolsRow) -> Action {
 /// What a ⋯ menu row says.
 pub(crate) fn tools_row_label(row: ToolsRow) -> &'static str {
     match row {
-        ToolsRow::ExplainAll => tr!("Explain All"),
+        ToolsRow::ExplainAll => tr!("Explain All…"),
         ToolsRow::Glossary => tr!("Glossary"),
         ToolsRow::SetUp => tr!("Set Up Project…"),
         ToolsRow::Tutorial => tr!("Tutorial"),
@@ -1656,7 +1656,7 @@ pub(crate) fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Mess
         ),
         ToolsRow::ExplainAll => (
             Glyph::TextLines,
-            tr!("Explain All").into(),
+            tr!("Explain All…").into(),
             Some(explain_all_message(app)),
         ),
         ToolsRow::Glossary => (

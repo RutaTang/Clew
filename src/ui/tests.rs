@@ -3485,7 +3485,7 @@ fn the_chrome_geometry_matches_what_is_drawn() {
     app.window_height = TOOLS_IN_MENU_H;
     assert!(!super::tools_on_strip(&app));
     for (row, label) in [
-        (super::ToolsRow::ExplainAll, "Explain All"),
+        (super::ToolsRow::ExplainAll, "Explain All…"),
         (super::ToolsRow::SetUp, "Set Up Project…"),
         (super::ToolsRow::Tutorial, "Tutorial"),
     ] {
@@ -10815,7 +10815,7 @@ fn explain_all_without_a_key_opens_settings_where_the_key_goes() {
     let mut app = reader_app();
     app.llm_available = false;
     open_tools_menu(&mut app);
-    let sent = click(sim_of(&app), "Explain All");
+    let sent = click(sim_of(&app), "Explain All…");
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Settings(crate::SettingsMsg::NeedKey))),
@@ -12267,6 +12267,38 @@ fn a_failures_controls_stay_put_on_the_status_line() {
     }
 }
 
+/// A failure standing on the status line is said in the language spoken
+/// now: after Display language changed it stood on in English beside
+/// "Réessayer" and "Réglages".
+#[test]
+fn a_standing_failure_is_said_in_the_language_now_spoken() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = reader_app();
+    app.say_failure_again(
+        || {
+            crate::tr!(
+                "Walkthrough failed: {error}",
+                error = crate::app::tasks::ai_reason("Connection refused (os error 111)")
+            )
+        },
+        None,
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    let said = |app: &App| {
+        let mut sim = sim_elem(super::statusbar::statusbar(app));
+        text_at(&mut sim, |t| t.starts_with("Walkthrough failed"), 0).is_some()
+    };
+    assert!(said(&app));
+    with_lang(Lang::Fr, || {
+        assert!(!said(&app), "still in English");
+        let mut sim = sim_elem(super::statusbar::statusbar(&app));
+        assert!(
+            text_at(&mut sim, |t| t.starts_with("Échec de la visite"), 0).is_some(),
+            "not said in French"
+        );
+    });
+}
+
 /// What voice could not do is said in the reader's language: on the card,
 /// on the pill, and under a model in Settings.
 #[test]
@@ -13371,7 +13403,7 @@ fn the_tools_menu_fits_a_short_window() {
             "the last row runs past the foot at {height}: {last:?}"
         );
         assert!(
-            text_at(&mut sim, |t| t == "Explain All", 0).is_some(),
+            text_at(&mut sim, |t| t == "Explain All…", 0).is_some(),
             "and the first is there too"
         );
         sim.point_at(last.center());
@@ -14957,7 +14989,7 @@ fn the_app_menu_keeps_its_tools_apart_and_shows_it_scrolls() {
     for tool in [
         "Call Graph",
         "Project Graphs",
-        "Explain All",
+        "Explain All…",
         "Start Debugging",
     ] {
         let at = y(&mut sim, tool);
@@ -17166,9 +17198,11 @@ fn ai_failures_are_said_where_the_action_was_taken() {
         "request failed: Connection refused".into(),
     ));
     {
+        // Kept as it failed, said plainly — the one sentence every AI
+        // failure says — in the language spoken.
         let mut sim = sim_elem(super::sidebar::walk_library(&app));
         assert!(
-            shows(&mut sim, "Connection refused"),
+            shows(&mut sim, "couldn't reach the AI provider"),
             "the failed row is gone"
         );
         assert!(shows(&mut sim, "Try again"));

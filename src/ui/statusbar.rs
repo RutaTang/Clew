@@ -608,7 +608,7 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     if let Some(failure) = failure
         && room >= least
     {
-        let whole = words_of(&failure.said);
+        let whole = words_of(&failure.shown());
         let (controls, controls_w) = failure_controls(failure, room - least - STATUS_GAP);
         let words = (room - controls_w - 2.0 * STATUS_GAP - SAID_MIN_W)
             .max(least)
@@ -742,11 +742,13 @@ fn failure_controls(
         width += retry_w;
     }
     if with_settings {
+        // At the field it is about, where it is about one.
         row = row.push(link(
             tr!("Settings"),
-            Message::Settings(SettingsMsg::OpenAt(
-                crate::app::state::SettingsPage::LanguageModel,
-            )),
+            Message::Settings(match failure.about {
+                Some(field) => SettingsMsg::Fix(field),
+                None => SettingsMsg::OpenAt(crate::app::state::SettingsPage::LanguageModel),
+            }),
         ));
         width += settings_w;
     }

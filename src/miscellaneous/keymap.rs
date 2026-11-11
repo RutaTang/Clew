@@ -252,7 +252,9 @@ impl Action {
             Action::ImportGraph => at(MenuSection::Tools, tr_noop!("Import Graph")),
             Action::TypeGraph => at(MenuSection::Tools, tr_noop!("Type Graph")),
             Action::ProjectMaps => at(MenuSection::Tools, tr_noop!("Project Graphs")),
-            Action::ExplainAll => at(MenuSection::Tools, tr_noop!("Explain All")),
+            // It opens its cost sheet first: "…", as the Overview's button
+            // has it.
+            Action::ExplainAll => at(MenuSection::Tools, tr_noop!("Explain All…")),
             Action::ToggleDiff => at(MenuSection::Tools, tr_noop!("Diff with Last Commit")),
             Action::TimeTravel => at(MenuSection::Tools, tr_noop!("Time Travel")),
             Action::Walkthrough => at(MenuSection::Tools, tr_noop!("Walkthroughs")),

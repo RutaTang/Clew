@@ -165,7 +165,7 @@ fn the_agent_lists_and_runs_the_windows_commands() {
         "{listed}"
     );
     assert!(listed.contains(&format!(
-        "- Explain All ({}) — asks the user first",
+        "- Explain All… ({}) — asks the user first",
         keys("⇧⌘E")
     )));
     assert!(
@@ -305,7 +305,7 @@ fn a_costly_command_waits_for_the_users_yes() {
     );
     assert_eq!(
         results(&mut rx),
-        [(1, "Ran “Explain All”.".to_string(), false)]
+        [(1, "Ran “Explain All…”.".to_string(), false)]
     );
     assert_eq!(
         app.proj

@@ -299,6 +299,16 @@ pub fn settings_key_id() -> iced::widget::Id {
     iced::widget::Id::new("settings-key")
 }
 
+/// The Language model page's model and base URL fields: where a failure
+/// about them puts the keyboard (`SettingsMsg::Fix`).
+pub fn settings_model_id() -> iced::widget::Id {
+    iced::widget::Id::new("settings-model")
+}
+
+pub fn settings_base_url_id() -> iced::widget::Id {
+    iced::widget::Id::new("settings-base-url")
+}
+
 pub fn ask_input_id() -> iced::widget::Id {
     iced::widget::Id::new("ask-input")
 }

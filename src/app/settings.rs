@@ -631,6 +631,23 @@ impl App {
                     usage,
                 ])
             }
+            SettingsMsg::Fix(field) => {
+                use crate::app::state::LlmField;
+                self.settings.page = SettingsPage::LanguageModel;
+                let opened = self.on_open_settings();
+                self.code_focused = false;
+                let id = match field {
+                    LlmField::Key => ui::settings_key_id(),
+                    LlmField::Model => ui::settings_model_id(),
+                    LlmField::BaseUrl => ui::settings_base_url_id(),
+                };
+                Task::batch([
+                    opened,
+                    self.sync_server_listing(),
+                    settings_to_top(),
+                    operation::focus(id),
+                ])
+            }
             SettingsMsg::NeedKey => {
                 self.settings.page = SettingsPage::LanguageModel;
                 let opened = self.on_open_settings();
