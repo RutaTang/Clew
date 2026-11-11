@@ -1175,6 +1175,8 @@ pub struct DiffState {
     /// How many lines the file has now, where it is known: lines after
     /// [`last_new`](Self::last_new) are hidden, and a `⋯` says so.
     pub total_new: Option<usize>,
+    /// What the row after the last change says: how many lines follow it.
+    pub tail_said: Option<String>,
 }
 
 /// The node of a map the reader clicked: what it is called, the file it is
@@ -1272,9 +1274,19 @@ impl DiffState {
                     (old_no, new_no) = (old, new);
                     // A hunk from the first line hides nothing above it: its
                     // `⋯` sat over line 1. Kept where git names its place.
-                    if old <= 1 && new <= 1 && place == HIDDEN {
+                    if old <= 1 && new <= 1 && place.is_none() {
                         continue;
                     }
+                    // How many lines it hides, said: a bare `⋯` said nothing
+                    // of it, and the place git names is where the next change
+                    // is, not what is hidden.
+                    let hides = new.saturating_sub(last_new + 1);
+                    let place = match (hides, place) {
+                        (0, Some(place)) => place,
+                        (0, None) => HIDDEN.to_string(),
+                        (n, None) => hidden_said(n),
+                        (n, Some(place)) => format!("{}   {place}", hidden_said(n)),
+                    };
                     Row {
                         kind: DiffKind::Hunk,
                         text: place.clone(),
@@ -1389,13 +1401,18 @@ impl DiffState {
             max_cols,
             last_new,
             total_new: None,
+            tail_said: None,
         }
     }
 
     /// With the file's own length: what follows the last change is marked
     /// as hidden.
     pub fn of_file(mut self, source: &str) -> Self {
-        self.total_new = Some(source.lines().count());
+        let total = source.lines().count();
+        self.total_new = Some(total);
+        self.tail_said = self
+            .hides_tail()
+            .then(|| hidden_said(total - self.last_new));
         self
     }
 
@@ -1414,7 +1431,15 @@ const DIFF_HIGHLIGHT_MAX: usize = 3000;
 
 /// What a hunk's header says: where its first line is before and after, and
 /// the place it is in (`fn main()`) — `⋯` when git names none.
-fn hunk_header(header: &str) -> (usize, usize, String) {
+/// "⋯ 14 unchanged lines": what a hidden stretch of a diff says.
+fn hidden_said(n: usize) -> String {
+    format!(
+        "{HIDDEN} {}",
+        trn!("1 unchanged line", "{n} unchanged lines", n)
+    )
+}
+
+fn hunk_header(header: &str) -> (usize, usize, Option<String>) {
     let mut parts = header.splitn(3, "@@");
     let _ = parts.next();
     let ranges = parts.next().unwrap_or("");
@@ -1427,11 +1452,7 @@ fn hunk_header(header: &str) -> (usize, usize, String) {
             .and_then(|n| n.parse::<usize>().ok())
             .unwrap_or(1)
     };
-    let place = if place.is_empty() {
-        HIDDEN.to_string()
-    } else {
-        format!("{HIDDEN}  {place}")
-    };
+    let place = (!place.is_empty()).then(|| place.to_string());
     (start('-'), start('+'), place)
 }
 

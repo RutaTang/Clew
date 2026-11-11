@@ -12940,7 +12940,7 @@ fn repeated_actions_are_icons_that_do_what_they_did() {
 
     let abs = root.join("src/lib.rs");
     app.proj.diff = Some(crate::DiffState::new(abs, "src/lib.rs".into(), Vec::new()));
-    let head = "src/lib.rs compared with HEAD";
+    let head = "src/lib.rs: changes since the last commit";
     words_gone(&mut sim_of(&app), &["✕ Close"]);
     let sent = click_right_of(
         || sim_of(&app),
@@ -13919,7 +13919,7 @@ fn the_diff_view_shows_places_and_numbers_not_git_headers() {
     ));
     let d = app.proj.diff.as_ref().unwrap();
     let mut sim = sim_elem(super::panes::diff_view(&app, 0, d));
-    assert!(shows(&mut sim, "⋯  fn line_2() {"));
+    assert!(shows(&mut sim, "⋯ 2 unchanged lines   fn line_2() {"));
     assert!(shows(&mut sim, "3 3"));
     assert!(!shows(&mut sim, "diff --git"));
     assert!(!shows(&mut sim, "@@"));

@@ -492,9 +492,11 @@ pub(crate) fn diff_view<'a>(
 
     let header = container(
         row![
-            text(tr!("{file} compared with HEAD", file = d.rel))
+            // Plain words, in the text's colour: "compared with HEAD" was
+            // git's, and in the accent it read as a link that did nothing.
+            text(tr!("{file}: changes since the last commit", file = d.rel))
                 .size(ts::BODY)
-                .color(theme::accent()),
+                .color(theme::fg()),
             space().width(Fill),
             super::toolbar::icon_action(
                 crate::glyph::Glyph::Close,
@@ -636,8 +638,12 @@ pub(crate) fn diff_view<'a>(
         }
         // The file goes on after its last change: the lines after it were
         // hidden with no mark, where a `⋯` stood over line 1 instead.
-        if d.hides_tail() && d.lines.len() <= MAX_DIFF_ROWS {
-            rows.push(hidden(crate::app::model::HIDDEN));
+        if let Some(tail) = d
+            .tail_said
+            .as_deref()
+            .filter(|_| d.lines.len() <= MAX_DIFF_ROWS)
+        {
+            rows.push(hidden(tail));
         }
         if d.lines.len() > MAX_DIFF_ROWS {
             rows.push(
@@ -2662,7 +2668,7 @@ mod tests {
             ]
         );
         assert!(d.runs.iter().all(|r| !r.text.contains("diff --git")));
-        assert_eq!(d.runs[0].text, "⋯  fn main() {");
+        assert_eq!(d.runs[0].text, "⋯ 9 unchanged lines   fn main() {");
         assert_eq!(d.runs[1].gutter, "10 10");
         assert_eq!(d.runs[2].gutter, "11   ");
         assert_eq!(d.runs[3].gutter, "   11");
@@ -2687,7 +2693,7 @@ mod tests {
                 line(DiffKind::Add, "+x"),
             ],
         );
-        assert_eq!(bare.runs[0].text, "⋯");
+        assert_eq!(bare.runs[0].text, "⋯ 11 unchanged lines");
         assert_eq!(bare.runs[1].gutter, "   12");
         // One from the first line hides nothing before it, so says nothing:
         // a `⋯` sat over line 1. Lines after its last change are hidden
@@ -2714,6 +2720,10 @@ mod tests {
         assert!(!top().hides_tail(), "the file's length unknown");
         assert!(!top().of_file("a\nb\nc\n").hides_tail());
         assert!(top().of_file("a\nb\nc\nd\ne\n").hides_tail());
+        assert_eq!(
+            top().of_file("a\nb\nc\nd\ne\n").tail_said.as_deref(),
+            Some("⋯ 2 unchanged lines")
+        );
         // Git's "\ No newline at end of file" is no line: not drawn, and
         // the lines after it keep their numbers.
         let marked = crate::DiffState::new(
