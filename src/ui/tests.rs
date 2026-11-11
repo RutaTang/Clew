@@ -15196,6 +15196,22 @@ fn the_mcp_registry_is_searched_and_used_from_settings() {
     // An entry Clew cannot run fills nothing.
     let _ = app.update(Message::Integrations(M::RegistryUse(1)));
     assert_eq!(app.settings.integrations.new_mcp_name, "notes");
+
+    // Add server asks for something to add, and says beside itself why an
+    // Add did not add — not at the top of the page, 400 px away.
+    app.settings.integrations.registry.found = None;
+    app.settings.integrations.new_mcp_target.clear();
+    assert!(click(sim_tall(super::view(&app)), "Add server").is_empty());
+    app.settings.integrations.new_mcp_target = "npx -y x".into();
+    assert!(matches!(
+        click(sim_tall(super::view(&app)), "Add server").as_slice(),
+        [Message::Integrations(M::McpAdd)]
+    ));
+    app.settings.integrations.mcp_add_error = Some("give the server a name".into());
+    assert!(shows(
+        &mut sim_tall(super::view(&app)),
+        "Not added: give the server a name."
+    ));
 }
 
 /// A search runs off the window's thread and only the newest answer is
@@ -16297,6 +16313,18 @@ fn the_usage_page_says_what_the_key_spent() {
     )));
     let mut page = sim_tall(super::usage::usage_page(&app));
     assert!(shows(&mut page, "Enter a number."));
+    drop(page);
+    // And Done keeps the editor until it is one: pressed, it closed and
+    // dropped the edit without a word.
+    assert!(click(sim_tall(super::usage::usage_page(&app)), "Done").is_empty());
+    let _ = app.update(Message::Usage(crate::UsageMsg::Price(
+        crate::app::usage::PriceField::Input,
+        "0.2".into(),
+    )));
+    assert!(matches!(
+        click(sim_tall(super::usage::usage_page(&app)), "Done").as_slice(),
+        [Message::Usage(crate::UsageMsg::EditPrices(false))]
+    ));
 }
 
 /// An empty call hierarchy, with the caret in a function, offers that

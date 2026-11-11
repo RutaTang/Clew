@@ -1373,19 +1373,31 @@ fn the_settings_add_and_remove_servers_and_agents() {
     assert_eq!(app.acp_agents.len(), 1);
     assert_eq!(app.ask_agent, None, "a removed agent is no longer picked");
 
-    // A form that cannot be saved says why.
+    // A form that cannot be saved says why — beside its Add, not as the
+    // page's note far above it; and no longer once it is typed in again.
+    let note = app.settings.integrations.note.clone();
     send(&mut app, IntegrationsMsg::McpName("bad name".into()));
     send(&mut app, IntegrationsMsg::McpTarget(shell.into()));
     send(&mut app, IntegrationsMsg::McpAdd);
     assert!(
         app.settings
             .integrations
-            .note
+            .mcp_add_error
             .as_deref()
-            .is_some_and(|n| n.starts_with("Not saved")),
+            .is_some_and(|e| e.contains("name")),
         "{:?}",
-        app.settings.integrations.note
+        app.settings.integrations.mcp_add_error
     );
+    assert_eq!(
+        app.settings.integrations.note, note,
+        "the page's note is left"
+    );
+    send(&mut app, IntegrationsMsg::McpName("good".into()));
+    assert_eq!(app.settings.integrations.mcp_add_error, None);
+    send(&mut app, IntegrationsMsg::AcpName("bad name".into()));
+    send(&mut app, IntegrationsMsg::AcpCommand(shell.into()));
+    send(&mut app, IntegrationsMsg::AcpAdd);
+    assert!(app.settings.integrations.acp_add_error.is_some());
 }
 
 #[test]

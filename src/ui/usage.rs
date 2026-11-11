@@ -449,14 +449,21 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
             None
         }
     };
-    let field = |label: &str, about: Option<String>, which: PriceField, value: String| {
-        let about = problem(which, &value).or(about);
+    let field = |label: &str, which: PriceField, value: String| {
+        let wrong = problem(which, &value);
         // Dollars per million tokens, said where the figure is typed, and
-        // set at the right as the page's other figures are.
+        // set at the right as the page's other figures are. A field that
+        // is wrong is marked, as the Connect form marks one, and says why
+        // under its name in the danger colour.
         let control = row![
             text("$").size(ts::BODY).color(theme::dim()),
             form::input("0", &value)
                 .on_input(move |v| Message::Usage(UsageMsg::Price(which, v)))
+                .style(if wrong.is_some() {
+                    theme::input_marked
+                } else {
+                    theme::input
+                })
                 .width(Length::Fixed(96.0)),
             text(tr!("per 1M tokens"))
                 .size(ts::SMALL)
@@ -464,19 +471,28 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
         ]
         .spacing(6)
         .align_y(iced::Center);
-        form::field(
-            label.to_string(),
-            about,
-            container(control)
-                .width(Fill)
-                .align_x(iced::alignment::Horizontal::Right),
-        )
+        let control = container(control)
+            .width(Fill)
+            .align_x(iced::alignment::Horizontal::Right);
+        match wrong {
+            Some(why) => form::field_wrong(label.to_string(), why, control),
+            None => form::field(label.to_string(), None, control),
+        }
     };
     let [input, cached, output] = shown;
+    // Done leaves the editor only with prices it can keep: pressed with
+    // "abc" in a field, it closed and dropped the edit without a word.
+    let all_right = [
+        (PriceField::Input, &input),
+        (PriceField::Cached, &cached),
+        (PriceField::Output, &output),
+    ]
+    .iter()
+    .all(|(which, value)| problem(*which, value).is_none());
     let mut rows = vec![
-        field(tr!("Input"), None, PriceField::Input, input),
-        field(tr!("Cached input"), None, PriceField::Cached, cached),
-        field(tr!("Output"), None, PriceField::Output, output),
+        field(tr!("Input"), PriceField::Input, input.clone()),
+        field(tr!("Cached input"), PriceField::Cached, cached.clone()),
+        field(tr!("Output"), PriceField::Output, output.clone()),
     ];
     // Editing prices Clew knows: a way back to the line, and to its own.
     if known.is_some() && editing {
@@ -487,10 +503,20 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
         if own && defaults {
             buttons = buttons.push(restore());
         }
-        buttons = buttons.push(form::primary(
+        let done = form::primary(
             tr!("Done"),
-            Some(Message::Usage(UsageMsg::EditPrices(false))),
-        ));
+            all_right.then_some(Message::Usage(UsageMsg::EditPrices(false))),
+        );
+        buttons = buttons.push(if all_right {
+            done.into()
+        } else {
+            super::toolbar::tip_at(
+                done,
+                tr!("Fix the prices marked in red first"),
+                None,
+                iced::widget::tooltip::Position::Top,
+            )
+        });
         rows.push(form::row_of(
             row![space().width(Fill), buttons].align_y(iced::Center),
         ));

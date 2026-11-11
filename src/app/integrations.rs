@@ -230,6 +230,11 @@ pub struct IntegrationsDraft {
     pub signed_in: HashSet<String>,
     /// What the last action did, or why it did not.
     pub note: Option<String>,
+    /// Why the add-a-server and add-an-agent forms' last Add did not add:
+    /// said beside their button, as the Connect form says what it lacks —
+    /// at the top of the page it was 400 px from what was pressed.
+    pub mcp_add_error: Option<String>,
+    pub acp_add_error: Option<String>,
     /// The MCP registry search (`mcp::registry`).
     pub registry: RegistrySearch,
 }
@@ -1815,6 +1820,7 @@ impl App {
         let result: Result<Option<String>, String> = match message {
             IntegrationsMsg::McpName(v) => {
                 draft.new_mcp_name = v;
+                draft.mcp_add_error = None;
                 return Task::none();
             }
             IntegrationsMsg::RegistryQuery(v) => {
@@ -1864,6 +1870,7 @@ impl App {
                 draft.new_mcp_name = name;
                 draft.new_mcp_target = target;
                 draft.new_mcp_extra = extra;
+                draft.mcp_add_error = None;
                 draft.note = Some(tr!(
                     "Filled in from the registry: read the command, fill in what it needs, then Add server"
                 ).to_string());
@@ -1872,21 +1879,31 @@ impl App {
             }
             IntegrationsMsg::McpTarget(v) => {
                 draft.new_mcp_target = v;
+                draft.mcp_add_error = None;
                 return Task::none();
             }
             IntegrationsMsg::McpExtra(v) => {
                 draft.new_mcp_extra = v;
+                draft.mcp_add_error = None;
                 return Task::none();
             }
             IntegrationsMsg::AcpName(v) => {
                 draft.new_acp_name = v;
+                draft.acp_add_error = None;
                 return Task::none();
             }
             IntegrationsMsg::AcpCommand(v) => {
                 draft.new_acp_command = v;
+                draft.acp_add_error = None;
                 return Task::none();
             }
-            IntegrationsMsg::McpAdd => self.add_mcp_from_form(),
+            // Why it did not add is said beside its button, not as the
+            // page's note.
+            IntegrationsMsg::McpAdd => {
+                let added = self.add_mcp_from_form();
+                self.settings.integrations.mcp_add_error = added.as_ref().err().cloned();
+                added.or(Ok(None))
+            }
             IntegrationsMsg::McpRemove(name) => {
                 mcp::hub::Hub::global().forget(&name);
                 mcp::config::remove(&name)
@@ -2038,7 +2055,11 @@ impl App {
                 mcp::hub::Hub::global().forget(&name);
                 result.map(|()| Some(tr!("Signed out of `{name}`", name = name)))
             }
-            IntegrationsMsg::AcpAdd => self.add_acp_from_form(),
+            IntegrationsMsg::AcpAdd => {
+                let added = self.add_acp_from_form();
+                self.settings.integrations.acp_add_error = added.as_ref().err().cloned();
+                added.or(Ok(None))
+            }
             IntegrationsMsg::AcpPreset(index) => match acp::config::PRESETS.get(index) {
                 Some(preset) => acp::config::save(&preset.config()).map(|()| {
                     Some(tr!(

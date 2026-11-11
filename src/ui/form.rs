@@ -96,6 +96,12 @@ fn rule<'a>() -> Element<'a, Message> {
 
 /// What a row sets, and under it `about`.
 fn label<'a>(label: String, about: Option<String>) -> Element<'a, Message> {
+    label_saying(label, about, false)
+}
+
+/// [`label`], its line under the name what is wrong (in the danger colour)
+/// when `wrong`.
+fn label_saying<'a>(label: String, about: Option<String>, wrong: bool) -> Element<'a, Message> {
     let mut col = column![text(label).size(ts::BASE).color(theme::fg())].spacing(2);
     if let Some(about) = about {
         // Its names in the reader's quotation marks, not backticks.
@@ -103,7 +109,7 @@ fn label<'a>(label: String, about: Option<String>) -> Element<'a, Message> {
         col = col.push(
             text(about)
                 .size(ts::SMALL)
-                .color(theme::dim())
+                .color(if wrong { theme::danger() } else { theme::dim() })
                 .wrapping(Wrapping::WordOrGlyph),
         );
     }
@@ -145,6 +151,28 @@ pub(crate) fn field<'a>(
 ) -> Element<'a, Message> {
     row![
         container(label(name.into(), about))
+            .width(LABEL_W)
+            .padding(Padding {
+                top: VALUE_TOP,
+                ..Padding::ZERO
+            }),
+        container(control.into()).width(Fill),
+    ]
+    .spacing(12)
+    .padding([ROW_PAD_Y - 2.0, ROW_PAD_X])
+    .into()
+}
+
+/// [`field`] whose typed value is wrong: `problem` said under its name in
+/// the danger colour, as the Connect form says a field it needs — the field
+/// itself marked by its caller ([`theme::input_marked`]).
+pub(crate) fn field_wrong<'a>(
+    name: impl Into<String>,
+    problem: String,
+    control: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    row![
+        container(label_saying(name.into(), Some(problem), true))
             .width(LABEL_W)
             .padding(Padding {
                 top: VALUE_TOP,

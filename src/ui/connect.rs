@@ -1762,11 +1762,18 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 )
                 .secure(true),
             ),
+            // Add only with something to add; and why it did not, beside
+            // it, as the Connect form says what it lacks.
             form::plain(
                 row![
-                    space().width(Fill),
-                    form::primary(tr!("Add server"), Some(Message::Integrations(M::McpAdd))),
+                    add_said(draft.mcp_add_error.as_deref()),
+                    form::primary(
+                        tr!("Add server"),
+                        (!draft.new_mcp_target.trim().is_empty())
+                            .then_some(Message::Integrations(M::McpAdd)),
+                    ),
                 ]
+                .spacing(12)
                 .align_y(iced::Center),
             ),
         ]
@@ -1862,9 +1869,14 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     ));
     add_acp.push(form::plain(
         row![
-            space().width(Fill),
-            form::primary(tr!("Add agent"), Some(Message::Integrations(M::AcpAdd))),
+            add_said(draft.acp_add_error.as_deref()),
+            form::primary(
+                tr!("Add agent"),
+                (!draft.new_acp_name.trim().is_empty() && !draft.new_acp_command.trim().is_empty())
+                    .then_some(Message::Integrations(M::AcpAdd)),
+            ),
         ]
+        .spacing(12)
         .align_y(iced::Center),
     ));
 
@@ -3037,4 +3049,21 @@ fn update_status(app: &App) -> Option<Element<'_, Message>> {
         _ => return None,
     };
     Some(form::row_of(body))
+}
+
+/// Why an Add of the Integrations page's forms did not add, in the danger
+/// colour, filling the row up to its button; nothing, and the row is the
+/// same height, when it did.
+fn add_said<'a>(error: Option<&str>) -> Element<'a, Message> {
+    match error {
+        Some(why) => {
+            text(crate::i18n::quoted(&tr!("Not added: {error}.", error = why)).into_owned())
+                .size(ts::BODY)
+                .color(theme::danger())
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Fill)
+                .into()
+        }
+        None => space().width(Fill).into(),
+    }
 }
