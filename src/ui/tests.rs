@@ -16653,3 +16653,14 @@ fn a_long_search_result_ends_in_an_ellipsis() {
         pieces
     );
 }
+
+/// The Overview's module map takes over half the window's height, within
+/// bounds: at a fixed 320 it was a knot some 200 high across a page 900
+/// wide, its labels running into one another.
+#[test]
+fn the_overview_map_takes_room_from_the_window() {
+    use super::docs_stats::overview_map_h;
+    assert!(overview_map_h(860.0) > 450.0, "{}", overview_map_h(860.0));
+    assert_eq!(overview_map_h(400.0), super::chrome::OVERVIEW_MAP_H);
+    assert_eq!(overview_map_h(4000.0), 640.0);
+}

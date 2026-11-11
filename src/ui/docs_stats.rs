@@ -739,12 +739,20 @@ fn module_map(app: &App) -> Option<Element<'_, Message>> {
             super::clipped::Clipped::new(
                 iced::widget::canvas::Canvas::new(overview_map_canvas(app, layout))
                     .width(Fill)
-                    .height(iced::Length::Fixed(OVERVIEW_MAP_H)),
+                    .height(iced::Length::Fixed(overview_map_h(app.window_height))),
             ),
         ]
         .spacing(6)
         .into(),
     )
+}
+
+/// The module map's height in a window `window_h` tall: over half of it.
+/// At a fixed 320 the map, fitted to hold at every angle of its spin, was a
+/// knot some 200 high across a page 900 wide, its labels running into one
+/// another; the written overview follows it, a scroll away.
+pub(crate) fn overview_map_h(window_h: f32) -> f32 {
+    (window_h * 0.55).clamp(OVERVIEW_MAP_H, 640.0)
 }
 
 /// Group a large integer with thousands separators, e.g. `12345` → `12,345`
