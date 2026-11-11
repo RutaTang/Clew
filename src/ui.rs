@@ -481,6 +481,24 @@ impl<'a> ActiveOverlay<'a> {
         })
     }
 
+    /// Which dialog it is, told apart from another in its place — the next
+    /// of several questions asked in turn too: the keyboard's ring goes to
+    /// the first stop of one come up in another's place.
+    pub(crate) fn scene(&self) -> String {
+        match self {
+            Self::LspCommand(_, number, _) => format!("lsp-command#{number}"),
+            Self::LspConsent(_, number, _) => format!("lsp-consent#{number}"),
+            Self::Graph(overlay) => format!("graph:{overlay:?}"),
+            Self::BpCondition(_) => "bp-condition".into(),
+            Self::FakeRun(_) => "fake-run".into(),
+            Self::BookmarkNote(_) => "bookmark-note".into(),
+            Self::ReadingNote(_) => "reading-note".into(),
+            Self::Finder => "finder".into(),
+            Self::Hover(_) => "hover".into(),
+            other => other.leaves_focus().unwrap_or("overlay").into(),
+        }
+    }
+
     /// Whether this overlay holds the keys of what is under it: every one
     /// but the hover peek, which asks for none (the Esc every overlay takes
     /// aside, `escape_message`). A time-travel session under one takes none
@@ -695,12 +713,32 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // The tutorial, a shortcut being typed, jump mode's codes: their keys
     // are their own, Tab too.
     let tab = app.tutorial.is_none() && app.rebinding.is_none() && app.jump.is_none();
+    // What is on top, whether or not it has a control of its own: a dialog
+    // with none (the finder with no match) still has the window under it.
+    let dialog = active_overlay(app).filter(ActiveOverlay::holds_keys);
+    let top = if app.tutorial.is_some() {
+        jump::OnTop {
+            layer: heard::Layer::Tutorial,
+            scene: None,
+        }
+    } else if let Some(dialog) = dialog {
+        jump::OnTop {
+            layer: heard::Layer::Overlay,
+            scene: Some(dialog.scene()),
+        }
+    } else {
+        jump::OnTop {
+            layer: heard::Layer::Ask,
+            scene: None,
+        }
+    };
     jump::root(
         window,
         up,
         app.ask_view == crate::AskView::Expanded,
         app.main_window,
         tab,
+        top,
     )
 }
 

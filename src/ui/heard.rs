@@ -92,6 +92,36 @@ impl Default for Gathering {
 
 thread_local! {
     static GATHERING: RefCell<Option<Gathering>> = const { RefCell::new(None) };
+    /// The name the control built last offered itself under, with its
+    /// press in its `Debug` form: kept while the keyboard's ring or the
+    /// codes are up, for the mark round that control to take
+    /// ([`name_of`]).
+    static LAST: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+}
+
+/// Whether what a control is called is kept as it is built
+/// ([`super::jump::naming`]), or the view is gathered.
+fn named() -> bool {
+    gathering() || super::jump::naming()
+}
+
+/// `message`'s control, built now, is called `shown`.
+fn note(shown: &str, message: &Message) {
+    if super::jump::naming() {
+        LAST.with(|l| *l.borrow_mut() = Some((format!("{message:?}"), shown.to_string())));
+    }
+}
+
+/// What the control built last, pressing `message`, is called: its own
+/// name, as it offered itself — not another's that presses the same (a
+/// tab and a row both opening the History, a × and a view's button both
+/// showing the Files), nor a switch's "On" or "Off".
+pub(crate) fn name_of(message: &Message) -> Option<String> {
+    LAST.with(|l| {
+        let l = l.borrow();
+        let (press, shown) = l.as_ref()?;
+        (*press == format!("{message:?}")).then(|| shown.clone())
+    })
 }
 
 /// Whether the view is being built to be gathered: what a label costs to
@@ -144,6 +174,7 @@ pub(crate) fn offer(shown: &str, message: &Message) {
     if gathering() {
         push(title_of(shown), shown.to_string(), message, None, false);
     }
+    note(shown, message);
 }
 
 /// `message`, offered under the label it is `shown` with: what a button's
@@ -157,7 +188,7 @@ pub(crate) fn said(shown: &str, message: Message) -> Message {
 /// question without its marks): made only while gathering, never for a
 /// frame that is only drawn.
 pub(crate) fn said_with(shown: impl FnOnce() -> String, message: Message) -> Message {
-    if gathering() {
+    if named() {
         offer(&shown(), &message);
     }
     message
@@ -169,7 +200,7 @@ pub(crate) fn said_to_with(
     item: impl FnOnce() -> String,
     message: Message,
 ) -> Message {
-    if gathering() {
+    if named() {
         return said_to(action, &item(), message);
     }
     message
@@ -187,6 +218,9 @@ pub(crate) fn said_to(action: &str, item: &str, message: Message) -> Message {
             false,
         );
     }
+    if super::jump::naming() {
+        note(&format!("{action}: {item}"), &message);
+    }
     message
 }
 
@@ -197,6 +231,9 @@ pub(crate) fn switch(name: &str, on: bool, set: impl Fn(bool) -> Message) {
     if gathering() {
         said_to(name, crate::tr!("On"), set(true));
         said_to(name, crate::tr!("Off"), set(false));
+    }
+    // Its name alone last: what the switch itself is called.
+    if named() {
         offer(name, &set(!on));
     }
 }
@@ -213,6 +250,7 @@ pub(crate) fn answer(shown: &str, answer: Answer, message: Message) -> Message {
             false,
         );
     }
+    note(shown, &message);
     message
 }
 
@@ -279,9 +317,12 @@ pub(crate) fn list() {
 /// `message`, offered as the next row of the list begun last
 /// ([`list`]), under what the row says.
 pub(crate) fn row(shown: impl FnOnce() -> String, message: Message) -> Message {
-    if gathering() {
+    if named() {
         let shown = shown();
-        push(shown.clone(), shown, &message, None, true);
+        if gathering() {
+            push(shown.clone(), shown.clone(), &message, None, true);
+        }
+        note(&shown, &message);
     }
     message
 }

@@ -271,7 +271,7 @@ impl App {
     fn run_waiting(&mut self, waiting: Waiting) -> Task<Message> {
         match waiting {
             Waiting::Command(title) => self.run_palette(&title),
-            Waiting::Press { message, .. } => self.update(*message),
+            Waiting::Press { message, .. } => self.press(*message),
         }
     }
 }
@@ -1916,7 +1916,7 @@ impl App {
             text: text.to_string(),
             outcome: HeardOutcome::Ran(choice.shown),
         });
-        Some(self.update(choice.message))
+        Some(self.press(choice.message))
     }
 
     /// `text` came to `done` ([`App::spoken`]): said on the status

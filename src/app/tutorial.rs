@@ -558,6 +558,8 @@ impl App {
 
     /// Begin the tour at step 0, on what is open.
     pub(crate) fn on_tutorial_start(&mut self) -> Task<Message> {
+        // The tour holds the keys: no ring over it.
+        let _ = self.end_ring(false);
         // The reader's own layout, to give back at the end (a tour started
         // again while one runs keeps the first one's).
         if self.tutorial.is_none() {

@@ -400,7 +400,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
     .width(Length::Fixed(left_cluster_w(app)));
 
     // Back / forward along the reading trail.
-    let nav = |glyph: Glyph, enabled: bool, msg: Message| {
+    let nav = |glyph: Glyph, enabled: bool, name: &str, msg: Message| {
         let mut b = icon_button(
             glyph,
             if enabled {
@@ -411,7 +411,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
             false,
         );
         if enabled {
-            b = b.on_press(msg);
+            b = b.on_press(super::heard::said(name, msg));
         }
         b
     };
@@ -421,6 +421,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
                 nav(
                     Glyph::ChevronLeft,
                     app.proj.history.can_back(),
+                    tr!("Back"),
                     Message::Reading(ReadingMsg::GoBack)
                 ),
                 tr!("Back"),
@@ -430,6 +431,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
                 nav(
                     Glyph::ChevronRight,
                     app.proj.history.can_forward(),
+                    tr!("Forward"),
                     Message::Reading(ReadingMsg::GoForward)
                 ),
                 tr!("Forward"),

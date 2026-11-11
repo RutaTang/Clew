@@ -2227,8 +2227,9 @@ pub enum WindowMsg {
     /// is put away.
     RingEnd,
     /// The keyboard's ring is on another stop now: what pressing it sends,
-    /// for a control (none for a field, which holds the keys).
-    RingMoved(Option<Box<Message>>),
+    /// for a control (none for a field, which holds the keys), and what the
+    /// control is called, as it said when built.
+    RingMoved(Option<Box<Message>>, Option<String>),
     /// A key the Files view's tree took, while it has the keyboard
     /// (`ui::tree_keys`).
     TreeKey(TreeKey),

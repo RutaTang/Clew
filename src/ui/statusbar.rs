@@ -370,9 +370,10 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             .style(theme::icon_button(false))
             .padding([2, 8]);
         if server.is_some() {
-            lsp_button = lsp_button.on_press(Message::Settings(SettingsMsg::OpenAt(
-                crate::SettingsPage::Languages,
-            )));
+            lsp_button = lsp_button.on_press(super::heard::said(
+                tr!("Language servers"),
+                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::Languages)),
+            ));
         }
         let open = tr!("Open Settings → Language servers");
         let tip = match (server.is_some(), whole) {

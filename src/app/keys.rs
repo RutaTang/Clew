@@ -32,6 +32,8 @@ impl App {
             self.status.clear();
             return Task::none();
         }
+        // The codes put the ring away: a press after them is a code's.
+        let _ = self.end_ring(false);
         self.jump = Some(String::new());
         self.pending_g = false;
         self.pending_z = false;
@@ -62,7 +64,7 @@ impl App {
                 match ui::jump::pressed(self.main_window, &typed) {
                     ui::jump::Typed::Press(message) => {
                         self.status.clear();
-                        self.update(*message)
+                        self.press(*message)
                     }
                     ui::jump::Typed::More => {
                         self.jump = Some(typed);
@@ -106,29 +108,58 @@ impl App {
         Task::none()
     }
 
-    /// The ring is on another stop: what it presses, said in the status
-    /// bar — a strip's tool is an icon alone — or nothing, on a field.
-    pub(crate) fn on_ring_moved(&mut self, press: Option<Message>) {
+    /// The ring is on another stop: what it is called — as its control
+    /// said when built, else as what it presses is offered — said in the
+    /// status bar (a strip's tool is an icon alone); nothing, on a field.
+    pub(crate) fn on_ring_moved(&mut self, press: Option<Message>, name: Option<String>) {
         // Said late, of a ring put away since: it stays away.
         if self.ring.is_none() {
             return;
         }
         self.ring = Some(ui::RingAsk::Kept);
-        self.status = match press {
-            Some(press) => ring_name(self, &press).unwrap_or_default(),
-            None => Default::default(),
-        };
+        self.status = name
+            .or_else(|| press.and_then(|press| ring_name(self, &press)))
+            .unwrap_or_default();
+        self.ring_said = self.status.clone();
     }
 
     /// The ring put away: by a key (`give_back`), the keys go back where
-    /// they were when it came up; by the pointer or a field taking them,
-    /// they are where those put them.
-    pub(crate) fn end_ring(&mut self, give_back: bool) {
-        if self.ring.take().is_some() {
+    /// they were when it came up — to the code, unless a dialog or the
+    /// tutorial holds them now; to the field it came up from, which the
+    /// task returned gives them back — and by the pointer or a field taking
+    /// them, they are where those put them. What the ring said in the
+    /// status bar goes with it.
+    pub(crate) fn end_ring(&mut self, give_back: bool) -> Option<Task<Message>> {
+        self.ring.take()?;
+        if self.status == self.ring_said {
             self.status.clear();
-            if give_back {
-                self.code_focused = self.ring_code;
-            }
+        }
+        self.ring_said.clear();
+        if !give_back {
+            return None;
+        }
+        let held_above =
+            ui::active_overlay(self).is_some_and(|o| o.holds_keys()) || self.tutorial.is_some();
+        self.code_focused = self.ring_code && !held_above;
+        if self.ring_code {
+            return None;
+        }
+        ui::jump::ring_from(self.main_window).map(operation::focus)
+    }
+
+    /// What pressing a control sends, sent as its click sends it: through
+    /// the window's shell when that takes it before the App does — closing
+    /// the window (which asks about unsaved edits first), a tour begun in a
+    /// window of its own — else to the App now.
+    pub(crate) fn press(&mut self, message: Message) -> Task<Message> {
+        let shells = matches!(
+            message,
+            Message::Window(WindowMsg::Close) | Message::Tutorial(TutorialMsg::InNewWindow(_))
+        );
+        if shells {
+            Task::done(message)
+        } else {
+            self.update(message)
         }
     }
 
@@ -147,16 +178,20 @@ impl App {
         match key.as_ref() {
             Key::Named(Named::Enter | Named::Space) if plain => {
                 let message = ui::jump::ring_press(self.main_window)?;
-                Some(self.update(message))
+                let task = self.press(message);
+                // The press gave the code the keys (a file opened from a
+                // row): they are its once the ring is put away.
+                if self.ring.is_some() && self.code_focused {
+                    self.ring_code = true;
+                    self.code_focused = false;
+                }
+                Some(task)
             }
-            Key::Named(Named::Escape) => {
-                self.end_ring(true);
-                Some(Task::none())
-            }
-            _ => {
-                self.end_ring(true);
-                None
-            }
+            Key::Named(Named::Escape) => Some(self.end_ring(true).unwrap_or_else(Task::none)),
+            // Any other key puts the ring away and does what it does — but
+            // for one given back to the field the ring came up from: it
+            // went to no field, and the field has the keys again.
+            _ => self.end_ring(true),
         }
     }
 
@@ -254,6 +289,9 @@ impl App {
         if std::mem::take(&mut self.escape_taken)
             && matches!(key.as_ref(), Key::Named(Named::Escape))
         {
+            // It put the ring away too: the field gave the keys where they
+            // go.
+            let _ = self.end_ring(false);
             return Task::none();
         }
 
@@ -290,7 +328,7 @@ impl App {
         }
         // The tutorial holds the keys: no ring over it.
         if self.tutorial.is_some() {
-            self.ring = None;
+            let _ = self.end_ring(false);
         }
         // The keyboard's ring is up: Enter, Space and Esc are its
         // (`ring_key`); any other key puts it away and does what it does.
@@ -640,7 +678,14 @@ impl App {
         if self.tutorial.is_some() || (self.shortcuts_shown() && !jump_on_shortcuts) {
             return Task::none();
         }
-        self.run_command_action(action).unwrap_or_else(Task::none)
+        // A menu's command (⌘J and every key the menu bar takes on macOS)
+        // puts the ring away, as any other key does.
+        let back = self.end_ring(true);
+        let run = self.run_command_action(action).unwrap_or_else(Task::none);
+        match back {
+            Some(back) => Task::batch([back, run]),
+            None => run,
+        }
     }
 
     /// Capture a keypress as the new binding for `action`. Esc cancels; keys

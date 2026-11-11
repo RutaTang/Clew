@@ -19,11 +19,13 @@ use iced::{Rectangle, Vector};
 use super::heard::Layer;
 
 /// What a mark says of itself to an operation: which mark it is, by the
-/// number it was built with, its layer, and what pressing it sends.
+/// number it was built with, its layer, what pressing it sends, and the
+/// name its control offered as it was built.
 pub(crate) struct MarkSeen {
     pub(crate) id: usize,
     pub(crate) layer: Layer,
     pub(crate) press: crate::Message,
+    pub(crate) name: Option<String>,
 }
 
 /// A part of the window a stop's place is read from.
@@ -86,6 +88,55 @@ pub(crate) struct Stop {
     /// What pressing it sends: a mark's own press — none for a field,
     /// which holds the keys.
     pub(crate) press: Option<crate::Message>,
+    /// What its control is called, as it said when built.
+    pub(crate) name: Option<String>,
+    /// A field's own id, when it has one.
+    pub(crate) id: Option<Id>,
+}
+
+/// A stop as it is found again once the window has changed under the
+/// ring — a press adding or taking stops before it: a mark by what it
+/// presses, a field by its id (else its place among the fields), and how
+/// many alike come before it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct StopKey {
+    what: KeyOf,
+    nth: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum KeyOf {
+    Press(String),
+    Field(Id),
+    FieldAt(usize),
+}
+
+impl Stop {
+    fn key_of(&self) -> KeyOf {
+        match (&self.kind, &self.press, &self.id) {
+            (_, Some(press), _) => KeyOf::Press(format!("{press:?}")),
+            (_, None, Some(id)) => KeyOf::Field(id.clone()),
+            (StopKind::Field { index, .. }, None, None) => KeyOf::FieldAt(*index),
+            (StopKind::Mark(id), None, None) => KeyOf::FieldAt(usize::MAX - id),
+        }
+    }
+}
+
+/// The key of `stops[at]` ([`StopKey`]).
+pub(crate) fn key_at(stops: &[Stop], at: usize) -> Option<StopKey> {
+    let what = stops.get(at)?.key_of();
+    let nth = stops[..at].iter().filter(|s| s.key_of() == what).count();
+    Some(StopKey { what, nth })
+}
+
+/// Where the stop `key` names is among `stops`, if it is still there.
+pub(crate) fn find(stops: &[Stop], key: &StopKey) -> Option<usize> {
+    stops
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.key_of() == key.what)
+        .nth(key.nth)
+        .map(|(at, _)| at)
 }
 
 impl Stop {
@@ -99,6 +150,9 @@ impl Stop {
 #[derive(Default)]
 pub(crate) struct Census {
     pub(crate) stops: Vec<Stop>,
+    /// The layer of every mark seen, the tree's rows too: how many codes
+    /// jump mode deals.
+    pub(crate) marks: Vec<Layer>,
     layers: Vec<Layer>,
     chrome: usize,
     tree: usize,
@@ -109,21 +163,24 @@ pub(crate) struct Census {
 }
 
 impl Census {
-    fn push(
-        &mut self,
-        kind: StopKind,
-        layer: Layer,
-        bounds: Rectangle,
-        press: Option<crate::Message>,
-    ) {
+    fn push(&mut self, kind: StopKind, layer: Layer, bounds: Rectangle) -> &mut Stop {
         self.stops.push(Stop {
             kind,
             layer,
             chrome: self.chrome > 0,
             bounds,
             scroll: self.stack.last().copied(),
-            press,
+            press: None,
+            name: None,
+            id: None,
         });
+        self.stops.last_mut().expect("just pushed")
+    }
+
+    /// The layer of the part of the window being read: the layer the
+    /// scope round it says, else `fallback`.
+    fn layer(&self, fallback: Layer) -> Layer {
+        self.layers.last().copied().unwrap_or(fallback)
     }
 }
 
@@ -158,27 +215,29 @@ impl Operation for Census {
         self.scrollables += 1;
     }
 
-    fn focusable(&mut self, _id: Option<&Id>, bounds: Rectangle, state: &mut dyn Focusable) {
+    fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn Focusable) {
         let index = self.focusables;
         self.focusables += 1;
         if self.tree == 0 {
-            let layer = self.layers.last().copied().unwrap_or(Layer::Window);
+            let layer = self.layer(Layer::Window);
             let focused = state.is_focused();
-            self.push(StopKind::Field { index, focused }, layer, bounds, None);
+            self.push(StopKind::Field { index, focused }, layer, bounds)
+                .id = id.cloned();
         }
     }
 
     fn custom(&mut self, _id: Option<&Id>, bounds: Rectangle, state: &mut dyn std::any::Any) {
         if let Some(seen) = state.downcast_ref::<MarkSeen>() {
+            // Its layer is the scope's it is in: a control built as the
+            // window was laid out was built knowing none.
+            let layer = self.layer(seen.layer);
+            self.marks.push(layer);
             // The tree's rows are walked by its own keys: the tree is one
             // stop, its field's.
             if self.tree == 0 {
-                self.push(
-                    StopKind::Mark(seen.id),
-                    seen.layer,
-                    bounds,
-                    Some(seen.press.clone()),
-                );
+                let stop = self.push(StopKind::Mark(seen.id), layer, bounds);
+                stop.press = Some(seen.press.clone());
+                stop.name = seen.name.clone();
             }
             return;
         }
@@ -242,21 +301,34 @@ pub(crate) struct Placed {
     /// to when that layer goes.
     pub(crate) saved: Vec<(Layer, usize)>,
     pub(crate) target: Option<StopKind>,
+    /// The stop it is on, as found again once the window changes.
+    pub(crate) key: Option<StopKey>,
+    /// The dialog on top it was placed in: another in its place is a
+    /// layer come up.
+    pub(crate) scene: Option<String>,
+    /// The field that held the keys when the ring came up from it, by its
+    /// id: they go back to it when the ring is put away by a key.
+    pub(crate) from: Option<Id>,
     /// What pressing the stop it is on sends, for a mark.
     pub(crate) press: Option<crate::Message>,
+    /// What the stop it is on is called.
+    pub(crate) name: Option<String>,
     /// Whether the window is to be told where it is now.
     pub(crate) announce: bool,
 }
 
 /// Where the ring goes among `stops` (in its [`order`]), asked to be at
-/// `ask`, `top` the layer on top now, `last` where it was placed before:
-/// on the first stop of a layer come up since — back where it was on a
-/// layer that layer covered, once it goes — else where it was asked to be.
-/// With what is kept for the layers under.
+/// `ask`, `top` the layer on top now and `scene` the dialog there, `last`
+/// where it was placed before: on the first stop of a layer come up since
+/// (or of a dialog come in another's place) — back where it was on a layer
+/// that layer covered, once it goes — else where it was asked to be: kept
+/// on the stop it was on, wherever that is now. With what is kept for the
+/// layers under.
 pub(crate) fn resolve(
     ask: RingAsk,
     stops: &[Stop],
     top: Layer,
+    scene: Option<&str>,
     last: Option<&Placed>,
 ) -> (Option<usize>, Vec<(Layer, usize)>) {
     let n = stops.len();
@@ -280,19 +352,35 @@ pub(crate) fn resolve(
         saved.retain(|(layer, _)| *layer < top);
         return (Some(back.unwrap_or(0).min(n - 1)), saved);
     }
+    // Another dialog in the place of the one it was in: its first stop.
+    if let Some(last) = last
+        && last.scene.as_deref() != scene
+    {
+        return (Some(0), saved);
+    }
+    // Where it was: on the same stop, found again — else at the same place.
+    let kept = |last: &Placed| {
+        let at = last.at?;
+        Some(
+            last.key
+                .as_ref()
+                .and_then(|key| find(stops, key))
+                .unwrap_or(at.min(n - 1)),
+        )
+    };
     // What was asked is placed once; kept there since.
     if let Some(last) = last
         && last.ask == ask
-        && let Some(at) = last.at
+        && let Some(at) = kept(last)
     {
-        return (Some(at.min(n - 1)), saved);
+        return (Some(at), saved);
     }
     let at = match ask {
         RingAsk::Start { forward } => start(forward, n),
         RingAsk::AfterFocused { forward } => {
             focused(stops).map_or_else(|| start(forward, n), |f| step(f, forward, n))
         }
-        RingAsk::Kept => last.and_then(|l| l.at).unwrap_or(0).min(n - 1),
+        RingAsk::Kept => last.and_then(kept).unwrap_or(0),
     };
     (Some(at), saved)
 }
@@ -382,6 +470,8 @@ mod tests {
             bounds: Rectangle::default(),
             scroll: None,
             press: None,
+            name: None,
+            id: None,
         }
     }
 
@@ -418,7 +508,11 @@ mod tests {
             top,
             saved,
             target: None,
+            key: None,
+            scene: None,
+            from: None,
             press: None,
+            name: None,
             announce: false,
         }
     }
@@ -441,7 +535,7 @@ mod tests {
                 stop(kind, Layer::Window, false)
             })
             .collect();
-        let at = |ask, last| resolve(ask, &stops, Layer::Window, last).0;
+        let at = |ask, last| resolve(ask, &stops, Layer::Window, None, last).0;
         assert_eq!(at(RingAsk::Start { forward: true }, None), Some(0));
         assert_eq!(at(RingAsk::Start { forward: false }, None), Some(4));
         assert_eq!(at(RingAsk::AfterFocused { forward: true }, None), Some(3));
@@ -454,7 +548,10 @@ mod tests {
             at(RingAsk::Start { forward: true }, Some(&started)),
             Some(3)
         );
-        assert_eq!(resolve(RingAsk::Kept, &[], Layer::Window, None).0, None);
+        assert_eq!(
+            resolve(RingAsk::Kept, &[], Layer::Window, None, None).0,
+            None
+        );
     }
 
     /// A dialog come up takes the ring to its first stop; gone, the ring is
@@ -465,12 +562,85 @@ mod tests {
             .map(|i| stop(StopKind::Mark(i), Layer::Window, false))
             .collect();
         let under = placed(RingAsk::Kept, 6, Layer::Window, vec![]);
-        let (at, saved) = resolve(RingAsk::Kept, &stops, Layer::Overlay, Some(&under));
+        let (at, saved) = resolve(RingAsk::Kept, &stops, Layer::Overlay, None, Some(&under));
         assert_eq!(at, Some(0));
         assert_eq!(saved, [(Layer::Window, 6)]);
         let over = placed(RingAsk::Kept, 2, Layer::Overlay, saved);
-        let (at, saved) = resolve(RingAsk::Kept, &stops, Layer::Window, Some(&over));
+        let (at, saved) = resolve(RingAsk::Kept, &stops, Layer::Window, None, Some(&over));
         assert_eq!(at, Some(6), "back on what opened it");
         assert!(saved.is_empty());
+    }
+
+    /// A stop pressing `message`, `nth` of its kind.
+    fn pressing(message: crate::Message) -> Stop {
+        let mut stop = stop(StopKind::Mark(0), Layer::Window, false);
+        stop.press = Some(message);
+        stop
+    }
+
+    /// Kept, the ring stays on the stop it was on — not at its place, when
+    /// a press took stops from before it or put more there — and only
+    /// with that stop gone does it keep the place.
+    #[test]
+    fn the_ring_is_kept_on_its_stop_wherever_it_goes() {
+        use crate::{Message, NavMsg, WindowMsg};
+        let toggle = || pressing(Message::Window(WindowMsg::ToggleLeftSidebar));
+        let other = |i: usize| pressing(Message::Nav(NavMsg::SearchQueryChanged(i.to_string())));
+        let before: Vec<Stop> = vec![other(1), other(2), other(3), toggle(), other(4)];
+        let mut last = placed(RingAsk::Kept, 3, Layer::Window, vec![]);
+        last.key = key_at(&before, 3);
+        // Two stops before it gone: it is at 1 now, not at 3.
+        let fewer: Vec<Stop> = vec![other(3), toggle(), other(4)];
+        let at = resolve(RingAsk::Kept, &fewer, Layer::Window, None, Some(&last)).0;
+        assert_eq!(at, Some(1));
+        // Stops come before it: further on.
+        let more: Vec<Stop> = (5..9).map(other).chain(before.clone()).collect();
+        let at = resolve(RingAsk::Kept, &more, Layer::Window, None, Some(&last)).0;
+        assert_eq!(at, Some(7));
+        // Gone itself: the place it had, as near as there is.
+        let gone: Vec<Stop> = vec![other(1), other(2)];
+        let at = resolve(RingAsk::Kept, &gone, Layer::Window, None, Some(&last)).0;
+        assert_eq!(at, Some(1));
+        // Two alike: the one it was on, by how many alike come before it.
+        let twice: Vec<Stop> = vec![toggle(), other(1), toggle()];
+        let mut on_second = placed(RingAsk::Kept, 2, Layer::Window, vec![]);
+        on_second.key = key_at(&twice, 2);
+        let shifted: Vec<Stop> = vec![other(9), toggle(), toggle()];
+        let at = resolve(
+            RingAsk::Kept,
+            &shifted,
+            Layer::Window,
+            None,
+            Some(&on_second),
+        )
+        .0;
+        assert_eq!(at, Some(2));
+    }
+
+    /// Another dialog come in the place of the one the ring was in takes
+    /// it to its own first stop.
+    #[test]
+    fn a_dialog_in_anothers_place_takes_the_ring_to_its_first_stop() {
+        let stops: Vec<Stop> = (0..6)
+            .map(|i| stop(StopKind::Mark(i), Layer::Overlay, false))
+            .collect();
+        let mut menu = placed(RingAsk::Kept, 4, Layer::Overlay, vec![]);
+        menu.scene = Some("tools-menu".into());
+        let same = resolve(
+            RingAsk::Kept,
+            &stops,
+            Layer::Overlay,
+            Some("tools-menu"),
+            Some(&menu),
+        );
+        assert_eq!(same.0, Some(4));
+        let other = resolve(
+            RingAsk::Kept,
+            &stops,
+            Layer::Overlay,
+            Some("settings"),
+            Some(&menu),
+        );
+        assert_eq!(other.0, Some(0));
     }
 }

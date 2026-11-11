@@ -2067,6 +2067,10 @@ fn a_control_built_as_laid_out_presses_itself() {
             false,
             None,
             true,
+            super::jump::OnTop {
+                layer: super::heard::Layer::Ask,
+                scene: None,
+            },
         )
     };
     let mut renderer = renderer();
@@ -2185,6 +2189,97 @@ fn tab_walks_the_controls_and_fields_and_enter_presses() {
     );
     assert!(app.proj.weak.showing, "pressed");
     assert!(app.ring.is_some(), "the ring stays");
+    assert!(
+        matches!(ring_at(&app).2, Some(Message::Weak(crate::WeakMsg::Show))),
+        "on what it pressed: {:?}",
+        ring_at(&app).2
+    );
+}
+
+/// The ring stays on the control it pressed, wherever the press moved it:
+/// the sidebar's toggle, pressed, takes the sidebar's stops from before it,
+/// and the ring is still on the toggle — not on the stop now where it was
+/// (the window's Close, past the end), whose Enter would close the window.
+#[test]
+fn the_ring_stays_on_what_it_pressed() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let mut app = tree_app();
+    app.show_left_sidebar = true;
+    app.code_focused = true;
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let (_, count, _) = ring_at(&app);
+    let toggle = format!("{:?}", Some(Message::Window(WindowMsg::ToggleLeftSidebar)));
+    for _ in 0..count {
+        if format!("{:?}", ring_at(&app).2) == toggle {
+            break;
+        }
+        window.tab(&mut app, false);
+    }
+    assert_eq!(format!("{:?}", ring_at(&app).2), toggle, "reached");
+    window.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(!app.show_left_sidebar, "hidden");
+    assert_eq!(format!("{:?}", ring_at(&app).2), toggle, "still on it");
+    window.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.show_left_sidebar, "shown again, not the window closed");
+    assert_eq!(format!("{:?}", ring_at(&app).2), toggle, "and still on it");
+}
+
+/// The messages `task` sends, run to its end: for a task that ends by
+/// itself (a message sent on), never one that waits on the world.
+fn task_sends(task: iced::Task<Message>) -> Vec<Message> {
+    use iced_test::futures::futures::StreamExt;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let _inside = runtime.enter();
+    let Some(stream) = iced_test::runtime::task::into_stream(task) else {
+        return Vec::new();
+    };
+    let actions: Vec<_> = runtime.block_on(stream.collect());
+    actions
+        .into_iter()
+        .filter_map(|action| match action {
+            iced_test::runtime::Action::Output(message) => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Enter on the window's Close, the ring on it, closes the window as a
+/// click does: the press goes to the shell, which asks about unsaved edits
+/// and lets the window go — not to the App, which takes no Close.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn enter_on_the_rings_close_closes_the_window() {
+    let none = keyboard::Modifiers::empty();
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, true);
+    let (_, count, _) = ring_at(&app);
+    for _ in 0..count {
+        if matches!(ring_at(&app).2, Some(Message::Window(WindowMsg::Close))) {
+            break;
+        }
+        window.tab(&mut app, true);
+    }
+    assert!(matches!(
+        ring_at(&app).2,
+        Some(Message::Window(WindowMsg::Close))
+    ));
+    let task = app.update(Message::Editor(EditorMsg::KeyPressed(
+        keyboard::Key::Named(keyboard::key::Named::Enter),
+        none,
+    )));
+    let sent = task_sends(task);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::Close))),
+        "sent on, to the shell: {sent:?}"
+    );
 }
 
 /// Esc puts the ring away, and the keys go back where they were — the
@@ -2290,7 +2385,8 @@ fn a_dialog_takes_the_ring_and_gives_it_back() {
 }
 
 /// Tab is each window's own: a field holding the keys in another window
-/// does not keep this one from ringing its controls.
+/// does not keep this one from ringing its controls, and its ring going
+/// round leaves the other's where it is.
 #[test]
 fn tab_is_each_windows_own() {
     let mut first = tree_app();
@@ -2307,6 +2403,34 @@ fn tab_is_each_windows_own() {
         "rung, from its own first stop"
     );
     assert_eq!(ring_at(&second).0, Some(0));
+    // Both up: the second's Tab moves the second's alone.
+    one.tab(&mut first, true);
+    one.tab(&mut first, true);
+    let (at, _, press) = ring_at(&first);
+    for _ in 0..3 {
+        two.tab(&mut second, false);
+    }
+    assert_eq!(ring_at(&second).0, Some(3));
+    let (still, _, still_press) = ring_at(&first);
+    assert_eq!(still, at, "the first window's ring stayed");
+    assert_eq!(format!("{still_press:?}"), format!("{press:?}"));
+}
+
+/// A press of the pointer puts the ring away, the keys where it puts them.
+#[test]
+fn a_press_of_the_pointer_puts_the_ring_away() {
+    let mut app = tree_app();
+    app.code_focused = true;
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    assert!(app.ring.is_some());
+    let _ = window.send(
+        &mut app,
+        &[Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Left,
+        ))],
+    );
+    assert_eq!(app.ring, None, "put away");
 }
 
 /// The tutorial's keys are its own: Tab puts up no ring over it.
@@ -2318,6 +2442,286 @@ fn the_tutorial_keeps_tab() {
     let mut window = Driven::new(&app);
     assert_ne!(window.tab(&mut app, false), iced::event::Status::Captured);
     assert_eq!(app.ring, None);
+}
+
+/// Put away with Esc under a dialog the ring's control opened, the keys
+/// are not the code's — its reading keys would act under the dialog — and
+/// a control that gave the code the keys gives them for good: Esc then
+/// leaves them there.
+#[test]
+fn the_keys_go_back_where_they_are_now() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let line = |app: &App| app.active_viewer().unwrap().caret.map_or(0, |(l, _)| l);
+    // A dialog came up over the code since the ring came up.
+    let mut app = reader_app();
+    app.code_focused = true;
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let _ = window.send(&mut app, &[]);
+    window.key(&mut app, Key::Named(Named::Escape), none);
+    assert_eq!(app.ring, None);
+    assert!(app.settings.open, "the dialog stays");
+    assert!(!app.code_focused, "not the code's, under the dialog");
+    let before = line(&app);
+    window.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(line(&app), before, "j moved nothing under it");
+    // The dialog's ×, pressed by the ring, gave the code the keys back.
+    let mut app = reader_app();
+    app.code_focused = true;
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    assert!(!app.code_focused);
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let (_, count, _) = ring_at(&app);
+    for _ in 0..count {
+        if matches!(
+            ring_at(&app).2,
+            Some(Message::Settings(crate::SettingsMsg::Close))
+        ) {
+            break;
+        }
+        window.tab(&mut app, false);
+    }
+    assert!(
+        matches!(
+            ring_at(&app).2,
+            Some(Message::Settings(crate::SettingsMsg::Close))
+        ),
+        "on its ×: {:?}",
+        ring_at(&app).2
+    );
+    window.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(!app.settings.open, "closed");
+    window.key(&mut app, Key::Named(Named::Escape), none);
+    assert_eq!(app.ring, None);
+    assert!(app.code_focused, "the code's, as the × gave them");
+    let before = line(&app);
+    window.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(line(&app), before + 1, "j reads on");
+}
+
+/// The ring come up from a field and put away by Esc gives the field the
+/// keys back: they are not left nowhere.
+#[test]
+fn the_ring_put_away_gives_a_field_its_keys_back() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.focus(&app, super::file_filter_id());
+    app.code_focused = false;
+    window.tab(&mut app, true);
+    assert_eq!(window.focused(&app), None, "back to a control: no field");
+    window.key(
+        &mut app,
+        Key::Named(Named::Escape),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.ring, None);
+    assert_eq!(
+        window.focused(&app),
+        Some(super::file_filter_id()),
+        "the filter's again"
+    );
+}
+
+/// A dialog with no control of its own — the finder with nothing found —
+/// keeps the ring in it, as one with controls does: Tab does not go on to
+/// the window under it.
+#[test]
+fn a_dialog_with_no_controls_keeps_the_ring() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(
+        crate::session::finder::FinderMode::Files,
+    )));
+    let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged(":".into())));
+    let mut window = Driven::new(&app);
+    window.focus(&app, super::finder_input_id());
+    window.tab(&mut app, false);
+    let (_, count, press) = ring_at(&app);
+    assert_eq!(count, 1, "the finder's field alone");
+    assert!(press.is_none(), "nothing under it: {press:?}");
+    assert_eq!(window.focused(&app), Some(super::finder_input_id()));
+}
+
+/// Another dialog come up in the place of the one the ring was in takes
+/// the ring to its own first stop.
+#[test]
+fn a_dialog_in_anothers_place_starts_the_ring_over() {
+    let mut app = reader_app();
+    app.show_app_menu = true;
+    let mut window = Driven::new(&app);
+    for _ in 0..4 {
+        window.tab(&mut app, false);
+    }
+    assert_eq!(ring_at(&app).0, Some(3));
+    // The menu's item opened a dialog in its place.
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let _ = window.send(&mut app, &[]);
+    assert!(app.settings.open);
+    let (at, _, press) = ring_at(&app);
+    assert_eq!(at, Some(0), "the dialog's first stop: {press:?}");
+}
+
+/// The codes or the tour, begun while the ring is up — by a menu's
+/// command, as the menu bar sends ⌘J on macOS — put the ring away: it does
+/// not come back once they are done.
+#[test]
+fn the_codes_and_the_tour_put_the_ring_away() {
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let _ = app.on_menu_action(crate::keymap::Action::Jump);
+    assert!(app.jump.is_some());
+    assert_eq!(app.ring, None);
+    // Any command of the menu bar's.
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let _ = app.on_menu_action(crate::keymap::Action::ZoomIn);
+    assert_eq!(app.ring, None);
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let _ = app.update(Message::Tutorial(crate::TutorialMsg::Begin));
+    assert_eq!(app.ring, None);
+}
+
+/// What else is said in the status bar while the ring is up stays when
+/// the ring goes: only the name it said goes with it.
+#[test]
+fn the_ring_takes_away_only_what_it_said() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    assert!(!app.status.is_empty(), "named");
+    window.key(&mut app, Key::Named(Named::Escape), none);
+    assert!(app.status.is_empty(), "its name went with it");
+    window.tab(&mut app, false);
+    app.status = "Could not save shortcuts".into();
+    window.key(&mut app, Key::Named(Named::Escape), none);
+    assert_eq!(app.status, "Could not save shortcuts");
+}
+
+/// Esc on a field the ring is on in a dialog puts the ring away, as it does
+/// on a button there: it does not close the dialog as well.
+#[test]
+fn esc_on_a_ringed_field_puts_away_the_ring_alone() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = reader_app();
+    let _ = app.update(Message::Connect(crate::ConnectMsg::Open));
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let (_, count, _) = ring_at(&app);
+    // A field: a stop the ring presses nothing on.
+    for _ in 0..count {
+        if ring_at(&app).2.is_none() {
+            break;
+        }
+        window.tab(&mut app, false);
+    }
+    assert!(ring_at(&app).2.is_none(), "on a field");
+    window.key(
+        &mut app,
+        Key::Named(Named::Escape),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.ring, None, "put away");
+    assert!(app.connect.is_some(), "the dialog stays");
+}
+
+/// Every control the ring reaches says its own name in the status bar —
+/// a switch its name, not "On" or "Off"; one of two controls pressing the
+/// same thing its own, not the other's.
+#[test]
+fn the_ring_says_each_controls_own_name() {
+    let mut app = tree_app();
+    app.code_focused = true;
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let (_, count, _) = ring_at(&app);
+    let mut unnamed = Vec::new();
+    for _ in 0..count {
+        let (_, _, press) = ring_at(&app);
+        if press.is_some() && app.status.is_empty() {
+            unnamed.push(format!("{press:?}"));
+        }
+        window.tab(&mut app, false);
+    }
+    assert!(unnamed.is_empty(), "said no name: {unnamed:#?}");
+    // A switch, by its name alone.
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Voice,
+    )));
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let (_, count, _) = ring_at(&app);
+    let mut said = Vec::new();
+    for _ in 0..count {
+        said.push(app.status.clone());
+        window.tab(&mut app, false);
+    }
+    assert!(
+        !said
+            .iter()
+            .any(|s| s.ends_with(": On") || s.ends_with(": Off")),
+        "a switch said as one of its states: {said:#?}"
+    );
+    assert!(
+        said.iter().any(|s| s == "Run spoken commands"),
+        "a switch, by its name: {said:#?}"
+    );
+}
+
+/// A control built as a dialog is laid out (a `responsive`'s) is in the
+/// dialog: the ring there reaches it.
+#[test]
+fn a_control_laid_out_in_a_dialog_is_the_dialogs() {
+    use iced::widget::{button, responsive, text};
+    let view = |ask: super::RingAsk| -> Element<'static, Message> {
+        super::jump::begin(true);
+        let dialog = responsive(|_| {
+            let late = Message::Project(ProjectMsg::SetUpMissing);
+            super::jump::mark(button(text("late")).on_press(late.clone()), late)
+        });
+        super::jump::root(
+            super::jump::scope(
+                dialog,
+                super::ring::ScopeTag::Layer(super::heard::Layer::Overlay),
+            ),
+            Some(super::jump::Up::Ring(ask)),
+            false,
+            None,
+            true,
+            super::jump::OnTop {
+                layer: super::heard::Layer::Overlay,
+                scene: Some("setup".into()),
+            },
+        )
+    };
+    let mut renderer = renderer();
+    super::jump::forget(None);
+    let _ui = UserInterface::build(
+        view(super::RingAsk::Start { forward: true }),
+        Size::new(400.0, 300.0),
+        Cache::default(),
+        &mut renderer,
+    );
+    let (at, count, pressed) = super::jump::ring_placed(None).expect("the ring placed");
+    assert_eq!((at, count), (Some(0), 1), "the dialog's one control");
+    assert!(matches!(
+        pressed,
+        Some(Message::Project(ProjectMsg::SetUpMissing))
+    ));
+    super::jump::forget(None);
 }
 
 /// A control scrolled out of sight is scrolled to when the ring reaches

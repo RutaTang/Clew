@@ -2055,10 +2055,6 @@ pub fn changed_files(root: &Path, base: &str) -> Result<Vec<(String, char)>, Git
     Ok(parse_name_status_z(&out))
 }
 
-/// The files the working tree changes against HEAD — staged or not, and
-/// those git does not track yet — under the project directory, as
-/// `(root-relative path, letter)`: `M`odified, `A`dded, `D`eleted,
-/// `R`enamed, `U`ntracked, `!` in conflict.
 /// What HEAD is: the branch checked out — one with no commit yet too — or,
 /// detached, the commit it is at. `None` when it names neither.
 pub fn head_name(root: &Path) -> Result<Option<clew_protocol::HeadName>, GitError> {
@@ -2080,6 +2076,10 @@ pub fn head_name(root: &Path) -> Result<Option<clew_protocol::HeadName>, GitErro
     Ok((!name.is_empty()).then_some(HeadName::Branch(name)))
 }
 
+/// The files the working tree changes against HEAD — staged or not, and
+/// those git does not track yet — under the project directory, as
+/// `(root-relative path, letter)`: `M`odified, `A`dded, `D`eleted,
+/// `R`enamed, `U`ntracked, `!` in conflict.
 pub fn working_status(root: &Path) -> Result<Vec<(String, char)>, GitError> {
     let git = Git::open(root)?;
     let out = git.bytes(

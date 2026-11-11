@@ -820,9 +820,6 @@ fn parse_suggestion(text: &str, n: usize) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// How many lines the file at `path` has (at least 1), read whole — `None`
-/// for one that cannot be read, or too large to be a source file worth
-/// reading here.
 /// `resolve`, asked once for each file: the steps of a trace — up to
 /// [`fr::MAX_STEPS`] — mostly name the same few, and resolving one reads it
 /// whole off the disk.
@@ -842,6 +839,9 @@ fn once_per_file<'a>(
     }
 }
 
+/// How many lines the file at `path` has (at least 1), read whole — `None`
+/// for one that cannot be read, or too large to be a source file worth
+/// reading here.
 fn lines_on_disk(path: &std::path::Path) -> Option<usize> {
     const MAX_BYTES: u64 = 8 * 1024 * 1024;
     if std::fs::metadata(path).ok()?.len() > MAX_BYTES {

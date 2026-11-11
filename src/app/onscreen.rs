@@ -478,7 +478,7 @@ impl App {
             text,
             outcome: HeardOutcome::Ran(target.shown),
         });
-        self.update(target.message)
+        self.press(target.message)
     }
 
     /// Put away what is on top, as Esc does, for `said`: the tutorial, a

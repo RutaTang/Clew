@@ -1393,9 +1393,14 @@ pub struct App {
     /// The keyboard's ring (Tab with no field holding the keys): where it
     /// is asked to be (`ui::ring`); `None` while it is not up.
     pub(crate) ring: Option<crate::ui::RingAsk>,
-    /// Whether the code held the keys when the ring came up: they go back
-    /// to it when the ring is put away by a key.
+    /// Whether the code held the keys when the ring came up — or was given
+    /// them since, by a control the ring pressed: they go back to it when
+    /// the ring is put away by a key.
     pub ring_code: bool,
+    /// What the ring last said in the status bar (the name of the control
+    /// it is on): taken away with the ring, unless something else has been
+    /// said there since.
+    pub(crate) ring_said: String,
     /// The region F6 last put the keys in (`App::cycle_region`).
     pub(crate) region: crate::app::keys::Region,
     /// Pending `g` prefix for two-key motions (gg / gd / gr / gi / gy).
