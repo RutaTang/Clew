@@ -7791,7 +7791,7 @@ fn a_call_tree_with_nothing_under_its_root_says_so() {
     let mut app = reader_app();
     for (direction, said) in [
         (crate::callgraph::Direction::Incoming, "No callers found"),
-        (crate::callgraph::Direction::Outgoing, "No callees found"),
+        (crate::callgraph::Direction::Outgoing, "No calls found"),
     ] {
         let mut tree =
             crate::callgraph::CallTree::new(7, direction, "python", vec![call_item("root")]);
@@ -16052,6 +16052,12 @@ fn the_history_view_lists_commits_and_opens_one_to_its_files() {
     let (app, new, old) = history_app();
     let view = || sim_elem(super::history::history_tab(&app));
     assert!(shows(&mut view(), "Tax the total"));
+    // Whole in its row, the opened commit's subject is not said again
+    // under it.
+    assert!(
+        text_at(&mut view(), |t| t == "Tax the total", 1).is_none(),
+        "the subject said twice"
+    );
     assert!(shows(&mut view(), "main"));
     assert!(shows(&mut view(), "bbbbbbb by Mira Chen, 3 days ago"));
     assert!(

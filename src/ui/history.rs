@@ -256,7 +256,6 @@ fn commit_row<'a>(
     now: i64,
 ) -> Element<'a, Message> {
     use super::steady::{cut, width_of};
-    const GAP: f32 = 4.0;
     let mut first = row![].spacing(GAP).align_y(iced::Center);
     // The names on it, while they leave the subject most of the row; the
     // rest counted in one more ("+2").
@@ -323,6 +322,33 @@ fn commit_row<'a>(
     .into()
 }
 
+/// The gap between a row's badges and its subject.
+const GAP: f32 = 4.0;
+
+/// The room a commit's row leaves its subject after its badges, as
+/// [`commit_row`] lays them out.
+fn subject_room(c: &LogCommit, room: f32) -> f32 {
+    use super::steady::{cut, width_of};
+    let mut left = room;
+    for (i, r) in c.refs.iter().enumerate() {
+        let name = cut(&r.name, BADGE_NAME_MAX, ts::CAPTION, crate::fonts::UI);
+        let w = badge_width(r.kind, &name) + GAP;
+        if i > 0 && room - (left - w) > room * 0.5 {
+            let more = format!("+{}", c.refs.len() - i);
+            left -= width_of(&more, ts::CAPTION, crate::fonts::UI) + 10.0 + GAP;
+            break;
+        }
+        left -= w;
+    }
+    left
+}
+
+/// Whether `subject` reads whole in `room`: an opened commit says it again
+/// only where its row had to cut it.
+fn subject_cut(subject: &str, room: f32) -> bool {
+    super::steady::cut(subject, room.max(0.0), ts::BODY, crate::fonts::UI) != subject
+}
+
 /// A name pointing at a commit: the branch checked out in the accent, other
 /// branches plain, remote ones and tags quieter.
 fn ref_badge(kind: RefKind, name: String) -> Element<'static, Message> {
@@ -381,24 +407,32 @@ fn commit_detail<'a>(
         Some(Ok(None)) => return note(tr!("This commit is not in the repository.").into()),
         Some(Ok(Some(d))) => d,
     };
-    detail_of(d, room, now)
+    let cut_in_row = h
+        .commits
+        .iter()
+        .find(|c| c.sha == sha)
+        .is_none_or(|c| subject_cut(&c.subject, subject_room(c, room)));
+    detail_of(d, room, now, cut_in_row)
 }
 
-fn detail_of(d: &CommitDetail, room: f32, now: i64) -> Element<'_, Message> {
+fn detail_of(d: &CommitDetail, room: f32, now: i64, cut_in_row: bool) -> Element<'_, Message> {
     let mut col = column![].spacing(6);
-    // The whole message: its subject — the row cuts it to one line, and an
-    // opened commit never said it whole — and its body, its paragraphs
-    // joined again where git broke them at 72 columns.
+    // The whole message: its subject where the row cut it to one line — an
+    // opened commit never said it whole, and where the row says it whole,
+    // saying it again under it read as a stutter — and its body, its
+    // paragraphs joined again where git broke them at 72 columns.
     let (subject, body) = d
         .message
         .split_once('\n')
         .map_or((d.message.as_str(), ""), |(s, rest)| (s, rest.trim()));
-    col = col.push(
-        text(subject.trim().to_string())
-            .size(ts::BODY)
-            .color(theme::fg())
-            .wrapping(Wrapping::WordOrGlyph),
-    );
+    if cut_in_row {
+        col = col.push(
+            text(subject.trim().to_string())
+                .size(ts::BODY)
+                .color(theme::fg())
+                .wrapping(Wrapping::WordOrGlyph),
+        );
+    }
     if !body.is_empty() {
         col = col.push(
             text(reflow(body))
@@ -792,6 +826,7 @@ fn by_id_row<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
         .map_or(0, |t| t.as_secs() as i64);
     // Its words in the row less its padding, cut with an ellipsis.
     let room = (app.sidebar_width - 24.0 - 2.0).max(0.0);
+    let cut_in_row = subject_cut(&subject, room);
     let said = tr!(
         "{sha} by {author}, {ago}",
         sha = short_sha(&d.sha),
@@ -823,7 +858,7 @@ fn by_id_row<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
     }
     column![
         head,
-        container(detail_of(d, room, now)).padding(Padding {
+        container(detail_of(d, room, now, cut_in_row)).padding(Padding {
             top: 2.0,
             right: 12.0,
             bottom: 10.0,

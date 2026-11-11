@@ -2547,7 +2547,7 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         if node.depth == 0 && node.children.as_ref().is_some_and(|c| c.is_empty()) {
             let none = match tree.direction {
                 Direction::Incoming => tr!("No callers found"),
-                Direction::Outgoing => tr!("No callees found"),
+                Direction::Outgoing => tr!("No calls found"),
             };
             rows.push(tree_empty_row(1, none.to_string()));
         }
