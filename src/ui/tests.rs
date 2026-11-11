@@ -4729,12 +4729,17 @@ fn an_unknown_host_is_trusted_only_by_a_click_on_the_key_shown() {
         Some(crate::ConnectStage::TrustHost { key, .. }) if *key == scanned_key()
     ));
 
-    // Cancel: back to the form, saying why.
+    // Cancel: back to the form, saying why — and back on this machine:
+    // the host never connected.
     let _ = app.update(Message::Connect(ConnectMsg::TrustCancel));
     assert!(matches!(
         app.connect.as_ref().map(|u| &u.stage),
         Some(crate::ConnectStage::Error(reason)) if reason == "refused: unknown key"
     ));
+    assert!(!app.connection.is_remote());
+    // Asked again, the key is shown again.
+    let _ = app.connect_to(port_2222_target());
+    let conn = app.conn_gen;
     let _ = app.update(Message::Server(ServerMsg::HostKeyUnknown {
         conn,
         reason: "refused: unknown key".into(),
@@ -4946,12 +4951,17 @@ fn a_changed_key_clew_recorded_is_forgotten_only_by_a_click_on_the_prompt() {
         "{sent:?}"
     );
 
-    // Cancel: back to the form, saying why.
+    // Cancel: back to the form, saying why — and back on this machine:
+    // the host never connected.
     let _ = app.update(Message::Connect(ConnectMsg::TrustCancel));
     assert!(matches!(
         stage(&app),
         Some(crate::ConnectStage::Error(reason)) if reason == "refused: the host key changed"
     ));
+    assert!(!app.connection.is_remote());
+    // Asked again, the refusal is shown again.
+    let _ = app.connect_to(port_2222_target());
+    let conn = app.conn_gen;
     let _ = app.update(changed(conn));
 
     // A data directory whose path has spaces in it.
@@ -7548,6 +7558,7 @@ fn the_connect_modal_can_revoke_the_live_hosts_ai_keys() {
     let mut app = reader_app();
     app.connection = port_2222_target();
     app.remote_ai_opt_in = true;
+    app.settings.key = "sk-test".into();
     app.connect = Some(crate::ConnectUi::default());
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "holds your API keys"));
@@ -7564,6 +7575,9 @@ fn the_connect_modal_can_revoke_the_live_hosts_ai_keys() {
     }
     assert_eq!(app.live_ai_opt_in(), Some(false));
     assert!(shows(&mut sim_of(&app), "does not hold your API keys"));
+    // With no key here, there is nothing for it to hold, or not.
+    app.settings.key.clear();
+    assert!(!shows(&mut sim_of(&app), "does not hold your API keys"));
     // Locally there is nothing to grant, so nothing is shown.
     app.connection = crate::connect::ConnTarget::Local;
     let mut local = sim_of(&app);

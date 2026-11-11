@@ -65,6 +65,7 @@ impl App {
             proj: ProjectSession::default(),
             server: crate::app::server::ServerLink::default(),
             pending_open: None,
+            pending_open_line: None,
             pending_consent: None,
             setup: None,
             pending_setup: None,
@@ -85,6 +86,8 @@ impl App {
             trail_writer: TrailWriter::default(),
             connection: Self::startup_connection(),
             left_local: None,
+            left_local_at: None,
+            connecting_as: None,
             escape_taken: false,
             // A CLEW_SSH startup target never carries the per-host AI-key
             // opt-in; only the Connect flow can grant it.

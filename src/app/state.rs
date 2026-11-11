@@ -1125,6 +1125,9 @@ pub struct App {
     /// File to open automatically once the initial scan completes
     /// (set when the CLI argument is a file path).
     pub pending_open: Option<PathBuf>,
+    /// The line (1-based) [`Self::pending_open`] opens at, when it is one
+    /// to come back to.
+    pub pending_open_line: Option<usize>,
     /// Project root awaiting the user's consent to create `.clew`.
     /// While `Some`, the setup sheet asks it (`setup`).
     pub pending_consent: Option<PathBuf>,
@@ -1200,6 +1203,13 @@ pub struct App {
     /// closes it, and a connect that failed left the window empty, the
     /// project it was reading a folder pick away.
     pub left_local: Option<std::path::PathBuf>,
+    /// The file the window was reading in [`Self::left_local`], and the
+    /// line its caret was on: a connect that never came up reopens it there.
+    pub left_local_at: Option<(std::path::PathBuf, Option<usize>)>,
+    /// The host a connect asked from the form is dialling: kept among the
+    /// saved hosts once it answers, not before — a typo that never
+    /// connected was listed for good.
+    pub connecting_as: Option<connect::SavedConnection>,
     /// The Escape now reaching the key handler has done its work already —
     /// it cleared the Files filter (`WindowMsg::FileFilterEscaped`) — and is
     /// to do nothing more. Any key press consumes it.

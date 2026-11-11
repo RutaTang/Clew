@@ -533,7 +533,8 @@ impl App {
                     .as_ref()
                     .is_some_and(|p| file.starts_with(&p.root)) =>
             {
-                self.open_file(file, None, true) // clears show_overview
+                let line = self.pending_open_line.take();
+                self.open_file(file, line, true) // clears show_overview
             }
             _ => Task::none(),
         };

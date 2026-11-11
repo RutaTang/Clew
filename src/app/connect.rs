@@ -122,9 +122,12 @@ impl App {
         if let Some(ui) = &mut self.connect {
             ui.marked.clear();
         }
-        self.remember_connection(conn.clone());
         let opt_in = conn.send_ai_keys;
-        let stop_old = self.connect_to(conn.target());
+        let target = conn.target();
+        let stop_old = self.connect_to(target);
+        // Saved once it answers (`on_server_ready`), not now: a host that
+        // never connected — a typo — was listed for good.
+        self.connecting_as = Some(conn);
         // After connect_to: it resets the opt-in for every transport switch.
         self.remote_ai_opt_in = opt_in;
         stop_old
@@ -171,6 +174,20 @@ impl App {
             && let Some(project) = &self.proj.project
         {
             self.left_local = Some(project.root.clone());
+            // And where in it: a connect that never comes up reopens the
+            // file at the line the reader was on.
+            self.left_local_at = self
+                .active_viewer()
+                .map(|v| (v.abs.clone(), v.caret.map(|(line, _)| line + 1)));
+        }
+        // Another host asked for: the one dialled before is not to be saved.
+        // (The same one again — trusted, then dialled anew — still is.)
+        if self
+            .connecting_as
+            .as_ref()
+            .is_some_and(|c| c.target() != target)
+        {
+            self.connecting_as = None;
         }
         // Stop the old project's work FIRST: `drop_connection_state` drops the
         // project's link (its stream ids) and the server link (the channel) —
@@ -202,6 +219,7 @@ impl App {
         self.setup = None;
         self.pending_setup = None;
         self.pending_open = None;
+        self.pending_open_line = None;
         // A new transport instance: late messages still queued from the old
         // one (its key differs, but its channel already held them) carry the
         // old number and are dropped by the one check in `dispatch`. A user
@@ -221,6 +239,33 @@ impl App {
             ui.stage = ConnectStage::Connecting { label };
         }
         stop_old
+    }
+
+    /// A connect asked from the Connect form that never came up — no ssh, a
+    /// host not there, a key not trusted, a server that refused — leaves the
+    /// reader where they were: back on this machine, the project they left
+    /// reopened at the file and line they were reading. The form keeps
+    /// saying why, to try again from. A link that came up and dropped is
+    /// not this: its project stays, to reconnect to.
+    pub(crate) fn back_home_after_failed_connect(&mut self, why: String) -> Task<Message> {
+        if !self.connection.is_remote() || self.proj.project.is_some() {
+            return Task::none();
+        }
+        let root = self.left_local.take().filter(|root| root.is_dir());
+        let at = self.left_local_at.take();
+        let switched = self.connect_to_saying(connect::ConnTarget::Local, why.clone());
+        if let Some(ui) = &mut self.connect {
+            ui.stage = ConnectStage::Error(why);
+        }
+        let Some(root) = root else {
+            return switched;
+        };
+        let open = self.request_open(root.clone());
+        if let Some((file, line)) = at.filter(|(file, _)| file.starts_with(&root)) {
+            self.pending_open = Some(file);
+            self.pending_open_line = line;
+        }
+        Task::batch([switched, open])
     }
 
     /// Trust or Forget, answered for the host this window is on: connect to it
@@ -525,13 +570,19 @@ impl App {
         match message {
             ConnectMsg::TrustHost { fingerprint } => self.on_connect_trust_host(&fingerprint),
             ConnectMsg::TrustCancel => {
-                if let Some(ui) = &mut self.connect
-                    && let ConnectStage::TrustHost { reason, .. }
-                    | ConnectStage::HostKeyChanged { reason, .. } = &ui.stage
-                {
+                let Some(reason) = self.connect.as_ref().and_then(|ui| match &ui.stage {
+                    ConnectStage::TrustHost { reason, .. }
+                    | ConnectStage::HostKeyChanged { reason, .. } => Some(reason.clone()),
+                    _ => None,
+                }) else {
+                    return Task::none();
+                };
+                if let Some(ui) = &mut self.connect {
                     ui.stage = ConnectStage::Error(reason.clone());
                 }
-                Task::none()
+                // The host not trusted, so never connected: back to where
+                // the reader was.
+                self.back_home_after_failed_connect(reason)
             }
             ConnectMsg::ForgetHostKey { host } => self.on_connect_forget_host_key(&host),
             ConnectMsg::Open => {

@@ -6280,25 +6280,26 @@ fn connect_bootstrap_failure_clears_the_scanning_placeholder() {
     );
 }
 
-/// A connect that fails from the modal leaves the window saying so — the
-/// welcome read "Connected to …" over a host never reached — and
-/// "Disconnect and read local code" goes back to the local project the window
-/// left for it, not to an empty window. Once the local server is up, its
-/// "Connecting to Local…" headline goes too.
+/// A connect from the Connect form that never comes up — here, no ssh —
+/// leaves the reader where they were: back on this machine, the project
+/// they left open again at the file and line they were reading, and the
+/// form saying why, to try again from. The host is not saved: it never
+/// answered — a typo was listed for good.
 #[test]
-fn a_failed_connect_says_so_and_disconnect_reads_the_local_project_again() {
+fn a_failed_connect_goes_back_to_where_the_reader_was() {
     let mut app = scanned_app("connect-failed-back-local");
     let root = app.proj.project.as_ref().unwrap().root.clone();
-    let host = crate::connect::SavedConnection {
-        name: String::new(),
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    app.active_viewer_mut().unwrap().caret = Some((2, 4));
+    let file = root.join("src/lib.rs");
+    app.connect = Some(ConnectUi {
         host: "h.example".into(),
         user: "root".into(),
-        port: 2222,
-        identity: String::new(),
-        send_ai_keys: false,
-    };
-    app.connect = Some(ConnectUi::default());
-    let _ = app.connect_to(host.target());
+        port: "2222".into(),
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    assert!(app.connection.is_remote());
     assert!(
         app.proj.project.is_none(),
         "going remote closes the local project"
@@ -6309,26 +6310,96 @@ fn a_failed_connect_says_so_and_disconnect_reads_the_local_project_again() {
         conn: app.conn_gen,
         reason: "ssh is not installed here".into(),
     }));
+    assert!(!app.connection.is_remote(), "back on this machine");
     assert!(
-        app.handshake_failure.is_some(),
-        "the window must know the host was not reached"
+        matches!(
+            app.connect.as_ref().map(|u| &u.stage),
+            Some(ConnectStage::Error(e)) if e.contains("ssh is not installed")
+        ),
+        "the form says why"
     );
-
-    let _ = app.update(Message::Connect(ConnectMsg::Disconnect));
-    assert!(!app.connection.is_remote());
-    assert!(app.left_local.is_none());
+    assert!(
+        app.status.contains("ssh is not installed"),
+        "{}",
+        app.status
+    );
+    assert!(
+        !app.saved_connections.iter().any(|c| c.host == "h.example"),
+        "a host that never answered is not saved"
+    );
     let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
         || app.pending_consent.as_deref() == Some(root.as_path());
     assert!(reopening, "the local project is not opened again");
+    assert_eq!(app.pending_open.as_deref(), Some(file.as_path()));
+    assert_eq!(app.pending_open_line, Some(3));
+    // Opened, the file is where the reader left it.
+    scan_synchronously(&mut app, root.clone());
+    land_active_load(&mut app, file.clone(), Some(3));
+    let v = app.active_viewer().expect("the file is open again");
+    assert_eq!(v.abs, file);
+    assert_eq!(v.target_line, Some(3));
+}
 
-    // The local transport's handshake lands: the headline has done its job.
-    app.status = tr!("Connecting to {host}…", host = app.connection.label());
+/// The host dialled from the form is saved once it answers, and only then.
+/// A link that came up and later dropped keeps its project to reconnect to:
+/// the way home is only for a connect that never came up.
+#[test]
+fn a_host_is_saved_once_it_answers() {
+    let mut app = scanned_app("connect-saved-on-answer");
+    app.connect = Some(ConnectUi {
+        host: "answers.example".into(),
+        user: "root".into(),
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    assert!(
+        !app.saved_connections
+            .iter()
+            .any(|c| c.host == "answers.example")
+    );
     let _ = app.on_server_ready();
     assert!(
-        !app.status.contains("Connecting to"),
-        "the status line still says {:?}",
-        app.status
+        app.saved_connections
+            .iter()
+            .any(|c| c.host == "answers.example"),
+        "{:?}",
+        app.saved_connections
     );
+    assert!(app.connecting_as.is_none());
+}
+
+/// A host whose key is not trusted, its prompt cancelled, never connected
+/// either: back home, as any connect that never came up.
+#[test]
+fn a_host_key_turned_down_goes_back_to_where_the_reader_was() {
+    let mut app = scanned_app("connect-trust-cancel-home");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.connect = Some(ConnectUi {
+        host: "new.example".into(),
+        user: "root".into(),
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    let target = app.connection.clone();
+    app.connect.as_mut().unwrap().stage = ConnectStage::TrustHost {
+        target,
+        reason: "new.example is not a known host".into(),
+        key: crate::backend::connect::ScannedHostKey {
+            host: "new.example".into(),
+            line: "new.example ssh-ed25519 AAAA".into(),
+            kind: "ED25519".into(),
+            fingerprint: "SHA256:abc".into(),
+        },
+    };
+    let _ = app.update(Message::Connect(ConnectMsg::TrustCancel));
+    assert!(!app.connection.is_remote());
+    assert!(matches!(
+        app.connect.as_ref().map(|u| &u.stage),
+        Some(ConnectStage::Error(e)) if e.contains("not a known host")
+    ));
+    let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
+        || app.pending_consent.as_deref() == Some(root.as_path());
+    assert!(reopening);
 }
 
 /// A server that refuses the handshake fails the Connect modal waiting on it

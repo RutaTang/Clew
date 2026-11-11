@@ -205,6 +205,7 @@ impl App {
     /// the rest of the session — no project, no fallback, and re-picking the
     /// folder just re-parked it.
     pub(crate) fn on_handshake_failed(&mut self, why: String) -> Task<Message> {
+        let never_up = self.connecting_from_form();
         // Drop the transport. Nothing can be asked of a server whose protocol
         // we don't share — it refuses every later request anyway — and
         // dropping the last sender ends the writer task, so the server sees
@@ -227,7 +228,13 @@ impl App {
         {
             ui.stage = ConnectStage::Error(why.clone());
         }
-        self.status = why;
+        self.status = why.clone();
+        // A connect from the form refused: back to where the reader was.
+        if never_up {
+            self.pending_scan_root = None;
+            self.scanning = false;
+            return self.back_home_after_failed_connect(why);
+        }
         let Some(root) = self.pending_scan_root.take() else {
             return Task::none();
         };
@@ -245,6 +252,12 @@ impl App {
     /// business requests flow to the server.
     pub(crate) fn on_server_ready(&mut self) -> Task<Message> {
         self.server.ready = true;
+        // The host dialled from the form answered: now it is one to keep.
+        if self.connection.is_remote()
+            && let Some(conn) = self.connecting_as.take()
+        {
+            self.remember_connection(conn);
+        }
         // The switch is done: "Connecting to Local…" stayed in the status
         // line for good once nothing else came to replace it. A headline
         // carrying a note (what the switch dropped) is left to be read.
@@ -282,6 +295,18 @@ impl App {
             self.enter_remote_browser(None);
         }
         Task::none()
+    }
+
+    /// Whether a remote connect asked from the Connect form is still on
+    /// its way up: the form open on "Connecting…", no project of the host's
+    /// open yet.
+    pub(crate) fn connecting_from_form(&self) -> bool {
+        self.connection.is_remote()
+            && self.proj.project.is_none()
+            && self
+                .connect
+                .as_ref()
+                .is_some_and(|ui| matches!(ui.stage, ConnectStage::Connecting { .. }))
     }
 
     pub(crate) fn on_server_unavailable(&mut self, reason: String) -> Task<Message> {
@@ -2129,7 +2154,17 @@ impl App {
             // project's state.
             ServerMsg::Connected { tx, .. } => self.on_server_connected(tx),
             ServerMsg::Disconnected { reason, .. } => self.on_server_disconnected(reason),
-            ServerMsg::Unavailable { reason, .. } => self.on_server_unavailable(reason),
+            ServerMsg::Unavailable { reason, .. } => {
+                // A connect from the form that never came up: the reader
+                // goes back to where they were (`back_home_after_failed_connect`).
+                let never_up = self.connecting_from_form();
+                let task = self.on_server_unavailable(reason.clone());
+                if never_up {
+                    Task::batch([task, self.back_home_after_failed_connect(reason)])
+                } else {
+                    task
+                }
+            }
             ServerMsg::HostKeyUnknown { reason, key, .. } => self.on_host_key_unknown(reason, key),
             ServerMsg::HostKeyChanged {
                 reason,

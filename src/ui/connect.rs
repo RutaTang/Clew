@@ -2139,6 +2139,10 @@ pub(crate) fn host_key_changed_prompt<'a>(
 /// when the connection is local (there is nothing to grant).
 pub(crate) fn live_ai_keys_row(app: &App) -> Option<Element<'_, Message>> {
     let held = app.live_ai_opt_in()?;
+    // No key here: nothing for a host to hold, or not.
+    if !held && app.settings.key.trim().is_empty() && app.settings.embed_key.trim().is_empty() {
+        return None;
+    }
     let host = app.connection.label();
     let row: Element<'_, Message> = if held {
         row![
