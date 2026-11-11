@@ -896,6 +896,10 @@ pub enum FailureOf {
     Explain,
     /// A walkthrough: one generated, or its row dismissed, takes it away.
     Walkthrough,
+    /// A commit's "what & why": one summarized takes it away.
+    Summary,
+    /// A fake run: one that runs takes it away.
+    FakeRun,
 }
 
 /// they stood when it was asked.

@@ -456,16 +456,29 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                         ),
                         None => tr!("{file} does not run on its own", file = file),
                     };
+                    // What gives way where the panel is narrow, cut short
+                    // with an ellipsis: kept whole, it squeezed the trace's
+                    // count to a word a line ("Tra / 1 / sto") and pushed
+                    // "Walk this run" out of the panel.
                     Element::from(
-                        text(said)
+                        container(iced::widget::responsive(move |room| {
+                            text(super::steady::elide_end(
+                                &said,
+                                ts::SMALL,
+                                crate::fonts::UI,
+                                room.width,
+                            ))
                             .size(ts::SMALL)
                             .color(theme::dim())
-                            .wrapping(Wrapping::None),
+                            .wrapping(Wrapping::None)
+                            .into()
+                        }))
+                        .width(Fill)
+                        .height(Length::Fixed((ts::SMALL * 1.3).ceil())),
                     )
                 }
-                None => Element::from(space().width(0)),
+                None => Element::from(space().width(Fill)),
             },
-            space().width(Fill),
             // A plain run never stops: no trace to count, nor to walk.
             if plain {
                 Element::from(space().width(0))
@@ -710,7 +723,10 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
         trn!("Trace: 1 stop", "Trace: {n} stops", n)
     };
     row![
-        text(count).size(ts::CAPTION).color(theme::dim()),
+        text(count)
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .wrapping(Wrapping::None),
         super::toolbar::tip_at(
             button(super::toolbar::ai_words(
                 tr!("Walk this run"),

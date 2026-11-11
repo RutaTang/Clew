@@ -814,22 +814,26 @@ pub(crate) fn tour_prep_sheet<'a>(
         ready
             .then(|| super::heard::said(tr!("Start the Tour"), Message::Tutorial(TutorialMsg::Go))),
     );
-    let start = if ready {
-        start.into()
+    // Why it cannot start yet, said beside it: in a tip alone (which a
+    // held button may not show), a press on the tour's main button did
+    // nothing, with no word why.
+    let waiting: Element<'_, Message> = if ready {
+        space().width(Fill).into()
     } else {
-        super::toolbar::tip_at(
-            start,
-            if !app.llm_available {
-                tr!("Needs a language model first")
-            } else if !prep.met(app, Need::Model) {
-                tr!("Ready once the model answers a test")
-            } else {
-                tr!("Ready once Tea Shop is")
-            },
-            None,
-            iced::widget::tooltip::Position::Top,
-        )
+        text(if !app.llm_available {
+            tr!("The tour needs a language model first (step 1).")
+        } else if !prep.met(app, Need::Model) {
+            tr!("The tour starts once the model answers a test (step 1).")
+        } else {
+            tr!("The tour starts once Tea Shop is ready (step 3).")
+        })
+        .size(ts::SMALL)
+        .color(theme::dim())
+        .wrapping(Wrapping::WordOrGlyph)
+        .width(Fill)
+        .into()
     };
+    let start: Element<'_, Message> = start.into();
     let not_now = button(text(tr!("Not now")).size(ts::BASE))
         .style(theme::toolbar_button)
         .padding([6, 16])
@@ -843,7 +847,7 @@ pub(crate) fn tour_prep_sheet<'a>(
             header,
             intro,
             steps,
-            row![space().width(Fill), not_now, start]
+            row![waiting, not_now, start]
                 .spacing(10)
                 .align_y(iced::Center),
         ]

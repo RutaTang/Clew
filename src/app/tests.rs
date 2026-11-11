@@ -15027,6 +15027,18 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
     }));
     assert!(!tt(&app).0, "a failed summary left its spinner up");
     assert!(app.status.contains("rate limited"), "{}", app.status);
+    // The failure the status bar stands, with its Try again: said only as
+    // passing text it had no controls, and was cut short after an older one.
+    let notice = app.failure_shown().expect("a standing failure");
+    assert_eq!(notice.of, crate::app::state::FailureOf::Summary);
+    assert!(matches!(
+        notice.retry,
+        Some(Message::TimeTravel(TimeTravelMsg::Why))
+    ));
+    assert_eq!(
+        notice.about, None,
+        "nothing about the base URL in a rate limit"
+    );
     // Kept with its commit, to be said in its band and asked again.
     assert_eq!(
         app.proj.time_travel.as_ref().unwrap().why.get("bbbb2222"),
@@ -15052,6 +15064,22 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         app.proj.time_travel.as_ref().unwrap().why.get("bbbb2222"),
         Some(Ok(_))
     ));
+    assert!(
+        app.failure_shown().is_some(),
+        "a stale reply took the failure away"
+    );
+    // One summarized takes it away.
+    let _again = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
+        stamp: app.stamp(),
+        session,
+        sha: "bbbb2222".into(),
+        result: Ok("so".into()),
+    }));
+    assert!(
+        app.failure_shown().is_none(),
+        "a summary written left the failure up"
+    );
 
     // The story: a failure after a scrub clears its spinner; a success shows.
     let _story = app.update(Message::TimeTravel(TimeTravelMsg::Story));

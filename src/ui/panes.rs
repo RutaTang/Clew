@@ -154,6 +154,19 @@ pub(crate) fn time_travel_view<'a>(
     .into()
 }
 
+/// "Settings", where a failure says what to check there: Settings opened
+/// at `field`, the keys in it, as the status bar's own Settings does.
+pub(crate) fn settings_fix_button<'a>(field: crate::app::state::LlmField) -> Element<'a, Message> {
+    button(text(tr!("Settings")).size(ts::SMALL))
+        .style(theme::toolbar_button)
+        .padding([2, 8])
+        .on_press(super::heard::said(
+            tr!("Settings"),
+            Message::Settings(crate::SettingsMsg::Fix(field)),
+        ))
+        .into()
+}
+
 /// The commit banner: sha · author · when, the subject, and the AI "what & why".
 pub(crate) fn time_travel_banner<'a>(
     tt: &'a TimeTravel,
@@ -228,12 +241,15 @@ pub(crate) fn time_travel_banner<'a>(
             tr!("Try again"),
             Message::TimeTravel(TimeTravelMsg::Why),
         ));
-        row![
-            text(tr!("Couldn't summarize: {error}", error = why.as_str()))
-                .size(ts::SMALL)
-                .color(theme::danger())
-                .wrapping(Wrapping::Word)
-                .width(Fill),
+        let mut row = row![
+            text(tr!(
+                "Couldn't summarize: {error}",
+                error = crate::app::tasks::ai_reason(why)
+            ))
+            .size(ts::SMALL)
+            .color(theme::danger())
+            .wrapping(Wrapping::Word)
+            .width(Fill),
             chrome_tip(
                 again,
                 tr!("Say what this commit changed and why, with AI (one AI call)"),
@@ -241,8 +257,12 @@ pub(crate) fn time_travel_banner<'a>(
             ),
         ]
         .spacing(8)
-        .align_y(iced::Center)
-        .into()
+        .align_y(iced::Center);
+        // Where it says to check the base URL, the way there.
+        if crate::app::tasks::unreached(why) {
+            row = row.push(settings_fix_button(crate::app::state::LlmField::BaseUrl));
+        }
+        row.into()
     } else {
         let what_why = button(super::toolbar::ai_words(
             tr!("What & why?"),

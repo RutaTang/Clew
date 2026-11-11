@@ -254,20 +254,34 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
             (header.into(), debug_col(rows))
         } else if let Some(why) = fake.failed.as_ref() {
             let name = fake.last.as_ref().map_or("", |s| s.target.name.as_str());
-            let header = row![
+            let mut header = row![
                 container(lead(name, tr!("failed").to_string()))
                     .width(Fill)
                     .clip(true),
                 control(tr!("Try again"), Message::Fake(FakeMsg::EditInputs), true),
-                close(),
             ]
             .spacing(4)
             .align_y(iced::Center);
+            // Where it says to check the base URL, the way there: it said
+            // "in Settings" with only Try again and Close beside it.
+            if crate::app::tasks::unreached(why) {
+                header = header.push(control(
+                    tr!("Settings"),
+                    Message::Settings(crate::SettingsMsg::Fix(
+                        crate::app::state::LlmField::BaseUrl,
+                    )),
+                    true,
+                ));
+            }
+            let header = header.push(close());
             let rows = vec![
-                text(tr!("The fake run failed: {why}", why = why.clone()))
-                    .size(ts::SMALL)
-                    .color(theme::danger())
-                    .into(),
+                text(tr!(
+                    "The fake run failed: {why}",
+                    why = crate::app::tasks::ai_reason(why)
+                ))
+                .size(ts::SMALL)
+                .color(theme::danger())
+                .into(),
             ];
             (header.into(), debug_col(rows))
         } else if let Some(sim) = fake.sim.as_ref() {

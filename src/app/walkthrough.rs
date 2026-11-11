@@ -197,16 +197,19 @@ impl App {
         if self.proj.walk.seq != seq || !shown {
             return Task::none();
         }
+        let about =
+            crate::app::tasks::unreached(&why).then_some(crate::app::state::LlmField::BaseUrl);
         self.say_failure_again(
             move || {
                 tr!(
                     "Couldn't narrate the run with AI ({reason}) — showing its stops as recorded",
-                    reason = crate::app::tasks::plain_detail(&why)
+                    reason = crate::app::tasks::ai_reason(&why)
                 )
             },
             Some(Message::Walk(WalkMsg::GenerateTrace)),
             crate::app::state::FailureOf::Walkthrough,
         );
+        self.failure_about(about);
         Task::none()
     }
 

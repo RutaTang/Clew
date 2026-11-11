@@ -391,12 +391,13 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         Anchoring::Corner,
     );
     // A full-size backdrop closes the menu on any outside click.
-    // A click of either button outside it puts it away.
-    opaque(
-        mouse_area(placed)
-            .on_press(Message::Hover(HoverMsg::ContextMenuClosed))
-            .on_right_press(Message::Hover(HoverMsg::ContextMenuClosed)),
+    // A click of either button outside it puts it away — a right one going
+    // on to what is under it, to open its own menu there.
+    super::MenuBackdrop::new(
+        mouse_area(placed).on_press(Message::Hover(HoverMsg::ContextMenuClosed)),
+        Message::Hover(HoverMsg::ContextMenuClosed),
     )
+    .into()
 }
 
 /// The file tree's right-click menu, at the click: open the file (beside
@@ -471,11 +472,11 @@ pub(crate) fn tree_menu<'a>(
         iced::Point::new(menu.x, menu.y),
         Anchoring::Corner,
     );
-    opaque(
-        mouse_area(placed)
-            .on_press(Message::Project(ProjectMsg::TreeMenuClosed))
-            .on_right_press(Message::Project(ProjectMsg::TreeMenuClosed)),
+    super::MenuBackdrop::new(
+        mouse_area(placed).on_press(Message::Project(ProjectMsg::TreeMenuClosed)),
+        Message::Project(ProjectMsg::TreeMenuClosed),
     )
+    .into()
 }
 
 // ---------------------------------------------------------------- server panel

@@ -1148,18 +1148,42 @@ impl App {
             return Task::none();
         };
         tt.why_pending.remove(&sha);
-        match result {
+        let failed = match result {
             Ok(text) => {
                 tt.why.insert(sha, Ok(text.trim().to_string()));
+                None
             }
             Err(e) => {
-                let why = crate::app::tasks::ai_reason(&e);
-                tt.why.insert(sha, Err(why.clone()));
-                self.status = tr!("Couldn't summarize: {error}", error = why)
+                // Kept as it came: worded where it is drawn, in the
+                // language spoken then, with a way to Settings when the
+                // base URL is to blame.
+                tt.why.insert(sha, Err(e.clone()));
+                Some(e)
             }
-        }
+        };
         if let Some(tt) = self.proj.time_travel.as_mut() {
             tt.sync_why_loading();
+        }
+        match failed {
+            // The failure the status bar stands for, with its Try again
+            // (and Settings): said only as passing text, it was squeezed
+            // in after an older failure, cut short, with no controls.
+            Some(e) => {
+                let about = crate::app::tasks::unreached(&e)
+                    .then_some(crate::app::state::LlmField::BaseUrl);
+                self.say_failure_again(
+                    move || {
+                        tr!(
+                            "Couldn't summarize: {error}",
+                            error = crate::app::tasks::ai_reason(&e)
+                        )
+                    },
+                    Some(Message::TimeTravel(TimeTravelMsg::Why)),
+                    crate::app::state::FailureOf::Summary,
+                );
+                self.failure_about(about);
+            }
+            None => self.forget_failure_of(crate::app::state::FailureOf::Summary),
         }
         Task::none()
     }

@@ -313,11 +313,24 @@ fn a_failed_run_says_why_and_can_be_tried_again() {
         app.proj.fake.failed
     );
     assert!(app.proj.fake.shown(), "the panel says why");
+    // And the status bar, with its Try again: it said only "its panel says
+    // why", with no way back to it.
+    let notice = app.failure_shown().expect("a standing failure");
+    assert_eq!(notice.of, crate::app::state::FailureOf::FakeRun);
+    assert!(notice.said.contains("no JSON"), "{}", notice.said);
+    assert!(matches!(
+        notice.retry,
+        Some(Message::Fake(FakeMsg::EditInputs))
+    ));
     let _ = app.update(Message::Fake(FakeMsg::EditInputs));
     assert_eq!(app.proj.fake.sheet.as_ref().unwrap().values, ["noon"]);
 
     // Run again, then Stop: the turn is cancelled.
     let _ = app.update(Message::Fake(FakeMsg::Run));
+    assert!(
+        app.failure_shown().is_none(),
+        "tried again, the failure stood on"
+    );
     let (stream, ..) = asked(&mut rx).unwrap();
     let _ = app.update(Message::Fake(FakeMsg::Stop));
     assert!(app.proj.fake.working.is_none());

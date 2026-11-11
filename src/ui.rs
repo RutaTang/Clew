@@ -31,7 +31,7 @@ mod corner_safe;
 mod dropdown;
 mod escape_clears;
 mod right_press;
-pub(crate) use right_press::RightPress;
+pub(crate) use right_press::{MenuBackdrop, RightPress};
 mod ring;
 mod tree_keys;
 pub(crate) use anchored::*;

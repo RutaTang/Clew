@@ -273,6 +273,9 @@ impl App {
         let target = sheet.target.clone();
         self.proj.fake.last = Some(sheet);
         self.proj.fake.failed = None;
+        // Being tried again: its Try again on the status bar would start
+        // another beside it.
+        self.forget_failure_of(crate::app::state::FailureOf::FakeRun);
         self.proj.fake.sim = None;
         self.proj.fake.seq += 1;
         let seq = self.proj.fake.seq;
@@ -446,6 +449,7 @@ impl App {
         let parsed = answer.and_then(|text| fr::parse(&text, resolve));
         match parsed {
             Ok(trace) if !working.debug => {
+                self.forget_failure_of(crate::app::state::FailureOf::FakeRun);
                 // A fake run lands on its end: what it returns, what it
                 // printed, the steps there to go back through.
                 self.status = if trace.dropped > 0 {
@@ -470,6 +474,7 @@ impl App {
                 Task::none()
             }
             Ok(trace) => {
+                self.forget_failure_of(crate::app::state::FailureOf::FakeRun);
                 self.status = if trace.dropped > 0 {
                     trn!(
                         "Fake debug ready — 1 step named no line of this project and was left out",
@@ -491,8 +496,23 @@ impl App {
                 self.fake_show_step()
             }
             Err(why) => {
-                self.status = tr!("The fake run failed — its panel says why").into();
-                self.proj.fake.failed = Some(crate::app::tasks::ai_reason(&why));
+                // Kept as it came: worded where it is drawn, with a way to
+                // Settings when the base URL is to blame — on its panel,
+                // and on the status bar with its Try again.
+                let about = crate::app::tasks::unreached(&why)
+                    .then_some(crate::app::state::LlmField::BaseUrl);
+                self.proj.fake.failed = Some(why.clone());
+                self.say_failure_again(
+                    move || {
+                        tr!(
+                            "The fake run failed: {why}",
+                            why = crate::app::tasks::ai_reason(&why)
+                        )
+                    },
+                    Some(Message::Fake(FakeMsg::EditInputs)),
+                    crate::app::state::FailureOf::FakeRun,
+                );
+                self.failure_about(about);
                 Task::none()
             }
         }

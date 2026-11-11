@@ -12261,6 +12261,41 @@ fn the_tour_sheet_says_all_set_only_of_a_model_that_answered() {
     assert!(says(&app, "All set."));
 }
 
+/// Why the tour cannot start yet is said beside its Start button, whatever
+/// is missing: in a tip alone (which a held button may not show), a press
+/// on the tour's main button did nothing, with no word why.
+#[test]
+fn the_tour_sheet_says_why_it_cannot_start_yet() {
+    use crate::app::state::ConnectionTest;
+    let mut app = reader_app();
+    let prep = crate::app::tutorial::TourPrep::default();
+    let says = |app: &App, words: &str| {
+        shows(
+            &mut sim_elem(super::tutorial::tour_prep_sheet(app, &prep)),
+            words,
+        )
+    };
+    app.llm_available = false;
+    assert!(says(
+        &app,
+        "The tour needs a language model first (step 1)."
+    ));
+    app.llm_available = true;
+    app.model_check.result = ConnectionTest::Untried;
+    assert!(says(
+        &app,
+        "The tour starts once the model answers a test (step 1)."
+    ));
+    assert!(!says(&app, "needs a language model"));
+    app.model_check.result = ConnectionTest::Answered("m".into());
+    assert!(!prep.ready(&app), "Tea Shop is not ready in a reader's app");
+    assert!(says(
+        &app,
+        "The tour starts once Tea Shop is ready (step 3)."
+    ));
+    assert!(!says(&app, "answers a test"));
+}
+
 /// A failure on the status line keeps its Try again, Settings and × where
 /// they are whatever else is said or stops being said: shortened to make
 /// room for the next message, they moved under the pointer and a click
@@ -15216,6 +15251,89 @@ fn the_why_popup_opens_at_the_line_it_is_about() {
     assert!(insight.y > 400.0 + lh, "{insight:?} is not under the line");
 }
 
+/// A fake run or a commit's summary that could not reach the provider says
+/// so in plain words, with the way to the field to fix beside it: they said
+/// the client's own words, or "check the base URL in Settings" with only
+/// Try again and Close there. Any other failure has no Settings.
+#[test]
+fn a_failed_fake_run_or_summary_shows_the_way_to_settings_when_unreached() {
+    use crate::app::state::LlmField;
+    let refused = "error sending request for url (http://127.0.0.1:9/chat/completions): \
+                   client error (Connect): tcp connect error: Connection refused (os error 111)";
+    let fixes = |sent: &[Message]| {
+        sent.iter().any(|m| {
+            matches!(
+                m,
+                Message::Settings(crate::SettingsMsg::Fix(LlmField::BaseUrl))
+            )
+        })
+    };
+    let mut app = reader_app();
+    app.proj.fake.failed = Some(refused.into());
+    let mut sim = sim_elem(super::fakerun::fake_panel(&app));
+    assert!(
+        !shows(&mut sim, "tcp connect error"),
+        "the client's own words"
+    );
+    assert!(shows(&mut sim, "The fake run failed: "));
+    drop(sim);
+    let sent = click_nth(sim_elem(super::fakerun::fake_panel(&app)), "Settings", 0);
+    assert!(fixes(&sent), "{sent:?}");
+    app.proj.fake.failed = Some("rate limited".into());
+    let mut sim = sim_elem(super::fakerun::fake_panel(&app));
+    assert!(shows(&mut sim, "rate limited"));
+    assert!(!shows(&mut sim, "Settings"));
+
+    let commit = clew_protocol::HistCommit {
+        sha: "aaaa1111".into(),
+        author: "a".into(),
+        time: 0,
+        subject: "subject".into(),
+        path: "src/lib.rs".into(),
+    };
+    let mut tt = crate::TimeTravel {
+        abs: "/p/src/lib.rs".into(),
+        rel: "src/lib.rs".into(),
+        lang: Some("rust"),
+        scope: crate::TimeScope::File,
+        commits: vec![commit.clone()],
+        idx: 0,
+        viewer: None,
+        scroll_y: 0.0,
+        scroll_x: 0.0,
+        caret: None,
+        focus_line: None,
+        reveal_change: false,
+        loading: false,
+        generation: 0,
+        session: 0,
+        scoped: 0,
+        why: std::collections::HashMap::new(),
+        why_loading: false,
+        why_pending: std::collections::HashSet::new(),
+        story: None,
+        story_loading: false,
+    };
+    tt.why.insert("aaaa1111".into(), Err(refused.into()));
+    let mut sim = sim_elem(super::panes::time_travel_banner(&tt, Some(&commit)));
+    assert!(
+        !shows(&mut sim, "tcp connect error"),
+        "the client's own words"
+    );
+    assert!(shows(&mut sim, "Couldn't summarize: "));
+    drop(sim);
+    let sent = click_nth(
+        sim_elem(super::panes::time_travel_banner(&tt, Some(&commit))),
+        "Settings",
+        0,
+    );
+    assert!(fixes(&sent), "{sent:?}");
+    tt.why.insert("aaaa1111".into(), Err("rate limited".into()));
+    let mut sim = sim_elem(super::panes::time_travel_banner(&tt, Some(&commit)));
+    assert!(shows(&mut sim, "rate limited"));
+    assert!(!shows(&mut sim, "Settings"));
+}
+
 /// A fake debug session in the bottom panel: said to be simulated, where
 /// it is in the trace, the line's values with what it changed, what the
 /// run returns — and its controls step it.
@@ -17349,6 +17467,83 @@ fn a_right_click_on_a_tree_row_opens_its_menu_at_the_pointer() {
     assert!(!shows(&mut sim, "Open to the Side"));
 }
 
+/// With a menu up, a right-click on another row puts it away and opens
+/// that row's menu there, in the one click, as a desktop's menus do: it
+/// only put the menu away, and a second right-click was needed. A left
+/// click outside only puts it away; a right-click on the menu itself does
+/// neither.
+#[test]
+fn a_right_click_outside_a_menu_opens_the_menu_of_what_it_is_on() {
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: Vec::new(),
+                files: vec!["main.rs".into()],
+            },
+        )],
+        files: vec!["README.md".into()],
+    };
+    let (readme, src) = {
+        let mut sim = sim_sized(&app, size);
+        (
+            text_at(&mut sim, |t| t == "README.md", 0).expect("README.md's row"),
+            text_at(&mut sim, |t| t == "src", 0).expect("src's row"),
+        )
+    };
+    // The pointer moved to `at` and the `button` clicked there; what the
+    // window was sent, applied.
+    let click = |app: &mut App, at: iced::Point, button: mouse::Button| {
+        let mut renderer = renderer();
+        let mut ui =
+            UserInterface::build(crate::ui::view(app), size, Cache::default(), &mut renderer);
+        let mut messages = Vec::new();
+        for event in [
+            mouse::Event::CursorMoved { position: at },
+            mouse::Event::ButtonPressed(button),
+            mouse::Event::ButtonReleased(button),
+        ] {
+            let _ = ui.update(
+                &[Event::Mouse(event)],
+                mouse::Cursor::Available(at),
+                &mut renderer,
+                &mut clipboard::Null,
+                &mut messages,
+            );
+        }
+        drop(ui);
+        for message in messages.clone() {
+            let _ = app.update(message);
+        }
+        messages
+    };
+    let open_on = |app: &App| app.proj.tree_menu.as_ref().map(|m| m.rel.clone());
+    let _ = click(&mut app, readme.center(), mouse::Button::Right);
+    assert_eq!(open_on(&app).as_deref(), Some("README.md"));
+    let sent = click(&mut app, src.center(), mouse::Button::Right);
+    assert_eq!(open_on(&app).as_deref(), Some("src"), "{sent:?}");
+    let menu = app.proj.tree_menu.as_ref().unwrap();
+    assert!(
+        (menu.x - src.center().x).abs() < 0.5 && (menu.y - src.center().y).abs() < 0.5,
+        "where the second click was: {menu:?}"
+    );
+    // A right-click on the menu itself is the menu's.
+    let row = text_at(&mut sim_sized(&app, size), |t| t == "Copy Path", 0).expect("its row");
+    let sent = click(&mut app, row.center(), mouse::Button::Right);
+    assert_eq!(open_on(&app).as_deref(), Some("src"), "{sent:?}");
+    // A left click outside only puts it away: README.md is not opened.
+    let sent = click(&mut app, readme.center(), mouse::Button::Left);
+    assert_eq!(open_on(&app), None, "{sent:?}");
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Editor(crate::EditorMsg::OpenRel { .. }))),
+        "the click outside went on to the row: {sent:?}"
+    );
+}
+
 /// A function's card and a file's lay out their actions alike: what is
 /// known (the date, and a function's callers) on one row, what to do
 /// (Explain, Ask) on the row under it — and right under what the card
@@ -17514,5 +17709,70 @@ fn a_failures_settings_link_puts_the_keys_in_the_field_to_fix() {
     ] {
         window.deliver(&mut app, Message::Settings(crate::SettingsMsg::Fix(field)));
         assert_eq!(window.focused(&app), Some(id), "{field:?}");
+    }
+}
+
+/// At a laptop's width, the debug panel's header keeps its trace whole —
+/// "Trace: 1 stop" on one line and "Walk this run" there — and it is the
+/// note on what ran that gives way: the count was squeezed to a word a
+/// line ("Tra / 1 / sto") and Walk this run pushed out of the panel.
+#[test]
+fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.ran_for = Some("pricing.py".into());
+    app.debug.trace = vec![crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: vec![crate::TraceFrame {
+            name: "subtotal".into(),
+            path: Some(root.join("pricing.py")),
+            line: 12,
+        }],
+    }];
+    app.debug.trace_rev += 1;
+    crate::app::tests::isolated_data_dir();
+    crate::fonts::load();
+    for width in [1400.0, 900.0, 640.0] {
+        let mut sim = iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(width, 260.0),
+            super::debug_panel(&app),
+        );
+        let count = text_at(&mut sim, |t| t == "Trace: 1 stop", 0).expect("the trace's count");
+        assert!(count.height < 20.0, "{width}: on one line: {count:?}");
+        let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
+        assert!(
+            walk.x + walk.width <= width,
+            "{width}: in the panel: {walk:?}"
+        );
+        // What ran is said whole while there is room, cut short where
+        // there is less, and gives way first where there is none.
+        let note = |t: &str| t.starts_with("pricing.py does not");
+        if width > 1000.0 {
+            assert!(
+                text_at(&mut sim, move |t| note(t) && !t.ends_with('…'), 0).is_some(),
+                "{width}: the note whole"
+            );
+        } else if width > 800.0 {
+            assert!(
+                text_at(&mut sim, move |t| note(t) && t.ends_with('…'), 0).is_some(),
+                "{width}: the note cut short"
+            );
+        }
     }
 }
