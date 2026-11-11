@@ -1756,7 +1756,10 @@ impl App {
         } else {
             row.saturating_sub(1)
         };
-        let most = v.content_rows().saturating_sub(1) as f32 * line_height;
+        // No further than puts the last line at the view's foot: Skim on a
+        // file scrolled to line 8 kept line 8 at the top of what now fitted
+        // whole, lines 1-7 above the view and its lower half empty.
+        let most = v.most_scroll(line_height);
         let y = (row as f32 * line_height).min(most);
         let scroll = if (y - v.scroll_y).abs() >= 0.5 {
             v.scroll_y = y;

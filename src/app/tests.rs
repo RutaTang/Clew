@@ -36492,6 +36492,44 @@ async fn the_window_polls_until_a_sent_documents_diagnostics_come() {
     }
 }
 
+/// Skim on a file scrolled down keeps no more scroll than the folded file
+/// has: what now fits in the view shows from its first line. Line 8 stayed
+/// at the top, lines 1-7 above the view and its lower half empty.
+#[test]
+fn skim_keeps_no_more_scroll_than_the_folded_file_has() {
+    let mut app = scanned_app("skim-scroll-clamp");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let mut body = String::from("import os\n\n\n\n\n\n\ndef long():\n");
+    for i in 0..40 {
+        body.push_str(&format!("    x{i} = {i}\n"));
+    }
+    std::fs::write(root.join("long.py"), &body).unwrap();
+    open_synchronously(&mut app, "long.py", None);
+    dismiss_overlays(&mut app);
+    let abs = root.join("long.py");
+    app.proj.symbol_index_by_file.insert(
+        abs.clone(),
+        Arc::new(vec![SymbolEntry {
+            name: "long".into(),
+            kind: "function".into(),
+            rel: "long.py".into(),
+            abs,
+            line: 8,
+            is_test: false,
+            entry: None,
+        }]),
+    );
+    let lh = app.line_height();
+    let v = app.active_viewer_mut().unwrap();
+    v.symbols.clear();
+    v.bounds_h = 20.0 * lh;
+    v.scroll_y = 7.0 * lh;
+    let _ = app.update(Message::Editor(EditorMsg::SkimFile));
+    let v = app.active_viewer().unwrap();
+    assert!(v.content_rows() < 20, "folded: {} rows", v.content_rows());
+    assert_eq!(v.scroll_y, 0.0, "the folded file fits: shown from its top");
+}
+
 /// The file's views take turns: Diff, Time Travel and Skim each show the
 /// file another way, and turning one on turns the others off — a diff
 /// asked for under Time Travel never showed, its button lit all the same.
