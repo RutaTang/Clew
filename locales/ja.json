@@ -702,6 +702,7 @@
  "Files changed on the remote host": "リモートホストでファイルが変更されました",
  "Files filtered by “{text}”": "「{text}」でファイルを絞り込み",
  "Filled in from the registry: read the command, fill in what it needs, then Add server": "レジストリから入力しました。コマンドを確認し、必要な項目を埋めてから「サーバーを追加」を押してください",
+ "Filter commits": "コミットを絞り込む",
  "Filter docs…": "ドキュメントを絞り込み…",
  "Filter files": "ファイルを絞り込み",
  "Filter terms…": "用語を絞り込み…",

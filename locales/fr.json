@@ -702,6 +702,7 @@
  "Files changed on the remote host": "Fichiers modifiés sur l’hôte distant",
  "Files filtered by “{text}”": "Fichiers filtrés par « {text} »",
  "Filled in from the registry: read the command, fill in what it needs, then Add server": "Rempli depuis le registre : lisez la commande, complétez ce qu’il faut, puis Ajouter le serveur",
+ "Filter commits": "Filtrer les commits",
  "Filter docs…": "Filtrer la documentation…",
  "Filter files": "Filtrer les fichiers",
  "Filter terms…": "Filtrer les termes…",

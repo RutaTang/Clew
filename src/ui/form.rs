@@ -457,7 +457,9 @@ pub(crate) fn segmented_across<'a>(
                 .center_y(Fill),
             )
             .style(theme::segment(chosen))
-            .padding(0)
+            // A little room either side: in a narrow sidebar the words
+            // touched the segment's edges.
+            .padding([0, 4])
             .width(Fill)
             .height(Length::Fixed(ACROSS_SIDE_H))
             .on_press_maybe(press)

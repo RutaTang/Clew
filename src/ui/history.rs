@@ -86,8 +86,15 @@ pub(crate) fn history_tab(app: &App) -> Element<'_, Message> {
 fn header<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
     // The filter every sidebar view has: its mark, its ✕, and Esc that
     // clears it — a plain field let Esc go on to close Time Travel.
+    // Said whole where there is room for it; cut mid-word ("Message,
+    // @author or") in a narrow sidebar.
+    let hint = if app.sidebar_width < 240.0 {
+        tr!("Filter commits")
+    } else {
+        tr!("Message, @author or commit id")
+    };
     let field = super::sidebar::filter_field(
-        tr!("Message, @author or commit id"),
+        hint,
         &h.query,
         None,
         |q| Message::History(HistoryMsg::Query(q)),
@@ -578,16 +585,33 @@ fn changes_rows<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
     // came last, under nine untracked build files.
     changed.sort_by_key(|(rel, letter)| (**letter == 'U', rel.as_str()));
     let room = (app.sidebar_width - 34.0 - 12.0 - 12.0 - 4.0 - 2.0).max(0.0);
+    // On one line at any width: the count whole, the words cut with an
+    // ellipsis — each wrapped on to two lines in a narrow sidebar.
+    let count = trn!("1 file", "{n} files", changed.len());
+    let words_room = (app.sidebar_width
+        - 2.0 * 12.0
+        - 13.0
+        - 2.0 * 8.0
+        - super::steady::width_of(&count, ts::SMALL, crate::fonts::UI)
+        - crate::ui::SCROLLBAR_W)
+        .max(0.0);
     let head = button(
         row![
             glyph::icon(Glyph::Clock, theme::accent(), 13.0),
-            text(tr!("Uncommitted changes"))
-                .size(ts::BODY)
-                .color(theme::fg()),
+            text(super::steady::cut(
+                tr!("Uncommitted changes"),
+                words_room,
+                ts::BODY,
+                crate::fonts::UI
+            ))
+            .size(ts::BODY)
+            .color(theme::fg())
+            .wrapping(Wrapping::None),
             space().width(Fill),
-            text(trn!("1 file", "{n} files", changed.len()))
+            text(count)
                 .size(ts::SMALL)
-                .color(theme::dim()),
+                .color(theme::dim())
+                .wrapping(Wrapping::None),
         ]
         .spacing(8)
         .align_y(iced::Center),

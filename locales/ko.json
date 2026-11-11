@@ -702,6 +702,7 @@
  "Files changed on the remote host": "원격 호스트에서 파일이 변경됨",
  "Files filtered by “{text}”": "“{text}”(으)로 파일 거름",
  "Filled in from the registry: read the command, fill in what it needs, then Add server": "레지스트리에서 채웠습니다. 명령을 확인하고 필요한 값을 채운 뒤 서버 추가를 누르세요",
+ "Filter commits": "커밋 필터",
  "Filter docs…": "문서 필터…",
  "Filter files": "파일 필터",
  "Filter terms…": "용어 필터…",

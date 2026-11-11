@@ -702,6 +702,7 @@
  "Files changed on the remote host": "远程主机上的文件已更改",
  "Files filtered by “{text}”": "按“{text}”筛选文件",
  "Filled in from the registry: read the command, fill in what it needs, then Add server": "已从注册表填入：请检查命令，补全所需内容，然后点“添加服务器”",
+ "Filter commits": "筛选提交",
  "Filter docs…": "筛选文档…",
  "Filter files": "筛选文件",
  "Filter terms…": "筛选术语…",
