@@ -3202,6 +3202,7 @@
  "“Why is this function here?”": "「この関数はなぜここにあるの？」",
  "“Why is {name} written this way?”": "「{name} はなぜこう書かれているの？」",
  "“{name}” is no longer in {file}": "「{name}」は {file} にもうありません",
+ "“{name}” is not in any commit yet. The file's commits:": "「{name}」はまだどのコミットにも入っていません。ファイルのコミット：",
  "“{text}” is not a port number (1–65535).": "「{text}」はポート番号（1〜65535）ではありません。",
  "“{text}” → {command}": "「{text}」→ {command}",
  "“{text}” → {command}?": "「{text}」→ {command}？",

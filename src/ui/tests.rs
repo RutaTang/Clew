@@ -8519,6 +8519,62 @@ fn the_margin_history_lists_the_files_commits() {
     assert!(shows(&mut sim, "Reading the file's history"));
 }
 
+/// A function no commit has yet — every line of it added since HEAD — has
+/// no history of its own: the margin says so over the file's commits, which
+/// are not its, and offers no "This function through time", which only
+/// answered that git had none.
+#[test]
+fn the_margin_history_says_a_new_function_is_not_committed() {
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.show_right_panel = true;
+    app.margin_tab = crate::MarginTab::History;
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.symbols = vec![crate::outline::Symbol {
+            name: "helper".into(),
+            kind: "function".into(),
+            line: 3,
+            end_line: 5,
+        }];
+        v.caret = Some((3, 0));
+    }
+    app.proj.explain.view = Some(crate::explain::Node::Function {
+        file: abs.clone(),
+        name: "helper".into(),
+        ordinal: 0,
+    });
+    app.proj.margin_history = Some((abs.clone(), Some(Ok(vec![]))));
+    let git = |kind: clew_protocol::ChangeKind| {
+        let mut status = vec![None; 400];
+        for line in status.iter_mut().take(5).skip(2) {
+            *line = Some(kind);
+        }
+        Some(Arc::new(clew_protocol::GitInfo {
+            blame: Vec::new(),
+            status,
+            deleted_at: Default::default(),
+        }))
+    };
+
+    // Committed and since changed: its history is there to read.
+    app.proj.panes[0].as_mut().unwrap().git = git(clew_protocol::ChangeKind::Modified);
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "This function through time"));
+    assert!(!shows(&mut sim, "is not in any commit yet"));
+    drop(sim);
+
+    // All of it new.
+    app.proj.panes[0].as_mut().unwrap().git = git(clew_protocol::ChangeKind::Added);
+    let mut sim = sim_of(&app);
+    assert!(shows(
+        &mut sim,
+        "“helper” is not in any commit yet. The file's commits:"
+    ));
+    assert!(!shows(&mut sim, "This function through time"));
+    assert!(shows(&mut sim, "Why is this line here?"));
+}
+
 /// A call row in a narrow margin puts its place under the name instead of
 /// running it off the edge, where name and place read as one clipped word.
 #[test]

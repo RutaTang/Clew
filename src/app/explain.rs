@@ -712,6 +712,25 @@ impl App {
         self.begin_refresh(false)
     }
 
+    /// The name of the function the caret is in when no commit has it yet:
+    /// every line of it added since HEAD. Its History has nothing of its own
+    /// — the file's commits are not its — and "This function through time"
+    /// only answered that git had no history for it.
+    pub(crate) fn caret_function_uncommitted(&self) -> Option<String> {
+        let v = self.active_viewer()?;
+        let git = v.git.as_ref()?;
+        let line1 = v.caret.map(|(l, _)| l + 1)?;
+        let sym = v
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+            .filter(|s| s.line <= line1 && line1 <= s.end_line)
+            .min_by_key(|s| s.end_line.saturating_sub(s.line))?;
+        let added = (sym.line.saturating_sub(1)..sym.end_line)
+            .all(|l| git.status_for(l) == Some(crate::git::ChangeKind::Added));
+        added.then(|| sym.name.clone())
+    }
+
     /// The explanation target for the active pane's caret: the innermost
     /// function/method it sits in, or the file itself when it's between
     /// functions. Drives the always-on explanation panel.

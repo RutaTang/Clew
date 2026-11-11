@@ -357,6 +357,68 @@ pub fn fold_ranges(lines: &[HlLine]) -> Vec<(usize, usize)> {
     out
 }
 
+/// How far up a block's header is followed to the line its signature
+/// starts on.
+const SIGNATURE_LINES: usize = 64;
+
+/// The line the signature of the block opened on `header` starts on, for a
+/// block whose opening line only continues it: rustfmt's `where` clause and
+/// lone `{`, a `) -> T {` closing a parameter list, Python's `):`, K&R C's
+/// `{` under `int main()`. The scope pinned over a function's body read
+/// `where` or `{`, not the `fn` the reader looks for. (Folds stay where
+/// the indentation opens them: Skim folds the body, not the parameters.)
+/// The walk goes up over deeper lines (the parameters, the bounds) and
+/// further continuation lines at the header's own indent; a line above that
+/// ends a statement (`;`, `}`) means the block stands on its own.
+pub fn signature_start(lines: &[HlLine], header: usize) -> usize {
+    let text = |line: usize| -> String { line_chars(lines, line).into_iter().collect() };
+    let continues = |t: &str| {
+        let t = t.trim_start();
+        t.starts_with('{')
+            || t.starts_with(')')
+            || t.starts_with(']')
+            || t.starts_with("->")
+            || t == "where"
+            || t.starts_with("where ")
+    };
+    let head = text(header);
+    let Some(at) = indent(&head.chars().collect::<Vec<_>>()) else {
+        return header;
+    };
+    if !continues(&head) {
+        return header;
+    }
+    let mut above = header;
+    let mut first = true;
+    while above > 0 && header - above < SIGNATURE_LINES {
+        above -= 1;
+        let line = text(above);
+        let Some(di) = indent(&line.chars().collect::<Vec<_>>()) else {
+            continue;
+        };
+        if first {
+            first = false;
+            let t = line.trim_end();
+            if t.ends_with(';') || t.ends_with('}') || (di <= at && t.ends_with('{')) {
+                return header;
+            }
+        }
+        if di > at {
+            continue;
+        }
+        if di < at {
+            break;
+        }
+        // At the header's own indent: the signature's first line, or one
+        // more line continuing it.
+        if !continues(&line) {
+            return above;
+        }
+    }
+    // Still a continuation: no signature line found above it.
+    header
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,5 +698,35 @@ mod tests {
         // A single-line body with no deeper following line is not foldable.
         let flat = plain_lines("a\nb\nc\n");
         assert_eq!(fold_ranges(&flat), Vec::<(usize, usize)>::new());
+    }
+
+    /// A block whose opening line only continues a signature — rustfmt's
+    /// `where` and lone `{`, a parameter list closed by `) -> T {`, Python's
+    /// `):`, K&R C's `{` — is named by the line the signature starts on: the
+    /// scope pinned over its body reads `fn`, not `where` or `{`.
+    #[test]
+    fn a_block_opened_under_its_signature_is_named_by_the_signature() {
+        let src = "impl X {\n    pub fn ser<S>(&self, s: S) -> R\n    where\n        S: Ser,\n    {\n        body();\n    }\n}\n";
+        let lines = plain_lines(src);
+        assert_eq!(signature_start(&lines, 4), 1, "the `{{`");
+        assert_eq!(signature_start(&lines, 2), 1, "the `where`");
+        assert_eq!(signature_start(&lines, 0), 0, "a header that is its own");
+
+        let lines = plain_lines("fn long(\n    a: i32,\n) -> i32 {\n    a\n}\n");
+        assert_eq!(signature_start(&lines, 2), 0);
+        let lines = plain_lines("def f(\n    a,\n):\n    return a\n");
+        assert_eq!(signature_start(&lines, 2), 0);
+        let lines = plain_lines("int main()\n{\n    return 0;\n}\n");
+        assert_eq!(signature_start(&lines, 1), 0);
+
+        // A block after a finished statement is a block of its own.
+        let lines = plain_lines("let a =\n    f();\n{\n    g();\n}\n");
+        assert_eq!(signature_start(&lines, 2), 2);
+        // `} else {` is the `else`'s, not the `if`'s.
+        let lines = plain_lines("if a {\n    x();\n} else {\n    y();\n}\n");
+        assert_eq!(signature_start(&lines, 2), 2);
+        // Nothing above to start it: the line itself.
+        let lines = plain_lines("{\n    x();\n}\n");
+        assert_eq!(signature_start(&lines, 0), 0);
     }
 }

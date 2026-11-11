@@ -3202,6 +3202,7 @@
  "“Why is this function here?”": "“이 함수는 왜 여기 있어?”",
  "“Why is {name} written this way?”": "“{name} 함수는 왜 이렇게 작성됐어?”",
  "“{name}” is no longer in {file}": "{file}에 “{name}” 항목이 더 이상 없습니다",
+ "“{name}” is not in any commit yet. The file's commits:": "“{name}”은(는) 아직 어떤 커밋에도 없습니다. 파일의 커밋:",
  "“{text}” is not a port number (1–65535).": "“{text}”: 올바른 포트 번호가 아닙니다 (1–65535).",
  "“{text}” → {command}": "“{text}” → {command}",
  "“{text}” → {command}?": "“{text}” → {command} 실행할까요?",

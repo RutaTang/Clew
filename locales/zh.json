@@ -3202,6 +3202,7 @@
  "“Why is this function here?”": "“为什么会有这个函数？”",
  "“Why is {name} written this way?”": "“{name} 为什么要这样写？”",
  "“{name}” is no longer in {file}": "{file} 中已没有“{name}”",
+ "“{name}” is not in any commit yet. The file's commits:": "“{name}”还没有进入任何提交。以下是该文件的提交：",
  "“{text}” is not a port number (1–65535).": "“{text}”不是有效的端口号（1–65535）。",
  "“{text}” → {command}": "“{text}” → {command}",
  "“{text}” → {command}?": "“{text}” → {command}？",

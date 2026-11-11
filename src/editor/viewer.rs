@@ -538,6 +538,13 @@ impl Viewer {
             }
             headers.pop();
         }
+        // Each named by the line its signature starts on: a function's body
+        // opens on rustfmt's lone `{` (or under a `where`), and the scope
+        // pinned over it read `{` — or `where` — not its `fn`.
+        for h in &mut headers {
+            *h = crate::analyze::signature_start(&self.lines, *h);
+        }
+        headers.dedup();
         headers
     }
 
@@ -1635,6 +1642,24 @@ mod tests {
         // covers it, nor the line before it with the last line under it.
         assert_eq!(v.sticky_at_row(5), Vec::<usize>::new());
         assert_eq!(v.sticky_at_row(4), vec![0]);
+    }
+
+    /// A function laid out by rustfmt — `where` and a lone `{` under its
+    /// signature — pins its `fn` line over its body, not the `{`.
+    #[test]
+    fn a_body_under_a_where_clause_pins_its_fn_line() {
+        let source = "impl X {\n    pub fn ser<S>(&self, s: S) -> R\n    where\n        S: Ser,\n    {\n        a();\n        b();\n        c();\n        d();\n    }\n}\n";
+        let v = Viewer::new(
+            PathBuf::from("/tmp/x.rs"),
+            "x.rs".into(),
+            Some("rust"),
+            Arc::new(source.to_string()),
+            plain_lines(source),
+        );
+        // `a();` (line 5) at the top: `impl X {` and the `fn` over it.
+        assert_eq!(v.sticky_at_row(5), vec![0, 1]);
+        // The fold itself still opens on the `{`: Skim folds the body.
+        assert!(v.is_fold_header(4), "{:?}", v.folds);
     }
 
     #[test]

@@ -3202,6 +3202,7 @@
  "“Why is this function here?”": "« Pourquoi cette fonction est-elle là ? »",
  "“Why is {name} written this way?”": "« Pourquoi {name} est écrit comme ça ? »",
  "“{name}” is no longer in {file}": "« {name} » ne figure plus dans {file}",
+ "“{name}” is not in any commit yet. The file's commits:": "« {name} » n'est encore dans aucun commit. Les commits du fichier :",
  "“{text}” is not a port number (1–65535).": "« {text} » n’est pas un numéro de port (1–65535).",
  "“{text}” → {command}": "« {text} » → {command}",
  "“{text}” → {command}?": "« {text} » → {command} ?",

@@ -2004,6 +2004,15 @@ fn margin_history(app: &App) -> Element<'_, Message> {
             .into()
     };
     let mut rows = Column::new().spacing(2);
+    // A function no commit has yet: said first, so the file's commits under
+    // it are not read as its own.
+    let uncommitted = app.caret_function_uncommitted();
+    if let Some(name) = &uncommitted {
+        rows = rows.push(note(tr!(
+            "“{name}” is not in any commit yet. The file's commits:",
+            name = name
+        )));
+    }
     let file = app.active_viewer().map(|v| &v.abs);
     match app
         .proj
@@ -2062,7 +2071,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
             .on_press(super::heard::said(title, msg))
     };
     let mut links = row![].spacing(6);
-    if in_function {
+    if in_function && uncommitted.is_none() {
         links = links.push(link(
             tr!("This function through time"),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: true }),
