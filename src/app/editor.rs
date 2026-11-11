@@ -120,6 +120,10 @@ impl App {
             // Remember the symbol at the target so the trail can re-anchor to it
             // after edits shift its line (see `reanchor` in FilesRehashed).
             let label = line.and_then(|l| self.symbol_name_at(&abs, l));
+            if let Some(l) = line {
+                let around = self.function_around(&abs, l);
+                self.note_trail_fn(&abs, l, around);
+            }
             self.proj.history.push(
                 Loc {
                     path: abs.clone(),
@@ -275,7 +279,10 @@ impl App {
         };
         let moves = here.line.is_none_or(|at| enclosing(at) == enclosing(line));
         let abs = v.abs.clone();
+        // The function the stop is in, kept with it while it is known.
+        let around = enclosing(line).map(|(_, name)| name);
         let label = self.symbol_name_at(&abs, line);
+        self.note_trail_fn(&abs, line, around);
         self.proj.history.settle(line, label, moves);
     }
 

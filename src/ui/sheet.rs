@@ -694,12 +694,20 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         );
     }
     // Where the reader is now: the function the caret is in, when it is in
-    // one of the current stop's file's.
+    // one of the current stop's file's — or that file, the caret in it but
+    // in no function: after Ctrl+Home the crumb still said "main():24".
     let here = match (app.cursor_target(), stops.last()) {
         (Some(crate::explain::Node::Function { file, name, .. }), Some((_, loc, _)))
             if file == loc.path =>
         {
-            Some(name)
+            Some(Some(name))
+        }
+        (_, Some((_, loc, _)))
+            if app
+                .active_viewer()
+                .is_some_and(|v| v.abs == loc.path && v.caret.is_some()) =>
+        {
+            Some(None)
         }
         _ => None,
     };
@@ -806,33 +814,34 @@ fn merged_stops<'a>(
 /// What each trail stop is called: the function it was in, else its file's
 /// name — with its line when a stop beside it has the same name, which two
 /// visits to one file outside any function otherwise read as ("cart.py ›
-/// cart.py"). `here` names the current (last) stop when the caret is in a
-/// function of its file. A function's name is said with `()`
-/// (`is_function` says which names in a file are functions).
+/// cart.py"). `here` names the current (last) stop where the caret is in its
+/// file: the function it is in, or none — the file. A function's name is
+/// said with `()` (`is_function` says which names in a file are functions).
 fn trail_names(
     stops: &[(usize, &crate::history::Loc, Option<&str>)],
-    here: Option<String>,
+    here: Option<Option<String>>,
     is_function: impl Fn(&std::path::Path, &str) -> bool,
 ) -> Vec<String> {
     let last = stops.len().saturating_sub(1);
     let mut here = here;
+    let file_name = |loc: &crate::history::Loc| {
+        loc.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
     let mut names: Vec<(String, bool)> = stops
         .iter()
         .enumerate()
         .map(
             |(i, (_, loc, label))| match (here.take_if(|_| i == last), label) {
-                (Some(here), _) => (format!("{here}()"), true),
+                (Some(Some(here)), _) => (format!("{here}()"), true),
+                (Some(None), _) => (file_name(loc), false),
                 (None, Some(label)) if is_function(&loc.path, label) => {
                     (format!("{label}()"), true)
                 }
                 (None, Some(label)) => (label.to_string(), true),
-                (None, None) => (
-                    loc.path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    false,
-                ),
+                (None, None) => (file_name(loc), false),
             },
         )
         .collect();
@@ -882,8 +891,14 @@ mod tests {
         );
         // The caret in a function names the current stop.
         assert_eq!(
-            trail_names(&stops, Some("total".into()), function),
+            trail_names(&stops, Some(Some("total".into())), function),
             ["main.py", "subtotal()", "cart.py", "total()"]
+        );
+        // The caret in the file, in no function: the file is where it is.
+        let in_fn = vec![(0, &b, None), (1, &a18, Some("subtotal"))];
+        assert_eq!(
+            trail_names(&in_fn, Some(None), function),
+            ["main.py", "cart.py"]
         );
         // A name that is no function (a class) is said as it is.
         assert_eq!(trail_names(&stops, None, |_, _| false)[1], "subtotal");

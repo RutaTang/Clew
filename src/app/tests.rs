@@ -37026,6 +37026,34 @@ fn a_recorded_runs_step_opens_where_the_run_stopped() {
     assert_eq!(step.symbol.as_deref(), Some("origin"));
 }
 
+/// A trail stop keeps the function it was in once its file is closed:
+/// "main():23" became "main.py:23" when the reader left main.py, the name
+/// looked up in a file no longer open. What was noted for a line goes when
+/// it is in no function any more.
+#[test]
+fn a_trail_stop_keeps_its_function_once_its_file_is_closed() {
+    let mut app = scanned_app("trail-fn-kept");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let closed = root.join("src/lib.rs");
+    assert!(app.proj.panes.iter().flatten().all(|v| v.abs != closed));
+    assert_eq!(app.function_around(&closed, 4), None);
+    app.note_trail_fn(&closed, 4, Some("origin".into()));
+    assert_eq!(app.function_around(&closed, 4).as_deref(), Some("origin"));
+    assert_eq!(
+        crate::ui::stop_label(
+            &app,
+            &crate::history::Loc {
+                path: closed.clone(),
+                line: Some(4)
+            },
+            None
+        ),
+        "origin():4"
+    );
+    app.note_trail_fn(&closed, 4, None);
+    assert_eq!(app.function_around(&closed, 4), None);
+}
+
 /// A walkthrough being made can be stopped from its row: the request goes,
 /// the row is no longer "Generating…", and a late answer to it opens
 /// nothing. While generating, its row had no control at all.

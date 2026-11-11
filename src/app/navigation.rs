@@ -1025,13 +1025,38 @@ impl App {
     /// file is open and its outline says how far each runs: what a stop
     /// recorded by its line, not at a definition, was inside.
     pub(crate) fn function_around(&self, file: &Path, line1: usize) -> Option<String> {
-        let v = self.proj.panes.iter().flatten().find(|v| v.abs == file)?;
+        let Some(v) = self.proj.panes.iter().flatten().find(|v| v.abs == file) else {
+            // Not open: what it was when the trail stopped there.
+            return self
+                .proj
+                .trail_fn
+                .get(&(file.to_path_buf(), line1))
+                .cloned();
+        };
         v.symbols
             .iter()
             .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
             .filter(|s| s.line <= line1 && line1 <= s.end_line)
             .min_by_key(|s| s.end_line.saturating_sub(s.line))
             .map(|s| s.name.clone())
+    }
+
+    /// Keep `around`, the function `file`'s line `line1` is in, for the
+    /// trail stop made there ([`ProjectSession::trail_fn`]); none, forget
+    /// what was kept. Kept no more than the trail holds stops, about.
+    pub(crate) fn note_trail_fn(&mut self, file: &Path, line1: usize, around: Option<String>) {
+        let key = (file.to_path_buf(), line1);
+        match around {
+            Some(name) => {
+                if self.proj.trail_fn.len() >= 4 * crate::history::MAX_NODES {
+                    self.proj.trail_fn.clear();
+                }
+                self.proj.trail_fn.insert(key, name);
+            }
+            None => {
+                self.proj.trail_fn.remove(&key);
+            }
+        }
     }
 
     /// Whether `(file, name)` is a test function, per the symbol index.

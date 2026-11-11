@@ -2234,6 +2234,11 @@ pub struct ProjectSession {
     pub view_memo: crate::ui::ViewMemo,
     // -- The reading session -----------------------------------------------------
     pub history: History,
+    /// The function each trail stop was in, by its file and line, as it was
+    /// when the stop was made — with its file open, its functions' ends
+    /// known. Once the reader left the file, "main():23" became
+    /// "main.py:23": the name was looked up in a file no longer open.
+    pub trail_fn: HashMap<(PathBuf, usize), String>,
     /// Trail nodes whose subtree is collapsed in the TRAIL view.
     pub trail_collapsed: std::collections::HashSet<usize>,
     /// The `History::renumbering` stamp `trail_collapsed` was recorded under:
@@ -2628,6 +2633,7 @@ impl Default for ProjectSession {
             citation_index: Default::default(),
             view_memo: Default::default(),
             history: Default::default(),
+            trail_fn: Default::default(),
             trail_collapsed: Default::default(),
             trail_renumbering: Default::default(),
             bookmarks: Default::default(),

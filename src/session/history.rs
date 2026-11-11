@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Bound on the tree, in memory and on disk. Reaching it drops the OLDEST
 /// visits (see [`History::push`]) — the trail keeps its recent past instead
 /// of starting over.
-const MAX_NODES: usize = 800;
+pub const MAX_NODES: usize = 800;
 
 /// How many of the oldest visits one eviction drops, so a trail at the cap
 /// is not re-spliced on every single navigation.
