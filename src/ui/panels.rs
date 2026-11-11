@@ -119,12 +119,6 @@ fn nothing_running<'a>() -> Element<'a, Message> {
             text(tr!("Nothing is running"))
                 .size(ts::EMPHASIS)
                 .color(theme::fg()),
-            text(tr!(
-                "Each run opens here in a tab of its own, and goes on while you look at another."
-            ))
-            .size(ts::BODY)
-            .color(theme::dim())
-            .align_x(iced::Center),
             space().height(6),
             row![
                 start(
@@ -282,7 +276,8 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     let (status_txt, status_color) = match (session.status, session.exit_code) {
         (DebugStatus::Launching, _) => (tr!("launching…").to_string(), theme::dim()),
         (DebugStatus::Running, _) => (tr!("running").to_string(), theme::success()),
-        (DebugStatus::Stopped, _) => (tr!("stopped").to_string(), theme::warning()),
+        // Paused, as its tab says: "stopped" is what Stop leaves.
+        (DebugStatus::Stopped, _) => (tr!("paused").to_string(), theme::warning()),
         (DebugStatus::Terminated, Some(code)) => (
             tr!("exited with code {code}", code = code).to_string(),
             if code == 0 {
@@ -2142,14 +2137,6 @@ fn import_cycles_note<'a>(app: &'a App, focus: &'a std::path::Path) -> Element<'
             ImportNote::Cycles,
         ))),
         move || {
-            let caption = note_line(
-                text(tr!(
-                    "Files that import one another, directly or through others."
-                ))
-                .size(ts::CAPTION)
-                .color(theme::dim())
-                .wrapping(Wrapping::Word),
-            );
             // The cycle's files, set apart by dots: they import one another
             // in no order a line of arrows could honestly draw.
             let mut files: Vec<Element<'a, Message>> = Vec::new();
@@ -2165,7 +2152,7 @@ fn import_cycles_note<'a>(app: &'a App, focus: &'a std::path::Path) -> Element<'
                 .wrap()
                 .vertical_spacing(1)
                 .into();
-            note_list(vec![caption, files], 180.0)
+            note_list(vec![files], 180.0)
         },
     )
 }

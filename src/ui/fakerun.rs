@@ -134,11 +134,6 @@ pub(crate) fn fake_sheet<'a>(sheet: &'a Sheet) -> Element<'a, Message> {
     let panel = container(
         column![
             title,
-            text(tr!(
-                "Clew's model works out what it would do with these inputs, line by line. Nothing is run."
-            ))
-            .size(ts::SMALL)
-            .color(theme::dim()),
             Column::with_children(fields).spacing(10),
             row![suggest, space().width(Fill), cancel_b, run_b].spacing(8),
         ]
@@ -179,12 +174,6 @@ pub(crate) fn heading<'a>(words: &'a str) -> Element<'a, Message> {
 /// values (what the line changed marked), and what the model says of it.
 pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
     let fake = &app.proj.fake;
-    let chip = || {
-        text(tr!("simulated · not run"))
-            .size(ts::CAPTION)
-            .color(theme::accent())
-            .wrapping(Wrapping::None)
-    };
     // Which it was asked as: the run being worked out's, else the trace's,
     // else the last sheet's.
     let debug = fake
@@ -204,7 +193,6 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
             .size(ts::BASE)
             .color(theme::fg())
             .wrapping(Wrapping::None),
-            chip(),
             text(name.to_string())
                 .size(ts::SMALL)
                 .font(crate::fonts::CODE)
@@ -231,14 +219,7 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
             ]
             .spacing(8)
             .align_y(iced::Center);
-            let mut rows = vec![
-                text(tr!(
-                    "Clew's model is reading the code it calls, then tracing it line by line."
-                ))
-                .size(ts::SMALL)
-                .color(theme::fg())
-                .into(),
-            ];
+            let mut rows: Vec<Element<'_, Message>> = Vec::new();
             for read in &w.reading {
                 rows.push(
                     text(read.clone())

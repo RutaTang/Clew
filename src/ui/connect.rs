@@ -840,12 +840,7 @@ fn server_log(app: &App) -> Element<'_, Message> {
             .height(180),
         )
     };
-    form::group(
-        tr!("Server log"),
-        Some(tr!("Latest output from the current file's server.").into()),
-        None,
-        vec![row],
-    )
+    form::group(tr!("Server log"), None, None, vec![row])
 }
 
 /// The Python interpreter: the one in use and who named it, the ones

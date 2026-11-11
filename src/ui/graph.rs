@@ -2656,14 +2656,11 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
         .color(theme::accent())
         .into(),
     );
-    rows.push(
-        text(app.precise_summary().unwrap_or_else(|| {
-            tr!("Name-based & approximate — Refine with LSP for exact calls.").to_string()
-        }))
-        .size(ts::CAPTION)
-        .color(theme::dim())
-        .into(),
-    );
+    // What the refinement left out, if anything: how precise the calls
+    // are is the header's badge.
+    if let Some(missing) = app.precise_summary() {
+        rows.push(text(missing).size(ts::CAPTION).color(theme::dim()).into());
+    }
 
     // Ranking walks the whole graph (and, for the test filter, the symbol
     // index): memoized per graph and index generation instead of redone per

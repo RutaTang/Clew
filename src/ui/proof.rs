@@ -84,14 +84,8 @@ pub(crate) fn proof_panel(app: &App) -> Element<'_, Message> {
             .into(),
         ])
     } else if !ready {
-        super::panels::debug_col(vec![
-            text(tr!(
-                "The Lean server checks the proof, then says the goals after each tactic."
-            ))
-            .size(ts::SMALL)
-            .color(theme::fg())
-            .into(),
-        ])
+        // The header says it is asking the Lean server.
+        super::panels::debug_col(Vec::new())
     } else {
         proof_columns(walk)
     };

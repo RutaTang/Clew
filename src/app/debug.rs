@@ -1254,7 +1254,7 @@ impl App {
         };
         let tid = s.thread_id.unwrap_or(0);
         self.say_debug_state(tr!(
-            "Stopped: {reason}",
+            "Paused: {reason}",
             reason = stop_reason_label(&s.reason)
         ));
         let run = self.debug_run;
@@ -1539,7 +1539,7 @@ impl App {
                 // behind, an inspection still in flight for it would arrive and
                 // fill the panel back in while the program is running.
                 self.bump_debug_stop();
-                // Running again: "Stopped: breakpoint" is no longer so.
+                // Running again: "Paused: breakpoint" is no longer so.
                 if self.debug.said.as_deref().is_some_and(|s| s == self.status) {
                     self.say_debug_state(self.running_said());
                 }

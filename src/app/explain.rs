@@ -761,13 +761,13 @@ impl App {
                     name,
                     ordinal,
                 };
-                // Reveal the panel now (a cached summary, or the placeholder),
-                // then generate the block walkthrough. Without the second step a
-                // menu / Cmd+click "Explain" just parked the panel on "Not
-                // explained yet" and looked dead; ExplainMsg::Blocks shows a cached
-                // walkthrough if present, else streams a fresh one.
-                let show = self.show_explanation(node.clone());
-                Task::batch([show, Task::done(Message::Explain(ExplainMsg::Blocks(node)))])
+                // Its explanation, as the file's Explain gives the file's:
+                // shown, and written — this function alone, one call — when
+                // it has none. It used to write the block walkthrough, which
+                // the card showed under the function's name as if it were
+                // the function's explanation, a few lines of it, cut off; the
+                // walkthrough is View → Explanation in blocks.
+                self.on_explain_node(node)
             }
             None => {
                 self.status = tr!("No function here to explain").into();
@@ -850,19 +850,20 @@ impl App {
         }
     }
 
-    /// Re-explain the node in the open panel: a pass that pays for this node
-    /// and for what quotes its summary, and keeps every other entry as it is
-    /// (`explain::Reuse::Node`) — it used to run Explain All, which re-billed
-    /// every summary an older prompt wrote. Only when the node is already
-    /// explained: point the user at the explicit Explain All otherwise.
-    /// The file's Explain: show the node's explanation, and when it has
-    /// none, write it — this node alone, one call: what it quotes keeps
-    /// what it has (`explain::Reuse::Node`). Explain All is the way to
-    /// explain all of it, bottom up.
+    /// The file's Explain, and a function's (its context menu, ⌘-click):
+    /// show the node's explanation, and when it has none, write it — this
+    /// node alone, one call: what it quotes keeps what it has
+    /// (`explain::Reuse::Node`). Explain All is the way to explain all of
+    /// it, bottom up.
     pub(crate) fn on_explain_node(&mut self, node: explain::Node) -> Task<Message> {
         let shown = self.update_explain(ExplainMsg::Show(node.clone()));
-        if self.proj.explain.cache.contains_key(&node) || self.require_llm().is_err() {
+        if self.proj.explain.cache.contains_key(&node) {
             return shown;
+        }
+        // Asked for, with no model to write it: Settings, where one is
+        // added, as every other AI action opens it.
+        if let Err(ask_for_key) = self.require_llm() {
+            return Task::batch([shown, ask_for_key]);
         }
         // One pass at a time: the one running writes it, if it is due.
         if self.proj.explain.running {
@@ -876,6 +877,11 @@ impl App {
         Task::batch([shown, pass])
     }
 
+    /// Re-explain the node in the open panel: a pass that pays for this node
+    /// and for what quotes its summary, and keeps every other entry as it is
+    /// (`explain::Reuse::Node`) — it used to run Explain All, which re-billed
+    /// every summary an older prompt wrote. Only when the node is already
+    /// explained: point the user at the explicit Explain All otherwise.
     pub(crate) fn on_reexplain_node(&mut self) -> Task<Message> {
         let Some(node) = self.proj.explain.view.clone() else {
             return Task::none();

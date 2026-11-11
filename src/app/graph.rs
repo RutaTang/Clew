@@ -2107,23 +2107,19 @@ impl App {
         Some(label)
     }
 
-    /// What the Calls list says of a refined graph: the languages its exact
-    /// edges are for, and those it leaves out.
+    /// What the Calls list says of a refined graph: what it leaves out —
+    /// the languages no server refined, the functions none could — or
+    /// `None` when nothing is. How precise it is, and for which languages,
+    /// is the header's badge (`precise_label`); said here again, it was a
+    /// line under it describing it.
     pub(crate) fn precise_summary(&self) -> Option<String> {
         if !self.proj.project_calls.precise {
             return None;
         }
         // Sentence by sentence, each whole.
-        let mut summary = match self.refined_languages().as_slice() {
-            [] => tr!("LSP-precise — each call as the language server resolves it.").to_string(),
-            covered => tr!(
-                "LSP-precise for {languages} — each call as the language server resolves it.",
-                languages = crate::app::languages::language_names(covered)
-            ),
-        };
+        let mut summary = String::new();
         let left = self.languages_left_out();
         if !left.is_empty() {
-            summary.push(' ');
             summary.push_str(&tr!(
                 "Functions in {languages} are left out: no server was ready to refine them.",
                 languages = crate::app::languages::language_names(&left)
@@ -2136,7 +2132,9 @@ impl App {
         match calls.unrefined.len() {
             0 => {}
             n => {
-                summary.push(' ');
+                if !summary.is_empty() {
+                    summary.push(' ');
+                }
                 summary.push_str(&if out_too {
                     trn!(
                         "1 function could not be refined: calls into and out of it may be missing.",
@@ -2152,7 +2150,7 @@ impl App {
                 });
             }
         }
-        Some(summary)
+        (!summary.is_empty()).then_some(summary)
     }
 
     /// The languages the refinement covers (`refined_langs`), sorted.

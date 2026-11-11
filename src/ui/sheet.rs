@@ -69,12 +69,29 @@ pub(crate) fn text_width(content: &str, size: f32, font: iced::Font) -> f32 {
 /// How tall `content` is set at `size` in `font`, wrapped at words to
 /// `width`.
 pub(crate) fn text_height(content: &str, size: f32, font: iced::Font, width: f32) -> f32 {
+    text_height_spaced(
+        content,
+        size,
+        iced::widget::text::LineHeight::default(),
+        font,
+        width,
+    )
+}
+
+/// [`text_height`] with its lines set `line_height` apart.
+pub(crate) fn text_height_spaced(
+    content: &str,
+    size: f32,
+    line_height: iced::widget::text::LineHeight,
+    font: iced::Font,
+    width: f32,
+) -> f32 {
     use iced::advanced::text::{self, paragraph::Plain};
     let paragraph = Plain::<<iced::Renderer as text::Renderer>::Paragraph>::new(text::Text {
         content: content.to_string(),
         bounds: iced::Size::new(width.max(1.0), f32::INFINITY),
         size: size.into(),
-        line_height: text::LineHeight::default(),
+        line_height,
         font,
         align_x: text::Alignment::Left,
         align_y: iced::alignment::Vertical::Top,

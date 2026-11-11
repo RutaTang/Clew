@@ -52,12 +52,6 @@ pub(crate) fn weak_home(app: &App) -> Element<'_, Message> {
         super::chrome::close_button(close()),
     ]
     .align_y(iced::Center);
-    let about = text(tr!(
-        "Where to look first: long, deeply nested or branchy functions, ones that can panic, run text as code or swallow errors, and notes saying something is wrong — weighed by how often their file changes. A guide to read by, not a list of bugs."
-    ))
-    .size(ts::BODY)
-    .color(theme::fg_muted());
-
     let Some(spots) = weak.spots.as_ref() else {
         let words = match (&weak.failed, weak.building) {
             (Some(why), _) => tr!("No weak spots: {why}", why = why.clone()),
@@ -65,12 +59,7 @@ pub(crate) fn weak_home(app: &App) -> Element<'_, Message> {
             (None, false) => String::new(),
         };
         return container(
-            column![
-                header,
-                about,
-                text(words).size(ts::BASE).color(theme::dim())
-            ]
-            .spacing(14),
+            column![header, text(words).size(ts::BASE).color(theme::dim())].spacing(14),
         )
         .width(Fill)
         .height(Fill)
@@ -81,7 +70,6 @@ pub(crate) fn weak_home(app: &App) -> Element<'_, Message> {
         return container(
             column![
                 header,
-                about,
                 text(tr!(
                     "Nothing stands out: no function here is long, tangled or risky by these measures."
                 ))
@@ -163,7 +151,6 @@ pub(crate) fn weak_home(app: &App) -> Element<'_, Message> {
     container(
         column![
             header,
-            about,
             count,
             scrollable(
                 Column::with_children(rows)

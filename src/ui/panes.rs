@@ -440,16 +440,7 @@ pub(crate) fn time_travel_story<'a>(
         None => tr!("Story of this block").to_string(),
     };
     let header = row![
-        column![
-            text(title).size(ts::BODY).color(theme::accent()),
-            // `git log -L` only follows the block's CURRENT lines, so earlier
-            // rewrites may not be attributed — say so, so it's not read as a full
-            // biography.
-            text(tr!("From the commits that touched these lines"))
-                .size(ts::CAPTION)
-                .color(theme::dim()),
-        ]
-        .spacing(1),
+        text(title).size(ts::BODY).color(theme::accent()),
         space().width(Fill),
         button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
             .style(theme::toolbar_button)
@@ -1319,6 +1310,54 @@ const NOTE_H: f32 = 104.0;
 const ACTIVE_NOTE_H: f32 = 193.0;
 /// Room kept between notes that would otherwise overlap.
 const NOTE_GAP: f32 = 8.0;
+/// The least the raised card is given for the explanation in blocks, where
+/// the margin has it.
+const WALKTHROUGH_NOTE_MIN_H: f32 = 420.0;
+
+/// The lines of what the raised card says that its 193 pixels hold.
+const ACTIVE_NOTE_LINES: f32 = 4.0;
+/// How much narrower the card's words are than the margin: the margin's
+/// padding and the card's, on both sides.
+const ACTIVE_NOTE_TEXT_INSET: f32 = 44.0;
+
+/// Height of the raised card for a function's explanation, `summary`: the
+/// whole of it, where it runs past the four lines of [`ACTIVE_NOTE_H`] —
+/// up to `room`, the margin's height above its foot, past which it
+/// scrolls. Measured as plain words at the margin's `width`, with a
+/// quarter of a line more for what is set as code, a little wider than
+/// words. Four lines
+/// were shown and the rest scrolled out of a window that size, cut through
+/// a line.
+fn summary_note_h(summary: Option<&str>, width: f32, room: f32) -> f32 {
+    use super::explain_view::{NOTE_LINE_HEIGHT, NOTE_SIZE};
+    let Some(summary) = summary else {
+        return ACTIVE_NOTE_H;
+    };
+    let words: String = summary
+        .chars()
+        .filter(|c| !matches!(c, '`' | '*'))
+        .collect();
+    let line = NOTE_SIZE * NOTE_LINE_HEIGHT;
+    let said = super::sheet::text_height_spaced(
+        &words,
+        NOTE_SIZE,
+        iced::widget::text::LineHeight::Relative(NOTE_LINE_HEIGHT),
+        crate::fonts::UI,
+        width - ACTIVE_NOTE_TEXT_INSET,
+    ) + line / 4.0;
+    (ACTIVE_NOTE_H + said - ACTIVE_NOTE_LINES * line).clamp(ACTIVE_NOTE_H, room.max(ACTIVE_NOTE_H))
+}
+
+/// Height of the raised card while it shows the explanation in blocks: a
+/// long read, block by block, given the margin from where the card starts
+/// down to `room` (the margin's foot) — and, where its function is low in
+/// view, at least [`WALKTHROUGH_NOTE_MIN_H`], the card raised to fit. In a
+/// summary's 193 pixels it showed three lines of the first block, the last
+/// cut through.
+fn walkthrough_note_h(room: f32, top: f32) -> f32 {
+    let room = room.max(ACTIVE_NOTE_H);
+    (room - top.max(0.0)).max(WALKTHROUGH_NOTE_MIN_H).min(room)
+}
 /// How far the raised card reaches above its function's first line: the
 /// design's 9, and the pixel of the edge it draws round itself (outside its
 /// box, where iced draws a border inside), so its name is where the
@@ -1431,16 +1470,12 @@ fn notes_beside_code<'a>(
                     if *name == sym.name && *o == ordinal
             );
             let y = y_of(sym.line);
-            let (h, lift) = if is_active {
-                (ACTIVE_NOTE_H, ACTIVE_NOTE_LIFT)
-            } else {
-                (NOTE_H, 0.0)
-            };
             if replaced && !is_active {
                 continue;
             }
-            // Only what is in view is looked up.
-            if !replaced && (y + h < 0.0 || y - lift > size.height) {
+            // Only what is in view is looked up (the raised card, once its
+            // height is known, below).
+            if !replaced && !is_active && (y + NOTE_H < 0.0 || y > size.height) {
                 continue;
             }
             let node = Node::Function {
@@ -1450,6 +1485,21 @@ fn notes_beside_code<'a>(
             };
             let cached = app.proj.explain.cache.get(&node);
             if !is_active && cached.is_none() {
+                continue;
+            }
+            let (h, lift) = if is_active {
+                let room = size.height - foot;
+                let h = if app.proj.explain.showing_detail {
+                    walkthrough_note_h(room, y - ACTIVE_NOTE_LIFT)
+                } else {
+                    let summary = cached.map(|c| crate::app::shown_summary(c));
+                    summary_note_h(summary.as_deref(), size.width, room)
+                };
+                (h, ACTIVE_NOTE_LIFT)
+            } else {
+                (NOTE_H, 0.0)
+            };
+            if !replaced && (y + h < 0.0 || y - lift > size.height) {
                 continue;
             }
             let meta = tr!(

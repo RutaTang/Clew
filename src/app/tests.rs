@@ -1469,6 +1469,65 @@ fn the_files_explain_writes_its_missing_explanation() {
     assert_eq!(app.proj.explain.generation, generation);
 }
 
+/// A function's Explain — its context menu — writes the function's own
+/// explanation, it alone, as the file's Explain writes the file's. It wrote
+/// the block walkthrough, which the card showed under the function's name as
+/// its explanation, three lines of it cut off. With no model to write it,
+/// Settings opens where one is added; it said so and opened nothing.
+#[test]
+fn a_functions_explain_writes_its_own_explanation() {
+    let mut app = scanned_app("explain-fn-menu");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let menu_on = |app: &mut App, line: usize| {
+        app.proj.context_menu = Some(crate::ContextMenu {
+            pane: app.proj.active,
+            line,
+            col: 4,
+            x: 0.0,
+            y: 0.0,
+            insight: None,
+            served: true,
+            by_pointer: true,
+        });
+    };
+    let origin = explain::Node::Function {
+        file: app.proj.project.as_ref().unwrap().root.join("src/lib.rs"),
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    // No model: Settings, at the page where one is added.
+    app.llm_config_cache = Some(None);
+    menu_on(&mut app, 2); // `pub fn origin() -> Point {`
+    let opened = run_task(app.update(Message::Explain(ExplainMsg::FromMenu)));
+    assert!(
+        opened.iter().any(|m| matches!(
+            m,
+            Message::Settings(SettingsMsg::OpenAt(SettingsPage::LanguageModel))
+        )),
+        "{opened:?}"
+    );
+    assert!(!app.proj.explain.running);
+    assert_eq!(app.proj.explain.view.as_ref(), Some(&origin), "still shown");
+
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    menu_on(&mut app, 2);
+    let _ = app.update(Message::Explain(ExplainMsg::FromMenu));
+    assert!(app.proj.context_menu.is_none(), "the menu goes");
+    assert!(app.proj.explain.running, "it is being explained");
+    assert_eq!(
+        app.proj.explain.pass_target.as_ref(),
+        Some(&origin),
+        "it alone"
+    );
+    assert!(
+        app.proj.explain.blocks_in_flight.is_empty(),
+        "not its walkthrough"
+    );
+    assert!(!app.proj.explain.showing_detail);
+    assert!(app.show_right_panel, "where it is shown");
+}
+
 #[test]
 fn cancel_explain_stops_and_clears_progress() {
     // Fix: a running Explain pass must be cancellable.
@@ -5742,7 +5801,7 @@ fn a_finished_run_is_no_longer_said_to_be_running() {
 
     // Stopped, then running again.
     app.debug.session = Some(session());
-    app.say_debug_state(tr!("Stopped: {reason}", reason = "breakpoint"));
+    app.say_debug_state(tr!("Paused: {reason}", reason = "breakpoint"));
     event(
         &mut app,
         dap::DapEvent::Continued {

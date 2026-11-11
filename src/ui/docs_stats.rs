@@ -637,7 +637,9 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     };
     let (why, action) = if !app.llm_available {
         (
-            tr!("The overview is written by the AI model you choose in Settings."),
+            Some(tr!(
+                "The overview is written by the AI model you choose in Settings."
+            )),
             step(
                 tr!("Add an API Key…"),
                 Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
@@ -645,17 +647,18 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         )
     } else if app.proj.explain.cache.is_empty() {
         (
-            tr!(
+            Some(tr!(
                 "The overview is written from the project's explanations, which Explain All writes."
-            ),
+            )),
             step(
                 tr!("Explain All…"),
                 super::toolbar::explain_all_message(app),
             ),
         )
     } else {
+        // Ready to be written: the button says what it does.
         (
-            tr!("An overview of the project's parts, written from its explanations."),
+            None,
             step(
                 tr!("Generate overview"),
                 Message::Overview(OverviewMsg::Generate),
@@ -663,10 +666,12 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         )
     };
     let ask = column![
-        text(why)
-            .size(ts::BODY)
-            .color(theme::fg_muted())
-            .align_x(iced::Center),
+        why.map(|why| {
+            text(why)
+                .size(ts::BODY)
+                .color(theme::fg_muted())
+                .align_x(iced::Center)
+        }),
         action,
     ]
     .spacing(12)

@@ -207,7 +207,7 @@ pub struct DebugState {
     /// the trace records once its stack arrives.
     pub pending_reason: String,
     /// What the debugger last put on the status line about the run —
-    /// "Debugger running…", "Stopped: breakpoint" — taken down when the run
+    /// "Debugger running…", "Paused: breakpoint" — taken down when the run
     /// ends: it went on saying "Debugger running…" over a program that had
     /// exited.
     pub said: Option<String>,

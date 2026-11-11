@@ -4027,7 +4027,6 @@ fn the_weak_spots_page_lists_each_spot_with_why() {
     let mut sim = sim_of(&app);
     for words in [
         "Weak Spots",
-        "A guide to read by",
         "2 spots, from 12 files measured",
         "load",
         "src/load.rs:4",
@@ -4040,6 +4039,10 @@ fn the_weak_spots_page_lists_each_spot_with_why() {
     ] {
         assert!(shows(&mut sim, words), "{words} is not shown");
     }
+    assert!(
+        !shows(&mut sim, "A guide to read by"),
+        "no paragraph saying what the page is"
+    );
     drop(sim);
     let sent = click(sim_of(&app), "load");
     assert!(
@@ -7843,7 +7846,6 @@ fn the_files_import_cycle_opens_to_its_files_and_opens_each() {
     assert_eq!(app.proj.import_notes_open, [ImportNote::Cycles]);
 
     let mut tab = sim_elem(super::imports_tab(&app));
-    assert!(shows(&mut tab, "Files that import one another"));
     assert!(shows(&mut tab, "c.rs") && shows(&mut tab, "d.rs"));
     assert!(!shows(&mut tab, "a.rs"), "only lib.rs's cycle is listed");
     let _ = tab.click("d.rs");
@@ -10894,6 +10896,128 @@ fn a_diff_in_the_codes_place_leaves_the_margin_its_raised_note_alone() {
         "in Time Travel at {in_time_travel}, beside the code at {beside_code}"
     );
     assert!(!other_shown, "a note beside Time Travel's lines");
+}
+
+/// The explanation in blocks has the margin to be read in: the raised card
+/// reaches down it. In the summary's 193 pixels it showed three lines of the
+/// first block, the last cut through, the rest only by scrolling a window
+/// that size.
+#[test]
+fn the_explanation_in_blocks_has_the_margin_to_be_read_in() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 3,
+    }];
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    app.proj.explain.cache.insert(
+        node.clone(),
+        crate::explain::Cached {
+            summary: "Makes the point at zero.".into(),
+            prompt_hash: crate::incremental::content_hash(b"t"),
+            detail: Some(
+                "Names the point it makes.\n\n\
+                 Sets its x to zero.\n\n\
+                 Sets its y to zero.\n\n\
+                 Checks the two agree.\n\n\
+                 Hands the point back."
+                    .into(),
+            ),
+            basis: None,
+        },
+    );
+    // Where the card ends: its actions' row, the lowest "Calls" (the
+    // other is the margin's tab).
+    let card_foot = |app: &App| {
+        let mut sim = sim_of(app);
+        (0..)
+            .map_while(|nth| text_at(&mut sim, |t| t == "Calls", nth))
+            .map(|r| r.y)
+            .fold(f32::MIN, f32::max)
+    };
+    let _ = app.show_explanation(node.clone());
+    assert!(!app.proj.explain.showing_detail);
+    let summary_foot = card_foot(&app);
+    let _ = app.update(Message::Explain(crate::ExplainMsg::ToggleBlocks));
+    assert!(app.proj.explain.showing_detail);
+    let said = format!("{:?}", app.proj.explain.prepared);
+    assert!(said.contains("Hands the point back."), "{said}");
+    let blocks_foot = card_foot(&app);
+    assert!(
+        blocks_foot - summary_foot > 200.0,
+        "the card in blocks ends at {blocks_foot}, in summary at {summary_foot}"
+    );
+    assert!(
+        blocks_foot < app.window_height,
+        "its actions off the window at {blocks_foot}"
+    );
+}
+
+/// The raised card holds the whole of a function's explanation, where it
+/// runs past four lines: those were shown, and the rest scrolled out of a
+/// window that size, cut through a line. A short one keeps the card's own
+/// height.
+#[test]
+fn the_raised_card_holds_a_long_explanation_whole() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 3,
+    }];
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    let card_foot = |app: &mut App, summary: &str| {
+        app.proj.explain.cache.insert(
+            node.clone(),
+            crate::explain::Cached {
+                summary: summary.into(),
+                prompt_hash: crate::incremental::content_hash(b"t"),
+                detail: None,
+                basis: None,
+            },
+        );
+        let _ = app.show_explanation(node.clone());
+        let mut sim = sim_of(app);
+        (0..)
+            .map_while(|nth| text_at(&mut sim, |t| t == "Calls", nth))
+            .map(|r| r.y)
+            .fold(f32::MIN, f32::max)
+    };
+    let short = card_foot(&mut app, "Makes the point at zero.");
+    let shorter = card_foot(&mut app, "Zero.");
+    assert!((short - shorter).abs() < 1.0, "{short} and {shorter}");
+    let long = card_foot(
+        &mut app,
+        "Makes the point at zero, the origin every other point is measured \
+         from. It builds the point from two zero coordinates rather than \
+         asking for them, so a caller never passes the wrong ones. The \
+         layout code calls it once per frame to anchor the grid, and the \
+         tests call it to check that distances from it are the lengths \
+         they expect. Nothing in it can fail, and it allocates nothing.",
+    );
+    assert!(
+        long - short > 60.0,
+        "the long card ends at {long}, the short one at {short}"
+    );
+    assert!(
+        long < app.window_height,
+        "its actions off the window at {long}"
+    );
 }
 
 /// Escape in the Files view's filter empties it, as its × does: it stayed
@@ -14437,7 +14561,10 @@ fn the_fake_debug_panel_shows_the_trace_and_steps_it() {
     app.show_bottom = true;
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Fake debug"));
-    assert!(shows(&mut sim, "simulated · not run"));
+    assert!(
+        !shows(&mut sim, "simulated"),
+        "no caption saying what Fake debug is"
+    );
     assert!(shows(&mut sim, "step 2 of 2"));
     assert!(shows(&mut sim, "value is set"));
     assert!(shows(&mut sim, "7"));
