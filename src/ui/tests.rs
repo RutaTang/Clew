@@ -13813,15 +13813,17 @@ fn find_by_meaning_with_no_model_says_where_to_set_one_up() {
     app.embed_missing = "Configure an embedding endpoint in Settings".into();
     let mut sim = sim_elem(super::semantic_tab(&app));
     assert!(
-        text_at(
+        shows(
             &mut sim,
-            |t| t == "Configure an embedding endpoint in Settings",
-            0
-        )
-        .is_some(),
-        "why, in the panel"
+            "Find by meaning needs an embedding model, on this computer or from a service."
+        ),
+        "why, in the panel, in one sentence"
     );
-    let sent = click(sim_elem(super::semantic_tab(&app)), "Set Up…");
+    assert!(!shows(&mut sim, "Build index"), "nothing greyed to press");
+    let sent = click(
+        sim_elem(super::semantic_tab(&app)),
+        "Set Up Find by Meaning…",
+    );
     assert!(
         sent.iter().any(|m| matches!(
             m,
@@ -13861,10 +13863,12 @@ fn build_index_waits_for_notes_and_offers_explain_all() {
     );
     let sent = click(sim_elem(super::semantic_tab(&app)), "Build index");
     assert!(sent.iter().any(builds), "{sent:?}");
-    // No model to embed with: it waits again.
+    // No model to embed with: nothing to build with, and the way to one
+    // offered in its place.
     app.embed_available = false;
-    let sent = click(sim_elem(super::semantic_tab(&app)), "Build index");
-    assert!(!sent.iter().any(builds), "{sent:?}");
+    let mut sim = sim_elem(super::semantic_tab(&app));
+    assert!(!shows(&mut sim, "Build index"));
+    assert!(shows(&mut sim, "Set Up Find by Meaning…"));
 }
 
 /// A map opened with no project says why it is empty, not "Nothing to
@@ -14713,7 +14717,7 @@ fn the_file_tools_say_what_they_do() {
     for (label, says) in [
         ("Explain", "Explain this file with AI"),
         ("Skim", "Skim: fold every body to its signature"),
-        ("Diff", "Diff vs HEAD"),
+        ("Diff", "Changes since the last commit"),
     ] {
         let at = text_at(&mut sim_of(&app), |t| t == label, 0).expect(label);
         assert!(!shows(&mut sim_of(&app), says), "{label}: said at rest");

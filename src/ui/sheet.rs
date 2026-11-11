@@ -536,6 +536,10 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     } else {
         view_menu.into()
     };
+    let unchanged = !diffing
+        && v.git
+            .as_ref()
+            .is_some_and(|g| g.status.iter().all(Option::is_none) && g.deleted_at.is_empty());
     let tools = row![
         file_tool(
             Glyph::TextLines,
@@ -557,10 +561,16 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             Message::Editor(EditorMsg::SkimFile),
             short,
         ),
+        // Said before it is pressed when there is nothing to show: on an
+        // unchanged file, Diff replaced the code with one line saying so.
         file_tool(
             Glyph::Diff,
             tr!("Diff"),
-            Some(tr!("Diff vs HEAD")),
+            Some(if unchanged {
+                tr!("No changes since the last commit")
+            } else {
+                tr!("Changes since the last commit")
+            }),
             diffing,
             caps(Action::ToggleDiff),
             Message::Editor(EditorMsg::ToggleDiff),

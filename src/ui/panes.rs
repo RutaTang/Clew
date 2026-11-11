@@ -2562,11 +2562,16 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     // progress lives only in the status bar, so it isn't duplicated here.
     let names = crate::notes::note_keys(&v.symbols);
     let (done, total) = crate::notes::coverage(&app.proj.notes, &v.rel, &names);
-    let header_content: Element<'_, Message> =
+    // What "understood" counts, said where the pointer rests: the circle
+    // beside each name was never explained.
+    let header_content: Element<'_, Message> = super::toolbar::tip_at(
         text(tr!("{done}/{total} understood", done = done, total = total))
             .size(ts::SMALL)
-            .color(theme::fg_muted())
-            .into();
+            .color(theme::fg_muted()),
+        tr!("Tick the circle beside a function once you've read it; this counts them"),
+        None,
+        iced::widget::tooltip::Position::Bottom,
+    );
     let header = container(header_content).padding(Padding {
         top: 2.0,
         right: 10.0,

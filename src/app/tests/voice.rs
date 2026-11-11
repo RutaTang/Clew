@@ -229,7 +229,8 @@ fn a_command_heard_runs_as_the_palette_runs_it() {
     assert!(!kept.contains("voice language"), "{kept}");
     // In lower case, but for capitals ("HEAD"), and ended as a sentence:
     // whisper writes in the style of its hint.
-    assert!(kept.contains("diff vs HEAD"), "{kept}");
+    assert!(kept.contains("diff with last commit"), "{kept}");
+    assert_eq!(crate::app::voice::hint_case("Diff vs HEAD"), "diff vs HEAD");
     assert!(kept.ends_with("Clew."), "{kept}");
     let audio = *hears.heard_audio.lock().unwrap();
     assert!(audio < spoken().len(), "trimmed: {audio}");

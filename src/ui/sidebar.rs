@@ -2196,23 +2196,8 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     };
     // The index builds itself from explanation summaries (automatically, after
     // Explain All) — so the hint only reports state, never asks for a manual step.
-    let info: Element<'_, Message> = if !app.embed_available && n == 0 {
-        // No model to search with, and no index: where one is set up, as a
-        // link — what stood here was Explain All, which needs one as much.
-        // An index built before keeps its count here.
-        button(
-            text(tr!("Set Up…"))
-                .size(ts::CAPTION)
-                .color(theme::accent()),
-        )
-        .style(theme::icon_button(false))
-        .padding([2, 6])
-        .on_press(super::heard::said(
-            tr!("Set Up…"),
-            Message::Settings(crate::SettingsMsg::OpenAt(crate::SettingsPage::Embeddings)),
-        ))
-        .into()
-    } else if n == 0 && app.proj.explain.cache.is_empty() {
+    // (No model and no index is said below, in a sentence and a button.)
+    let info: Element<'_, Message> = if n == 0 && app.proj.explain.cache.is_empty() {
         // The step that gets there, as a link.
         button(
             text(tr!("Explain All…"))
@@ -2240,20 +2225,45 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     };
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    rows.push(
-        row![build, space().width(Fill), info]
-            .align_y(iced::Center)
-            .into(),
-    );
-    // And why the panel stays empty, said in it: a search pressed showed
-    // nothing, and said why only for a moment in the status bar.
-    if !app.embed_available && !app.embed_missing.is_empty() {
+    if !app.embed_available && n == 0 {
+        // No model and no index: one sentence on what it needs, and one
+        // button to set it up — a greyed Build index, a small link and a
+        // line from Settings said it three ways, none of them a way in.
         rows.push(
-            text(app.embed_missing.clone())
-                .size(ts::SMALL)
-                .color(theme::dim())
+            text(tr!(
+                "Find by meaning needs an embedding model, on this computer or from a service."
+            ))
+            .size(ts::SMALL)
+            .color(theme::fg_muted())
+            .wrapping(Wrapping::WordOrGlyph)
+            .into(),
+        );
+        rows.push(
+            button(text(tr!("Set Up Find by Meaning…")).size(ts::SMALL))
+                .style(theme::secondary_button)
+                .padding([4, 10])
+                .on_press(super::heard::said(
+                    tr!("Set Up Find by Meaning…"),
+                    Message::Settings(crate::SettingsMsg::OpenAt(crate::SettingsPage::Embeddings)),
+                ))
                 .into(),
         );
+    } else {
+        rows.push(
+            row![build, space().width(Fill), info]
+                .align_y(iced::Center)
+                .into(),
+        );
+        // And why the panel stays empty, said in it: a search pressed
+        // showed nothing, and said why only for a moment in the status bar.
+        if !app.embed_available && !app.embed_missing.is_empty() {
+            rows.push(
+                text(app.embed_missing.clone())
+                    .size(ts::SMALL)
+                    .color(theme::dim())
+                    .into(),
+            );
+        }
     }
     if app.proj.searching_semantic {
         rows.push(

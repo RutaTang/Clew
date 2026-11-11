@@ -2212,7 +2212,7 @@ fn voice_store() -> Option<Store> {
 /// word in capitals ("HEAD", "API"). Whisper writes what it hears in the
 /// style of the text before it, and a list of names in Title Case had it
 /// write "What does the Total Function do?".
-fn hint_case(title: &str) -> String {
+pub(crate) fn hint_case(title: &str) -> String {
     title
         .split(' ')
         .map(|word| {
