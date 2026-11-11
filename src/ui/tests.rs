@@ -17390,3 +17390,22 @@ fn every_note_card_has_one_layout_under_its_words() {
         assert!(under < 50.0, "{under} under {head:?}: {date:?}");
     }
 }
+
+/// A command with two shortcuts shows each as its keys, the way the
+/// search field shows its own: "Ctrl+L / Ctrl+G" was one cap of words.
+#[test]
+fn a_rows_two_shortcuts_are_each_drawn_as_keys() {
+    let mut sim = sim_elem(super::toolbar::row_keycap("Ctrl+L / Ctrl+G".into()));
+    for key in ["Ctrl", "L", "G", "/"] {
+        assert!(
+            text_at(&mut sim, |t| t == key, 0).is_some(),
+            "{key} on its own"
+        );
+    }
+    assert!(text_at(&mut sim, |t| t.contains("Ctrl+"), 0).is_none());
+    let ctrl = |sim: &mut Sim<'_>, nth| text_at(sim, |t| t == "Ctrl", nth).unwrap();
+    assert!(
+        ctrl(&mut sim, 1).x > ctrl(&mut sim, 0).x,
+        "both Ctrls, side by side"
+    );
+}

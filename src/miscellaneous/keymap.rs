@@ -328,6 +328,10 @@ impl Action {
     }
 }
 
+/// What stands between an action's two shortcuts where a list shows both
+/// ([`Keymap::shown`]); a key cap shows each as its own keys either side.
+pub(crate) const CAPS_OR: &str = " / ";
+
 /// A chord other editors use for an action, taken as that action while no
 /// action of the keymap is bound to it: Ctrl+G is Go to Line in VS Code,
 /// JetBrains and Sublime, and did nothing here — and gave no sign — where
@@ -854,7 +858,7 @@ impl Keymap {
     pub fn shown(&self, action: Action) -> String {
         let own = self.chord(action).caps();
         match self.alias(action) {
-            Some(alias) => format!("{own} / {}", alias.caps()),
+            Some(alias) => format!("{own}{CAPS_OR}{}", alias.caps()),
             None => own,
         }
     }

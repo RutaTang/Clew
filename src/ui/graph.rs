@@ -1792,7 +1792,14 @@ impl GraphCanvas<'_> {
                 .cmp(&first(a))
                 .then(lproj[b].2.total_cmp(&lproj[a].2))
         });
-        let mut placed: Vec<iced::Rectangle> = Vec::new();
+        // What a label must keep clear of: the labels placed before it, and
+        // every node's own disc. A label moved off a neighbour's label went
+        // over that neighbour's dot ("discounts.py" ending on pricing.py's).
+        let mut placed: Vec<iced::Rectangle> = lproj
+            .iter()
+            .zip(&self.layout.nodes)
+            .map(|(&(x, y, _, persp), node)| node_disc(x, y, node_radius(node.weight, persp)))
+            .collect();
         let mut target = vec![0.0f32; n];
         let mut side = st.label_side_target.clone();
         side.resize(n, 0.0);
@@ -2137,6 +2144,18 @@ fn label_rect(x: f32, y: f32, r: f32, width: f32, left: bool) -> iced::Rectangle
         y: y - 6.5,
         width,
         height: 13.0,
+    }
+}
+
+/// The room a node's disc of radius `r` at `(x, y)` takes from labels: the
+/// disc, and a pixel round it.
+fn node_disc(x: f32, y: f32, r: f32) -> iced::Rectangle {
+    let r = r + 1.0;
+    iced::Rectangle {
+        x: x - r,
+        y: y - r,
+        width: 2.0 * r,
+        height: 2.0 * r,
     }
 }
 
@@ -4649,6 +4668,33 @@ mod tests {
         assert_eq!(
             label_spot(&[], 100.0, 50.0, 5.0, 60.0, false, 800.0).map(|s| s.1),
             Some(false)
+        );
+    }
+
+    /// A label keeps clear of another node's disc as of its label: one
+    /// moved off a neighbour's label was drawn over that neighbour's dot.
+    #[test]
+    fn a_label_keeps_off_another_nodes_disc() {
+        // A node just right of this one: its disc where this label would
+        // run.
+        let discs = [node_disc(100.0, 50.0, 5.0), node_disc(140.0, 52.0, 5.0)];
+        let (rect, left) =
+            label_spot(&discs, 100.0, 50.0, 5.0, 60.0, false, 800.0).expect("a place");
+        assert!(left, "{rect:?}");
+        // Its own disc is never in its way.
+        assert_eq!(
+            label_spot(&discs[..1], 100.0, 50.0, 5.0, 60.0, false, 800.0).map(|s| s.1),
+            Some(false)
+        );
+        // A disc either side: no name at rest (the pointer still shows it).
+        let boxed = [
+            node_disc(100.0, 50.0, 5.0),
+            node_disc(140.0, 52.0, 5.0),
+            node_disc(60.0, 48.0, 5.0),
+        ];
+        assert_eq!(
+            label_spot(&boxed, 100.0, 50.0, 5.0, 60.0, false, 800.0),
+            None
         );
     }
 

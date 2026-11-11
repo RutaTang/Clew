@@ -213,7 +213,7 @@ impl Finder {
         self.selected = 0;
         let query = self.query.trim().to_string();
         let query = query.as_str();
-        let mut results = rank(query, titles.iter().copied(), BAR_COMMANDS, false);
+        let mut results = rank_commands(query, titles);
         let n = titles.len();
         // A file asked for at a line is matched by its name.
         let file_query = self.file_query();
@@ -237,6 +237,24 @@ impl Finder {
         let len = self.results.len() as i32;
         self.selected = (self.selected as i32 + delta).rem_euclid(len) as usize;
     }
+}
+
+/// The best few of the commands titled `titles` for the command bar's
+/// `query`: those whose titles hold every word typed, when some do, else
+/// those that hold its letters in order ("gtl" still finds Go to Line…).
+/// Each word was matched by its letters anywhere in a title: "go to line"
+/// listed "Light theme: One Light", "Rosé Pine Dawn" and "Start
+/// listening…" under Go to Line….
+fn rank_commands(query: &str, titles: &[&str]) -> Vec<usize> {
+    let ranked = rank(query, titles.iter().copied(), titles.len(), false);
+    let worded: Vec<usize> = ranked
+        .iter()
+        .copied()
+        .filter(|&i| contains_words(titles[i], query))
+        .collect();
+    let mut ranked = if worded.is_empty() { ranked } else { worded };
+    ranked.truncate(BAR_COMMANDS);
+    ranked
 }
 
 /// Whether `name` holds every word of `query` as it is spelled (case
@@ -324,6 +342,32 @@ pub(crate) fn rank<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The command bar lists the commands that say what was typed, when
+    /// some do — not every title holding its letters somewhere — and
+    /// falls back to the letters when none says it.
+    #[test]
+    fn the_command_bar_lists_commands_that_say_what_was_typed() {
+        let titles = [
+            "Light theme: One Light",
+            "Rosé Pine Dawn",
+            "Start listening… On/Off",
+            "Go to Line…",
+            "Go to File…",
+        ];
+        let bar = |query: &str| {
+            let mut f = Finder {
+                query: query.into(),
+                ..Default::default()
+            };
+            f.refresh_bar(&titles, &[]);
+            f.results.iter().map(|&i| titles[i]).collect::<Vec<_>>()
+        };
+        assert_eq!(bar("go to line"), ["Go to Line…"]);
+        assert_eq!(bar("go to"), ["Go to Line…", "Go to File…"]);
+        // An abbreviation says no title's words: its letters find it.
+        assert!(bar("gtl").contains(&"Go to Line…"), "{:?}", bar("gtl"));
+    }
 
     #[test]
     fn a_file_at_a_line_is_found_by_its_name() {

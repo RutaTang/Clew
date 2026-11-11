@@ -262,7 +262,7 @@ pub(crate) const TIP_WRAP_W: f32 = 520.0;
 /// A tooltip's shortcut, as its keys: each a cap of its own on the bubble,
 /// the design's 17 wide at least and 18 high, 4 either side of its words.
 fn tip_keys<'a>(caps: &str) -> Element<'a, Message> {
-    Row::with_children(split_caps(caps).into_iter().map(|key| {
+    let cap = |key: String| -> Element<'a, Message> {
         let width = (text_width(&key, ts::CAPTION, crate::fonts::UI_MEDIUM) + 2.0 * TIP_KEY_PAD)
             .max(TIP_KEY_MIN_W);
         container(ts::set_in(
@@ -277,10 +277,23 @@ fn tip_keys<'a>(caps: &str) -> Element<'a, Message> {
         .center_x(Length::Fixed(width))
         .style(theme::tip_key)
         .into()
-    }))
-    .spacing(3)
-    .align_y(iced::Center)
-    .into()
+    };
+    // Two shortcuts for one command, as a key cap shows them.
+    let mut row = Row::new().spacing(3).align_y(iced::Center);
+    for (n, alternative) in caps.split(crate::keymap::CAPS_OR).enumerate() {
+        if n > 0 {
+            row = row.push(
+                text("/")
+                    .size(ts::CAPTION)
+                    .font(crate::fonts::UI_MEDIUM)
+                    .color(theme::tip_text()),
+            );
+        }
+        for key in split_caps(alternative) {
+            row = row.push(cap(key));
+        }
+    }
+    row.into()
 }
 
 /// A tooltip's distance from what it names: the design's 10.
@@ -341,7 +354,7 @@ fn caps_in<'a>(caps: String, font: iced::Font, size: CapSize) -> Element<'a, Mes
     // The design's cap: 5 either side of its words inside its 1 px edge
     // (drawn inside the box by iced), as wide as `size` lets it be at
     // least, its words centred.
-    Row::with_children(split_caps(&caps).into_iter().map(|key| {
+    let cap = |key: String| -> Element<'a, Message> {
         let width = (text_width(&key, size.text, font) + 2.0 * (5.0 + 1.0)).max(size.least);
         container(ts::set_in(
             text(key).font(font).color(theme::fg_muted()),
@@ -352,10 +365,20 @@ fn caps_in<'a>(caps: String, font: iced::Font, size: CapSize) -> Element<'a, Mes
         .center_x(Length::Fixed(width))
         .style(theme::keycap)
         .into()
-    }))
-    .spacing(3)
-    .align_y(iced::Center)
-    .into()
+    };
+    // Two shortcuts for one command ("Ctrl+L / Ctrl+G"): each as its keys,
+    // a "/" between them. It was one cap of words, beside rows and a
+    // search field whose keys were caps of their own.
+    let mut row = Row::new().spacing(3).align_y(iced::Center);
+    for (n, alternative) in caps.split(crate::keymap::CAPS_OR).enumerate() {
+        if n > 0 {
+            row = row.push(text("/").size(size.text).font(font).color(theme::dim()));
+        }
+        for key in split_caps(alternative) {
+            row = row.push(cap(key));
+        }
+    }
+    row.into()
 }
 
 /// The keys of a shortcut as [`Chord::caps`](crate::keymap::Chord::caps)

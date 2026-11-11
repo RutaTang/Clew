@@ -1044,13 +1044,43 @@ const OLD_DEFAULT_LIGHT: &str = "one-light";
 const THEMES_GENERATION_KEY: &str = "theme_generation";
 const THEMES_GENERATION: i64 = 2;
 
-/// 0 = dark, 1 = light. The three-way preference (Dark/Light/System) resolves to
-/// this binary flag whenever it is set (see `apply_pref`).
-static MODE: AtomicU8 = AtomicU8::new(0);
-/// Which THEMES entry is the chosen light / dark variant: Clew's own pair
-/// until the user picks otherwise.
-static LIGHT_ID: AtomicUsize = AtomicUsize::new(1); // clew-light
-static DARK_ID: AtomicUsize = AtomicUsize::new(0); // clew-dark
+/// A piece of the appearance every window is drawn in: the process's own —
+/// and, in the tests, each test thread's, so that a test previewing a light
+/// theme cannot light the pixels another test reads at that moment. `name`
+/// lends it to what is passed.
+macro_rules! appearance_cell {
+    ($(#[$doc:meta])* $name:ident: $ty:ty = $init:expr) => {
+        $(#[$doc])*
+        fn $name<R>(f: impl FnOnce(&$ty) -> R) -> R {
+            #[cfg(not(test))]
+            {
+                static CELL: $ty = $init;
+                f(&CELL)
+            }
+            #[cfg(test)]
+            {
+                thread_local! { static CELL: $ty = const { $init }; }
+                CELL.with(f)
+            }
+        }
+    };
+}
+
+appearance_cell!(
+    /// 0 = dark, 1 = light. The three-way preference (Dark/Light/System) resolves to
+    /// this binary flag whenever it is set (see `apply_pref`).
+    mode: AtomicU8 = AtomicU8::new(0)
+);
+appearance_cell!(
+    /// Which THEMES entry is the chosen light variant: Clew's own
+    /// (clew-light) until the user picks otherwise.
+    light_id: AtomicUsize = AtomicUsize::new(1)
+);
+appearance_cell!(
+    /// Which THEMES entry is the chosen dark variant: Clew's own
+    /// (clew-dark) until the user picks otherwise.
+    dark_id: AtomicUsize = AtomicUsize::new(0)
+);
 
 /// Bumped whenever the resolved appearance changes (mode, or either theme
 /// selection). The palette above is process-global while windows are not, so
@@ -1077,12 +1107,12 @@ pub fn redraw_everywhere() {
 
 /// Whether a light theme is currently active.
 pub fn is_light() -> bool {
-    MODE.load(Ordering::Relaxed) == 1
+    mode(|c| c.load(Ordering::Relaxed)) == 1
 }
 
 /// Switch between the light and dark selection. Request a redraw afterwards.
 pub fn set_light(light: bool) {
-    if MODE.swap(u8::from(light), Ordering::Relaxed) != u8::from(light) {
+    if mode(|c| c.swap(u8::from(light), Ordering::Relaxed)) != u8::from(light) {
         bump_revision();
     }
 }
@@ -1090,9 +1120,9 @@ pub fn set_light(light: bool) {
 /// Index into [`THEMES`] of the theme currently in effect.
 pub fn active_index() -> usize {
     let id = if is_light() {
-        LIGHT_ID.load(Ordering::Relaxed)
+        light_id(|c| c.load(Ordering::Relaxed))
     } else {
-        DARK_ID.load(Ordering::Relaxed)
+        dark_id(|c| c.load(Ordering::Relaxed))
     };
     id.min(THEMES.len() - 1)
 }
@@ -1117,14 +1147,14 @@ fn theme_index(id: &str, is_light: bool) -> Option<usize> {
 /// Choose the light / dark variant by id (ignored if unknown or wrong polarity).
 pub fn set_light_theme(id: &str) {
     if let Some(i) = theme_index(id, true)
-        && LIGHT_ID.swap(i, Ordering::Relaxed) != i
+        && light_id(|c| c.swap(i, Ordering::Relaxed)) != i
     {
         bump_revision();
     }
 }
 pub fn set_dark_theme(id: &str) {
     if let Some(i) = theme_index(id, false)
-        && DARK_ID.swap(i, Ordering::Relaxed) != i
+        && dark_id(|c| c.swap(i, Ordering::Relaxed)) != i
     {
         bump_revision();
     }
@@ -1132,10 +1162,10 @@ pub fn set_dark_theme(id: &str) {
 
 /// The currently-selected light / dark theme (regardless of which is active).
 pub fn current_light() -> &'static ThemeDef {
-    &THEMES[LIGHT_ID.load(Ordering::Relaxed).min(THEMES.len() - 1)]
+    &THEMES[light_id(|c| c.load(Ordering::Relaxed)).min(THEMES.len() - 1)]
 }
 pub fn current_dark() -> &'static ThemeDef {
-    &THEMES[DARK_ID.load(Ordering::Relaxed).min(THEMES.len() - 1)]
+    &THEMES[dark_id(|c| c.load(Ordering::Relaxed)).min(THEMES.len() - 1)]
 }
 
 /// The user's theme preference, persisted in the shared `config.toml`. `System`
@@ -1188,15 +1218,17 @@ impl ThemePref {
     }
 }
 
-/// The last OS appearance read from the platform: 0 = never read, 1 = dark,
-/// 2 = light. See [`system_is_light`].
-static SYSTEM_APPEARANCE: AtomicU8 = AtomicU8::new(0);
+appearance_cell!(
+    /// The last OS appearance read from the platform: 0 = never read, 1 = dark,
+    /// 2 = light. See [`system_is_light`].
+    system_appearance: AtomicU8 = AtomicU8::new(0)
+);
 
 /// Remember the OS appearance just read, for callers that cannot ask (only
 /// macOS reads one).
 #[cfg(any(target_os = "macos", test))]
 fn record_system_appearance(light: bool) {
-    SYSTEM_APPEARANCE.store(if light { 2 } else { 1 }, Ordering::Relaxed);
+    system_appearance(|c| c.store(if light { 2 } else { 1 }, Ordering::Relaxed));
 }
 
 /// Whether the OS is currently in light appearance.
@@ -1214,18 +1246,20 @@ pub fn system_is_light() -> bool {
             return light;
         }
     }
-    SYSTEM_APPEARANCE.load(Ordering::Relaxed) == 2
+    system_appearance(|c| c.load(Ordering::Relaxed)) == 2
 }
 
-/// The three-way preference in effect. Global for the same reason the palette
-/// is: one process paints every window from it, so two windows holding
-/// different preferences could only ever disagree about what is on screen.
-static PREF: AtomicU8 = AtomicU8::new(ThemePref::System as u8);
+appearance_cell!(
+    /// The three-way preference in effect. Global for the same reason the palette
+    /// is: one process paints every window from it, so two windows holding
+    /// different preferences could only ever disagree about what is on screen.
+    pref_cell: AtomicU8 = AtomicU8::new(ThemePref::System as u8)
+);
 
 /// The appearance preference currently in effect, for a window adopting a
 /// change another window made.
 pub fn current_pref() -> ThemePref {
-    match PREF.load(Ordering::Relaxed) {
+    match pref_cell(|c| c.load(Ordering::Relaxed)) {
         x if x == ThemePref::Dark as u8 => ThemePref::Dark,
         x if x == ThemePref::Light as u8 => ThemePref::Light,
         _ => ThemePref::System,
@@ -1241,7 +1275,7 @@ pub fn current_pref() -> ThemePref {
 /// appearance change had one of them call `apply_pref(System)` and overwrite
 /// the user's explicit choice.
 pub fn apply_pref(pref: ThemePref) {
-    if PREF.swap(pref as u8, Ordering::Relaxed) != pref as u8 {
+    if pref_cell(|c| c.swap(pref as u8, Ordering::Relaxed)) != pref as u8 {
         bump_revision();
     }
     set_light(pref.resolve_light());
