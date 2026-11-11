@@ -125,6 +125,28 @@ pub(crate) fn ask_place(app: &App) -> Option<AskPlace> {
     }
 }
 
+/// How far the open card reaches, from its right edge, into a row of
+/// controls whose right edge is at `right` and whose foot is at `bottom`
+/// (window coordinates): the room that row keeps clear so the card sits
+/// beside its controls, not over them. The card sits in its corner over
+/// whatever is there — the debugger's panel, the foot of the code — and it
+/// hid Continue, Step and Stop, and Time Travel's Older and Newer. Nothing
+/// while the card is not open, or does not come down to the row.
+pub(crate) fn card_reach(app: &App, right: f32, bottom: f32) -> f32 {
+    if !ask_is_card(app) {
+        return 0.0;
+    }
+    let Some(place) = ask_place(app) else {
+        return 0.0;
+    };
+    let (_, from_bottom) = corner(app);
+    let top = app.window_height - from_bottom - place.height;
+    if top >= bottom {
+        return 0.0;
+    }
+    (right - place.left + 8.0).max(0.0)
+}
+
 /// About how wide the pill is with Ask's own face on it.
 const PILL_W: f32 = 150.0;
 

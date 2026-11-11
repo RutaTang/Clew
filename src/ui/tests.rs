@@ -9486,9 +9486,12 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     let visits = super::trace_visits(&app, &g);
     let named: Vec<(&str, usize)> = visits
         .iter()
-        .map(|&(id, n)| (g.node(id).name.as_str(), n))
+        .map(|&(id, n, _)| (g.node(id).name.as_str(), n))
         .collect();
     assert_eq!(named, [("line_1", 2), ("line_0", 1)]);
+    // Each opens where the run first stopped in it, not on its first line.
+    let lines: Vec<usize> = visits.iter().map(|&(_, _, line)| line).collect();
+    assert_eq!(lines, [2, 1]);
     assert_eq!(super::trace_files(&app).len(), 1);
     app.proj.project_calls.graph = std::sync::Arc::new(g);
     let mut sim = sim_elem(super::project_calls_body(&app));

@@ -578,6 +578,47 @@ const EXPLAIN_EXTRA_W: f32 = 11.0 + 90.0 + 19.0 + 3.0 * 5.0;
 fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     let font = crate::fonts::UI;
     let width = |s: &str| super::steady::width_of(s, ts::SMALL, font);
+    let mut row = row![].spacing(STATUS_GAP).align_y(iced::Center);
+    // A status the back end wrote as it is (an error passed straight
+    // through) in the reader's language too, its names in the reader's
+    // quotation marks, not backticks.
+    let words_of = |s: &str| crate::i18n::quoted(&crate::i18n::message(s)).into_owned();
+    let least = SAID_MIN_W / 2.0;
+    // Words cut to `room`, said whole where the pointer rests when cut.
+    let line_of = |whole: String, room: f32, color: Option<iced::Color>| -> Element<'_, Message> {
+        let shown = super::steady::cut(&whole, room, ts::SMALL, font);
+        let mut line = status_text(shown.clone()).wrapping(iced::widget::text::Wrapping::None);
+        if let Some(color) = color {
+            line = line.color(color);
+        }
+        if shown == whole {
+            line.into()
+        } else {
+            super::toolbar::tip_at(line, whole, None, tooltip::Position::Top)
+        }
+    };
+    // A failure stands first, in the danger colour, with what to do about
+    // it — what fits of it beside the least of its words, its dismissal
+    // always — at a width that does not change with what else is said:
+    // after the chips, and shortened to make room for the next message,
+    // its Try again, Settings and × moved under the pointer, and a click
+    // meant for Settings landed on words.
+    let failure = app.failure_shown();
+    let mut used = 0.0;
+    if let Some(failure) = failure
+        && room >= least
+    {
+        let whole = words_of(&failure.said);
+        let (controls, controls_w) = failure_controls(failure, room - least - STATUS_GAP);
+        let words = (room - controls_w - 2.0 * STATUS_GAP - SAID_MIN_W)
+            .max(least)
+            .min(width(&whole));
+        row = row.push(line_of(whole, words, Some(theme::danger())));
+        row = row.push(controls);
+        used += words + STATUS_GAP + controls_w + STATUS_GAP;
+    }
+    let room = (room - used).max(0.0);
+    let mut used = 0.0;
     let setup = setup_label(app);
     let explain = explain_label(app);
     let full_chips: f32 = setup.as_ref().map_or(0.0, |(l, _)| width(l) + CHIP_EXTRA_W)
@@ -593,8 +634,6 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         });
     let chips_n = usize::from(setup.is_some()) + usize::from(explain.is_some());
     let short = full_chips + STATUS_GAP * chips_n as f32 + SAID_MIN_W > room;
-    let mut row = row![].spacing(STATUS_GAP).align_y(iced::Center);
-    let mut used = 0.0;
     // A chip short of room even shortened is left out: laid out clipped to
     // nothing, it was a control no one saw that the keyboard's ring still
     // stopped on (its Set up is in the command bar, its pass's progress in
@@ -614,11 +653,6 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         used += chip.1 + STATUS_GAP;
         row = row.push(chip.0);
     }
-    // A status the back end wrote as it is (an error passed straight
-    // through) in the reader's language too, its names in the reader's
-    // quotation marks, not backticks.
-    let words_of = |s: &str| crate::i18n::quoted(&crate::i18n::message(s)).into_owned();
-    let failure = app.failure_shown();
     // What Clew says besides a failure that stands: the failure keeps its
     // own place, and what is said after it (a file copied, a search done)
     // goes beside it rather than over it — said over it, the red Explain
@@ -650,40 +684,7 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             counts
         })
     };
-    let least = SAID_MIN_W / 2.0;
-    let mut left = room - used;
-    // Words cut to `room`, said whole where the pointer rests when cut.
-    let line_of = |whole: String, room: f32, color: Option<iced::Color>| -> Element<'_, Message> {
-        let shown = super::steady::cut(&whole, room, ts::SMALL, font);
-        let mut line = status_text(shown.clone()).wrapping(iced::widget::text::Wrapping::None);
-        if let Some(color) = color {
-            line = line.color(color);
-        }
-        if shown == whole {
-            line.into()
-        } else {
-            super::toolbar::tip_at(line, whole, None, tooltip::Position::Top)
-        }
-    };
-    // A failure stands, in the danger colour, with what to do about it —
-    // what fits of it beside the least of its words, its dismissal always.
-    if let Some(failure) = failure
-        && left >= least
-    {
-        let whole = words_of(&failure.said);
-        let (controls, controls_w) = failure_controls(failure, left - least - STATUS_GAP);
-        // With something else to say, the failure leaves it room: no more
-        // than its share, and never less than the least of its words.
-        let full = width(&whole);
-        let mut words = (left - controls_w - STATUS_GAP).max(least);
-        if said.is_some() {
-            words = words.min((left - controls_w) * 0.6).max(least);
-        }
-        let words = words.min(full);
-        row = row.push(line_of(whole, words, Some(theme::danger())));
-        row = row.push(controls);
-        left -= words + STATUS_GAP + controls_w + STATUS_GAP;
-    }
+    let left = room - used;
     if let Some(said) = said
         && left >= least
     {
@@ -720,7 +721,8 @@ fn failure_controls(
         .on_press(super::heard::said(label, msg))
     };
     let link_w = |label: &str| super::steady::width_of(label, ts::SMALL, font) + 12.0 + 2.0;
-    let dismiss_w = 11.0 + 8.0;
+    // A target the pointer finds: the glyph alone was 8 px of it.
+    let dismiss_w = 11.0 + 14.0;
     let retry_w = failure
         .retry
         .as_ref()
@@ -750,7 +752,7 @@ fn failure_controls(
     }
     let dismiss = button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
         .style(theme::icon_button(false))
-        .padding([1, 4])
+        .padding([5, 7])
         .on_press(super::heard::said(
             tr!("Dismiss"),
             Message::Window(WindowMsg::DismissFailure),

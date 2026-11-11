@@ -84,6 +84,7 @@ impl App {
             self.proj.explain.node_failed = None;
             self.forget_failure_of(crate::app::state::FailureOf::Explain);
         }
+        let one_node = matches!(kind, PassKind::Node(_));
         let reuse = match kind {
             PassKind::Explicit => explain::Reuse::SamePrompt,
             PassKind::Automatic => explain::Reuse::ChangedSources(reported),
@@ -103,13 +104,17 @@ impl App {
         self.proj.explain.progress = Some((0, 0));
         self.proj.explain.failed = 0;
         // What it does, said: a refresh of what changed is not the whole
-        // project explained again ("Explaining project… 20/45").
-        self.status = if self.proj.explain.pass_automatic {
-            tr!("Updating explanations…")
+        // project explained again ("Explaining project… 20/45"). One
+        // function or file is said by the chip, by name: "Explaining
+        // project…" beside "Explaining subtotal()…" read as a whole paid
+        // pass begun.
+        self.status = if one_node {
+            String::new()
+        } else if self.proj.explain.pass_automatic {
+            tr!("Updating explanations…").into()
         } else {
-            tr!("Explaining project…")
-        }
-        .into();
+            tr!("Explaining project…").into()
+        };
         let stream = iced::stream::channel(256, move |output| {
             let gather_root = root.clone();
             let fetch_ai = ai.clone();

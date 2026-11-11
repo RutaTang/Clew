@@ -2516,7 +2516,10 @@ fn send_with_retry(
             }
             Ok(r) => return Ok(r),
             // Nothing reached the provider: a failure to connect, resent
-            // only while another attempt may get further.
+            // only while another attempt may get further — sooner than a
+            // busy provider is: a provider still starting is up within a
+            // few seconds, and an address with nothing at it kept the
+            // reader looking at "Explaining…" for 7 s before it said so.
             Err(e) if crate::net::is_unreached(&e) => {
                 if last || !retryable_transport(&e) {
                     return Err(LlmError::Connect(crate::net::failure(
@@ -2524,7 +2527,7 @@ fn send_with_retry(
                         prepared.via.as_ref(),
                     )));
                 }
-                delay
+                delay / 2
             }
             Err(e) => {
                 return Err(LlmError::Transport(crate::net::failure(

@@ -147,7 +147,7 @@ pub(crate) fn time_travel_view<'a>(
         time_travel_banner(tt, commit),
         story,
         container(code).width(Fill).height(Fill),
-        time_travel_bar(tt),
+        time_travel_bar(tt, time_travel_bar_clear(app)),
     ]
     .width(Fill)
     .height(Fill)
@@ -321,7 +321,27 @@ pub(crate) fn time_travel_code<'a>(
 
 /// The timeline scrubber: older/newer steps, a slider, position, scope toggle,
 /// and (for a function scope) the "story of this function" narrative button.
-pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
+/// How much of Time Travel's bar, from its right, the Ask card covers in
+/// its corner: kept clear, so Newer and the commit count stay in reach.
+fn time_travel_bar_clear(app: &App) -> f32 {
+    let margin = if right_panel_shown(app) {
+        margin_w(app)
+    } else {
+        0.0
+    };
+    let below = if app.show_bottom {
+        app.bottom_shown_height()
+    } else {
+        0.0
+    };
+    super::askfloat::card_reach(
+        app,
+        app.window_width - super::toolbar::STRIP_W - margin,
+        app.window_height - super::STATUSBAR_H - below,
+    )
+}
+
+pub(crate) fn time_travel_bar(tt: &TimeTravel, clear: f32) -> Element<'_, Message> {
     let n = tt.commits.len();
     let last = n.saturating_sub(1);
     // `then` (lazy) — not `then_some` — so `idx - 1` isn't evaluated (underflowing
@@ -472,7 +492,12 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
         .spacing(10)
         .align_y(iced::Center),
     )
-    .padding([5, 12])
+    .padding(Padding {
+        top: 5.0,
+        right: 12.0 + clear,
+        bottom: 5.0,
+        left: 12.0,
+    })
     .width(Fill)
     .style(theme::time_travel_bar)
     .into()
@@ -2103,11 +2128,9 @@ fn active_note<'a>(
     };
     if unexplained && let Some(node) = node {
         // Marked as what spends an AI call is: the sparkle, and a tip.
+        // (Never explained: not "Explain this again".)
         let (label, tip) = if failed.is_some() {
-            (
-                tr!("Try again"),
-                tr!("Explain this again with AI (one AI call)"),
-            )
+            (tr!("Try again"), tr!("Explain this with AI (one AI call)"))
         } else {
             (tr!("Explain"), tr!("Explain this with AI (one AI call)"))
         };
@@ -2202,9 +2225,17 @@ fn active_note<'a>(
     } else {
         super::explain_view::render_note(app, &app.proj.explain.prepared)
     };
+    // The reason alone, as a sentence: "Couldn't explain it: couldn't
+    // reach…" said it twice, and ran a line longer than a function's card
+    // has, its last word — "Settings" — cut in half.
     if let Some(why) = failed {
+        let mut chars = why.chars();
+        let said = chars
+            .next()
+            .map(|first| format!("{}{}", first.to_uppercase(), chars.as_str()))
+            .unwrap_or_default();
         note.push(
-            text(tr!("Couldn't explain it: {reason}", reason = why))
+            text(said)
                 .size(ts::SMALL)
                 .color(theme::danger())
                 .wrapping(Wrapping::WordOrGlyph)

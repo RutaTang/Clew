@@ -1153,7 +1153,7 @@ impl App {
                 tt.why.insert(sha, Ok(text.trim().to_string()));
             }
             Err(e) => {
-                let why = crate::app::tasks::plain_detail(&e);
+                let why = crate::app::tasks::ai_reason(&e);
                 tt.why.insert(sha, Err(why.clone()));
                 self.status = tr!("Couldn't summarize: {error}", error = why)
             }
@@ -1456,6 +1456,7 @@ impl App {
                 m
             }
             Err(e) => {
+                let e = crate::app::tasks::ai_reason(&e);
                 self.status = tr!("Couldn't explain: {error}", error = e);
                 format!("*{}*", tr!("Couldn't explain why: {error}", error = e))
             }

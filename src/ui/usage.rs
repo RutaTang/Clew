@@ -179,7 +179,7 @@ fn balance_group(app: &App) -> Element<'_, Message> {
                 tr!("Balance"),
                 Some(tr!(
                     "Couldn't check it: {error}",
-                    error = crate::app::tasks::plain_detail(e)
+                    error = crate::app::tasks::ai_reason(e)
                 )),
                 refresh(false),
             ),

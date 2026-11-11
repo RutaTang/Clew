@@ -446,7 +446,20 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             ..Default::default()
         }
     });
-    let header = row![said, rule, controls].spacing(10).align_y(iced::Center);
+    // Clear of the Ask card in the corner: it sat over Continue, Step and
+    // Stop (the panel's foot is the status bar's top; its header, some 40
+    // px under the panel's top).
+    let panel_top = app.window_height - super::STATUSBAR_H - app.bottom_shown_height();
+    let reach = super::askfloat::card_reach(
+        app,
+        app.window_width - super::toolbar::STRIP_W,
+        panel_top + 44.0,
+    );
+    let header =
+        container(row![said, rule, controls].spacing(10).align_y(iced::Center)).padding(Padding {
+            right: reach,
+            ..Padding::ZERO
+        });
 
     // Call stack — click a frame to jump to its source.
     let mut stack_rows: Vec<Element<'_, Message>> = vec![

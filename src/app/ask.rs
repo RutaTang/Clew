@@ -597,7 +597,7 @@ impl App {
                 self.return_question(question, spoken);
                 self.status = tr!(
                     "Ask failed: {error}",
-                    error = crate::app::tasks::plain_detail(&e.to_string())
+                    error = crate::app::tasks::ai_reason(&e.to_string())
                 );
                 return Task::none();
             }
@@ -630,7 +630,7 @@ impl App {
                 self.return_question(question, spoken);
                 self.status = tr!(
                     "Ask failed: {error}",
-                    error = crate::app::tasks::plain_detail(&e.to_string())
+                    error = crate::app::tasks::ai_reason(&e.to_string())
                 );
                 return Task::none();
             }
@@ -1323,7 +1323,7 @@ impl App {
                 ))
             }
             StreamOutcome::Failed(e) => {
-                let e = crate::app::tasks::plain_detail(e);
+                let e = crate::app::tasks::ai_reason(e);
                 self.status = tr!("Ask failed: {error}", error = e);
                 Some(format!("*{}*", tr!("Couldn't answer: {error}", error = e)))
             }
@@ -1451,7 +1451,7 @@ impl App {
                 self.proj.ask_turns.remove(idx);
                 self.status = tr!(
                     "Agent mode unavailable ({reason}) — answering from the semantic index",
-                    reason = reason
+                    reason = crate::app::tasks::plain_detail(&reason)
                 );
                 return fallback;
             }

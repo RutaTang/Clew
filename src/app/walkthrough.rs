@@ -503,7 +503,7 @@ impl App {
                 self.proj.walk.retried = false;
                 // Kept where it was asked for, and on the status line until
                 // it is read, each with a way to try again.
-                let why = crate::app::tasks::plain_detail(&e.to_string());
+                let why = crate::app::tasks::ai_reason(&e.to_string());
                 self.proj.walk.failed = Some((scope.clone(), why.clone()));
                 self.say_failure(
                     tr!("Walkthrough failed: {error}", error = why),

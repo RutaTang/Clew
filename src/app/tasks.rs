@@ -2454,6 +2454,31 @@ pub(crate) fn plain_detail(raw: &str) -> String {
     }
 }
 
+/// What an AI call that failed with `raw` says to the reader, wherever it
+/// failed: no connection to the provider at all — nothing at the address,
+/// no such address — in the one sentence Explain says, naming the AI
+/// provider and where its address is set (a walkthrough, Ask, a fake run
+/// said only "nothing answered at that address", and three places the
+/// OS's own words); anything else in plain words ([`plain_detail`]).
+pub(crate) fn ai_reason(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    let unreached = [
+        "connection refused",
+        "dns error",
+        "failed to lookup address",
+        "name or service not known",
+        "nodename nor servname",
+        "no such host",
+    ]
+    .iter()
+    .any(|w| lower.contains(w));
+    if unreached {
+        ExplainFailure::Unreached(raw.to_string()).describe()
+    } else {
+        plain_detail(raw)
+    }
+}
+
 /// How an explain pass fell short, if it did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PassFailures {
@@ -2822,7 +2847,15 @@ where
                             ran.insert(job.group);
                             pass.complete(&job, summary);
                         }
-                        Err(why) if resend && why.may_pass_later() => {
+                        // (Not a provider that could not be reached at
+                        // all: llm's send resent it already, until another
+                        // attempt could not get further — sent again here,
+                        // a refused address took 17 s to be said.)
+                        Err(why)
+                            if resend
+                                && why.may_pass_later()
+                                && !matches!(why, ExplainFailure::Unreached(_)) =>
+                        {
                             last_failed = Some(std::time::Instant::now());
                             again.push((job, why));
                         }
@@ -4196,7 +4229,6 @@ mod pass_tests {
         let twice = [
             CallError::Llm(status(502, None, "Bad Gateway")),
             from_server(&status(502, None, "Bad Gateway")),
-            CallError::Llm(LlmError::Connect("connection refused".into())),
             CallError::Llm(LlmError::Transport("connection reset by peer".into())),
             CallError::Llm(status(429, None, "Rate limit reached")),
             CallError::Llm(status(503, None, "Service Unavailable")),
@@ -4218,9 +4250,12 @@ mod pass_tests {
         }
         // (A refusal of the prompt's length is not sent again either — nor
         // asked again this session at all: `was_rejected`, tested apart.)
+        // Nor is a provider that could not be reached at all: llm's send
+        // resent it already, for as long as another attempt might connect.
         let once = [
             CallError::Llm(status(422, None, "Unprocessable Entity")),
             from_server(&status(422, None, "Unprocessable Entity")),
+            CallError::Llm(LlmError::Connect("connection refused".into())),
         ];
         for failure in &once {
             assert_eq!(sent(explicit(), failure), 1, "sent again: {failure:?}");

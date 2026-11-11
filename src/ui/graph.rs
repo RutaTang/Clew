@@ -2714,12 +2714,24 @@ pub(crate) fn call_symbol_row<'a>(
     id: usize,
     trailing: String,
 ) -> Element<'a, Message> {
+    let line = app.proj.project_calls.graph.node(id).line;
+    call_symbol_row_at(app, id, trailing, line)
+}
+
+/// [`call_symbol_row`], said and opened at `line` of its function (where a
+/// run stopped in it) rather than its first.
+pub(crate) fn call_symbol_row_at<'a>(
+    app: &'a App,
+    id: usize,
+    trailing: String,
+    line: usize,
+) -> Element<'a, Message> {
     let n = app.proj.project_calls.graph.node(id);
     button(
         row![
             text(n.name.clone()).size(ts::BODY).wrapping(Wrapping::None),
             space().width(6),
-            text(format!("{}:{}", rel_of(app, &n.file), n.line))
+            text(format!("{}:{}", rel_of(app, &n.file), line))
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .wrapping(Wrapping::None),
@@ -2745,7 +2757,7 @@ pub(crate) fn call_symbol_row<'a>(
         || n.name.clone(),
         Message::Graph(GraphMsg::OverlayOpenAt {
             abs: n.file.clone(),
-            line: n.line,
+            line,
         }),
     ))
     .into()
@@ -2809,8 +2821,13 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
     let visits = trace_visits(app, g);
     if !visits.is_empty() {
         rows.push(section_header(tr!("Where the last debug run stopped")));
-        for &(id, stops) in visits.iter().take(40) {
-            rows.push(call_symbol_row(app, id, trn!("1 stop", "{n} stops", stops)));
+        for &(id, stops, line) in visits.iter().take(40) {
+            rows.push(call_symbol_row_at(
+                app,
+                id,
+                trn!("1 stop", "{n} stops", stops),
+                line,
+            ));
         }
     }
 
@@ -3412,22 +3429,29 @@ pub(crate) fn trace_files(
 pub(crate) fn trace_visits(
     app: &App,
     g: &crate::projectcalls::ProjectCallGraph,
-) -> std::sync::Arc<Vec<(usize, usize)>> {
+) -> std::sync::Arc<Vec<(usize, usize, usize)>> {
     app.proj.view_memo.trace_visits.get_or(
         (app.proj.project_calls.graph_rev, app.debug.trace_rev),
         || {
-            let mut counts: std::collections::HashMap<usize, usize> =
+            // Each function the run stopped in: how often, and the line it
+            // first stopped on — where its row opens. It opened the
+            // function's first line, as the run's walkthrough once did.
+            let mut counts: std::collections::HashMap<usize, (usize, usize)> =
                 std::collections::HashMap::new();
             for stop in &app.debug.trace {
-                let Some(id) = stop.frames.iter().find_map(|f| {
+                let Some((id, line)) = stop.frames.iter().find_map(|f| {
                     let path = f.path.as_deref()?;
                     g.id_of(path, &crate::short_frame_name(&f.name))
+                        .map(|id| (id, f.line))
                 }) else {
                     continue;
                 };
-                *counts.entry(id).or_default() += 1;
+                counts.entry(id).or_insert((0, line)).0 += 1;
             }
-            let mut visits: Vec<(usize, usize)> = counts.into_iter().collect();
+            let mut visits: Vec<(usize, usize, usize)> = counts
+                .into_iter()
+                .map(|(id, (stops, line))| (id, stops, line))
+                .collect();
             visits.sort_by(|a, b| {
                 b.1.cmp(&a.1)
                     .then_with(|| g.node(a.0).name.cmp(&g.node(b.0).name))

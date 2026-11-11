@@ -488,7 +488,7 @@ impl App {
             }
             Err(why) => {
                 self.status = tr!("The fake run failed — its panel says why").into();
-                self.proj.fake.failed = Some(crate::app::tasks::plain_detail(&why));
+                self.proj.fake.failed = Some(crate::app::tasks::ai_reason(&why));
                 Task::none()
             }
         }
@@ -760,7 +760,10 @@ impl App {
                         }
                     }
                     Err(why) => {
-                        self.status = tr!("No inputs suggested: {why}", why = why);
+                        self.status = tr!(
+                            "No inputs suggested: {why}",
+                            why = crate::app::tasks::ai_reason(&why)
+                        );
                     }
                 }
                 Task::none()
