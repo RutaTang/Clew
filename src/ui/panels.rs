@@ -1279,16 +1279,20 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .width(Length::Fixed(ROUND_BUTTON))
         .height(Length::Fixed(ROUND_BUTTON))
     };
+    // Nothing typed and nothing to stop: nothing to send, and the button
+    // says so (it stood lit and pressable over an empty field).
     let ask_btn = round(send_glyph, send_tint)
         .style(theme::round_button(true))
-        .on_press(super::heard::said(
-            if streaming && !typed {
-                send_tip
-            } else {
-                tr!("Send")
-            },
-            send_msg,
-        ));
+        .on_press_maybe((streaming || typed).then(|| {
+            super::heard::said(
+                if streaming && !typed {
+                    send_tip
+                } else {
+                    tr!("Send")
+                },
+                send_msg,
+            )
+        }));
     let ask_btn = super::toolbar::tip_at(ask_btn, send_tip, None, tooltip::Position::Top);
     // Or say it: the microphone, in the composer beside what is typed —
     // lit while it is on ([`super::askfloat::voice_lit`]), in the accent

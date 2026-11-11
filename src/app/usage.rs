@@ -96,6 +96,16 @@ pub(crate) fn purpose_label(key: &str) -> &'static str {
     }
 }
 
+/// One call of the purpose `key`, as the list of calls names it: "an
+/// explanation", where the month's summary counts "Explanations".
+pub(crate) fn call_label(key: &str) -> &'static str {
+    match key {
+        EXPLAIN => tr!("Explanation"),
+        WALKTHROUGH => tr!("Walkthrough"),
+        _ => purpose_label(key),
+    }
+}
+
 /// Append `entry` to the ledger. Blocking (a line's write).
 pub(crate) fn append(entry: &Entry) -> std::io::Result<()> {
     let Some(path) = ledger_path() else {

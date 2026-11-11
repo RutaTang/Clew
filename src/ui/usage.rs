@@ -58,19 +58,30 @@ pub(crate) fn usage_page(app: &App) -> Element<'_, Message> {
                     s.recent
                         .iter()
                         .map(|e| {
-                            let about = tr!(
-                                "{date}, {model}: {input} tokens in, {output} out",
-                                date = when(e.at as i64, now),
-                                model = e.model.as_str(),
-                                input = usage::tokens(e.input),
-                                output = usage::tokens(e.output)
-                            );
+                            // The model said only where it is not the one in
+                            // use: on every row, the same name was noise.
+                            let about = if e.model == app.usage.model {
+                                tr!(
+                                    "{date}: {input} tokens in, {output} out",
+                                    date = when(e.at as i64, now),
+                                    input = usage::tokens(e.input),
+                                    output = usage::tokens(e.output)
+                                )
+                            } else {
+                                tr!(
+                                    "{date}, {model}: {input} tokens in, {output} out",
+                                    date = when(e.at as i64, now),
+                                    model = e.model.as_str(),
+                                    input = usage::tokens(e.input),
+                                    output = usage::tokens(e.output)
+                                )
+                            };
                             let cost = e.cost().map_or_else(
                                 || "—".to_string(),
                                 |c| usage::money_in_column(c, fine),
                             );
                             form::item(
-                                usage::purpose_label(&e.purpose),
+                                usage::call_label(&e.purpose),
                                 Some(about),
                                 text(cost).size(ts::BODY).color(theme::fg()),
                             )
@@ -521,13 +532,15 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
             row![space().width(Fill), buttons].align_y(iced::Center),
         ));
     }
-    let about = known.is_none().then(|| {
-        tr!(
+    // Whose prices these are, said over the fields as over the line.
+    let about = match known {
+        None => tr!(
             "Clew doesn't know {model}'s prices. Enter them to see what calls cost.",
             model = model
-        )
-    });
-    form::group(tr!("Prices"), about, None, rows)
+        ),
+        Some(_) => model.to_string(),
+    };
+    form::group(tr!("Prices"), Some(about), None, rows)
 }
 
 /// A price per million tokens as the line says it: "$0.30", "$0.006".

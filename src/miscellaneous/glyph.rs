@@ -333,8 +333,7 @@ fn body(g: Glyph) -> &'static str {
         // A microphone on its stand.
         Mic => {
             "<rect x='9' y='3' width='6' height='11.5' rx='3'/>\
-             <path d='M5.5 11 A6.5 6.5 0 0 0 18.5 11'/><path d='M12 17.5 V21'/>\
-             <path d='M8.5 21 H15.5'/>"
+             <path d='M5.5 11 A6.5 6.5 0 0 0 18.5 11'/><path d='M12 17.5 V21 M8.5 21 H15.5'/>"
         }
         // A speaker, and the sound it makes.
         Speaker => {
@@ -388,7 +387,10 @@ fn body(g: Glyph) -> &'static str {
             "<rect x='5' y='10.5' width='14' height='9.5' rx='2'/>\
              <path d='M8.5 10.5 V8 A3.5 3.5 0 0 1 15.5 8 V10.5'/>"
         }
-        Send => "<path d='M12 19.5 V5'/><path d='M6 11 L12 5 L18 11'/>",
+        // One stroke, head and stem: a stem drawn on its own, a line with
+        // no width to its bounds, was lost at some positions and the arrow
+        // read as "^".
+        Send => "<path d='M6 11 L12 5 L18 11 M12 5 V19.5'/>",
         Check => "<path d='M5 12.5 L10 17.5 L19.5 7'/>",
         File => {
             "<path d='M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z'/>\
