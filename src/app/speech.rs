@@ -309,6 +309,10 @@ pub(crate) struct Speech {
     pub(crate) stall: (Duration, Duration),
     /// The models already said to be missing: said once a window.
     told: HashSet<&'static str>,
+    /// The answer last brought on screen because it would not be heard
+    /// ([`App::show_unheard`]): once an answer, so a card put away stays
+    /// away.
+    shown: Option<u64>,
     /// The models what is being said was made with.
     made_with: HashSet<&'static str>,
     /// Voice models downloading, by id.
@@ -349,6 +353,7 @@ impl Speech {
             reopened: false,
             stall: (STALLED_AFTER_ERROR, STALLED),
             told: HashSet::new(),
+            shown: None,
             made_with: HashSet::new(),
             downloads: HashMap::new(),
             download_errors: HashMap::new(),
@@ -642,12 +647,22 @@ impl App {
         let read_aloud = self.voice.prefs.read_aloud;
         // The newest answer only: one an earlier question gets late — its
         // close arriving after the next was asked — is not said over it.
-        let Some(turn) = self
+        let Some(spoken) = self
             .proj
             .ask_turns
             .last()
-            .filter(|t| t.stream == stream && read_aloud.reads(t.spoken))
+            .filter(|t| t.stream == stream)
+            .map(|t| t.spoken)
         else {
+            return Task::none();
+        };
+        if !read_aloud.reads(spoken) {
+            if spoken {
+                self.show_unheard(stream);
+            }
+            return Task::none();
+        }
+        let Some(turn) = self.proj.ask_turns.last() else {
             return Task::none();
         };
         let usual = self
@@ -711,6 +726,17 @@ impl App {
     /// Stop speaking — what is said, made, or waits to be — and stop reading
     /// the answer being read, or about to be: the one still coming. With
     /// the microphone on, it opens. Whether anything was being said.
+    /// The answer on `stream` will not be heard — not read aloud, or no
+    /// voice here to read it — so it is shown: a question said is sent
+    /// without the card, and its answer would otherwise be nowhere to be
+    /// seen. Once an answer, so the card put away stays away.
+    fn show_unheard(&mut self, stream: u64) {
+        if self.voice.speech.shown != Some(stream) {
+            self.voice.speech.shown = Some(stream);
+            self.reveal_ask();
+        }
+    }
+
     pub(crate) fn stop_speaking(&mut self) -> bool {
         let read_aloud = self.voice.prefs.read_aloud;
         let coming = self
@@ -797,16 +823,29 @@ impl App {
             return self
                 .give_up_speaking(tr!("There is no data directory to keep the voice in").into());
         };
+        // An answer's sentence no voice here can say: the answer is shown
+        // instead. Not a sample of a voice in Settings — that is not an
+        // answer.
+        let unheard = |app: &mut Self| {
+            if only.is_none()
+                && let Some(stream) = app.proj.ask_turns.last().map(|t| t.stream)
+            {
+                app.show_unheard(stream);
+            }
+        };
         while let Some(sentence) = self.voice.speech.queue.pop_front() {
             let Some(model) = only.or_else(|| speech::for_language(sentence.lang)) else {
+                unheard(self);
                 continue;
             };
             // Being downloaded or removed, in any window: as good as not here.
             let changing = crate::app::voice::downloading(&speech::dir(&store, model));
             if changing {
+                unheard(self);
                 continue;
             }
             if !speech::installed(&store, model) {
+                unheard(self);
                 // Said once a window — the status line is not a nag — and
                 // not at all while it downloads.
                 let speech = &mut self.voice.speech;

@@ -320,6 +320,43 @@ fn a_spoken_answer_is_read_aloud_as_it_comes() {
     assert_eq!(voice.texts().len(), said);
 }
 
+/// An answer to a question said that will not be heard — reading aloud
+/// off, or no voice here to read it — is shown instead: the question went
+/// without the card, and the answer would be nowhere to be seen. Once an
+/// answer: put away again, it stays away as the answer goes on. One heard
+/// is not shown.
+#[test]
+fn an_answer_not_heard_is_shown() {
+    let (mut app, voice, _output) = speech_app("speech-unheard");
+    let qwen = speech::find("qwen3-tts").unwrap();
+    // Reading aloud off.
+    app.voice.prefs.read_aloud = ReadAloud::Never;
+    app.ask_view = AskView::Hidden;
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "The total adds them. Then");
+    assert!(app.ask_view.is_open(), "{:?}", app.ask_view);
+    app.ask_view = AskView::Hidden;
+    delta(&mut app, 1, " it returns them.");
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert!(!app.ask_view.is_open(), "{:?}", app.ask_view);
+    // No voice here to read it.
+    app.voice.prefs.read_aloud = ReadAloud::Spoken;
+    let store = app.voice.store.clone().unwrap();
+    std::fs::remove_dir_all(speech::dir(&store, qwen)).unwrap();
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "The total adds them. Then");
+    assert!(app.ask_view.is_open(), "{:?}", app.ask_view);
+    ended(&mut app, 2, StreamOutcome::Done);
+    assert!(voice.texts().is_empty(), "{:?}", voice.texts());
+    // Heard: left to be heard.
+    install(&app, qwen);
+    app.ask_view = AskView::Hidden;
+    asked(&mut app, 3, true);
+    delta(&mut app, 3, "The total adds them. Then");
+    assert_eq!(voice.texts(), ["The total adds them."]);
+    assert!(!app.ask_view.is_open(), "{:?}", app.ask_view);
+}
+
 /// An agent step's text is said as it is written, not once it is whole: a
 /// remark before tool calls is said through and taken out of the answer —
 /// the tool calls show what it went on to do — and the answer the next step

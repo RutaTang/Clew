@@ -3643,7 +3643,13 @@ fn escape_names_the_topmost_overlay() {
         Some(Message::Settings(crate::SettingsMsg::Close))
     ));
 
+    // Settings opened from the project's sheet is over it, and goes first.
     app.pending_consent = Some(PathBuf::from("/nonexistent/clew-ui-test"));
+    assert!(matches!(
+        super::escape_message(&app),
+        Some(Message::Settings(crate::SettingsMsg::Close))
+    ));
+    app.settings.open = false;
     assert!(matches!(
         super::escape_message(&app),
         Some(Message::Project(ProjectMsg::ConsentDenied(root))) if root == std::path::Path::new("/nonexistent/clew-ui-test")
@@ -13213,6 +13219,48 @@ fn the_heat_toggle_keeps_its_width() {
     assert_eq!(heat_at(false), heat_at(true));
 }
 
+/// Settings, opened from a project's sheet — the first open's, or one
+/// asked from the menu — comes up over it, and closes back to it: under
+/// the sheet, "Add an API Key…" seemed to do nothing.
+#[test]
+fn settings_opened_from_the_projects_sheet_is_over_it() {
+    use crate::app::setup::{ProjectSetup, SetupMode};
+    let mut app = reader_app();
+    let root = PathBuf::from("/nonexistent/clew-sheet");
+    app.pending_consent = Some(root.clone());
+    assert!(matches!(
+        super::active_overlay(&app),
+        Some(super::ActiveOverlay::Consent(_))
+    ));
+    app.settings.open = true;
+    assert!(matches!(
+        super::active_overlay(&app),
+        Some(super::ActiveOverlay::Settings)
+    ));
+    app.settings.open = false;
+    assert!(matches!(
+        super::active_overlay(&app),
+        Some(super::ActiveOverlay::Consent(_))
+    ));
+    app.pending_consent = None;
+    app.setup = Some(ProjectSetup {
+        root,
+        mode: SetupMode::Manage,
+        servers: true,
+        explain: false,
+        census: None,
+    });
+    assert!(matches!(
+        super::active_overlay(&app),
+        Some(super::ActiveOverlay::Setup(_))
+    ));
+    app.settings.open = true;
+    assert!(matches!(
+        super::active_overlay(&app),
+        Some(super::ActiveOverlay::Settings)
+    ));
+}
+
 /// The setup sheet with no AI key offers where one is added, a click away:
 /// it said "Needs an API key in Settings." and left the reader to find it.
 #[test]
@@ -15531,8 +15579,9 @@ fn a_click_on_a_breakpoints_dot_is_not_taken_by_the_sidebars_divider() {
     let size = iced::Size::new(1000.0, 640.0);
     let app = sidebar_app(size);
     let edge = app.window_frame + app.sidebar_width;
-    // The dot starts past the sheet's 1px border and the bookmark ribbon's
-    // room, 4.5px in; its left side is the first place a click aims.
+    // A dot starts past the sheet's 1px border and the bookmark ribbon's
+    // room, 4.5px in at the least; its left side is the first place a
+    // click aims.
     for x in [edge + 5.0, edge + 8.0] {
         let at = iced::Point::new(x, 300.0);
         let mut renderer = renderer();

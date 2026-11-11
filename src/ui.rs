@@ -378,7 +378,11 @@ pub(crate) enum ActiveOverlay<'a> {
 /// The overlay on top right now, if any (see [`ActiveOverlay`]).
 pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
     use ActiveOverlay as O;
-    let overlay = if let Some(root) = &app.pending_consent {
+    // Settings opened from the project's sheet — its "Add an API Key…" —
+    // comes up over it, and closes back to it: under the sheet, the click
+    // seemed to do nothing.
+    let sheet_up = !app.settings.open;
+    let overlay = if let Some(root) = app.pending_consent.as_ref().filter(|_| sheet_up) {
         O::Consent(root)
     } else if let Some((number, pending)) = app.proj.pending_lsp_command.on_screen() {
         O::LspCommand(
@@ -391,7 +395,7 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
     } else if let Some(setup) = app
         .setup
         .as_ref()
-        .filter(|s| s.mode != crate::app::setup::SetupMode::Open)
+        .filter(|s| sheet_up && s.mode != crate::app::setup::SetupMode::Open)
     {
         O::Setup(setup)
     } else if app.update.show_notes {
@@ -552,6 +556,22 @@ impl<'a> ActiveOverlay<'a> {
             Self::Finder => finder_modal(app),
             Self::ContextMenu(menu) => context_menu(app, menu),
             Self::Hover(hover) => hover_tooltip(hover),
+        }
+    }
+
+    /// What the overlay is called where it is opened, in English — as it is
+    /// put away by voice: "close the call graph", "hide Settings". `None`
+    /// for what goes by no name of its own (a menu, a prompt).
+    pub(crate) fn name(&self) -> Option<&'static str> {
+        match self {
+            Self::Graph(overlay) => Some(graph::graph_title(*overlay)),
+            Self::Settings => Some(tr_noop!("Settings")),
+            Self::FakeRun(sheet) => Some(if sheet.debug {
+                tr_noop!("Fake debug")
+            } else {
+                tr_noop!("Fake run")
+            }),
+            _ => None,
         }
     }
 

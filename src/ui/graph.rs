@@ -150,16 +150,22 @@ pub(crate) fn graph_modal_frame<'a>(
     )
 }
 
+/// A project graph's title, in English: titled as the strip, the menu and
+/// the command bar name what opens it — and as voice puts it away ("close
+/// the call graph").
+pub(crate) fn graph_title(overlay: crate::Overlay) -> &'static str {
+    match overlay {
+        crate::Overlay::ProjectImports => tr_noop!("Import Graph"),
+        crate::Overlay::ProjectCalls => tr_noop!("Call Graph"),
+        crate::Overlay::ProjectTypes => tr_noop!("Type Graph"),
+        crate::Overlay::ProjectMaps => tr_noop!("Project Graphs"),
+    }
+}
+
 pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element<'_, Message> {
     // Its list's rows counted from 1, as voice picks them.
     super::heard::list();
-    // Titled as the strip, the menu and the command bar name what opens it.
-    let title = match overlay {
-        crate::Overlay::ProjectImports => tr!("Import Graph"),
-        crate::Overlay::ProjectCalls => tr!("Call Graph"),
-        crate::Overlay::ProjectTypes => tr!("Type Graph"),
-        crate::Overlay::ProjectMaps => tr!("Project Graphs"),
-    };
+    let title = crate::i18n::lookup(graph_title(overlay));
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
         crate::Overlay::ProjectCalls => Some(if let Some(progress) = app.refine_progress_label() {

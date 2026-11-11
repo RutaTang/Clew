@@ -2169,6 +2169,31 @@ fn on_screen(
     }
 }
 
+/// What is on top is put away by its name, as Esc does: "close the call
+/// graph" went to Ask, a question about the call graph, and the graph
+/// stayed. A question naming it still goes there.
+#[test]
+fn what_is_on_top_is_closed_by_its_name() {
+    let (mut app, script, _) = voice_app("voice-close-named", "");
+    let _ = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectCalls)));
+    assert!(matches!(
+        crate::ui::active_overlay(&app),
+        Some(crate::ui::ActiveOverlay::Graph(Overlay::ProjectCalls))
+    ));
+    say_words(&mut app, &script, "Close the call graph.");
+    assert!(crate::ui::active_overlay(&app).is_none(), "{}", app.status);
+    assert_eq!(ran(&app), Some("Closed"));
+    assert!(
+        app.proj.ask_input.is_empty(),
+        "asked: {}",
+        app.proj.ask_input
+    );
+
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    say_words(&mut app, &script, "close settings");
+    assert!(!app.settings.open, "{}", app.status);
+}
+
 /// "Never mind" and "cancel" put away what is on top: they answer a
 /// question only when it is the one on top — a dialog — never a card in
 /// Ask the reader was not looking at, which "no" still answers.

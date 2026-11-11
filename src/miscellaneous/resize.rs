@@ -24,7 +24,8 @@ pub const THICKNESS: f32 = 8.0;
 
 /// The thickness of the strip beside the sidebar, which lies over the code
 /// sheet's edge: it ends before the gutter's marks (a breakpoint's dot
-/// starts 4.5px in), so a click on a dot never grabs the divider.
+/// starts 4.5px in at the least), so a click on a dot never grabs the
+/// divider.
 pub const EDGE_GRIP: f32 = 4.0;
 
 pub struct Divider<'a, Message> {

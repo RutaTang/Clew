@@ -1953,6 +1953,9 @@ where
         let gutter_px = gutter_width(state.char_width, self.font_size);
         // The line numbers' column, right-aligned to its edge.
         let number_w = number_width(state.char_width, self.font_size);
+        // The room left of the file's widest number, where its marks sit.
+        let mark_room = number_w
+            - self.lines.len().max(1).to_string().len() as f32 * state.char_width * NUMBER_SCALE;
 
         // Visible row range relative to the content top (rows, not source
         // lines — collapsed folds compress the vertical space).
@@ -2095,6 +2098,7 @@ where
                 bounds.x,
                 y,
                 lh,
+                mark_room,
             ) {
                 renderer.fill_quad(
                     renderer::Quad {
@@ -2705,16 +2709,19 @@ struct GutterMark {
 const BOOKMARK_RIBBON_W: f32 = 2.5;
 
 /// The marks a line's gutter shows at its left, from the gutter's `x`, the
-/// row at `y` `lh` tall: a bookmark's ribbon down its edge — the line number
-/// tinted was its only sign, a colour alone — then a breakpoint: a dot, a
-/// rounded square when conditional (it was only amber), a ring when the
-/// adapter refused it.
+/// row at `y` `lh` tall, `room` wide before the file's widest line number
+/// starts: a bookmark's ribbon down its edge — the line number tinted was
+/// its only sign, a colour alone — then a breakpoint: a dot, a rounded
+/// square when conditional (it was only amber), a ring when the adapter
+/// refused it, centred in that room — one column for the whole file, so it
+/// doesn't shift as the numbers grow a digit — and never over the ribbon.
 fn gutter_marks(
     bookmark: bool,
     breakpoint: Option<BreakpointMark>,
     x: f32,
     y: f32,
     lh: f32,
+    room: f32,
 ) -> Vec<GutterMark> {
     let mut marks = Vec::new();
     if bookmark {
@@ -2734,7 +2741,7 @@ fn gutter_marks(
         let d = (lh * 0.55).min(9.0);
         marks.push(GutterMark {
             bounds: Rectangle {
-                x: x + BOOKMARK_RIBBON_W + 1.0,
+                x: x + ((room - d) / 2.0).max(BOOKMARK_RIBBON_W + 1.0),
                 y: y + (lh - d) / 2.0,
                 width: d,
                 height: d,
@@ -3190,14 +3197,14 @@ mod tests {
             conditional: false,
             refused: false,
         };
-        assert!(gutter_marks(false, None, 0.0, 0.0, 20.0).is_empty());
-        let ribbon = gutter_marks(true, None, 0.0, 0.0, 20.0);
+        assert!(gutter_marks(false, None, 0.0, 0.0, 20.0, 0.0).is_empty());
+        let ribbon = gutter_marks(true, None, 0.0, 0.0, 20.0, 0.0);
         assert_eq!(ribbon.len(), 1, "a bookmark has a mark of its own");
         assert!(
             ribbon[0].bounds.height > ribbon[0].bounds.width * 3.0,
             "a ribbon"
         );
-        let dot = gutter_marks(false, Some(plain), 0.0, 0.0, 20.0)[0];
+        let dot = gutter_marks(false, Some(plain), 0.0, 0.0, 20.0, 0.0)[0];
         let square = gutter_marks(
             false,
             Some(BreakpointMark {
@@ -3207,6 +3214,7 @@ mod tests {
             0.0,
             0.0,
             20.0,
+            0.0,
         )[0];
         assert!(dot.radius >= dot.bounds.width / 2.0 - 0.01, "round");
         assert!(square.radius < square.bounds.width / 3.0, "squared off");
@@ -3219,13 +3227,24 @@ mod tests {
             0.0,
             0.0,
             20.0,
+            0.0,
         )[0];
         assert!(dot.filled && !ring.filled);
-        let both = gutter_marks(true, Some(plain), 0.0, 0.0, 20.0);
+        let both = gutter_marks(true, Some(plain), 0.0, 0.0, 20.0, 0.0);
         assert_eq!(both.len(), 2);
         assert!(
             both[1].bounds.x >= both[0].bounds.x + both[0].bounds.width,
             "side by side: {both:?}"
+        );
+        // With room before the numbers, the dot sits in its middle; with
+        // little, it still keeps off the ribbon.
+        let centred = gutter_marks(true, Some(plain), 10.0, 0.0, 20.0, 30.0)[1];
+        let mid = centred.bounds.x + centred.bounds.width / 2.0;
+        assert!((mid - 25.0).abs() < 0.01, "{centred:?}");
+        let tight = gutter_marks(true, Some(plain), 0.0, 0.0, 20.0, 6.0);
+        assert!(
+            tight[1].bounds.x >= tight[0].bounds.x + tight[0].bounds.width,
+            "{tight:?}"
         );
     }
 
