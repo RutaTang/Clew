@@ -2047,6 +2047,18 @@ fn active_note<'a>(
     // This function or file, in one call — the card offered only the whole
     // project's Explain All, about 45 calls asked of a reader who wanted
     // one note.
+    // Explain, Try again and Explaining… take turns in one slot as wide as
+    // the widest: pressed, Explain became the wider "Explaining…", and
+    // "2 callers" went to a row of its own, under the pointer, its tip
+    // over the very word the reader waited for.
+    let explain_room = {
+        let words = [tr!("Explain"), tr!("Try again"), tr!("Explaining…")];
+        super::steady::widest(&words, NOTE_ACTION_SIZE, font(true)).max(super::steady::widest(
+            &words,
+            NOTE_ACTION_SIZE,
+            font(false),
+        ))
+    };
     if unexplained && let Some(node) = node {
         // Marked as what spends an AI call is: the sparkle, and a tip.
         let (label, tip) = if failed.is_some() {
@@ -2062,7 +2074,7 @@ fn active_note<'a>(
                 Glyph::Sparkle,
                 label.into(),
                 true,
-                None,
+                Some(explain_room),
                 true,
                 Message::Explain(ExplainMsg::Explain(node)),
             ),
@@ -2073,12 +2085,15 @@ fn active_note<'a>(
         actions = actions.push(
             container(
                 row![
-                    glyph::icon(Glyph::Sparkle, theme::dim(), 13.0),
+                    container(glyph::icon(Glyph::Sparkle, theme::dim(), 13.0))
+                        .width(Length::Fixed(13.0))
+                        .height(Length::Fixed(13.0)),
                     text(tr!("Explaining…"))
                         .size(NOTE_ACTION_SIZE)
                         .font(font(false))
                         .color(theme::dim())
-                        .wrapping(Wrapping::None),
+                        .wrapping(Wrapping::None)
+                        .width(Length::Fixed(explain_room.ceil())),
                 ]
                 .spacing(6)
                 .height(Fill)
@@ -2138,7 +2153,13 @@ fn active_note<'a>(
                 file = app.active_viewer().map_or("", |v| v.rel.as_str())
             ))),
         ));
-    let mut note = super::explain_view::render_note(app, &app.proj.explain.prepared);
+    // Its Explain failed: why, in its place — "Not explained yet." above it
+    // took the room the reason needed, and said what the failure says.
+    let mut note = if failed.is_some() {
+        Vec::new()
+    } else {
+        super::explain_view::render_note(app, &app.proj.explain.prepared)
+    };
     if let Some(why) = failed {
         note.push(
             text(tr!("Couldn't explain it: {reason}", reason = why))
