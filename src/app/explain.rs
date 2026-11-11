@@ -95,7 +95,14 @@ impl App {
         self.proj.explain.running = true;
         self.proj.explain.progress = Some((0, 0));
         self.proj.explain.failed = 0;
-        self.status = tr!("Explaining project…").into();
+        // What it does, said: a refresh of what changed is not the whole
+        // project explained again ("Explaining project… 20/45").
+        self.status = if self.proj.explain.pass_automatic {
+            tr!("Updating explanations…")
+        } else {
+            tr!("Explaining project…")
+        }
+        .into();
         let stream = iced::stream::channel(256, move |output| {
             let gather_root = root.clone();
             let fetch_ai = ai.clone();
@@ -656,7 +663,13 @@ impl App {
     }
 
     pub(crate) fn request_auto_refresh(&mut self) -> Task<Message> {
-        if !self.llm_available || self.proj.explain.cache.is_empty() {
+        // Switched off, a change spends nothing by itself: the status bar
+        // says the explanations are out of date, and the changed code
+        // waits for a pass the reader asks for (and is told the cost of).
+        if !self.llm_available
+            || self.proj.explain.cache.is_empty()
+            || !self.keep_explanations_fresh
+        {
             return Task::none();
         }
         // Let any running pass finish, then re-check on completion / next tick.

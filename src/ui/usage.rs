@@ -73,6 +73,23 @@ pub(crate) fn usage_page(app: &App) -> Element<'_, Message> {
         }
     }
     groups.push(prices_group(app, &app.usage.model));
+    // What spends without a press each time: said, and the reader's to
+    // turn off. A file changed on disk explained itself again, a few calls
+    // at a time, with nothing anywhere saying so.
+    groups.push(form::group(
+        tr!("Automatic AI calls"),
+        None,
+        None,
+        vec![form::toggle(
+            tr!("Keep explanations up to date"),
+            Some(
+                tr!("When code changes, Clew explains the changed parts again, a few AI calls each time. When off, the status bar says the explanations are out of date, and you choose when to update them.")
+                    .to_string(),
+            ),
+            app.keep_explanations_fresh,
+            |on| Message::Usage(UsageMsg::KeepFresh(on)),
+        )],
+    ));
     form::page(groups)
 }
 

@@ -844,6 +844,16 @@ impl App {
                 Task::none()
             }
             UsageMsg::PriceSaved(Ok(())) => Task::none(),
+            UsageMsg::KeepFresh(on) => {
+                self.keep_explanations_fresh = on;
+                self.keep_view_pref(crate::app::runtime::KEEP_EXPLANATIONS_FRESH, on);
+                // Turned on with code changed meanwhile: refreshed now.
+                if on {
+                    self.request_auto_refresh()
+                } else {
+                    Task::none()
+                }
+            }
             UsageMsg::ResetPrice => {
                 let model = self.usage.model.clone();
                 if let Err(e) = save_own_price(&model, None) {

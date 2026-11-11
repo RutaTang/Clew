@@ -1411,6 +1411,11 @@ pub struct App {
     /// Lines down the code's indentation (the View menu's "Indent guides").
     /// Off as the design has it.
     pub show_indent_guides: bool,
+    /// Explain again, by itself, the code a change on disk made new or
+    /// different — a few AI calls at a time (Settings → Usage and cost).
+    /// Off, the status bar says the explanations are out of date, and
+    /// refreshing them asks first, with what it would cost.
+    pub keep_explanations_fresh: bool,
     /// The LLM settings modal: whether it's open and its draft fields (see
     /// [`SettingsDraft`]).
     pub settings: SettingsDraft,

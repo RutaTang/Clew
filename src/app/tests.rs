@@ -3286,6 +3286,51 @@ fn auto_refresh_throttles_but_manual_does_not() {
     assert!(!app.proj.refresh_pending, "the queued change rides along");
 }
 
+/// Switched off (Settings → Usage and cost), a change to the code spends
+/// nothing by itself: no pass starts, none is queued, and turning it back on
+/// refreshes what changed meanwhile.
+#[test]
+fn explanations_kept_fresh_only_when_switched_on() {
+    let mut app = blank_app();
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    app.proj.explain.cache.insert(
+        explain::Node::File(PathBuf::from("a.rs")),
+        explain::Cached {
+            summary: "s".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    assert!(app.keep_explanations_fresh, "on by default, as it was");
+    let _ = app.update(Message::Usage(UsageMsg::KeepFresh(false)));
+    assert!(!app.keep_explanations_fresh);
+    app.proj
+        .explain
+        .changed_sources
+        .insert(PathBuf::from("a.rs"));
+    assert!(
+        run_task(app.request_auto_refresh()).is_empty(),
+        "switched off, a change must start no pass"
+    );
+    assert!(
+        app.proj.last_auto_refresh.is_none() && !app.proj.refresh_pending,
+        "switched off, nothing is queued for later either"
+    );
+    assert!(
+        !app.proj.explain.changed_sources.is_empty(),
+        "what changed is kept for the pass the reader asks for"
+    );
+    let started = run_task(app.update(Message::Usage(UsageMsg::KeepFresh(true))));
+    assert!(
+        started
+            .iter()
+            .any(|m| matches!(m, Message::Explain(ExplainMsg::Refresh))),
+        "switched back on, what changed meanwhile is refreshed: {started:?}"
+    );
+}
+
 #[test]
 fn search_flow_message_wiring() {
     let mut app = scanned_app("search");

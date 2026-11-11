@@ -859,6 +859,14 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
             theme::accent(),
             true,
         )
+    } else if !app.keep_explanations_fresh && !app.proj.explain.changed_sources.is_empty() {
+        // Code changed, and nothing refreshes it by itself (Settings →
+        // Usage and cost): said, not claimed up to date.
+        (
+            format!("↻ {}", tr!("Explanations out of date")),
+            theme::accent(),
+            true,
+        )
     } else {
         // The notes, not the project: "Up to date" beside the scan's own
         // "Up to date" said one word for two things.
@@ -881,6 +889,7 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
             )
         ),
         format!("↻ {}", tr!("Explanations up to date")),
+        format!("↻ {}", tr!("Explanations out of date")),
     ];
     let every: Vec<&str> = every.iter().map(String::as_str).collect();
     let words = super::steady::slot(
@@ -893,9 +902,18 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
         .style(theme::icon_button(false))
         .padding([2, 8]);
     if enabled {
+        // As Explain All is: the sheet first, with what it would cost. A
+        // click on a label that read "up to date" ran the whole pass, every
+        // function not yet explained included, with no word of its cost.
         b = b.on_press(super::heard::said(
             &label,
-            Message::Explain(ExplainMsg::RefreshAll),
+            super::toolbar::explain_all_message(app),
+        ));
+        return Some(super::toolbar::tip_at(
+            b,
+            tr!("Explain what's new or changed. Shows the cost before anything runs."),
+            None,
+            tooltip::Position::Top,
         ));
     }
     Some(b.into())

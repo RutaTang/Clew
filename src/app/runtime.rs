@@ -143,6 +143,7 @@ impl App {
             show_minimap: view_pref(VIEW_MINIMAP, false),
             show_inline_blame: view_pref(VIEW_BLAME, false),
             show_indent_guides: view_pref(VIEW_INDENT_GUIDES, false),
+            keep_explanations_fresh: view_pref(KEEP_EXPLANATIONS_FRESH, true),
             settings: SettingsDraft::default(),
             ask_agent: crate::app::integrations::stored_ask_agent(),
             overlay_open: false,
@@ -971,6 +972,8 @@ pub(crate) const VIEW_INLAY_HINTS: &str = "view_inlay_hints";
 pub(crate) const VIEW_MINIMAP: &str = "view_minimap";
 pub(crate) const VIEW_BLAME: &str = "view_inline_blame";
 pub(crate) const VIEW_INDENT_GUIDES: &str = "view_indent_guides";
+/// Whether explanations are refreshed by themselves as code changes.
+pub(crate) const KEEP_EXPLANATIONS_FRESH: &str = "keep_explanations_fresh";
 
 /// A View-menu choice as saved, or `default` when it never was (or the
 /// config cannot be read).

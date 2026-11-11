@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{
-    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, GlossaryMsg, GraphMsg,
-    HoverMsg, NavMsg, ProjectMsg, ReadingMsg, ServerMsg, Stamp, TutorialMsg, WalkMsg, WindowMsg,
+    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg,
+    GlossaryMsg, GraphMsg, HoverMsg, NavMsg, ProjectMsg, ReadingMsg, ServerMsg, Stamp, TutorialMsg,
+    WalkMsg, WindowMsg,
 };
 
 use iced::advanced::clipboard;
@@ -1452,6 +1453,37 @@ fn indexing_and_explain_progress_say_what_is_happening_once() {
             text_at(&mut sim, |t| t.contains("Up to date"), 1).is_none(),
             "\"Up to date\" twice"
         );
+        // A click asks first: the Explain sheet, with what it would cost,
+        // not a pass of every function not yet explained.
+        let sent = click(sim_of(&app), "↻ Explanations up to date");
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
+            )),
+            "the chip opens the Explain sheet: {sent:?}"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|m| matches!(m, Message::Explain(ExplainMsg::RefreshAll))),
+            "the chip ran a pass with no word of its cost"
+        );
+    }
+    {
+        // Not kept fresh by itself, changed code is said to be out of date.
+        app.keep_explanations_fresh = false;
+        app.proj
+            .explain
+            .changed_sources
+            .insert(PathBuf::from("/nonexistent/clew-ui-test/src/lib.rs"));
+        {
+            let mut sim = sim_of(&app);
+            assert!(shows(&mut sim, "Explanations out of date"));
+            assert!(!shows(&mut sim, "Explanations up to date"));
+        }
+        app.keep_explanations_fresh = true;
+        app.proj.explain.changed_sources.clear();
     }
     app.proj.explain.running = true;
     app.proj.explain.progress = Some((3, 9));

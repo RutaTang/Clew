@@ -2159,6 +2159,8 @@ pub enum UsageMsg {
     ResetPrice,
     /// A price was kept in `config.toml` — or why not.
     PriceSaved(Result<(), String>),
+    /// Whether explanations are refreshed by themselves as code changes.
+    KeepFresh(bool),
 }
 
 /// Auto-update: checking, downloading and installing a release.
@@ -3192,7 +3194,8 @@ impl UsageMsg {
             | UsageMsg::OpenBilling
             | UsageMsg::Price(..)
             | UsageMsg::ResetPrice
-            | UsageMsg::PriceSaved(..) => None,
+            | UsageMsg::PriceSaved(..)
+            | UsageMsg::KeepFresh(..) => None,
         }
     }
 }
