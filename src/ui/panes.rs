@@ -1400,6 +1400,14 @@ fn notes_beside_code<'a>(
         } else {
             0.0
         };
+        // While the diff or Time Travel stands in the code's place, none of
+        // its lines is on screen to be level with: the note the caret is in
+        // heads the margin — where it is with its function at the top of the
+        // code — and no other is laid beside lines that are not there. Each
+        // was placed by the hidden code's scroll, under the diff's banner:
+        // the raised note a banner lower than without it, the rest beside
+        // whatever of the diff was there.
+        let replaced = code_replaced(app, v);
         let mut notes: Vec<(f32, f32, Element<'_, Message>)> = Vec::new();
         if matches!(active, Some(Node::File(_))) {
             let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
@@ -1425,8 +1433,11 @@ fn notes_beside_code<'a>(
             } else {
                 (NOTE_H, 0.0)
             };
+            if replaced && !is_active {
+                continue;
+            }
             // Only what is in view is looked up.
-            if y + h < 0.0 || y - lift > size.height {
+            if !replaced && (y + h < 0.0 || y - lift > size.height) {
                 continue;
             }
             let node = Node::Function {
@@ -1456,7 +1467,9 @@ fn notes_beside_code<'a>(
                     .unwrap_or_default();
                 plain_note(sym.name.clone(), meta, summary, sym.line)
             };
-            let top = if is_active {
+            let top = if replaced {
+                0.0
+            } else if is_active {
                 (y - lift).min(size.height - h - foot)
             } else {
                 y - lift
@@ -1510,6 +1523,12 @@ fn notes_beside_code<'a>(
 
 /// The width the margin's notes are built at when only gathered.
 const MARGIN_GATHER_W: f32 = 320.0;
+
+/// Whether the active pane shows something else in `v`'s code's place —
+/// its diff, or Time Travel — as [`pane_view`] decides.
+fn code_replaced(app: &App, v: &Viewer) -> bool {
+    time_travel_on_screen(app).is_some() || app.proj.diff.as_ref().is_some_and(|d| d.abs == v.abs)
+}
 
 /// A note's head: the name it is about (as code, for a function) and what
 /// kind of thing that is, where.

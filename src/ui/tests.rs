@@ -10396,6 +10396,97 @@ fn the_raised_note_keeps_clear_of_the_ask_pill() {
     assert!(seen_low, "the note was never brought low in the view");
 }
 
+/// While the diff or Time Travel stands in the code's place, the note the
+/// caret is in heads the margin — where it is with its function at the top
+/// of the code — and no other note is laid beside lines that are not on
+/// screen. Each was placed by the hidden code's scroll: the raised note a
+/// banner lower than without the diff, the rest beside whatever of the
+/// diff was there.
+#[test]
+fn a_diff_in_the_codes_place_leaves_the_margin_its_raised_note_alone() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    let function = |name: &str, line: usize| crate::outline::Symbol {
+        name: name.into(),
+        kind: "function".into(),
+        line,
+        end_line: line + 2,
+    };
+    // `origin` heads the file and has the caret; `other`, further down,
+    // is explained.
+    app.proj.panes[0].as_mut().unwrap().symbols =
+        vec![function("origin", 1), function("other", 10)];
+    let node = |name: &str| crate::explain::Node::Function {
+        file: abs.clone(),
+        name: name.into(),
+        ordinal: 0,
+    };
+    app.proj.explain.view = Some(node("origin"));
+    app.proj.explain.cache.insert(
+        node("other"),
+        crate::explain::Cached {
+            summary: "Does the other thing.".into(),
+            prompt_hash: crate::incremental::content_hash(b"t"),
+            detail: None,
+            basis: None,
+        },
+    );
+    let margin = |app: &App| {
+        let mut sim = sim_of(app);
+        let raised = text_at(&mut sim, |t| t == "origin", 0).map(|r| r.y);
+        (raised, shows(&mut sim, "Does the other thing."))
+    };
+    let (beside_code, other_shown) = margin(&app);
+    let beside_code = beside_code.expect("the raised note beside the code");
+    assert!(other_shown, "beside the code, the other note shows");
+
+    app.proj.diff = Some(crate::DiffState::new(
+        abs.clone(),
+        "src/lib.rs".into(),
+        Vec::new(),
+    ));
+    let (beside_diff, other_shown) = margin(&app);
+    let beside_diff = beside_diff.expect("the raised note beside the diff");
+    assert!(
+        (beside_diff - beside_code).abs() < 1.0,
+        "beside the diff at {beside_diff}, beside the code at {beside_code}"
+    );
+    assert!(!other_shown, "a note beside the diff's lines");
+    app.proj.diff = None;
+
+    let hv = app.proj.panes[0].clone().unwrap();
+    app.proj.time_travel = Some(crate::TimeTravel {
+        abs: abs.clone(),
+        rel: "src/lib.rs".into(),
+        lang: Some("rust"),
+        scope: crate::TimeScope::File,
+        commits: Vec::new(),
+        idx: 0,
+        viewer: Some(hv),
+        scroll_y: 0.0,
+        scroll_x: 0.0,
+        caret: None,
+        focus_line: None,
+        loading: false,
+        generation: 0,
+        session: 0,
+        scoped: 0,
+        why: std::collections::HashMap::new(),
+        why_loading: false,
+        why_pending: std::collections::HashSet::new(),
+        story: None,
+        story_loading: false,
+    });
+    let (in_time_travel, other_shown) = margin(&app);
+    let in_time_travel = in_time_travel.expect("the raised note in Time Travel");
+    assert!(
+        (in_time_travel - beside_code).abs() < 1.0,
+        "in Time Travel at {in_time_travel}, beside the code at {beside_code}"
+    );
+    assert!(!other_shown, "a note beside Time Travel's lines");
+}
+
 /// Escape in the Files view's filter empties it, as its × does: it stayed
 /// filled however often Escape was pressed. Only while the filter has the
 /// keyboard: Escape elsewhere leaves it be.

@@ -44,6 +44,22 @@ pub(crate) fn pill_foot<'a, M: 'a>() -> Element<'a, M> {
     space().height(PILL_H + ASK_MARGIN).into()
 }
 
+/// How far up from the foot of `pane`'s code view the pill floats over its
+/// lines: while Ask is hidden to it and nothing else is under it there — no
+/// margin (which is always wider than the pill), no debugger's panel, no
+/// page over the panes — in the pane at the window's right. Else nothing.
+/// The caret is kept above it ([`App::code_seen_h`](crate::App)): moved
+/// down a line at a time in a narrow window, it went on under the pill.
+pub(crate) fn pill_over_code(app: &App, pane: usize) -> f32 {
+    let rightmost = usize::from(app.proj.split);
+    let over = app.ask_view == AskView::Hidden
+        && pane == rightmost
+        && !right_panel_shown(app)
+        && !app.show_bottom
+        && pane_cover(app).is_none();
+    if over { PILL_H + ASK_MARGIN } else { 0.0 }
+}
+
 /// Where the open Ask window is drawn, in window coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AskPlace {

@@ -1438,23 +1438,40 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// How much of `pane`'s code view is seen: its height, less the foot of
+    /// it the Ask pill floats over ([`ui::pill_over_code`]). The caret kept
+    /// in view is kept in this — moved down a line at a time in a narrow
+    /// window, it went on under the pill — and a page is as many lines.
+    pub(crate) fn code_seen_h(&self, pane: usize) -> f32 {
+        let line_height = self.line_height();
+        self.proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .map_or(0.0, |v| {
+                (v.viewport_h - ui::pill_over_code(self, pane)).max(line_height)
+            })
+    }
+
     /// Move the active pane's block cursor and scroll it into view.
     pub(crate) fn move_cursor(&mut self, motion: viewer::Motion) -> Task<Message> {
         let pane = self.proj.active;
         let line_height = self.line_height();
+        let seen_h = self.code_seen_h(pane);
         let Some(v) = self.active_viewer_mut() else {
             return Task::none();
         };
         v.move_caret(motion);
         let (line, _) = v.caret.unwrap_or((0, 0));
         // Keep the cursor line within the viewport (in display rows, so folds
-        // above it are accounted for).
+        // above it are accounted for) — above the Ask pill, where it floats
+        // over the code's foot.
         let top = v.row_of(line) as f32 * line_height;
         let bottom = top + line_height;
         if top < v.scroll_y {
             v.scroll_y = top;
-        } else if bottom > v.scroll_y + v.viewport_h {
-            v.scroll_y = bottom - v.viewport_h;
+        } else if bottom > v.scroll_y + seen_h {
+            v.scroll_y = bottom - seen_h;
         }
         let y = v.scroll_y;
         self.reader_moved_caret(pane);
@@ -1468,10 +1485,11 @@ impl App {
     /// end it goes to the last line (the first, scrolling up).
     pub(crate) fn scroll_pages(&mut self, pages: i32) -> Task<Message> {
         let line_height = self.line_height();
-        let Some(v) = self.active_viewer() else {
+        if self.active_viewer().is_none() {
             return Task::none();
-        };
-        let page = ((v.viewport_h / line_height).floor() as i64 - 1).max(1);
+        }
+        let seen_h = self.code_seen_h(self.proj.active);
+        let page = ((seen_h / line_height).floor() as i64 - 1).max(1);
         self.scroll_rows(page * i64::from(pages))
     }
 
@@ -1684,6 +1702,7 @@ impl App {
         };
         let pane = self.proj.active;
         let line_height = self.line_height();
+        let seen_h = self.code_seen_h(pane);
         let Some(v) = self.active_viewer_mut() else {
             return Task::none();
         };
@@ -1695,9 +1714,10 @@ impl App {
             v.scroll_y =
                 Self::estimate_notebook_offset(&doc, &v.nb_expanded, line + 1, line_height);
         } else {
-            // Center-ish the match line (display rows account for folds).
+            // Center-ish the match line (display rows account for folds),
+            // unless it is in view already — clear of the Ask pill.
             let top = v.row_of(line) as f32 * line_height;
-            if top < v.scroll_y || top + line_height > v.scroll_y + v.viewport_h {
+            if top < v.scroll_y || top + line_height > v.scroll_y + seen_h {
                 v.scroll_y = (top - v.viewport_h / 3.0).max(0.0);
             }
         }

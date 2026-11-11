@@ -184,25 +184,25 @@ impl Action {
             Action::OpenSymbol => tr!("Go to symbol"),
             Action::ProjectSearch => tr!("Search text"),
             Action::FindInFile => tr!("Find in file"),
-            Action::CopySelection => tr!("Copy selection"),
+            Action::CopySelection => tr!("Copy"),
             Action::ToggleBookmark => tr!("Toggle bookmark"),
             Action::GotoLine => tr!("Go to line"),
-            Action::ToggleSplit => tr!("Toggle split view"),
+            Action::ToggleSplit => tr!("Split view"),
             Action::ZoomIn => tr!("Zoom in"),
             Action::ZoomOut => tr!("Zoom out"),
             Action::ZoomReset => tr!("Actual size"),
             Action::GoBack => tr!("Back"),
             Action::GoForward => tr!("Forward"),
-            Action::TraceValue => tr!("Trace value at cursor"),
-            Action::FakeRun => tr!("Fake run at cursor"),
-            Action::FakeDebug => tr!("Fake debug at cursor"),
+            Action::TraceValue => tr!("Trace value"),
+            Action::FakeRun => tr!("Fake run"),
+            Action::FakeDebug => tr!("Fake debug"),
             Action::ToggleAsk => tr!("Ask"),
             Action::Run => tr!("Run without debugging"),
             Action::StartDebug => tr!("Start debugging"),
-            Action::CallGraph => tr!("Project call graph"),
-            Action::ImportGraph => tr!("Project import graph"),
-            Action::TypeGraph => tr!("Project type graph"),
-            Action::ProjectMaps => tr!("Project graphs (schema, routes, …)"),
+            Action::CallGraph => tr!("Call graph"),
+            Action::ImportGraph => tr!("Import graph"),
+            Action::TypeGraph => tr!("Type graph"),
+            Action::ProjectMaps => tr!("Project graphs"),
             Action::ExplainAll => tr!("Explain All"),
             Action::ToggleDiff => tr!("Diff vs HEAD"),
             Action::TimeTravel => tr!("Time Travel"),
@@ -211,7 +211,7 @@ impl Action {
             Action::Shortcuts => tr!("Keyboard shortcuts"),
             Action::CommandPalette => tr!("Command palette"),
             Action::Jump => tr!("Jump to a control"),
-            Action::Voice => tr!("Talk (voice)"),
+            Action::Voice => tr!("Talk"),
             Action::Overview => tr!("Architecture overview"),
             Action::Stats => tr!("Code statistics"),
             Action::WeakSpots => tr!("Weak spots"),
@@ -1178,6 +1178,34 @@ mod tests {
         for action in Action::ALL {
             assert_eq!(Action::from_id(action.id()), Some(action));
             assert!(!action.menu().title.is_empty());
+        }
+    }
+
+    /// The shortcut list names each command as the menus and the command
+    /// bar do — its menu title, less the "…" — in every language. It said
+    /// "Toggle split view" where the menu said "Split View", "Project call
+    /// graph" for "Call Graph", "Talk (voice)" for "Talk", and in French,
+    /// Chinese, Japanese and Korean another name for Jump to a Control.
+    /// One stays its own: the list's "Find in file", where the Edit menu
+    /// has the platform's "Find…" (and voice says "find" to it). In a list
+    /// with no menu round it, a bare "Find" would not say what is searched;
+    /// and "Find" is already the name of finding by meaning.
+    #[test]
+    fn the_shortcut_list_names_each_command_as_the_menu_does() {
+        for lang in crate::i18n::Lang::ALL {
+            crate::i18n::with_lang(lang, || {
+                for action in Action::ALL {
+                    if action == Action::FindInFile {
+                        continue;
+                    }
+                    let title = crate::i18n::lookup(action.menu().title);
+                    assert_eq!(
+                        action.label().to_lowercase(),
+                        title.trim_end_matches('…').to_lowercase(),
+                        "{lang:?}: {action:?}"
+                    );
+                }
+            });
         }
     }
 }

@@ -33683,7 +33683,7 @@ fn an_export_waits_for_the_docs_index_its_glossary_needs() {
     );
 }
 
-/// The "Trace value at cursor" action traces the name under the caret — it
+/// The "Trace value" action traces the name under the caret — it
 /// asks for a language server, which this fixture has none of — and says
 /// what to do without a caret. A trace cut at the cap says so whatever mix
 /// of definitions and references overflowed it, and a row never read moves
@@ -35324,5 +35324,117 @@ fn the_reading_guide_is_written_kept_and_regenerated_as_a_guide() {
             .iter()
             .any(|m| matches!(m, Message::Walk(WalkMsg::Generate(s)) if s == GUIDE_SCOPE)),
         "{again:?}"
+    );
+}
+
+/// Where the Ask pill floats over the code's foot — a narrow window, no
+/// margin under it — the caret moved down a line at a time stays above it:
+/// it went on under the pill. Page Down puts the last line seen whole above
+/// the pill at the top, and find-next scrolls to a match under it. Where
+/// nothing floats over the code, the caret goes down to the view's last
+/// line.
+#[test]
+fn the_caret_keeps_clear_of_the_ask_pill() {
+    let mut app = blank_app();
+    let root = PathBuf::from("/nonexistent/clew-caret-pill");
+    let source: String = (0..200)
+        .map(|i| format!("let value_{i} = {i};\n"))
+        .collect();
+    let lines = crate::highlight::plain_lines(&source);
+    app.proj.project = Some(crate::Project {
+        root: root.clone(),
+        tree: Default::default(),
+        files: Arc::new(Vec::new()),
+        truncated: false,
+    });
+    app.proj.panes[0] = Some(Viewer::new(
+        root.join("src/lib.rs"),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(source),
+        lines,
+    ));
+    app.proj.active = 0;
+    assert_eq!(app.ask_view, crate::AskView::Hidden, "the pill shows");
+    app.show_bottom = false;
+    let lh = app.line_height();
+    let view_h = 16.0 * lh;
+    let foot = crate::ui::PILL_H + crate::ui::ASK_MARGIN;
+    let from_top = |app: &mut App| {
+        let v = app.active_viewer_mut().unwrap();
+        v.viewport_h = view_h;
+        v.viewport_measured = true;
+        v.scroll_y = 0.0;
+        v.caret = Some((0, 0));
+    };
+    // How far down the view the caret line's foot is.
+    let caret_foot = |app: &App| {
+        let v = app.active_viewer().unwrap();
+        let (line, _) = v.caret.unwrap();
+        (v.row_of(line) + 1) as f32 * lh - v.scroll_y
+    };
+
+    // A narrow window: no margin, the pill over the code.
+    app.window_width = 760.0;
+    app.window_height = 520.0;
+    app.show_right_panel = true;
+    assert!(
+        !crate::ui::right_panel_shown(&app),
+        "no room for the margin"
+    );
+    from_top(&mut app);
+    let mut lowest = 0.0_f32;
+    for _ in 0..40 {
+        let _ = app.move_cursor(viewer::Motion::Down);
+        lowest = lowest.max(caret_foot(&app));
+        assert!(
+            caret_foot(&app) <= view_h - foot + 0.5,
+            "the caret's line ends at {} of {view_h}, under the pill from {}",
+            caret_foot(&app),
+            view_h - foot
+        );
+    }
+    assert!(
+        lowest > view_h - foot - lh,
+        "the caret went no lower than {lowest}"
+    );
+
+    // Page Down: the last line seen whole above the pill heads the page.
+    from_top(&mut app);
+    let last_seen = ((view_h - foot) / lh).floor() - 1.0;
+    let _ = app.scroll_pages(1);
+    let top = app.active_viewer().unwrap().scroll_y / lh;
+    assert!(
+        (top - last_seen).abs() < 0.01,
+        "the page starts at line {top}, the last seen was {last_seen}"
+    );
+
+    // Find-next to a match on the view's last line, under the pill.
+    from_top(&mut app);
+    let under = (view_h / lh) as usize - 1;
+    app.proj.find.open = true;
+    app.proj.find.query = format!("= {under};");
+    app.recompute_find();
+    let _ = app.update(Message::Editor(EditorMsg::FindStep(0)));
+    assert_eq!(app.active_viewer().unwrap().caret.map(|c| c.0), Some(under));
+    assert!(
+        caret_foot(&app) <= view_h - foot + 0.5,
+        "the match's line ends at {} of {view_h}, under the pill",
+        caret_foot(&app)
+    );
+    app.proj.find.open = false;
+
+    // A wide window: the margin under the pill, the caret down to the foot.
+    app.window_width = 1280.0;
+    app.window_height = 860.0;
+    assert!(crate::ui::right_panel_shown(&app), "the margin shows");
+    from_top(&mut app);
+    for _ in 0..40 {
+        let _ = app.move_cursor(viewer::Motion::Down);
+    }
+    assert!(
+        (caret_foot(&app) - view_h).abs() < 0.5,
+        "beside the margin the caret's line ends at {} of {view_h}",
+        caret_foot(&app)
     );
 }
