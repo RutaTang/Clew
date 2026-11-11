@@ -3144,6 +3144,7 @@
  "{file} (too large, {size} KiB)": "{file} (너무 큼, {size} KiB)",
  "{file} (too large, {size})": "{file} (너무 큼, {size})",
  "{file} could not be read there": "호스트에서 {file} 파일을 읽을 수 없음",
+ "{file} does not run on its own": "{file}은(는) 단독으로 실행되지 않습니다",
  "{file} is not UTF-8 text — its summaries are dropped": "{file} 파일은 UTF-8 텍스트가 아니어서 요약을 삭제했습니다",
  "{file} is not a plain file — its summaries are dropped": "{file} 파일은 일반 파일이 아니어서 요약을 삭제했습니다",
  "{file} is too large to explain ({size}) — its summaries are dropped": "{file} 파일은 너무 커서({size}) 설명할 수 없습니다 — 요약을 삭제했습니다",

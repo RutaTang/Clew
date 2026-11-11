@@ -350,6 +350,7 @@ impl App {
             .filter(|v| picked && v.abs != program)
             .and_then(|v| v.abs.file_name())
             .map(|n| n.to_string_lossy().into_owned());
+        self.debug.ran_for = reading.clone();
         self.status = match lang {
             Some(_) if no_debug => match reading {
                 Some(reading) => tr!(

@@ -218,6 +218,11 @@ pub struct DebugState {
     /// ends: it went on saying "Debugger running…" over a program that had
     /// exited.
     pub said: Option<String>,
+    /// The file being read when Run picked another program to run for it
+    /// ("pricing.py" when main.py ran): said in the run's panel for as long
+    /// as the run is there. Said only on the status line, it was gone in
+    /// under half a second, and the reader took it that pricing.py ran.
+    pub ran_for: Option<String>,
     /// Watch expressions (persist across stops/sessions).
     pub watches: Vec<String>,
     /// The add-watch input box.
@@ -299,6 +304,7 @@ pub struct ParkedDebug {
     pub trace_program: Option<String>,
     pub pending_reason: String,
     pub said: Option<String>,
+    pub ran_for: Option<String>,
     pub last_fn: Option<String>,
     pub hover_safe: bool,
     pub child_started: Option<u64>,

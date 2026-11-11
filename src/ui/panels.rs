@@ -411,6 +411,17 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 .size(ts::SMALL)
                 .color(status_color)
                 .wrapping(Wrapping::None),
+            // Picked for the file being read, which does not run itself:
+            // said here, with the run, for as long as it is shown.
+            match app.debug.ran_for.as_deref() {
+                Some(file) => Element::from(
+                    text(tr!("{file} does not run on its own", file = file))
+                        .size(ts::SMALL)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::None),
+                ),
+                None => Element::from(space().width(0)),
+            },
             space().width(Fill),
             // A plain run never stops: no trace to count, nor to walk.
             if plain {

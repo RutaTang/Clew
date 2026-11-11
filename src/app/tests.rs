@@ -28110,6 +28110,7 @@ fn run_starts_the_program_without_the_debugger() {
     assert!(app.debug.session.is_some(), "{}", app.status);
     assert!(!app.debug.no_debug, "Debug debugs");
     assert!(app.status.contains("Starting debugger"), "{}", app.status);
+    assert_eq!(app.debug.ran_for, None, "main.py runs itself");
 }
 
 /// A jump that opens another file near its end keeps the file's start in
@@ -28239,6 +28240,9 @@ fn run_on_a_module_of_defs_runs_the_projects_main() {
     let _ = app.update(Message::Debug(DebugMsg::Run));
     let session = app.debug.session.as_ref().expect("a run");
     assert_eq!(session.program, root.join("main.py"), "{}", app.status);
+    // Said with the run, for as long as it is shown — said only on the
+    // status line, it was gone in under half a second.
+    assert_eq!(app.debug.ran_for.as_deref(), Some("pricing.py"));
     let _ = app.update(Message::Debug(DebugMsg::Stop));
 
     // A script with code at its top level runs itself.
@@ -28266,6 +28270,7 @@ fn run_on_a_module_of_defs_runs_the_projects_main() {
     let _ = app.update(Message::Debug(DebugMsg::Run));
     let session = app.debug.session.as_ref().expect("a run");
     assert_eq!(session.program, root.join("tool.py"));
+    assert_eq!(app.debug.ran_for, None);
     let _ = app.update(Message::Debug(DebugMsg::Stop));
 
     // A module whose only call at its top is a constant's value is still a

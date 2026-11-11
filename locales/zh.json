@@ -3144,6 +3144,7 @@
  "{file} (too large, {size} KiB)": "{file}（过大，{size} KiB）",
  "{file} (too large, {size})": "{file}（过大，{size}）",
  "{file} could not be read there": "无法在远程主机上读取 {file}",
+ "{file} does not run on its own": "{file} 不能单独运行",
  "{file} is not UTF-8 text — its summaries are dropped": "{file} 不是 UTF-8 文本，已舍弃它的摘要",
  "{file} is not a plain file — its summaries are dropped": "{file} 不是普通文件，已舍弃它的摘要",
  "{file} is too large to explain ({size}) — its summaries are dropped": "{file} 太大，无法解释（{size}），已舍弃它的摘要",

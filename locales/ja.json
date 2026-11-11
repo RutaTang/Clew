@@ -3144,6 +3144,7 @@
  "{file} (too large, {size} KiB)": "{file}（{size} KiB、サイズ超過）",
  "{file} (too large, {size})": "{file}（{size}、サイズ超過）",
  "{file} could not be read there": "{file} をリモートホストで読み込めませんでした",
+ "{file} does not run on its own": "{file} は単独では実行されません",
  "{file} is not UTF-8 text — its summaries are dropped": "{file} は UTF-8 テキストではないため、要約を破棄しました",
  "{file} is not a plain file — its summaries are dropped": "{file} は通常のファイルではないため、要約を破棄しました",
  "{file} is too large to explain ({size}) — its summaries are dropped": "{file} は解説するには大きすぎるため（{size}）、要約を破棄しました",

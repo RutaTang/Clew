@@ -3144,6 +3144,7 @@
  "{file} (too large, {size} KiB)": "{file} (trop volumineux, {size} Kio)",
  "{file} (too large, {size})": "{file} (trop volumineux, {size})",
  "{file} could not be read there": "{file} n’a pas pu être lu sur l’hôte",
+ "{file} does not run on its own": "{file} ne s’exécute pas seul",
  "{file} is not UTF-8 text — its summaries are dropped": "{file} n’est pas un texte UTF-8 — ses résumés sont supprimés",
  "{file} is not a plain file — its summaries are dropped": "{file} n’est pas un fichier ordinaire — ses résumés sont supprimés",
  "{file} is too large to explain ({size}) — its summaries are dropped": "{file} est trop volumineux pour être expliqué ({size}) — ses résumés sont supprimés",
