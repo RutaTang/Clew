@@ -159,7 +159,8 @@ fn balance_group(app: &App) -> Element<'_, Message> {
 /// one left out where another has money (DeepSeek tells "$0.00" beside a
 /// yuan balance).
 pub(crate) fn balance_said(amounts: &[(String, String)]) -> String {
-    let held = |a: &str| a.trim().parse::<f64>().map_or(true, |n| n != 0.0);
+    // Held unless it reads as nothing: an amount that does not parse is shown.
+    let held = |a: &str| !a.trim().parse::<f64>().is_ok_and(|n| n == 0.0);
     let any_held = amounts.iter().any(|(_, a)| held(a));
     let shown: Vec<String> = amounts
         .iter()
