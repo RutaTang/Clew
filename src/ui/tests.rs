@@ -15999,3 +15999,109 @@ fn a_filtered_history_draws_no_branches() {
     assert_eq!(app.proj.git_log.commits[1].sha, old);
     assert!(g.iter().all(|r| !r.dashed), "{g:?}");
 }
+
+/// Updates is the last of Settings' pages: what a reader sets up first
+/// comes first, Clew's own updates after.
+#[test]
+fn updates_is_the_last_settings_page() {
+    assert_eq!(
+        crate::SettingsPage::ALL.last(),
+        Some(&crate::SettingsPage::Updates)
+    );
+    assert_eq!(crate::SettingsPage::ALL[0], crate::SettingsPage::Appearance);
+}
+
+/// "Check now" says what it is doing, on the page it was pressed on: its
+/// answer went only to the status bar the Settings window covers, so it
+/// seemed to do nothing. While a check runs the button says "Checking…"
+/// and cannot be pressed again; after, the page says what it found.
+#[test]
+fn check_now_says_what_it_found_on_its_page() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Updates,
+    )));
+    assert!(
+        !shows(&mut sim_of(&app), "Clew is up to date"),
+        "before any check"
+    );
+    app.update.checking = true;
+    assert!(shows(&mut sim_of(&app), "Checking…"));
+    let sent = click(sim_of(&app), "Checking…");
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Updater(crate::UpdaterMsg::Check))),
+        "a second check while one runs: {sent:?}"
+    );
+    let release = clew_core::update::Release {
+        version: crate::updater::current_version(),
+        notes: String::new(),
+        dmg_url: None,
+    };
+    let _ = app.update(Message::Updater(crate::UpdaterMsg::Checked {
+        manual: true,
+        result: Ok(release),
+    }));
+    assert!(!app.update.checking);
+    assert!(shows(&mut sim_of(&app), "Clew is up to date"));
+    assert!(shows(&mut sim_of(&app), "Check now"));
+
+    let _ = app.update(Message::Updater(crate::UpdaterMsg::Checked {
+        manual: true,
+        result: Err("no network".into()),
+    }));
+    assert!(shows(&mut sim_of(&app), "Update check failed: no network"));
+}
+
+/// A form's segmented control is as wide as the pickers above and below it,
+/// in equal parts: Mode's System / Light / Dark hugged their words and sat
+/// short of the theme pickers.
+#[test]
+fn a_forms_switch_is_as_wide_as_its_pickers() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Appearance,
+    )));
+    let mut sim = sim_of(&app);
+    let centre =
+        |sim: &mut Sim<'_>, t: &'static str| text_at(sim, move |c| c == t, 0).expect(t).center_x();
+    let (system, light, dark) = (
+        centre(&mut sim, "System"),
+        centre(&mut sim, "Light"),
+        centre(&mut sim, "Dark"),
+    );
+    // Equal parts: their centres evenly apart, a third of the picker's width.
+    let step = super::form::PICK_W / 3.0;
+    assert!(
+        ((light - system) - step).abs() < 3.0,
+        "{system} {light} {dark}"
+    );
+    assert!(
+        ((dark - light) - step).abs() < 3.0,
+        "{system} {light} {dark}"
+    );
+}
+
+/// A page put away from over the code (Statistics here) brings the code
+/// back where the reader left it: the code view, drawn afresh under it,
+/// started at the top. Nothing is scrolled for a view at the top already,
+/// nor while the page is still up.
+#[test]
+fn a_page_put_away_leaves_the_code_where_it_was() {
+    let mut app = reader_app();
+    app.proj.panes[0].as_mut().unwrap().scroll_y = 480.0;
+    app.panes_covered = false;
+    assert!(app.sync_panes_uncovered().is_none(), "nothing covered it");
+    app.proj.stats.showing = true;
+    assert!(app.sync_panes_uncovered().is_none(), "still covered");
+    assert!(app.panes_covered);
+    app.proj.stats.showing = false;
+    assert!(app.sync_panes_uncovered().is_some(), "scrolled back");
+    assert!(app.sync_panes_uncovered().is_none(), "once");
+    app.proj.panes[0].as_mut().unwrap().scroll_y = 0.0;
+    app.proj.stats.showing = true;
+    let _ = app.sync_panes_uncovered();
+    app.proj.stats.showing = false;
+    assert!(app.sync_panes_uncovered().is_none(), "at the top already");
+}

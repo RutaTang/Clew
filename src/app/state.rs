@@ -933,25 +933,27 @@ impl AiFields {
 pub enum SettingsPage {
     #[default]
     Appearance,
-    Updates,
     LanguageModel,
     Embeddings,
     Voice,
     Integrations,
     Languages,
     Shortcuts,
+    Updates,
 }
 
 impl SettingsPage {
+    /// In the order the Settings list shows them: what a reader sets up
+    /// first, Clew's own updates last.
     pub const ALL: [SettingsPage; 8] = [
         SettingsPage::Appearance,
-        SettingsPage::Updates,
         SettingsPage::LanguageModel,
         SettingsPage::Embeddings,
         SettingsPage::Voice,
         SettingsPage::Integrations,
         SettingsPage::Languages,
         SettingsPage::Shortcuts,
+        SettingsPage::Updates,
     ];
 
     /// The page's title, in English: shown through `crate::i18n::lookup`.
@@ -1071,6 +1073,21 @@ pub struct UpdateState {
     pub consent_waits: bool,
     /// Whether clew checks for updates automatically at startup (persisted).
     pub auto_check: bool,
+    /// What the last check found, said under Settings' Version row: a check
+    /// pressed there answered only on the status bar the Settings window
+    /// covers, so pressing it seemed to do nothing. `None` until one ran.
+    pub last_check: Option<CheckOutcome>,
+}
+
+/// What a check for updates found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckOutcome {
+    /// This is the newest release.
+    UpToDate,
+    /// A newer one is on offer (`UpdateState::available`).
+    Found,
+    /// The check could not be made: why.
+    Failed(String),
 }
 
 impl Default for UpdateState {
@@ -1085,6 +1102,7 @@ impl Default for UpdateState {
             checking: false,
             consent_waits: false,
             auto_check: true,
+            last_check: None,
         }
     }
 }
@@ -1203,6 +1221,10 @@ pub struct App {
     /// closes it, and a connect that failed left the window empty, the
     /// project it was reading a folder pick away.
     pub left_local: Option<std::path::PathBuf>,
+    /// Whether a page (Statistics, the Overview, a docs page…) covered the
+    /// code panes when the window was last drawn: once it is put away, the
+    /// code comes back scrolled where the reader left it.
+    pub panes_covered: bool,
     /// A connect asked from the Connect form or its saved hosts, until the
     /// host answers (see [`Dial`]).
     pub dial: Option<Dial>,

@@ -1426,6 +1426,33 @@ impl App {
         Task::none()
     }
 
+    /// The code panes back from under a page that covered them (Statistics,
+    /// the Overview, Weak spots, the Glossary, a docs page): drawn afresh,
+    /// their code views start at the top, so each is scrolled back to where
+    /// the reader left it — the caret's line still on screen. `None` while
+    /// nothing was put away.
+    pub(crate) fn sync_panes_uncovered(&mut self) -> Option<Task<Message>> {
+        let covered = ui::pane_cover(self).is_some();
+        let was = std::mem::replace(&mut self.panes_covered, covered);
+        if !was || covered {
+            return None;
+        }
+        let scrolls: Vec<Task<Message>> = self
+            .proj
+            .panes
+            .iter()
+            .enumerate()
+            .filter_map(|(pane, v)| {
+                let v = v.as_ref()?;
+                let (x, y) = (v.scroll_x, v.scroll_y);
+                (x > 0.0 || y > 0.0).then(|| {
+                    operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x, y })
+                })
+            })
+            .collect();
+        (!scrolls.is_empty()).then(|| Task::batch(scrolls))
+    }
+
     pub(crate) fn on_outline_jump(&mut self, line: usize) -> Task<Message> {
         let Some(abs) = self.active_viewer().map(|v| v.abs.clone()) else {
             return Task::none();

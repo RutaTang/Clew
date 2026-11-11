@@ -193,11 +193,8 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 form::item(tr!("Dark theme"), None, dark_pick),
             ],
         )]),
-        SettingsPage::Updates => form::page(vec![form::group(
-            "",
-            None,
-            None,
-            vec![
+        SettingsPage::Updates => {
+            let mut rows = vec![
                 form::toggle(
                     tr!("Check for updates automatically"),
                     None,
@@ -207,10 +204,12 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 form::item(
                     tr!("Version"),
                     Some(format!("Clew {}", crate::updater::current_version())),
-                    form::action(tr!("Check now"), Some(Message::Updater(UpdaterMsg::Check))),
+                    check_now(app),
                 ),
-            ],
-        )]),
+            ];
+            rows.extend(update_status(app));
+            form::page(vec![form::group("", None, None, rows)])
+        }
         SettingsPage::LanguageModel => form::page(vec![form::group(
             "",
             None,
@@ -2872,4 +2871,123 @@ fn registry_kind(kind: &str) -> String {
         "nuget" => "NuGet".into(),
         other => other.to_string(),
     }
+}
+
+/// "Check now", and while a check runs its icon turning and "Checking…" in
+/// its place, as wide either way: pressed, it said nothing — the answer went
+/// to the status bar the Settings window covers.
+fn check_now(app: &App) -> Element<'_, Message> {
+    use super::steady::width_of;
+    let checking = app.update.checking;
+    let updating = matches!(
+        app.update.phase,
+        crate::UpdatePhase::Downloading | crate::UpdatePhase::Installing
+    );
+    let idle = tr!("Check now");
+    let busy = tr!("Checking…");
+    const ICON: f32 = 13.0;
+    const GAP: f32 = 6.0;
+    let width = width_of(idle, ts::BODY, crate::fonts::UI)
+        .max(width_of(busy, ts::BODY, crate::fonts::UI) + ICON + GAP)
+        + 2.0 * 12.0
+        + 2.0;
+    let words: Element<'_, Message> = if checking {
+        row![
+            super::meter::spinning(Glyph::Refresh, theme::fg_muted(), ICON),
+            text(busy).size(ts::BODY).wrapping(Wrapping::None),
+        ]
+        .spacing(GAP)
+        .align_y(iced::Center)
+        .into()
+    } else {
+        text(idle).size(ts::BODY).wrapping(Wrapping::None).into()
+    };
+    button(container(words).center_x(Fill))
+        .style(theme::secondary_button)
+        .padding([5, 12])
+        .width(width)
+        .on_press_maybe(
+            (!checking && !updating)
+                .then(|| super::heard::said(idle, Message::Updater(UpdaterMsg::Check))),
+        )
+        .into()
+}
+
+/// What the last check found, under the Version row: up to date, a newer
+/// Clew (with what is new in it and the way to it), an update on its way,
+/// or why the check failed. Nothing while a check runs — its button says
+/// so — or before any.
+fn update_status(app: &App) -> Option<Element<'_, Message>> {
+    use crate::{CheckOutcome, UpdatePhase};
+    let u = &app.update;
+    if u.checking {
+        return None;
+    }
+    let line = |mark: Element<'static, Message>, said: String, color: iced::Color| {
+        row![
+            mark,
+            text(said)
+                .size(ts::SMALL)
+                .color(color)
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Fill),
+        ]
+        .spacing(6)
+        .align_y(iced::Center)
+    };
+    let mark = |g: Glyph, color: iced::Color| -> Element<'static, Message> {
+        crate::glyph::icon(g, color, 13.0)
+    };
+    let body: Element<'_, Message> = match (&u.phase, &u.available, &u.last_check) {
+        (UpdatePhase::Downloading, Some(a), _) => line(
+            super::meter::spinning(Glyph::Refresh, theme::accent(), 13.0),
+            tr!("Downloading Clew {version}…", version = a.version),
+            theme::fg_muted(),
+        )
+        .into(),
+        (UpdatePhase::Installing, Some(_), _) => line(
+            super::meter::spinning(Glyph::Refresh, theme::accent(), 13.0),
+            tr!("Installing update… Clew will relaunch").into(),
+            theme::fg_muted(),
+        )
+        .into(),
+        (UpdatePhase::Failed(e), Some(_), _) => line(
+            mark(Glyph::Info, theme::danger()),
+            tr!("Update failed: {error}", error = e),
+            theme::danger(),
+        )
+        .push(form::action(
+            tr!("Retry"),
+            Some(Message::Updater(UpdaterMsg::InstallStart)),
+        ))
+        .into(),
+        (_, Some(a), _) => line(
+            mark(Glyph::Sparkle, theme::accent()),
+            tr!("Clew {version} is available", version = a.version),
+            theme::fg(),
+        )
+        .push(form::action(
+            tr!("What's new"),
+            Some(Message::Updater(UpdaterMsg::ShowNotes)),
+        ))
+        .push(form::primary(
+            tr!("Update now"),
+            Some(Message::Updater(UpdaterMsg::InstallStart)),
+        ))
+        .into(),
+        (_, None, Some(CheckOutcome::UpToDate)) => line(
+            mark(Glyph::CheckCircle, theme::success()),
+            tr!("Clew is up to date").into(),
+            theme::fg_muted(),
+        )
+        .into(),
+        (_, None, Some(CheckOutcome::Failed(e))) => line(
+            mark(Glyph::Info, theme::danger()),
+            tr!("Update check failed: {error}", error = e),
+            theme::danger(),
+        )
+        .into(),
+        _ => return None,
+    };
+    Some(form::row_of(body))
 }

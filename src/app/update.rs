@@ -86,6 +86,11 @@ impl App {
             Some(read) => Task::batch([task, read]),
             None => task,
         };
+        // A page put away from over the code: the code where it was.
+        let task = match self.sync_panes_uncovered() {
+            Some(scroll) => Task::batch([task, scroll]),
+            None => task,
+        };
         // An answer that came with Ask put away is read once its card is
         // open, whichever way it was opened.
         if self.ask_view.is_open() {

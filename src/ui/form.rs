@@ -110,6 +110,15 @@ fn label<'a>(label: String, about: Option<String>) -> Element<'a, Message> {
     col.into()
 }
 
+/// Something said in a group under the row it is about, padded as the
+/// group's rows are.
+pub(crate) fn row_of<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
+        .width(Fill)
+        .padding([ROW_PAD_Y, ROW_PAD_X])
+        .into()
+}
+
 /// A row: `label` and under it `about` at the left, `control` at the right.
 pub(crate) fn item<'a>(
     name: impl Into<String>,
@@ -462,23 +471,38 @@ pub(crate) fn segmented_across<'a>(
     .into()
 }
 
-/// A segmented control: one segment per `(label, chosen, msg)`, the
-/// chosen one raised in the trough.
+/// A segmented control of a form's row: one segment per `(label, chosen,
+/// msg)`, the chosen one raised in the trough. As wide as the row's other
+/// controls ([`PICK_W`]) — wider only when its labels need it — in equal
+/// parts, each label centred: one hugging its labels sat short of the
+/// pickers above and below it.
 pub(crate) fn segmented<'a>(
     segments: impl IntoIterator<Item = (String, bool, Message)>,
 ) -> Element<'a, Message> {
+    const PAD_X: f32 = 14.0;
+    const GAP: f32 = 2.0;
+    let segments: Vec<(String, bool, Message)> = segments.into_iter().collect();
+    let n = segments.len().max(1) as f32;
+    let widest = segments
+        .iter()
+        .map(|(label, ..)| super::steady::width_of(label, ts::BODY, crate::fonts::UI_MEDIUM))
+        .fold(0.0, f32::max);
+    // The trough's own padding (2 a side) and the gaps between parts.
+    let width = PICK_W.max(n * (widest + 2.0 * PAD_X) + (n - 1.0) * GAP + 4.0);
     container(
         Row::with_children(segments.into_iter().map(|(label, chosen, msg)| {
             let msg = super::heard::said(&label, msg);
-            button(text(label).size(ts::BODY))
+            button(container(text(label).size(ts::BODY).wrapping(Wrapping::None)).center_x(Fill))
                 .style(theme::segment(chosen))
-                .padding([4, 14])
+                .padding([4, 0])
+                .width(Fill)
                 .on_press(msg)
                 .into()
         }))
-        .spacing(2),
+        .spacing(GAP),
     )
     .padding(2)
+    .width(width)
     .style(theme::trough)
     .into()
 }

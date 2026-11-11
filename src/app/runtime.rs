@@ -86,6 +86,7 @@ impl App {
             trail_writer: TrailWriter::default(),
             connection: Self::startup_connection(),
             left_local: None,
+            panes_covered: false,
             dial: None,
             escape_taken: false,
             // A CLEW_SSH startup target never carries the per-host AI-key

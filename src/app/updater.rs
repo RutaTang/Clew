@@ -71,6 +71,11 @@ impl App {
         result: Result<clew_core::update::Release, String>,
     ) -> Task<Message> {
         self.update.checking = false;
+        self.update.last_check = Some(match &result {
+            Ok(release) if release.version > updater::current_version() => CheckOutcome::Found,
+            Ok(_) => CheckOutcome::UpToDate,
+            Err(e) => CheckOutcome::Failed(e.clone()),
+        });
         match result {
             // A download or install is under way for the release on offer, and
             // it stays the one on offer: replaced, the banner named a version
