@@ -100,14 +100,14 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         able: menu.served,
     };
     let mut navigate = vec![
-        goto(GotoKind::Definition, "g d"),
-        goto(GotoKind::References, "g r"),
-        goto(GotoKind::Implementation, "g i"),
-        goto(GotoKind::TypeDefinition, "g y"),
+        goto(GotoKind::Definition, "gd"),
+        goto(GotoKind::References, "gr"),
+        goto(GotoKind::Implementation, "gi"),
+        goto(GotoKind::TypeDefinition, "gy"),
         Row {
             label: tr!("Call Hierarchy"),
             msg: Message::Calls(CallsMsg::FromMenu),
-            keys: keys("g c"),
+            keys: keys("gc"),
             able: menu.served,
         },
     ];
@@ -125,7 +125,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         navigate.push(Row {
             label: kind.label(),
             msg: Message::Hover(HoverMsg::Insight),
-            keys: keys("g e"),
+            keys: keys("ge"),
             able: menu.served || matches!(lang, Some("c" | "cpp")),
         });
     }

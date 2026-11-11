@@ -13665,7 +13665,7 @@ fn the_context_menu_waits_for_the_language_server() {
     );
     // Each row names the keys that do it in the code, on its own line.
     let trace = app.keymap.chord(crate::keymap::Action::TraceValue).caps();
-    for (row, keys) in [("Go to Definition", "g d"), ("Trace Value", trace.as_str())] {
+    for (row, keys) in [("Go to Definition", "gd"), ("Trace Value", trace.as_str())] {
         let mut sim = sim_of(&app);
         let at = |sim: &mut Sim<'_>, t: &str| {
             let t = t.to_string();
