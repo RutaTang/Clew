@@ -143,7 +143,7 @@ fn generics(sources: &[(&Source, tree_sitter::Tree)]) -> Option<ProjectMap> {
             } else {
                 "function"
             };
-            map.detail(g, format!("generic {what} · comptime {}", generic.params));
+            map.detail(g, format!("generic {what}, comptime {}", generic.params));
             let label = format!("{name}({})", picked.join(", "));
             let at = map.node("instance", &label, &label);
             map.place(at, &source.rel, line(call));
@@ -606,10 +606,10 @@ mod tests {
         let list = g.nodes.iter().find(|n| n.label == "List").unwrap();
         assert_eq!(
             (list.file.as_str(), list.line, list.detail.as_str()),
-            ("src/list.zig", 1, "generic type · comptime T: type")
+            ("src/list.zig", 1, "generic type, comptime T: type")
         );
         let max = g.nodes.iter().find(|n| n.label == "max").unwrap();
-        assert_eq!(max.detail, "generic function · comptime T: type");
+        assert_eq!(max.detail, "generic function, comptime T: type");
         let first = g.nodes.iter().find(|n| n.label == "List(i32)").unwrap();
         assert_eq!((first.file.as_str(), first.line), ("src/main.zig", 2));
     }

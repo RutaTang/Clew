@@ -2892,5 +2892,8 @@ pub struct Dial {
     /// The project it was reading there, and the file and line (1-based) it
     /// was at — or the ones a project on its way back was to reopen at.
     pub root: Option<PathBuf>,
-    pub at: Option<(PathBuf, Option<usize>)>,
+    pub at: Option<ReadAt>,
 }
+
+/// A file read, and the line (1-based) the caret was on in it.
+pub type ReadAt = (PathBuf, Option<usize>);

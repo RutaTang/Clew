@@ -1117,7 +1117,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 container(
                     row![
                         button(
-                            text(format!("📎 {} · L{}", pin.rel, pin.line))
+                            text(format!("📎 {}:{}", pin.rel, pin.line))
                                 .size(ts::SMALL)
                                 .color(theme::accent())
                         )
@@ -2137,12 +2137,12 @@ fn import_cycles_note<'a>(app: &'a App, focus: &'a std::path::Path) -> Element<'
             ImportNote::Cycles,
         ))),
         move || {
-            // The cycle's files, set apart by dots: they import one another
-            // in no order a line of arrows could honestly draw.
+            // The cycle's files, a list set apart by commas: they import one
+            // another in no order a line of arrows could honestly draw.
             let mut files: Vec<Element<'a, Message>> = Vec::new();
             for (i, f) in cycle.iter().enumerate() {
                 if i > 0 {
-                    files.push(text("·").size(ts::SMALL).color(theme::dim()).into());
+                    files.push(text(",").size(ts::SMALL).color(theme::dim()).into());
                 }
                 files.push(cycle_file(app, f, f == focus));
             }

@@ -3779,6 +3779,14 @@ fn sim_elem(elem: Element<'_, Message>) -> Sim<'_> {
     iced_test::simulator(elem)
 }
 
+/// [`sim_elem`] tall enough for a whole Settings section: what a test
+/// clicks is on screen however long the sections above it grow.
+fn sim_tall(elem: Element<'_, Message>) -> Sim<'_> {
+    crate::app::tests::isolated_data_dir();
+    crate::fonts::load();
+    iced_test::Simulator::with_size(Default::default(), Size::new(1024.0, 3000.0), elem)
+}
+
 /// The visible bounds of the `nth` (0-based) text whose content satisfies
 /// `pred`, if it is on screen.
 fn text_at(sim: &mut Sim<'_>, pred: impl Fn(&str) -> bool + Send, nth: usize) -> Option<Rectangle> {
@@ -4952,14 +4960,15 @@ fn a_changed_key_clew_recorded_is_forgotten_only_by_a_click_on_the_prompt() {
         "{sent:?}"
     );
 
-    // Cancel: back to the form, saying why — and back on this machine:
-    // the host never connected.
+    // Cancel: back to the form, saying why. A connect clew made itself
+    // (not asked from the form) has nowhere else to go back to: the window
+    // stays on the host.
     let _ = app.update(Message::Connect(ConnectMsg::TrustCancel));
     assert!(matches!(
         stage(&app),
         Some(crate::ConnectStage::Error(reason)) if reason == "refused: the host key changed"
     ));
-    assert!(!app.connection.is_remote());
+    assert_eq!(app.connection, port_2222_target());
     // Asked again, the refusal is shown again.
     let _ = app.connect_to(port_2222_target());
     let conn = app.conn_gen;
@@ -8481,7 +8490,7 @@ fn the_margin_history_lists_the_files_commits() {
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Read lines lazily"));
     assert!(
-        shows(&mut sim, "aaaaaaa  ·  Ada"),
+        shows(&mut sim, "aaaaaaa by Ada"),
         "its short sha and author"
     );
     drop(sim);
@@ -8938,8 +8947,8 @@ fn a_project_graphs_words_are_translated() {
             "方法解析顺序：D → B → object"
         );
         assert_eq!(
-            super::map_text("id serial · primary key → users"),
-            "id serial · 主键 → users"
+            super::map_text("id serial (primary key) → users"),
+            "id serial (主键) → users"
         );
         assert_eq!(super::map_text("1 lemmas"), "1 条引理");
         assert_eq!(super::map_text("pub use"), "pub use");
@@ -9020,7 +9029,7 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
         },
     ]);
     let mut sim = sim_elem(super::project_maps_body(&app));
-    assert!(shows(&mut sim, "Database schema · 2 nodes · 1 arrow"));
+    assert!(shows(&mut sim, "Database schema, 2 nodes, 1 arrow"));
     assert!(shows(&mut sim, "an arrow is a foreign key"));
     assert!(shows(&mut sim, "TABLE"));
     assert!(shows(&mut sim, "db/schema.sql:7"));
@@ -9029,7 +9038,7 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
     drop(sim);
     app.proj.maps_selected = Some("routes".into());
     let mut sim = sim_elem(super::project_maps_body(&app));
-    assert!(shows(&mut sim, "Routes · 1 node · 0 arrows"));
+    assert!(shows(&mut sim, "Routes, 1 node, 0 arrows"));
     assert!(shows(&mut sim, "GET /users"));
     drop(sim);
     assert!(super::map_picker(&app).is_some());
@@ -9110,10 +9119,7 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
         &root, &files, &structure,
     ));
     let mut sim = sim_elem(super::project_types_body(&app));
-    assert!(shows(
-        &mut sim,
-        "4 types · 4 relations · 1 inheritance link"
-    ));
+    assert!(shows(&mut sim, "4 types, 4 relations, 1 inheritance link"));
     assert!(shows(&mut sim, "MOST REFERENCED (USED BY THE MOST TYPES)"));
     assert!(shows(&mut sim, "Customer"));
     assert!(shows(&mut sim, "2 ←"), "Customer is named twice");
@@ -9133,11 +9139,11 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
         )),
     );
     let mut sim = sim_elem(super::project_types_body(&app));
-    assert!(shows(&mut sim, "· 0 inheritance links"));
+    assert!(shows(&mut sim, ", 0 inheritance links"));
     drop(sim);
     crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
         let mut sim = sim_elem(super::project_types_body(&app));
-        assert!(shows(&mut sim, "· 0 lien d’héritage"));
+        assert!(shows(&mut sim, ", 0 lien d’héritage"));
     });
     app.proj.type_graph = structured;
     // A node of the type map opens its definition at its line.
@@ -9576,7 +9582,7 @@ fn rows_send_the_identity_of_what_they_show() {
     };
     app.proj.ask_pins = vec![pin.clone()];
     app.ask_view = crate::AskView::Compact;
-    let sent = click(sim_of(&app), "📎 src/lib.rs · L4");
+    let sent = click(sim_of(&app), "📎 src/lib.rs:4");
     assert!(
         matches!(sent.as_slice(), [Message::Ask(AskMsg::PinGoto(k))] if *k == pin.key()),
         "{sent:?}"
@@ -9946,7 +9952,7 @@ fn a_notebook_shows_its_cells_and_folds_its_outputs() {
     assert!(app.proj.panes[0].as_ref().unwrap().notebook.is_some());
     {
         let mut sim = sim_of(&app);
-        assert!(shows(&mut sim, "2 cells · 1 with output · python"));
+        assert!(shows(&mut sim, "2 cells, 1 with output, python"));
         assert!(shows(&mut sim, "In [3]"), "the code cell's execution badge");
         assert!(shows(&mut sim, "▸ output (1)"), "outputs start folded");
         assert!(shows(&mut sim, "Expand all outputs"));
@@ -10311,7 +10317,7 @@ fn the_languages_section_offers_each_languages_build_choices() {
         .into(),
         python: None,
     }));
-    let mut sim = sim_elem(super::connect::languages_section(&app));
+    let mut sim = sim_tall(super::connect::languages_section(&app));
     for shown in [
         "What rust-analyzer checks the project with. \
          Also set in .clew/lsp.toml: cargo.features. Settings here take precedence.",
@@ -10379,7 +10385,7 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
                 "zig".to_string(),
                 vec![ToolchainCandidate {
                     command: "/h/.zvm/0.13.0/zig".into(),
-                    name: "zvm · Zig 0.13.0".into(),
+                    name: "Zig 0.13.0 (zvm)".into(),
                     project: true,
                 }],
             ),
@@ -10388,13 +10394,13 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
         ..Default::default()
     }));
     let warning = "Runs the project's own code. Only for projects you trust.";
-    let mut sim = sim_elem(super::connect::languages_section(&app));
+    let mut sim = sim_tall(super::connect::languages_section(&app));
     for shown in [
         "TypeScript and JavaScript",
         "Clew's built-in TypeScript 5",
         "The project's TypeScript 5.4.5 — runs the project's own code",
         "Zig",
-        "zvm · Zig 0.13.0",
+        "Zig 0.13.0 (zvm)",
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
     }
@@ -10412,7 +10418,7 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
     assert_eq!(chosen[0].typescript.as_deref(), Some(projects.as_str()));
 
     app.proj.lang_choices = chosen[0].clone();
-    let mut sim = sim_elem(super::connect::languages_section(&app));
+    let mut sim = sim_tall(super::connect::languages_section(&app));
     assert!(sim.find(warning).is_ok(), "said once it is the one chosen");
 }
 
@@ -10447,7 +10453,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
                 "ruby".to_string(),
                 one(
                     "/h/.rbenv/versions/3.3.0/bin/ruby-lsp",
-                    "rbenv · Ruby 3.3.0",
+                    "Ruby 3.3.0 (rbenv)",
                 ),
             ),
             (
@@ -10462,7 +10468,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
         .into(),
         ..Default::default()
     }));
-    let mut sim = sim_elem(super::connect::languages_section(&app));
+    let mut sim = sim_tall(super::connect::languages_section(&app));
     for shown in [
         "Java",
         "JDK 21",
@@ -10471,7 +10477,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
         "C#",
         "src/App.sln",
         "The Ruby that runs Ruby LSP.",
-        "rbenv · Ruby 3.3.0",
+        "Ruby 3.3.0 (rbenv)",
         "The ruby-lsp found on the PATH",
         "The Erlang Language Platform build to run.",
         "The elp found on the PATH",
@@ -10480,7 +10486,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
     }
-    let _ = sim.click("rbenv · Ruby 3.3.0");
+    let _ = sim.click("Ruby 3.3.0 (rbenv)");
     let chosen: Vec<LanguageChoices> = sim
         .into_messages()
         .filter_map(|m| match m {
@@ -10534,7 +10540,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
         app.proj.project_languages = vec![language.to_string()];
         // The project's code is in them, as a scan finds it.
         app.proj.code_languages = app.proj.project_languages.clone();
-        let mut sim = sim_elem(super::connect::languages_section(&app));
+        let mut sim = sim_tall(super::connect::languages_section(&app));
         let _ = sim.click(row_label);
         let chosen: Vec<LanguageChoices> = sim
             .into_messages()
@@ -10568,7 +10574,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
     };
     // The ELP chosen is one of those found, not a program of the user's
     // own: no row of its own for it.
-    let mut sim = sim_elem(super::connect::languages_section(&app));
+    let mut sim = sim_tall(super::connect::languages_section(&app));
     assert!(sim.find("elp in /opt/elp/bin").is_ok());
     assert!(
         sim.find("Your own program").is_err(),
@@ -11664,8 +11670,8 @@ fn the_card_names_its_session_and_lists_the_others() {
         // time in it.
         assert!(!shows(&mut sim, "New session"));
         assert!(shows(&mut sim, "How is a host connected?"));
-        assert!(shows(&mut sim, "2 min ago · 1 question"));
-        assert!(shows(&mut sim, "2 h ago · 2 questions"));
+        assert!(shows(&mut sim, "2 min ago, 1 question"));
+        assert!(shows(&mut sim, "2 h ago, 2 questions"));
     }
     let sent = click(sim_of(&app), "How is a host connected?");
     assert!(
@@ -11682,7 +11688,7 @@ fn the_card_names_its_session_and_lists_the_others() {
         assert!(shows(&mut sim, "How is a host connected?"));
         assert!(shows(&mut sim, "Over SSH, with the user's own keys."));
         assert!(
-            !shows(&mut sim, "2 min ago · 1 question"),
+            !shows(&mut sim, "2 min ago, 1 question"),
             "the other is not found"
         );
     }
@@ -12825,7 +12831,7 @@ fn repeated_actions_are_icons_that_do_what_they_did() {
 
     let abs = root.join("src/lib.rs");
     app.proj.diff = Some(crate::DiffState::new(abs, "src/lib.rs".into(), Vec::new()));
-    let head = "src/lib.rs  ·  vs HEAD";
+    let head = "src/lib.rs compared with HEAD";
     words_gone(&mut sim_of(&app), &["✕ Close"]);
     let sent = click_right_of(
         || sim_of(&app),
@@ -14365,6 +14371,42 @@ fn a_fields_words_sit_on_its_labels_line() {
     );
 }
 
+/// A field whose control starts with a checkbox or a line of chips has
+/// their words on its label's line: "Features" sat 7 below "All features
+/// of all packages", "Build tags" 4 below its first tag.
+#[test]
+fn a_fields_checkbox_and_chips_sit_on_its_labels_line() {
+    let app = reader_app();
+    let level = |sim: &mut Sim<'_>, label: &str, value: &str| {
+        let l = text_at(sim, |t| t == label, 0).expect("the label");
+        let v = text_at(sim, |t| t == value, 0).expect("the value");
+        assert!(
+            (l.center_y() - v.center_y()).abs() <= 1.5,
+            "{label} {l:?}, {value} {v:?}"
+        );
+    };
+    let rust = clew_protocol::RustOptions {
+        packages: vec![clew_protocol::CargoPackage {
+            name: "salvo".into(),
+            root: true,
+            features: vec!["acme".into()],
+            default: Vec::new(),
+        }],
+        targets: Vec::new(),
+        project_sets: Vec::new(),
+    };
+    let mut sim = sim_elem(super::connect::rust_block(&app, Some(&rust)));
+    level(&mut sim, "Features", "All features of all packages");
+    let go = clew_protocol::GoOptions {
+        tags: vec!["integration".into()],
+        ..Default::default()
+    };
+    let mut sim = sim_elem(super::connect::go_block(&app, Some(&go)));
+    level(&mut sim, "Build tags", "integration");
+    let mut sim = sim_elem(super::connect::go_block(&app, None));
+    level(&mut sim, "Build tags", "No build tags in this project.");
+}
+
 /// The find bar's ‹ and › go to the matches while there are some, and do
 /// nothing while there are none — in grey then, as they were always drawn,
 /// so that with 16 matches they looked switched off.
@@ -14884,7 +14926,7 @@ fn the_mcp_registry_is_searched_and_used_from_settings() {
             "no paragraph saying what the servers are for"
         );
         assert!(shows(&mut sim, "io.github.acme/notes-mcp"));
-        assert!(shows(&mut sim, "npm · 1.2.0"));
+        assert!(shows(&mut sim, "npm 1.2.0"));
         assert!(shows(&mut sim, "Clew can't run it"));
     }
     let used = click(sim_of(&app), "Use");

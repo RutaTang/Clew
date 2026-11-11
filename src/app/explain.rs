@@ -353,7 +353,7 @@ impl App {
             self.status = if self.status.is_empty() {
                 note
             } else {
-                format!("{} · {note}", self.status)
+                format!("{}; {note}", self.status)
             };
         }
         // What the store lacks of the window's copy is in it already
@@ -485,10 +485,10 @@ impl App {
                 "Explained {n} functions, files and folders",
                 n
             );
-            // Each clause after a " · " says one thing whole.
+            // Each clause after a "; " says one thing whole.
             if failures.failed > 0 {
                 let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
-                status.push_str(" · ");
+                status.push_str("; ");
                 status.push_str(&trn!(
                     "1 failed: {reasons}",
                     "{n} failed: {reasons}",
@@ -497,7 +497,7 @@ impl App {
                 ));
             }
             if tally.unquoted > 0 {
-                status.push_str(" · ");
+                status.push_str("; ");
                 status.push_str(&trn!(
                     "1 explained without the failed summaries it builds on",
                     "{n} explained without the failed summaries they build on",
@@ -505,7 +505,7 @@ impl App {
                 ));
             }
             if !tally.waiting.is_empty() {
-                status.push_str(" · ");
+                status.push_str("; ");
                 status.push_str(&trn!(
                     "1 left for the next refresh",
                     "{n} left for the next refresh",
@@ -535,10 +535,10 @@ impl App {
                 ));
             }
             if !left.is_empty() {
-                status.push_str(" · ");
+                status.push_str("; ");
                 status.push_str(&tr!(
                     "{list} — Explain All brings them up to date",
-                    list = left.join(" · ")
+                    list = left.join(", ")
                 ));
             }
             status
@@ -547,7 +547,7 @@ impl App {
         // holds no summary loses nothing by it.
         let held: Vec<String> = tally.held.iter().map(|p| self.shown_path(p)).collect();
         if !held.is_empty() {
-            status.push_str(" · ");
+            status.push_str("; ");
             status.push_str(&trn!(
                 "1 file could not be read ({files}) — its summaries are kept until it can be",
                 "{n} files could not be read ({files}) — their summaries are kept until they can be",
@@ -557,7 +557,7 @@ impl App {
         }
         // Dropped only by a pass that ran to its end.
         if completed && let Some(note) = self.dropped_note(&tally.dropped) {
-            status.push_str(&format!(" · {note}"));
+            status.push_str(&format!("; {note}"));
         }
         self.status = status;
 

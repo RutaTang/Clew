@@ -3657,7 +3657,7 @@ mod scroll_tests {
             .unwrap_or(0);
         // Long enough that the content overflows the simulator viewport with and
         // without the chip, so both measurements are real content widths.
-        let annotation = "Ada Lovelace, 3 days ago · rework the retry budget so a cold \
+        let annotation = "rework the retry budget so a cold \
                           cache cannot stall the first request"
             .to_string();
         let chip = ": HashMap<String, Vec<u8>>".to_string();
@@ -4616,7 +4616,7 @@ mod font_tests {
         use iced::advanced::Widget;
         use iced::advanced::text::Shaping;
         use iced::advanced::widget::Tree;
-        let blame = "张三, 3 days ago · 修复 bug";
+        let blame = "修复 bug (张三, 3 days ago)";
         let lines = crate::highlight::plain_lines("fn main() {}\n");
         let view = crate::codeview::CodeView::new(
             &lines,

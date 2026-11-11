@@ -313,8 +313,8 @@ pub(crate) fn search_status(
         Some(first) => {
             let n = skipped_total.max(skipped.len());
             trn!(
-                "{matches} · 1 file not searched ({file}: {reason})",
-                "{matches} · {n} files not searched ({file}: {reason})",
+                "{matches}; 1 file not searched ({file}: {reason})",
+                "{matches}; {n} files not searched ({file}: {reason})",
                 n,
                 matches = matches,
                 file = first.rel,

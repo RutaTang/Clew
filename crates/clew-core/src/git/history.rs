@@ -176,10 +176,10 @@ fn parse_refs(names: &str) -> Vec<LogRef> {
             push(RefKind::Tag, tag.strip_prefix("refs/tags/").unwrap_or(tag));
         } else if let Some(branch) = part.strip_prefix("refs/heads/") {
             push(RefKind::Branch, branch);
-        } else if let Some(remote) = part.strip_prefix("refs/remotes/") {
-            if !remote.ends_with("/HEAD") {
-                push(RefKind::Remote, remote);
-            }
+        } else if let Some(remote) = part.strip_prefix("refs/remotes/")
+            && !remote.ends_with("/HEAD")
+        {
+            push(RefKind::Remote, remote);
         }
     }
     refs

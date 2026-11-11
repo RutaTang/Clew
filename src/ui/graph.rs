@@ -2535,7 +2535,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
                 ),
                 trn!("1 cycle", "{n} cycles", app.proj.import_cycles.len()),
             ]
-            .join(" · "),
+            .join(", "),
         )
         .size(ts::BODY)
         .color(theme::accent())
@@ -2587,7 +2587,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
         rows.push(section_header(tr!("External packages")));
         rows.push(
             container(
-                text(ranks.externals.join("  ·  "))
+                text(ranks.externals.join(", "))
                     .size(ts::SMALL)
                     .color(theme::dim()),
             )
@@ -2698,7 +2698,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
         text(format!(
-            "{} · {}",
+            "{}, {}",
             trn!("1 function", "{n} functions", g.node_count()),
             trn!("1 call edge", "{n} call edges", g.edge_count()),
         ))
@@ -2819,8 +2819,11 @@ pub(crate) fn map_text(english: &str) -> String {
     if let Some(sources) = english.strip_prefix("reads ") {
         return tr!("reads {sources}", sources = sources).to_string();
     }
-    if let Some(kind) = english.strip_prefix("supervisor · ") {
-        return tr!("supervisor · {kind}", kind = kind).to_string();
+    if let Some(kind) = english
+        .strip_prefix("supervisor (")
+        .and_then(|k| k.strip_suffix(')'))
+    {
+        return tr!("supervisor ({kind})", kind = kind).to_string();
     }
     if let Some(name) = english.strip_prefix("alias of ") {
         return tr!("alias of {name}", name = name).to_string();
@@ -2856,8 +2859,8 @@ pub(crate) fn map_text(english: &str) -> String {
         .to_string();
     }
     // A column's line: `id serial · primary key → users`.
-    match english.split_once(" · primary key") {
-        Some((column, rest)) => format!("{column} · {}{rest}", tr!("primary key")),
+    match english.split_once(" (primary key)") {
+        Some((column, rest)) => format!("{column} ({}){rest}", tr!("primary key")),
         None => english.to_string(),
     }
 }
@@ -2909,7 +2912,7 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
         text(format!(
-            "{} · {} · {}",
+            "{}, {}, {}",
             trn!("1 type", "{n} types", g.node_count()),
             trn!("1 relation", "{n} relations", g.edge_count()),
             trn!(
@@ -3047,7 +3050,7 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     let map = &app.proj.maps[at];
     let mut rows: Vec<Element<'_, Message>> = vec![
         text(format!(
-            "{} · {} · {}",
+            "{}, {}, {}",
             crate::i18n::lookup(&map.title),
             trn!("1 node", "{n} nodes", map.nodes.len()),
             trn!("1 arrow", "{n} arrows", map.edges.len())
@@ -3408,7 +3411,7 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
         }
         line = line.push(space().width(Fill)).push(
             text(format!(
-                "{} · {}",
+                "{}, {}",
                 trn!("1 commit", "{n} commits", f.commits),
                 crate::i18n::ago(f.last, now)
             ))

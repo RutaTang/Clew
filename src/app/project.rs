@@ -65,10 +65,10 @@ fn scan_summary(report: &fs_scan::ScanReport) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("; "))
 }
 
-/// The status line for a project's file set: "120 files · 1042 symbols".
+/// The status line for a project's file set: "120 files, 1042 symbols".
 pub(crate) fn size_status(files: usize, symbols: usize) -> String {
     format!(
-        "{} · {}",
+        "{}, {}",
         trn!("1 file", "{n} files", files),
         trn!("1 symbol", "{n} symbols", symbols)
     )

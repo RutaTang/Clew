@@ -280,7 +280,7 @@ pub(crate) fn layout_answer(layout: &MemoryLayout) -> InsightAnswer {
         )
     );
     if padding > 0 {
-        md.push_str(" · ");
+        md.push_str(", ");
         md.push_str(&trn!(
             "1 byte of padding",
             "{n} bytes of padding",

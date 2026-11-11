@@ -1390,7 +1390,7 @@ impl App {
             // read "ready": that lie is what stops the user from restarting a
             // server whose every request now fails.
             Some(LspSlot::Ready(c)) if !c.alive() => {
-                (tr!("stopped · restarts on open").into(), restart())
+                (tr!("stopped, restarts on open").into(), restart())
             }
             // Progress, or the server's complaint — including a state clew
             // can no longer read — from this update's snapshot.
@@ -1423,7 +1423,7 @@ impl App {
             // (`refresh_server_panel`), never from probing here per frame.
             None => match self.lsp_located.get(language) {
                 Some(LocatedKind::Ready) => (
-                    tr!("installed · starts on open").into(),
+                    tr!("installed, starts on open").into(),
                     provision(tr!("Start")),
                 ),
                 Some(LocatedKind::NeedsDownload) => {

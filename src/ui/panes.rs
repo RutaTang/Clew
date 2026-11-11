@@ -186,13 +186,9 @@ pub(crate) fn time_travel_banner<'a>(
             .size(ts::BODY)
             .color(theme::accent())
             .font(crate::fonts::CODE),
-        text(format!(
-            "{}  ·  {}",
-            c.author,
-            crate::i18n::ago(c.time, now)
-        ))
-        .size(ts::SMALL)
-        .color(theme::dim()),
+        text(format!("{}, {}", c.author, crate::i18n::ago(c.time, now)))
+            .size(ts::SMALL)
+            .color(theme::dim()),
     ]
     .spacing(10)
     .align_y(iced::Center);
@@ -477,7 +473,7 @@ pub(crate) fn diff_view<'a>(
 
     let header = container(
         row![
-            text(tr!("{file}  ·  vs HEAD", file = d.rel))
+            text(tr!("{file} compared with HEAD", file = d.rel))
                 .size(ts::BODY)
                 .color(theme::accent()),
             space().width(Fill),
@@ -1503,7 +1499,7 @@ fn notes_beside_code<'a>(
                 continue;
             }
             let meta = tr!(
-                "{kind} · line {line}",
+                "{kind}, line {line}",
                 kind = short_kind(&sym.kind),
                 line = sym.line
             );
@@ -2040,10 +2036,11 @@ fn margin_history(app: &App) -> Element<'_, Message> {
                                 .size(ts::BODY)
                                 .color(theme::fg())
                                 .wrapping(Wrapping::WordOrGlyph),
-                            text(format!(
-                                "{short}  ·  {}  ·  {}",
-                                c.author,
-                                crate::i18n::ago(c.time, now)
+                            text(tr!(
+                                "{sha} by {author}, {ago}",
+                                sha = short,
+                                author = c.author,
+                                ago = crate::i18n::ago(c.time, now)
                             ))
                             .size(ts::SMALL)
                             .color(theme::dim())

@@ -16629,7 +16629,7 @@ fn the_maps_overlay_reads_a_local_projects_maps_when_they_are_stale() {
             .find(|n| n.label == "users")
             .unwrap()
             .detail,
-        "id int · primary key\nemail text"
+        "id int (primary key)\nemail text"
     );
 }
 
@@ -17867,7 +17867,7 @@ async fn one_function_a_server_fails_is_left_unrefined_and_the_rest_kept() {
         format!("Call graph refined with LSP — {unrefined}")
     );
     let label = app.precise_label().expect("refined");
-    assert!(label.contains(" · 1 function unrefined"), "{label}");
+    assert!(label.contains("; 1 function unrefined"), "{label}");
     assert_eq!(
         python.prepared(4),
         1,
@@ -18769,7 +18769,7 @@ async fn a_refine_with_a_server_down_says_what_it_covers() {
     );
     settle_graphs(&mut app, refine);
     assert!(app.proj.project_calls.precise, "precondition: refined");
-    let badge = "● LSP-precise: Rust · Python left out";
+    let badge = "● LSP-precise: Rust; Python left out";
     let mut header =
         iced_test::simulator(crate::ui::project_graph_modal(&app, Overlay::ProjectCalls));
     assert!(header.find(badge).is_ok(), "{:?}", app.precise_label());
@@ -18811,7 +18811,7 @@ async fn what_a_refinement_leaves_out_follows_the_project() {
     settle_graphs(&mut app, batch);
     assert_eq!(
         app.precise_label().as_deref(),
-        Some("● LSP-precise: Rust · Python left out")
+        Some("● LSP-precise: Rust; Python left out")
     );
     let summary = app.precise_summary().unwrap_or_default();
     assert!(
@@ -25348,7 +25348,7 @@ fn a_local_file_that_could_not_be_read_keeps_every_summary() {
     );
     assert!(
         app.status
-            .starts_with("Nothing re-explained · 1 file could not be read"),
+            .starts_with("Nothing re-explained; 1 file could not be read"),
         "{}",
         app.status
     );
@@ -25748,7 +25748,7 @@ fn a_remote_file_too_large_to_explain_is_said_so_and_asked_for_once() {
     assert_eq!(helper_asked(&batches), 1, "{batches:?}");
     assert_eq!(
         app.status,
-        "Explained 4 functions, files and folders · src/util/helper.rs is too large to explain \
+        "Explained 4 functions, files and folders; src/util/helper.rs is too large to explain \
          (2.3 MB) — its summaries are dropped"
     );
     assert_eq!(
@@ -25792,7 +25792,7 @@ fn a_host_that_settles_nothing_is_not_asked_forever() {
     assert_eq!(*app.proj.explain.cache, before);
     assert!(
         app.status.ends_with(
-            "· 2 files could not be read (src/lib.rs, src/util/helper.rs) — their summaries \
+            "; 2 files could not be read (src/lib.rs, src/util/helper.rs) — their summaries \
              are kept until they can be"
         ),
         "{}",
@@ -25816,7 +25816,7 @@ fn a_local_file_that_can_no_longer_be_explained_is_dropped_and_said_so() {
     assert_eq!(
         app.status,
         format!(
-            "Explained 4 functions, files and folders · src/util/helper.rs is too large to explain \
+            "Explained 4 functions, files and folders; src/util/helper.rs is too large to explain \
              ({size}) — its summaries are dropped"
         )
     );
@@ -25853,7 +25853,7 @@ fn a_local_file_that_can_no_longer_be_explained_is_dropped_and_said_so() {
     drive(&mut app, refresh, explain_and_save);
     assert!(
         app.status
-            .ends_with("· src/util/helper.rs is not UTF-8 text — its summaries are dropped"),
+            .ends_with("; src/util/helper.rs is not UTF-8 text — its summaries are dropped"),
         "{}",
         app.status
     );
@@ -25937,7 +25937,7 @@ fn a_local_file_saved_while_it_was_read_is_read_as_it_was_saved() {
     assert_eq!(*app.proj.explain.cache, before, "{}", app.status);
     assert!(
         app.status
-            .contains("· 1 file could not be read (src/util/helper.rs)"),
+            .contains("; 1 file could not be read (src/util/helper.rs)"),
         "{}",
         app.status
     );
@@ -25969,7 +25969,7 @@ fn a_file_that_can_no_longer_be_explained_is_said_to_be_what_it_is() {
     drive(&mut app, pass, explain_and_save);
     assert!(
         app.status.ends_with(
-            "· 2 files can no longer be explained (src/lib.rs (not a plain file), \
+            "; 2 files can no longer be explained (src/lib.rs (not a plain file), \
              src/util/helper.rs (outside the project)) — their summaries are dropped"
         ),
         "{}",
@@ -25982,7 +25982,7 @@ fn a_file_that_can_no_longer_be_explained_is_said_to_be_what_it_is() {
     std::os::unix::fs::symlink(&away, root.join("src/util/helper.rs")).unwrap();
     let pass = app.update(Message::Explain(ExplainMsg::Project));
     drive(&mut app, pass, explain_and_save);
-    let out = "· src/util/helper.rs resolves outside the project — its summaries are dropped";
+    let out = "; src/util/helper.rs resolves outside the project — its summaries are dropped";
     assert!(app.status.ends_with(out), "{}", app.status);
     // ... or a link to a file of the project.
     let (mut app, root, _provider) = helper_project("explain-said-link-in");
@@ -25991,7 +25991,7 @@ fn a_file_that_can_no_longer_be_explained_is_said_to_be_what_it_is() {
     std::os::unix::fs::symlink(&kept, root.join("src/util/helper.rs")).unwrap();
     let pass = app.update(Message::Explain(ExplainMsg::Project));
     drive(&mut app, pass, explain_and_save);
-    let not_plain = "· src/util/helper.rs is not a plain file — its summaries are dropped";
+    let not_plain = "; src/util/helper.rs is not a plain file — its summaries are dropped";
     assert!(app.status.ends_with(not_plain), "{}", app.status);
 
     let host = remote_helper_host(Some(HELPER));
@@ -26439,11 +26439,11 @@ fn a_prompt_refused_for_its_length_freezes_nothing_that_quotes_it() {
     assert_ne!(app.proj.explain.cache[&top].summary, before.summary);
     assert!(
         app.status.starts_with(
-            "Explained 7 functions, files and folders · 1 failed: the prompt is too long for the \
+            "Explained 7 functions, files and folders; 1 failed: the prompt is too long for the \
              model ("
         ) && app
             .status
-            .contains("· 1 explained without the failed summaries it builds on")
+            .contains("; 1 explained without the failed summaries it builds on")
             && !app.status.contains("2 failed"),
         "{}",
         app.status
@@ -26490,7 +26490,7 @@ fn a_summary_that_keeps_failing_is_waited_for_once() {
     );
     assert!(
         app.status
-            .contains("· 1 explained without the failed summaries it builds on"),
+            .contains("; 1 explained without the failed summaries it builds on"),
         "{}",
         app.status
     );
@@ -26535,7 +26535,7 @@ fn a_summary_waits_once_a_session_whatever_passes_come_between() {
     );
     assert!(
         app.status
-            .contains("· 1 explained without the failed summaries it builds on"),
+            .contains("; 1 explained without the failed summaries it builds on"),
         "{}",
         app.status
     );
@@ -33969,7 +33969,7 @@ fn export_notes_writes_the_markdown_where_picked() {
         "{written}"
     );
     assert!(
-        written.contains("- `src/lib.rs` · `origin` ✓ understood\n  > returns the origin\n"),
+        written.contains("- `origin` in `src/lib.rs` ✓ understood\n  > returns the origin\n"),
         "{written}"
     );
     assert!(
@@ -34230,7 +34230,7 @@ fn an_export_waits_for_the_docs_index_its_glossary_needs() {
     );
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(
-        text.contains("- **`Point`** (struct) — A point on the plane · `src/lib.rs:1`"),
+        text.contains("- **`Point`** (struct) — A point on the plane (`src/lib.rs:1`)"),
         "{text}"
     );
 

@@ -772,7 +772,7 @@ async fn run_editor_tool(
         return (format!("`{name}` is not a tool of this session"), true);
     };
     let call_id = session.call_id("mcp");
-    let title = format!("{} · {}", tool.server, tool.info.display_name());
+    let title = format!("{} ({})", tool.info.display_name(), tool.server);
     conn.update(
         id,
         json!({

@@ -696,8 +696,8 @@ fn widgets(files: &[File]) -> Option<ProjectMap> {
                 if !base.contains("state ") {
                     map.detail(
                         root,
-                        format!("{base} · state {}", c.name)
-                            .trim_start_matches(" · ")
+                        format!("{base}, state {}", c.name)
+                            .trim_start_matches(", ")
                             .to_string(),
                     );
                 }
@@ -1216,7 +1216,7 @@ mod tests {
         );
         assert_eq!(
             node("CartPage").detail,
-            "ConsumerStatefulWidget · state _CartPageState"
+            "ConsumerStatefulWidget, state _CartPageState"
         );
         assert_eq!(node("Scaffold").line, 11);
         assert_eq!(node("runApp").line, 4);

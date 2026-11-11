@@ -502,7 +502,12 @@ fn other_path<'a>(
 fn chip<'a>(label: String, on: bool, msg: Message) -> Element<'a, Message> {
     button(text(label).size(ts::BODY))
         .style(theme::toggle(on))
-        .padding([3, 9])
+        .padding(Padding {
+            top: form::CHIP_PAD_Y,
+            bottom: form::CHIP_PAD_Y,
+            left: 9.0,
+            right: 9.0,
+        })
         .on_press(msg)
         .into()
 }
@@ -579,7 +584,8 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             crate::highlight::lang_name(language)
                 .map(str::to_string)
                 .unwrap_or_else(|| language.clone()),
-            Some(format!("{server} · {status}")),
+            // The server, and under it how it stands.
+            Some(format!("{server}\n{status}")),
             action,
         ));
     }
@@ -761,7 +767,7 @@ pub(crate) fn installed_servers(app: &App) -> Element<'_, Message> {
             form::item(
                 srv.name.clone(),
                 Some(format!(
-                    "{} · {}",
+                    "{}, {}",
                     srv.version,
                     super::explain_view::human_size(srv.bytes)
                 )),
@@ -899,10 +905,10 @@ fn python_block<'a>(
                 PythonEnvKind::System => tr!("System"),
             };
             let label = match (&candidate.kind, &candidate.version) {
-                (PythonEnvKind::System, Some(version)) => format!("{kind} · Python {version}"),
+                (PythonEnvKind::System, Some(version)) => format!("{kind} Python {version}"),
                 (PythonEnvKind::System, None) => kind.to_string(),
-                (_, Some(version)) => format!("{kind} · {} · Python {version}", candidate.name),
-                (_, None) => format!("{kind} · {}", candidate.name),
+                (_, Some(version)) => format!("{} (Python {version}, {kind})", candidate.name),
+                (_, None) => format!("{} ({kind})", candidate.name),
             };
             rows.push(form::choice(
                 label,
@@ -941,7 +947,7 @@ fn python_block<'a>(
 }
 
 /// The Cargo features and target rust-analyzer loads the project with.
-fn rust_block<'a>(
+pub(super) fn rust_block<'a>(
     app: &'a App,
     options: Option<&'a clew_protocol::RustOptions>,
 ) -> Element<'a, Message> {
@@ -1064,14 +1070,16 @@ fn rust_block<'a>(
         ),
         None,
         vec![
-            form::field(tr!("Features"), None, features),
+            // Its first line is a checkbox's words: on the label's line,
+            // not 7 above it.
+            form::field_text(tr!("Features"), None, features),
             form::field(tr!("Target"), None, target),
         ],
     )
 }
 
 /// The build tags and platform gopls loads the project with.
-fn go_block<'a>(
+pub(super) fn go_block<'a>(
     app: &'a App,
     options: Option<&'a clew_protocol::GoOptions>,
 ) -> Element<'a, Message> {
@@ -1083,6 +1091,7 @@ fn go_block<'a>(
     let mut seen = std::collections::HashSet::new();
     all.retain(|t| seen.insert(t.clone()));
     let mut tags = column![].spacing(8);
+    let no_tags = all.is_empty();
     if all.is_empty() {
         tags = tags.push(form::note(tr!("No build tags in this project.")));
     } else {
@@ -1165,7 +1174,11 @@ fn go_block<'a>(
         ),
         None,
         vec![
-            form::field(tr!("Build tags"), None, tags),
+            if no_tags {
+                form::field_text(tr!("Build tags"), None, tags)
+            } else {
+                form::field_chips(tr!("Build tags"), None, tags)
+            },
             form::field(tr!("Platform"), None, platform),
         ],
     )
@@ -1533,11 +1546,11 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 _ if !server.enabled => (tr!("Off").to_string(), theme::dim()),
                 Some(Status::Connected { info, tools }) => (
                     if info.name.is_empty() {
-                        trn!("Connected · 1 tool", "Connected · {n} tools", *tools)
+                        trn!("Connected, 1 tool", "Connected, {n} tools", *tools)
                     } else {
                         trn!(
-                            "Connected to {server} · 1 tool",
-                            "Connected to {server} · {n} tools",
+                            "Connected to {server}, 1 tool",
+                            "Connected to {server}, {n} tools",
                             *tools,
                             server = info.name
                         )
@@ -1674,7 +1687,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     }
     let mut add_rows = Vec::new();
     if !needs.is_empty() {
-        add_rows.push(form::field(
+        add_rows.push(form::field_text(
             tr!("It reads"),
             None,
             Column::with_children(needs).spacing(6),
@@ -2806,9 +2819,9 @@ fn registry_group(draft: &crate::app::integrations::IntegrationsDraft) -> Elemen
             for (i, entry) in entries.iter().enumerate() {
                 let how = match &entry.install {
                     Install::Stdio { kind, .. } => {
-                        format!("{} · {}", registry_kind(kind), entry.version)
+                        format!("{} {}", registry_kind(kind), entry.version)
                     }
-                    Install::Remote { .. } => format!("{} · {}", tr!("remote"), entry.version),
+                    Install::Remote { .. } => format!("{} {}", tr!("remote"), entry.version),
                     Install::Unsupported(why) => tr!("Clew can't run it: {why}", why = why.clone()),
                 };
                 let usable = !matches!(entry.install, Install::Unsupported(_));

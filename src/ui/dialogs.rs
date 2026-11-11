@@ -71,7 +71,7 @@ pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_,
 pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_, Message> {
     let (rel, symbol, draft) = edit;
     prompt_modal(Prompt {
-        title: tr!("Note on {symbol}  ·  {file}", symbol = symbol, file = rel),
+        title: tr!("Note on {symbol} in {file}", symbol = symbol, file = rel),
         placeholder: tr!("what you worked out about this symbol…"),
         value: draft,
         input_id: note_input_id(),
@@ -236,7 +236,7 @@ pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> El
 pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     let placeholder = match app.proj.finder.mode {
         _ if app.proj.finder.bar => tr!("Run a command or open a file"),
-        FinderMode::Files => tr!("Open a file  ·  > for a command, :123 for a line"),
+        FinderMode::Files => tr!("Open a file, or type > for a command, :123 for a line"),
         FinderMode::Symbols => tr!("Go to a symbol"),
     };
     let glyph = match app.proj.finder.mode {
@@ -514,7 +514,7 @@ fn suggestion_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
                 Glyph::Braces,
                 theme::dim(),
                 name.clone(),
-                Some(tr!("{file} · line {line}", file = file, line = line)),
+                Some(tr!("{file}, line {line}", file = file, line = line)),
                 None,
             ),
             Suggestion::Command { title, recent } => (

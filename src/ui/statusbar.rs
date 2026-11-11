@@ -318,8 +318,8 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             ))
         });
         let named = |status: &str| match server {
-            Some((Some(name), _)) => format!("{lang} · {name} {status}"),
-            Some((None, _)) => format!("{lang} · {status}"),
+            Some((Some(name), _)) => format!("{lang}: {name} {status}"),
+            Some((None, _)) => format!("{lang}: {status}"),
             None => lang.to_string(),
         };
         let said = match &server {
@@ -577,7 +577,7 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
                 count = thousands(files)
             );
             if symbols > 0 {
-                counts.push_str(" · ");
+                counts.push_str(", ");
                 counts.push_str(&trn!(
                     "{count} symbol",
                     "{count} symbols",

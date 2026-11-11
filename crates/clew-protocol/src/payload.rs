@@ -487,7 +487,7 @@ impl StructureIndex {
             let n = ts.methods.len();
             bits.push(format!("{n} method{}", if n == 1 { "" } else { "s" }));
         }
-        (!bits.is_empty()).then(|| bits.join(" · "))
+        (!bits.is_empty()).then(|| bits.join("; "))
     }
 }
 
@@ -550,7 +550,7 @@ mod tests {
             .insert("Shape".into(), (0..10).map(|i| format!("T{i}")).collect());
         assert_eq!(
             idx.summary_line("Point").as_deref(),
-            Some("impl Clone, Debug · 1 method")
+            Some("impl Clone, Debug; 1 method")
         );
         assert_eq!(
             idx.summary_line("Shape").as_deref(),

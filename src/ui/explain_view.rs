@@ -616,7 +616,7 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
         Node::Function { file, name, .. } => (
             name.clone(),
             match file.file_name() {
-                Some(f) => format!("fn · {}", f.to_string_lossy()),
+                Some(f) => tr!("function in {file}", file = f.to_string_lossy()),
                 None => "fn".to_string(),
             },
             true,
@@ -1058,7 +1058,7 @@ pub(crate) fn lsp_command_modal(
             .color(theme::fg()),
             column(blocks).spacing(8),
             text(tr!(
-                "Language: {language} · Server: {server} {version}",
+                "Language: {language}, server: {server} {version}",
                 language = crate::app::languages::language_name(&pending.language),
                 server = pending.server_name,
                 version = pending.version

@@ -96,7 +96,7 @@ pub fn distinguish_labels(nodes: &mut [NodeInput]) {
             if files_named {
                 tail(&nodes[i].file, parts + 1)
             } else {
-                format!("{label} · {}", tail(&nodes[i].file, parts))
+                format!("{label} ({})", tail(&nodes[i].file, parts))
             }
         };
         let mut names: Vec<Option<String>> = vec![None; same.len()];
@@ -674,8 +674,8 @@ mod tests {
                 "p/src/ui/mod.rs",
                 "x/src/ui/mod.rs",
                 "main.rs",
-                "new · a.rs",
-                "new · b.rs"
+                "new (a.rs)",
+                "new (b.rs)"
             ]
         );
     }

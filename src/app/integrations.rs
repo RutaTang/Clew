@@ -586,7 +586,7 @@ impl App {
             });
             return Task::none();
         };
-        let label = format!("{} · {}", target.server.name, target.tool.display_name());
+        let label = format!("{} ({})", target.tool.display_name(), target.server.name);
         let ask = target
             .server
             .needs_approval(&target.tool.name, target.tool.read_only);

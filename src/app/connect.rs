@@ -133,7 +133,8 @@ impl App {
     }
 
     /// Connect to `target`, asked from the Connect form (`save`: the form's
-    /// host) or its saved hosts: recorded as a [`Dial`] until it answers.
+    /// host) or its saved hosts: recorded as a
+    /// [`Dial`](crate::app::state::Dial) until it answers.
     /// Where the reader was is where a dial that never answers goes back to
     /// — and a dial asked while another never answered goes back to where
     /// that one began.
@@ -167,7 +168,7 @@ impl App {
     /// The project this window is reading and the file and line (1-based) it
     /// is at — or, a project on its way back (its scan, its consent sheet),
     /// the ones it is to reopen at.
-    pub(crate) fn reading_place(&self) -> Option<(PathBuf, Option<(PathBuf, Option<usize>)>)> {
+    pub(crate) fn reading_place(&self) -> Option<(PathBuf, Option<crate::app::state::ReadAt>)> {
         if let Some(project) = &self.proj.project {
             let at = self
                 .active_viewer()

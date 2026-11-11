@@ -2171,7 +2171,9 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     }
     for (node, score) in &app.proj.semantic_results {
         let label = match node {
-            Node::Function { file, name, .. } => format!("{name} · {}", rel_of(app, file)),
+            Node::Function { file, name, .. } => {
+                tr!("{name} in {file}", name = name, file = rel_of(app, file))
+            }
             Node::File(p) => rel_of(app, p),
             Node::Folder(p) => rel_of(app, p),
         };

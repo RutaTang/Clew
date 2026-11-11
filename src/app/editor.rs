@@ -1834,7 +1834,7 @@ impl App {
             return None;
         }
         let text = if b.uncommitted {
-            format!("· {}", tr!("Uncommitted change"))
+            tr!("Uncommitted change").to_string()
         } else {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1844,11 +1844,11 @@ impl App {
             if summary.chars().count() > 60 {
                 summary = summary.chars().take(59).collect::<String>() + "…";
             }
+            // What the commit said, then who and when.
             format!(
-                "{}, {} · {}",
+                "{summary} ({}, {})",
                 b.author,
-                crate::i18n::ago(b.time, now),
-                summary
+                crate::i18n::ago(b.time, now)
             )
         };
         Some((line, text))

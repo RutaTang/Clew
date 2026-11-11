@@ -2134,7 +2134,7 @@ impl App {
         if !calls.precise {
             return None;
         }
-        // Each part after a " · " says one thing whole.
+        // Each part after a "; " says one thing whole.
         let mut label = match self.refined_languages().as_slice() {
             [] => tr!("● LSP-precise").to_string(),
             covered => tr!(
@@ -2144,7 +2144,7 @@ impl App {
         };
         let left = self.languages_left_out();
         if !left.is_empty() {
-            label.push_str(" · ");
+            label.push_str("; ");
             label.push_str(&tr!(
                 "{languages} left out",
                 languages = crate::app::languages::language_names(&left)
@@ -2153,7 +2153,7 @@ impl App {
         match calls.unrefined.len() {
             0 => {}
             n => {
-                label.push_str(" · ");
+                label.push_str("; ");
                 label.push_str(&trn!("1 function unrefined", "{n} functions unrefined", n));
             }
         }
@@ -2161,7 +2161,7 @@ impl App {
         if !waiting.is_empty() {
             let names =
                 crate::app::languages::language_names(&waiting.into_iter().collect::<Vec<_>>());
-            label.push_str(" · ");
+            label.push_str("; ");
             label.push_str(&tr!("waiting for {languages}", languages = names));
         }
         Some(label)

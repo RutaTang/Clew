@@ -170,6 +170,27 @@ pub(crate) fn field_text<'a>(
 /// text's place in the control.
 pub(crate) const VALUE_TOP: f32 = 7.0;
 
+/// The space above and below a chip's words (a feature, a build tag).
+pub(crate) const CHIP_PAD_Y: f32 = 3.0;
+
+/// [`field`] whose control starts with a line of chips: set down so the
+/// chips' words are on the label's line. Beside a typed field's label they
+/// sat 4 above it.
+pub(crate) fn field_chips<'a>(
+    name: impl Into<String>,
+    about: Option<String>,
+    chips: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    field(
+        name,
+        about,
+        container(chips.into()).padding(Padding {
+            top: VALUE_TOP - CHIP_PAD_Y,
+            ..Padding::ZERO
+        }),
+    )
+}
+
 /// A row of its own content, padded as the others are.
 pub(crate) fn plain<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content.into())

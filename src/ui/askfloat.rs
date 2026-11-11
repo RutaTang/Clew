@@ -642,7 +642,7 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
         match &app.proj.explain.view {
             Some(crate::explain::Node::Function { file, name: f, .. }) if *file == v.abs => {
-                tr!("Viewing {file} · {function}", file = name, function = f)
+                tr!("Viewing {function} in {file}", file = name, function = f)
             }
             _ => tr!("Viewing {file}", file = name),
         }
@@ -869,7 +869,7 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
         let current = app.proj.ask_session == Some(session.id);
         let questions = session.turns.len();
         let meta = format!(
-            "{} · {}",
+            "{}, {}",
             when(session.updated, now),
             trn!("1 question", "{n} questions", questions)
         );

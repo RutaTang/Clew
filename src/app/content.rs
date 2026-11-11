@@ -193,7 +193,7 @@ impl App {
                     reason = reason
                 ),
                 Some(reason) => tr!(
-                    "Rendered {rendered} · {failed} failed ({reason})",
+                    "Rendered {rendered}, {failed} failed ({reason})",
                     rendered = rendered,
                     failed = failed,
                     reason = reason
