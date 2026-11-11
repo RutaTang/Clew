@@ -21,9 +21,7 @@ pub(crate) fn usage_page(app: &App) -> Element<'_, Message> {
             vec![form::item(
                 tr!("This month"),
                 None,
-                text(tr!("Reading the ledger…"))
-                    .size(ts::BODY)
-                    .color(theme::dim()),
+                text(tr!("Loading…")).size(ts::BODY).color(theme::dim()),
             )],
         )),
         Some(entries) => {
@@ -56,7 +54,7 @@ pub(crate) fn usage_page(app: &App) -> Element<'_, Message> {
                         .iter()
                         .map(|e| {
                             let about = tr!(
-                                "{date}, {model}: {input} in, {output} out",
+                                "{date}, {model}: {input} tokens in, {output} out",
                                 date = super::panes::short_date(e.at as i64, now),
                                 model = e.model.as_str(),
                                 input = usage::tokens(e.input),
@@ -86,16 +84,16 @@ fn balance_group(app: &App) -> Element<'_, Message> {
     let refresh = |busy: bool| -> Element<'_, Message> {
         super::toolbar::busy_action(
             Glyph::Refresh,
-            tr!("Read again"),
+            tr!("Check again"),
             Some(Message::Usage(UsageMsg::RefreshBalance)),
             busy,
         )
     };
     let row: Element<'_, Message> = if !app.usage.tells_balance {
         let about = match kind {
-            llm::Provider::Custom => tr!("This endpoint does not tell its balance.").to_string(),
+            llm::Provider::Custom => tr!("This endpoint doesn't report a balance.").to_string(),
             _ => tr!(
-                "{provider} does not tell an API key its balance.",
+                "{provider} doesn't share the balance with API keys. See it on the billing page.",
                 provider = provider
             ),
         };
@@ -111,12 +109,12 @@ fn balance_group(app: &App) -> Element<'_, Message> {
     } else if !app.llm_available {
         form::item(
             tr!("Balance"),
-            Some(tr!("Add an API key to read it.").into()),
+            Some(tr!("Add an API key to see it.").into()),
             space().width(0),
         )
     } else {
         let told = tr!(
-            "As {provider} tells it. Reading it uses no tokens.",
+            "From your {provider} account. Checking it costs nothing.",
             provider = provider
         );
         match &app.usage.balance {
@@ -135,16 +133,14 @@ fn balance_group(app: &App) -> Element<'_, Message> {
             ),
             Balance::Failed(e) => form::item(
                 tr!("Balance"),
-                Some(tr!("Could not read it: {error}", error = e.as_str())),
+                Some(tr!("Couldn't check it: {error}", error = e.as_str())),
                 refresh(false),
             ),
             Balance::Reading | Balance::Unread | Balance::NotTold => form::item(
                 tr!("Balance"),
                 Some(told),
                 row![
-                    text(tr!("Reading the balance…"))
-                        .size(ts::BODY)
-                        .color(theme::dim()),
+                    text(tr!("Checking…")).size(ts::BODY).color(theme::dim()),
                     refresh(true),
                 ]
                 .spacing(8)
@@ -256,12 +252,12 @@ fn spent_group<'a>(s: &usage::Summary) -> Element<'a, Message> {
         tr!("Spent"),
         Some(if unpriced > 0 {
             trn!(
-                "Estimated from each call's tokens at the prices below; 1 call this month has no price.",
-                "Estimated from each call's tokens at the prices below; {n} calls this month have no price.",
+                "Worked out from each call's tokens at the prices below. 1 call this month has no price.",
+                "Worked out from each call's tokens at the prices below. {n} calls this month have no price.",
                 unpriced as usize
             )
         } else {
-            tr!("Estimated from each call's tokens at the prices below; your provider's bill is what counts.")
+            tr!("Worked out from each call's tokens at the prices below. Your provider's bill is the final word.")
                 .to_string()
         }),
         None,
@@ -320,9 +316,9 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
             tr!("Your own prices"),
             usage::builtin_price(model)
                 .is_some()
-                .then(|| tr!("Clew has its own for this model.").to_string()),
+                .then(|| tr!("Clew has defaults for this model.").to_string()),
             form::action(
-                tr!("Use Clew's prices"),
+                tr!("Restore defaults"),
                 Some(Message::Usage(UsageMsg::ResetPrice)),
             ),
         ));
@@ -331,12 +327,12 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
         tr!("Set a model on the Language model page first.").to_string()
     } else if usage::price_of(model).is_none() {
         tr!(
-            "Clew has no price for {model}: set one to see what calls cost. In US dollars per million tokens.",
+            "Clew doesn't know {model}'s prices. Enter them, in US dollars per million tokens, to see what calls cost.",
             model = model
         )
     } else {
         tr!(
-            "For {model}, in US dollars per million tokens. Clew's own were looked up in {date}; prices change, so check your provider's page.",
+            "US dollars per million tokens, for {model}. Clew's defaults date from {date} and prices change, so check your provider's pricing page.",
             model = model,
             date = usage::PRICES_AS_OF
         )

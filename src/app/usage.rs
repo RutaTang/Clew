@@ -397,7 +397,8 @@ pub(crate) fn estimate(entries: &[Entry], purpose: &str, calls: u64, model: &str
         .filter(|e| e.purpose == purpose)
         .take(ESTIMATE_FROM)
         .collect();
-    let (input, cached, output) = if lately.len() >= ESTIMATE_MIN {
+    let from_history = lately.len() >= ESTIMATE_MIN;
+    let (input, cached, output) = if from_history {
         let n = lately.len() as u64;
         let sum = |f: fn(&Entry) -> u64| lately.iter().map(|e| f(e)).sum::<u64>() / n;
         (sum(|e| e.input), sum(|e| e.cached), sum(|e| e.output))
@@ -407,6 +408,7 @@ pub(crate) fn estimate(entries: &[Entry], purpose: &str, calls: u64, model: &str
     Estimate {
         tokens: calls * (input + output),
         cost: price_of(model).map(|p| p.cost(calls * input, calls * cached, calls * output)),
+        from_history,
     }
 }
 
@@ -432,18 +434,44 @@ pub(crate) struct Estimate {
     pub tokens: u64,
     /// In US dollars, when the model has a price.
     pub cost: Option<f64>,
+    /// Drawn from the reader's own recent calls for it, not a typical one.
+    pub from_history: bool,
 }
 
 impl Estimate {
-    /// "About 70k tokens, about $0.04." — or the tokens alone.
-    pub(crate) fn said(&self) -> String {
+    /// `calls` of them, in one sentence of one weight: "About 44 AI calls:
+    /// 75k tokens, $0.03." The count stood bold over a dim line of the
+    /// tokens and money — the figure that matters most said least.
+    pub(crate) fn said(&self, calls: usize) -> String {
+        let count = crate::app::setup::about(calls);
+        let tokens = tokens(self.tokens);
         match self.cost {
-            Some(cost) => tr!(
-                "About {tokens} tokens, about {cost}.",
-                tokens = tokens(self.tokens),
+            Some(cost) => trn!(
+                "About {count} AI call: {tokens} tokens, {cost}.",
+                "About {count} AI calls: {tokens} tokens, {cost}.",
+                calls,
+                count = count,
+                tokens = tokens,
                 cost = money(cost)
             ),
-            None => tr!("About {tokens} tokens.", tokens = tokens(self.tokens)),
+            None => trn!(
+                "About {count} AI call: {tokens} tokens.",
+                "About {count} AI calls: {tokens} tokens.",
+                calls,
+                count = count,
+                tokens = tokens
+            ),
+        }
+    }
+
+    /// Where the figures come from, and what they are worth.
+    pub(crate) fn basis(&self) -> String {
+        if self.from_history {
+            tr!("Estimated from your recent explanations. Your provider's bill is the final word.")
+                .to_string()
+        } else {
+            tr!("Estimated from a typical explanation. Your provider's bill is the final word.")
+                .to_string()
         }
     }
 }
@@ -721,12 +749,12 @@ impl App {
     }
 
     /// What `calls` more Explain calls are likely to cost, said.
-    pub(crate) fn explain_estimate(&self, calls: usize) -> Option<String> {
+    pub(crate) fn explain_estimate(&self, calls: usize) -> Option<Estimate> {
         if calls == 0 || !self.llm_available {
             return None;
         }
         let entries = self.usage.entries.as_deref().unwrap_or(&[]);
-        Some(estimate(entries, EXPLAIN, calls as u64, &self.usage.model).said())
+        Some(estimate(entries, EXPLAIN, calls as u64, &self.usage.model))
     }
 
     /// What the Ask answer on `stream` used, and what it cost, said — once
@@ -832,11 +860,18 @@ mod tests {
         let drawn = estimate(&lately, EXPLAIN, 10, "gpt-4o-mini");
         assert_eq!(drawn.tokens, 11_000);
         assert!((drawn.cost.unwrap() - (10_000.0 * 0.15 + 1_000.0 * 0.6) / 1e6).abs() < 1e-12);
+        assert!(drawn.from_history && !typical.from_history);
         assert_eq!(estimate(&lately, EXPLAIN, 1, "mystery").cost, None);
-        assert!(
-            estimate(&lately, EXPLAIN, 1, "mystery")
-                .said()
-                .contains("tokens")
+        assert_eq!(
+            estimate(&lately, EXPLAIN, 1, "mystery").said(1),
+            "About 1 AI call: 1.1k tokens."
+        );
+        assert_eq!(
+            drawn.said(10),
+            format!(
+                "About 10 AI calls: 11k tokens, {}.",
+                money(drawn.cost.unwrap())
+            )
         );
     }
 

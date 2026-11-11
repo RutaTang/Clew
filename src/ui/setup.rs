@@ -13,7 +13,7 @@ use crate::app::message::{Message, ProjectMsg};
 use crate::app::setup::{ProjectSetup, SetupMode, explain_line, servers_line};
 use crate::app::state::App;
 use crate::theme;
-use crate::tr;
+use crate::{tr, trn};
 
 /// Room under a tick for what it takes, lined up with its label.
 const DETAIL_INDENT: f32 = 26.0;
@@ -59,14 +59,27 @@ pub(crate) fn setup_sheet<'a>(
         .unwrap_or_else(|| root.display().to_string());
     let census = setup.and_then(|s| s.census.as_ref());
     let calls = setup.map(|s| s.census.as_ref().map(|c| c.calls));
-    let explain_says = explain_line(app.llm_available, calls.flatten(), app.embed_available);
-    // What those calls are likely to cost, under the count of them: said
+    // What those calls are likely to cost, with the count of them: said
     // before anything is spent, not after.
-    let estimate = calls
-        .flatten()
-        .flatten()
-        .and_then(|n| app.explain_estimate(n))
-        .unwrap_or_default();
+    let counted = calls.flatten().flatten();
+    let estimate = counted.and_then(|n| Some((n, app.explain_estimate(n)?)));
+    // The count, its tokens and its money in one sentence of one weight —
+    // the count stood bold over a dim line of the rest — and what else
+    // explaining does on a line of its own.
+    let (explain_says, explain_also) = match &estimate {
+        Some((n, e)) => (
+            e.said(*n),
+            if app.embed_available {
+                tr!("Also builds the semantic index.").to_string()
+            } else {
+                String::new()
+            },
+        ),
+        None => (
+            explain_line(app.llm_available, calls.flatten(), app.embed_available),
+            String::new(),
+        ),
+    };
 
     let title = match mode {
         SetupMode::Open => tr!("Open {name}", name = name),
@@ -207,7 +220,7 @@ pub(crate) fn setup_sheet<'a>(
                 can_explain.then_some(|on| Message::Project(ProjectMsg::SetupExplain(on))),
                 explain_says,
                 1.0,
-                Some(estimate),
+                Some(explain_also),
             ));
             // No key: where one is added, a click away — the line said
             // "in Settings" and left the reader to find it.
@@ -236,13 +249,69 @@ pub(crate) fn setup_sheet<'a>(
             }
         }
         SetupMode::Explain => {
-            body = body.push(
-                column![
-                    text(explain_says).size(ts::BODY).color(theme::fg_muted()),
-                    text(estimate).size(ts::SMALL).color(theme::dim()),
-                ]
-                .spacing(4),
-            );
+            body = body.push(match estimate {
+                // What it will likely take, as three figures of one weight:
+                // the calls, their tokens, their money.
+                Some((n, e)) => {
+                    let tile = |value: String, label: String| -> Element<'a, Message> {
+                        container(
+                            column![
+                                text(value)
+                                    .size(ts::TITLE)
+                                    .font(crate::fonts::UI_MEDIUM)
+                                    .color(theme::fg()),
+                                text(label).size(ts::SMALL).color(theme::dim()),
+                            ]
+                            .spacing(2),
+                        )
+                        .padding([10, 12])
+                        .width(Fill)
+                        .style(theme::form_card)
+                        .into()
+                    };
+                    let cost = e.cost.map_or_else(|| "—".to_string(), crate::app::usage::money);
+                    let mut notes = column![
+                        text(e.basis())
+                            .size(ts::SMALL)
+                            .color(theme::dim())
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                    ]
+                    .spacing(2);
+                    if e.cost.is_none() {
+                        notes = notes.push(
+                            text(tr!(
+                                "Clew doesn't know this model's prices: enter them under Usage and cost to see what it costs."
+                            ))
+                            .size(ts::SMALL)
+                            .color(theme::dim())
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                        );
+                    }
+                    if !explain_also.is_empty() {
+                        notes = notes.push(
+                            text(explain_also).size(ts::SMALL).color(theme::dim()),
+                        );
+                    }
+                    column![
+                        row![
+                            tile(
+                                crate::app::setup::about(n),
+                                trn!("AI call", "AI calls", n).to_string()
+                            ),
+                            tile(
+                                crate::app::usage::tokens(e.tokens),
+                                tr!("tokens").to_string()
+                            ),
+                            tile(cost, tr!("estimated cost").to_string()),
+                        ]
+                        .spacing(8),
+                        notes,
+                    ]
+                    .spacing(10)
+                    .into()
+                }
+                None => Element::from(text(explain_says).size(ts::BODY).color(theme::fg_muted())),
+            });
         }
     }
 

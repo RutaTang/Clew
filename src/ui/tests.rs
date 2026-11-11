@@ -5204,14 +5204,17 @@ fn the_setup_sheet_says_what_each_choice_takes() {
         "Language servers",
         "rust-analyzer: download, builds the project (runs its code)",
         "Explain the project",
-        "About 3,600 AI calls. Also builds the semantic index.",
+        "Also builds the semantic index.",
         "Skip setup",
     ] {
         assert!(shows(&mut sim, said), "{said:?}");
     }
-    // And what those calls are likely to cost, under their count.
+    // And what those calls are likely to cost, with their count, in one
+    // sentence of one weight.
     let estimate = app.explain_estimate(3617).expect("an estimate");
-    assert!(shows(&mut sim, &estimate), "{estimate:?}");
+    let said = estimate.said(3617);
+    assert!(said.starts_with("About 3,600 AI calls: "), "{said:?}");
+    assert!(shows(&mut sim, &said), "{said:?}");
     assert!(matches!(
         click(sim_elem(sheet(&app, &root)), "Language servers").as_slice(),
         [Message::Project(ProjectMsg::SetupServers(false))]
@@ -5231,6 +5234,19 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     let mut sim = sim_elem(sheet(&app, &root));
     assert!(shows(&mut sim, "Explain iced?"));
     assert!(!shows(&mut sim, "Language servers"));
+    // Asking first: the calls, their tokens and their money as three
+    // figures of one weight, and where they come from.
+    for said in [
+        "3,600".to_string(),
+        "AI calls".to_string(),
+        crate::app::usage::tokens(estimate.tokens),
+        "tokens".to_string(),
+        "estimated cost".to_string(),
+        estimate.basis(),
+        "Also builds the semantic index.".to_string(),
+    ] {
+        assert!(shows(&mut sim, &said), "{said:?}");
+    }
     assert!(matches!(
         click(sim_elem(sheet(&app, &root)), "Explain").as_slice(),
         [Message::Project(ProjectMsg::SetupApply)]
@@ -16105,7 +16121,7 @@ fn the_usage_page_says_what_the_key_spent() {
     let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
         crate::SettingsPage::Usage,
     )));
-    assert!(shows(&mut sim_of(&app), "Reading the ledger…"));
+    assert!(shows(&mut sim_of(&app), "Loading…"));
     let now = crate::app::usage::now_secs();
     let call = |purpose: &str, input: u64, output: u64| Entry {
         at: now,
@@ -16213,10 +16229,12 @@ fn explaining_says_what_it_will_likely_cost() {
     let mut app = reader_app();
     app.llm_available = true;
     let estimate = app.explain_estimate(45).expect("an estimate");
+    let said = estimate.said(45);
     assert!(
-        estimate.starts_with("About ") && estimate.contains("tokens"),
-        "{estimate:?}"
+        said.starts_with("About 45 AI calls: ") && said.contains("tokens"),
+        "{said:?}"
     );
+    assert!(!estimate.from_history, "no explanations in the ledger yet");
     assert_eq!(
         app.explain_estimate(0),
         None,
