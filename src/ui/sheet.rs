@@ -609,9 +609,16 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
 fn trail_row(app: &App) -> Element<'_, Message> {
     let stops = app.proj.history.recent_path(TRAIL_STOPS);
     let last = stops.len().saturating_sub(1);
-    let mut line = row![glyph::icon(Glyph::Route, theme::dim(), 13.0)]
-        .spacing(6)
-        .align_y(iced::Center);
+    // Its icon says what the row is where the pointer rests: read as a
+    // breadcrumb, "lib.rs › Frame" over another file was taken for that
+    // file's path.
+    let route = super::toolbar::tip_at(
+        glyph::icon(Glyph::Route, theme::dim(), 13.0),
+        tr!("Reading trail"),
+        None,
+        iced::widget::tooltip::Position::Bottom,
+    );
+    let mut line = row![route].spacing(6).align_y(iced::Center);
     // No visit recorded yet (a file restored, not gone to): the file on the
     // sheet is where the trail starts.
     if stops.is_empty()

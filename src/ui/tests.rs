@@ -12824,6 +12824,53 @@ fn the_context_menu_waits_for_the_language_server() {
     }
 }
 
+/// The Set up sheet has its ×, as the first open's does: the same dialog
+/// had one shown one way and none the other.
+#[test]
+fn the_set_up_sheet_has_its_close() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Project(ProjectMsg::SetupShow(
+        crate::app::setup::SetupMode::Manage,
+    )));
+    assert!(app.setup.is_some());
+    let close = crate::ui::heard::gather(&app)
+        .into_iter()
+        .find(|t| t.title == "Close")
+        .expect("its ×");
+    assert!(matches!(
+        close.message,
+        Message::Project(ProjectMsg::SetupClose)
+    ));
+}
+
+/// With no embedding model, Find by meaning says why it stays empty and
+/// where one is set up: a search showed nothing, its reason flashed in the
+/// status bar, and the link beside Build index was Explain All.
+#[test]
+fn find_by_meaning_with_no_model_says_where_to_set_one_up() {
+    let mut app = reader_app();
+    app.embed_available = false;
+    app.embed_missing = "Configure an embedding endpoint in Settings".into();
+    let mut sim = sim_elem(super::semantic_tab(&app));
+    assert!(
+        text_at(
+            &mut sim,
+            |t| t == "Configure an embedding endpoint in Settings",
+            0
+        )
+        .is_some(),
+        "why, in the panel"
+    );
+    let sent = click(sim_elem(super::semantic_tab(&app)), "Set Up…");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::OpenAt(crate::SettingsPage::Embeddings))
+        )),
+        "{sent:?}"
+    );
+}
+
 /// Build index does nothing without notes to build from, and is drawn so,
 /// with the step that gets there beside it: it looked ready, and answered
 /// in the status bar. With notes and a model it builds.

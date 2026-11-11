@@ -2062,6 +2062,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     // looked ready, and answered in the status bar.
     let can_build = !app.proj.explain.cache.is_empty() && app.embed_available;
     let press = (!building && can_build).then_some(Message::Semantic(SemanticMsg::BuildIndex));
+    let can_press = press.is_some();
     // While it builds, the button's own icon turns, in its place: words
     // that came in for the build ("Building…", "Building the index…") moved
     // what stood beside them, and the count went for as long as it ran.
@@ -2069,7 +2070,14 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         if building {
             super::meter::spinning(crate::glyph::Glyph::Refresh, theme::accent(), size)
         } else {
-            crate::glyph::icon(crate::glyph::Glyph::Refresh, theme::fg_muted(), size)
+            // Dimmed with its words when there is nothing it can do: its
+            // icon at full strength, it looked ready.
+            let tint = if can_press {
+                theme::fg_muted()
+            } else {
+                theme::dim()
+            };
+            crate::glyph::icon(crate::glyph::Glyph::Refresh, tint, size)
         }
     };
     // The first build is asked for in words; building again, as the other
@@ -2094,7 +2102,23 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     };
     // The index builds itself from explanation summaries (automatically, after
     // Explain All) — so the hint only reports state, never asks for a manual step.
-    let info: Element<'_, Message> = if n == 0 && app.proj.explain.cache.is_empty() {
+    let info: Element<'_, Message> = if !app.embed_available && n == 0 {
+        // No model to search with, and no index: where one is set up, as a
+        // link — what stood here was Explain All, which needs one as much.
+        // An index built before keeps its count here.
+        button(
+            text(tr!("Set Up…"))
+                .size(ts::CAPTION)
+                .color(theme::accent()),
+        )
+        .style(theme::icon_button(false))
+        .padding([2, 6])
+        .on_press(super::heard::said(
+            tr!("Set Up…"),
+            Message::Settings(crate::SettingsMsg::OpenAt(crate::SettingsPage::Embeddings)),
+        ))
+        .into()
+    } else if n == 0 && app.proj.explain.cache.is_empty() {
         // The step that gets there, as a link.
         button(
             text(tr!("Explain All…"))
@@ -2127,6 +2151,16 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
             .align_y(iced::Center)
             .into(),
     );
+    // And why the panel stays empty, said in it: a search pressed showed
+    // nothing, and said why only for a moment in the status bar.
+    if !app.embed_available && !app.embed_missing.is_empty() {
+        rows.push(
+            text(app.embed_missing.clone())
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .into(),
+        );
+    }
     if app.proj.searching_semantic {
         rows.push(
             text(tr!("Searching…"))

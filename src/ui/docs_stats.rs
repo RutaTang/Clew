@@ -977,7 +977,23 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
 
     // Largest files: click a row to open it.
     let root = app.proj.project.as_ref().map(|p| p.root.clone());
-    let mut files = Column::new().spacing(2);
+    // Its columns named, as the table's above are: a bare number beside
+    // each file did not say it was its lines. Lined up with the rows'
+    // cells inside their padding.
+    let files_header = row![
+        space().width(Fill),
+        head(tr!("Lines"), 80.0),
+        head(tr!("programming language\u{4}Language"), 90.0),
+    ]
+    .spacing(8)
+    .padding(Padding {
+        top: 0.0,
+        right: 8.0,
+        bottom: 0.0,
+        left: 8.0,
+    })
+    .align_y(iced::Center);
+    let mut files = Column::new().spacing(2).push(files_header);
     for f in &report.top_files {
         let inner = row![
             text(f.rel.clone())

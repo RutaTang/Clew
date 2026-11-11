@@ -86,7 +86,18 @@ pub(crate) fn setup_sheet<'a>(
         .align_y(iced::Center)
         .into()
     } else {
-        title.into()
+        // The other sheets' × too, as their Cancel: the first open's had
+        // one, "Set up" none, and the same dialog looked two ways.
+        row![
+            title,
+            space().width(Fill),
+            super::chrome::close_button_saying(
+                Message::Project(ProjectMsg::SetupClose),
+                tr!("Close"),
+            ),
+        ]
+        .align_y(iced::Center)
+        .into()
     };
     let mut body = column![header].spacing(14);
 

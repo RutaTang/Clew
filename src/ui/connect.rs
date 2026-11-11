@@ -622,8 +622,10 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             listed.then(|| tr!("Checking the project's options…").to_string()),
         ),
     };
+    // Under the page's own title, "Language servers": its first group is
+    // each language's, not the page's name again.
     parts.push(form::group(
-        tr!("Language servers"),
+        tr!("By language"),
         servers_about,
         listed.then(|| {
             form::action(
