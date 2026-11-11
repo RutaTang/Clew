@@ -282,11 +282,14 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
             (app.proj.walk.generating.as_deref() != Some(guide)).then_some(guide_msg),
             !has_guide,
         ),
+        // What it reviews is what its tour is then called: a branch's
+        // changes, or the last commit where the branch has none — said
+        // "Review branch changes", it made "Change review (last commit)".
         walk_action(
             Glyph::Diff,
-            tr!("Review branch changes").to_string(),
+            tr!("Review changes").to_string(),
             None,
-            tr!("The AI writes a tour of this branch's changes"),
+            tr!("The AI writes a tour of this branch's changes, or of the last commit when there are none"),
             Some(Message::Walk(WalkMsg::GenerateDiff)),
             true,
         ),
@@ -345,13 +348,28 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// A tour's title as shown: a run's plain one ("Run: main.py", kept in
+/// English as made) said in the language spoken now — it stayed English
+/// beside French words.
+pub(crate) fn walk_title(wt: &crate::walkthrough::Walkthrough) -> String {
+    match wt.scope.strip_prefix("@trace ") {
+        Some(program) if wt.title == crate::walkthrough::plain_run_title(program) => {
+            tr!("Run: {program}", program = program)
+        }
+        _ => wt.title.clone(),
+    }
+}
+
 /// A human label for a walkthrough's scope: the whole codebase, a change review,
-/// a debug run, or the user's feature prompt.
+/// a debug run, or the user's feature prompt — each named as the action
+/// that makes it is, in the language spoken now.
 pub(crate) fn scope_label(scope: &str) -> String {
     if scope.is_empty() {
         tr!("Whole codebase").to_string()
     } else if scope == crate::walkthrough::GUIDE_SCOPE {
-        tr!("Reading guide").to_string()
+        // As its action says: "Reading guide" under "Where to start
+        // reading" read as another thing.
+        tr!("Where to start reading").to_string()
     } else if let Some(rest) = scope.strip_prefix("@trace") {
         match rest.trim() {
             "" => tr!("Debug run").to_string(),
@@ -363,7 +381,13 @@ pub(crate) fn scope_label(scope: &str) -> String {
             // "Change review (changes)", it said "changes" twice.
             _ if scope == crate::app::DIFF_SCOPE_PENDING => tr!("Change review").to_string(),
             "" => tr!("Change review").to_string(),
-            label => tr!("Change review ({label})", label = label),
+            // What it was against, as git's side wrote it in English:
+            // said in the language spoken now.
+            "last commit" => tr!("Change review (last commit)").to_string(),
+            label => match label.strip_prefix("vs ") {
+                Some(base) => tr!("Change review (vs {base})", base = base),
+                None => tr!("Change review ({label})", label = label),
+            },
         }
     } else {
         scope.to_string()
@@ -453,7 +477,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
     };
     let matches = |wt: &crate::walkthrough::Walkthrough| {
         query.is_empty()
-            || wt.title.to_lowercase().contains(&query)
+            || walk_title(wt).to_lowercase().contains(&query)
             || wt.scope.to_lowercase().contains(&query)
     };
 
@@ -571,31 +595,38 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                 &label,
                 Message::Walk(WalkMsg::ForgetFailure),
             ));
-        list = list.push(
-            container(
-                row![
-                    column![
-                        text(label).size(ts::BASE).color(theme::fg()),
-                        // Kept as it failed, said in the language spoken now.
-                        text(tr!(
-                            "Failed: {reason}",
-                            reason = crate::app::tasks::ai_reason(why)
-                        ))
-                        .size(ts::CAPTION)
-                        .color(theme::danger())
-                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-                    ]
-                    .spacing(1)
-                    .width(Fill),
-                    retry,
-                    forget,
-                ]
-                .spacing(2)
-                .align_y(iced::Center),
-            )
-            .width(Fill)
-            .padding([6, 8]),
-        );
+        // Its controls on its title's line, and why it failed under them
+        // across the whole row: beside them, the reason was squeezed into
+        // a column a word or two wide ("Failed: couldn't reach / the AI /
+        // provider …") five lines tall.
+        let mut body = column![
+            row![
+                container(text(label).size(ts::BASE).color(theme::fg()))
+                    .width(Fill)
+                    .clip(true),
+                retry,
+                forget,
+            ]
+            .spacing(2)
+            .align_y(iced::Center),
+            // Kept as it failed, said in the language spoken now.
+            text(tr!(
+                "Failed: {reason}",
+                reason = crate::app::tasks::ai_reason(why)
+            ))
+            .size(ts::CAPTION)
+            .color(theme::danger())
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            .width(Fill),
+        ]
+        .spacing(2);
+        // Where it says to check the base URL, the way there.
+        if crate::app::tasks::unreached(why) {
+            body = body.push(super::panes::settings_fix_button(
+                crate::app::state::LlmField::BaseUrl,
+            ));
+        }
+        list = list.push(container(body).width(Fill).padding([6, 8]));
     }
 
     for (_, wt) in visible {
@@ -625,7 +656,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         // text never runs under the controls.
         let title = button(
             column![
-                text(wt.title.clone()).size(ts::BASE).color(if is_open {
+                text(walk_title(wt)).size(ts::BASE).color(if is_open {
                     theme::fg_bright()
                 } else {
                     theme::fg()

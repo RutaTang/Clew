@@ -34,7 +34,40 @@ pub(crate) fn spends_ai(msg: &Message) -> bool {
         ) | Message::Fake(FakeMsg::FromMenu { .. } | FakeMsg::AtCaret { .. })
             | Message::Overview(OverviewMsg::Generate)
             | Message::Walk(WalkMsg::Generate(_) | WalkMsg::GenerateTrace | WalkMsg::GenerateDiff)
+            | Message::Ask(AskMsg::Suggested(_))
     )
+}
+
+/// The command bar's title for asking `question` of Clew: in English, as
+/// every command's title is ([`PaletteCommand::title`]), and read back by
+/// [`asked_in`].
+fn ask_title(question: &str) -> String {
+    format!("{ASK_PREFIX}{question}{ASK_SUFFIX}")
+}
+
+const ASK_PREFIX: &str = "Ask Clew: \u{201c}";
+const ASK_SUFFIX: &str = "\u{201d}";
+
+/// The question a command bar row titled `title` asks, if it asks one.
+pub(crate) fn asked_in(title: &str) -> Option<&str> {
+    title.strip_prefix(ASK_PREFIX)?.strip_suffix(ASK_SUFFIX)
+}
+
+/// The command bar's row that asks `question` of Clew, in the Ask window.
+fn ask_command(question: &str) -> PaletteCommand {
+    PaletteCommand {
+        title: ask_title(question),
+        keys: None,
+        action: PaletteAction::Send(Message::Ask(AskMsg::Suggested(question.to_string()))),
+        shown_as: Some(tr!("Ask Clew: “{question}”", question = question)),
+    }
+}
+
+/// Whether what was typed into the command bar reads as a question to ask:
+/// it has a question mark, or three words or more — "how is tax
+/// computed" — where a command's or a file's name is a word or two.
+fn looks_like_a_question(typed: &str) -> bool {
+    typed.contains(['?', '？']) || typed.split_whitespace().count() >= 3
 }
 
 /// One command in the palette.
@@ -411,6 +444,26 @@ impl App {
             commands.extend(files);
             *results = commands;
         }
+        // What was typed, asked of Clew: a row of its own, listed last.
+        // Only the empty bar offered Ask, so a question typed into it found
+        // commands and files and no way to ask it. Not ranked with the
+        // commands — its title holds every word typed, and would have
+        // been the one "worded" match that put the rest out — but added
+        // after them, the files' places moved one on.
+        let question = self.proj.finder.query.trim().to_string();
+        if self.proj.finder.bar && !question.is_empty() {
+            let ask_at = self.palette.len();
+            self.palette.push(ask_command(&question));
+            let results = &mut self.proj.finder.results;
+            for i in results.iter_mut().filter(|i| **i >= ask_at) {
+                *i += 1;
+            }
+            // Offered where it reads as a question — several words, or a
+            // question mark — or where nothing else was found.
+            if looks_like_a_question(&question) || results.is_empty() {
+                results.push(ask_at);
+            }
+        }
     }
 
     /// The finder's results ranked, by `rank`, against the commands'
@@ -613,6 +666,13 @@ impl App {
     /// pressed as a click presses it. The agent runs commands by
     /// [`Self::run_palette`], which never reaches what is on screen.
     pub(crate) fn run_from_bar(&mut self, title: &str) -> Task<Message> {
+        // What was typed, asked: the Ask window opened on its answer.
+        if let Some(question) = asked_in(title).map(str::to_string) {
+            self.proj.finder.open = false;
+            let open = self.update(Message::Ask(AskMsg::Open));
+            let asked = self.update(Message::Ask(AskMsg::Suggested(question)));
+            return Task::batch([open, asked]);
+        }
         if self.palette_commands().iter().any(|c| c.title == title) {
             return self.run_palette(title);
         }

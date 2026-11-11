@@ -455,10 +455,18 @@ pub fn from_trace(root: &Path, program: &str, stops: &[crate::TraceStop]) -> Opt
         return None;
     }
     Some(Walkthrough {
-        title: tr!("Run: {program}", program = program),
+        title: plain_run_title(program),
         scope: String::new(),
         steps,
     })
+}
+
+/// The title of a run's tour as made without a model: kept in English, the
+/// key it is translated by where it is shown (`ui::sidebar::walk_title`) —
+/// made in the language spoken then, it stayed in it after Display
+/// language changed.
+pub fn plain_run_title(program: &str) -> String {
+    format!("Run: {program}")
 }
 
 /// The prompt that asks a model to narrate a run's walkthrough

@@ -123,18 +123,29 @@ pub(crate) fn setup_sheet<'a>(
 
     if mode == SetupMode::Open {
         body = body.push(
-            row![
-                text(tr!("Project data folder:"))
-                    .size(ts::BODY)
-                    .color(theme::dim()),
-                text(format!("{}/.clew", root.display()))
-                    .size(ts::BODY)
-                    .font(crate::fonts::CODE)
-                    .color(theme::fg_muted())
-                    .wrapping(iced::widget::text::Wrapping::Glyph),
+            column![
+                row![
+                    text(tr!("Project data folder:"))
+                        .size(ts::BODY)
+                        .color(theme::dim()),
+                    text(format!("{}/.clew", root.display()))
+                        .size(ts::BODY)
+                        .font(crate::fonts::CODE)
+                        .color(theme::fg_muted())
+                        .wrapping(iced::widget::text::Wrapping::Glyph),
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
+                // What of it git sees: its bookmarks and notes showed up
+                // among the reader's uncommitted changes with no word why.
+                text(tr!(
+                    "Its bookmarks, notes and project settings can be committed with the project; your own reading state stays out of git."
+                ))
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(iced::widget::text::Wrapping::Word),
             ]
-            .spacing(6)
-            .align_y(iced::Center),
+            .spacing(4),
         );
     }
 

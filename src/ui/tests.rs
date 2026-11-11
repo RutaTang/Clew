@@ -5327,6 +5327,7 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     for said in [
         "Open iced",
         "/nonexistent/iced/.clew",
+        "Its bookmarks, notes and project settings can be committed with the project; your own reading state stays out of git.",
         "Language servers",
         "rust-analyzer: download, builds the project (runs its code)",
         "Explain the project",
@@ -9419,6 +9420,58 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
     app.debug.session = Some(stopped);
     let mut sim = sim_elem(super::debug_panel(&app));
     assert!(shows(&mut sim, "CALL STACK"));
+}
+
+/// A tour is named as the action that made it, in the language spoken
+/// now: "Review changes" makes a change review of the branch, or of the
+/// last commit; "Where to start reading" makes one named so; a run's plain
+/// tour, made in English, is said in French once French is spoken. They
+/// said "Review branch changes" over "Change review (last commit)",
+/// "Reading guide", and "Run: main.py" among French words.
+#[test]
+fn walkthroughs_are_named_as_their_actions_in_the_language_spoken_now() {
+    use crate::i18n::{Lang, with_lang};
+    use crate::walkthrough::{GUIDE_SCOPE, Walkthrough};
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    let mut sim = sim_elem(super::walk_tab(&app));
+    assert!(shows(&mut sim, "Review changes"));
+    assert!(!shows(&mut sim, "Review branch changes"));
+    assert_eq!(super::scope_label(GUIDE_SCOPE), "Where to start reading");
+    assert_eq!(
+        super::scope_label("@diff last commit"),
+        "Change review (last commit)"
+    );
+    assert_eq!(
+        super::scope_label("@diff vs main"),
+        "Change review (vs main)"
+    );
+    let run = Walkthrough {
+        title: crate::walkthrough::plain_run_title("main.py"),
+        scope: "@trace main.py".into(),
+        steps: Vec::new(),
+    };
+    assert_eq!(super::walk_title(&run), "Run: main.py");
+    with_lang(Lang::Fr, || {
+        assert_eq!(super::walk_title(&run), "Exécution\u{a0}: main.py");
+        assert_eq!(
+            super::scope_label("@diff last commit"),
+            "Revue des modifications (dernier commit)"
+        );
+        assert_eq!(
+            super::scope_label("@diff vs main"),
+            "Revue des modifications (par rapport à main)"
+        );
+    });
+    // A title the model wrote is its own.
+    let narrated = Walkthrough {
+        title: "Checkout totals the cart".into(),
+        ..run
+    };
+    with_lang(Lang::Fr, || {
+        assert_eq!(super::walk_title(&narrated), "Checkout totals the cart");
+    });
 }
 
 #[test]
@@ -15509,7 +15562,9 @@ fn the_reading_guide_is_a_tree_in_the_walkthroughs_view() {
     );
     app.proj.walk.open = Some(GUIDE_SCOPE.into());
     let mut sim = sim_elem(super::walk_tab(&app));
-    assert!(shows(&mut sim, "Reading guide"));
+    // Its row named as the action that made it.
+    assert!(text_at(&mut sim, |t| t == label, 1).is_some());
+    assert!(!shows(&mut sim, "Reading guide"));
     let x = |sim: &mut Sim<'_>, title: &str| {
         text_at(sim, |t| t == title, 0)
             .unwrap_or_else(|| panic!("{title} is drawn"))
@@ -17346,6 +17401,46 @@ fn ai_failures_are_said_where_the_action_was_taken() {
             "the failed row is gone"
         );
         assert!(shows(&mut sim, "Try again"));
+    }
+    {
+        // In a sidebar's width, why it failed runs across the row under
+        // its controls: beside them it was a column a word or two wide,
+        // five lines tall. And where it says to check the base URL, the
+        // way there is beside it.
+        crate::app::tests::isolated_data_dir();
+        crate::fonts::load();
+        let width = 260.0;
+        let mut sim = iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(width, 400.0),
+            super::sidebar::walk_library(&app),
+        );
+        let again = text_at(&mut sim, |t| t == "Try again", 0).expect("Try again");
+        let why = text_at(&mut sim, |t| t.starts_with("Failed: "), 0).expect("why");
+        assert!(
+            why.y >= again.y + again.height,
+            "under the controls: {why:?} {again:?}"
+        );
+        assert!(why.width > width * 0.6, "across the row: {why:?}");
+        drop(sim);
+        let sent = click_nth(
+            iced_test::Simulator::with_size(
+                Default::default(),
+                Size::new(width, 400.0),
+                super::sidebar::walk_library(&app),
+            ),
+            "Settings",
+            0,
+        );
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                Message::Settings(crate::SettingsMsg::Fix(
+                    crate::app::state::LlmField::BaseUrl
+                ))
+            )),
+            "{sent:?}"
+        );
     }
 
     let node = crate::explain::Node::Function {

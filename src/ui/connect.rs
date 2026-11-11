@@ -589,7 +589,9 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     let mut servers = Vec::new();
     for language in &rows {
         let server = match choices.servers.as_ref().and_then(|s| s.get(language)) {
-            Some(choice) => tr!("Your program: {program}", program = program_line(choice)),
+            // The server program the reader chose: "Your program:" read as
+            // the reader's own code.
+            Some(choice) => tr!("{program} (your choice)", program = program_line(choice)),
             None => app
                 .effective_server(language)
                 .map(|s| match s.command {

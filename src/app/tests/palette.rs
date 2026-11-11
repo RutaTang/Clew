@@ -408,3 +408,65 @@ fn the_command_bar_keeps_to_worded_titles_in_another_language() {
         }
     });
 }
+
+/// A question typed into the command bar is offered to Ask, last, with
+/// what it found above it, and Enter on it asks it: only the empty bar
+/// offered Ask, so "how is tax computed" found commands and files and no
+/// way to ask. A word or two is a name, not a question; where nothing else
+/// is found it is offered too. Its row does not crowd out what the letters
+/// typed still find ("gtl", Go to Line…).
+#[test]
+fn a_question_typed_in_the_command_bar_can_be_asked() {
+    let mut app = scanned_app("palette-ask-typed");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    open_synchronously(&mut app, "src/lib.rs", None);
+    open_palette(&mut app);
+    let question = "how is the origin computed";
+    let asks = format!("Ask Clew: \u{201c}{question}\u{201d}");
+    typed(&mut app, question);
+    let found = titles(&app);
+    assert_eq!(found.last(), Some(&asks), "{found:?}");
+    assert_eq!(
+        found.iter().filter(|t| t.starts_with("Ask Clew")).count(),
+        1
+    );
+    typed(&mut app, "lib");
+    let found = titles(&app);
+    assert!(
+        !found.iter().any(|t| t.starts_with("Ask Clew")),
+        "{found:?}"
+    );
+    // The files are still where their rows say: the Ask row did not move
+    // their places in the list.
+    let files: Vec<&str> = app
+        .proj
+        .finder
+        .results
+        .iter()
+        .filter(|&&i| i >= app.palette.len())
+        .map(|&i| {
+            app.proj.project.as_ref().unwrap().files[i - app.palette.len()]
+                .rel
+                .as_str()
+        })
+        .collect();
+    assert!(files.contains(&"src/lib.rs"), "{files:?}");
+    typed(&mut app, "gtl");
+    assert!(titles(&app).iter().any(|t| t == "Go to Line…"));
+    typed(&mut app, "zzqqxx");
+    assert_eq!(titles(&app), ["Ask Clew: \u{201c}zzqqxx\u{201d}"]);
+
+    // Enter on it: asked, in the Ask window.
+    typed(&mut app, question);
+    app.proj.finder.selected = app.proj.finder.results.len() - 1;
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    assert!(!app.proj.finder.open, "the bar stays open");
+    // On its way: being looked up, or already a turn.
+    assert!(
+        app.proj.inflight.ask_retrieval.is_some()
+            || app.proj.ask_turns.iter().any(|t| t.question == question),
+        "not asked"
+    );
+    assert!(app.proj.ask_input.is_empty(), "{:?}", app.proj.ask_input);
+    assert_ne!(app.ask_view, crate::app::model::AskView::Hidden);
+}
