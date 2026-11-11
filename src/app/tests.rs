@@ -19847,7 +19847,10 @@ fn the_skim_button_shows_whether_the_file_is_skimmed() {
         }]),
     );
     let lines = app.skim_lines(&abs);
-    assert_eq!(lines, [2]);
+    assert_eq!(
+        lines.iter().map(|&(start, _)| start).collect::<Vec<_>>(),
+        [2]
+    );
     assert!(!app.active_viewer().unwrap().skimmed(&lines));
     let _ = app.update(Message::Editor(EditorMsg::SkimFile));
     assert!(app.active_viewer().unwrap().skimmed(&lines));

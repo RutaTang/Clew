@@ -537,9 +537,8 @@ impl App {
                     Key::Character("a") => self.fold_toggle_at_cursor(),
                     Key::Character("R") => self.fold_all(false),
                     Key::Character("M") => self.fold_all(true),
-                    _ => {}
+                    _ => Task::none(),
                 }
-                Task::none()
             }
             Key::Character("z") => {
                 self.pending_z = true;

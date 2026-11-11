@@ -2724,6 +2724,58 @@ fn a_control_laid_out_in_a_dialog_is_the_dialogs() {
     super::jump::forget(None);
 }
 
+/// Skim near a file's end leaves the code in view: the file folded short,
+/// the view was left where it was, past its end — nothing but the last
+/// line on screen. The function at the top stays at the top.
+#[test]
+fn skim_keeps_the_code_in_view() {
+    let mut app = reader_app();
+    let source: String = (0..120)
+        .map(|i| format!("fn f{i}() {{\n    let a = {i};\n    let b = a;\n}}\n"))
+        .collect();
+    let lines = crate::highlight::plain_lines(&source);
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.proj.panes[0] = Some(Viewer::new(
+        abs.clone(),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(source),
+        lines,
+    ));
+    app.proj.symbol_index_by_file.insert(
+        abs.clone(),
+        Arc::new(
+            (0..120)
+                .map(|i| crate::index::SymbolEntry {
+                    name: format!("f{i}"),
+                    kind: "function".into(),
+                    rel: "src/lib.rs".into(),
+                    abs: abs.clone(),
+                    line: i * 4 + 1,
+                    is_test: false,
+                    entry: None,
+                })
+                .collect(),
+        ),
+    );
+    let line_h = app.line_height();
+    // Reading the last functions: f110 at the top.
+    let v = app.active_viewer_mut().unwrap();
+    v.scroll_y = 440.0 * line_h;
+    v.caret = Some((441, 0));
+    let _ = app.update(Message::Editor(EditorMsg::SkimFile));
+    let v = app.active_viewer().unwrap();
+    let rows = v.content_rows();
+    assert!(rows < 300, "skimmed: {rows} rows");
+    assert!(
+        v.scroll_y <= (rows - 1) as f32 * line_h,
+        "past the end: {} with {rows} rows",
+        v.scroll_y
+    );
+    let top = v.line_at_row((v.scroll_y / line_h) as usize);
+    assert_eq!(top, 440, "f110 at the top still");
+}
+
 /// A control scrolled out of sight is scrolled to when the ring reaches
 /// it; a picker and a tick are stops, pressed by Enter as by a click.
 #[test]

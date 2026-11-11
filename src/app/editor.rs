@@ -1181,7 +1181,7 @@ impl App {
         {
             let sig_lines = self.skim_lines(&abs);
             if self.active_viewer().is_some_and(|v| v.skimmed(&sig_lines)) {
-                self.fold_in(self.proj.active, |v| v.skim_bodies(&sig_lines));
+                tasks.push(self.fold_in(self.proj.active, |v| v.skim_bodies(&sig_lines)));
             }
         }
         Task::batch(tasks)
@@ -1512,60 +1512,101 @@ impl App {
 
     /// Change `pane`'s folds with `fold`. A fold that hides the caret pulls
     /// it onto its header, which is the reader moving it as much as a click
-    /// is (`reader_moved_caret`).
-    fn fold_in(&mut self, pane: usize, fold: impl FnOnce(&mut Viewer)) {
+    /// is (`reader_moved_caret`). The line at the top of the view stays at
+    /// the top — its fold's header, folded away — and the view no further
+    /// down than the code now runs: left where it was, a file folded short
+    /// (Skim near its end) showed nothing but its last line.
+    fn fold_in(&mut self, pane: usize, fold: impl FnOnce(&mut Viewer)) -> Task<Message> {
+        let line_height = self.line_height();
         let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) else {
-            return;
+            return Task::none();
         };
         let caret = v.caret;
+        let top = v.line_at_row((v.scroll_y / line_height.max(1.0)) as usize);
         fold(v);
+        let row = v.row_of(top);
+        // Folded away: its fold's header, the visible line before it.
+        let row = if v.line_at_row(row) == top {
+            row
+        } else {
+            row.saturating_sub(1)
+        };
+        let most = v.content_rows().saturating_sub(1) as f32 * line_height;
+        let y = (row as f32 * line_height).min(most);
+        let scroll = if (y - v.scroll_y).abs() >= 0.5 {
+            v.scroll_y = y;
+            operation::scroll_to(
+                ui::code_scroll_id(pane),
+                AbsoluteOffset { x: v.scroll_x, y },
+            )
+        } else {
+            Task::none()
+        };
         if v.caret != caret {
             self.reader_moved_caret(pane);
         }
+        scroll
     }
 
     /// Toggle the fold enclosing the caret (`za`).
-    pub(crate) fn fold_toggle_at_cursor(&mut self) {
+    pub(crate) fn fold_toggle_at_cursor(&mut self) -> Task<Message> {
         self.fold_in(self.proj.active, |v| {
             let line = v.caret.map(|(l, _)| l).unwrap_or(0);
             if let Some(header) = v.fold_header_for(line) {
                 v.toggle_fold(header);
             }
-        });
+        })
     }
 
     /// Collapse (`zM`) or expand (`zR`) every fold in the active pane.
-    pub(crate) fn fold_all(&mut self, collapse: bool) {
+    pub(crate) fn fold_all(&mut self, collapse: bool) -> Task<Message> {
         self.fold_in(self.proj.active, |v| {
             if collapse {
                 v.collapse_all();
             } else {
                 v.expand_all();
             }
-        });
+        })
     }
 
     /// Toggle "skim" for the active file: fold every function/method body down
     /// to its signature (which still shows its inline summary), so the file
     /// reads as an annotated table of contents. Uses the symbol index to fold
     /// only bodies, leaving impl/mod blocks open so every signature stays shown.
-    pub(crate) fn skim_active_file(&mut self) {
+    pub(crate) fn skim_active_file(&mut self) -> Task<Message> {
         let Some(v) = self.active_viewer() else {
-            return;
+            return Task::none();
         };
-        let sig_lines = self.skim_lines(&v.abs);
-        self.fold_in(self.proj.active, |v| v.skim_bodies(&sig_lines));
+        let functions = self.skim_lines(&v.abs);
+        self.fold_in(self.proj.active, |v| v.skim_bodies(&functions))
     }
 
-    /// Where `abs`'s functions and methods start (0-based): what Skim folds.
-    pub(crate) fn skim_lines(&self, abs: &Path) -> Vec<usize> {
+    /// Where `abs`'s functions and methods start and end (0-based; the end
+    /// `usize::MAX` when not known): what Skim folds. From the file's own
+    /// outline when it is open — which knows where each ends — else from
+    /// the project's index, which knows where each starts.
+    pub(crate) fn skim_lines(&self, abs: &Path) -> Vec<(usize, usize)> {
+        let open = self
+            .proj
+            .panes
+            .iter()
+            .flatten()
+            .find(|v| v.abs == abs && !v.symbols.is_empty());
+        if let Some(v) = open {
+            return v
+                .symbols
+                .iter()
+                .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+                .map(|s| (s.line.saturating_sub(1), s.end_line.saturating_sub(1)))
+                .collect();
+        }
         self.proj
             .symbol_index_by_file
             .get(abs)
             .map(|syms| {
                 syms.iter()
                     .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
-                    .map(|s| s.line.saturating_sub(1)) // 1-based symbol line → 0-based
+                    .map(|s| (s.line.saturating_sub(1), usize::MAX)) // 1-based → 0-based
                     .collect()
             })
             .unwrap_or_default()
@@ -1858,10 +1899,7 @@ impl App {
                 self.selecting = false;
                 Task::none()
             }
-            EditorMsg::FoldToggle { pane, line } => {
-                self.fold_in(pane, |v| v.toggle_fold(line));
-                Task::none()
-            }
+            EditorMsg::FoldToggle { pane, line } => self.fold_in(pane, |v| v.toggle_fold(line)),
             EditorMsg::MinimapScrolled { pane, fraction } => {
                 self.on_minimap_scrolled(pane, fraction)
             }
@@ -1938,20 +1976,14 @@ impl App {
                 } else {
                     self.one_file_view(FileView::Skim)
                 };
-                self.skim_active_file();
-                others
+                let fold = self.skim_active_file();
+                Task::batch([others, fold])
             }
             EditorMsg::ScrollPages(pages) => self.scroll_pages(pages),
             EditorMsg::ScrollLines(lines) => self.scroll_rows(i64::from(lines)),
             EditorMsg::MoveCaret(motion) => self.move_cursor(motion),
-            EditorMsg::FoldAll(collapse) => {
-                self.fold_all(collapse);
-                Task::none()
-            }
-            EditorMsg::FoldHere => {
-                self.fold_toggle_at_cursor();
-                Task::none()
-            }
+            EditorMsg::FoldAll(collapse) => self.fold_all(collapse),
+            EditorMsg::FoldHere => self.fold_toggle_at_cursor(),
             EditorMsg::GotoLineNumber(line) => {
                 let Some(v) = self.active_viewer() else {
                     return Task::none();

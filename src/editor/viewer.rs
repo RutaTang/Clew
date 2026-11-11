@@ -576,8 +576,8 @@ impl Viewer {
     /// way, it expands them instead, so the same action enters and leaves skim.
     /// Unlike `collapse_all`, it leaves container folds (impl/mod) open so every
     /// signature stays visible.
-    pub fn skim_bodies(&mut self, sig_lines: &[usize]) {
-        let headers = self.skim_headers(sig_lines);
+    pub fn skim_bodies(&mut self, functions: &[(usize, usize)]) {
+        let headers = self.skim_headers(functions);
         if headers.is_empty() {
             return;
         }
@@ -595,29 +595,41 @@ impl Viewer {
 
     /// Whether the bodies [`Self::skim_bodies`] folds are (mostly) folded:
     /// what pressing Skim again would undo, so the button shows it pressed.
-    pub fn skimmed(&self, sig_lines: &[usize]) -> bool {
-        let headers = self.skim_headers(sig_lines);
+    pub fn skimmed(&self, functions: &[(usize, usize)]) -> bool {
+        let headers = self.skim_headers(functions);
         !headers.is_empty() && self.skimmed_among(&headers)
     }
 
-    /// The fold headers of the functions starting at `sig_lines` (0-based):
-    /// each the body's — of the regions headed in the few lines from its
-    /// signature (and before the next one's), the one that runs on longest.
-    /// The first header found was a signature's parameters when they ran
-    /// over several lines: Skim folded them and left the body open.
-    fn skim_headers(&self, sig_lines: &[usize]) -> Vec<usize> {
-        let mut starts: Vec<usize> = sig_lines.to_vec();
-        starts.sort_unstable();
-        starts
+    /// The fold headers of the `functions` (each its first and last line,
+    /// 0-based; `usize::MAX` for a last not known): each the body's — of the
+    /// regions headed in the few lines from its signature (and before the
+    /// next one's), the one that runs on longest, within the function. The
+    /// first header found was a signature's parameters when they ran over
+    /// several lines: Skim folded them and left the body open. And one that
+    /// ran past the function was another's: a function of one line before
+    /// `mod tests {` or an `impl` took that block for its body, and Skim
+    /// folded away every function in it.
+    fn skim_headers(&self, functions: &[(usize, usize)]) -> Vec<usize> {
+        let mut functions: Vec<(usize, usize)> = functions.to_vec();
+        functions.sort_unstable();
+        functions
             .iter()
             .enumerate()
-            .filter_map(|(i, &l0)| {
-                let next = starts.get(i + 1).copied().unwrap_or(usize::MAX);
+            .filter_map(|(i, &(l0, last_of_fn))| {
+                let next = functions.get(i + 1).map_or(usize::MAX, |&(n, _)| n);
                 let last = l0
                     .saturating_add(SKIM_SIGNATURE_LINES)
                     .min(next.saturating_sub(1));
+                // Its own: within it — and, its end not known, over before
+                // the next function begins.
+                let within = if last_of_fn == usize::MAX {
+                    next.saturating_sub(1)
+                } else {
+                    last_of_fn
+                };
                 (l0..=last)
                     .filter_map(|l| self.fold_at(l))
+                    .filter(|&(_, end)| end <= within)
                     .max_by_key(|&(_, end)| end)
                     .map(|(h, _)| h)
             })
@@ -1062,12 +1074,43 @@ mod tests {
         // The parameters' region and the body's both open within the first
         // lines of `total`.
         assert!(v.is_fold_header(0) && v.is_fold_header(3), "{:?}", v.folds);
-        v.skim_bodies(&[0, 7, 8]);
+        v.skim_bodies(&[(0, usize::MAX), (7, usize::MAX), (8, usize::MAX)]);
         assert!(v.collapsed.contains(&3), "the body: {:?}", v.collapsed);
         assert!(!v.collapsed.contains(&0), "not the parameters");
         // `one` is a line of its own: nothing of `two`'s is folded for it.
         assert!(v.collapsed.contains(&8));
         assert_eq!(v.collapsed.len(), 2, "{:?}", v.collapsed);
+    }
+
+    /// A function of one line just before a block of others — `mod tests`,
+    /// an `impl` — does not take the block for its body: Skim folds the
+    /// block's functions, not the block, whether or not it knows where each
+    /// function ends.
+    #[test]
+    fn skim_folds_no_block_round_other_functions() {
+        let source = "fn one() -> u32 { 1 }\n\nmod tests {\n    fn two() -> u32 {\n        \
+                      2\n    }\n}\n";
+        let lines = plain_lines(source);
+        let viewer = || {
+            Viewer::new(
+                PathBuf::from("/tmp/blocks.rs"),
+                "blocks.rs".into(),
+                Some("rust"),
+                Arc::new(source.to_string()),
+                lines.clone(),
+            )
+        };
+        let mut v = viewer();
+        assert!(v.is_fold_header(2) && v.is_fold_header(3), "{:?}", v.folds);
+        v.skim_bodies(&[(0, 0), (3, 5)]);
+        assert_eq!(v.collapsed.iter().copied().collect::<Vec<_>>(), [3]);
+        let mut v = viewer();
+        v.skim_bodies(&[(0, usize::MAX), (3, usize::MAX)]);
+        assert_eq!(
+            v.collapsed.iter().copied().collect::<Vec<_>>(),
+            [3],
+            "its end not known"
+        );
     }
 
     /// The code view's caches know a document by its generation, which moves
