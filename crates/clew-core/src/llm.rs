@@ -599,7 +599,7 @@ impl Completion {
 }
 
 mod carry;
-pub use carry::{Asking, CARRY_ON_PROMPT, CARRY_ONS, CarryRequest, Seam, carry_on};
+pub use carry::{Asking, CARRY_ON_FROM, CARRY_ON_PROMPT, CARRY_ONS, CarryRequest, Seam, carry_on};
 
 /// Whether a provider's stop reason means the output budget cut the answer.
 /// The values do not collide across dialects, so one predicate serves both.
@@ -4676,9 +4676,13 @@ mod tests {
         let mut scripts = vec![Script::Respond(http("200 OK", "application/json", body))];
         scripts.extend((0..CARRY_ONS).map(|n| anthropic_reply(&format!(" more {n}"), true)));
         let (addr, handle) = mock(scripts);
-        let done = complete_chat_full(&anthropic_at(addr), "s", &[ChatMsg::user("q")], 8, &|| {
-            false
-        })
+        let done = complete_chat_full(
+            &anthropic_at(addr),
+            "s",
+            &[ChatMsg::user("q")],
+            CARRY_ON_FROM,
+            &|| false,
+        )
         .expect("a completion");
         assert_eq!(handle.join().unwrap().served, 1 + CARRY_ONS);
         assert_eq!(
@@ -4707,8 +4711,14 @@ mod tests {
             ))
         };
         let (addr, handle) = mock((0..=CARRY_ONS).map(|_| partial()).collect());
-        let done =
-            complete_chat_full(&custom(addr), "s", &[ChatMsg::user("q")], 8, &|| false).unwrap();
+        let done = complete_chat_full(
+            &custom(addr),
+            "s",
+            &[ChatMsg::user("q")],
+            CARRY_ON_FROM,
+            &|| false,
+        )
+        .unwrap();
         handle.join().unwrap();
         assert!(done.truncated);
 
@@ -4724,7 +4734,7 @@ mod tests {
             &custom(addr),
             "s",
             &[ChatMsg::user("q")],
-            8,
+            CARRY_ON_FROM,
             |d| seen.push_str(d),
             &|| false,
         )
@@ -4760,9 +4770,13 @@ mod tests {
             anthropic_reply("- lib.rs — `CacheIss", true),
             anthropic_reply("ue` holds the cache.", false),
         ]);
-        let done = complete_chat_full(&anthropic_at(addr), "s", &[ChatMsg::user("q")], 8, &|| {
-            false
-        })
+        let done = complete_chat_full(
+            &anthropic_at(addr),
+            "s",
+            &[ChatMsg::user("q")],
+            CARRY_ON_FROM,
+            &|| false,
+        )
         .unwrap();
         assert_eq!(done.text, "- lib.rs — `CacheIssue` holds the cache.");
         assert!(!done.truncated);
@@ -4789,7 +4803,7 @@ mod tests {
             &custom(addr),
             "s",
             &[ChatMsg::user("q")],
-            8,
+            CARRY_ON_FROM,
             &mut |d| seen.push_str(d),
             &|| false,
         )

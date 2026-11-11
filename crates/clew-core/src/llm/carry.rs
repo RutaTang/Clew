@@ -10,6 +10,12 @@
 
 use super::{Completion, LlmError};
 
+/// The smallest output budget an answer is carried on within. One smaller
+/// asks for a word or two — a connection test's "OK" — and is answered by
+/// what came, cut or not: carried on, it cost a second request to say what
+/// the first had shown.
+pub const CARRY_ON_FROM: u32 = 64;
+
 /// How many more requests an answer cut off at its output limit is given to
 /// finish. Each goes on from where the last stopped, so the whole answer has
 /// this many more times the room of the first; past them it stays cut.
@@ -58,6 +64,9 @@ pub fn carry_on(
     cancelled: &dyn Fn() -> bool,
     request: &mut CarryRequest<'_>,
 ) -> Result<Completion, LlmError> {
+    if max_tokens < CARRY_ON_FROM {
+        return Ok(done);
+    }
     let mut tokens = max_tokens;
     for _ in 0..CARRY_ONS {
         if !done.truncated {
@@ -345,6 +354,18 @@ mod tests {
                 ("CarryOn(\"The start, the rest of it\")".to_string(), 100),
             ]
         );
+    }
+
+    /// An answer asked for in a few tokens is what came: a connection test
+    /// cut at its 16 paid for a second request to say nothing new.
+    #[test]
+    fn a_short_budget_is_not_carried_on() {
+        let done = carry_on(cut("O"), 16, &mut |_| {}, &|| false, &mut |_, _, _| {
+            panic!("carried on a 16-token answer")
+        })
+        .unwrap();
+        assert_eq!(done.text, "O");
+        assert!(done.truncated, "still said to be cut");
     }
 
     /// A request that does not stream is read from its result, and joined

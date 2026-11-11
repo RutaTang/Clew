@@ -16137,6 +16137,22 @@ fn the_usage_page_says_what_the_key_spent() {
     assert!(shows(&mut page, "Prices"));
 }
 
+/// The balance says what is left: an empty currency beside one with money
+/// is left out; with none, the empty one is said.
+#[test]
+fn a_balance_leaves_out_an_empty_currency() {
+    let said = |a: &[(&str, &str)]| {
+        super::usage::balance_said(
+            &a.iter()
+                .map(|(c, v)| (c.to_string(), v.to_string()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(said(&[("USD", "0.00"), ("CNY", "72.01")]), "¥72.01");
+    assert_eq!(said(&[("USD", "3.10"), ("CNY", "72.01")]), "$3.10, ¥72.01");
+    assert_eq!(said(&[("USD", "0.00")]), "$0.00");
+}
+
 /// A model call the server made says what it used: kept, and counted to
 /// the Ask answer it was for, whose cost is then said under it.
 #[test]

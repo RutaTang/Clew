@@ -124,16 +124,10 @@ fn balance_group(app: &App) -> Element<'_, Message> {
                 tr!("Balance"),
                 Some(told),
                 row![
-                    text(
-                        amounts
-                            .iter()
-                            .map(|(c, a)| amount(c, a))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                    .size(ts::BASE)
-                    .font(crate::fonts::UI_MEDIUM)
-                    .color(theme::fg()),
+                    text(balance_said(amounts))
+                        .size(ts::BASE)
+                        .font(crate::fonts::UI_MEDIUM)
+                        .color(theme::fg()),
                     refresh(false),
                 ]
                 .spacing(8)
@@ -159,6 +153,20 @@ fn balance_group(app: &App) -> Element<'_, Message> {
         }
     };
     form::group(tr!("Account"), None, None, vec![row])
+}
+
+/// What is left, as the page says it: each currency's amount, an empty
+/// one left out where another has money (DeepSeek tells "$0.00" beside a
+/// yuan balance).
+pub(crate) fn balance_said(amounts: &[(String, String)]) -> String {
+    let held = |a: &str| a.trim().parse::<f64>().map_or(true, |n| n != 0.0);
+    let any_held = amounts.iter().any(|(_, a)| held(a));
+    let shown: Vec<String> = amounts
+        .iter()
+        .filter(|(_, a)| !any_held || held(a))
+        .map(|(c, a)| amount(c, a))
+        .collect();
+    shown.join(", ")
 }
 
 /// An amount in its currency, as a reader writes it: ¥110.00, $3.10.
