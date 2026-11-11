@@ -2768,7 +2768,8 @@ impl App {
             GraphMsg::OverlayOpenImports(path) => {
                 self.proj.overlay = None;
                 self.proj.graph_pick = None;
-                self.sidebar = SidebarTab::Imports;
+                // The sidebar stays as the reader had it: opening a module
+                // from a map swapped their Files for the Imports view.
                 self.open_file(path, None, true)
             }
             GraphMsg::OverlayOpenAt { abs, line } => {

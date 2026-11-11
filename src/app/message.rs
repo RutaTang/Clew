@@ -983,7 +983,8 @@ pub enum GraphMsg {
     OpenOverlay(Overlay),
     /// Close the project-graph overlay.
     CloseOverlay,
-    /// From an overlay: open a file, focus the Imports tab, and close the overlay.
+    /// From an overlay or the overview's map: open a file and close the
+    /// overlay, leaving the sidebar as it is.
     OverlayOpenImports(PathBuf),
     /// From an overlay: open a file at a line and close the overlay.
     OverlayOpenAt { abs: PathBuf, line: usize },

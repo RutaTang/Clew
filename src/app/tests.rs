@@ -3428,6 +3428,17 @@ fn the_reading_trail_opens_on_the_current_stop() {
     );
 }
 
+/// A module opened from a map leaves the sidebar as the reader had it: it
+/// swapped their Files for the Imports view.
+#[test]
+fn opening_a_module_from_a_map_keeps_the_sidebar() {
+    let mut app = scanned_app("map-open");
+    app.sidebar = SidebarTab::Files;
+    let abs = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");
+    let _ = app.update(Message::Graph(GraphMsg::OverlayOpenImports(abs)));
+    assert_eq!(app.sidebar, SidebarTab::Files);
+}
+
 #[test]
 fn font_size_rescales_scroll() {
     let mut app = scanned_app("font");
