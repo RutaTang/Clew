@@ -25069,6 +25069,22 @@ fn explained_project(tag: &str) -> (App, PathBuf, CountingProvider) {
     (app, root, provider)
 }
 
+/// Explain All is said by the explaining chip alone ("Explaining 0/45"):
+/// "Explaining project…" on the status line beside it said it twice.
+#[test]
+fn explain_all_is_said_once() {
+    let mut app = scanned_app("explain-all-said-once");
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let _ = app.update(Message::Explain(ExplainMsg::Project));
+    assert!(app.proj.explain.running, "{}", app.status);
+    assert!(
+        !app.status.contains("Explaining"),
+        "said twice: {:?}",
+        app.status
+    );
+}
+
 /// `name`'s function node in `rel`.
 fn fn_node(root: &Path, rel: &str, name: &str) -> explain::Node {
     explain::Node::Function {

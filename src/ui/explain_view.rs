@@ -613,11 +613,24 @@ fn reached_from_rows<'a>(
                 .into(),
             );
         }
-        out.push(
-            container(iced::widget::Row::with_children(steps).spacing(4).wrap())
-                .padding([1, 6])
-                .into(),
-        );
+        // Its entry first, the rest wrapping beside it: a line the chain
+        // ran on to began flush left, under the entry ("discounts()" alone
+        // at the start of a line), and read as a chain of its own.
+        let mut steps = steps.into_iter();
+        let line: Element<'a, Message> = match steps.next() {
+            Some(entry) => row![
+                entry,
+                iced::widget::Row::with_children(steps.collect::<Vec<_>>())
+                    .spacing(4)
+                    .width(Fill)
+                    .wrap()
+                    .vertical_spacing(2),
+            ]
+            .spacing(4)
+            .into(),
+            None => space().height(0).into(),
+        };
+        out.push(container(line).padding([1, 6]).into());
     }
     out
 }

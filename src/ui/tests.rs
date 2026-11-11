@@ -4753,11 +4753,14 @@ fn the_shortcuts_modal_lists_every_action_with_its_chord() {
     }
     for action in Action::ALL {
         let caps = app.keymap.chord(action).caps();
-        assert!(
-            sim.find(caps.as_str()).is_ok(),
-            "{:?}'s chord {caps:?} is not shown",
-            action.label()
-        );
+        // Each key a cap of its own.
+        for key in super::toolbar::split_caps(&caps) {
+            assert!(
+                sim.find(key.as_str()).is_ok(),
+                "{:?}'s chord {caps:?} is not shown ({key:?})",
+                action.label()
+            );
+        }
     }
 }
 
@@ -8893,6 +8896,27 @@ fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
          as a one-step chain"
     );
     drop(sim);
+    // Where the margin is narrow, the chain runs on under its second
+    // step, not flush left under its entry: "work()" alone at a line's
+    // start read as a chain of its own.
+    crate::app::tests::isolated_data_dir();
+    crate::fonts::load();
+    let mut sim = iced_test::Simulator::with_size(
+        Default::default(),
+        Size::new(150.0, 400.0),
+        Element::from(iced::widget::Column::with_children(super::call_flow_rows(
+            &app,
+            &node("work"),
+        ))),
+    );
+    let entry = text_at(&mut sim, |t| t == "main()", 0).expect("the entry");
+    let last = text_at(&mut sim, |t| t == "work()", 0).expect("the last step");
+    assert!(last.y > entry.y + 4.0, "wrapped: {entry:?} {last:?}");
+    assert!(
+        last.x > entry.x + 20.0,
+        "under its second step: {entry:?} {last:?}"
+    );
+    drop(sim);
     // Reached by a test alone: TESTS says so, and there is no chain to
     // show — nor a claim that nothing reaches it.
     let mut sim = sim_elem(
@@ -10904,6 +10928,32 @@ fn explain_all_without_a_key_opens_settings_where_the_key_goes() {
     assert_eq!(app.settings.page, crate::SettingsPage::LanguageModel);
 }
 
+/// Settings' shortcuts are drawn as the command bar draws them, a cap per
+/// key: here, where they are learned, a command's keys were one pill of
+/// words ("Ctrl+L"), its other keys plain text ("or Ctrl+G"), and the
+/// reading motions a line of code ("h j k l   ← ↓ ↑ →").
+#[test]
+fn settings_draws_every_shortcut_as_key_caps() {
+    let app = reader_app();
+    let mut sim = sim_elem(super::connect::shortcuts_body(&app));
+    // The motions, a cap a key.
+    for key in ["h", "j", "k", "l", "gd", "za", "Esc", "F9"] {
+        assert!(sim.find(key).is_ok(), "{key} is a cap of its own");
+    }
+    assert!(sim.find("h j k l   ← ↓ ↑ →").is_err());
+    // A command's other keys after "or", as caps.
+    assert!(sim.find("or").is_ok());
+    // No text holds a chord whole, or "or" and its keys together.
+    let whole = |t: &str| t.contains("Ctrl+") || t.contains("Shift+") || t.starts_with("or ");
+    assert!(
+        sim.find(move |c: iced_test::selector::Candidate<'_>| match c {
+            iced_test::selector::Candidate::Text { content, .. } if whole(content) => Some(()),
+            _ => None,
+        })
+        .is_err()
+    );
+}
+
 /// The status bar's target picker is there for a file whose dimming the
 /// platform decides — Rust's, Go's, Haskell's — and not for one whose does
 /// not (C#'s, Erlang's: their files' own symbols decide).
@@ -11140,6 +11190,53 @@ fn the_raised_note_keeps_clear_of_the_ask_pill() {
         );
     }
     assert!(seen_low, "the note was never brought low in the view");
+}
+
+/// The Ask pill floats over the bottom panel's foot at its right, where a
+/// run's output is: the output's column ends above it, so no line of it
+/// runs under the pill, scrolled to its end or not.
+#[test]
+fn no_line_of_a_runs_output_is_under_the_ask_pill() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    // Lines as wide as the column, as a log's are.
+    let output: String = (1..=120)
+        .map(|n| format!("printed line {n} {}\n", "x".repeat(200)))
+        .collect();
+    app.debug.no_debug = true;
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Running,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: vec![("stdout".into(), output)],
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.show_bottom = true;
+    app.ask_view = crate::AskView::Hidden;
+    let mut sim = sim_of(&app);
+    let pill = text_at(&mut sim, |t| t == "Ask", 0).expect("the pill");
+    let pill_h = crate::ui::askfloat::PILL_H;
+    let pill_top = pill.center_y() - pill_h / 2.0;
+    // The output, as much of it as is on screen (clipped to where its
+    // column shows it).
+    let shown = text_at(&mut sim, |t| t.contains("printed line 1 "), 0).expect("the output");
+    assert!(shown.height > 3.0 * 14.0, "{shown:?}");
+    assert!(
+        shown.x + shown.width > pill.x,
+        "the output reaches across under the pill's side: {shown:?} {pill:?}"
+    );
+    assert!(
+        shown.y + shown.height <= pill_top,
+        "{shown:?} runs under the pill from {pill_top}"
+    );
 }
 
 /// While the diff or Time Travel stands in the code's place, the note the
@@ -13865,6 +13962,56 @@ fn settings_opened_from_the_projects_sheet_is_over_it() {
         super::active_overlay(&app),
         Some(super::ActiveOverlay::Settings)
     ));
+}
+
+/// "Set up" says why its Apply waits beside it: greyed with nothing said
+/// when nothing ticked would do anything, it read as broken.
+#[test]
+fn the_set_up_sheet_says_why_apply_waits() {
+    use crate::app::setup::{Census, ProjectSetup, SetupMode, SetupServer};
+    let mut app = reader_app();
+    let root = PathBuf::from("/nonexistent/teashop");
+    let says = |app: &App, words: &str| {
+        shows(
+            &mut sim_elem(super::setup::setup_sheet(
+                app,
+                &root,
+                app.setup.as_ref(),
+                true,
+            )),
+            words,
+        )
+    };
+    let census = |servers: Vec<SetupServer>| Census {
+        servers,
+        calls: Some(12),
+    };
+    let setup = |servers: bool, explain: bool, census: Census| ProjectSetup {
+        mode: SetupMode::Manage,
+        root: root.clone(),
+        servers,
+        servers_declined: false,
+        explain,
+        census: Some(census),
+    };
+    // Every server set up, Explain not ticked: nothing to apply, and why.
+    app.setup = Some(setup(true, false, census(Vec::new())));
+    assert!(says(
+        &app,
+        "Nothing to apply: the language servers are already set up."
+    ));
+    // A server to set up, but unticked: tick it.
+    let pyright = SetupServer {
+        language: "python".into(),
+        name: "pyright".into(),
+        fetch: crate::app::setup::Fetch::Download,
+        builds: false,
+    };
+    app.setup = Some(setup(false, false, census(vec![pyright.clone()])));
+    assert!(says(&app, "Nothing to apply: tick what to set up."));
+    // Something to do: nothing said.
+    app.setup = Some(setup(true, false, census(vec![pyright])));
+    assert!(!says(&app, "Nothing to apply"));
 }
 
 /// The setup sheet with no AI key offers where one is added, a click away:

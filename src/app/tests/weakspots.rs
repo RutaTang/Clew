@@ -43,11 +43,25 @@ fn the_page_lists_a_local_projects_weak_spots() {
     assert_eq!(spots.len(), 1, "{spots:?}");
     assert_eq!(spots[0].name, "load");
     assert_eq!(spots[0].rel, "src/load.rs", "a test file is no weak spot");
-    assert!(app.status.contains("1 weak spot"), "{}", app.status);
+    // Said by its page, not the status line too: there it stood on after
+    // the page was put away for another ("No weak spots" over the
+    // glossary).
+    assert!(!app.status.contains("weak spot"), "{}", app.status);
     // Shown again, nothing changed: not measured again.
     let _ = app.update(Message::Weak(WeakMsg::Close));
     let _ = app.update(Message::Weak(WeakMsg::Show));
     assert!(!app.proj.weak.building, "measured again for nothing");
+
+    // A pass that lands with its page put away is said on the status line.
+    app.proj.weak.spots = None;
+    let task = app.update(Message::Weak(WeakMsg::Show));
+    assert!(app.proj.weak.building);
+    let _ = app.update(Message::Weak(WeakMsg::Close));
+    for m in run_task(task) {
+        let _ = app.update(m);
+    }
+    assert!(app.status.contains("1 weak spot"), "{}", app.status);
+    let _ = app.update(Message::Weak(WeakMsg::Show));
 
     // Its row opens its code, putting the page away.
     let _ = app.update(Message::Weak(WeakMsg::Open(0)));

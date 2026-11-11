@@ -2646,26 +2646,24 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
             .align_y(iced::Center)
             .into()
         } else {
-            let pill = button(
-                text(app.keymap.chord(action).caps())
-                    .size(ts::BODY)
-                    .color(theme::fg()),
-            )
-            .style(theme::secondary_button)
-            .padding([3, 10])
-            .on_press(super::heard::said_to_with(
-                tr!("Change shortcut"),
-                || action.label().to_string(),
-                Message::Window(WindowMsg::RebindStart(action)),
-            ));
+            // Its keys as caps, as the command bar draws them: here, where
+            // shortcuts are learned, they were one pill of words ("Ctrl+L")
+            // and its other keys plain text beside it.
+            let pill = button(super::toolbar::row_keycap(app.keymap.chord(action).caps()))
+                .style(theme::secondary_button)
+                .padding([2, 4])
+                .on_press(super::heard::said_to_with(
+                    tr!("Change shortcut"),
+                    || action.label().to_string(),
+                    Message::Window(WindowMsg::RebindStart(action)),
+                ));
             // The chord other editors use for it, where it reaches it too:
             // said beside the one a click rebinds.
             let pill: Element<'_, Message> = match app.keymap.alias(action) {
                 Some(alias) => row![
                     pill,
-                    text(tr!("or {keys}", keys = alias.caps()))
-                        .size(ts::SMALL)
-                        .color(theme::dim()),
+                    text(tr!("or")).size(ts::SMALL).color(theme::dim()),
+                    super::toolbar::row_keycap(alias.caps()),
                 ]
                 .spacing(6)
                 .align_y(iced::Center)
@@ -2733,16 +2731,7 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
     ];
     let vim = motions
         .into_iter()
-        .map(|(label, keys)| {
-            slim(
-                label.to_string(),
-                text(crate::keymap::local_keys(keys))
-                    .size(ts::BODY)
-                    .font(crate::fonts::CODE)
-                    .color(theme::fg_muted())
-                    .into(),
-            )
-        })
+        .map(|(label, keys)| slim(label.to_string(), motion_caps(keys)))
         .collect();
 
     form::page(vec![
@@ -2756,6 +2745,22 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
         ),
         form::note(tr!("Saved to {path}", path = crate::llm::config_hint())).into(),
     ])
+}
+
+/// A reading motion's keys as caps, as every other shortcut's are: each
+/// group (three spaces apart in `keys`) its keys side by side, the groups
+/// set apart. They were a line of code-font text.
+fn motion_caps<'a>(keys: &str) -> Element<'a, Message> {
+    let keys = crate::keymap::local_keys(keys);
+    let mut groups = Row::new().spacing(10).align_y(iced::Center);
+    for group in keys.split("   ").filter(|g| !g.trim().is_empty()) {
+        let mut caps = Row::new().spacing(3).align_y(iced::Center);
+        for key in group.split(' ').filter(|k| !k.is_empty()) {
+            caps = caps.push(super::toolbar::row_keycap(key.to_string()));
+        }
+        groups = groups.push(caps);
+    }
+    groups.into()
 }
 
 /// A shortcut's row: what it does, and its keys at the right — slimmer

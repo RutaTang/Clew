@@ -107,13 +107,12 @@ impl App {
         // project explained again ("Explaining project… 20/45"). One
         // function or file is said by the chip, by name: "Explaining
         // project…" beside "Explaining subtotal()…" read as a whole paid
-        // pass begun.
-        self.status = if one_node {
-            String::new()
-        } else if self.proj.explain.pass_automatic {
+        // pass begun. The whole project's pass is said by the chip too
+        // ("Explaining 0/45"): "Explaining project…" beside it said it twice.
+        self.status = if self.proj.explain.pass_automatic && !one_node {
             tr!("Updating explanations…").into()
         } else {
-            tr!("Explaining project…").into()
+            String::new()
         };
         let stream = iced::stream::channel(256, move |output| {
             let gather_root = root.clone();

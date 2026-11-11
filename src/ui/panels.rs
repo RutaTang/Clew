@@ -612,11 +612,6 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .into(),
         );
     }
-    // The pill floats over the panel's foot at its right, where the output
-    // is: scrolled to its end, the last lines are clear of it.
-    if app.ask_view == crate::AskView::Hidden {
-        out_rows.push(super::askfloat::pill_foot());
-    }
 
     // Watch — expressions re-evaluated each stop, with an add box + remove.
     let mut watch_rows: Vec<Element<'_, Message>> = vec![
@@ -672,14 +667,24 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     // column's room — and the output's, while the program has printed
     // nothing: values were cut at 180 px beside an empty column.
     let quiet = session.output.is_empty();
+    // The pill floats over the panel's foot at its right, where the output
+    // is: the output's column ends above it, so no line runs under it —
+    // scrolled to its end alone, the lines on their way there did.
+    let output: Element<'_, Message> = if app.ask_view == crate::AskView::Hidden {
+        column![debug_col(out_rows), super::askfloat::pill_foot()]
+            .height(Fill)
+            .into()
+    } else {
+        debug_col(out_rows)
+    };
     let panels = if output_only {
-        row![debug_col(out_rows)]
+        row![output]
     } else {
         row![
             container(debug_col(stack_rows)).width(Length::FillPortion(2)),
             container(debug_col(var_rows)).width(Length::FillPortion(if quiet { 6 } else { 4 })),
             container(debug_col(watch_rows)).width(Length::FillPortion(2)),
-            container(debug_col(out_rows)).width(Length::FillPortion(if quiet { 2 } else { 6 })),
+            container(output).width(Length::FillPortion(if quiet { 2 } else { 6 })),
         ]
     }
     .spacing(6)

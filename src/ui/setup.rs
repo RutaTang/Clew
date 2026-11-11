@@ -436,8 +436,28 @@ pub(crate) fn setup_sheet<'a>(
     } else {
         accept_button
     };
+    // Why its main button waits, said beside it: greyed with nothing said,
+    // Apply read as broken.
+    let why_not: Option<&str> = (!something && !looking).then(|| match (mode, setup) {
+        (SetupMode::Manage, Some(s))
+            if !s.explain && census.is_some_and(|c| c.servers.is_empty()) =>
+        {
+            tr!("Nothing to apply: the language servers are already set up.")
+        }
+        (SetupMode::Explain, Some(s)) if s.explain => tr!("Nothing is left to explain."),
+        _ => tr!("Nothing to apply: tick what to set up."),
+    });
+    let left: Element<'a, Message> = match why_not {
+        Some(why) => text(why)
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .wrapping(iced::widget::text::Wrapping::Word)
+            .width(Fill)
+            .into(),
+        None => space().width(Fill).into(),
+    };
     body = body.push(
-        row![space().width(Fill), decline_button, accept_button,]
+        row![left, decline_button, accept_button,]
             .spacing(10)
             .align_y(iced::Center),
     );

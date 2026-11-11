@@ -218,19 +218,30 @@ impl App {
             return Task::none();
         }
         self.proj.weak.building = false;
+        // Said on the status line only when its page is not there to say
+        // it: said beside the page, it stood on after the page was put
+        // away for another ("No weak spots" over the glossary).
+        let say = !self.proj.weak.showing;
+        if !say {
+            self.settle_status(&[tr!("Looking for weak spots…")]);
+        }
         match result {
             Ok(spots) => {
                 // "0 weak spots found" read as a count of nothing.
-                self.status = if spots.is_empty() {
-                    tr!("No weak spots").into()
-                } else {
-                    trn!("1 weak spot found", "{n} weak spots found", spots.len())
-                };
+                if say {
+                    self.status = if spots.is_empty() {
+                        tr!("No weak spots").into()
+                    } else {
+                        trn!("1 weak spot found", "{n} weak spots found", spots.len())
+                    };
+                }
                 self.proj.weak.files = files;
                 self.proj.weak.spots = Some(Arc::new(spots));
             }
             Err(why) => {
-                self.status = tr!("No weak spots: {why}", why = why.clone());
+                if say {
+                    self.status = tr!("No weak spots: {why}", why = why.clone());
+                }
                 self.proj.weak.failed = Some(why);
             }
         }
