@@ -620,21 +620,26 @@ impl App {
             }
             None => {}
         }
-        // At the commit asked for (the margin's History), else the newest.
-        let first = self
-            .proj
-            .time_travel_at
-            .take()
-            .and_then(|sha| {
-                self.proj
-                    .time_travel
-                    .as_ref()?
-                    .commits
-                    .iter()
-                    .position(|c| c.sha == sha)
-            })
-            .unwrap_or(0);
-        Task::done(Message::TimeTravel(TimeTravelMsg::Goto(first)))
+        // At the commit asked for (the margin's History, the History view),
+        // else the newest — said so: one not among the file's commits it
+        // reads (a merge, another branch's, older than the newest it
+        // keeps) landed on the newest without a word.
+        let asked = self.proj.time_travel_at.take();
+        let found = asked.as_ref().and_then(|sha| {
+            self.proj
+                .time_travel
+                .as_ref()?
+                .commits
+                .iter()
+                .position(|c| c.sha == *sha)
+        });
+        if let (Some(sha), None) = (&asked, found) {
+            self.status = tr!(
+                "Time Travel does not reach {sha} (a merge, another branch's commit, or an old one): at the newest instead",
+                sha = sha.get(..7).unwrap_or(sha)
+            );
+        }
+        Task::done(Message::TimeTravel(TimeTravelMsg::Goto(found.unwrap_or(0))))
     }
 
     /// The commits that touched the file being read, asked for as the

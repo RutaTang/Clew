@@ -1500,10 +1500,9 @@ fn a_functions_explain_writes_its_own_explanation() {
     menu_on(&mut app, 2); // `pub fn origin() -> Point {`
     let opened = run_task(app.update(Message::Explain(ExplainMsg::FromMenu)));
     assert!(
-        opened.iter().any(|m| matches!(
-            m,
-            Message::Settings(SettingsMsg::OpenAt(SettingsPage::LanguageModel))
-        )),
+        opened
+            .iter()
+            .any(|m| matches!(m, Message::Settings(SettingsMsg::NeedKey))),
         "{opened:?}"
     );
     assert!(!app.proj.explain.running);
@@ -21912,7 +21911,7 @@ fn every_tools_menu_row_dismisses_the_menu() {
             ToolsRow::Tutorial => vec![Message::Tutorial(TutorialMsg::Start)],
             ToolsRow::ExplainAll => vec![
                 Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain)),
-                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
+                Message::Settings(SettingsMsg::NeedKey),
                 Message::Explain(ExplainMsg::Cancel),
             ],
             ToolsRow::SetUp => vec![Message::Project(ProjectMsg::SetupShow(
@@ -21996,12 +21995,7 @@ fn every_llm_flow_reports_a_missing_key_the_same_way() {
         );
         let out = run_task(task);
         assert!(
-            matches!(
-                out.as_slice(),
-                [Message::Settings(SettingsMsg::OpenAt(
-                    SettingsPage::LanguageModel
-                ))]
-            ),
+            matches!(out.as_slice(), [Message::Settings(SettingsMsg::NeedKey)]),
             "{what} did not offer Settings: {out:?}"
         );
     }
@@ -22078,12 +22072,7 @@ fn every_llm_flow_reports_a_missing_key_the_same_way() {
         );
         let out = run_task(task);
         assert!(
-            matches!(
-                out.as_slice(),
-                [Message::Settings(SettingsMsg::OpenAt(
-                    SettingsPage::LanguageModel
-                ))]
-            ),
+            matches!(out.as_slice(), [Message::Settings(SettingsMsg::NeedKey)]),
             "{what} did not offer Settings: {out:?}"
         );
         if what.contains("Ask") {

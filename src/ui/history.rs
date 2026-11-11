@@ -166,12 +166,7 @@ fn commit_list<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
             );
         }
     }
-    let foot: Element<'a, Message> = if h.loading {
-        text(tr!("Reading more…"))
-            .size(ts::SMALL)
-            .color(theme::dim())
-            .into()
-    } else if h.more {
+    let more = || {
         button(text(tr!("More commits")).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([3, 10])
@@ -179,13 +174,26 @@ fn commit_list<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
                 tr!("More commits"),
                 Message::History(HistoryMsg::More),
             ))
-            .into()
-    } else if let Some(e) = &h.error {
-        text(e.clone())
+    };
+    let foot: Element<'a, Message> = if h.loading {
+        text(tr!("Reading more…"))
             .size(ts::SMALL)
             .color(theme::dim())
-            .wrapping(Wrapping::WordOrGlyph)
             .into()
+    } else if let Some(e) = &h.error {
+        // Why the next page did not come — it was under "More commits",
+        // and scrolling read no further — and the button to ask again.
+        let said = text(e.clone())
+            .size(ts::SMALL)
+            .color(theme::danger())
+            .wrapping(Wrapping::WordOrGlyph);
+        if h.more {
+            column![said, more()].spacing(6).into()
+        } else {
+            said.into()
+        }
+    } else if h.more {
+        more().into()
     } else {
         space().height(0).into()
     };

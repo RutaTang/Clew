@@ -291,6 +291,12 @@ pub fn find_input_id() -> iced::widget::Id {
     iced::widget::Id::new("find-input")
 }
 
+/// The Language model page's API key field: where `SettingsMsg::NeedKey`
+/// puts the keyboard.
+pub fn settings_key_id() -> iced::widget::Id {
+    iced::widget::Id::new("settings-key")
+}
+
 pub fn ask_input_id() -> iced::widget::Id {
     iced::widget::Id::new("ask-input")
 }

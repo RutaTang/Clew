@@ -33,6 +33,11 @@ pub struct Finder {
     /// Opened as the command bar (Cmd+Shift+P): with nothing typed it
     /// suggests what to do; a query matches commands, then files.
     pub bar: bool,
+    /// Go to File found no file by the query: its results are the command
+    /// bar's — the commands it names, then files. "settings" said only "No
+    /// matches" there, though the field over the window that opens it
+    /// says it searches commands too.
+    pub bar_fallback: bool,
 }
 
 impl Finder {
@@ -62,7 +67,10 @@ impl Finder {
     /// The command bar with a query that is neither `>` commands nor a
     /// `:N` line: the commands it matches, then the files.
     pub fn is_bar_search(&self) -> bool {
-        self.bar && !self.is_home() && !self.is_commands() && !self.query.trim().starts_with(':')
+        (self.bar || self.bar_fallback)
+            && !self.is_home()
+            && !self.is_commands()
+            && !self.query.trim().starts_with(':')
     }
 
     /// The query less its `>`.

@@ -821,21 +821,87 @@ fn python_with(
             user: !probe.in_venv,
         }));
     }
+    let mut launch = json!({
+        "request": "launch",
+        "program": program,
+        "args": args,
+        "cwd": cwd.to_string_lossy(),
+        "console": "internalConsole",
+        "python": [python.to_string_lossy()],
+        "stopOnEntry": false,
+        "justMyCode": false,
+    });
+    // A module of a package (`teashop/pricing.py`) run as a script could
+    // not import its own package — "No module named 'teashop'": the folder
+    // the package sits in goes on the import path. One that imports its
+    // siblings relatively (`from .models import …`) has no package at all
+    // as a script, so it runs as Python runs a package's module: `-m`.
+    if let Some(package) = python_package(&in_dir(cwd, program)) {
+        let mut path = vec![package.root.clone()];
+        path.extend(
+            std::env::var_os("PYTHONPATH")
+                .map_or_else(Vec::new, |p| std::env::split_paths(&p).collect::<Vec<_>>()),
+        );
+        if let Ok(joined) = std::env::join_paths(path) {
+            launch["env"] = json!({ "PYTHONPATH": joined.to_string_lossy() });
+        }
+        if package.relative_imports
+            && let Some(launch) = launch.as_object_mut()
+        {
+            launch.remove("program");
+            launch.insert("module".into(), json!(package.module));
+        }
+    }
     Ok(Resolution::Ready(AdapterSpec {
         command: python.to_path_buf(),
         args: vec!["-m".into(), "debugpy.adapter".into()],
-        launch: json!({
-            "request": "launch",
-            "program": program,
-            "args": args,
-            "cwd": cwd.to_string_lossy(),
-            "console": "internalConsole",
-            "python": [python.to_string_lossy()],
-            "stopOnEntry": false,
-            "justMyCode": false,
-        }),
+        launch,
         transport: AdapterTransport::Stdio,
     }))
+}
+
+/// The package a Python file is a module of: the folder the outermost
+/// package sits in (what goes on the import path), the module's dotted
+/// name, and whether it imports relatively. `None` for a file outside any
+/// package (no `__init__.py` beside it), or a package's own `__init__.py`.
+#[derive(Debug, PartialEq)]
+struct PythonPackage {
+    root: PathBuf,
+    module: String,
+    relative_imports: bool,
+}
+
+fn python_package(file: &Path) -> Option<PythonPackage> {
+    let stem = file.file_stem()?.to_str()?;
+    if stem == "__init__" || file.extension()? != "py" {
+        return None;
+    }
+    let mut dir = file.parent()?;
+    let mut parts = Vec::new();
+    while dir.join("__init__.py").is_file() {
+        parts.push(dir.file_name()?.to_str()?.to_string());
+        dir = dir.parent()?;
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.reverse();
+    // `python -m pkg` runs `pkg/__main__.py`.
+    if stem != "__main__" {
+        parts.push(stem.to_string());
+    }
+    let source = std::fs::read_to_string(file).unwrap_or_default();
+    let relative_imports = source.lines().any(|line| {
+        let line = line.trim_start();
+        line.strip_prefix("from").is_some_and(|rest| {
+            rest.trim_start().starts_with('.') && rest.starts_with(char::is_whitespace)
+        })
+    });
+    Some(PythonPackage {
+        root: dir.to_path_buf(),
+        module: parts.join("."),
+        relative_imports,
+    })
 }
 
 /// Dart's SDK ships a DAP adapter: `dart debug_adapter` over stdio.
@@ -1602,6 +1668,53 @@ mod tests {
         // The probe ran from `/`, with the safe-path flag, never the project.
         let log = std::fs::read_to_string(dir.join("log")).unwrap();
         assert!(log.starts_with("/ 1 -c "), "{log}");
+    }
+
+    /// A module of a package runs with the folder its package sits in on
+    /// the import path ("No module named 'teashop'" ran it as a lone
+    /// script); one importing its siblings relatively runs as `-m`. A lone
+    /// script, or a package's `__init__.py`, runs as it always did.
+    #[test]
+    #[cfg(unix)]
+    fn a_package_module_runs_where_its_package_imports() {
+        let dir = TempDir::new("dap-py-pkg");
+        let python = fake_python(&dir, "echo '1 0'");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(root.join("teashop/sub")).unwrap();
+        std::fs::write(root.join("teashop/__init__.py"), "").unwrap();
+        std::fs::write(root.join("teashop/sub/__init__.py"), "").unwrap();
+        std::fs::write(
+            root.join("teashop/pricing.py"),
+            "from teashop.models import Order\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("teashop/sub/deep.py"),
+            "from ..models import Order\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("main.py"), "import teashop\n").unwrap();
+        let launch = |program: &str| {
+            let Resolution::Ready(spec) = python_with(&python, program, &[], &root).unwrap() else {
+                panic!("debugpy is present");
+            };
+            spec.launch
+        };
+        let absolute = launch("teashop/pricing.py");
+        assert_eq!(absolute["program"], "teashop/pricing.py");
+        let path = absolute["env"]["PYTHONPATH"].as_str().unwrap();
+        assert_eq!(
+            std::env::split_paths(path).next().as_deref(),
+            Some(root.as_path()),
+            "the package's folder first on the path"
+        );
+        let relative = launch(&root.join("teashop/sub/deep.py").to_string_lossy());
+        assert!(relative.get("program").is_none(), "{relative}");
+        assert_eq!(relative["module"], "teashop.sub.deep");
+        let lone = launch("main.py");
+        assert_eq!(lone["program"], "main.py");
+        assert!(lone.get("env").is_none() && lone.get("module").is_none());
+        assert_eq!(python_package(&root.join("teashop/__init__.py")), None);
     }
 
     #[test]

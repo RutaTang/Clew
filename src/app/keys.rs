@@ -703,7 +703,7 @@ impl App {
             } else if self.llm_available {
                 Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
             } else {
-                Message::Settings(SettingsMsg::OpenAt(SettingsPage::LanguageModel))
+                Message::Settings(SettingsMsg::NeedKey)
             }),
             ToggleDiff => self.update(Message::Editor(EditorMsg::ToggleDiff)),
             TimeTravel => self.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false })),

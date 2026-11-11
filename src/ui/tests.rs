@@ -10642,12 +10642,8 @@ fn explain_all_without_a_key_opens_settings_where_the_key_goes() {
     open_tools_menu(&mut app);
     let sent = click(sim_of(&app), "Explain All");
     assert!(
-        sent.iter().any(|m| matches!(
-            m,
-            Message::Settings(crate::SettingsMsg::OpenAt(
-                crate::SettingsPage::LanguageModel
-            ))
-        )),
+        sent.iter()
+            .any(|m| matches!(m, Message::Settings(crate::SettingsMsg::NeedKey))),
         "{sent:?}"
     );
     let mut app = reader_app();
@@ -11313,7 +11309,8 @@ fn the_raised_note_says_when_its_function_changed() {
         ],
     );
     assert!(shows(&mut sim_of(&app), "Feb 29, 2024"));
-    // A line of it not committed: said so.
+    // A line of it edited since: its commits still date it — "Uncommitted"
+    // read as if it were new.
     set(
         &mut app,
         vec![
@@ -11322,6 +11319,18 @@ fn the_raised_note_says_when_its_function_changed() {
             blame(946_598_400, true),
             blame(1_709_251_199, false),
             blame(946_598_400, false),
+        ],
+    );
+    assert!(shows(&mut sim_of(&app), "Feb 29, 2024"));
+    // None of it committed yet: said so.
+    set(
+        &mut app,
+        vec![
+            blame(1_793_793_600, false),
+            blame(1, false),
+            blame(946_598_400, true),
+            blame(1_709_251_199, true),
+            blame(946_598_400, true),
         ],
     );
     assert!(shows(&mut sim_of(&app), "Uncommitted"));
@@ -13103,9 +13112,8 @@ fn an_unexplained_note_offers_explain_all() {
     assert!(
         sent.iter().any(|m| matches!(
             m,
-            Message::Settings(crate::SettingsMsg::OpenAt(
-                crate::SettingsPage::LanguageModel
-            )) | Message::Project(crate::ProjectMsg::SetupShow(_))
+            Message::Settings(crate::SettingsMsg::NeedKey)
+                | Message::Project(crate::ProjectMsg::SetupShow(_))
         )),
         "{sent:?}"
     );
@@ -16104,4 +16112,196 @@ fn a_page_put_away_leaves_the_code_where_it_was() {
     let _ = app.sync_panes_uncovered();
     app.proj.stats.showing = false;
     assert!(app.sync_panes_uncovered().is_none(), "at the top already");
+}
+
+/// An AI action asked with no key opens the Language model page saying why,
+/// the keyboard in its key field: it opened on the form with no word of it.
+/// The word goes as Settings closes.
+#[test]
+fn an_ai_action_without_a_key_says_why_settings_opened() {
+    let mut app = reader_app();
+    app.settings.key.clear();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::NeedKey));
+    assert!(app.settings.open);
+    assert_eq!(app.settings.page, crate::SettingsPage::LanguageModel);
+    assert!(shows(&mut sim_of(&app), "That needs an AI model"));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Close));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::LanguageModel,
+    )));
+    assert!(
+        !shows(&mut sim_of(&app), "That needs an AI model"),
+        "opened by hand: nothing asked for it"
+    );
+}
+
+/// Go to File (Ctrl+P, the key the field over the window shows) with no file
+/// by the name typed offers the commands that have it: "settings" said only
+/// "No matches", though that field says it searches commands too. A name
+/// that is a file's lists the files as before.
+#[test]
+fn go_to_file_offers_the_commands_no_file_is_named_after() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(
+        crate::session::finder::FinderMode::Files,
+    )));
+    let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged("settings".into())));
+    assert!(
+        app.proj.finder.bar_fallback,
+        "nothing of the project by that name"
+    );
+    assert!(!app.proj.finder.results.is_empty());
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, "No matches"));
+        assert!(shows(&mut sim, "Settings"), "a Settings command offered");
+    }
+    let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged(":".into())));
+    assert!(
+        !app.proj.finder.bar_fallback,
+        "a line asked for is not searched"
+    );
+}
+
+/// The History view with the sidebar on it, nothing asked yet.
+fn history_shown(mut app: App) -> App {
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::History;
+    app
+}
+
+/// A History page read for the view as it stands.
+fn history_page(app: &App, result: Result<clew_protocol::LogPage, String>) -> Message {
+    Message::History(crate::HistoryMsg::Loaded {
+        stamp: app.stamp(),
+        generation: app.proj.git_log.generation,
+        skip: 0,
+        result,
+    })
+}
+
+/// The History view reads what it shows whenever it shows and has not
+/// asked — after a new project, or a tutorial's sample put away, it stayed
+/// on "Reading the history…": nothing read it again.
+#[test]
+fn the_history_view_reads_again_once_it_has_not_asked() {
+    let mut app = history_shown(reader_app());
+    app.proj.git_log.asked = false;
+    let _ = app.update(Message::Noop);
+    assert!(app.proj.git_log.asked, "read on the next update");
+    // Not shown: nothing read.
+    app.sidebar = crate::SidebarTab::Files;
+    app.proj.git_log.asked = false;
+    let _ = app.update(Message::Noop);
+    assert!(!app.proj.git_log.asked);
+}
+
+/// A filter is read once its typing settles, not for each key: each key
+/// walked the whole history.
+#[test]
+fn the_history_filter_is_read_once_it_settles() {
+    use crate::HistoryMsg;
+    let mut app = history_shown(reader_app());
+    app.proj.git_log.asked = true;
+    let _ = app.update(Message::History(HistoryMsg::Query("ta".into())));
+    let first = app.proj.git_log.typed;
+    let _ = app.update(Message::History(HistoryMsg::Query("tax".into())));
+    assert!(app.proj.git_log.asked, "not read for a key");
+    let _ = app.update(Message::History(HistoryMsg::QuerySettled(first)));
+    assert!(
+        !app.proj.git_log.loading,
+        "an earlier key's settling reads nothing"
+    );
+    let last = app.proj.git_log.typed;
+    let _ = app.update(Message::History(HistoryMsg::QuerySettled(last)));
+    assert!(app.proj.git_log.loading, "the last key's settling reads it");
+}
+
+/// A first page that failed clears what the last filter showed — it
+/// stayed under the new chip as if it matched; one file's commits, followed
+/// across renames, are drawn apart.
+#[test]
+fn a_failed_or_followed_history_page_is_shown_for_what_it_is() {
+    let (mut app, ..) = history_app();
+    app.proj.git_log.path = Some("teashop/legacy.py".into());
+    let failed = history_page(&app, Err("refused".into()));
+    let _ = app.update(failed);
+    assert!(app.proj.git_log.commits.is_empty() && app.proj.git_log.graph.is_empty());
+    assert_eq!(app.proj.git_log.error.as_deref(), Some("refused"));
+
+    let (mut app, new, old) = history_app();
+    let page = clew_protocol::LogPage {
+        commits: app.proj.git_log.commits.clone(),
+        more: false,
+    };
+    let project = app.proj.project.as_mut().unwrap();
+    project.files = std::sync::Arc::new(vec![crate::fs_scan::FileEntry {
+        abs: project.root.join("teashop/pricing.py"),
+        rel: "teashop/pricing.py".into(),
+    }]);
+    app.proj.git_log.path = Some("teashop/pricing.py".into());
+    let loaded = history_page(&app, Ok(page));
+    let _ = app.update(loaded);
+    assert_eq!(app.proj.git_log.commits.len(), 2, "{new} {old}");
+    assert!(app.proj.git_log.graph.iter().all(|r| r.dashed));
+}
+
+/// A changed file pressed while it is the one being read shows its Diff at
+/// once — no load was coming to show it after, and the Diff came on at the
+/// file's next opening, long after. What waits for a file is dropped when
+/// another opens first, or it fails to.
+#[test]
+fn history_opens_answer_the_next_file_only() {
+    use crate::HistoryMsg;
+    let mut app = reader_app();
+    let sent = crate::app::tests::run_task(app.update(Message::History(HistoryMsg::OpenChanged(
+        "src/lib.rs".into(),
+    ))));
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Editor(crate::EditorMsg::ToggleDiff))),
+        "{sent:?}"
+    );
+    assert!(app.proj.diff_after_open.is_none(), "nothing left waiting");
+
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.diff_after_open = Some(root.join("a.py"));
+    app.proj.time_travel_after_open = Some((root.join("a.py"), "a".repeat(40)));
+    let _ = app.after_history_open(&root.join("b.py"));
+    assert!(app.proj.diff_after_open.is_none() && app.proj.time_travel_after_open.is_none());
+
+    app.proj.diff_after_open = Some(root.join("a.py"));
+    app.forget_history_open(&root.join("a.py"));
+    assert!(app.proj.diff_after_open.is_none());
+}
+
+/// A commit whose read failed is read again when opened again; it was
+/// cached, failed, for good.
+#[test]
+fn a_commit_read_that_failed_is_read_again() {
+    use crate::HistoryMsg;
+    let (mut app, new, _) = history_app();
+    app.proj
+        .git_log
+        .details
+        .insert(new.clone(), Err("timed out".into()));
+    app.proj.git_log.open = None;
+    let _ = app.update(Message::History(HistoryMsg::Toggle(new.clone())));
+    assert_eq!(app.proj.git_log.open.as_deref(), Some(new.as_str()));
+    assert!(!app.proj.git_log.details.contains_key(&new), "asked again");
+}
+
+/// The check pressed in Settings ends its own "Checking…": the one at
+/// startup answering meanwhile left it pressable again — and a startup
+/// check that failed is no red line in Settings.
+#[test]
+fn only_the_pressed_check_ends_checking() {
+    let mut app = reader_app();
+    app.update.checking = true;
+    let _ = app.update(Message::Updater(crate::UpdaterMsg::Checked {
+        manual: false,
+        result: Err("offline".into()),
+    }));
+    assert!(app.update.checking);
+    assert!(app.update.last_check.is_none());
 }

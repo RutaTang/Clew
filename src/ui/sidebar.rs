@@ -1696,6 +1696,19 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let mut last_rel: Option<&str> = None;
+    // What a preview has beside its line number and the row's pencil and ✕:
+    // cut to it with an ellipsis — cut at 48 characters, a narrower panel
+    // clipped it mid-letter.
+    let preview_room = (app.sidebar_width
+        - 8.0
+        - 4.0
+        - 36.0
+        - 4.0
+        - 2.0 * 2.0
+        - 2.0 * (13.0 + 12.0)
+        - crate::ui::SCROLLBAR_W
+        - 4.0)
+        .max(0.0);
     for bm in &app.proj.bookmarks {
         if last_rel != Some(bm.rel.as_str()) {
             last_rel = Some(bm.rel.as_str());
@@ -1709,9 +1722,11 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
                 .color(theme::dim())
                 .width(36),
             container(
-                text(truncate_ellipsis(
+                text(super::steady::cut(
                     &crate::highlight::line_in_order(&bm.preview),
-                    48
+                    preview_room,
+                    ts::BODY,
+                    crate::fonts::UI,
                 ))
                 .size(ts::BODY)
                 .wrapping(Wrapping::None)

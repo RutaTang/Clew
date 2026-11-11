@@ -1566,7 +1566,7 @@ pub(crate) fn explain_all_message(app: &App) -> Message {
     if app.llm_available {
         Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
     } else {
-        Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel))
+        Message::Settings(SettingsMsg::NeedKey)
     }
 }
 

@@ -100,11 +100,40 @@ pub fn project_log(
     if let Some(grep) = grep {
         args.push(format!("--grep={grep}"));
     }
+    // Children before their parents, as the lanes are drawn: git's default
+    // order is by date, and commits of the same second (or a skewed clock)
+    // came parent first — a lane dangled to the list's foot. A single
+    // commit asked (the newest, `App::sync_repo_tip`) is the first git
+    // meets, HEAD itself: ordering would walk the whole history for it.
+    if limit > 1 {
+        args.push("--topo-order".into());
+    }
+    // One file's commits follow it across renames, as its margin's History
+    // does — "All of this file's commits" stopped at a rename. Following
+    // stops rewriting parents: the view draws such a list apart, as a
+    // filtered one.
+    let file = rel.filter(|rel| root.join(rel).is_file());
+    if file.is_some() {
+        args.push("--follow".into());
+    }
+    // The whole project of a repository's top: every commit, no pathspec —
+    // `.` turned on history simplification, and a merge whose tree is one
+    // parent's (a pull request merged as it stood) went missing, and the
+    // commit on it. Of a folder within the repository: its commits, merges
+    // kept.
+    let path = match rel {
+        Some(rel) => Some(git_name(root, rel)),
+        None if git.repo.prefix.is_empty() => None,
+        None => {
+            args.push("--full-history".into());
+            Some(".".to_string())
+        }
+    };
     if all {
         args.extend(["--branches", "--remotes", "--tags"].map(String::from));
     }
     args.extend([END_OF_OPTIONS, "HEAD", "--"].map(String::from));
-    args.push(rel.map_or_else(|| ".".to_string(), |rel| git_name(root, rel)));
+    args.extend(path);
     let out = match git.text(&args, GIT_HISTORY_TIMEOUT) {
         Ok(out) => out,
         Err(e @ GitError::Failed { .. }) => {

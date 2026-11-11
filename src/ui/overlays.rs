@@ -232,12 +232,17 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         ],
     ];
     // As designed, or as wide as its longest row (its keys too) in the
-    // reader's language, so none wraps.
+    // reader's language, so none wraps or is clipped. A row is its words,
+    // the room between and its keys, two gaps of 16 apart (the keys' slot
+    // is there, empty, on a row with none): counted one gap short, a long
+    // French or Japanese row's keys were cut at the menu's edge.
     let key_w = |k: &Option<String>| {
-        k.as_deref().map_or(0.0, |k| {
-            super::sheet::text_width(k, ts::SMALL, crate::fonts::UI) + 16.0
-        })
+        2.0 * ROW_GAP
+            + k.as_deref().map_or(0.0, |k| {
+                super::sheet::text_width(k, ts::SMALL, crate::fonts::UI)
+            })
     };
+    const ROW_GAP: f32 = 16.0;
     let width = groups
         .iter()
         .flatten()
@@ -246,6 +251,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
                 + key_w(&r.keys)
                 + 2.0 * 12.0
                 + 2.0 * 4.0
+                + 2.0
         })
         .fold(MENU_W, f32::max)
         .ceil();
@@ -280,7 +286,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         };
         let b = button(
             row![words, space().width(Fill), trailing]
-                .spacing(16)
+                .spacing(ROW_GAP)
                 .align_y(iced::Center),
         )
         .style(theme::list_row(false))

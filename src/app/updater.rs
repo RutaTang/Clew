@@ -70,12 +70,23 @@ impl App {
         manual: bool,
         result: Result<clew_core::update::Release, String>,
     ) -> Task<Message> {
-        self.update.checking = false;
-        self.update.last_check = Some(match &result {
-            Ok(release) if release.version > updater::current_version() => CheckOutcome::Found,
-            Ok(_) => CheckOutcome::UpToDate,
-            Err(e) => CheckOutcome::Failed(e.clone()),
-        });
+        // The check pressed in Settings is the one that ends its
+        // "Checking…": the one at startup coming in meanwhile let it be
+        // pressed again.
+        if manual {
+            self.update.checking = false;
+        }
+        // What Settings says it found: any check's finding, but only a
+        // pressed one's failure — one at startup that found no network was
+        // a red line under a check nobody asked for.
+        match &result {
+            Ok(release) if release.version > updater::current_version() => {
+                self.update.last_check = Some(CheckOutcome::Found);
+            }
+            Ok(_) => self.update.last_check = Some(CheckOutcome::UpToDate),
+            Err(e) if manual => self.update.last_check = Some(CheckOutcome::Failed(e.clone())),
+            Err(_) => {}
+        }
         match result {
             // A download or install is under way for the release on offer, and
             // it stays the one on offer: replaced, the banner named a version

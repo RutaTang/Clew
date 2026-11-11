@@ -86,6 +86,14 @@ impl App {
             Some(read) => Task::batch([task, read]),
             None => task,
         };
+        // The History view reads what it shows once it shows and has not
+        // asked: a new project, the sidebar back on it, a tutorial's sample
+        // put away. It stayed on "Reading the history…".
+        let task = if self.history_unread() {
+            Task::batch([task, self.sync_history()])
+        } else {
+            task
+        };
         // A page put away from over the code: the code where it was.
         let task = match self.sync_panes_uncovered() {
             Some(scroll) => Task::batch([task, scroll]),

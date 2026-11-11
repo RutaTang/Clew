@@ -375,6 +375,7 @@ impl App {
         let content = match result {
             Err(e) => {
                 self.status = format!("{rel}: {e}");
+                self.forget_history_open(&abs);
                 return Task::none();
             }
             Ok(content) => content,

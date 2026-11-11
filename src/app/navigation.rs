@@ -847,6 +847,7 @@ impl App {
             self.refresh_suggestions();
             return;
         }
+        self.proj.finder.bar_fallback = false;
         if self.proj.finder.is_bar_search() {
             self.refresh_bar();
             return;
@@ -858,6 +859,15 @@ impl App {
                     let symbols = self.fresh_symbol_index();
                     let recent = self.proj.history.recent_files(RECENT_FILES);
                     self.proj.finder.refresh_files(&files, &symbols, &recent);
+                }
+                // No file or symbol by that name: what the command bar finds
+                // for it — its commands first ("settings").
+                if self.proj.finder.results.is_empty()
+                    && !self.proj.finder.query.trim().is_empty()
+                    && !self.proj.finder.is_line_query()
+                {
+                    self.proj.finder.bar_fallback = true;
+                    self.refresh_bar();
                 }
             }
             FinderMode::Symbols => {

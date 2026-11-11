@@ -575,21 +575,27 @@ fn reached_from_rows<'a>(
                     .color(theme::accent())
                     .into()
             };
+            // A step and the arrow after it, one piece: wrapped apart, a
+            // line began with the arrow.
             steps.push(
-                button(label)
-                    .style(theme::list_row(false))
-                    .padding([1, 4])
-                    .on_press(heard::said(
-                        &n.name,
-                        Message::Semantic(SemanticMsg::OpenNode(Node::Function {
-                            file: n.file.clone(),
-                            name: n.name.clone(),
-                            ordinal: g.ordinals().get(step).copied().unwrap_or(0),
-                        })),
-                    ))
-                    .into(),
+                row![
+                    button(label)
+                        .style(theme::list_row(false))
+                        .padding([1, 4])
+                        .on_press(heard::said(
+                            &n.name,
+                            Message::Semantic(SemanticMsg::OpenNode(Node::Function {
+                                file: n.file.clone(),
+                                name: n.name.clone(),
+                                ordinal: g.ordinals().get(step).copied().unwrap_or(0),
+                            })),
+                        )),
+                    text("›").size(ts::SMALL).color(theme::dim()),
+                ]
+                .spacing(4)
+                .align_y(iced::Center)
+                .into(),
             );
-            steps.push(text("›").size(ts::SMALL).color(theme::dim()).into());
         }
         out.push(
             container(iced::widget::Row::with_children(steps).spacing(4).wrap())

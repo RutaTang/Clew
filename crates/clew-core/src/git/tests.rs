@@ -2689,3 +2689,93 @@ fn a_commit_is_read_whole() {
         clew_protocol::GitResult::CommitDetail(Some(_))
     ));
 }
+
+/// The whole project's log keeps every commit: a merge whose tree is one
+/// parent's (a branch merged as it stood) and the commit on it went missing
+/// under the `.` pathspec's history simplification. Children always come
+/// before their parents, however their clocks read; and a user's
+/// `log.follow=true` does not turn a folder's log into a followed one.
+#[test]
+fn the_project_log_keeps_merges_and_children_first() {
+    let dir = repo_dir("git-log-merge");
+    let at = |args: &[&str]| {
+        let ok = plain_git()
+            .args(args)
+            .current_dir(&*dir)
+            .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00Z")
+            .env("GIT_AUTHOR_DATE", "2024-01-01T00:00:00Z")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    sh_git(&dir, &["checkout", "-q", "-b", "main"]);
+    std::fs::create_dir_all(dir.join("proj")).unwrap();
+    std::fs::write(dir.join("proj/a.txt"), "a\n").unwrap();
+    at(&["add", "-A"]);
+    at(&["commit", "-qm", "c1"]);
+    at(&["checkout", "-q", "-b", "feat"]);
+    std::fs::write(dir.join("proj/f.txt"), "f\n").unwrap();
+    at(&["add", "-A"]);
+    at(&["commit", "-qm", "f1"]);
+    at(&["checkout", "-q", "main"]);
+    at(&["merge", "-q", "--no-ff", "-m", "Merge feat", "feat"]);
+    std::fs::write(dir.join("proj/a.txt"), "a2\n").unwrap();
+    at(&["add", "-A"]);
+    at(&["commit", "-qm", "c2"]);
+
+    let page = project_log(&dir, false, None, None, None, 0, 10).unwrap();
+    let subjects: Vec<&str> = page.commits.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects.len(), 4, "{subjects:?}");
+    assert!(subjects.contains(&"Merge feat"), "{subjects:?}");
+    assert_eq!(
+        subjects[0], "c2",
+        "the newest first, all of the same second"
+    );
+    // Each commit before its parents.
+    let index = |sha: &str| page.commits.iter().position(|c| c.sha == sha);
+    for (i, c) in page.commits.iter().enumerate() {
+        for parent in &c.parents {
+            assert!(
+                index(parent).is_none_or(|p| p > i),
+                "{} above its parent",
+                c.subject
+            );
+        }
+    }
+
+    // A folder's log, under a user's `log.follow=true`: parents rewritten
+    // to its own commits, merges kept.
+    sh_git(&dir, &["config", "log.follow", "true"]);
+    let proj = dir.join("proj");
+    let page = project_log(&proj, false, None, None, None, 0, 10).unwrap();
+    let listed: Vec<&str> = page.commits.iter().map(|c| c.sha.as_str()).collect();
+    let subjects: Vec<&str> = page.commits.iter().map(|c| c.subject.as_str()).collect();
+    assert!(subjects.contains(&"Merge feat"), "{subjects:?}");
+    for c in &page.commits {
+        for parent in &c.parents {
+            assert!(
+                listed.contains(&parent.as_str()),
+                "{} -> {parent}",
+                c.subject
+            );
+        }
+    }
+}
+
+/// One file's log follows it across a rename, as its margin's History does.
+#[test]
+fn a_files_log_follows_its_renames() {
+    let dir = repo_dir("git-log-follow");
+    std::fs::write(dir.join("old.txt"), "one\ntwo\nthree\n").unwrap();
+    commit_all(&dir, "Start");
+    sh_git(&dir, &["mv", "old.txt", "new.txt"]);
+    commit_all(&dir, "Rename");
+    std::fs::write(dir.join("new.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+    commit_all(&dir, "Grow");
+    let page = project_log(&dir, false, Some("new.txt"), None, None, 0, 10).unwrap();
+    let subjects: Vec<&str> = page.commits.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects, ["Grow", "Rename", "Start"]);
+}

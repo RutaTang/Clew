@@ -68,6 +68,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     let key = input(&key_hint, &app.settings.key, |v| {
         Message::Settings(SettingsMsg::KeyChanged(v))
     })
+    .id(super::settings_key_id())
     .secure(true);
     let (model_hint, base_hint) = model_field_hints(app.settings.provider);
     let model = input(model_hint, &app.settings.model, |v| {
@@ -212,7 +213,10 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         }
         SettingsPage::LanguageModel => form::page(vec![form::group(
             "",
-            None,
+            // Opened by an AI action asked without a key: why, above the
+            // field it needs — it opened on the form with no word of it.
+            (app.settings.key_asked && app.settings.key.trim().is_empty())
+                .then(|| tr!("That needs an AI model: add an API key below, then try it again.").to_string()),
             None,
             [
                 form::field(tr!("Provider"), None, provider),

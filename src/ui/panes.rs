@@ -1732,9 +1732,11 @@ pub(crate) fn leaning_on(
     Some(Leaning::References(sites))
 }
 
-/// When lines `first..=last` (1-based) of the open file last changed, as
-/// its blame has it: the newest of their commits — or `None` with no blame,
-/// and "Uncommitted" (`Some(None)`) when one of them is not committed yet.
+/// When lines `first..=last` (1-based) of the open file were last
+/// committed, as its blame has it: the newest of their commits — or `None`
+/// with no blame, and "Uncommitted" (`Some(None)`) when none of them is
+/// committed yet. Lines edited since do not hide the commits the rest have:
+/// a file with history and a local change read "Uncommitted", as if new.
 fn last_changed(v: &Viewer, first: usize, last: usize) -> Option<Option<i64>> {
     let git = v.git.as_ref()?;
     let lines = git
@@ -1743,10 +1745,13 @@ fn last_changed(v: &Viewer, first: usize, last: usize) -> Option<Option<i64>> {
     if lines.is_empty() {
         return None;
     }
-    if lines.iter().any(|b| b.uncommitted) {
-        return Some(None);
-    }
-    Some(lines.iter().map(|b| b.time).max())
+    Some(
+        lines
+            .iter()
+            .filter(|b| !b.uncommitted)
+            .map(|b| b.time)
+            .max(),
+    )
 }
 
 /// A commit's day, as a reader says it: "Nov 4", with its year when that

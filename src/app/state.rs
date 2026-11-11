@@ -883,6 +883,10 @@ pub struct SettingsDraft {
     pub integrations: crate::app::integrations::IntegrationsDraft,
     /// The page Settings shows: one feature's settings at a time.
     pub page: SettingsPage,
+    /// Opened by an AI action asked with no key (`SettingsMsg::NeedKey`):
+    /// the Language model page says so above its fields — it opened with
+    /// no word of why. Cleared as Settings closes.
+    pub key_asked: bool,
 }
 
 /// The fields of Settings that are kept as it closes, not as they change —
@@ -1003,6 +1007,7 @@ impl Default for SettingsDraft {
             save_failed: false,
             integrations: Default::default(),
             page: SettingsPage::Appearance,
+            key_asked: false,
         }
     }
 }

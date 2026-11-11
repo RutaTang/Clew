@@ -816,6 +816,10 @@ pub enum HistoryMsg {
     Show { path: Option<String> },
     /// The filter as typed: words of the message, `@author`, a commit id.
     Query(String),
+    /// The filter as it stood a moment after it was typed (`n`, its
+    /// number): read then, if no key came since — a read per key walked the
+    /// whole history once for each.
+    QuerySettled(u64),
     /// Every branch's commits, or only HEAD's.
     AllBranches(bool),
     /// The whole project's commits, not only one path's.
@@ -2105,6 +2109,9 @@ pub enum SettingsMsg {
     /// `OpenAt` on the one a flow needs (Voice, for a model to download).
     Open,
     OpenAt(SettingsPage),
+    /// An AI action asked with no key: the Language model page, saying so,
+    /// its key field taking the keyboard.
+    NeedKey,
     Close,
     /// Put the AI fields back as Settings opened on them: what was typed
     /// there is kept as Settings closes, unless discarded first.
@@ -2624,6 +2631,7 @@ impl HistoryMsg {
             | HistoryMsg::TipRead { stamp, .. } => Some(Origin::Stamped(stamp)),
             HistoryMsg::Show { .. }
             | HistoryMsg::Query(_)
+            | HistoryMsg::QuerySettled(_)
             | HistoryMsg::AllBranches(_)
             | HistoryMsg::WholeProject
             | HistoryMsg::More
@@ -3131,6 +3139,7 @@ impl SettingsMsg {
             | SettingsMsg::EmbedModelRemoved(..)
             | SettingsMsg::Open
             | SettingsMsg::OpenAt(..)
+            | SettingsMsg::NeedKey
             | SettingsMsg::Close
             | SettingsMsg::Discard
             | SettingsMsg::Page(..)

@@ -310,6 +310,11 @@ const PINNED_CONFIG: &[&str] = &[
     "color.ui=false",
     "log.showSignature=false",
     "log.showRoot=true",
+    // A log of one path is never turned into `--follow` behind the
+    // query's back: follow mode stops rewriting parents, and the History
+    // view's lanes dangled (a user's `log.follow=true`). The queries that
+    // follow a file's renames ask for it themselves.
+    "log.follow=false",
     "i18n.logOutputEncoding=UTF-8",
     // A submodule change is shown as its commit ids, never as a patch that a
     // git run inside the submodule would produce (see "Submodules are never

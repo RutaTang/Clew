@@ -40,9 +40,7 @@ impl App {
                 // Not where the key is kept: Settings, opened here, is where
                 // it is added (the file's whole path filled the status line).
                 self.status = tr!("Add an API key in Settings").into();
-                Err(Task::done(Message::Settings(SettingsMsg::OpenAt(
-                    SettingsPage::LanguageModel,
-                ))))
+                Err(Task::done(Message::Settings(SettingsMsg::NeedKey)))
             }
         }
     }
@@ -364,6 +362,7 @@ impl App {
             }
         }
         self.settings.open = false;
+        self.settings.key_asked = false;
         self.rebinding = None;
         self.keymap_notice = None;
         // A model's failed download is said under it, in here; once
@@ -568,7 +567,29 @@ impl App {
             SettingsMsg::OpenAt(page) => {
                 self.settings.page = page;
                 let opened = self.on_open_settings();
-                Task::batch([opened, self.sync_server_listing(), settings_to_top()])
+                // "Add an API Key…": the keyboard in the field it is added
+                // to, while there is none.
+                let key =
+                    if page == SettingsPage::LanguageModel && self.settings.key.trim().is_empty() {
+                        self.code_focused = false;
+                        operation::focus(ui::settings_key_id())
+                    } else {
+                        Task::none()
+                    };
+                Task::batch([opened, self.sync_server_listing(), settings_to_top(), key])
+            }
+            SettingsMsg::NeedKey => {
+                self.settings.page = SettingsPage::LanguageModel;
+                let opened = self.on_open_settings();
+                self.settings.key_asked = true;
+                // The keyboard where the key goes.
+                self.code_focused = false;
+                Task::batch([
+                    opened,
+                    self.sync_server_listing(),
+                    settings_to_top(),
+                    operation::focus(ui::settings_key_id()),
+                ])
             }
             SettingsMsg::Page(page) => {
                 let other = self.settings.page != page;

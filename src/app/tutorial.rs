@@ -26,7 +26,7 @@ pub(crate) fn closes_tools_menu(message: &Message) -> bool {
         message,
         Message::Tutorial(TutorialMsg::Start)
             | Message::Explain(ExplainMsg::Cancel)
-            | Message::Settings(SettingsMsg::Open | SettingsMsg::OpenAt(_))
+            | Message::Settings(SettingsMsg::Open | SettingsMsg::OpenAt(_) | SettingsMsg::NeedKey)
             | Message::Explain(ExplainMsg::Project)
             | Message::Project(ProjectMsg::SetupShow(_))
             | Message::Window(WindowMsg::OpenShortcuts)

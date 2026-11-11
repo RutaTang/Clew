@@ -2598,6 +2598,11 @@ pub fn finder_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::
     move |theme, status| {
         let mut style = list_row(selected)(theme, status);
         style.border.radius = 8.0.into();
+        // The row under the pointer only faintly: the one Enter opens — the
+        // keys' — stays the one row lit. Both lit as much read as two picks.
+        if !selected && matches!(status, button::Status::Hovered) {
+            style.background = Some(with_alpha(bg_hover(), 0.45).into());
+        }
         style
     }
 }

@@ -12,6 +12,9 @@ use clew_protocol::{CommitDetail, GitOp, LogCommit, LogPage};
 /// How many commits a page brings.
 pub(crate) const PAGE: usize = 100;
 
+/// How long the filter rests before it is read.
+const QUERY_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// The History view's state, the open project's.
 #[derive(Debug, Default)]
 pub struct HistoryView {
@@ -44,6 +47,8 @@ pub struct HistoryView {
     pub by_id: Option<(String, Result<Option<CommitDetail>, String>)>,
     /// The uncommitted changes' row opened to its files.
     pub changes_open: bool,
+    /// Numbers the filter's keys: it is read once one has settled.
+    pub typed: u64,
 }
 
 /// What the filter asks for: whose commits (`@ada`), what their message
@@ -257,6 +262,19 @@ impl App {
                     return Task::none();
                 }
                 h.query = query;
+                h.typed += 1;
+                let typed = h.typed;
+                // Read once the typing settles, not for each key.
+                Task::perform(
+                    async { tokio::time::sleep(QUERY_SETTLE).await },
+                    move |()| Message::History(HistoryMsg::QuerySettled(typed)),
+                )
+            }
+            HistoryMsg::QuerySettled(typed) => {
+                let h = &mut self.proj.git_log;
+                if typed != h.typed {
+                    return Task::none();
+                }
                 h.asked = false;
                 self.sync_history()
             }
@@ -290,6 +308,9 @@ impl App {
                 result,
                 ..
             } => {
+                // One file's commits are followed across its renames, and
+                // so are not each other's parents: drawn apart.
+                let followed = self.history_follows_a_file();
                 let h = &mut self.proj.git_log;
                 if generation != h.generation {
                     return Task::none();
@@ -307,13 +328,24 @@ impl App {
                         h.more = page.more;
                         h.error = None;
                         let filter = log_filter(&h.query);
-                        h.graph = if filter.author.is_some() || filter.grep.is_some() {
+                        h.graph = if followed || filter.author.is_some() || filter.grep.is_some() {
                             sparse_rows(h.commits.len(), h.more)
                         } else {
                             graph_rows(&h.commits)
                         };
                     }
-                    Err(e) => h.error = Some(e),
+                    Err(e) => {
+                        // The first page of what is asked now failed: what
+                        // the last filter showed is not this one's — it
+                        // stayed, under the new chip, as if it matched.
+                        if skip == 0 {
+                            h.commits.clear();
+                            h.graph.clear();
+                            h.more = false;
+                            h.open = None;
+                        }
+                        h.error = Some(e);
+                    }
                 }
                 Task::none()
             }
@@ -324,9 +356,11 @@ impl App {
                     return Task::none();
                 }
                 h.open = Some(sha.clone());
-                if h.details.contains_key(&sha) {
+                // Read once, and again after a read that failed.
+                if matches!(h.details.get(&sha), Some(Ok(_))) {
                     return Task::none();
                 }
+                h.details.remove(&sha);
                 self.read_commit(sha)
             }
             HistoryMsg::DetailRead { sha, result, .. } => {
@@ -372,8 +406,15 @@ impl App {
                 let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
                     return Task::none();
                 };
-                self.proj.diff_after_open = Some(root.join(&rel));
-                self.open_file(root.join(rel), None, true)
+                let abs = root.join(&rel);
+                // Already the file being read: its Diff now — no load is
+                // coming to show it after.
+                if self.active_viewer().is_some_and(|v| v.abs == abs) {
+                    return self.show_diff_of(&abs);
+                }
+                let open = self.open_file(abs.clone(), None, true);
+                self.proj.diff_after_open = Some(abs);
+                open
             }
             HistoryMsg::CopyId(sha) => {
                 self.status = tr!("Copied the commit id").into();
@@ -426,14 +467,16 @@ impl App {
     /// The first page read, when the view shows and has not asked for what
     /// it shows now (a new filter, another branch or path, a new project).
     pub(crate) fn sync_history(&mut self) -> Task<Message> {
-        if self.sidebar != SidebarTab::History || !self.show_left_sidebar {
-            return Task::none();
-        }
-        if self.proj.git_log.asked {
+        if !self.history_unread() {
             return Task::none();
         }
         self.proj.git_log.asked = true;
         self.load_history_page(true)
+    }
+
+    /// Whether the History view shows and has not asked for what it shows.
+    pub(crate) fn history_unread(&self) -> bool {
+        self.sidebar == SidebarTab::History && self.show_left_sidebar && !self.proj.git_log.asked
     }
 
     /// The History view read again from its top — the history moved on (a
@@ -550,26 +593,67 @@ impl App {
     }
 
     /// What waits for the file `abs` to open (`open_file_at_commit`, a
-    /// changed file's Diff): carried out now it has.
+    /// changed file's Diff): carried out now it has. Only the next file to
+    /// open answers it: another opening first (the reader went elsewhere)
+    /// drops it — left waiting, it fired at the file's next opening by any
+    /// way, long after.
     pub(crate) fn after_history_open(&mut self, abs: &std::path::Path) -> Task<Message> {
         let mut tasks = Vec::new();
-        if let Some((file, sha)) = self.proj.time_travel_after_open.take() {
-            if file == abs {
-                tasks.push(Task::done(Message::TimeTravel(TimeTravelMsg::StartAt {
-                    sha,
-                })));
-            } else {
-                self.proj.time_travel_after_open = Some((file, sha));
-            }
+        if let Some((file, sha)) = self.proj.time_travel_after_open.take()
+            && file == abs
+        {
+            tasks.push(Task::done(Message::TimeTravel(TimeTravelMsg::StartAt {
+                sha,
+            })));
         }
-        if let Some(file) = self.proj.diff_after_open.take() {
-            if file == abs {
-                tasks.push(Task::done(Message::Editor(EditorMsg::ToggleDiff)));
-            } else {
-                self.proj.diff_after_open = Some(file);
-            }
+        if let Some(file) = self.proj.diff_after_open.take()
+            && file == abs
+        {
+            tasks.push(self.show_diff_of(abs));
         }
         Task::batch(tasks)
+    }
+
+    /// A file asked for from the History view could not be opened: what
+    /// waited for it does not wait on.
+    pub(crate) fn forget_history_open(&mut self, abs: &std::path::Path) {
+        if self
+            .proj
+            .time_travel_after_open
+            .as_ref()
+            .is_some_and(|(file, _)| file == abs)
+        {
+            self.proj.time_travel_after_open = None;
+        }
+        if self.proj.diff_after_open.as_deref() == Some(abs) {
+            self.proj.diff_after_open = None;
+        }
+    }
+
+    /// The Diff of `abs`, the file being read: shown, not toggled — a Diff
+    /// already on (or on its way) stays.
+    fn show_diff_of(&mut self, abs: &std::path::Path) -> Task<Message> {
+        let shown = self.proj.diff.as_ref().is_some_and(|d| d.abs == abs)
+            || self
+                .proj
+                .diff_pending
+                .as_ref()
+                .is_some_and(|(_, file)| file == abs);
+        if shown {
+            Task::none()
+        } else {
+            Task::done(Message::Editor(EditorMsg::ToggleDiff))
+        }
+    }
+
+    /// Whether the History view lists one file's commits (`HistoryView::
+    /// path` names a file of the project): followed across renames, so
+    /// drawn as a list, not a graph.
+    fn history_follows_a_file(&self) -> bool {
+        let (Some(path), Some(project)) = (&self.proj.git_log.path, &self.proj.project) else {
+            return false;
+        };
+        project.files.iter().any(|f| f.rel == *path)
     }
 }
 
