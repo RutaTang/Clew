@@ -211,11 +211,11 @@ pub(crate) fn time_travel_banner<'a>(
             .wrapping(Wrapping::Word)
             .into()
     } else {
-        button(
-            text(tr!("What & why?"))
-                .size(ts::SMALL)
-                .color(theme::accent()),
-        )
+        let what_why = button(super::toolbar::ai_words(
+            tr!("What & why?"),
+            ts::SMALL,
+            theme::accent(),
+        ))
         .style(theme::toolbar_button)
         // Its words under the subject's, at its left edge: padded on the
         // left too, they stood 8 px in from the line above.
@@ -228,8 +228,12 @@ pub(crate) fn time_travel_banner<'a>(
         .on_press(super::heard::said(
             tr!("What & why?"),
             Message::TimeTravel(TimeTravelMsg::Why),
-        ))
-        .into()
+        ));
+        chrome_tip(
+            what_why,
+            tr!("Say what this commit changed and why, with AI (one AI call)"),
+            None,
+        )
     };
 
     container(column![head, subject, why].spacing(5))
@@ -1981,13 +1985,18 @@ fn active_note<'a>(
     // project's Explain All, about 45 calls asked of a reader who wanted
     // one note.
     if unexplained && let Some(node) = node {
-        actions = actions.push(action(
-            Glyph::TextLines,
-            tr!("Explain").into(),
-            true,
+        // Marked as what spends an AI call is: the sparkle, and a tip.
+        actions = actions.push(chrome_tip(
+            action(
+                Glyph::Sparkle,
+                tr!("Explain").into(),
+                true,
+                None,
+                true,
+                Message::Explain(ExplainMsg::Explain(node)),
+            ),
+            tr!("Explain this with AI (one AI call)"),
             None,
-            true,
-            Message::Explain(ExplainMsg::Explain(node)),
         ));
     }
     // A function's calls: a file's card had the way in too, to a margin
@@ -2230,9 +2239,23 @@ fn margin_history(app: &App) -> Element<'_, Message> {
             Message::TimeTravel(TimeTravelMsg::Start { symbol: true }),
         ));
     }
-    links = links.push(link(
-        tr!("Why is this line here?"),
-        Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
+    // An AI call, marked as one: beside the free links it looked like them.
+    links = links.push(chrome_tip(
+        button(super::toolbar::ai_words(
+            tr!("Why is this line here?"),
+            ts::SMALL,
+            theme::accent(),
+        ))
+        .style(theme::icon_button(false))
+        .padding([3, 6])
+        .on_press(super::heard::said(
+            tr!("Why is this line here?"),
+            Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
+        )),
+        tr!(
+            "Explain from the commits that touched it why this line is here, with AI (one AI call)"
+        ),
+        None,
     ));
     // All of the file's commits, in the History view: beyond the margin's
     // own list, with what each changed beside this file.

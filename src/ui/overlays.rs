@@ -91,6 +91,8 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         msg: Message,
         keys: Option<String>,
         able: bool,
+        /// Spends an AI call: marked so, as every such control is.
+        ai: bool,
     }
     let keys = |k: &str| Some(k.to_string());
     let goto = |kind: GotoKind, k: &str| Row {
@@ -98,6 +100,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         msg: Message::Hover(HoverMsg::ContextGoto(kind)),
         keys: keys(k),
         able: menu.served,
+        ai: false,
     };
     let mut navigate = vec![
         goto(GotoKind::Definition, "gd"),
@@ -109,6 +112,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             msg: Message::Calls(CallsMsg::FromMenu),
             keys: keys("gc"),
             able: menu.served,
+            ai: false,
         },
     ];
     let lang = app
@@ -127,6 +131,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             msg: Message::Hover(HoverMsg::Insight),
             keys: keys("ge"),
             able: menu.served || matches!(lang, Some("c" | "cpp")),
+            ai: false,
         });
     }
     // And its others (Rust: a type's memory layout, an item's tests),
@@ -137,6 +142,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             msg: Message::Hover(HoverMsg::InsightOf(kind)),
             keys: None,
             able: menu.served,
+            ai: false,
         });
     }
     // A Lean proof, walked one tactic at a time.
@@ -146,6 +152,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             msg: Message::Proof(crate::ProofMsg::FromMenu),
             keys: None,
             able: menu.served,
+            ai: false,
         });
     }
     let plain = |label: &'static str, msg: Message| Row {
@@ -153,6 +160,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         msg,
         keys: None,
         able: true,
+        ai: false,
     };
     // In groups: going somewhere, understanding what is here, marking the
     // line, debugging.
@@ -166,6 +174,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             },
             Row {
                 keys: Some(app.keymap.chord(crate::keymap::Action::FakeRun).caps()),
+                ai: true,
                 ..plain(
                     tr!("Fake Run…"),
                     Message::Fake(crate::FakeMsg::FromMenu { debug: false }),
@@ -173,17 +182,24 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             },
             Row {
                 keys: Some(app.keymap.chord(crate::keymap::Action::FakeDebug).caps()),
+                ai: true,
                 ..plain(
                     tr!("Fake Debug…"),
                     Message::Fake(crate::FakeMsg::FromMenu { debug: true }),
                 )
             },
-            plain(tr!("Explain"), Message::Explain(ExplainMsg::FromMenu)),
+            Row {
+                ai: true,
+                ..plain(tr!("Explain"), Message::Explain(ExplainMsg::FromMenu))
+            },
             plain(tr!("Add to Ask"), Message::Ask(AskMsg::AboutSelection)),
-            plain(
-                tr!("Why Is This Here?"),
-                Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
-            ),
+            Row {
+                ai: true,
+                ..plain(
+                    tr!("Why Is This Here?"),
+                    Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
+                )
+            },
         ],
         // A bookmark on this line, and a note to come back to it by.
         {
@@ -249,6 +265,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         .map(|r| {
             super::sheet::text_width(r.label, ts::BASE, crate::fonts::UI)
                 + key_w(&r.keys)
+                + if r.ai { 12.0 + 6.0 } else { 0.0 }
                 + 2.0 * 12.0
                 + 2.0 * 4.0
                 + 2.0
@@ -276,13 +293,23 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         } else {
             words.color(theme::dim())
         };
-        let trailing: Element<'a, Message> = match r.keys {
+        let keys: Element<'a, Message> = match r.keys {
             Some(k) => text(k)
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .wrapping(Wrapping::None)
                 .into(),
             None => space().into(),
+        };
+        // What spends an AI call says so, at the row's end: these sat
+        // among the free rows, alike.
+        let trailing: Element<'a, Message> = if r.ai {
+            row![keys, glyph::icon(Glyph::Sparkle, theme::accent(), 12.0)]
+                .spacing(6)
+                .align_y(iced::Center)
+                .into()
+        } else {
+            keys
         };
         let b = button(
             row![words, space().width(Fill), trailing]
@@ -293,7 +320,14 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         .width(Fill)
         .padding([5, 12])
         .on_press_maybe(r.able.then(|| super::heard::said(r.label, r.msg)));
-        if r.able {
+        if r.able && r.ai {
+            super::toolbar::tip_at(
+                b,
+                tr!("Uses one AI call"),
+                None,
+                iced::widget::tooltip::Position::Right,
+            )
+        } else if r.able {
             b.into()
         } else {
             super::toolbar::tip_at(

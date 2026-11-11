@@ -185,6 +185,16 @@ fn caret_commands_run_where_the_caret_is() {
         goto.action,
         PaletteAction::Goto(GotoKind::Definition)
     ));
+    // The rows that call the AI model are marked (a sparkle), the rest not.
+    let spends = |title: &str| {
+        app.palette
+            .iter()
+            .find(|c| c.title == title)
+            .unwrap_or_else(|| panic!("{title} listed"))
+            .spends_ai()
+    };
+    assert!(spends("Explain"));
+    assert!(!spends("Go to Definition") && !spends("Toggle Breakpoint"));
     typed(&mut app, ">toggle breakpoint");
     let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
     let lib = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");

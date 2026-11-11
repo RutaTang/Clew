@@ -1446,7 +1446,7 @@ fn indexing_and_explain_progress_say_what_is_happening_once() {
         // second time beside the scan's own.
         let mut sim = sim_of(&app);
         assert!(
-            shows(&mut sim, "Explanations up to date"),
+            shows(&mut sim, "No changes to explain"),
             "the refresh chip, idle"
         );
         assert!(
@@ -1455,7 +1455,7 @@ fn indexing_and_explain_progress_say_what_is_happening_once() {
         );
         // A click asks first: the Explain sheet, with what it would cost,
         // not a pass of every function not yet explained.
-        let sent = click(sim_of(&app), "↻ Explanations up to date");
+        let sent = click(sim_of(&app), "↻ No changes to explain");
         assert!(
             sent.iter().any(|m| matches!(
                 m,
@@ -1480,7 +1480,7 @@ fn indexing_and_explain_progress_say_what_is_happening_once() {
         {
             let mut sim = sim_of(&app);
             assert!(shows(&mut sim, "Explanations out of date"));
-            assert!(!shows(&mut sim, "Explanations up to date"));
+            assert!(!shows(&mut sim, "No changes to explain"));
         }
         app.keep_explanations_fresh = true;
         app.proj.explain.changed_sources.clear();

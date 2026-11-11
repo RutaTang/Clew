@@ -557,9 +557,16 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
     for (pos, &idx) in app.proj.finder.results.iter().enumerate() {
         let selected = pos == app.proj.finder.selected;
         if let Some(command) = app.palette.get(idx) {
+            // What uses the AI model is marked so: a typed "expl" put
+            // Explain first, looking like any other command.
+            let (glyph, tint) = if command.spends_ai() {
+                (Glyph::Sparkle, theme::accent())
+            } else {
+                (Glyph::Prompt, theme::dim())
+            };
             rows.push(bar_row(
-                Glyph::Prompt,
-                theme::dim(),
+                glyph,
+                tint,
                 command.shown().to_string(),
                 None,
                 command.keys.clone(),

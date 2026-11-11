@@ -102,6 +102,19 @@ pub(crate) fn search_field_rect(app: &App) -> iced::Rectangle {
 /// Wrap a bare-icon control with a tooltip naming it and, when it has one,
 /// its keyboard shortcut. Icon buttons carry no visible label, so the
 /// tooltip is where a reader learns what each one does.
+/// The words of a control that spends an AI call, marked so: a sparkle
+/// before them, as every such control has. Links that spent a call looked
+/// like the free links beside them.
+pub(crate) fn ai_words<'a>(label: &str, size: f32, color: iced::Color) -> Element<'a, Message> {
+    iced::widget::row![
+        glyph::icon(Glyph::Sparkle, color, (size - 1.0).max(9.0)),
+        text(label.to_string()).size(size).color(color),
+    ]
+    .spacing(4)
+    .align_y(iced::Center)
+    .into()
+}
+
 pub(crate) fn chrome_tip<'a>(
     control: impl Into<Element<'a, Message>>,
     name: &'a str,

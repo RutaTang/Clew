@@ -872,10 +872,11 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
             true,
         )
     } else {
-        // The notes, not the project: "Up to date" beside the scan's own
-        // "Up to date" said one word for two things.
+        // What it knows: nothing changed since the explanations were
+        // written. "Explanations up to date" read as all of the project
+        // explained, beside a card saying "Not explained yet."
         (
-            format!("↻ {}", tr!("Explanations up to date")),
+            format!("↻ {}", tr!("No changes to explain")),
             theme::dim(),
             true,
         )
@@ -892,7 +893,7 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
                 seconds = crate::AUTO_REFRESH_MIN_INTERVAL.as_secs()
             )
         ),
-        format!("↻ {}", tr!("Explanations up to date")),
+        format!("↻ {}", tr!("No changes to explain")),
         format!("↻ {}", tr!("Explanations out of date")),
     ];
     let every: Vec<&str> = every.iter().map(String::as_str).collect();
@@ -915,7 +916,9 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
         ));
         return Some(super::toolbar::tip_at(
             b,
-            tr!("Explain what's new or changed. Shows the cost before anything runs."),
+            tr!(
+                "Explain what's new, changed or not yet explained. Shows the cost before anything runs."
+            ),
             None,
             tooltip::Position::Top,
         ));

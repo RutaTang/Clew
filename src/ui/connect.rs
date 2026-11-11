@@ -90,12 +90,19 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         app.settings.connection_test,
         crate::app::state::ConnectionTest::Testing(_)
     );
+    // What it costs, said where the pointer rests: it is an AI call, as
+    // the Usage page then lists it.
     let test = form::item(
         tr!("Connection"),
         tested,
-        form::action(
-            tr!("Test connection"),
-            (!testing).then_some(Message::Settings(SettingsMsg::TestConnection)),
+        super::toolbar::tip_at(
+            form::action(
+                tr!("Test connection"),
+                (!testing).then_some(Message::Settings(SettingsMsg::TestConnection)),
+            ),
+            tr!("Sends one tiny AI request to check the key (less than $0.0001)"),
+            None,
+            iced::widget::tooltip::Position::Top,
         ),
     );
 

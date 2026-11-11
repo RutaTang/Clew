@@ -564,13 +564,22 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
     };
     row![
         text(count).size(ts::CAPTION).color(theme::dim()),
-        button(text(tr!("Walk this run")).size(ts::SMALL))
+        super::toolbar::tip_at(
+            button(super::toolbar::ai_words(
+                tr!("Walk this run"),
+                ts::SMALL,
+                theme::fg()
+            ))
             .style(theme::toolbar_button)
             .padding([2, 8])
             .on_press(super::heard::said(
                 tr!("Walk this run"),
                 Message::Walk(WalkMsg::GenerateTrace),
             )),
+            tr!("Tell the story of this run, stop by stop, with AI (one AI call)"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        ),
     ]
     .spacing(6)
     .align_y(iced::Center)

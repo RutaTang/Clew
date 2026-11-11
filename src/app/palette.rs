@@ -20,6 +20,23 @@ use crate::*;
 /// Most commands the palette remembers as recently run.
 const MAX_RECENT: usize = 8;
 
+/// Whether `msg` uses the AI model: explaining, asking why, a fake run,
+/// a written overview, story or walkthrough.
+pub(crate) fn spends_ai(msg: &Message) -> bool {
+    matches!(
+        msg,
+        Message::Editor(EditorMsg::RunAction(
+            keymap::Action::ExplainAll | keymap::Action::FakeRun | keymap::Action::FakeDebug
+        )) | Message::Explain(
+            ExplainMsg::FromMenu | ExplainMsg::Project | ExplainMsg::ReexplainNode
+        ) | Message::TimeTravel(
+            TimeTravelMsg::WhyIsThisHere | TimeTravelMsg::Why | TimeTravelMsg::Story
+        ) | Message::Fake(FakeMsg::FromMenu { .. } | FakeMsg::AtCaret { .. })
+            | Message::Overview(OverviewMsg::Generate)
+            | Message::Walk(WalkMsg::GenerateTrace | WalkMsg::GenerateDiff)
+    )
+}
+
 /// One command in the palette.
 #[derive(Debug, Clone)]
 pub(crate) struct PaletteCommand {
@@ -37,6 +54,15 @@ pub(crate) struct PaletteCommand {
 }
 
 impl PaletteCommand {
+    /// Whether running it uses the AI model (and so costs money): its row
+    /// is marked so, as every control that does is.
+    pub(crate) fn spends_ai(&self) -> bool {
+        match &self.action {
+            PaletteAction::Send(m) | PaletteAction::AtCaret(m) => spends_ai(m),
+            PaletteAction::Goto(_) | PaletteAction::Insight => false,
+        }
+    }
+
     /// What the row says: its title, in the reader's language.
     pub(crate) fn shown(&self) -> &str {
         self.shown_as
