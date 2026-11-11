@@ -37079,6 +37079,27 @@ fn a_walkthrough_asked_for_again_takes_its_failure_away() {
     assert!(watch.is_aborted());
 }
 
+/// The status line's Try again on a walkthrough's failure asks for that
+/// tour again, and the failure goes: one request, not a second beside it.
+#[test]
+fn a_walkthroughs_failure_is_tried_again_from_the_status_line() {
+    let mut app = scanned_app("walk-failure-retry");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    app.say_failure(
+        "Walkthrough failed: no".into(),
+        Some(Message::Walk(WalkMsg::Generate("checkout".into()))),
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    let before = app.proj.walk.seq;
+    let _ = app.update(Message::Window(WindowMsg::RetryFailure));
+    assert!(app.failure_shown().is_none(), "{:?}", app.failure_notice);
+    assert_eq!(app.proj.walk.seq, before + 1);
+    assert_eq!(app.proj.walk.generating.as_deref(), Some("checkout"));
+    // Nothing left to try again: a second press does nothing.
+    let _ = app.update(Message::Window(WindowMsg::RetryFailure));
+    assert_eq!(app.proj.walk.seq, before + 1);
+}
+
 /// With no tour yet the header shows New: the first one landing keeps it
 /// there, its field and Generate, where it turned into "Search
 /// walkthroughs…" by itself.

@@ -198,11 +198,16 @@ pub(crate) fn time_travel_banner<'a>(
         .color(theme::fg())
         .wrapping(Wrapping::Word);
 
+    // As tall as the button it replaces and the row with Try again that
+    // may follow it: going from one to the next moved the code 4 px.
     let why: Element<'a, Message> = if tt.why_loading {
-        text(tr!("Summarizing…"))
-            .size(ts::SMALL)
-            .color(theme::dim())
-            .into()
+        container(
+            text(tr!("Summarizing…"))
+                .size(ts::SMALL)
+                .color(theme::dim()),
+        )
+        .padding([2, 0])
+        .into()
     } else if let Some(Ok(w)) = tt.why.get(&c.sha) {
         // Plain text: a model's code marks would show as they are.
         text(strip_backticks(w))

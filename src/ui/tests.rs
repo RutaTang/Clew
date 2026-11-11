@@ -12239,6 +12239,34 @@ fn the_tour_sheet_says_all_set_only_of_a_model_that_answered() {
     assert!(says(&app, "All set."));
 }
 
+/// A failure on the status line keeps its Try again, Settings and × where
+/// they are whatever else is said or stops being said: shortened to make
+/// room for the next message, they moved under the pointer and a click
+/// meant for Settings landed on words.
+#[test]
+fn a_failures_controls_stay_put_on_the_status_line() {
+    let mut app = reader_app();
+    app.say_failure(
+        "Couldn't explain lib.rs: couldn't reach the AI provider (nothing answered at that address) — check the base URL in Settings".into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    let at = |app: &App, words: &str| {
+        let mut sim = sim_elem(super::statusbar::statusbar(app));
+        text_at(&mut sim, |t| t == words, 0).map(|r| r.x)
+    };
+    let before = (at(&app, "Try again"), at(&app, "Settings"));
+    assert!(before.0.is_some() && before.1.is_some(), "{before:?}");
+    for said in ["Copied 2 lines", "Code statistics ready", ""] {
+        app.status = said.into();
+        assert_eq!(
+            (at(&app, "Try again"), at(&app, "Settings")),
+            before,
+            "moved for {said:?}"
+        );
+    }
+}
+
 /// What voice could not do is said in the reader's language: on the card,
 /// on the pill, and under a model in Settings.
 #[test]

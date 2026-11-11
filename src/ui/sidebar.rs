@@ -1966,8 +1966,14 @@ fn trail_caption(app: &App, v: &crate::history::Visit) -> String {
     let rel = rel_of(app, &v.loc.path);
     // A named place says its file; one its name already gives ("pricing.py",
     // "pricing.py:42") says the folder the file is in — the project's own,
-    // by its name, for one at its root.
-    if v.label.is_some() {
+    // by its name, for one at its root. Named by the function its line is
+    // in ("main():12", `stop_label`) is named too: it said "teashop/" under
+    // that, and "main.py" under "main()".
+    let named = v.label.is_some()
+        || v.loc
+            .line
+            .is_some_and(|line| app.function_around(&v.loc.path, line).is_some());
+    if named {
         return rel;
     }
     match rel.rsplit_once('/') {
