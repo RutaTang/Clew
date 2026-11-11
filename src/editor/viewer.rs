@@ -177,6 +177,10 @@ pub struct Viewer {
     /// the generous guess a pane starts with: only a measured height can say
     /// a jump target is already in view.
     pub viewport_measured: bool,
+    /// The code view's height exactly as the scrollable last reported it
+    /// (0 before it has): `viewport_h` is raised to the window's height on a
+    /// resize, a guess too big to fit a file's end to.
+    pub bounds_h: f32,
     pub target_line: Option<usize>, // 1-based jump target, drawn highlighted
     pub selection: Option<Selection>,
     /// Last clicked position as (0-based line, 0-based display column).
@@ -288,6 +292,7 @@ impl Viewer {
             // viewport; only affects how many rows are materialized.
             viewport_h: 2400.0,
             viewport_measured: false,
+            bounds_h: 0.0,
             target_line: None,
             selection: None,
             caret: None,
@@ -738,7 +743,10 @@ impl Viewer {
                 {
                     return 0.0;
                 }
-                let max_y = (self.content_rows().saturating_sub(1)) as f32 * line_height;
+                // No further than puts the last line at the view's foot: a
+                // jump near the end of a short file left its first lines
+                // scrolled away above, and the view below mostly empty.
+                let max_y = self.most_scroll(line_height);
                 let mut top = row.saturating_sub(3);
                 for _ in 0..8 {
                     let pinned = self.sticky_at_row(top).len();
@@ -750,6 +758,18 @@ impl Viewer {
                 (top as f32 * line_height).clamp(0.0, max_y.max(0.0))
             }
             None => 0.0,
+        }
+    }
+
+    /// The furthest a jump scrolls: the last line at the foot of the view,
+    /// as measured — or, not measured yet, the last line at its top.
+    pub fn most_scroll(&self, line_height: f32) -> f32 {
+        let rows = self.content_rows();
+        let last_at_top = rows.saturating_sub(1) as f32 * line_height;
+        if self.bounds_h > 0.0 {
+            last_at_top.min((rows as f32 * line_height - self.bounds_h).max(0.0))
+        } else {
+            last_at_top.max(0.0)
         }
     }
 
@@ -1431,6 +1451,25 @@ mod tests {
         // Too near the bottom edge to read with what follows it.
         assert_eq!(v.scroll_offset_for(Some(18), LH), 14.0 * LH);
         assert_eq!(v.scroll_offset_for(Some(100), LH), 96.0 * LH);
+    }
+
+    /// A jump near the end of a short file stops with its last line at the
+    /// view's foot: the 33rd line of a 38-line file put lines 30 to 38 at
+    /// the top, the 29 before them scrolled away and the view below empty.
+    #[test]
+    fn a_jump_near_the_end_keeps_the_last_line_at_the_foot() {
+        let mut v = viewer_with_lines(38);
+        v.viewport_h = 20.0 * LH;
+        v.viewport_measured = true;
+        // Not measured exactly: as before, the last line may reach the top.
+        assert_eq!(v.scroll_offset_for(Some(33), LH), 29.0 * LH);
+        v.bounds_h = 20.0 * LH;
+        assert_eq!(v.most_scroll(LH), 18.0 * LH);
+        assert_eq!(v.scroll_offset_for(Some(33), LH), 18.0 * LH);
+        // A file that fits is never scrolled.
+        v.bounds_h = 40.0 * LH;
+        assert_eq!(v.most_scroll(LH), 0.0);
+        assert_eq!(v.scroll_offset_for(Some(33), LH), 0.0);
     }
 
     #[test]

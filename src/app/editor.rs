@@ -2047,11 +2047,30 @@ impl App {
                 self.on_git_info_loaded(abs, req, info)
             }
             EditorMsg::Scrolled(pane, viewport) => {
+                let line_height = self.line_height();
                 if let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) {
                     v.scroll_y = viewport.absolute_offset().y;
                     v.scroll_x = viewport.absolute_offset().x;
                     v.viewport_h = viewport.bounds().height;
                     v.viewport_measured = true;
+                    let grew = v.bounds_h > 0.0 && viewport.bounds().height > v.bounds_h + 0.5;
+                    v.bounds_h = viewport.bounds().height;
+                    // The view made taller (the window enlarged, a panel
+                    // shut): code it now has room for is brought back down
+                    // from above, where a file that fits started at line 9
+                    // with empty space under its end. Only then — a reader
+                    // scrolling past the end on purpose is left there.
+                    let most = v.most_scroll(line_height);
+                    if grew && v.scroll_y > most + 0.5 {
+                        v.scroll_y = most;
+                        return operation::scroll_to(
+                            ui::code_scroll_id(pane),
+                            AbsoluteOffset {
+                                x: v.scroll_x,
+                                y: most,
+                            },
+                        );
+                    }
                 }
                 Task::none()
             }
