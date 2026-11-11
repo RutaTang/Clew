@@ -294,7 +294,7 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
             // the pill keeps its size.
             let mark: Element<'_, Message> = if app.proj.ask_unread {
                 stack![
-                    glyph::icon(Glyph::Message, theme::accent(), 15.0),
+                    glyph::icon(Glyph::AskAi, theme::accent(), 15.0),
                     container(
                         container(space().width(UNREAD_DOT).height(UNREAD_DOT)).style(
                             |_: &iced::Theme| container::Style {
@@ -317,7 +317,7 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
                 ]
                 .into()
             } else {
-                glyph::icon(Glyph::Message, theme::accent(), 15.0)
+                glyph::icon(Glyph::AskAi, theme::accent(), 15.0)
             };
             let face = row![
                 mark,
@@ -383,7 +383,7 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
     // the pill says so, a click opening the card on it.
     if !app.ask_view.is_open() && app.ask_stream_active() {
         let line = phase_line(
-            glyph::icon(Glyph::Message, theme::accent(), 14.0),
+            glyph::icon(Glyph::AskAi, theme::accent(), 14.0),
             phase_words()[2],
             super::meter::ripple(&PILL_BARS),
         );
@@ -717,7 +717,7 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         menu_open.then(|| sessions_menu(app)),
         iced::Vector::new(-6.0, 6.0),
     );
-    let mut header = row![glyph::icon(Glyph::Message, theme::accent(), 15.0), title]
+    let mut header = row![glyph::icon(Glyph::AskAi, theme::accent(), 15.0), title]
         .spacing(6)
         .align_y(iced::Center);
     if let Some(on) = reading {

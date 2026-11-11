@@ -2233,7 +2233,7 @@ fn active_note<'a>(
         ));
     }
     let actions = actions.push(action(
-        Glyph::Message,
+        Glyph::AskAi,
         tr!("Ask").into(),
         true,
         None,

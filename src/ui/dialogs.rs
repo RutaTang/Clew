@@ -501,7 +501,7 @@ fn suggestion_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
         }
         let (glyph, tint, title, detail, keys) = match suggestion {
             Suggestion::Ask(title) => (
-                Glyph::Message,
+                Glyph::AskAi,
                 theme::accent(),
                 title.clone(),
                 None,

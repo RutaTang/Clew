@@ -44,6 +44,8 @@ pub enum Glyph {
     /// A step over, and a spark: a run the AI works out, stepped through
     /// (Fake Debug).
     FakeDebug,
+    /// A speech bubble, and a spark: a question the AI answers (Ask).
+    AskAi,
     Compass,
     Skim,
     Folder,
@@ -261,6 +263,14 @@ fn body(g: Glyph) -> &'static str {
              <path d='M12 20v-9'/><path d='M6.53 9C4.6 8.8 3 7.1 3 5'/><path d='M6 13H2'/>\
              <path d='M3 21c0-2.1 1.7-3.9 3.8-4'/><path d='M20.97 5c0 2.1-1.6 3.8-3.5 4'/>\
              <path d='M22 13h-4'/><path d='M17.2 17c2.1.1 3.8 1.9 3.8 4'/></g>\
+             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
+        }
+        // Ask's bubble, and the spark Explain and the fake runs carry: what
+        // spends an AI call bears it. The bubble drawn smaller, its lines
+        // as thick as the rest.
+        AskAi => {
+            "<path transform='translate(0.6 5.2) scale(0.74)' stroke-width='2.7' \
+             d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/>\
              <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
         }
         Compass => "<circle cx='12' cy='12' r='8'/><path d='M12 6 L14.2 12 L12 18 L9.8 12 Z'/>",
