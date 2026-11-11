@@ -320,9 +320,14 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // Only where Run picked the program for the file being read: a
+        // program named in launch.json runs whatever is open, and the file
+        // read may well run on its own.
+        let picked =
+            !self.connection.is_remote() && !root.join(".clew").join("launch.json").exists();
         let reading = self
             .active_viewer()
-            .filter(|v| v.abs != program)
+            .filter(|v| picked && v.abs != program)
             .and_then(|v| v.abs.file_name())
             .map(|n| n.to_string_lossy().into_owned());
         self.status = match lang {

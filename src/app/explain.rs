@@ -493,6 +493,16 @@ impl App {
         }
         let mut status = if let Some(stopped) = &failures.stopped {
             tr!("Explain stopped: {reason}", reason = stopped.describe())
+        } else if let Some(target) = reexplained.as_ref().filter(|_| failures.failed > 0) {
+            // One function or file asked for: said of it, not of the whole
+            // project ("Explained 345 functions, files and folders; 1
+            // failed" for an Explain that explained nothing).
+            let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
+            tr!(
+                "Couldn't explain {name}: {reasons}",
+                name = node_said(target),
+                reasons = why.join("; ")
+            )
         } else if let Some(target) = reexplained.as_ref().filter(|_| failures.failed == 0) {
             let file = target.path();
             let not_read = tally.unread.iter().any(|p| p == file)
@@ -600,15 +610,23 @@ impl App {
         if failures.stopped.is_some() || failures.failed > 0 {
             // A re-explain is asked for again from its note, which may no
             // longer be the one shown: no way back to it from here.
+            //
+            // A node explained, only what builds on it failed: nothing of it
+            // to ask for again (Explain would only show its note). Explain
+            // All goes by its cost sheet, as every way to it does: stopped
+            // after three calls, a retry pays for the whole project.
             let retry = match &reexplained {
-                Some(node) if self.proj.explain.pass_target_new => {
-                    Some(ExplainMsg::Explain(node.clone()))
+                Some(node)
+                    if self.proj.explain.pass_target_new
+                        && !self.proj.explain.cache.contains_key(node) =>
+                {
+                    Some(Message::Explain(ExplainMsg::Explain(node.clone())))
                 }
                 Some(_) => None,
-                None if automatic => Some(ExplainMsg::Refresh),
-                None => Some(ExplainMsg::Project),
+                None if automatic => Some(Message::Explain(ExplainMsg::Refresh)),
+                None => Some(crate::ui::explain_all_message(self)),
             };
-            self.say_failure(status, retry.map(Message::Explain));
+            self.say_failure(status, retry);
         } else {
             self.status = status;
         }
@@ -620,7 +638,13 @@ impl App {
         // rendered, not to what they describe — nothing downstream changed
         // either: the overview is not re-billed for a new prompt wording.
         let mut tasks = vec![persist];
-        let downstream = !automatic || tally.regenerated > 0;
+        // Not after a pass that fell short: built on what it could not
+        // explain, and paid for with the AI that just failed, the index and
+        // the overview would say "Building semantic index…" over the failure
+        // the reader is to see, and likely fail the same way. The next pass
+        // that completes brings them up to date.
+        let fell_short = failures.stopped.is_some() || failures.failed > 0;
+        let downstream = (!automatic || tally.regenerated > 0) && !fell_short;
         // The search index follows what was asked for: built after a pass
         // someone started (the cost they agreed to says so), kept fresh
         // after an automatic one — never built the first time by one.
@@ -634,7 +658,11 @@ impl App {
         if downstream && self.proj.overview.markdown.is_some() && self.overview_inputs_changed() {
             tasks.push(Task::done(Message::Overview(OverviewMsg::Generate)));
         }
-        if self.proj.refresh_pending {
+        // A refresh waiting is not run over a failure either: what it would
+        // explain waits in `changed_sources` for the next change or pass.
+        if fell_short {
+            self.proj.refresh_pending = false;
+        } else if self.proj.refresh_pending {
             tasks.push(self.request_auto_refresh());
         }
         if let Some(node) = self.proj.explain.view.clone() {
@@ -1282,6 +1310,18 @@ fn refused_note(why: explain::Refusal, file: &str) -> String {
         explain::Refusal::OutsideProject => tr!(
             "{file} resolves outside the project — its summaries are dropped",
             file = file
+        ),
+    }
+}
+
+/// A node as the status line names it: a function with its brackets, a
+/// file or folder by its own name.
+fn node_said(node: &explain::Node) -> String {
+    match node {
+        explain::Node::Function { name, .. } => format!("{name}()"),
+        explain::Node::File(path) | explain::Node::Folder(path) => path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
         ),
     }
 }

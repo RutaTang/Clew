@@ -581,9 +581,16 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     let setup = setup_label(app);
     let explain = explain_label(app);
     let full_chips: f32 = setup.as_ref().map_or(0.0, |(l, _)| width(l) + CHIP_EXTRA_W)
-        + explain
-            .as_ref()
-            .map_or(0.0, |(_, widest)| width(widest) + EXPLAIN_EXTRA_W);
+        + explain.as_ref().map_or(0.0, |(_, widest)| {
+            // One node's chip has no bar: counted with one, it gave way
+            // to "…" with room to spare.
+            let bar = if app.proj.explain.pass_target.is_some() {
+                90.0 + 5.0
+            } else {
+                0.0
+            };
+            width(widest) + EXPLAIN_EXTRA_W - bar
+        });
     let chips_n = usize::from(setup.is_some()) + usize::from(explain.is_some());
     let short = full_chips + STATUS_GAP * chips_n as f32 + SAID_MIN_W > room;
     let mut row = row![].spacing(STATUS_GAP).align_y(iced::Center);
@@ -629,8 +636,11 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         })
     };
     let left = room - used;
-    // A failure stands, in the danger colour, with what to do about it.
-    let failure = app.failure_shown().map(failure_controls);
+    // A failure stands, in the danger colour, with what to do about it —
+    // what fits of it beside the least of its words, its dismissal always.
+    let failure = app
+        .failure_shown()
+        .map(|f| failure_controls(f, left - SAID_MIN_W / 2.0 - STATUS_GAP));
     if let Some(said) = said
         && left >= SAID_MIN_W / 2.0
     {
@@ -661,8 +671,13 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
 
 /// What a failure on the status line offers (`App::failure_notice`): try
 /// it again, where it can be; the settings it may be about; and a way to
-/// take it off the line. With their width.
-fn failure_controls(failure: &crate::app::state::FailureNotice) -> (Element<'_, Message>, f32) {
+/// take it off the line — what fits in `room` of them, the way to take it
+/// off the line always (clipped away, it was a control no one saw, and the
+/// failure stood for good). With their width.
+fn failure_controls(
+    failure: &crate::app::state::FailureNotice,
+    room: f32,
+) -> (Element<'_, Message>, f32) {
     let font = crate::fonts::UI_MEDIUM;
     let link = |label: &str, msg: Message| {
         button(
@@ -676,20 +691,32 @@ fn failure_controls(failure: &crate::app::state::FailureNotice) -> (Element<'_, 
         .padding([1, 6])
         .on_press(super::heard::said(label, msg))
     };
-    let link_w = |label: &str| super::steady::width_of(label, ts::SMALL, font) + 12.0;
+    let link_w = |label: &str| super::steady::width_of(label, ts::SMALL, font) + 12.0 + 2.0;
+    let dismiss_w = 11.0 + 8.0;
+    let retry_w = failure
+        .retry
+        .as_ref()
+        .map_or(0.0, |_| link_w(tr!("Try again")));
+    let settings_w = link_w(tr!("Settings"));
+    // Settings gives way first, then Try again.
+    let with_retry = retry_w > 0.0 && dismiss_w + retry_w <= room;
+    let kept_retry = if with_retry { retry_w } else { 0.0 };
+    let with_settings = dismiss_w + kept_retry + settings_w <= room;
     let mut row = row![].spacing(2).align_y(iced::Center);
     let mut width = 0.0;
-    if let Some(retry) = &failure.retry {
+    if let Some(retry) = failure.retry.as_ref().filter(|_| with_retry) {
         row = row.push(link(tr!("Try again"), retry.clone()));
-        width += link_w(tr!("Try again")) + 2.0;
+        width += retry_w;
     }
-    row = row.push(link(
-        tr!("Settings"),
-        Message::Settings(SettingsMsg::OpenAt(
-            crate::app::state::SettingsPage::LanguageModel,
-        )),
-    ));
-    width += link_w(tr!("Settings")) + 2.0;
+    if with_settings {
+        row = row.push(link(
+            tr!("Settings"),
+            Message::Settings(SettingsMsg::OpenAt(
+                crate::app::state::SettingsPage::LanguageModel,
+            )),
+        ));
+        width += settings_w;
+    }
     let dismiss = button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
         .style(theme::icon_button(false))
         .padding([1, 4])
@@ -703,7 +730,7 @@ fn failure_controls(failure: &crate::app::state::FailureNotice) -> (Element<'_, 
         None,
         tooltip::Position::Top,
     ));
-    width += 11.0 + 8.0;
+    width += dismiss_w;
     (row.into(), width)
 }
 

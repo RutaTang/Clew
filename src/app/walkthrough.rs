@@ -189,7 +189,15 @@ impl App {
     /// (`WalkMsg::Unnarrated`): said, standing, with a way to try again —
     /// unless another generation has started since.
     fn on_walkthrough_unnarrated(&mut self, seq: u64, why: String) -> Task<Message> {
-        if self.proj.walk.seq != seq {
+        // Said only of a run's tour that is shown: its Done may have kept
+        // nothing ("no valid steps"), and that is what the line says then.
+        let shown = self
+            .proj
+            .walk
+            .open
+            .as_deref()
+            .is_some_and(|scope| scope.starts_with("@trace "));
+        if self.proj.walk.seq != seq || !shown {
             return Task::none();
         }
         self.say_failure(

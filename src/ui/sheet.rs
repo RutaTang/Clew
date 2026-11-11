@@ -713,7 +713,10 @@ fn trail_row(app: &App) -> Element<'_, Message> {
     let around: Vec<Option<String>> = stops
         .iter()
         .map(|(_, loc, label)| match (label, loc.line) {
-            (None, Some(line)) => app.function_around(&loc.path, line),
+            // A function by construction: said as one, indexed or not.
+            (None, Some(line)) => app
+                .function_around(&loc.path, line)
+                .map(|name| format!("{name}()")),
             _ => None,
         })
         .collect();

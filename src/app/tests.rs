@@ -36778,6 +36778,93 @@ fn a_failed_explain_stands_until_dismissed_with_a_way_to_try_again() {
     assert!(app.failure_notice.is_none(), "{:?}", app.failure_notice);
 }
 
+/// What a failed pass would set going after it — the search index, the
+/// overview, a refresh that was waiting — does not start: each said
+/// "Building semantic index…" over the failure, so a reader with
+/// embeddings set up never saw it, and each would spend AI that had just
+/// failed. A single function's Explain that failed is said of it, not as
+/// "Explained 345 functions, files and folders; 1 failed"; and where the
+/// function was explained, only what builds on it failed, there is
+/// nothing of it to try again.
+#[test]
+fn a_failed_explain_is_not_buried_by_what_follows_it() {
+    let mut app = scanned_app("explain-failure-not-buried");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let node = |name: &str| explain::Node::Function {
+        file: root.join("src/lib.rs"),
+        name: name.into(),
+        ordinal: 0,
+    };
+    let cached = explain::Cached {
+        summary: "does other things".into(),
+        prompt_hash: 1,
+        detail: None,
+        basis: None,
+    };
+    let mut cache = explain::Cache::new();
+    cache.insert(node("other"), cached.clone());
+    app.set_explain_cache(cache.clone());
+    app.embed_available = true;
+    app.proj.refresh_pending = true;
+    app.proj.explain.running = true;
+    app.proj.explain.pass_target = Some(node("helper"));
+    app.proj.explain.pass_target_new = true;
+    let lost = ExplainFailure::Network("connection reset".into());
+    let done = app.update(Message::Explain(ExplainMsg::Done {
+        stamp: app.stamp(),
+        generation: app.proj.explain.generation,
+        cache: cache.clone(),
+        failures: PassFailures {
+            failed: 1,
+            calls: vec![lost.clone()],
+            ..PassFailures::default()
+        },
+        tally: Default::default(),
+        written: Default::default(),
+    }));
+    assert!(
+        app.status.starts_with("Couldn't explain helper(): the connection failed"),
+        "{}",
+        app.status
+    );
+    for message in run_task(done) {
+        assert!(
+            !matches!(
+                message,
+                Message::Semantic(SemanticMsg::BuildIndex)
+                    | Message::Overview(OverviewMsg::Generate)
+                    | Message::Explain(ExplainMsg::Refresh)
+            ),
+            "{message:?}"
+        );
+        let _ = app.update(message);
+    }
+    assert!(app.failure_shown().is_some(), "buried by {:?}", app.status);
+    assert!(!app.proj.refresh_pending);
+
+    // The function explained, a summary built on it not: Try again would
+    // only show its note.
+    let mut with_helper = cache;
+    with_helper.insert(node("helper"), cached);
+    app.proj.explain.running = true;
+    app.proj.explain.pass_target = Some(node("helper"));
+    app.proj.explain.pass_target_new = true;
+    let _ = app.update(Message::Explain(ExplainMsg::Done {
+        stamp: app.stamp(),
+        generation: app.proj.explain.generation,
+        cache: with_helper,
+        failures: PassFailures {
+            failed: 1,
+            calls: vec![lost],
+            ..PassFailures::default()
+        },
+        tally: Default::default(),
+        written: Default::default(),
+    }));
+    let notice = app.failure_shown().expect("said as a failure");
+    assert!(notice.retry.is_none(), "{:?}", notice.retry);
+}
+
 /// A walkthrough that failed keeps its row where it was asked for, saying
 /// why, with a way to try again — and stands on the status line. The
 /// "Generating…" row just went away, as if nothing had been asked.

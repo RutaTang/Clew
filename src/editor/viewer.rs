@@ -790,6 +790,12 @@ impl Viewer {
     /// shrank moves nothing, and a notebook's rendered cells are not its
     /// lines' height.
     pub fn measured(&mut self, height: f32, line_height: f32) -> Option<f32> {
+        // A view laid out to nothing (a window minimized) has no foot: kept,
+        // the next real height read as a first measure, and pulled a reader
+        // scrolled past the end back up.
+        if height <= 0.0 {
+            return None;
+        }
         let first = self.bounds_h <= 0.0;
         let grew = !first && height > self.bounds_h + 0.5;
         // Where the foot was before: the reader at or above it was not
@@ -1561,6 +1567,14 @@ mod tests {
         let mut jumped = viewer_with_lines(38);
         jumped.scroll_y = 33.0 * LH;
         assert_eq!(jumped.measured(20.0 * LH, LH), Some(18.0 * LH));
+        // A view laid out to nothing and back is no first measure: a reader
+        // past the end stays there.
+        let mut past = viewer_with_lines(2000);
+        past.measured(20.0 * LH, LH);
+        past.scroll_y = 1999.0 * LH;
+        assert_eq!(past.measured(0.0, LH), None);
+        assert_eq!(past.measured(20.0 * LH, LH), None);
+        assert_eq!(past.scroll_y, 1999.0 * LH);
     }
 
     #[test]

@@ -999,6 +999,12 @@ impl App {
             let offset = viewport.absolute_offset();
             tt.scroll_x = offset.x;
             tt.scroll_y = offset.y;
+            // Its own height, not the live view's it was given: shorter, under
+            // the commit's banner and over the scrubber, it scrolls further,
+            // and its sticky band is worked out from the line at its top.
+            if let Some(v) = tt.viewer.as_mut() {
+                v.bounds_h = viewport.bounds().height;
+            }
         }
         Task::none()
     }

@@ -2088,9 +2088,15 @@ pub enum ExplainFailure {
     /// limit (408, 429), or a failure it reported mid-answer.
     Unavailable(String),
     /// No answer came: the connection to the provider — or, for a remote
-    /// project, to the clew-server that calls it — could not be made, broke,
-    /// or went quiet.
+    /// project, to the clew-server that calls it — broke, or went quiet.
     Network(String),
+    /// No connection to the provider could be made at all, after the
+    /// attempts every request makes (`llm::send_with_retry`): an address
+    /// that refuses connections, a name that does not resolve, a network
+    /// that is down. Told apart from [`Self::Network`] because it is what
+    /// stops a pass (`Unanswered`): a connection that broke mid-answer
+    /// says nothing of the next call.
+    Unreached(String),
     /// The provider answered, and the answer could not be used: not what
     /// its API sends, or no text in it.
     Unusable(String),
@@ -2170,9 +2176,8 @@ impl ExplainFailure {
                 // Never reached the provider (llm sent it again while
                 // another attempt could get further), or reached it and
                 // broke.
-                ProviderFailure::Unreached | ProviderFailure::Broken => {
-                    ExplainFailure::Network(detail)
-                }
+                ProviderFailure::Unreached => ExplainFailure::Unreached(detail),
+                ProviderFailure::Broken => ExplainFailure::Network(detail),
                 ProviderFailure::Stream => ExplainFailure::Unavailable(detail),
                 ProviderFailure::Unusable => ExplainFailure::Unusable(detail),
                 ProviderFailure::Settings => ExplainFailure::Rejected {
@@ -2264,7 +2269,7 @@ impl ExplainFailure {
                     detail = detail
                 )
             }
-            ExplainFailure::Network(detail) => {
+            ExplainFailure::Network(detail) | ExplainFailure::Unreached(detail) => {
                 tr!(
                     "the connection failed ({detail}) — check the network and try again",
                     detail = detail
@@ -2300,6 +2305,7 @@ impl ExplainFailure {
             self,
             ExplainFailure::Unavailable(_)
                 | ExplainFailure::Network(_)
+                | ExplainFailure::Unreached(_)
                 | ExplainFailure::Internal(_)
         )
     }
@@ -2331,7 +2337,10 @@ impl ExplainFailure {
 
     /// Whether `other` is worded as this one is, whatever its detail.
     fn same_kind(&self, other: &ExplainFailure) -> bool {
+        use ExplainFailure::{Network, Unreached};
         match (self, other) {
+            // Said in the same words: one failed connection is enough.
+            (Network(_) | Unreached(_), Network(_) | Unreached(_)) => true,
             (
                 ExplainFailure::Rejected { what: a, .. },
                 ExplainFailure::Rejected { what: b, .. },
@@ -2430,15 +2439,24 @@ fn was_rejected(model: &str, hash: incremental::Version) -> bool {
 /// ([`ExplainFailure::may_pass_later`]).
 type CallOutcome = Result<String, ExplainFailure>;
 
-/// Calls of a pass that got no answer, one after another: the connection
-/// to the provider failed, or the provider was unavailable, each after the
-/// attempts every request makes (`llm::send_with_retry`). With nothing
-/// answered yet, a few such calls in a row mean the provider cannot be
-/// reached — an endpoint that refuses connections, a network that is down
-/// — and every later call would fail as they did: a pass whose every call
-/// failed so ran each of them in turn, its bar filling for a minute of
-/// work that all failed. Once calls have been answered, only as many in a
-/// row as the pass makes at once stop it: the network lost mid-pass.
+/// Calls of a pass that could not reach the provider, one after another:
+/// no connection could be made, after the attempts every request makes
+/// (`llm::send_with_retry`). With nothing answered yet, a few such calls in
+/// a row mean the provider cannot be reached — an endpoint that refuses
+/// connections, a network that is down — and every later call would fail
+/// as they did: a pass whose every call failed so ran each of them in turn,
+/// its bar filling for a minute of work that all failed. Before anything is
+/// answered, an answer that is no provider's (a page where JSON was due:
+/// a captive portal, a web server at the base URL) or a request refused as
+/// it stands counts too. Once calls have been answered, only unreached
+/// calls count, and only as many in a row as the pass makes at once stop
+/// it: the network lost mid-pass.
+///
+/// Calls end in the order they finish, not the order they were sent, so
+/// only failures that took their retries count: a 502 or a connection
+/// reset mid-answer comes back at once, ahead of answers still on their
+/// way, and three of them stopped a healthy pass (they are sent again
+/// once, at the end of their level).
 #[derive(Debug, Default)]
 struct Unanswered {
     in_a_row: usize,
@@ -2457,9 +2475,14 @@ impl Unanswered {
                 self.answered = true;
                 self.in_a_row = 0;
             }
-            Err(ExplainFailure::Network(_) | ExplainFailure::Unavailable(_)) => {
-                self.in_a_row += 1;
-            }
+            Err(ExplainFailure::Unreached(_)) => self.in_a_row += 1,
+            Err(
+                ExplainFailure::Unusable(_)
+                | ExplainFailure::Rejected {
+                    what: Rejection::Request,
+                    ..
+                },
+            ) if !self.answered => self.in_a_row += 1,
             Err(_) => {}
         }
         let limit = if self.answered {
@@ -4276,7 +4299,8 @@ mod pass_tests {
             .collect();
         for gone in [
             llm::LlmError::Connect("Connection refused (os error 111)".into()),
-            status(503, None, "Service Unavailable"),
+            // A page where JSON was due: a web server at the base URL.
+            llm::LlmError::Protocol("expected value at line 1 column 1".into()),
         ] {
             let failure = gone.clone();
             let (outcome, calls) = pass_with(project(&files), explain::Cache::new(), "m-gone", {
@@ -4286,7 +4310,7 @@ mod pass_tests {
             assert!(
                 matches!(
                     outcome.failures.stopped,
-                    Some(ExplainFailure::Network(_) | ExplainFailure::Unavailable(_))
+                    Some(ExplainFailure::Unreached(_) | ExplainFailure::Unusable(_))
                 ),
                 "{gone:?}: {:?}",
                 outcome.failures
@@ -4300,15 +4324,30 @@ mod pass_tests {
     /// as the pass makes at once do: the network went away mid-pass.
     #[test]
     fn unanswered_calls_stop_a_pass_only_in_a_row() {
-        let lost = || Err(ExplainFailure::Network("connection reset".into()));
+        let lost = || Err(ExplainFailure::Unreached("connection refused".into()));
         let mut fresh = Unanswered::default();
         assert!(!fresh.note(&lost()));
-        assert!(!fresh.note(&Err(ExplainFailure::Unusable("no text".into()))));
+        // What fails at once, ahead of answers on their way, never counts:
+        // a gateway's 502, a connection reset mid-answer.
+        assert!(!fresh.note(&Err(ExplainFailure::Unavailable("502".into()))));
+        assert!(!fresh.note(&Err(ExplainFailure::Network("reset".into()))));
         assert!(!fresh.note(&lost()));
         assert!(
             fresh.note(&lost()),
             "nothing answered: a few in a row stop it"
         );
+        // Before an answer, a page where JSON was due counts too; after
+        // one, it is that call's own failure.
+        let page = || Err(ExplainFailure::Unusable("not JSON".into()));
+        let mut odd = Unanswered::default();
+        assert!(!odd.note(&page()));
+        assert!(!odd.note(&page()));
+        assert!(odd.note(&page()));
+        let mut answered = Unanswered::default();
+        assert!(!answered.note(&Ok("does a".into())));
+        for _ in 0..EXPLAIN_CONCURRENCY {
+            assert!(!answered.note(&page()));
+        }
         let mut going = Unanswered::default();
         assert!(!going.note(&Ok("does a".into())));
         for _ in 1..EXPLAIN_CONCURRENCY {
@@ -4663,22 +4702,26 @@ mod pass_tests {
             );
         }
 
-        let network = [
-            LlmError::Connect("connection refused".into()),
-            LlmError::Transport("timed out after 4013 ms".into()),
-        ]
-        .into_iter()
-        .flat_map(both)
-        .chain(
-            [
-                "server gone",
-                "server dropped the request",
-                "no reply from the server within 600s",
-                "the server took no requests for 600s",
-                "not connected to a server",
-            ]
-            .map(|words| rpc(None, words)),
-        );
+        // No connection made at all: unreached, which stops a pass.
+        for call in both(LlmError::Connect("connection refused".into())) {
+            assert!(
+                matches!(of(&call), ExplainFailure::Unreached(_)),
+                "{call:?}"
+            );
+        }
+        let network = [LlmError::Transport("timed out after 4013 ms".into())]
+            .into_iter()
+            .flat_map(both)
+            .chain(
+                [
+                    "server gone",
+                    "server dropped the request",
+                    "no reply from the server within 600s",
+                    "the server took no requests for 600s",
+                    "not connected to a server",
+                ]
+                .map(|words| rpc(None, words)),
+            );
         for call in network {
             assert!(matches!(of(&call), ExplainFailure::Network(_)), "{call:?}");
         }

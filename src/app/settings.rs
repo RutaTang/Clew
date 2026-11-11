@@ -711,35 +711,53 @@ impl App {
     }
 }
 
-/// What Test connection says of a call that failed: what went wrong and
-/// what to check, in plain words. It said the connection's own words —
-/// "request failed: Connection refused (os error 111)" — which named
-/// neither the address it could not reach nor the field that holds it.
+/// What Test connection says of a call that failed: what went wrong, what
+/// to check, and the provider's or the connection's own words — what tells
+/// a certificate a proxy swapped from an address that refuses
+/// connections, or an account out of credit from a provider that is busy.
+/// It said only the connection's words ("request failed: Connection
+/// refused (os error 111)"), naming neither the address nor the field
+/// that holds it.
 fn connection_failure(err: &crate::app::rpc::CallError, cfg: &llm::Config) -> String {
     use crate::app::tasks::{ExplainFailure, Rejection};
     match ExplainFailure::of_call(err, &cfg.model) {
-        ExplainFailure::Network(_) => tr!(
-            "Couldn't reach {host}. Check the base URL and your network.",
-            host = host_of(&cfg.base_url)
+        ExplainFailure::Network(detail) | ExplainFailure::Unreached(detail) => tr!(
+            "Couldn't reach {host} ({detail}). Check the base URL and your network.",
+            host = host_of(&cfg.base_url),
+            detail = detail
         ),
         ExplainFailure::Rejected {
             what: Rejection::Key,
-            ..
-        } => tr!("The provider rejected the API key. Check it, or paste a new one.").to_string(),
+            detail,
+        } => tr!(
+            "The provider rejected the API key ({detail}). Check it, or paste a new one.",
+            detail = detail
+        ),
         ExplainFailure::Rejected {
             what: Rejection::Model(model),
-            ..
+            detail,
         } => tr!(
-            "The provider has no model “{model}” at this address. Check the model's name.",
-            model = model
+            "The provider has no model “{model}” at this address ({detail}). Check the model's name.",
+            model = model,
+            detail = detail
         ),
         ExplainFailure::Rejected {
             what: Rejection::Endpoint,
-            ..
-        } => tr!("Nothing answers at this base URL. Check it.").to_string(),
-        ExplainFailure::Unavailable(_) => {
-            tr!("The provider is busy or down right now. Try again in a minute.").to_string()
-        }
+            detail,
+        } => tr!(
+            "Nothing answers at this base URL ({detail}). Check it.",
+            detail = detail
+        ),
+        // A 429 for the account, not the moment: out of credit, over a
+        // quota. "Try again in a minute" was never true of it.
+        ExplainFailure::Unavailable(detail) if is_about_billing(&detail) => tr!(
+            "The provider refused for your account's quota or credit ({detail}). Check your plan.",
+            detail = detail
+        ),
+        ExplainFailure::Unavailable(detail) => tr!(
+            "The provider is busy or down right now ({detail}). Try again in a minute.",
+            detail = detail
+        ),
         other => {
             let said = other.describe();
             let mut chars = said.chars();
@@ -751,13 +769,25 @@ fn connection_failure(err: &crate::app::rpc::CallError, cfg: &llm::Config) -> St
     }
 }
 
+/// Whether a provider's words are about the account's money rather than
+/// its load: OpenAI's `insufficient_quota`, a billing limit, no credit.
+fn is_about_billing(words: &str) -> bool {
+    let words = words.to_ascii_lowercase();
+    ["quota", "billing", "credit", "insufficient", "payment"]
+        .iter()
+        .any(|w| words.contains(w))
+}
+
 /// The host and port a base URL names: what a connection that could not
-/// be made was made to.
+/// be made was made to — never a user name or password written into it.
 fn host_of(base_url: &str) -> &str {
     let rest = base_url
         .split_once("://")
         .map_or(base_url, |(_, rest)| rest);
-    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
     if host.is_empty() { base_url } else { host }
 }
 
@@ -772,6 +802,51 @@ fn settings_to_top() -> Task<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test connection says what failed, what to check, and the provider's
+    /// or the connection's own words: an account out of credit is not "busy",
+    /// and a certificate a proxy swapped is not a wrong address. The address
+    /// it names never carries a password written into the base URL.
+    #[test]
+    fn a_failed_connection_test_says_why_in_plain_words_and_its_own() {
+        use crate::app::rpc::CallError;
+        let cfg = |base: &str| {
+            llm::Config::from_form(
+                llm::Provider::Custom,
+                String::new(),
+                "m".into(),
+                base.into(),
+            )
+        };
+        let local = cfg("http://127.0.0.1:9/v1");
+        let refused = CallError::Llm(llm::LlmError::Connect(
+            "Connection refused (os error 111)".into(),
+        ));
+        let said = connection_failure(&refused, &local);
+        assert!(said.contains("Couldn't reach 127.0.0.1:9"), "{said}");
+        assert!(said.contains("Connection refused"), "{said}");
+        let tls = CallError::Llm(llm::LlmError::Connect(
+            "invalid peer certificate: UnknownIssuer".into(),
+        ));
+        assert!(connection_failure(&tls, &local).contains("UnknownIssuer"));
+        let quota = CallError::Llm(llm::LlmError::Status {
+            who: "OpenAI".into(),
+            code: 429,
+            kind: Some("insufficient_quota".into()),
+            message: "You exceeded your current quota".into(),
+        });
+        let said = connection_failure(&quota, &local);
+        assert!(said.contains("quota or credit"), "{said}");
+        assert!(!said.contains("busy"), "{said}");
+        for (base, host) in [
+            ("https://user:secret@llm.corp:8443/v1", "llm.corp:8443"),
+            ("http://[::1]:8080/v1", "[::1]:8080"),
+            ("llm.corp/v1", "llm.corp"),
+            ("", ""),
+        ] {
+            assert_eq!(host_of(base), host, "{base}");
+        }
+    }
 
     /// One indexed unit, with a vector that makes it the obvious hit for
     /// anything (so a stale index answering a query would be conspicuous).
