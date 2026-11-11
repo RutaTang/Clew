@@ -13,12 +13,16 @@ use crate::*;
 /// hand-maintained list of what to stop, and a field added here is dropped
 /// (and its task aborted) without anyone having to remember a teardown site.
 /// Where on its line a jump lands (`landing`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum LandingAt {
     /// The character a language server named, in its position encoding.
     Char(usize, crate::viewer::PositionEncoding),
     /// The first place the line spells this name as a word.
     Name(String),
+    /// Where the search first matched the line: a result opened at the
+    /// line's start, lighting whatever word stood there, and the reader
+    /// had to find the match along the line again.
+    Match(clew_core::search::PreviewMatcher),
 }
 
 #[derive(Default, Debug)]

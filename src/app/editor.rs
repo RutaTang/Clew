@@ -26,6 +26,18 @@ pub(crate) fn open_status(rel: &str, lang_key: Option<&str>) -> String {
 }
 
 impl App {
+    /// Open a search result, line `line` of `abs`, on what matched in it.
+    pub(crate) fn open_search_hit(&mut self, abs: PathBuf, line: usize) -> Task<Message> {
+        if let Some(matcher) = self.proj.search.matcher.clone() {
+            self.proj.landing_next = Some((
+                abs.clone(),
+                line.saturating_sub(1),
+                crate::app::state::LandingAt::Match(matcher),
+            ));
+        }
+        self.open_file(abs, Some(line), true)
+    }
+
     /// Open a file into the active pane, optionally jumping to a 1-based line,
     /// and (with `push`) record the jump on the reading trail.
     pub(crate) fn open_file(
@@ -1993,6 +2005,7 @@ impl App {
         match message {
             EditorMsg::OpenRel { rel, line } => self.on_open_rel(rel, line),
             EditorMsg::OpenAbs { abs, line, push } => self.open_file(abs, line, push),
+            EditorMsg::OpenHit { abs, line } => self.open_search_hit(abs, line),
             EditorMsg::FileLoaded {
                 req,
                 pane,
@@ -2202,6 +2215,9 @@ fn landing_col(
         LandingAt::Name(name) => {
             word_at(raw, name).map_or(0, |at| Col::from_offset(raw, at, PositionEncoding::Utf8).0)
         }
+        LandingAt::Match(matcher) => matcher.ranges(raw).first().map_or(0, |&(at, _)| {
+            Col::from_offset(raw, at, PositionEncoding::Utf8).0
+        }),
     }
 }
 

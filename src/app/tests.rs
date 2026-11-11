@@ -3339,6 +3339,8 @@ fn search_flow_message_wiring() {
         let project = app.proj.project.as_ref().unwrap();
         (project.root.clone(), project.files.clone())
     };
+    // The match along its line, not at its start.
+    std::fs::write(root.join("notes.txt"), "the needle in notes\n").unwrap();
     let result = search::search_in(
         &root,
         files,
@@ -3360,14 +3362,23 @@ fn search_flow_message_wiring() {
     assert_eq!(app.proj.search.hits.len(), 1);
     assert_eq!(app.proj.search.hits[0].rel, "notes.txt");
 
-    // Clicking a hit opens the file at that line.
+    // Clicking a hit opens the file at that line, on what matched: it
+    // opened at the line's start, and the match was to be found again.
+    app.proj.search.matcher = search::PreviewMatcher::of_search(&search::SearchOptions {
+        query: "needle".to_string(),
+        ..Default::default()
+    });
     let hit = app.proj.search.hits[0].clone();
-    let _ = app.update(Message::Editor(EditorMsg::OpenAbs {
+    let _ = app.update(Message::Editor(EditorMsg::OpenHit {
         abs: hit.abs.clone(),
-        line: Some(hit.line),
-        push: true,
+        line: hit.line,
     }));
     let content = read_text_file(&hit.abs).unwrap();
+    let at = content
+        .lines()
+        .nth(hit.line - 1)
+        .and_then(|l| l.find("needle"))
+        .expect("the hit's line has the needle");
     let req = app.proj.link.pane_pending[0].expect("open_file minted a load token");
     let _ = app.update(Message::Editor(EditorMsg::FileLoaded {
         stamp: app.stamp(),
@@ -3378,6 +3389,11 @@ fn search_flow_message_wiring() {
         result: Ok(content),
     }));
     assert_eq!(app.active_viewer().unwrap().target_line, Some(1));
+    assert_eq!(
+        app.active_viewer().unwrap().caret,
+        Some((hit.line - 1, at)),
+        "the caret is on the match"
+    );
 }
 
 #[test]

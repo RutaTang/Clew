@@ -1393,10 +1393,9 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
             })
             .on_press(super::heard::row(
                 || format!("{} {}", hit.rel, hit.line),
-                Message::Editor(EditorMsg::OpenAbs {
+                Message::Editor(EditorMsg::OpenHit {
                     abs: hit.abs.clone(),
-                    line: Some(hit.line),
-                    push: true,
+                    line: hit.line,
                 }),
             ))
             .into(),

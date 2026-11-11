@@ -411,6 +411,12 @@ pub enum EditorMsg {
         line: Option<usize>,
         push: bool,
     },
+    /// Open a search result, line `line` (1-based) of `abs`, on what the
+    /// search matched in it.
+    OpenHit {
+        abs: PathBuf,
+        line: usize,
+    },
     FileLoaded {
         stamp: Stamp,
         /// The load token minted at request time; applied only while the pane
@@ -2533,6 +2539,7 @@ impl EditorMsg {
             | EditorMsg::DiffLoaded { stamp, .. } => Some(Origin::Stamped(stamp)),
             EditorMsg::OpenRel { .. }
             | EditorMsg::OpenAbs { .. }
+            | EditorMsg::OpenHit { .. }
             | EditorMsg::Scrolled(..)
             | EditorMsg::PaneFocused(..)
             | EditorMsg::ToggleSplit
