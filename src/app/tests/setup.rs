@@ -646,7 +646,7 @@ fn a_server_on_this_computer_is_used_not_installed_again() {
     let servers = look(&bin).servers_for(&root, &python);
     assert_eq!(servers.len(), 1, "{servers:?}");
     assert_eq!(servers[0].fetch, Fetch::OnPath(program.clone()));
-    assert_eq!(servers_line(&servers), "pyright: the one on this computer");
+    assert_eq!(servers_line(&servers), "pyright: already installed");
 
     let empty = test_dir("on-path-setup-empty");
     std::fs::create_dir_all(&empty).unwrap();

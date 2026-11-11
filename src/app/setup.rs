@@ -313,7 +313,7 @@ pub(crate) fn servers_line(servers: &[SetupServer]) -> String {
                 Fetch::Nothing => {}
                 Fetch::Download => takes.push(tr!("download").into()),
                 Fetch::Install(tool) => takes.push(tr!("install with {tool}", tool = tool)),
-                Fetch::OnPath(_) => takes.push(tr!("the one on this computer").into()),
+                Fetch::OnPath(_) => takes.push(tr!("already installed").into()),
             }
             if s.builds {
                 takes.push(tr!("builds the project (runs its code)").into());

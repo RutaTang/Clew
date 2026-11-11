@@ -325,22 +325,34 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
     .step(1.0)
     .width(Fill);
 
+    // Named as code reads: "checkout()", "class Order" — not "fn checkout".
     let scope_label = match &tt.scope {
-        TimeScope::Symbol { name, kind, .. } => format!("{} {name}", short_kind(kind)),
+        TimeScope::Symbol { name, kind, .. } => match kind.as_str() {
+            "function" | "method" => format!("{name}()"),
+            _ => format!("{kind} {name}"),
+        },
         TimeScope::File => tr!("whole file").to_string(),
     };
     // Clicking toggles between the whole file and the block under the caret.
-    let scope_btn = button(
-        text(format!("{}  ⇄", tr!("Scope: {scope}", scope = scope_label)))
-            .size(ts::SMALL)
-            .color(theme::fg_muted()),
-    )
-    .style(theme::toolbar_button)
-    .padding([2, 8])
-    .on_press(super::heard::said(
-        tr!("Change scope"),
-        Message::TimeTravel(TimeTravelMsg::ToggleScope),
-    ));
+    let scope_btn = chrome_tip(
+        button(
+            text(format!("{}  ⇄", tr!("Scope: {scope}", scope = scope_label)))
+                .size(ts::SMALL)
+                .color(theme::fg_muted()),
+        )
+        .style(theme::toolbar_button)
+        .padding([2, 8])
+        .on_press(super::heard::said(
+            tr!("Change scope"),
+            Message::TimeTravel(TimeTravelMsg::ToggleScope),
+        )),
+        if matches!(tt.scope, TimeScope::File) {
+            tr!("Follow only the function or class under the caret")
+        } else {
+            tr!("Follow the whole file")
+        },
+        None,
+    );
 
     let story: Element<'_, Message> = if matches!(tt.scope, TimeScope::Symbol { .. }) {
         if tt.story_loading {
@@ -359,31 +371,38 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
             } else {
                 theme::accent()
             };
-            button(text(label).size(ts::SMALL).color(color))
+            let b = button(text(label).size(ts::SMALL).color(color))
                 .style(theme::toolbar_button)
                 .padding([2, 8])
                 .on_press(super::heard::said(
                     label,
                     Message::TimeTravel(TimeTravelMsg::Story),
-                ))
-                .into()
+                ));
+            if tt.story.is_some() {
+                b.into()
+            } else {
+                // An AI call, said before it is made.
+                chrome_tip(
+                    b,
+                    tr!("Tell how this code came to be, commit by commit (one AI call)"),
+                    None,
+                )
+            }
         }
     } else {
         space().into()
     };
     // Writing the story, Story, Hide story: in a place as wide as the widest
     // of them (and a button's padding), at the bar's end — turning from one
-    // to the next moved the scope, the count and the arrows before it.
-    let story: Element<'_, Message> = if matches!(tt.scope, TimeScope::Symbol { .. }) {
-        let widest = super::steady::widest(
-            &[tr!("Writing the story…"), tr!("Hide story"), tr!("Story")],
-            ts::SMALL,
-            crate::fonts::UI,
-        );
-        container(story).width(widest + 16.0).into()
-    } else {
-        story
-    };
+    // to the next moved the scope, the count and the arrows before it. Kept
+    // in the whole file's scope too, empty: there, the slider grew by it
+    // and the count jumped as the scope changed.
+    let widest = super::steady::widest(
+        &[tr!("Writing the story…"), tr!("Hide story"), tr!("Story")],
+        ts::SMALL,
+        crate::fonts::UI,
+    );
+    let story: Element<'_, Message> = container(story).width(widest + 16.0).into();
 
     container(
         row![
@@ -1679,10 +1698,12 @@ pub(crate) enum Leaning {
 }
 
 impl Leaning {
-    /// What the note says: "21 references", "1 caller".
+    /// What the note says: "Called from 21 places", "1 caller". Not
+    /// "references": the editor's word for every use of a name, both ways,
+    /// where this counts only the calls to it.
     pub(crate) fn label(self) -> String {
         match self {
-            Leaning::References(n) => trn!("1 reference", "{n} references", n),
+            Leaning::References(n) => trn!("Called from 1 place", "Called from {n} places", n),
             Leaning::Callers(n) => trn!("1 caller", "{n} callers", n),
         }
     }

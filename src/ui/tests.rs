@@ -5237,7 +5237,7 @@ fn the_setup_sheet_says_what_each_choice_takes() {
         "rust-analyzer: download, builds the project (runs its code)",
         "Explain the project",
         "Also builds the semantic index.",
-        "Skip setup",
+        "Open without setup",
     ] {
         assert!(shows(&mut sim, said), "{said:?}");
     }
@@ -5289,8 +5289,8 @@ fn the_setup_sheet_says_what_each_choice_takes() {
 /// servers' row is there from the first frame, ticked as it will be, and
 /// keeps its room, so the look landing — with a server to set up or none —
 /// neither ticks anything nor moves Open; Open waits for the look (it sets
-/// up what the look found), Skip setup does not; and its × says that it
-/// does not open the project, beside Skip setup, which does.
+/// up what the look found), Open without setup does not; and its × says that it
+/// does not open the project, beside Open without setup, which does.
 #[test]
 fn the_setup_sheet_holds_still_while_it_looks() {
     use crate::app::setup::{Census, Fetch, ProjectSetup, SetupMode, SetupServer};
@@ -5332,7 +5332,7 @@ fn the_setup_sheet_holds_still_while_it_looks() {
         "nothing to choose yet"
     );
     assert!(matches!(
-        click(sim_elem(sheet(&app, &root)), "Skip setup").as_slice(),
+        click(sim_elem(sheet(&app, &root)), "Open without setup").as_slice(),
         [Message::Project(ProjectMsg::OpenWithoutSetup(r))] if *r == root
     ));
     let looking = open_at(&app);
@@ -5471,13 +5471,13 @@ fn an_unread_questions_allow_sends_nothing() {
         click(sim, "Open").as_slice(),
         [Message::Project(ProjectMsg::ConsentAllowed(r))] if *r == root
     ));
-    // A first open's Skip setup opens the project too, with nothing set
+    // A first open's Open without setup opens the project too, with nothing set
     // up: an answer as Open is, pressed only once it can have been read.
     let sim = sim_elem(open_sheet(&root, false));
-    assert!(click(sim, "Skip setup").is_empty());
+    assert!(click(sim, "Open without setup").is_empty());
     let sim = sim_elem(open_sheet(&root, true));
     assert!(matches!(
-        click(sim, "Skip setup").as_slice(),
+        click(sim, "Open without setup").as_slice(),
         [Message::Project(ProjectMsg::OpenWithoutSetup(r))] if *r == root
     ));
     let pending = crate::PendingLspCommand {
@@ -7309,7 +7309,7 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
     );
     check(
         |ready| open_sheet(&root, ready),
-        ("Skip setup", |m| {
+        ("Open without setup", |m| {
             matches!(m, Message::Project(ProjectMsg::OpenWithoutSetup(_)))
         }),
         None,
@@ -11458,7 +11458,7 @@ fn the_raised_note_says_when_its_function_changed() {
             Default::default(),
         )),
     );
-    assert!(shows(&mut sim_of(&app), "3 references"));
+    assert!(shows(&mut sim_of(&app), "Called from 3 places"));
     // A call at the top of its file, in no function (Python's `if __name__
     // == "__main__": main()`), is a reference too: such a `main` read "0
     // references". A method call of that name is not one.
@@ -11486,7 +11486,7 @@ fn the_raised_note_says_when_its_function_changed() {
             Default::default(),
         )),
     );
-    assert!(shows(&mut sim_of(&app), "4 references"));
+    assert!(shows(&mut sim_of(&app), "Called from 4 places"));
 }
 
 /// The margin, with no note to show, says why, centered under a muted icon

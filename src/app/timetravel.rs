@@ -1483,6 +1483,16 @@ impl App {
                 };
                 // File -> the function at the current focus/caret; Symbol -> File.
                 let symbol = matches!(tt.scope, TimeScope::File);
+                // No block under the caret: said, rather than the whole
+                // file's history loaded again with nothing changed.
+                if symbol {
+                    let (scope, refused) = self.time_travel_scope(true);
+                    if matches!(scope, TimeScope::File) && !refused {
+                        self.status =
+                            tr!("Put the caret in a function or class to follow only it").into();
+                        return Task::none();
+                    }
+                }
                 Task::done(Message::TimeTravel(TimeTravelMsg::Start { symbol }))
             }
             TimeTravelMsg::Exit => {

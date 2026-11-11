@@ -88,7 +88,7 @@ pub(crate) fn setup_sheet<'a>(
     };
     let title = text(title).size(ts::TITLE).color(theme::fg());
     // A first open's ×, as Escape: the project is not opened — said in its
-    // tip, beside Skip setup, which opens it.
+    // tip, beside Open without setup, which opens it.
     let header: Element<'a, Message> = if mode == SetupMode::Open {
         row![
             title,
@@ -335,12 +335,12 @@ pub(crate) fn setup_sheet<'a>(
             false,
         ),
     };
-    // A first open's Skip setup opens the project, with nothing set up: an
+    // A first open's Open without setup opens the project, with nothing set up: an
     // answer to the question as Open is, so pressed only once it can have
     // been read. Not opening it at all is the ×, or Escape.
     let (decline_label, decline, decline_gated) = if mode == SetupMode::Open {
         (
-            tr!("Skip setup"),
+            tr!("Open without setup"),
             Message::Project(ProjectMsg::OpenWithoutSetup(root.to_path_buf())),
             true,
         )
@@ -375,7 +375,7 @@ pub(crate) fn setup_sheet<'a>(
         .style(theme::toolbar_button)
         .padding([6, 16])
         .on_press_maybe(decline_ready.then(|| {
-            // Skip setup opens the project: no "no" to opening it, which
+            // Open without setup opens the project: no "no" to opening it, which
             // the × is; Cancel is.
             if decline_gated {
                 super::heard::said(decline_label, decline)
@@ -384,7 +384,14 @@ pub(crate) fn setup_sheet<'a>(
             }
         }));
     let decline_button: Element<'a, Message> = if decline_gated {
-        crate::ui::fresh::allow(decline_ready, decline_button)
+        // What it leaves out, said where the pointer rests: beside Open, it
+        // opened the project too, and said nothing of the ticks it ignored.
+        super::toolbar::tip_at(
+            crate::ui::fresh::allow(decline_ready, decline_button),
+            tr!("Open the project and set nothing up. The choices above are ignored."),
+            None,
+            iced::widget::tooltip::Position::Top,
+        )
     } else {
         decline_button.into()
     };
