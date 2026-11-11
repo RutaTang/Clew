@@ -782,9 +782,12 @@ fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
         + 5.0
         + 19.0
         + 5.0;
-    let mut chip = row![glyph::icon(Glyph::Sparkle, theme::accent(), 11.0), counter]
-        .spacing(5)
-        .align_y(iced::Center);
+    // At its own width: squeezed by the counter beside it, the sparkle drew
+    // as a sliver two pixels wide.
+    let sparkle = container(glyph::icon(Glyph::Sparkle, theme::accent(), 11.0))
+        .width(Length::Fixed(11.0))
+        .height(Length::Fixed(11.0));
+    let mut chip = row![sparkle, counter].spacing(5).align_y(iced::Center);
     // A short determinate bar once the total is known, so progress reads at
     // a glance instead of by parsing the counter.
     if let Some((done, total)) = app.proj.explain.progress

@@ -87,8 +87,8 @@ fn header<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
     // The filter every sidebar view has: its mark, its ✕, and Esc that
     // clears it — a plain field let Esc go on to close Time Travel.
     // Said whole where there is room for it; cut mid-word ("Message,
-    // @author or") in a narrow sidebar.
-    let hint = if app.sidebar_width < 240.0 {
+    // @author or c") at the sidebar's own width.
+    let hint = if app.sidebar_width < 320.0 {
         tr!("Filter commits")
     } else {
         tr!("Message, @author or commit id")

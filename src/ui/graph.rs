@@ -189,16 +189,24 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
             text(precise).size(ts::SMALL).color(theme::accent()).into()
         } else {
             // With no project there is nothing to refine.
-            button(text(tr!("Refine with LSP")).size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([3, 10])
-                .on_press_maybe(app.proj.project.is_some().then(|| {
-                    super::heard::said(
-                        tr!("Refine with LSP"),
-                        Message::Graph(GraphMsg::RefineProjectCalls),
-                    )
-                }))
-                .into()
+            // In words, with what it does said where the pointer rests:
+            // "Refine with LSP" was an acronym and no more.
+            super::toolbar::tip_at(
+                button(text(tr!("Check calls with the language server")).size(ts::SMALL))
+                    .style(theme::toolbar_button)
+                    .padding([3, 10])
+                    .on_press_maybe(app.proj.project.is_some().then(|| {
+                        super::heard::said(
+                            tr!("Check calls with the language server"),
+                            Message::Graph(GraphMsg::RefineProjectCalls),
+                        )
+                    })),
+                tr!(
+                    "Ask each language's server which calls are real, and redraw the graph with only those"
+                ),
+                None,
+                iced::widget::tooltip::Position::Bottom,
+            )
         }),
         crate::Overlay::ProjectImports => None,
         crate::Overlay::ProjectTypes => app.docs_loading().then(|| {

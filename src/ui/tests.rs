@@ -5272,8 +5272,8 @@ fn the_setup_sheet_says_what_each_choice_takes() {
         "3,600".to_string(),
         "AI calls".to_string(),
         crate::app::usage::tokens(estimate.tokens),
-        "tokens".to_string(),
-        "estimated cost".to_string(),
+        "Tokens".to_string(),
+        "Estimated cost".to_string(),
         estimate.basis(),
         "Also builds the semantic index.".to_string(),
     ] {
@@ -13839,7 +13839,7 @@ fn a_map_with_no_project_says_why() {
     ));
     let sent = click(
         sim_elem(super::project_graph_modal(&app, calls)),
-        "Refine with LSP",
+        "Check calls with the language server",
     );
     assert!(
         !sent

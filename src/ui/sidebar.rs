@@ -395,7 +395,7 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
     let placeholder = if is_search {
         tr!("Search walkthroughs…")
     } else {
-        tr!("A feature, or leave empty for all")
+        tr!("A feature (optional)")
     };
     let mut input = text_input(placeholder, &app.walk_ui.input)
         .style(theme::input)

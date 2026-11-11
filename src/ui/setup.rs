@@ -300,9 +300,9 @@ pub(crate) fn setup_sheet<'a>(
                             ),
                             tile(
                                 crate::app::usage::tokens(e.tokens),
-                                tr!("tokens").to_string()
+                                tr!("Tokens").to_string()
                             ),
-                            tile(cost, tr!("estimated cost").to_string()),
+                            tile(cost, tr!("Estimated cost").to_string()),
                         ]
                         .spacing(8),
                         notes,

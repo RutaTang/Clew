@@ -220,7 +220,12 @@ impl App {
         self.proj.weak.building = false;
         match result {
             Ok(spots) => {
-                self.status = trn!("1 weak spot found", "{n} weak spots found", spots.len());
+                // "0 weak spots found" read as a count of nothing.
+                self.status = if spots.is_empty() {
+                    tr!("No weak spots").into()
+                } else {
+                    trn!("1 weak spot found", "{n} weak spots found", spots.len())
+                };
                 self.proj.weak.files = files;
                 self.proj.weak.spots = Some(Arc::new(spots));
             }
