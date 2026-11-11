@@ -830,11 +830,22 @@ pub struct ExplainState {
 
 /// What the Language model page's Test connection found, for the fields as
 /// An AI action's failure, standing on the status line
-/// (`App::failure_notice`): what it says there, and what tries it again.
+/// (`App::failure_notice`): what it says there, what tries it again, and
+/// what it is of — what doing that again successfully takes it away.
 #[derive(Debug, Clone)]
 pub struct FailureNotice {
     pub said: String,
     pub retry: Option<Message>,
+    pub of: FailureOf,
+}
+
+/// What a standing failure is of (`FailureNotice::of`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureOf {
+    /// An Explain pass: a pass that completes takes it away.
+    Explain,
+    /// A walkthrough: one generated, or its row dismissed, takes it away.
+    Walkthrough,
 }
 
 /// they stood when it was asked.
@@ -1565,11 +1576,12 @@ pub struct App {
     /// and for an empty line.
     pub status_seen: String,
     pub status_since: Option<std::time::Instant>,
-    /// An AI action that failed, as the status line says it: it stands —
-    /// in the danger colour, with a way to try again and a way to the
-    /// settings — until it is dismissed or something else is said. A
-    /// failure that went with the other notices was missed by anyone who
-    /// looked away for ten seconds.
+    /// An AI action that failed, as the status line says it: it stands, in
+    /// a place of its own — in the danger colour, with a way to try again
+    /// and a way to the settings — beside whatever else is said, until it
+    /// is dismissed, tried again, or done again successfully. A failure
+    /// said with the other notices went with them: missed by anyone who
+    /// looked away for ten seconds, or said over by the next message.
     pub failure_notice: Option<FailureNotice>,
     /// What the status line said last, in the wait a close or a quit is in,
     /// of the window waiting for its host (`App::show_waiting`): said once,

@@ -206,6 +206,7 @@ impl App {
                 reason = why
             ),
             Some(Message::Walk(WalkMsg::GenerateTrace)),
+            crate::app::state::FailureOf::Walkthrough,
         );
         Task::none()
     }
@@ -362,6 +363,10 @@ impl App {
         }
         match result {
             Ok(mut wt) => {
+                // A tour made: a failure of an earlier one is past.
+                if awaited {
+                    self.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
+                }
                 // Drop steps that don't resolve to a real project file.
                 wt.steps
                     .retain(|s| self.resolve_walk_file(&s.file).is_some());
@@ -480,6 +485,7 @@ impl App {
                 self.say_failure(
                     tr!("Walkthrough failed: {error}", error = e),
                     Some(Message::Walk(WalkMsg::again(&scope))),
+                    crate::app::state::FailureOf::Walkthrough,
                 );
                 Task::none()
             }
@@ -875,8 +881,11 @@ impl App {
                 seq, scope, result, ..
             } => self.on_walkthrough_done(seq, scope, result),
             WalkMsg::Unnarrated { seq, why, .. } => self.on_walkthrough_unnarrated(seq, why),
+            // Dismissed where it was asked for, it is dismissed: it stood on
+            // the status line too, a second thing to dismiss.
             WalkMsg::ForgetFailure => {
                 self.proj.walk.failed = None;
+                self.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
                 Task::none()
             }
             WalkMsg::Open(scope) => {

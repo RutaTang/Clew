@@ -2281,6 +2281,9 @@ pub enum WindowMsg {
     /// Take the failure the status line stands for off it
     /// (`App::failure_notice`): read, and nothing more to do about it.
     DismissFailure,
+    /// Try the failed action on the status line again, and take the
+    /// failure off it (`App::failure_notice`).
+    RetryFailure,
     /// Custom window controls (frameless window has no OS buttons).
     Close,
     Minimize,
@@ -3285,6 +3288,7 @@ impl WindowMsg {
             | WindowMsg::FocusChanged(..)
             | WindowMsg::ControlsHover(..)
             | WindowMsg::DismissFailure
+            | WindowMsg::RetryFailure
             | WindowMsg::Close
             | WindowMsg::Minimize
             | WindowMsg::ToggleFullscreen

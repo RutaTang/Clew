@@ -36766,16 +36766,46 @@ fn a_failed_explain_stands_until_dismissed_with_a_way_to_try_again() {
     // Read or not, it stands.
     app.status_since = Some(Instant::now() - STATUS_LIFETIME - Duration::from_secs(1));
     let _ = app.update(Message::Tick);
-    assert_eq!(app.status, said, "it went before it was dealt with");
-    // Dismissed, it goes.
-    let _ = app.update(Message::Window(WindowMsg::DismissFailure));
-    assert!(app.status.is_empty(), "{}", app.status);
-    assert!(app.failure_shown().is_none());
-    // Something else said takes its place, and it is not said again.
-    app.say_failure("Walkthrough failed: no".into(), None);
+    assert_eq!(
+        app.failure_shown().map(|f| f.said.as_str()),
+        Some(said.as_str()),
+        "it went before it was dealt with"
+    );
+    // Something else said goes beside it, not over it: the failure and
+    // its Try again stand.
     app.status = "Copied 3 lines".into();
-    let _ = app.update(Message::Noop);
-    assert!(app.failure_notice.is_none(), "{:?}", app.failure_notice);
+    app.note_status();
+    assert_eq!(app.status, "Copied 3 lines");
+    assert_eq!(
+        app.failure_shown().map(|f| f.said.as_str()),
+        Some(said.as_str())
+    );
+    // Dismissed, it goes, and what else was said stays.
+    let _ = app.update(Message::Window(WindowMsg::DismissFailure));
+    assert_eq!(app.status, "Copied 3 lines");
+    assert!(app.failure_shown().is_none());
+    // Tried again, it goes too, and the same Explain sets out.
+    app.say_failure(
+        said.clone(),
+        Some(Message::Explain(ExplainMsg::Explain(node.clone()))),
+        crate::app::state::FailureOf::Explain,
+    );
+    app.proj.explain.running = false;
+    let _ = app.update(Message::Window(WindowMsg::RetryFailure));
+    assert!(app.failure_shown().is_none());
+    assert_ne!(app.status, said, "the old failure is still said");
+    // An Explain that then goes well takes an Explain failure away, and
+    // not a walkthrough's.
+    app.say_failure(
+        "Walkthrough failed: no".into(),
+        None,
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    app.forget_failure_of(crate::app::state::FailureOf::Explain);
+    assert!(app.failure_shown().is_some());
+    app.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
+    assert!(app.failure_shown().is_none());
+    assert!(app.status.is_empty(), "{}", app.status);
 }
 
 /// What a failed pass would set going after it — the search index, the
@@ -36823,7 +36853,8 @@ fn a_failed_explain_is_not_buried_by_what_follows_it() {
         written: Default::default(),
     }));
     assert!(
-        app.status.starts_with("Couldn't explain helper(): the connection failed"),
+        app.status
+            .starts_with("Couldn't explain helper(): the connection failed"),
         "{}",
         app.status
     );

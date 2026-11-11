@@ -522,14 +522,6 @@ impl App {
     /// time it began to (see `status_since`).
     pub(crate) fn note_status(&mut self) {
         if self.status != self.status_seen {
-            // Something else said: the failure it stood for is said no more.
-            if self
-                .failure_notice
-                .as_ref()
-                .is_some_and(|f| f.said != self.status)
-            {
-                self.failure_notice = None;
-            }
             self.status_seen.clone_from(&self.status);
             self.status_since = (!self.status.is_empty()).then(std::time::Instant::now);
         }
@@ -545,7 +537,6 @@ impl App {
             || self.waiting_said.is_some()
             || self.says_not_saved()
             || self.handshake_failure.as_deref() == Some(self.status.as_str())
-            || self.failure_shown().is_some()
             || calls.refine_wait.is_some()
             || calls.refine_full_wait.is_some()
     }
@@ -553,16 +544,30 @@ impl App {
     /// Say that an AI action failed: on the status line, standing until it
     /// is dismissed or something else is said, with `retry` to try it again
     /// (`App::failure_notice`).
-    pub(crate) fn say_failure(&mut self, said: String, retry: Option<Message>) {
+    pub(crate) fn say_failure(
+        &mut self,
+        said: String,
+        retry: Option<Message>,
+        of: crate::app::state::FailureOf,
+    ) {
         self.status = said.clone();
-        self.failure_notice = Some(crate::app::state::FailureNotice { said, retry });
+        self.failure_notice = Some(crate::app::state::FailureNotice { said, retry, of });
     }
 
-    /// The failure the status line says now, if it says one.
+    /// The failure the status line stands, if it stands one.
     pub(crate) fn failure_shown(&self) -> Option<&crate::app::state::FailureNotice> {
-        self.failure_notice
-            .as_ref()
-            .filter(|f| !f.said.is_empty() && f.said == self.status)
+        self.failure_notice.as_ref().filter(|f| !f.said.is_empty())
+    }
+
+    /// Take a standing failure of `of` away: what it was of was done again
+    /// successfully, or dismissed where it was asked for.
+    pub(crate) fn forget_failure_of(&mut self, of: crate::app::state::FailureOf) {
+        if self.failure_notice.as_ref().is_some_and(|f| f.of == of) {
+            let notice = self.failure_notice.take();
+            if notice.is_some_and(|f| f.said == self.status) {
+                self.status.clear();
+            }
+        }
     }
 
     /// Whether the status line says a notice that will be taken away.
@@ -719,11 +724,25 @@ impl App {
                 Task::none()
             }
             WindowMsg::DismissFailure => {
-                if self.failure_shown().is_some() {
+                if let Some(notice) = self.failure_notice.take()
+                    && notice.said == self.status
+                {
                     self.status.clear();
                 }
-                self.failure_notice = None;
                 Task::none()
+            }
+            // Tried again: the failure is not the news, what it tries is.
+            WindowMsg::RetryFailure => {
+                let Some(notice) = self.failure_notice.take() else {
+                    return Task::none();
+                };
+                if notice.said == self.status {
+                    self.status.clear();
+                }
+                match notice.retry {
+                    Some(retry) => self.update(retry),
+                    None => Task::none(),
+                }
             }
             // Closing is the shell's (`Shell::CloseRequested`): it asks about
             // edits the window cannot send before it lets the window go, and

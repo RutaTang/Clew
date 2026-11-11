@@ -183,6 +183,18 @@ impl App {
         self.start_session(true)
     }
 
+    /// Whether a run or debug session is still going — running, paused or
+    /// starting — while the bottom panel is hidden: what the status bar's
+    /// session chip says, and what Run and Debug show again first.
+    pub(crate) fn hidden_session_live(&self) -> bool {
+        !self.show_bottom
+            && self
+                .debug
+                .session
+                .as_ref()
+                .is_some_and(|s| s.status != DebugStatus::Terminated)
+    }
+
     /// What the status line says while the session runs: a run is no
     /// debugger's.
     fn running_said(&self) -> String {
@@ -210,6 +222,14 @@ impl App {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
+        // The panel hidden over a session still live: Run or Debug shows it
+        // again, as its tooltip says — it started a second copy of the
+        // program beside the one paused out of sight. Asked again, with the
+        // panel shown, it starts another.
+        if !self.show_bottom && self.hidden_session_live() {
+            self.show_bottom = true;
+            return Task::none();
+        }
         // A remote project's launch.json lives in the REMOTE .clew (fetched
         // over the protocol inside the stream, along with the adapter — the
         // program, config, and adapter binary all live on that host, so

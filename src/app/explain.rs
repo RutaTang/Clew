@@ -626,8 +626,10 @@ impl App {
                 None if automatic => Some(Message::Explain(ExplainMsg::Refresh)),
                 None => Some(crate::ui::explain_all_message(self)),
             };
-            self.say_failure(status, retry);
+            self.say_failure(status, retry, crate::app::state::FailureOf::Explain);
         } else {
+            // Done again, and done: the failure it stood for is past.
+            self.forget_failure_of(crate::app::state::FailureOf::Explain);
             self.status = status;
         }
 

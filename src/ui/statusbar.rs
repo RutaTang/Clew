@@ -607,13 +607,28 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         used += chip.1 + STATUS_GAP;
         row = row.push(chip.0);
     }
-    // What is open, in counts — unless Clew has something to say.
-    let said = if !app.status.is_empty() {
-        // A status the back end wrote as it is (an error passed straight
-        // through) in the reader's language too, its names in the reader's
-        // quotation marks, not backticks.
-        Some(crate::i18n::quoted(&crate::i18n::message(&app.status)).into_owned())
+    // A session going on behind the hidden panel, said, and a way back to
+    // it: hidden while paused, nothing showed one was live, and Debug
+    // started a second copy of the program.
+    if let Some(chip) = session_chip(app).filter(|chip| used + chip.1 <= room) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
+    // A status the back end wrote as it is (an error passed straight
+    // through) in the reader's language too, its names in the reader's
+    // quotation marks, not backticks.
+    let words_of = |s: &str| crate::i18n::quoted(&crate::i18n::message(s)).into_owned();
+    let failure = app.failure_shown();
+    // What Clew says besides a failure that stands: the failure keeps its
+    // own place, and what is said after it (a file copied, a search done)
+    // goes beside it rather than over it — said over it, the red Explain
+    // failure was gone at the next word, its Try again with it.
+    let said = if !app.status.is_empty() && failure.is_none_or(|f| f.said != app.status) {
+        Some(words_of(&app.status))
+    } else if failure.is_some() {
+        None
     } else {
+        // What is open, in counts — unless Clew has something to say.
         app.proj.project.as_ref().map(|project| {
             let files = project.files.len();
             let symbols = app.proj.symbol_index.len();
@@ -635,31 +650,44 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             counts
         })
     };
-    let left = room - used;
-    // A failure stands, in the danger colour, with what to do about it —
-    // what fits of it beside the least of its words, its dismissal always.
-    let failure = app
-        .failure_shown()
-        .map(|f| failure_controls(f, left - SAID_MIN_W / 2.0 - STATUS_GAP));
-    if let Some(said) = said
-        && left >= SAID_MIN_W / 2.0
-    {
-        let controls_w = failure.as_ref().map_or(0.0, |(_, w)| *w + STATUS_GAP);
-        let words = (left - controls_w).max(SAID_MIN_W / 2.0);
-        let shown = super::steady::cut(&said, words, ts::SMALL, font);
+    let least = SAID_MIN_W / 2.0;
+    let mut left = room - used;
+    // Words cut to `room`, said whole where the pointer rests when cut.
+    let line_of = |whole: String, room: f32, color: Option<iced::Color>| -> Element<'_, Message> {
+        let shown = super::steady::cut(&whole, room, ts::SMALL, font);
         let mut line = status_text(shown.clone()).wrapping(iced::widget::text::Wrapping::None);
-        if failure.is_some() {
-            line = line.color(theme::danger());
+        if let Some(color) = color {
+            line = line.color(color);
         }
-        row = row.push(if shown == said {
+        if shown == whole {
             line.into()
         } else {
-            // Cut short: said whole where the pointer rests.
-            super::toolbar::tip_at(line, said, None, tooltip::Position::Top)
-        });
-        if let Some((controls, _)) = failure {
-            row = row.push(controls);
+            super::toolbar::tip_at(line, whole, None, tooltip::Position::Top)
         }
+    };
+    // A failure stands, in the danger colour, with what to do about it —
+    // what fits of it beside the least of its words, its dismissal always.
+    if let Some(failure) = failure
+        && left >= least
+    {
+        let whole = words_of(&failure.said);
+        let (controls, controls_w) = failure_controls(failure, left - least - STATUS_GAP);
+        // With something else to say, the failure leaves it room: no more
+        // than its share, and never less than the least of its words.
+        let full = width(&whole);
+        let mut words = (left - controls_w - STATUS_GAP).max(least);
+        if said.is_some() {
+            words = words.min((left - controls_w) * 0.6).max(least);
+        }
+        let words = words.min(full);
+        row = row.push(line_of(whole, words, Some(theme::danger())));
+        row = row.push(controls);
+        left -= words + STATUS_GAP + controls_w + STATUS_GAP;
+    }
+    if let Some(said) = said
+        && left >= least
+    {
+        row = row.push(line_of(said, left, None));
     }
     container(row)
         .width(Fill)
@@ -704,8 +732,11 @@ fn failure_controls(
     let with_settings = dismiss_w + kept_retry + settings_w <= room;
     let mut row = row![].spacing(2).align_y(iced::Center);
     let mut width = 0.0;
-    if let Some(retry) = failure.retry.as_ref().filter(|_| with_retry) {
-        row = row.push(link(tr!("Try again"), retry.clone()));
+    if with_retry {
+        row = row.push(link(
+            tr!("Try again"),
+            Message::Window(WindowMsg::RetryFailure),
+        ));
         width += retry_w;
     }
     if with_settings {
@@ -732,6 +763,54 @@ fn failure_controls(
     ));
     width += dismiss_w;
     (row.into(), width)
+}
+
+/// The chip of a run or debug session going on behind the hidden bottom
+/// panel — "Debugging main.py — paused" — which shows the panel again; and
+/// its width. `None` while the panel shows, or nothing is live.
+fn session_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
+    if !app.hidden_session_live() {
+        return None;
+    }
+    let session = app.debug.session.as_ref()?;
+    let file = session
+        .program
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let paused = session.status == crate::DebugStatus::Stopped;
+    let said = match (app.debug.no_debug, paused) {
+        (true, _) => tr!("Running {file}", file = file),
+        (false, true) => tr!("Debugging {file} — paused", file = file),
+        (false, false) => tr!("Debugging {file}", file = file),
+    };
+    let width = super::steady::width_of(&said, ts::SMALL, crate::fonts::UI) + CHIP_EXTRA_W;
+    let chip = button(
+        row![
+            glyph::icon(Glyph::Debug, theme::accent(), 11.0),
+            text(said.clone())
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .wrapping(iced::widget::text::Wrapping::None),
+        ]
+        .spacing(5)
+        .align_y(iced::Center),
+    )
+    .style(theme::icon_button(false))
+    .padding([2, 8])
+    .on_press(super::heard::said(
+        &said,
+        Message::Window(WindowMsg::ShowDebugPanel),
+    ));
+    Some((
+        super::toolbar::tip_at(
+            chip,
+            tr!("Show the Run/Debug panel"),
+            None,
+            tooltip::Position::Top,
+        ),
+        width,
+    ))
 }
 
 /// What the setting-up chip says, and whether it is a button: setting up,
