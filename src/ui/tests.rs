@@ -16142,6 +16142,7 @@ fn the_usage_page_says_what_the_key_spent() {
         model: "gpt-4o-mini".into(),
         input,
         cached: 0,
+        written: 0,
         output,
     };
     let _ = app.update(Message::Usage(crate::UsageMsg::Read(vec![
@@ -16217,6 +16218,7 @@ fn a_reported_call_is_kept_and_counted_to_its_answer() {
             model: "gpt-4o-mini".into(),
             input: 1_000,
             cached: 0,
+            written: 0,
             output: 500,
         });
     }
@@ -16230,6 +16232,7 @@ fn a_reported_call_is_kept_and_counted_to_its_answer() {
         model: "gpt-4o-mini".into(),
         input: 0,
         cached: 0,
+        written: 0,
         output: 0,
     });
     assert_eq!(app.usage.entries.as_ref().map(Vec::len), Some(2));
@@ -16708,5 +16711,33 @@ fn a_server_program_is_added_from_a_form_of_its_own() {
             ))
         )),
         "Add uses the draft"
+    );
+}
+
+/// A call this window makes itself is counted where the window shows it —
+/// the ledger as read, and the Ask answer it was for — not only kept in
+/// the file: the Usage page and a local answer's cost knew nothing of it.
+#[test]
+fn a_local_call_is_counted_where_it_is_shown() {
+    let mut app = reader_app();
+    app.usage.entries = Some(Vec::new());
+    let meter = crate::App::local_meter();
+    meter(clew_core::llm::Spent {
+        provider: clew_core::llm::Provider::OpenAI,
+        model: "gpt-4o-mini".into(),
+        usage: clew_core::llm::Usage {
+            input: 1_000,
+            cached: 0,
+            written: 0,
+            output: 500,
+        },
+        purpose: crate::app::usage::ASK.into(),
+        work: 77,
+    });
+    app.take_local_spent();
+    assert_eq!(app.usage.entries.as_ref().map(Vec::len), Some(1));
+    assert!(
+        app.answer_cost(77).is_some(),
+        "the answer shows what it cost"
     );
 }

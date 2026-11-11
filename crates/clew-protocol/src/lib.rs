@@ -143,7 +143,7 @@ pub use payload::*;
 /// v26: every model call the server makes for the client says what it used
 /// ([`Event::Usage`]), and [`Request::Chat`] / [`Request::ChatStream`] say
 /// what they are for (`purpose`): the client's ledger of what its key spent.
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -1411,6 +1411,9 @@ pub enum Event {
         model: String,
         input: u64,
         cached: u64,
+        /// Of `input`, those written to the provider's prompt cache, which
+        /// bill above its input price.
+        written: u64,
         output: u64,
     },
     /// A one-line notice for the status bar about the connection's background

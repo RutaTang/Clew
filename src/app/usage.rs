@@ -37,6 +37,10 @@ pub struct Entry {
     pub input: u64,
     #[serde(default)]
     pub cached: u64,
+    /// Of `input`, those written to the prompt cache (a line kept before
+    /// they were counted has none).
+    #[serde(default)]
+    pub written: u64,
     pub output: u64,
 }
 
@@ -49,13 +53,14 @@ impl Entry {
             model: model.to_string(),
             input: usage.input,
             cached: usage.cached.min(usage.input),
+            written: usage.written.min(usage.input),
             output: usage.output,
         }
     }
 
     /// Its cost in US dollars, at the price its model has now.
     pub(crate) fn cost(&self) -> Option<f64> {
-        price_of(&self.model).map(|p| p.cost(self.input, self.cached, self.output))
+        price_of(&self.model).map(|p| p.cost(self.input, self.cached, self.written, self.output))
     }
 }
 
@@ -152,11 +157,20 @@ pub(crate) struct Price {
     pub output: f64,
 }
 
+/// What writing a token to the prompt cache costs, against reading it as
+/// input: Anthropic's five-minute cache writes, the only ones a provider
+/// bills apart (OpenAI's and DeepSeek's caches cost nothing to fill).
+const CACHE_WRITE: f64 = 1.25;
+
 impl Price {
-    pub(crate) fn cost(&self, input: u64, cached: u64, output: u64) -> f64 {
+    /// What `input` prompt tokens — `cached` of them read from the prompt
+    /// cache, `written` to it — and `output` tokens cost, in US dollars.
+    pub(crate) fn cost(&self, input: u64, cached: u64, written: u64, output: u64) -> f64 {
         let cached = cached.min(input);
-        ((input - cached) as f64 * self.input
+        let written = written.min(input - cached);
+        ((input - cached - written) as f64 * self.input
             + cached as f64 * self.cached
+            + written as f64 * self.input * CACHE_WRITE
             + output as f64 * self.output)
             / 1e6
     }
@@ -285,6 +299,10 @@ pub(crate) fn draft_price(draft: &[String; 3]) -> Option<Price> {
     })
 }
 
+/// What this process's own model calls spent, for its window to count
+/// ([`App::take_local_spent`]).
+static LOCAL_SPENT: std::sync::Mutex<Vec<llm::Spent>> = std::sync::Mutex::new(Vec::new());
+
 /// The latest price save asked for: one asked before it, still writing,
 /// writes nothing — the saves run off the window's thread, and an older
 /// keystroke's would otherwise land last.
@@ -350,7 +368,7 @@ impl Totals {
         self.cached += e.cached;
         self.output += e.output;
         match price {
-            Some(p) => self.cost += p.cost(e.input, e.cached, e.output),
+            Some(p) => self.cost += p.cost(e.input, e.cached, e.written, e.output),
             None => self.unpriced += 1,
         }
     }
@@ -465,16 +483,29 @@ pub(crate) fn estimate(entries: &[Entry], purpose: &str, calls: u64, model: &str
         .take(ESTIMATE_FROM)
         .collect();
     let from_history = lately.len() >= ESTIMATE_MIN;
-    let (input, cached, output) = if from_history {
+    let (input, cached, written, output) = if from_history {
         let n = lately.len() as u64;
         let sum = |f: fn(&Entry) -> u64| lately.iter().map(|e| f(e)).sum::<u64>() / n;
-        (sum(|e| e.input), sum(|e| e.cached), sum(|e| e.output))
+        (
+            sum(|e| e.input),
+            sum(|e| e.cached),
+            sum(|e| e.written),
+            sum(|e| e.output),
+        )
     } else {
-        typical_call(purpose)
+        let (input, cached, output) = typical_call(purpose);
+        (input, cached, 0, output)
     };
     Estimate {
         tokens: calls * (input + output),
-        cost: price_of(model).map(|p| p.cost(calls * input, calls * cached, calls * output)),
+        cost: price_of(model).map(|p| {
+            p.cost(
+                calls * input,
+                calls * cached,
+                calls * written,
+                calls * output,
+            )
+        }),
         from_history,
     }
 }
@@ -643,10 +674,31 @@ impl App {
     /// The model calls this window makes itself — when it has no
     /// clew-server, or the server may not hold the key — reported straight
     /// to the ledger.
+    ///
+    /// Kept in the file at once, and handed to the window too
+    /// ([`Self::take_local_spent`]): it went to the file alone, and the
+    /// Usage page, the estimates and a local Ask answer's cost knew nothing
+    /// of it until the ledger was read again.
     pub(crate) fn local_meter() -> llm::Meter {
         std::sync::Arc::new(|spent: llm::Spent| {
+            if spent.usage.is_empty() {
+                return;
+            }
             let _ = append(&Entry::now(&spent.purpose, &spent.model, spent.usage));
+            LOCAL_SPENT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(spent);
         })
+    }
+
+    /// What this window's own calls spent since it last looked, counted as
+    /// a server's are — already in the file.
+    pub(crate) fn take_local_spent(&mut self) {
+        let spent = std::mem::take(&mut *LOCAL_SPENT.lock().unwrap_or_else(|e| e.into_inner()));
+        for s in spent {
+            self.count_spent(s.work, &s.purpose, &s.model, s.usage);
+        }
     }
 
     /// A model call the server made for this window used this much: kept in
@@ -662,19 +714,7 @@ impl App {
         if usage.is_empty() {
             return Task::none();
         }
-        let entry = Entry::now(&purpose, &model, usage);
-        if purpose == ASK {
-            let (spent, at) = self
-                .usage
-                .by_stream
-                .entry(work)
-                .or_insert_with(|| (llm::Usage::default(), model.clone()));
-            *spent += usage;
-            at.clone_from(&model);
-        }
-        if let Some(entries) = self.usage.entries.as_mut() {
-            entries.push(entry.clone());
-        }
+        let entry = self.count_spent(work, &purpose, &model, usage);
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || append(&entry))
@@ -685,6 +725,25 @@ impl App {
             },
             |failed| Message::Usage(UsageMsg::Written(failed)),
         )
+    }
+
+    /// What a call spent, counted where this window shows it: the ledger
+    /// as read, and the Ask answer it was for.
+    fn count_spent(&mut self, work: u64, purpose: &str, model: &str, usage: llm::Usage) -> Entry {
+        let entry = Entry::now(purpose, model, usage);
+        if purpose == ASK {
+            let (spent, at) = self
+                .usage
+                .by_stream
+                .entry(work)
+                .or_insert_with(|| (llm::Usage::default(), model.to_string()));
+            *spent += usage;
+            model.clone_into(at);
+        }
+        if let Some(entries) = self.usage.entries.as_mut() {
+            entries.push(entry.clone());
+        }
+        entry
     }
 
     /// Read the ledger again, for the Usage page.
@@ -833,7 +892,9 @@ impl App {
         let (usage, model) = self.usage.by_stream.get(&stream)?;
         let total = usage.input + usage.output;
         Some(
-            match price_of(model).map(|p| p.cost(usage.input, usage.cached, usage.output)) {
+            match price_of(model)
+                .map(|p| p.cost(usage.input, usage.cached, usage.written, usage.output))
+            {
                 Some(cost) => tr!(
                     "{tokens} tokens, {cost}",
                     tokens = tokens(total),
@@ -863,6 +924,7 @@ mod tests {
             model: model.into(),
             input,
             cached: 0,
+            written: 0,
             output,
         }
     }
@@ -905,8 +967,8 @@ mod tests {
             cached: 0.1,
             output: 5.0,
         };
-        assert!((price.cost(1_000_000, 500_000, 100_000) - 1.05).abs() < 1e-9);
-        assert!((price.cost(10, 99, 0) - 10.0 * 0.1 / 1e6).abs() < 1e-12);
+        assert!((price.cost(1_000_000, 500_000, 0, 100_000) - 1.05).abs() < 1e-9);
+        assert!((price.cost(10, 99, 0, 0) - 10.0 * 0.1 / 1e6).abs() < 1e-12);
     }
 
     /// Today, this month and the chart count what fell in them; the month's
@@ -982,6 +1044,25 @@ mod tests {
                 money(drawn.cost.unwrap())
             )
         );
+    }
+
+    /// Tokens written to Anthropic's prompt cache bill at 1.25 times its
+    /// input price: priced as input, a Sonnet step writing 20,000 came out
+    /// a fifth low.
+    #[test]
+    fn cache_writes_bill_above_input() {
+        let sonnet = builtin_price("claude-sonnet-4-5").unwrap();
+        let want = (500.0 * 3.0 + 20_000.0 * 3.75 + 300.0 * 15.0) / 1e6;
+        assert!((sonnet.cost(20_500, 0, 20_000, 300) - want).abs() < 1e-12);
+        let mut e = entry(0, ASK, "claude-sonnet-4-5", 20_500, 300);
+        e.written = 20_000;
+        assert!((e.cost().unwrap() - want).abs() < 1e-12);
+        // A line kept before writes were counted reads as none.
+        let old: Entry = serde_json::from_str(
+            r#"{"at":1,"purpose":"ask","model":"m","input":5,"cached":0,"output":1}"#,
+        )
+        .unwrap();
+        assert_eq!(old.written, 0);
     }
 
     /// The price form's fields read as a price once Input and Output do; a

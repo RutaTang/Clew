@@ -253,6 +253,7 @@ fn usage_meter(out: &UnboundedSender<ServerMessage>) -> llm::Meter {
                 model: spent.model,
                 input: spent.usage.input,
                 cached: spent.usage.cached,
+                written: spent.usage.written,
                 output: spent.usage.output,
             },
         });

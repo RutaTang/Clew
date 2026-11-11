@@ -480,6 +480,10 @@ pub struct Usage {
     pub input: u64,
     /// Of `input`, those read from the prompt cache, which bill lower.
     pub cached: u64,
+    /// Of `input`, those written to the prompt cache, which bill higher
+    /// (Anthropic's cache writes, at 1.25 times its input price): priced
+    /// as input, every Ask step on Anthropic came out a fifth low.
+    pub written: u64,
     /// Tokens the model wrote.
     pub output: u64,
 }
@@ -495,6 +499,7 @@ impl std::ops::AddAssign for Usage {
     fn add_assign(&mut self, other: Usage) {
         self.input += other.input;
         self.cached += other.cached;
+        self.written += other.written;
         self.output += other.output;
     }
 }
@@ -508,15 +513,18 @@ fn usage_of(dialect: Dialect, usage: &Value) -> Usage {
     match dialect {
         Dialect::Anthropic => {
             let read = n("/cache_read_input_tokens");
+            let written = n("/cache_creation_input_tokens");
             Usage {
-                input: n("/input_tokens") + read + n("/cache_creation_input_tokens"),
+                input: n("/input_tokens") + read + written,
                 cached: read,
+                written,
                 output: n("/output_tokens"),
             }
         }
         Dialect::OpenAi => Usage {
             input: n("/prompt_tokens"),
             cached: n("/prompt_tokens_details/cached_tokens").max(n("/prompt_cache_hit_tokens")),
+            written: 0,
             output: n("/completion_tokens"),
         },
     }
@@ -1122,14 +1130,7 @@ pub fn balance_url(cfg: &Config) -> Option<String> {
     let base = cfg.base_url.trim().trim_end_matches('/');
     match cfg.provider {
         Provider::DeepSeek => Some(format!("{}/user/balance", base.trim_end_matches("/v1"))),
-        Provider::Custom
-            if crate::net::request_uri(base)
-                .ok()
-                .and_then(|u| u.host().map(str::to_ascii_lowercase))
-                .is_some_and(|h| h == "openrouter.ai" || h.ends_with(".openrouter.ai")) =>
-        {
-            Some(format!("{base}/credits"))
-        }
+        Provider::Custom if is_openrouter(cfg) => Some(format!("{base}/credits")),
         _ => None,
     }
 }
@@ -1285,13 +1286,23 @@ fn chat_body(
 }
 
 /// Ask an OpenAI-dialect stream to end with what it used, which it only
-/// tells when asked. Only of the providers known to take the field: a
-/// Custom endpoint may refuse a body with a field it does not know, and the
-/// answer is worth more than its count.
+/// tells when asked. Only of the providers known to take the field —
+/// OpenRouter among the Custom endpoints: another may refuse a body with a
+/// field it does not know, and the answer is worth more than its count.
+/// OpenRouter's streams, every Ask answer among them, went uncounted.
 fn ask_stream_usage(cfg: &Config, body: &mut Value) {
-    if matches!(cfg.provider, Provider::OpenAI | Provider::DeepSeek) {
+    if matches!(cfg.provider, Provider::OpenAI | Provider::DeepSeek) || is_openrouter(cfg) {
         body["stream_options"] = json!({ "include_usage": true });
     }
+}
+
+/// Whether `cfg` is a Custom endpoint at OpenRouter.
+fn is_openrouter(cfg: &Config) -> bool {
+    cfg.provider == Provider::Custom
+        && crate::net::request_uri(cfg.base_url.trim())
+            .ok()
+            .and_then(|u| u.host().map(str::to_ascii_lowercase))
+            .is_some_and(|h| h == "openrouter.ai" || h.ends_with(".openrouter.ai"))
 }
 
 /// The body of a tool-conversation request in `cfg`'s dialect.
@@ -1712,6 +1723,7 @@ impl StreamState {
                     let prompt = usage_of(Dialect::Anthropic, usage);
                     self.usage.input = prompt.input;
                     self.usage.cached = prompt.cached;
+                    self.usage.written = prompt.written;
                     self.usage.output = self.usage.output.max(prompt.output);
                 }
             }
@@ -4309,6 +4321,7 @@ mod tests {
             Usage {
                 input: 1000,
                 cached: 800,
+                written: 80,
                 output: 42
             }
         );
@@ -4324,6 +4337,7 @@ mod tests {
             Usage {
                 input: 900,
                 cached: 512,
+                written: 0,
                 output: 50
             }
         );
@@ -4356,7 +4370,8 @@ mod tests {
         assert_eq!((out.usage.input, out.usage.output), (10, 3));
         let sse = concat!(
             r#"data: {"type":"message_start","message":{"usage":{"input_tokens":20,"#,
-            r#""cache_read_input_tokens":100,"output_tokens":1}}}"#,
+            r#""cache_read_input_tokens":100,"cache_creation_input_tokens":30,"#,
+            r#""output_tokens":1}}}"#,
             "\n\n",
             r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"ok"}}"#,
             "\n\n",
@@ -4369,8 +4384,9 @@ mod tests {
         assert_eq!(
             out.usage,
             Usage {
-                input: 120,
+                input: 150,
                 cached: 100,
+                written: 30,
                 output: 9
             }
         );
@@ -4397,6 +4413,16 @@ mod tests {
         );
         assert_eq!(balance_url(&cfg(Provider::Anthropic, "")), None);
         assert_eq!(balance_url(&cfg(Provider::OpenAI, "")), None);
+        // OpenRouter's streams are asked what they used, as OpenAI's are;
+        // another Custom endpoint's are not (it may refuse the field).
+        let asks = |c: &Config| {
+            let mut body = json!({});
+            ask_stream_usage(c, &mut body);
+            body.get("stream_options").is_some()
+        };
+        assert!(asks(&cfg(Provider::Custom, "https://openrouter.ai/api/v1")));
+        assert!(!asks(&cfg(Provider::Custom, "http://localhost:11434/v1")));
+        assert!(asks(&cfg(Provider::DeepSeek, "https://api.deepseek.com")));
         assert_eq!(
             parse_balance(
                 r#"{"is_available":true,"balance_infos":[{"currency":"CNY",

@@ -923,10 +923,11 @@ impl App {
                         // whatever text the provider layer gives it.
                         // What it used goes to the ledger from here: no
                         // server tells.
+                        // Counted to this answer, as a server's are.
                         let answered = llm::metered(
                             crate::App::local_meter(),
                             crate::app::usage::ASK,
-                            0,
+                            stream_id,
                             || {
                                 llm::complete_chat_stream_full(
                                     &cfg,

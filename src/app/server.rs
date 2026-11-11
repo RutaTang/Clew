@@ -955,6 +955,7 @@ impl App {
                 model,
                 input,
                 cached,
+                written,
                 output,
             } => {
                 task = self.on_spent(
@@ -964,6 +965,7 @@ impl App {
                     clew_core::llm::Usage {
                         input,
                         cached,
+                        written,
                         output,
                     },
                 );

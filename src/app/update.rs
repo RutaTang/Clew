@@ -20,6 +20,9 @@ impl App {
         // arrives (see below).
         let left_focus = ui::active_overlay(self).and_then(|o| o.leaves_focus());
         let task = self.dispatch(message);
+        // What this window's own model calls spent since: counted where it
+        // is shown (the server's are counted as their `Usage` comes).
+        self.take_local_spent();
         // One such come up — opened by a chord from inside a field, or a
         // question arriving while the user types — takes the keyboard from
         // what is under it: the Ask input left focused under a graph took

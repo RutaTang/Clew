@@ -1559,6 +1559,7 @@ fn notification_samples() -> Vec<Event> {
             model: "deepseek-v4-flash".into(),
             input: 1200,
             cached: 800,
+            written: 100,
             output: 300,
         },
     ]);
