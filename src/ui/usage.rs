@@ -514,6 +514,20 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
         if own && defaults {
             buttons = buttons.push(restore());
         }
+        // A price that reads as none: a way out all the same, back to the
+        // prices last kept — Done waits for prices it can keep, and the
+        // reader who cleared a field to give up had no way out but typing.
+        if !all_right {
+            buttons = buttons.push(super::toolbar::tip_at(
+                form::action(
+                    tr!("Cancel"),
+                    Some(Message::Usage(UsageMsg::EditPrices(false))),
+                ),
+                tr!("Keep the prices last saved"),
+                None,
+                iced::widget::tooltip::Position::Top,
+            ));
+        }
         let done = form::primary(
             tr!("Done"),
             all_right.then_some(Message::Usage(UsageMsg::EditPrices(false))),

@@ -298,6 +298,7 @@ pub(crate) fn node_pick(
     let node = layout.nodes.get(i)?;
     let open = node_open_message(layout, kind, i)?;
     Some(crate::app::model::GraphPick {
+        node: i,
         label: node.label.clone(),
         file: node.file.clone(),
         open: Box::new(open),
@@ -498,7 +499,8 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
             &app.graph_matches(),
             app.graph_found,
             app.graph_focus_rev,
-        ),
+        )
+        .with_pick(app.proj.graph_pick.as_ref()),
     )
     .width(Fill)
     .height(Fill);
@@ -594,6 +596,10 @@ pub(crate) struct GraphCanvas<'a> {
     /// Bumped to send the camera to the search's node in focus, or back
     /// over the whole map once the search is cleared.
     pub(crate) focus_rev: u64,
+    /// The node the app has picked — the one the row over the map names —
+    /// when the app keeps the pick ([`GraphCanvas::with_pick`]); else the
+    /// map keeps its own.
+    pub(crate) pick: Option<Option<usize>>,
 }
 
 impl<'a> GraphCanvas<'a> {
@@ -619,6 +625,35 @@ impl<'a> GraphCanvas<'a> {
             fit_rev: 0,
             lit: None,
             focus_rev: 0,
+            pick: None,
+        }
+    }
+
+    /// Light the node `pick` names, the app's pick: the row over the map
+    /// names it. The map lit its own last click, and the two parted — a
+    /// search moved the row to another node, or cleared it, and the node
+    /// clicked stayed lit. A pick that no longer names its node (the map
+    /// laid out anew) lights nothing.
+    pub(crate) fn with_pick(mut self, pick: Option<&crate::app::model::GraphPick>) -> Self {
+        self.pick = Some(pick.and_then(|p| {
+            self.layout
+                .nodes
+                .get(p.node)
+                .filter(|n| n.label == p.label && n.file == p.file)
+                .map(|_| p.node)
+        }));
+        self
+    }
+
+    /// The node picked: the app's, when it keeps the pick, else the map's
+    /// own while its layout is the one it was picked on.
+    fn picked(&self, state: &GraphState) -> Option<usize> {
+        match self.pick {
+            Some(pick) => pick,
+            None => state
+                .picked
+                .filter(|&(_, sig)| sig == state.sig)
+                .map(|(i, _)| i),
         }
     }
 
@@ -2140,10 +2175,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
         let proj = self.project_all(bounds, state);
         // The node under the pointer — else the one picked, lit as long as
         // it is: clicked, nothing on the map said which.
-        let picked = state
-            .picked
-            .filter(|&(_, sig)| sig == state.sig)
-            .map(|(i, _)| i);
+        let picked = self.picked(state);
         let hovered = cursor
             .position_in(bounds)
             .and_then(|c| self.hit(c, bounds, state))
@@ -2343,18 +2375,26 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                     && sig == state.sig
                     && sig == layout_sig(self.layout)
                 {
-                    let msg = if state.picked == Some((i, sig)) {
+                    let msg = if self.picked(state) == Some(i) {
                         self.open_message(i)
                     } else {
-                        state.picked = Some((i, sig));
-                        self.pick_message(i)
+                        let pick = self.pick_message(i);
+                        // Picked only once the app is told: a node that
+                        // opens nothing is not lit as picked.
+                        if pick.is_some() {
+                            state.picked = Some((i, sig));
+                        }
+                        pick
                     };
                     if let Some(msg) = msg {
                         return Some(Action::publish(msg).and_capture());
                     }
                 }
                 // A click off the nodes puts the picked one down.
-                if !matches!(was, Drag::Node(..)) && state.moved < 5.0 && state.picked.is_some() {
+                if !matches!(was, Drag::Node(..))
+                    && state.moved < 5.0
+                    && self.picked(state).is_some()
+                {
                     state.picked = None;
                     return Some(
                         Action::publish(Message::Graph(GraphMsg::Picked(None))).and_capture(),
@@ -3996,6 +4036,28 @@ mod tests {
         // Round: the third of one match is that match.
         let c = canvas(&l, true, false).with_search("file_4", &graph_matches(&l, "file_4"), 2, 1);
         assert_eq!(c.lit.as_ref().unwrap().focus, Some(4));
+    }
+
+    /// The node lit as picked is the one the row over the map names: a
+    /// search that moves the pick, or clears it, moves or puts out the
+    /// light, whatever was clicked last. A pick that no longer names its
+    /// node lights nothing; a map the app keeps no pick for lights its own.
+    #[test]
+    fn the_lit_node_is_the_one_the_pick_names() {
+        let l = layout(8);
+        let mut st = GraphState::default();
+        st.sig = layout_sig(&l);
+        st.picked = Some((2, st.sig));
+        let pick = |i: usize| node_pick(&l, crate::Overlay::ProjectImports, i).unwrap();
+        assert_eq!(canvas(&l, true, false).picked(&st), Some(2), "its own");
+        let c = canvas(&l, true, false).with_pick(Some(&pick(5)));
+        assert_eq!(c.picked(&st), Some(5), "the search's");
+        let c = canvas(&l, true, false).with_pick(None);
+        assert_eq!(c.picked(&st), None, "the search cleared");
+        let mut stale = pick(5);
+        stale.label = "gone.rs".into();
+        let c = canvas(&l, true, false).with_pick(Some(&stale));
+        assert_eq!(c.picked(&st), None, "not the node it named");
     }
 
     /// The camera goes to what the search found: centred, zoomed in, the

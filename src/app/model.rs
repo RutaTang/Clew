@@ -1190,6 +1190,9 @@ pub struct DiffState {
 /// wanted to look at.
 #[derive(Debug, Clone)]
 pub struct GraphPick {
+    /// The node's index in the layout it was picked on: lit there while it
+    /// still names this node (see [`crate::ui::GraphCanvas::with_pick`]).
+    pub node: usize,
     pub label: String,
     pub file: PathBuf,
     pub open: Box<crate::Message>,

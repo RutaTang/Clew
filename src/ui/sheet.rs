@@ -636,7 +636,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
 /// the reader came from, each a click back to it; the file on the sheet
 /// alone before there is a way back.
 fn trail_row(app: &App) -> Element<'_, Message> {
-    let stops = merged_stops(app.proj.history.recent_path(TRAIL_STOPS));
+    let stops = merged_stops(app.proj.history.recent_path(TRAIL_STOPS), app.first_rows());
     let last = stops.len().saturating_sub(1);
     // Its icon says what the row is where the pointer rests: read as a
     // breadcrumb, "lib.rs › Frame" over another file was taken for that
@@ -740,19 +740,20 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// The trail's stops as the row shows them: a file's stop followed by one
-/// in a function of that file is that one — "main.py › main" was one place
-/// said twice, and Back from the second seemed to do nothing.
+/// The trail's stops as the row shows them: a stop Back passes over
+/// ([`crate::history::History::changes_nothing`], for a view `first_rows`
+/// lines tall) is not one — "main.py › main" was one place said twice, and
+/// Back from the second seemed to do nothing.
 fn merged_stops<'a>(
     stops: Vec<(usize, &'a crate::history::Loc, Option<&'a str>)>,
+    first_rows: usize,
 ) -> Vec<(usize, &'a crate::history::Loc, Option<&'a str>)> {
     let keep: Vec<bool> = (0..stops.len())
         .map(|i| {
-            let (_, loc, label) = stops[i];
-            let into_it = stops
-                .get(i + 1)
-                .is_some_and(|(_, next, next_label)| next.path == loc.path && next_label.is_some());
-            !(label.is_none() && into_it)
+            let (_, loc, _) = stops[i];
+            !stops.get(i + 1).is_some_and(|(_, next, _)| {
+                crate::history::History::changes_nothing(loc, next, first_rows)
+            })
         })
         .collect();
     stops
@@ -846,8 +847,9 @@ mod tests {
         assert_eq!(trail_names(&stops, None, |_, _| false)[1], "subtotal");
     }
 
-    /// A file's stop followed by one in a function of that file is shown as
-    /// that one: "main.py › main" was one place said twice.
+    /// A file's stop followed by one near its top is shown as that one:
+    /// "main.py › main" was one place said twice. Down the file, Back stops
+    /// at the file's top, and so does the trail.
     #[test]
     fn a_files_stop_merges_into_its_functions() {
         let loc = |p: &str, line| crate::history::Loc {
@@ -855,18 +857,22 @@ mod tests {
             line,
         };
         let (main_top, main_fn, cart) = (
-            loc("main.py", Some(1)),
+            loc("main.py", None),
             loc("main.py", Some(12)),
             loc("cart.py", Some(3)),
         );
-        let stops = vec![
-            (0, &main_top, None),
-            (1, &main_fn, Some("main")),
-            (2, &cart, None),
-            (3, &cart, None),
-        ];
-        let ids: Vec<usize> = merged_stops(stops).iter().map(|s| s.0).collect();
-        assert_eq!(ids, [1, 2, 3], "two file stops in a row both stay");
+        let stops = || {
+            vec![
+                (0, &main_top, None),
+                (1, &main_fn, Some("main")),
+                (2, &cart, None),
+                (3, &cart, None),
+            ]
+        };
+        let ids: Vec<usize> = merged_stops(stops(), 40).iter().map(|s| s.0).collect();
+        assert_eq!(ids, [1, 3], "the same place twice is one stop");
+        let ids: Vec<usize> = merged_stops(stops(), 10).iter().map(|s| s.0).collect();
+        assert_eq!(ids, [0, 1, 3], "line 12 is off a 10-line screen");
     }
 
     /// The divider over the margin's edge, held by its middle and not yet

@@ -99,9 +99,6 @@ pub(crate) fn search_field_rect(app: &App) -> iced::Rectangle {
     }
 }
 
-/// Wrap a bare-icon control with a tooltip naming it and, when it has one,
-/// its keyboard shortcut. Icon buttons carry no visible label, so the
-/// tooltip is where a reader learns what each one does.
 /// The words of a control that spends an AI call, marked so: a sparkle
 /// before them, as every such control has. Links that spent a call looked
 /// like the free links beside them.
@@ -115,6 +112,9 @@ pub(crate) fn ai_words<'a>(label: &str, size: f32, color: iced::Color) -> Elemen
     .into()
 }
 
+/// Wrap a bare-icon control with a tooltip naming it and, when it has one,
+/// its keyboard shortcut. Icon buttons carry no visible label, so the
+/// tooltip is where a reader learns what each one does.
 pub(crate) fn chrome_tip<'a>(
     control: impl Into<Element<'a, Message>>,
     name: &'a str,
@@ -1771,8 +1771,8 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
                 tip_at(
                     item,
                     trn!(
-                        "Shown for files over 1 line",
-                        "Shown for files over {n} lines",
+                        "Shown when a file shows 1 line or more (folded lines don't count)",
+                        "Shown when a file shows {n} lines or more (folded lines don't count)",
                         crate::codeview::MINIMAP_MIN_ROWS
                     ),
                     None,

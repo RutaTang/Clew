@@ -14136,6 +14136,7 @@ fn a_picked_node_is_said_over_the_map_which_fills_the_window() {
     app.proj.overlay = Some(crate::Overlay::ProjectImports);
     let file = PathBuf::from("/nonexistent/clew-ui-test/src/app/mod.rs");
     app.proj.graph_pick = Some(crate::app::model::GraphPick {
+        node: 0,
         label: "app/mod.rs".into(),
         file: file.clone(),
         open: Box::new(Message::Graph(GraphMsg::OverlayOpenImports(file.clone()))),
@@ -16330,8 +16331,13 @@ fn the_usage_page_says_what_the_key_spent() {
     assert!(shows(&mut page, "Enter a number."));
     drop(page);
     // And Done keeps the editor until it is one: pressed, it closed and
-    // dropped the edit without a word.
+    // dropped the edit without a word. Cancel is the way out meanwhile,
+    // back to the prices last kept.
     assert!(click(sim_tall(super::usage::usage_page(&app)), "Done").is_empty());
+    assert!(matches!(
+        click(sim_tall(super::usage::usage_page(&app)), "Cancel").as_slice(),
+        [Message::Usage(crate::UsageMsg::EditPrices(false))]
+    ));
     let _ = app.update(Message::Usage(crate::UsageMsg::Price(
         crate::app::usage::PriceField::Input,
         "0.2".into(),
@@ -16340,6 +16346,10 @@ fn the_usage_page_says_what_the_key_spent() {
         click(sim_tall(super::usage::usage_page(&app)), "Done").as_slice(),
         [Message::Usage(crate::UsageMsg::EditPrices(false))]
     ));
+    assert!(
+        !shows(&mut sim_tall(super::usage::usage_page(&app)), "Cancel"),
+        "prices it can keep: Done alone"
+    );
 }
 
 /// An empty call hierarchy, with the caret in a function, offers that
@@ -16921,14 +16931,27 @@ fn a_local_call_is_counted_where_it_is_shown() {
 }
 
 /// A folder's change dot counts only what the tree shows inside it: a
-/// dot for `__pycache__/*.pyc`, hidden by the tree, led nowhere.
+/// dot for `__pycache__/*.pyc`, hidden by the tree, or for a deleted file,
+/// led nowhere; a tracked file in a folder the tree otherwise leaves out is
+/// listed, and counts.
 #[test]
 fn a_folder_marks_only_the_changes_the_tree_shows() {
-    use super::sidebar::shown_in_tree;
-    assert!(shown_in_tree("shop/cart.py"));
-    assert!(!shown_in_tree("shop/__pycache__/cart.cpython-313.pyc"));
-    assert!(!shown_in_tree("web/node_modules/x/index.js"));
-    assert!(!shown_in_tree(".clew/bookmarks.json"));
-    assert!(shown_in_tree(".clew/launch.json"));
-    assert!(shown_in_tree("README.md"));
+    use super::sidebar::tree_holds;
+    use crate::fs_scan::DirNode;
+    let dir = |dirs: Vec<(&str, DirNode)>, files: &[&str]| DirNode {
+        dirs: dirs.into_iter().map(|(n, d)| (n.to_string(), d)).collect(),
+        files: files.iter().map(|f| f.to_string()).collect(),
+    };
+    let shop = dir(
+        vec![(
+            "node_modules",
+            dir(vec![("pkg", dir(vec![], &["index.js"]))], &[]),
+        )],
+        &["cart.py"],
+    );
+    assert!(tree_holds(&shop, "cart.py"));
+    assert!(!tree_holds(&shop, "__pycache__/cart.cpython-313.pyc"));
+    assert!(!tree_holds(&shop, "gone.py"), "deleted: not in the tree");
+    assert!(tree_holds(&shop, "node_modules/pkg/index.js"), "tracked");
+    assert!(!tree_holds(&shop, "node_modules/pkg/other.js"));
 }

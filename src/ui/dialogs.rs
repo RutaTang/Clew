@@ -517,21 +517,29 @@ fn suggestion_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
                 Some(tr!("{file}, line {line}", file = file, line = line)),
                 None,
             ),
-            Suggestion::Command { title, recent } => (
-                match title.as_str() {
-                    _ if *recent => Glyph::TimeTravel,
-                    "Open Remote…" => Glyph::Remote,
-                    "Open Folder…" => Glyph::FolderOpen,
-                    _ => Glyph::Prompt,
-                },
-                theme::dim(),
-                crate::i18n::lookup(title).to_string(),
-                None,
-                app.palette
-                    .iter()
-                    .find(|c| &c.title == title)
-                    .and_then(|c| c.keys.clone()),
-            ),
+            Suggestion::Command { title, recent } => {
+                let command = app.palette.iter().find(|c| &c.title == title);
+                // What uses the AI model is marked so here too, as when
+                // typed for: a recent Explain looked like any command.
+                let (glyph, tint) = if command.is_some_and(|c| c.spends_ai()) {
+                    (Glyph::Sparkle, theme::accent())
+                } else {
+                    let glyph = match title.as_str() {
+                        _ if *recent => Glyph::TimeTravel,
+                        "Open Remote…" => Glyph::Remote,
+                        "Open Folder…" => Glyph::FolderOpen,
+                        _ => Glyph::Prompt,
+                    };
+                    (glyph, theme::dim())
+                };
+                (
+                    glyph,
+                    tint,
+                    crate::i18n::lookup(title).to_string(),
+                    None,
+                    command.and_then(|c| c.keys.clone()),
+                )
+            }
         };
         rows.push(bar_row(
             glyph,

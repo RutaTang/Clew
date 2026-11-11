@@ -1759,9 +1759,11 @@ pub(crate) fn leaning_on(
     let g = &app.proj.project_calls.graph;
     let id = g.id_of_key(file, name, ordinal)?;
     let callers = g.callers_of(id);
-    // A caller by its file and name: call sites say which function they
-    // are in by its name alone, so two callers of one name in one file
-    // would count each other's calls.
+    // Counted as the Calls tab lists them: each caller once.
+    let caller_count = callers.len();
+    // Their call sites, by the caller's file and name: call sites say which
+    // function they are in by its name alone, so two callers of one name in
+    // one file would count each other's calls.
     let callers: std::collections::BTreeSet<(&std::path::Path, &str)> = callers
         .iter()
         .map(|&c| {
@@ -1772,7 +1774,7 @@ pub(crate) fn leaning_on(
     let mut sites = 0;
     for (caller_file, caller) in &callers {
         let Some(calls) = app.proj.calls_by_file.get(*caller_file) else {
-            return Some(Leaning::Callers(g.callers_of(id).len()));
+            return Some(Leaning::Callers(caller_count));
         };
         sites += calls
             .calls
@@ -1794,7 +1796,7 @@ pub(crate) fn leaning_on(
             .count();
     }
     Some(Leaning::References {
-        callers: callers.len(),
+        callers: caller_count,
         sites,
     })
 }

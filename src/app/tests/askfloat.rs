@@ -290,6 +290,14 @@ fn ask_keeps_its_sessions() {
         "newest first"
     );
 
+    // The menu, drawn over everything, goes as the command palette comes
+    // over it: it stayed on top, and took the palette's clicks.
+    let _ = app.update(Message::Ask(AskMsg::SessionsMenu(true)));
+    assert!(app.ask_sessions_menu);
+    let _ = app.update(Message::Nav(crate::NavMsg::PaletteOpened));
+    assert!(!app.ask_sessions_menu, "closed under the palette");
+    dismiss_overlays(&mut app);
+
     // Back to the first: its questions and answers on the card.
     let _ = app.update(Message::Ask(AskMsg::SessionsMenu(true)));
     assert!(app.ask_sessions_menu);

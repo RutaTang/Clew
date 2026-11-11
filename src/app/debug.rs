@@ -121,18 +121,25 @@ impl App {
             .is_some_and(|calls| calls.calls.iter().any(|s| s.caller.is_none()))
     }
 
-    /// The one file of the project in `lang` with a program start (a
-    /// `main`), when there is exactly one.
+    /// The project's evident program start in `lang`, when there is exactly
+    /// one: a `main` function — not a method of that name — in a file named
+    /// `main` or `__main__`, outside the folders whose code is not the
+    /// program (tests, fixtures, examples, scripts, tools, docs, benches,
+    /// others' code). Any file with a `main` did not do: a project's
+    /// `scripts/seed_db.py` ran, and rewrote its database, for Run on
+    /// `utils.py`.
     fn only_program_start(&self, lang: dap::Lang) -> Option<PathBuf> {
         let mut starts = self
             .proj
             .symbol_index_by_file
             .iter()
             .filter(|(file, symbols)| {
-                symbols
-                    .iter()
-                    .any(|s| s.entry == Some(crate::graph::index::EntryKind::Main))
-                    && dap::Lang::detect(None, file) == Some(lang)
+                symbols.iter().any(|s| {
+                    s.entry == Some(crate::graph::index::EntryKind::Main)
+                        && s.kind == "function"
+                        && !s.is_test
+                        && is_program_start_file(&s.rel)
+                }) && dap::Lang::detect(None, file) == Some(lang)
             })
             .map(|(file, _)| file.clone());
         let start = starts.next()?;
@@ -155,11 +162,14 @@ impl App {
     /// What the status line says while the session runs: a run is no
     /// debugger's.
     fn running_said(&self) -> String {
-        // What runs, named: which file Run picked was said nowhere.
+        // What runs, named: which file Run picked was said nowhere. A
+        // remote run's program is the project's folder there, not a file —
+        // "Running Clew…" named no program.
         let name = self
             .debug
             .session
             .as_ref()
+            .filter(|_| !self.connection.is_remote())
             .and_then(|s| s.program.file_name())
             .map(|n| n.to_string_lossy().into_owned());
         match (self.debug.no_debug, name) {
@@ -2745,9 +2755,75 @@ pub(crate) struct Closing {
     pub(crate) teardown: Task<Message>,
 }
 
+/// Folders whose `main` is not the program's: its tests and their inputs,
+/// examples, helper scripts and tools, docs, benchmarks, others' code.
+const NOT_THE_PROGRAM: &[&str] = &[
+    "test",
+    "tests",
+    "testdata",
+    "test_data",
+    "fixture",
+    "fixtures",
+    "__fixtures__",
+    "example",
+    "examples",
+    "script",
+    "scripts",
+    "tool",
+    "tools",
+    "doc",
+    "docs",
+    "bench",
+    "benches",
+    "benchmark",
+    "benchmarks",
+    "vendor",
+    "third_party",
+    "node_modules",
+];
+
+/// Whether `rel`, a file of the project, is where its program evidently
+/// starts: named `main` or `__main__`, in none of [`NOT_THE_PROGRAM`].
+fn is_program_start_file(rel: &str) -> bool {
+    let mut parts = rel.rsplit(['/', '\\']);
+    let named = parts
+        .next()
+        .and_then(|name| Path::new(name).file_stem())
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| matches!(stem, "main" | "__main__"));
+    named && !parts.any(|dir| NOT_THE_PROGRAM.contains(&dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A program evidently starts in a `main` or `__main__` file outside its
+    /// tests, scripts, tools and the like — not in any file with a `main`.
+    #[test]
+    fn a_program_start_is_a_main_file_of_the_program_itself() {
+        for rel in [
+            "main.py",
+            "app/__main__.py",
+            "cmd/serve/main.go",
+            "src\\main.py",
+        ] {
+            assert!(is_program_start_file(rel), "{rel}");
+        }
+        for rel in [
+            "scripts/seed_db.py",
+            "scripts/main.py",
+            "tests/main.py",
+            "tools/gen/main.go",
+            "examples/demo/main.go",
+            "benches/main.py",
+            "utils.py",
+            "main_test.go",
+            "domain.py",
+        ] {
+            assert!(!is_program_start_file(rel), "{rel}");
+        }
+    }
 
     /// Clew's notice comes out of the launch body — the adapter never sees
     /// it — and is what the console shows; a body without one is untouched.

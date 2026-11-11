@@ -129,15 +129,34 @@ pub fn word_at(lines: &[HlLine], line: usize, col: usize) -> Option<String> {
 }
 
 /// [`word_at`], for a word of the code itself: none inside a string or a
-/// comment. Clicked inside "declined@example.com", every `declined`
-/// variable of the function lit up, as if the text named it.
+/// comment — but for one in `{…}` in a string, an interpolation
+/// (`println!("{total}")`, `${total}`, an f-string), where it is a variable.
+/// Clicked inside "declined@example.com", every `declined` variable of the
+/// function lit up, as if the text named it.
 pub fn code_word_at(lines: &[HlLine], line: usize, col: usize) -> Option<String> {
-    let (start, _) = word_range_at(lines, line, col)?;
+    let (start, end) = word_range_at(lines, line, col)?;
     let (_, _, _, style) = locate(lines, line, start)?;
-    if is_literal(style) {
+    if is_literal(style) && !interpolated(lines.get(line)?, start, end) {
         return None;
     }
     word_at(lines, line, col)
+}
+
+/// Whether the word at columns `start..end` of `line` sits in braces: the
+/// nearest brace before it opens, the nearest after it closes.
+fn interpolated(line: &HlLine, start: usize, end: usize) -> bool {
+    let before = line_window(line, 0, start);
+    let after = line_window(line, end, end + 4 * MAX_WORD_CHARS);
+    let opens = before
+        .iter()
+        .rev()
+        .find(|c| matches!(c, '{' | '}'))
+        .is_some_and(|&c| c == '{');
+    let closes = after
+        .iter()
+        .find(|c| matches!(c, '{' | '}'))
+        .is_some_and(|&c| c == '}');
+    opens && closes
 }
 
 /// Whole-word occurrences of `word` across `lines`, as (line, col0, col1) in
@@ -547,6 +566,20 @@ mod tests {
         assert_eq!(code_word_at(&lines, 0, 5).as_deref(), Some("foo"));
         assert_eq!(code_word_at(&lines, 1, 10), None);
         assert_eq!(code_word_at(&lines, 2, 4), None);
+    }
+
+    /// A word in `{…}` in a string is a variable's, interpolated: the caret
+    /// there lights it, as on the code's own.
+    #[test]
+    fn an_interpolated_word_is_the_variables() {
+        use crate::highlight::highlight_lines;
+        let src = "let total = 1;\nprintln!(\"{total} items\");\nlet s = `${total}`;\n";
+        let lines = highlight_lines(src, Some("rust"));
+        assert_eq!(code_word_at(&lines, 1, 12).as_deref(), Some("total"));
+        // Beside the braces, the string's words are still its own.
+        assert_eq!(code_word_at(&lines, 1, 19), None);
+        let lines = highlight_lines("const s = `${total} of ${all}`;\n", Some("javascript"));
+        assert_eq!(code_word_at(&lines, 0, 14).as_deref(), Some("total"));
     }
 
     /// Reference implementation of bracket matching: the plain per-character

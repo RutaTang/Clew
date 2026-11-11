@@ -27989,6 +27989,66 @@ fn a_jump_into_another_short_file_keeps_its_start() {
     assert_eq!(v.scroll_y, 18.0 * lh, "its last line at the foot");
 }
 
+/// Run swaps in only an evident program start: a `main` in a helper script,
+/// a method named `main`, or two starts to choose between leave Run on the
+/// file it was asked for — a project's `scripts/seed_db.py` ran, and
+/// rewrote its database, for Run on `utils.py`.
+#[test]
+fn run_swaps_in_only_an_evident_program_start() {
+    let mut app = scanned_app("debug-run-evident-main");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(root.join("utils.py"), "def price():\n    return 3\n").unwrap();
+    for main in ["main.py", "scripts/seed_db.py", "app/__main__.py"] {
+        std::fs::write(root.join(main), "def main():\n    pass\n").unwrap();
+    }
+    let symbol = |file: &str, name: &str, kind: &str| SymbolEntry {
+        name: name.into(),
+        kind: kind.into(),
+        rel: file.into(),
+        abs: root.join(file),
+        line: 1,
+        is_test: false,
+        entry: (name == "main").then_some(crate::graph::index::EntryKind::Main),
+    };
+    app.proj.symbol_index_by_file.insert(
+        root.join("utils.py"),
+        Arc::new(vec![symbol("utils.py", "price", "function")]),
+    );
+    open_synchronously(&mut app, "utils.py", None);
+    let runs = |app: &mut App| {
+        let _ = app.update(Message::Debug(DebugMsg::Run));
+        let program = app.debug.session.as_ref().expect("a run").program.clone();
+        let _ = app.update(Message::Debug(DebugMsg::Stop));
+        program
+    };
+    // A helper script's main: not the program.
+    app.proj.symbol_index_by_file.insert(
+        root.join("scripts/seed_db.py"),
+        Arc::new(vec![symbol("scripts/seed_db.py", "main", "function")]),
+    );
+    assert_eq!(runs(&mut app), root.join("utils.py"));
+    // A method named main: not a program start.
+    app.proj.symbol_index_by_file.insert(
+        root.join("main.py"),
+        Arc::new(vec![symbol("main.py", "main", "method")]),
+    );
+    assert_eq!(runs(&mut app), root.join("utils.py"));
+    // One evident start: it runs.
+    app.proj.symbol_index_by_file.insert(
+        root.join("main.py"),
+        Arc::new(vec![symbol("main.py", "main", "function")]),
+    );
+    assert_eq!(runs(&mut app), root.join("main.py"));
+    // Two to choose between: neither is picked for the reader.
+    app.proj.symbol_index_by_file.insert(
+        root.join("app/__main__.py"),
+        Arc::new(vec![symbol("app/__main__.py", "main", "function")]),
+    );
+    assert_eq!(runs(&mut app), root.join("utils.py"));
+}
+
 /// Run on a module that only defines things runs the project's one
 /// program start instead — Run on `pricing.py` beside a `main.py` printed
 /// nothing and exited 0 — and the status line names what runs. A file that

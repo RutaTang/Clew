@@ -635,14 +635,14 @@ impl App {
             ReadingMsg::GoBack if self.active_viewer().is_some() && self.put_away_page() => {
                 Task::none()
             }
-            ReadingMsg::GoBack => match self.proj.history.back() {
+            ReadingMsg::GoBack => match self.proj.history.back_showing(self.first_rows()) {
                 Some(loc) => {
                     let saved = self.save_history();
                     Task::batch([saved, self.open_file(loc.path, loc.line, false)])
                 }
                 None => Task::none(),
             },
-            ReadingMsg::GoForward => match self.proj.history.forward() {
+            ReadingMsg::GoForward => match self.proj.history.forward_showing(self.first_rows()) {
                 Some(loc) => {
                     let saved = self.save_history();
                     Task::batch([saved, self.open_file(loc.path, loc.line, false)])

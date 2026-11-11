@@ -100,7 +100,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 tr!("Test connection"),
                 (!testing).then_some(Message::Settings(SettingsMsg::TestConnection)),
             ),
-            tr!("Sends one tiny AI request to check the key (less than $0.0001)"),
+            tr!("Sends one tiny AI request to check the key (a fraction of a cent)"),
             None,
             iced::widget::tooltip::Position::Top,
         ),

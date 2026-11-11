@@ -283,6 +283,7 @@ fn also_called(title: &str) -> &'static str {
         "Code Statistics" => "stats",
         "Architecture Overview" => "overview",
         "Talk" => "voice microphone listen",
+        "Diff with Last Commit" => "head diff vs head",
         _ => "",
     }
 }
@@ -296,6 +297,7 @@ fn formerly(title: &str) -> Option<&'static str> {
         "Type Graph" => Some("Type Map"),
         "Code Statistics" => Some("Stats"),
         "Architecture Overview" => Some("Overview"),
+        "Diff with Last Commit" => Some("Diff vs HEAD"),
         _ => None,
     }
 }

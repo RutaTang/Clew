@@ -526,6 +526,9 @@ impl App {
                 // window's AI calls is told which language to answer in.
                 theme::redraw_everywhere();
                 self.send_ai_config();
+                // What is said of embeddings was put in words once, in the
+                // language then: said again in this one.
+                self.refresh_embeddings();
                 self.respeak_explanation()
             }
             SettingsMsg::SetThemeVariant { id, is_light } => {
@@ -538,6 +541,7 @@ impl App {
                 // It may have been the language another window chose: this
                 // window's server answers in it too.
                 self.send_ai_config();
+                self.refresh_embeddings();
                 self.respeak_explanation()
             }
             SettingsMsg::SystemAppearanceChanged => {

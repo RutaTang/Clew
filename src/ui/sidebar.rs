@@ -797,16 +797,19 @@ pub(crate) fn file_change_mark<'a>(app: &App, rel: &str) -> Element<'a, Message>
     }
 }
 
-/// A folder holding a change: a dot, as editors mark one.
-fn dir_change_mark<'a>(app: &App, rel: &str) -> Element<'a, Message> {
+/// A folder holding a change: a dot, as editors mark one. `node` is the
+/// folder as the tree lays it out.
+fn dir_change_mark<'a>(app: &App, rel: &str, node: &DirNode) -> Element<'a, Message> {
     let inside = format!("{rel}/");
     // Only what the tree shows inside: a dot for `__pycache__/*.pyc`, which
-    // the tree hides, led nowhere when the folder was opened.
+    // the tree hides, or for a file deleted, led nowhere when the folder was
+    // opened.
     let changed = app
         .proj
         .git_status
         .keys()
-        .filter(|changed| changed.starts_with(&inside) && shown_in_tree(changed))
+        .filter_map(|changed| changed.strip_prefix(&inside))
+        .filter(|under| tree_holds(node, under))
         .count();
     if changed == 0 {
         return space().width(0).into();
@@ -821,19 +824,18 @@ fn dir_change_mark<'a>(app: &App, rel: &str) -> Element<'a, Message> {
     )
 }
 
-/// Whether the file tree shows the file at `rel`: none in a folder it
-/// leaves out (`__pycache__`, `node_modules`, `.clew` but for the files of
-/// it that are shown).
-pub(crate) fn shown_in_tree(rel: &str) -> bool {
-    use clew_core::fs_scan::{NOISE_DIRS, VISIBLE_CLEW_FILES};
-    let parts: Vec<&str> = rel.split('/').collect();
-    let Some((_, dirs)) = parts.split_last() else {
-        return true;
-    };
-    if let [".clew", name] = parts.as_slice() {
-        return VISIBLE_CLEW_FILES.contains(name);
+/// Whether the tree under `node` shows the file at `rel`, relative to it.
+/// Not a rule of folder names: a tracked file in a folder the tree leaves
+/// out is listed all the same.
+pub(crate) fn tree_holds(node: &DirNode, rel: &str) -> bool {
+    match rel.split_once('/') {
+        Some((dir, rest)) => node
+            .dirs
+            .iter()
+            .find(|(name, _)| name == dir)
+            .is_some_and(|(_, child)| tree_holds(child, rest)),
+        None => node.files.iter().any(|f| f == rel),
     }
-    !dirs.iter().any(|d| NOISE_DIRS.contains(d))
 }
 
 /// The colour of a change's letter.
@@ -1078,7 +1080,7 @@ pub(crate) fn append_tree_rows<'a>(
                 ts::BASE,
             ),
             space().width(Fill),
-            dir_change_mark(app, &rel),
+            dir_change_mark(app, &rel, child),
         ]
         .spacing(6)
         .height(Fill)

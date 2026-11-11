@@ -240,6 +240,16 @@ impl App {
     /// [`Self::open_file`] once the trail is recorded: show `abs` at `line`
     /// in the active pane — moving the cursor when it is already there, else
     /// loading it.
+    /// How many lines the code view shows from a file's top — what Back,
+    /// Forward and the trail take to be a file's first screen. Not measured
+    /// yet: none.
+    pub(crate) fn first_rows(&self) -> usize {
+        let lh = self.line_height();
+        self.active_viewer()
+            .filter(|v| v.viewport_measured && lh > 0.0)
+            .map_or(0, |v| (v.viewport_h / lh) as usize)
+    }
+
     fn open_file_at(&mut self, abs: PathBuf, line: Option<usize>) -> Task<Message> {
         // A jump lands the reader in the code view.
         self.code_focused = true;

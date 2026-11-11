@@ -207,20 +207,43 @@ impl History {
         self.renumbered = renumbered;
     }
 
-    /// Go back to the visit before this one — past any that would leave the
-    /// screen as it is: the file the reader is in, visited with no line (a
-    /// file opened, then a function in it gone to). Back to it changed
-    /// nothing on screen, and seemed broken.
+    /// Go back to the visit before this one; see [`History::back_showing`].
+    /// With no view measured, only a visit to this very place is passed.
     pub fn back(&mut self) -> Option<Loc> {
+        self.back_showing(0)
+    }
+
+    /// Go forward to the visit after this one; see
+    /// [`History::forward_showing`].
+    pub fn forward(&mut self) -> Option<Loc> {
+        self.forward_showing(0)
+    }
+
+    /// Whether going from `here` to `loc` would leave the screen as it is:
+    /// the same place, or the top of the same file while `here` is on its
+    /// first screen — a view `first_rows` lines tall, which shows a line at
+    /// its top with three above it (as a jump does). A file opened, then a
+    /// function near its top gone to: Back to the file changed nothing on
+    /// screen, and seemed broken. Down the file, it scrolls to the top.
+    pub fn changes_nothing(loc: &Loc, here: &Loc, first_rows: usize) -> bool {
+        loc.path == here.path
+            && (loc.line == here.line
+                || (loc.line.is_none() && here.line.is_some_and(|l| l + 3 <= first_rows)))
+    }
+
+    /// Go back to the visit before this one — past any that would change
+    /// nothing on screen ([`History::changes_nothing`], for a view
+    /// `first_rows` lines tall). At the trail's start it stops there.
+    pub fn back_showing(&mut self, first_rows: usize) -> Option<Loc> {
         let mut cur = self.current?;
         let here = self.nodes[cur].loc.clone();
-        let stays =
-            |loc: &Loc| loc.path == here.path && (loc.line.is_none() || loc.line == here.line);
         loop {
             let parent = self.nodes[cur].parent?;
             self.nodes[parent].preferred = Some(cur); // forward returns to where we were
             cur = parent;
-            if !stays(&self.nodes[cur].loc) || self.nodes[cur].parent.is_none() {
+            if !Self::changes_nothing(&self.nodes[cur].loc, &here, first_rows)
+                || self.nodes[cur].parent.is_none()
+            {
                 break;
             }
         }
@@ -228,13 +251,22 @@ impl History {
         Some(self.nodes[cur].loc.clone())
     }
 
-    pub fn forward(&mut self) -> Option<Loc> {
-        let cur = self.current?;
-        let child = self.nodes[cur]
-            .preferred
-            .or_else(|| self.nodes[cur].children.last().copied())?;
-        self.current = Some(child);
-        Some(self.nodes[child].loc.clone())
+    /// Go forward to the visit after this one — past those Back passes
+    /// over, so that Back then Forward returns to the same place.
+    pub fn forward_showing(&mut self, first_rows: usize) -> Option<Loc> {
+        let next = |h: &Self, i: usize| {
+            h.nodes[i]
+                .preferred
+                .or_else(|| h.nodes[i].children.last().copied())
+        };
+        let mut cur = next(self, self.current?)?;
+        while let Some(after) = next(self, cur)
+            && Self::changes_nothing(&self.nodes[cur].loc, &self.nodes[after].loc, first_rows)
+        {
+            cur = after;
+        }
+        self.current = Some(cur);
+        Some(self.nodes[cur].loc.clone())
     }
 
     /// The visits that led to the current one, oldest first and the current
@@ -1027,21 +1059,28 @@ mod tests {
     }
 
     /// Back skips a visit that would leave the screen as it is — the file
-    /// the reader is in, opened with no line — and goes to the one before.
+    /// the reader is in, opened with no line, while the place is on its
+    /// first screen — and Forward skips it the same way: Back then Forward
+    /// returns to where the reader was. Down the file, the file's top is a
+    /// stop of its own, both ways.
     #[test]
     fn back_skips_a_visit_that_would_change_nothing() {
         let mut h = History::default();
         push(&mut h, "cart", Some(3));
         push(&mut h, "main", None);
         h.push(loc("main", Some(12)), Some("main".into()));
-        assert_eq!(h.back(), Some(loc("cart", Some(3))));
-        // Forward comes back the way it went.
-        assert_eq!(h.forward(), Some(loc("main", None)));
+        assert_eq!(h.back_showing(40), Some(loc("cart", Some(3))));
+        assert_eq!(h.forward_showing(40), Some(loc("main", Some(12))));
+        assert_eq!(h.back_showing(40), Some(loc("cart", Some(3))));
+        // A view too short to show line 12 from the top: the top is a stop.
+        assert_eq!(h.forward_showing(10), Some(loc("main", None)));
+        assert_eq!(h.forward_showing(10), Some(loc("main", Some(12))));
+        assert_eq!(h.back_showing(10), Some(loc("main", None)));
         // At the trail's start it stops there.
         let mut h = History::default();
         push(&mut h, "main", None);
         h.push(loc("main", Some(12)), Some("main".into()));
-        assert_eq!(h.back(), Some(loc("main", None)));
+        assert_eq!(h.back_showing(40), Some(loc("main", None)));
     }
 
     #[test]
