@@ -392,7 +392,8 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
         .padding([5, 0])
         .width(Fill)
         .on_press_maybe(
-            (!active && !(empty && label == tr!("Search")))
+            // With no tour, Search has nothing to search: not offered.
+            (!(active || (empty && label == tr!("Search"))))
                 .then(|| super::heard::said(label, Message::Walk(WalkMsg::ToggleMode))),
         )
     };
