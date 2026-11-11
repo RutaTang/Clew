@@ -565,11 +565,9 @@ impl Estimate {
     /// Where the figures come from, and what they are worth.
     pub(crate) fn basis(&self) -> String {
         if self.from_history {
-            tr!("Estimated from your recent explanations. Your provider's bill is the final word.")
-                .to_string()
+            tr!("Estimated from your recent explanations.").to_string()
         } else {
-            tr!("Estimated from a typical explanation. Your provider's bill is the final word.")
-                .to_string()
+            tr!("Estimated from a typical explanation.").to_string()
         }
     }
 }

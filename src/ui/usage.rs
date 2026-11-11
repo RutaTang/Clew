@@ -264,18 +264,17 @@ fn spent_group<'a>(s: &usage::Summary) -> Element<'a, Message> {
         ]
         .spacing(8),
     ));
+    // Said only when it changes how the figures read: a call with no
+    // price is left out of them.
     let unpriced = s.month.unpriced;
     form::group(
         tr!("Spent"),
-        Some(if unpriced > 0 {
+        (unpriced > 0).then(|| {
             trn!(
-                "Worked out from each call's tokens at the prices below. 1 call this month has no price.",
-                "Worked out from each call's tokens at the prices below. {n} calls this month have no price.",
+                "1 call this month has no price, so it isn't counted.",
+                "{n} calls this month have no price, so they aren't counted.",
                 unpriced as usize
             )
-        } else {
-            tr!("Worked out from each call's tokens at the prices below. Your provider's bill is the final word.")
-                .to_string()
         }),
         None,
         rows,
