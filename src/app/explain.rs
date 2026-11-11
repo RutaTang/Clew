@@ -1277,7 +1277,15 @@ impl App {
                 // (the file banner's click, the file's Explain) did not show.
                 self.show_right_panel = true;
                 self.margin_tab = MarginTab::Notes;
-                self.show_explanation(node)
+                let unexplained = !self.proj.explain.cache.contains_key(&node);
+                let shown = self.show_explanation(node);
+                // Nothing written of it, and nothing to write it with: where
+                // a key is added, as every other way to explain goes — the
+                // margin said "Not explained yet." and no more.
+                if unexplained && let Err(settings) = self.require_llm() {
+                    return Task::batch([shown, settings]);
+                }
+                shown
             }
             ExplainMsg::ReexplainNode => self.on_reexplain_node(),
             ExplainMsg::Blocks(node) => self.on_explain_blocks(node),

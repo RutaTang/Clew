@@ -658,22 +658,7 @@ pub(crate) fn tour_prep_sheet<'a>(
     let shop = match sample {
         None => tr!("Getting Tea Shop ready…").to_string(),
         Some(Err(e)) => e.clone(),
-        Some(Ok((_, census))) => {
-            let servers = if census.servers.is_empty() {
-                tr!("Its language server is ready.").to_string()
-            } else {
-                tr!(
-                    "Set up as the tour starts: {servers}.",
-                    servers = crate::app::setup::servers_line(&census.servers)
-                )
-            };
-            let calls = crate::app::setup::explain_line(
-                app.llm_available,
-                Some(census.calls),
-                app.embed_available,
-            );
-            format!("{servers} {calls}")
-        }
+        Some(Ok((_, census))) => tea_shop_line(census, app.llm_available, app.embed_available),
     };
 
     let steps = column![
@@ -761,10 +746,56 @@ pub(crate) fn tour_prep_sheet<'a>(
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }
 
+/// What the tour's step for its sample, Tea Shop, says once the sample is
+/// looked at: its language server — ready, or set up as the tour starts —
+/// and, with a model to explain it with, what explaining it takes. With
+/// none, the step above it, the model's, says so: said here too, "Needs an
+/// API key in Settings." read as the server's.
+pub(crate) fn tea_shop_line(
+    census: &crate::app::setup::Census,
+    llm_available: bool,
+    embed_available: bool,
+) -> String {
+    let servers = if census.servers.is_empty() {
+        tr!("Its language server is ready.").to_string()
+    } else {
+        tr!(
+            "Set up as the tour starts: {servers}.",
+            servers = crate::app::setup::servers_line(&census.servers)
+        )
+    };
+    if !llm_available {
+        return servers;
+    }
+    let calls = crate::app::setup::explain_line(true, Some(census.calls), embed_available);
+    format!("{servers} {calls}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// Tea Shop's step says what its server takes — and, with no model to
+    /// explain it with, nothing of a key: the model's step says so, and here
+    /// "Needs an API key in Settings." read as the server's.
+    #[test]
+    fn tea_shops_step_says_nothing_of_a_key() {
+        let census = crate::app::setup::Census {
+            servers: vec![crate::app::setup::SetupServer {
+                language: "python".into(),
+                name: "pyright".into(),
+                fetch: crate::app::setup::Fetch::Nothing,
+                builds: false,
+            }],
+            calls: Some(12),
+        };
+        let without = tea_shop_line(&census, false, false);
+        assert!(without.contains("pyright"), "{without}");
+        assert!(!without.contains("API key"), "{without}");
+        let with = tea_shop_line(&census, true, false);
+        assert!(with.contains("AI call"), "what explaining takes: {with}");
+    }
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> iced::Rectangle {
         iced::Rectangle {

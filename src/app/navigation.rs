@@ -868,8 +868,11 @@ impl App {
     }
 
     pub(crate) fn on_finder_opened(&mut self, mode: FinderMode) -> Task<Message> {
+        // No project, no files or symbols to find: the command bar — Open
+        // Folder, Open Remote, every command — which the field over the
+        // window offers to search too. Ctrl+P and the field did nothing.
         if self.proj.project.is_none() {
-            return Task::none();
+            return self.on_palette_opened();
         }
         self.proj.finder.open = true;
         self.proj.finder.bar = false;

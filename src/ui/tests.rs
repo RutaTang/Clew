@@ -12211,7 +12211,9 @@ fn the_status_bar_is_one_line_at_any_width() {
 
 /// What the status bar lays out for its room — the chip that sets up
 /// missing language servers — is built only when laid out, and is pressed
-/// by voice all the same: gathered as it is drawn.
+/// by voice all the same: gathered as it is drawn. Pressed, it asks first —
+/// the setup sheet, saying what each server takes — and fetches nothing,
+/// runs no build, until that is agreed to.
 #[test]
 fn the_status_bars_chips_are_pressed_by_voice() {
     let mut app = reader_app();
@@ -12228,8 +12230,16 @@ fn the_status_bars_chips_are_pressed_by_voice() {
         .expect("the chip is gathered");
     assert!(matches!(
         chip.message,
-        Message::Project(ProjectMsg::SetUpMissing)
+        Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Manage))
     ));
+    let _ = app.update(chip.message.clone());
+    assert!(
+        app.setup
+            .as_ref()
+            .is_some_and(|s| s.mode == crate::app::setup::SetupMode::Manage),
+        "the setup sheet, asking"
+    );
+    assert!(app.proj.setting_up.is_empty(), "nothing set up yet");
 }
 
 /// The ⋯ menu fits the window: in one short enough for the strip to fall

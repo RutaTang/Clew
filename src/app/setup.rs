@@ -761,6 +761,13 @@ impl App {
     ) -> Task<Message> {
         match result {
             Ok(exe) => {
+                // Said done, as a download a file asked for is: the status
+                // bar said "Downloading rust-analyzer…" on, beside the
+                // server's own "ready".
+                self.status = tr!(
+                    "{language} server installed",
+                    language = crate::app::languages::language_name(&language)
+                );
                 // Set up — and looked at afresh, so a look begun before it
                 // was in, landing after, does not offer it again.
                 self.proj.setup_missing.retain(|s| s.language != language);

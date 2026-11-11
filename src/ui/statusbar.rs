@@ -662,12 +662,15 @@ fn setup_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
     } else {
         crate::app::setup::servers_line(&servers)
     };
+    // It asks first, as the first open's sheet does: what each server
+    // takes — a download, a build that runs the project's own code — is
+    // said there, and nothing is fetched or run until it is agreed to.
     let chip = button(quiet)
         .style(theme::icon_button(false))
         .padding([2, 8])
         .on_press(super::heard::said(
             tr!("Set up missing language servers"),
-            Message::Project(ProjectMsg::SetUpMissing),
+            Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Manage)),
         ));
     Some((
         super::toolbar::tip_at(chip, tip, None, tooltip::Position::Top),

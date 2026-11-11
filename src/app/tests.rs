@@ -19826,6 +19826,42 @@ fn a_diff_toggle_while_loading_cancels_and_a_git_failure_is_not_no_changes() {
     assert!(app.status.is_empty(), "{}", app.status);
 }
 
+/// The file's Explain, with no note written of it and no model to write
+/// one, goes where a key is added — as every other way to explain does —
+/// rather than show "Not explained yet." and no more.
+#[test]
+fn explain_with_no_model_says_where_to_add_one() {
+    let mut app = scanned_app("explain-no-key");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    assert!(app.llm_config().is_none(), "no model set up");
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let _ = app.update(Message::Explain(ExplainMsg::Show(
+        crate::explain::Node::File(abs),
+    )));
+    assert_eq!(app.status, "Add an API key in Settings");
+}
+
+/// With no project open, the finder (Ctrl+P, the field over the window)
+/// opens the command bar, with its Open Folder: it did nothing.
+#[test]
+fn the_finder_with_no_project_opens_the_command_bar() {
+    let mut app = scanned_app("no-project-finder");
+    app.proj.project = None;
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    assert!(app.proj.finder.open, "opened");
+    assert!(app.proj.finder.bar, "as the command bar");
+}
+
+/// A server the status bar's Set up fetched is said to be in once it is:
+/// "Downloading rust-analyzer…" stayed on, beside the server's own "ready".
+#[test]
+fn a_server_set_up_is_said_to_be_in() {
+    let mut app = scanned_app("fetched-said");
+    app.status = "Downloading rust-analyzer…".into();
+    let _ = app.on_lsp_fetched("rust".into(), Ok(PathBuf::from("/opt/rust-analyzer")));
+    assert_eq!(app.status, "Rust server installed");
+}
+
 /// Skim is a toggle like Diff and Time Travel, and its button says so: it
 /// shows pressed while the file's bodies are folded, and not once a second
 /// press has unfolded them.
