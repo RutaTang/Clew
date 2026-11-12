@@ -32,6 +32,11 @@ pub struct Walkthrough {
     #[serde(default)]
     pub scope: String,
     pub steps: Vec<Step>,
+    /// When a run's tour was made (unix seconds): said beside it, as runs
+    /// of one program share its name — which run a tour shows was not to
+    /// be told. `None` for every other tour, and one made before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made: Option<i64>,
 }
 
 /// One stop on the tour, anchored to a symbol (preferred) or a line.
@@ -515,6 +520,7 @@ pub fn from_trace(root: &Path, program: &str, stops: &[crate::TraceStop]) -> Opt
         return None;
     }
     Some(Walkthrough {
+        made: None,
         title: plain_run_title(program),
         scope: String::new(),
         steps,
@@ -929,6 +935,7 @@ mod tests {
     fn saving_a_tour_settles_a_pending_remote_edit_first() {
         let root = clew_core::testutil::TempDir::new("walk-settle");
         let tour = |scope: &str| Walkthrough {
+            made: None,
             title: scope.to_uppercase(),
             scope: scope.into(),
             steps: Vec::new(),
@@ -1036,6 +1043,7 @@ mod tests {
     #[test]
     fn roundtrips_through_json() {
         let wt = Walkthrough {
+            made: None,
             title: "T".into(),
             scope: "lsp".into(),
             steps: vec![Step {
@@ -1056,6 +1064,7 @@ mod tests {
 
     fn tour(scope: &str) -> Walkthrough {
         Walkthrough {
+            made: None,
             title: format!("Tour of {scope}"),
             scope: scope.into(),
             steps: vec![Step {
@@ -1480,6 +1489,7 @@ mod trace_tests {
     #[test]
     fn a_reading_guide_is_shaped_into_a_tree() {
         let mut wt = Walkthrough {
+            made: None,
             title: "Guide".into(),
             scope: GUIDE_SCOPE.into(),
             steps: [2, 0, 3, 1, 5, 4]

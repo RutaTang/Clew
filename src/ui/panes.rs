@@ -2908,6 +2908,28 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 symbol: key.clone(),
             }),
         ));
+        // Each says what it does where the pointer rests, as in All notes:
+        // here, where they are first seen, they said nothing.
+        let toggle = super::toolbar::tip_at(
+            toggle,
+            if understood {
+                tr!("Mark not understood")
+            } else {
+                tr!("Mark understood")
+            },
+            None,
+            tooltip::Position::Bottom,
+        );
+        let pencil = super::toolbar::tip_at(
+            pencil,
+            if has_text {
+                tr!("Edit note")
+            } else {
+                tr!("Add a note")
+            },
+            None,
+            tooltip::Position::Bottom,
+        );
         // Top-align so the toggle circle and pencil sit on the kind-badge/name
         // line rather than floating in the middle of the multi-line row.
         let jump = button(

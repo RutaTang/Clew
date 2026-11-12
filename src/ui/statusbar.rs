@@ -561,6 +561,12 @@ const STATUS_LINE_H: f32 = 20.0;
 /// The least room what Clew says is given beside the chips: below it, the
 /// chips are said short, and with less still, it is not said.
 const SAID_MIN_W: f32 = 120.0;
+/// The most room kept beside a standing failure for what Clew says next —
+/// half the bar, up to this: kept whatever is said, so the failure's
+/// controls do not move, and enough for what is under way to be said
+/// whole ("Working out what discounts does…" was cut to "Working out wh…"
+/// beside an older failure given the rest).
+const SAID_KEPT_MAX_W: f32 = 320.0;
 /// What a chip takes beside its words: its mark, the room after it, and its
 /// padding.
 const CHIP_EXTRA_W: f32 = 11.0 + 5.0 + 16.0;
@@ -636,9 +642,17 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             row = row.push(controls);
             used += controls_w + STATUS_GAP;
         } else {
-            let words = (room - controls_w - 2.0 * STATUS_GAP - SAID_MIN_W - chips_w)
-                .max(least)
-                .min(width(&whole));
+            // Half of what is free is kept for what is said next, up to
+            // `SAID_KEPT_MAX_W`; the failure keeps at least what failed
+            // (its words before the reason), its reason whole where the
+            // pointer rests.
+            let free = room - controls_w - 2.0 * STATUS_GAP - chips_w;
+            let kept = (free / 2.0).clamp(SAID_MIN_W, SAID_KEPT_MAX_W);
+            let head = whole
+                .split_once(": ")
+                .map_or(whole.as_str(), |(head, _)| head);
+            let floor = (width(head) + width("…")).min(free - SAID_MIN_W);
+            let words = (free - kept).max(floor).max(least).min(width(&whole));
             row = row.push(line_of(whole, words, Some(theme::danger())));
             row = row.push(controls);
             used += words + STATUS_GAP + controls_w + STATUS_GAP;

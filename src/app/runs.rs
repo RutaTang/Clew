@@ -63,7 +63,7 @@ impl ParkedDebug {
             pending_reason: String::new(),
             said: None,
             ran_for: None,
-            last_fn: None,
+            trail_fns: Default::default(),
             hover_safe: false,
             child_started: None,
             children: Default::default(),
@@ -103,7 +103,7 @@ impl App {
         swap(&mut self.debug.pending_reason, &mut p.pending_reason);
         swap(&mut self.debug.said, &mut p.said);
         swap(&mut self.debug.ran_for, &mut p.ran_for);
-        swap(&mut self.debug.last_fn, &mut p.last_fn);
+        swap(&mut self.debug.trail_fns, &mut p.trail_fns);
         swap(&mut self.debug.hover_safe, &mut p.hover_safe);
         swap(&mut self.debug.child_started, &mut p.child_started);
         swap(&mut self.debug.children, &mut p.children);

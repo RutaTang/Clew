@@ -411,6 +411,7 @@ mod export_tests {
         );
         let trail = history.flatten();
         let tours = vec![Walkthrough {
+            made: None,
             title: "Startup".into(),
             scope: "boot".into(),
             steps: vec![walkthrough::Step {
@@ -534,6 +535,7 @@ _Scope: boot_
         history.push(at("c.rs"), Some("__init__".into()));
         let trail = history.flatten();
         let tours = vec![Walkthrough {
+            made: None,
             title: "__init__ and *ptr".into(),
             scope: String::new(),
             steps: vec![walkthrough::Step {

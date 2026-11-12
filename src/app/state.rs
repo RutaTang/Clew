@@ -227,9 +227,11 @@ pub struct DebugState {
     pub watches: Vec<String>,
     /// The add-watch input box.
     pub watch_input: String,
-    /// The last function the debugger stopped in — so entering a NEW function
-    /// records one reading-trail entry (not one per line step).
-    pub last_fn: Option<String>,
+    /// The functions this run has stopped in, by file and name: entering
+    /// one for the first time records one reading-trail entry — not one per
+    /// line step, nor one each time it is entered again (stepping between
+    /// two functions filled the trail with them in turn).
+    pub trail_fns: std::collections::HashSet<(std::path::PathBuf, String)>,
     /// Breakpoints per file (absolute path → 1-based line → breakpoint),
     /// independent of a running session so they can be set before and persist
     /// across runs.
@@ -305,7 +307,7 @@ pub struct ParkedDebug {
     pub pending_reason: String,
     pub said: Option<String>,
     pub ran_for: Option<String>,
-    pub last_fn: Option<String>,
+    pub trail_fns: std::collections::HashSet<(std::path::PathBuf, String)>,
     pub hover_safe: bool,
     pub child_started: Option<u64>,
     pub children: DebugChildren,
@@ -905,6 +907,9 @@ pub enum FailureOf {
     /// Time Travel's story: one written, or the session left, takes it
     /// away.
     Story,
+    /// An Ask answer, failed while Ask was put away to its pill: asked
+    /// again, or answered, takes it away.
+    Ask,
 }
 
 /// they stood when it was asked.
@@ -2271,6 +2276,9 @@ pub struct ProjectSession {
     /// Counts the gutter lines rested on, for [`GutterTip::generation`]:
     /// kept apart from the tip, which leaving the gutter takes away.
     pub gutter_seq: u64,
+    /// The tree's menu asked for from the keys (⇧F10, the Menu key), not
+    /// by a right-click: it opens with its first row chosen.
+    pub tree_menu_keys: bool,
     /// An open right-click navigation menu: (pane, line, col, window x, y).
     pub context_menu: Option<ContextMenu>,
     /// The file tree's right-click: the row it was on — said before where
@@ -2765,6 +2773,7 @@ impl Default for ProjectSession {
             gutter_tip: None,
             gutter_seq: 0,
             context_menu: Default::default(),
+            tree_menu_keys: false,
             tree_menu_for: None,
             tree_menu: None,
             diff: Default::default(),

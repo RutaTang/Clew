@@ -442,8 +442,20 @@ impl App {
 
     /// Stop the run being worked out, if one is: its turn is cancelled on
     /// the server, and its answer no longer waited for.
+    /// Take "Working out what `name` does…" off the status line, if it is
+    /// still what the line says.
+    fn settle_fake_status(&mut self, name: &str) {
+        let working = tr!("Working out what {name} does…", name = name);
+        self.settle_status(&[&working]);
+    }
+
     pub(crate) fn stop_fake_work(&mut self) -> Task<Message> {
-        if let Some(stream) = self.proj.fake.working.take().and_then(|w| w.stream) {
+        let Some(working) = self.proj.fake.working.take() else {
+            return Task::none();
+        };
+        // Its tab closed or its work stopped: no longer at work.
+        self.settle_fake_status(&working.target.name);
+        if let Some(stream) = working.stream {
             self.proj.link.agent_streams.remove(&stream);
             let _ = self.send_to_server(clew_protocol::Request::Cancel { id: stream });
         }
@@ -524,6 +536,10 @@ impl App {
                 // and on the status bar with its Try again.
                 let about = crate::app::tasks::setting_to_fix(&why);
                 self.proj.fake.failed = Some(why.clone());
+                // No longer at work: the status bar said it was, beside
+                // the panel saying it failed, until something else was
+                // said there.
+                self.settle_fake_status(&working.target.name);
                 // Said on its panel, with Try again and Settings: on the
                 // status bar too, only where the panel is not to be seen —
                 // both at once said the one failure twice.

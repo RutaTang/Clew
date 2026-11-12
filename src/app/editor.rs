@@ -2132,11 +2132,16 @@ impl App {
             EditorMsg::Scrolled(pane, viewport) => {
                 let line_height = self.line_height();
                 if let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) {
+                    let was = v.viewport_h;
                     v.scroll_y = viewport.absolute_offset().y;
                     v.scroll_x = viewport.absolute_offset().x;
                     v.viewport_h = viewport.bounds().height;
                     v.viewport_measured = true;
-                    if let Some(y) = v.measured(viewport.bounds().height, line_height) {
+                    if let Some(y) = v
+                        .measured(viewport.bounds().height, line_height)
+                        .or_else(|| kept_in_sight(v, was, line_height))
+                    {
+                        v.scroll_y = y;
                         return operation::scroll_to(
                             ui::code_scroll_id(pane),
                             AbsoluteOffset { x: v.scroll_x, y },
@@ -2148,9 +2153,14 @@ impl App {
             EditorMsg::ViewMeasured { pane, height } => {
                 let line_height = self.line_height();
                 if let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) {
+                    let was = v.viewport_h;
                     v.viewport_h = height;
                     v.viewport_measured = true;
-                    if let Some(y) = v.measured(height, line_height) {
+                    if let Some(y) = v
+                        .measured(height, line_height)
+                        .or_else(|| kept_in_sight(v, was, line_height))
+                    {
+                        v.scroll_y = y;
                         return operation::scroll_to(
                             ui::code_scroll_id(pane),
                             AbsoluteOffset { x: v.scroll_x, y },
@@ -2371,4 +2381,22 @@ fn untracked_diff(source: &str) -> Vec<git::DiffLine> {
         text: format!("+{line}"),
     }));
     lines
+}
+
+/// The code seen shrunk from `was` to the viewer's height now — a panel
+/// opened under it, the window made shorter: where to scroll to keep the
+/// cursor's line, seen before, in sight, with a couple of lines under it.
+/// The bottom panel opening for a fake run hid the very function it was
+/// run on, and the margin's card with it.
+fn kept_in_sight(v: &Viewer, was: f32, line_height: f32) -> Option<f32> {
+    let now = v.viewport_h;
+    if now >= was {
+        return None;
+    }
+    let (line, _) = v.caret?;
+    let top = v.row_of(line) as f32 * line_height;
+    let bottom = top + line_height;
+    let seen_before = top >= v.scroll_y && bottom <= v.scroll_y + was;
+    (seen_before && bottom > v.scroll_y + now)
+        .then(|| (bottom + 2.0 * line_height - now).min(top).max(0.0))
 }

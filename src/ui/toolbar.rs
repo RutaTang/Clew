@@ -1190,11 +1190,14 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
             StripSlot::Tool(t) => tool(t),
             StripSlot::Row(row) => {
                 let (glyph, label, msg) = tools_row(app, row);
-                tip_at(
+                // Greyed, it says why, as the strip's own tools do.
+                let why = msg.is_none().then_some(tr!("Open a folder first"));
+                tip_at_why(
                     strip_button(glyph, theme::fg_muted(), false, msg.is_some())
                         .on_press_maybe(msg.map(|m| super::heard::said(&label, m))),
                     label,
                     caps(tools_row_action(row)),
+                    why,
                     tooltip::Position::Left,
                 )
             }
@@ -1571,8 +1574,8 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
         }
         let (glyph, label, msg) = tools_row(app, r);
         let keys = menu_chord(app, tools_row_action(r));
-        let item = menu_item(Some(glyph), label, keys, msg);
-        items.push(item);
+        let why = msg.is_none().then_some(tr!("Open a folder first"));
+        items.push(said_why(menu_item(Some(glyph), label, keys, msg), why));
     }
     let rows = Column::with_children(items).spacing(MENU_ROW_SPACING);
     let room = tools_menu_room(app);
@@ -1770,10 +1773,13 @@ pub(crate) fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Mess
             cancel_explaining_label(app.proj.explain.progress),
             Some(Message::Explain(ExplainMsg::Cancel)),
         ),
+        // With no folder open, nothing to explain: drawn so, as the
+        // strip's other tools and the ☰ menu's row are — it stood lit,
+        // and pressed, did nothing.
         ToolsRow::ExplainAll => (
             Glyph::TextLines,
             tr!("Explain All…").into(),
-            Some(explain_all_message(app)),
+            has_project.then(|| explain_all_message(app)),
         ),
         ToolsRow::Glossary => (
             Glyph::Dictionary,

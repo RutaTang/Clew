@@ -1408,6 +1408,7 @@ impl App {
             ProjectMsg::ToggleDir(rel) => self.on_toggle_dir(rel),
             ProjectMsg::TreeMenuFor { rel, dir } => {
                 self.proj.tree_menu_for = Some((rel, dir));
+                self.proj.tree_menu_keys = false;
                 Task::none()
             }
             ProjectMsg::TreeMenuAt { x, y } => {
@@ -1415,6 +1416,12 @@ impl App {
                     self.proj.context_menu = None;
                     self.proj.tree_cursor = Some(rel.clone());
                     self.proj.tree_menu = Some(crate::app::state::TreeMenu { rel, dir, x, y });
+                    // Opened from the keys (⇧F10, the Menu key): on its
+                    // first row, Enter runs it — with nothing chosen,
+                    // Enter did nothing until ↓ was pressed.
+                    if std::mem::take(&mut self.proj.tree_menu_keys) {
+                        return self.on_tab(true, false);
+                    }
                 }
                 Task::none()
             }

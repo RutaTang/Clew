@@ -382,6 +382,14 @@ impl App {
         // What the card said of the last question that could not be asked
         // is said again only if this one cannot be either.
         self.proj.ask_notice = None;
+        // No folder open: nothing to ask about, said so with the way to
+        // one. It went on to say an embedding endpoint was missing, which
+        // was not what stood in the way.
+        if self.proj.project.is_none() {
+            self.status = tr!("Open a folder to ask about its code").into();
+            self.proj.ask_notice = Some(self.status.clone());
+            return Task::none();
+        }
         // A question asked while one is being answered waits its turn: it
         // is queued, and asked once nothing is answering
         // (`send_next_queued`). One answer at a time, whatever produces it —
@@ -1302,6 +1310,32 @@ impl App {
         task
     }
 
+    /// Each answer's ending — why it failed, that it was stopped — said
+    /// again in the language spoken now: said once, it stayed in the one
+    /// spoken then. Drawn again from its start.
+    pub(crate) fn respeak_turn_endings(&mut self) -> Task<Message> {
+        let mut tasks = Vec::new();
+        for idx in 0..self.proj.ask_turns.len() {
+            let turn = &mut self.proj.ask_turns[idx];
+            let Some((end, said)) = turn.extras.ended.clone() else {
+                continue;
+            };
+            let now = turn_end_words(&end);
+            if now == said || turn.streaming || !turn.answer_md.ends_with(&said) {
+                continue;
+            }
+            let kept = turn.answer_md.len() - said.len();
+            turn.answer_md.truncate(kept);
+            turn.answer_md.push_str(&now);
+            turn.extras.ended = Some((end, now));
+            turn.answer.clear();
+            turn.settled = 0;
+            let to = turn.answer_md.len();
+            tasks.push(self.settle_answer_to(idx, to));
+        }
+        Task::batch(tasks)
+    }
+
     pub(crate) fn on_ask_stream_ended(
         &mut self,
         stream: u64,
@@ -1335,14 +1369,11 @@ impl App {
         // A Stop is what the user asked for, not a failure: it reads as
         // stopped, whatever layer it came from (the server's stream, its
         // agent turn, or the provider call on this machine).
-        let empty_reason = match &outcome {
+        let end = match &outcome {
             StreamOutcome::Done => None,
             StreamOutcome::Stopped => {
                 self.status = tr!("Answer stopped").into();
-                Some(format!(
-                    "*{}*",
-                    tr!("Stopped before any answer was written.")
-                ))
+                Some(TurnEnd::Stopped)
             }
             StreamOutcome::Failed(e) => {
                 // An ACP agent brings its own model: Clew's base URL has
@@ -1351,15 +1382,33 @@ impl App {
                 let own = self.proj.ask_turns[idx].extras.agent.is_none();
                 self.proj.ask_turns[idx].extras.fix =
                     own.then(|| crate::app::tasks::setting_to_fix(e)).flatten();
-                let e = if !own {
-                    crate::app::tasks::plain_detail(e)
-                } else {
-                    crate::app::tasks::ai_reason(e)
-                };
-                self.status = tr!("Ask failed: {error}", error = e);
-                Some(format!("*{}*", tr!("Couldn't answer: {error}", error = e)))
+                // Said in the conversation, with Try again and Settings;
+                // on the status bar too only while Ask is put away to its
+                // pill — both at once said the one failure twice, the
+                // status bar's grey and with nothing to do.
+                if self.ask_view == AskView::Hidden {
+                    let (raw, about) = (e.clone(), self.proj.ask_turns[idx].extras.fix);
+                    self.say_failure_again(
+                        move || {
+                            let said = if own {
+                                crate::app::tasks::ai_reason(&raw)
+                            } else {
+                                crate::app::tasks::plain_detail(&raw)
+                            };
+                            tr!("Couldn't answer: {error}", error = said)
+                        },
+                        Some(Message::Ask(AskMsg::AskAgain(idx))),
+                        crate::app::state::FailureOf::Ask,
+                    );
+                    self.failure_about(about);
+                }
+                Some(TurnEnd::Failed {
+                    raw: e.clone(),
+                    own,
+                })
             }
         };
+        let empty_reason = end.as_ref().map(turn_end_words);
         // Finalize the turn: ended with no text, show why; then render the
         // accumulated markdown as rich segments.
         let md = {
@@ -1371,6 +1420,7 @@ impl App {
                 turn.extras.failed = matches!(outcome, StreamOutcome::Failed(_));
                 // In place of what was there (blank lines, settled as they
                 // came): drawn from its start.
+                turn.extras.ended = end.clone().map(|end| (end, reason.clone()));
                 turn.answer_md = reason;
                 turn.answer.clear();
                 turn.settled = 0;
@@ -1382,8 +1432,9 @@ impl App {
                 if turn.answer_md.matches("```").count() % 2 == 1 {
                     turn.answer_md.push_str("\n```");
                 }
-                turn.answer_md
-                    .push_str(&format!("\n\n*{}*", tr!("Stopped here.")));
+                let here = turn_end_words(&TurnEnd::StoppedHere);
+                turn.answer_md.push_str(&here);
+                turn.extras.ended = Some((TurnEnd::StoppedHere, here));
             }
             turn.answer_md.clone()
         };
@@ -1860,6 +1911,8 @@ impl App {
             // the field. (Try again on a failed answer put the question in
             // its place, and the draft was gone.)
             AskMsg::AskAgain(n) => {
+                // Asked again: its notice, where Ask was put away, goes.
+                self.forget_failure_of(crate::app::state::FailureOf::Ask);
                 let failed = self
                     .proj
                     .ask_turns
@@ -2015,6 +2068,23 @@ impl App {
                 result,
                 ..
             } => self.on_acp_option_set(agent, session, option, value, result),
+        }
+    }
+}
+
+/// What `end` says in an answer, in the language spoken now: in place of
+/// the answer, or (stopped part-way) after what came of it.
+pub(crate) fn turn_end_words(end: &TurnEnd) -> String {
+    match end {
+        TurnEnd::Stopped => format!("*{}*", tr!("Stopped before any answer was written.")),
+        TurnEnd::StoppedHere => format!("\n\n*{}*", tr!("Stopped here.")),
+        TurnEnd::Failed { raw, own } => {
+            let said = if *own {
+                crate::app::tasks::ai_reason(raw)
+            } else {
+                crate::app::tasks::plain_detail(raw)
+            };
+            format!("*{}*", tr!("Couldn't answer: {error}", error = said))
         }
     }
 }

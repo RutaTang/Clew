@@ -97,10 +97,11 @@ impl App {
             .trace_program
             .clone()
             .unwrap_or_else(|| "program".to_string());
-        let Some(plain) = walkthrough::from_trace(&root, &program, &self.debug.trace) else {
+        let Some(mut plain) = walkthrough::from_trace(&root, &program, &self.debug.trace) else {
             self.status = tr!("The last run never stopped inside this project").into();
             return Task::none();
         };
+        plain.made = Some(crate::app::ask_sessions::now());
         let scope = format!("@trace {program}");
         let seq = self.begin_walkthrough_generation(scope.clone());
         let Some(cfg) = self.llm_config() else {
@@ -151,6 +152,7 @@ impl App {
                 // it read as the AI's story of the run, and a thin one.
                 match narrated {
                     Ok(mut wt) if wt.steps.len() == plain.steps.len() => {
+                        wt.made = plain.made;
                         for (step, own) in wt.steps.iter_mut().zip(&plain.steps) {
                             step.file = own.file.clone();
                             step.symbol = own.symbol.clone();

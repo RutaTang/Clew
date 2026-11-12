@@ -137,7 +137,12 @@ impl<Message> Widget<Message, Theme, Renderer> for Tip<'_, Message> {
         ) {
             let state = tree.state.downcast_mut::<State>();
             let now = Instant::now();
-            let over = cursor.position_over(layout.bounds()).is_some();
+            let moved = matches!(event, Event::Mouse(mouse::Event::CursorMoved { .. }));
+            let over = rests(
+                *state,
+                cursor.position_over(layout.bounds()).is_some(),
+                moved,
+            );
             let pressed = matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
             let next = step(*state, over, pressed, now);
             if next != *state {
@@ -246,6 +251,14 @@ impl<Message> Widget<Message, Theme, Renderer> for Tip<'_, Message> {
             .as_widget_mut()
             .operate(&mut tree.children[0], layout, renderer, operation);
     }
+}
+
+/// Whether the pointer, `over` what a tooltip names, is resting there for
+/// it: one that moved onto it, or is still where it was. One that never
+/// moved, a control come up under it — the Ask card's mic under the pill
+/// just pressed — is not: its tip came up over the suggestions under it.
+fn rests(state: State, over: bool, moved: bool) -> bool {
+    over && (moved || !matches!(state, State::Idle))
 }
 
 /// Where a tooltip goes from `state`, the pointer `over` what it names or
@@ -386,6 +399,21 @@ mod tests {
             step(State::Idle, true, false, left + WARM * 2),
             State::Resting { .. }
         ));
+    }
+
+    /// L13: a control come up under a pointer that has not moved is not
+    /// rested on — its tip waits for the pointer to move onto it.
+    #[test]
+    fn a_control_come_up_under_a_still_pointer_shows_no_tip() {
+        assert!(!rests(State::Idle, true, false), "came up under it");
+        assert!(rests(State::Idle, true, true), "moved onto it");
+        let t0 = Instant::now();
+        assert!(
+            rests(State::Resting { at: t0 }, true, false),
+            "still resting"
+        );
+        assert!(rests(State::Shown, true, false), "still shown");
+        assert!(!rests(State::Shown, false, true), "left it");
     }
 
     /// A click puts it away, and it stays away while the pointer stays.

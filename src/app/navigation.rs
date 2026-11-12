@@ -1445,6 +1445,7 @@ impl App {
         // (`ui::tree_keys`), as a right-click on the row does.
         if key == TreeKey::Menu {
             self.proj.tree_menu_for = Some((row.rel.clone(), row.dir));
+            self.proj.tree_menu_keys = true;
             return Task::none();
         }
         let open = row.dir && self.proj.expanded.contains(&row.rel);

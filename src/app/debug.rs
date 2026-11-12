@@ -323,7 +323,7 @@ impl App {
         });
         self.show_bottom = true;
         self.debug.no_debug = no_debug;
-        self.debug.last_fn = None;
+        self.debug.trail_fns.clear();
         // A new run: its trace starts empty.
         self.debug.trace.clear();
         self.debug.trace_cut = false;
@@ -2062,14 +2062,14 @@ impl App {
         if self.debug_off_screen {
             return self.eval_watches();
         }
-        // Fuse into the reading trail: when execution enters a NEW
-        // function, record one entry (labelled with the function name) so
-        // the debug run becomes a navigable path in the TRAIL tab.
+        // Fuse into the reading trail: when execution enters a function
+        // for the first time in this run, record one entry (labelled with
+        // the function name) so the debug run becomes a navigable path in
+        // the TRAIL tab.
         let mut saved = Task::none();
         if let (true, Some(fname), Some((path, line))) = (record, &fname, &target)
-            && self.debug.last_fn.as_ref() != Some(fname)
+            && self.debug.trail_fns.insert((path.clone(), fname.clone()))
         {
-            self.debug.last_fn = Some(fname.clone());
             self.proj.history.push(
                 Loc {
                     path: path.clone(),

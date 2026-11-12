@@ -3228,6 +3228,7 @@ fn a_new_walkthrough_being_made_has_a_stop() {
         app.proj.walk.library = library
             .map(|scope: &str| {
                 vec![crate::walkthrough::Walkthrough {
+                    made: None,
                     title: "Review".into(),
                     scope: scope.into(),
                     steps: Vec::new(),
@@ -4454,6 +4455,7 @@ fn the_walkthrough_player_stops_at_its_ends_and_closes() {
         stop: None,
     };
     let tour = |n: usize| crate::walkthrough::Walkthrough {
+        made: None,
         title: "tour".into(),
         scope: "t".into(),
         steps: (1..=n).map(step).collect(),
@@ -4638,6 +4640,13 @@ fn the_app_menu_draws_off_what_needs_a_project_or_a_file() {
     }
     let sent = click(sim_elem(super::app_menu(&app)), "Start Debugging");
     assert!(sent.is_empty(), "{sent:?}");
+    // M3: the strip's (and the ⋯ menu's) Explain All with it — it stood
+    // lit, and pressed, did nothing.
+    assert!(
+        super::tools_row(&app, super::ToolsRow::ExplainAll)
+            .2
+            .is_none()
+    );
     // R16-4: Back and Forward as the top bar's arrows: nowhere to go.
     assert!(!super::menu_action_able(&app, Action::GoBack));
     assert!(!super::menu_action_able(&app, Action::GoForward));
@@ -5011,6 +5020,7 @@ fn reading_panels_are_drawn_fresh_for_what_they_show() {
         stop: None,
     };
     let tour = crate::walkthrough::Walkthrough {
+        made: None,
         title: "tour".into(),
         scope: String::new(),
         steps: vec![step(1), step(2)],
@@ -10051,6 +10061,57 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
     );
 }
 
+/// M5: a frame's place in the call stack fits its column whole — its last
+/// digit was cut off at the column's edge ("pricing.py:2" for ":20"),
+/// the column's own padding uncounted when the room was worked out.
+#[test]
+fn a_call_stack_frames_line_number_fits_its_column() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    crate::fonts::load();
+    for (width, rel, line) in [
+        (1100.0, "teashop/pricing.py", 20),
+        (1440.0, "teashop/pricing/rules/discounts/runpy.py", 203),
+    ] {
+        app.debug.session = Some(crate::DebugSession {
+            client: None,
+            status: crate::DebugStatus::Stopped,
+            exit_code: None,
+            thread_id: Some(1),
+            frames: vec![crate::dap::StackFrame {
+                id: 1,
+                name: "total".into(),
+                path: Some(root.join(rel)),
+                line,
+                column: 1,
+            }],
+            scopes: Vec::new(),
+            watches: Vec::new(),
+            output: vec![("stdout".into(), "Darjeeling left: 3".into())],
+            current: None,
+            program: root.join("main.py"),
+            args: Vec::new(),
+            cwd: root.clone(),
+            addr: None,
+        });
+        app.show_bottom = true;
+        let size = Size::new(width, 900.0);
+        app.window_width = size.width;
+        app.window_height = size.height;
+        let mut sim = sim_sized(&app, size);
+        let tail = format!("{}:{line}", rel.rsplit('/').next().unwrap());
+        let loc = text_at(&mut sim, |t| t.ends_with(&tail), 0).expect("the frame's place");
+        let vars = text_at(&mut sim, |t| t == "VARIABLES", 0).expect("the next column");
+        // The variables' heading is its column's padding (6) in; the gap
+        // (6), the stack column's padding (6) and its row's (6) before it.
+        assert!(
+            loc.x + loc.width <= vars.x - 24.0 + 0.5,
+            "{width}: {loc:?} runs past its column (next at {})",
+            vars.x
+        );
+    }
+}
+
 /// A tour is named as the action that made it, in the language spoken
 /// now: "Review changes" makes a change review of the branch, or of the
 /// last commit; "Where to start reading" makes one named so; a run's plain
@@ -10078,6 +10139,7 @@ fn walkthroughs_are_named_as_their_actions_in_the_language_spoken_now() {
         "Review changes (vs main)"
     );
     let run = Walkthrough {
+        made: None,
         title: crate::walkthrough::plain_run_title("main.py"),
         scope: "@trace main.py".into(),
         steps: Vec::new(),
@@ -10096,6 +10158,7 @@ fn walkthroughs_are_named_as_their_actions_in_the_language_spoken_now() {
     });
     // A title the model wrote is its own.
     let narrated = Walkthrough {
+        made: None,
         title: "Checkout totals the cart".into(),
         ..run
     };
@@ -10526,6 +10589,7 @@ fn rows_send_the_identity_of_what_they_show() {
 
 fn tour(scope: &str) -> crate::walkthrough::Walkthrough {
     crate::walkthrough::Walkthrough {
+        made: None,
         title: format!("Tour of {scope}"),
         scope: scope.into(),
         steps: vec![
@@ -12454,6 +12518,42 @@ fn an_empty_ask_shows_questions_not_instructions() {
     app.proj.project = None;
     let mut sim = sim_elem(super::ask_panel(&app, 560.0));
     assert!(!shows(&mut sim, "Answers draw on the open file"));
+    drop(sim);
+
+    // H2: asked with no folder open — said so, with the way to one; it
+    // said to configure embeddings, as plain words, under questions about
+    // "this codebase" there was none of.
+    let mut app = blank_app();
+    app.proj.ask_input = "what is this?".into();
+    let _ = app.update(Message::Ask(AskMsg::Submit));
+    assert_eq!(
+        app.proj.ask_notice.as_deref(),
+        Some("Open a folder to ask about its code")
+    );
+    let sent = click(sim_elem(super::ask_panel(&app, 560.0)), "Open Folder…");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Project(crate::ProjectMsg::OpenFolderPressed))),
+        "{sent:?}"
+    );
+    assert!(!shows(
+        &mut sim_elem(super::ask_panel(&app, 560.0)),
+        "Try asking"
+    ));
+    // The embeddings it is about, where they are what is missing: their
+    // page of Settings, a click away.
+    let mut app = reader_app();
+    app.proj.ask_notice = Some(crate::app::embedding::why_no_embeddings());
+    let sent = click(sim_elem(super::ask_panel(&app, 560.0)), "Settings");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::OpenAt(
+                crate::app::state::SettingsPage::Embeddings
+            ))
+        )),
+        "{sent:?}"
+    );
 }
 
 /// The palette's rows show each command and its keys, a cap per key; a
@@ -13134,6 +13234,34 @@ fn a_failures_controls_stay_put_on_the_status_line() {
             before,
             "moved for {said:?}"
         );
+    }
+}
+
+/// What is under way now is said whole beside an older failure, at the
+/// widths a window is used at: the failure gave it about 120 px, and
+/// "Working out what discounts does…" was "Working out wh…". The failure
+/// keeps what failed, its reason whole where the pointer rests.
+#[test]
+fn what_is_under_way_is_said_whole_beside_an_older_failure() {
+    let mut app = reader_app();
+    app.say_failure(
+        "Couldn't explain lib.rs: couldn't reach the AI provider (nothing answered at that address) — check the base URL in Settings".into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    let now = "Working out what discounts does…";
+    app.status = now.into();
+    for width in [1100.0, 1440.0] {
+        let mut sim = sim_sized(&app, Size::new(width, 800.0));
+        assert!(
+            text_at(&mut sim, |t| t == now, 0).is_some(),
+            "cut at {width}"
+        );
+        assert!(
+            text_at(&mut sim, |t| t.starts_with("Couldn't explain lib.rs"), 0).is_some(),
+            "what failed is gone at {width}"
+        );
+        assert!(text_at(&mut sim, |t| t == "Try again", 0).is_some());
     }
 }
 
@@ -15692,6 +15820,51 @@ fn a_files_card_offers_no_calls() {
     );
 }
 
+/// M7: an outline row's understood circle and note pencil say what they do
+/// where the pointer rests, as All notes' do — here, where they are first
+/// seen, they said nothing.
+#[test]
+fn an_outline_rows_circle_and_pencil_say_what_they_do() {
+    let mut app = reader_app();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![clew_protocol::Symbol {
+        name: "OutOfStock".into(),
+        kind: "class".into(),
+        line: 1,
+        end_line: 4,
+    }];
+    let rests_on = |from_name: f32, said: &str| {
+        super::tip::warm_now();
+        let mut sim = sim_elem(super::outline_content(&app));
+        let name = text_at(&mut sim, |t| t == "OutOfStock", 0).expect("the row");
+        let at = Point::new(name.x + from_name, name.center_y());
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        shows(&mut sim, said)
+    };
+    // The circle, somewhere left of the name; the pencil at the row's end.
+    assert!(
+        (8..120)
+            .step_by(4)
+            .any(|dx| rests_on(-(dx as f32), "Mark understood")),
+        "the circle says nothing"
+    );
+    // The pencil at the row's end, by the panel's right edge (1024 wide).
+    let name_x = {
+        let mut sim = sim_elem(super::outline_content(&app));
+        text_at(&mut sim, |t| t == "OutOfStock", 0)
+            .expect("the row")
+            .x
+    };
+    assert!(
+        (980..1022)
+            .step_by(3)
+            .any(|x| rests_on(x as f32 - name_x, "Add a note")),
+        "the pencil says nothing"
+    );
+}
+
 /// Two classes' `__init__` are two rows with notes of their own: each
 /// row's understood mark is kept under its class, not shared — marking one
 /// marked both.
@@ -16436,6 +16609,7 @@ fn the_reading_guide_is_a_tree_in_the_walkthroughs_view() {
         stop: None,
     };
     app.proj.walk.library = vec![Walkthrough {
+        made: None,
         title: "Where to start".into(),
         scope: GUIDE_SCOPE.into(),
         steps: vec![
@@ -18645,6 +18819,59 @@ fn a_menus_ring_goes_with_it_and_the_keys_go_back() {
     assert!(app.tree_focused, "the keys are the tree's again");
 }
 
+/// M10: a menu opened from the keys — ⇧F10, the Menu key — opens on its
+/// first row: Enter runs it. With nothing chosen, Enter did nothing until
+/// ↓ was pressed.
+#[test]
+fn a_menu_opened_from_the_keys_opens_on_its_first_row() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: Vec::new(),
+        files: vec!["README.md".into(), "main.py".into()],
+    };
+    let mut driven = Driven::sized(&app, size);
+    app.code_focused = false;
+    app.proj.tree_cursor = Some("main.py".into());
+    driven.focus(&app, super::files_tree_keys_id());
+    let _ = driven.send(&mut app, &[]);
+    let _ = driven.key(&mut app, Key::Named(Named::F10), keyboard::Modifiers::SHIFT);
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.proj.tree_menu.is_some(), "the tree's menu");
+    assert!(app.ring.is_some(), "nothing chosen");
+    assert_eq!(app.status, "Open", "not on its first row");
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.proj.tree_menu.is_none(), "Enter ran nothing");
+
+    // The code's, from the Menu key: on its first row too.
+    app.code_focused = true;
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.caret = Some((2, 0));
+    }
+    let _ = driven.send(&mut app, &[]);
+    let _ = driven.key(&mut app, Key::Named(Named::ContextMenu), none);
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.proj.context_menu.is_some(), "the code's menu");
+    assert!(app.ring.is_some(), "nothing chosen in the code's menu");
+    // A right-click's menu opens as it did, nothing chosen.
+    let _ = driven.key(&mut app, Key::Named(Named::Escape), none);
+    let _ = driven.send(&mut app, &[]);
+    let _ = app.update(Message::Project(crate::ProjectMsg::TreeMenuFor {
+        rel: "main.py".into(),
+        dir: false,
+    }));
+    let _ = app.update(Message::Project(crate::ProjectMsg::TreeMenuAt {
+        x: 40.0,
+        y: 80.0,
+    }));
+    assert!(app.proj.tree_menu.is_some());
+    assert!(app.ring.is_none(), "a right-click's menu chose a row");
+}
+
 /// Where the keys are once a menu worked from the keyboard has gone: the
 /// opened file's after Open on the tree's menu (they went back to the tree
 /// the ring came up from, and j walked the tree); the code's after a menu
@@ -18751,7 +18978,14 @@ fn shift_f10_opens_the_menu_of_what_the_keyboard_is_on() {
         "by its row: {menu:?} {row:?}"
     );
     assert!(menu.x < 300.0, "in the sidebar: {menu:?}");
-    app.proj.tree_menu = None;
+    // Put away as a reader does, with Esc: opened from the keys, the ring
+    // is on its first row, and goes with it.
+    let _ = driven.key(
+        &mut app,
+        Key::Named(Named::Escape),
+        keyboard::Modifiers::empty(),
+    );
+    assert!(app.proj.tree_menu.is_none() && app.ring.is_none());
 
     // The code's, at its caret.
     app.code_focused = true;
@@ -19269,6 +19503,40 @@ fn the_debug_header_keeps_walk_this_run_beside_the_ask_card() {
     );
 }
 
+/// M6: a run's steps made without a model are told apart by their stop —
+/// a breakpoint hit again and again in one function listed "discounts",
+/// "discounts", "discounts"; a narrated step keeps the title it was given.
+#[test]
+fn a_runs_plain_steps_are_named_by_their_stop() {
+    let app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let hit = |line: usize| crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: vec![crate::TraceFrame {
+            name: "discounts".into(),
+            path: Some(root.join("src/lib.rs")),
+            line,
+        }],
+    };
+    let tour = crate::walkthrough::from_trace(&root, "main.py", &[hit(20), hit(20), hit(21)])
+        .expect("a tour");
+    let titles: Vec<String> = tour.steps.iter().map(super::step_title).collect();
+    assert_eq!(
+        titles,
+        [
+            "Stop 1: discounts",
+            "Stop 2: discounts",
+            "Stop 3: discounts"
+        ]
+    );
+    let mut narrated = tour.steps[0].clone();
+    narrated.title = "Where the discounts are worked out".into();
+    assert_eq!(
+        super::step_title(&narrated),
+        "Where the discounts are worked out"
+    );
+}
+
 /// M10: an open run's tour made without a model, its step shown, is said
 /// again in the language chosen: "Stop 1 (breakpoint) in discounts…"
 /// stayed English in a French window.
@@ -19292,6 +19560,7 @@ fn an_open_runs_step_is_said_again_in_the_language_chosen() {
     )
     .expect("a tour");
     app.proj.walk.library = vec![crate::walkthrough::Walkthrough {
+        made: None,
         scope: "@trace main.py".into(),
         ..tour
     }];

@@ -569,7 +569,11 @@ impl App {
                 // What is said of embeddings was put in words once, in the
                 // language then: said again in this one.
                 self.refresh_embeddings();
-                Task::batch([self.respeak_explanation(), self.respeak_walk_step()])
+                Task::batch([
+                    self.respeak_explanation(),
+                    self.respeak_walk_step(),
+                    self.respeak_turn_endings(),
+                ])
             }
             SettingsMsg::SetThemeVariant { id, is_light } => {
                 self.set_theme_variant(id, is_light);
@@ -583,7 +587,11 @@ impl App {
                 // window's server answers in it too.
                 self.send_ai_config();
                 self.refresh_embeddings();
-                Task::batch([self.respeak_explanation(), self.respeak_walk_step()])
+                Task::batch([
+                    self.respeak_explanation(),
+                    self.respeak_walk_step(),
+                    self.respeak_turn_endings(),
+                ])
             }
             SettingsMsg::SystemAppearanceChanged => {
                 // Only follow the OS when the preference is System; re-color

@@ -316,6 +316,12 @@ fn a_failed_run_says_why_and_can_be_tried_again() {
     // Said there, with its Try again and Settings: not on the status bar
     // as well — both at once said the one failure twice.
     assert!(app.failure_shown().is_none(), "said twice");
+    // H1: nor is it said to be still at work.
+    assert!(
+        !app.status.contains("Working out"),
+        "still working, says the status bar: {}",
+        app.status
+    );
     let _ = app.update(Message::Fake(FakeMsg::EditInputs));
     assert_eq!(app.proj.fake.sheet.as_ref().unwrap().values, ["noon"]);
 
@@ -390,6 +396,21 @@ fn a_failed_run_says_why_and_can_be_tried_again() {
         app.failure_shown().is_none(),
         "its panel closed, the failure stood on"
     );
+}
+
+/// H1: a fake run closed while it works takes "Working out what … does…"
+/// off the status bar with it: it stood there after the tab was gone.
+#[test]
+fn a_fake_run_closed_while_it_works_is_no_longer_said_to_work() {
+    let mut app = fake_app("fake-close-working");
+    let _rx = attach_server(&mut app);
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: false }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    assert!(app.status.contains("Working out"), "{}", app.status);
+    let _ = app.update(Message::Fake(FakeMsg::Close));
+    assert!(app.proj.fake.working.is_none());
+    assert!(!app.status.contains("Working out"), "{}", app.status);
 }
 
 /// Fake runs run side by side, each in its own tab: a second does not stop

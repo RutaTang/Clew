@@ -607,7 +607,14 @@ impl App {
 
     /// The failure the status line stands, if it stands one.
     pub(crate) fn failure_shown(&self) -> Option<&crate::app::state::FailureNotice> {
-        self.failure_notice.as_ref().filter(|f| !f.said.is_empty())
+        self.failure_notice
+            .as_ref()
+            .filter(|f| !f.said.is_empty())
+            .filter(|f| {
+                // An Ask answer's failure is said in the conversation while Ask
+                // is open: there alone.
+                !(f.of == crate::app::state::FailureOf::Ask && self.ask_view.is_open())
+            })
     }
 
     /// Take a standing failure of `of` away: what it was of was done again

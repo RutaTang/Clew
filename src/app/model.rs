@@ -476,6 +476,21 @@ pub struct TurnExtras {
     /// it, beside Try again — its words said "check the base URL in
     /// Settings", and nothing led there.
     pub fix: Option<crate::app::state::LlmField>,
+    /// How the answer ended short of one of its own, with the words that
+    /// said so in it: said again in the language spoken now when that
+    /// changes — "Couldn't answer: …" stood in English above "Impossible
+    /// de répondre : …" in one conversation.
+    pub ended: Option<(TurnEnd, String)>,
+}
+
+/// How an answer ended short of one: stopped before a word of it, stopped
+/// part-way, or failed with `raw` (said plainly where an ACP agent, not
+/// Clew's own model, failed: `own` false).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TurnEnd {
+    Stopped,
+    StoppedHere,
+    Failed { raw: String, own: bool },
 }
 
 /// What an approval card answers.

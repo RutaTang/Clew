@@ -360,6 +360,34 @@ pub(crate) fn walk_title(wt: &crate::walkthrough::Walkthrough) -> String {
     }
 }
 
+/// A step's title as shown: a run's step made without a model named by its
+/// stop as well — "Stop 3: discounts", counted as the debug panel counts
+/// them — in the language spoken now. A breakpoint hit fourteen times in
+/// one function listed fourteen "discounts", and nothing told them apart.
+pub(crate) fn step_title(step: &crate::walkthrough::Step) -> String {
+    match &step.stop {
+        Some(facts) if step.symbol.as_deref() == Some(step.title.as_str()) => {
+            tr!("Stop {n}: {name}", n = facts.ordinal, name = step.title)
+        }
+        _ => step.title.clone(),
+    }
+}
+
+/// What a tour's row says under its title: its scope, and when a run's
+/// tour was made — "Debug run (main.py), 5 min ago" — as every run of one
+/// program is named alike.
+pub(crate) fn walk_subtitle(wt: &crate::walkthrough::Walkthrough) -> String {
+    let scope = scope_label(&wt.scope);
+    match wt.made {
+        Some(made) => tr!(
+            "{what}, {when}",
+            what = scope,
+            when = crate::app::ask_sessions::when(made, crate::app::ask_sessions::now())
+        ),
+        None => scope,
+    }
+}
+
 /// A human label for a walkthrough's scope: the whole codebase, a change review,
 /// a debug run, or the user's feature prompt — each named as the action
 /// that makes it is, in the language spoken now.
@@ -663,7 +691,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                 theme::danger(),
             )
         } else {
-            (scope_label(&wt.scope), theme::dim())
+            (walk_subtitle(wt), theme::dim())
         };
         // The tour row: a full-width clickable title (so its selected highlight
         // spans the whole row) with the regenerate/delete controls layered on top
@@ -801,7 +829,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                     button(
                         row![
                             text(mark).size(ts::CAPTION).color(theme::dim()).width(18),
-                            text(step.title.clone()).size(ts::BODY).color(if is_cur {
+                            text(step_title(step)).size(ts::BODY).color(if is_cur {
                                 theme::fg()
                             } else {
                                 theme::dim()
@@ -819,7 +847,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                         left: 22.0 + indent,
                     })
                     .on_press(super::heard::row(
-                        || step.title.clone(),
+                        || step_title(step),
                         Message::Walk(WalkMsg::Goto {
                             scope: wt.scope.clone(),
                             step: si,

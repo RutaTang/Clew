@@ -515,7 +515,11 @@ impl App {
         let y = y.clamp(panes.y, (panes.y + panes.height - 1.0).max(panes.y));
         let (sx, sy) = (v.scroll_x, v.scroll_y);
         // In the content's space, as a click's point comes.
-        self.on_context_menu_opened(pane, line, col, x + sx, y + sy)
+        let opened = self.on_context_menu_opened(pane, line, col, x + sx, y + sy);
+        // Opened from the keys, on its first row: Enter runs it. With
+        // nothing chosen, Enter did nothing until ↓ was pressed.
+        let ring = self.on_tab(true, false);
+        Task::batch([opened, ring])
     }
 
     /// Whether the language server of what `pane` shows is ready.

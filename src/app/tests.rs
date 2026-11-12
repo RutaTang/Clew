@@ -1027,6 +1027,7 @@ fn a_waiting_line_said_before_a_language_switch_is_still_known() {
     assert_eq!(app.status, "", "{french}: still up as the wait ended");
 
     let tour = walkthrough::Walkthrough {
+        made: None,
         title: "tour".into(),
         scope: "how it starts".into(),
         steps: Vec::new(),
@@ -9476,6 +9477,7 @@ fn a_generated_walkthrough_keeps_the_other_windows_tour() {
     // The other window generates and persists a tour.
     std::fs::create_dir_all(root.join(".clew").join("cache")).unwrap();
     let theirs = walkthrough::Walkthrough {
+        made: None,
         title: "Theirs".into(),
         scope: "theirs".into(),
         steps: vec![walkthrough::Step {
@@ -9492,6 +9494,7 @@ fn a_generated_walkthrough_keeps_the_other_windows_tour() {
 
     // This window's generation lands, from its stale (empty) library.
     let mine = walkthrough::Walkthrough {
+        made: None,
         title: "Mine".into(),
         scope: String::new(),
         steps: vec![walkthrough::Step {
@@ -9581,6 +9584,7 @@ fn an_answer_shown_clears_the_line_that_said_it_was_coming() {
     app.proj.walk.seq += 1;
     app.proj.walk.pending = Some(app.proj.walk.seq);
     let tour = walkthrough::Walkthrough {
+        made: None,
         title: "Tour".into(),
         scope: String::new(),
         steps: vec![walkthrough::Step {
@@ -10459,6 +10463,7 @@ fn an_adopted_remote_walkthrough_library_keeps_the_open_tour_by_scope() {
 
     // It regenerates that tour, which travels as an upsert by scope.
     let mine = walkthrough::Walkthrough {
+        made: None,
         title: "Mine".into(),
         scope: "mine".into(),
         steps: vec![walkthrough::Step {
@@ -11782,6 +11787,7 @@ fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
     let (mut app, _, mut rx) = remote_app("remote-state-said-to-wait-tours");
     let tour = |scope: &str| {
         walkthrough::merge_upsert(&walkthrough::Walkthrough {
+            made: None,
             title: scope.into(),
             scope: scope.into(),
             steps: Vec::new(),
@@ -11894,6 +11900,7 @@ fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
 fn a_close_waits_for_an_agreed_edit_a_later_one_must_land_after() {
     let tour = |scope: &str| {
         walkthrough::merge_upsert(&walkthrough::Walkthrough {
+            made: None,
             title: scope.into(),
             scope: scope.into(),
             steps: Vec::new(),
@@ -12422,6 +12429,7 @@ fn edits_a_host_fails_while_a_close_waits_end_as_they_were_made() {
 fn the_walkthrough_library_keeps_the_order_its_edits_were_made_in() {
     let tour = |scope: &str| {
         walkthrough::merge_upsert(&walkthrough::Walkthrough {
+            made: None,
             title: scope.into(),
             scope: scope.into(),
             steps: Vec::new(),
@@ -12642,6 +12650,7 @@ fn the_edits_given_up_while_a_window_closes_are_kept_within_a_bound() {
 #[test]
 fn a_retry_said_of_one_edit_is_not_taken_back_for_another_named_alike() {
     let tour = |scope: &str| walkthrough::Walkthrough {
+        made: None,
         title: "tour".into(),
         scope: scope.into(),
         steps: Vec::new(),
@@ -21462,6 +21471,48 @@ fn the_debuggers_state_reaches_a_prompt_as_data() {
     );
 }
 
+/// L10: stepping between two functions over and over records each once in
+/// the reading trail — it filled with alternating "tax() / total()" rows.
+#[test]
+fn stepping_back_and_forth_records_each_function_once_in_the_trail() {
+    let mut app = scanned_app("debug-trail-once");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("app"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    let frame = |name: &str, line: usize| crate::dap::StackFrame {
+        id: 1,
+        name: name.into(),
+        path: Some(root.join("src/lib.rs")),
+        line,
+        column: 1,
+    };
+    for _ in 0..4 {
+        let _ = app.on_dap_stop_inspected(vec![frame("tax", 2)], Vec::new(), true);
+        let _ = app.on_dap_stop_inspected(vec![frame("total", 4)], Vec::new(), true);
+    }
+    let labels: Vec<String> = app
+        .proj
+        .history
+        .flatten()
+        .into_iter()
+        .filter_map(|v| v.label)
+        .collect();
+    assert_eq!(labels, ["tax", "total"], "the trail flooded");
+}
+
 /// A debug run's trace: each inspected stop is recorded with the reason the
 /// adapter gave and the stack it stopped with, up to the cap (then marked
 /// cut); "Walk the last run" without a model stores the plain tour of it in
@@ -21526,6 +21577,13 @@ fn a_debug_runs_stops_are_traced_and_walked() {
         .find(|w| w.scope == "@trace app")
         .expect("the run's tour");
     assert_eq!(tour.title, "Run: app");
+    // M15: dated, as runs of one program share its name.
+    assert!(tour.made.is_some(), "which run it shows");
+    assert!(
+        crate::ui::walk_subtitle(tour).ends_with(", just now"),
+        "{}",
+        crate::ui::walk_subtitle(tour)
+    );
     let symbols: Vec<&str> = tour
         .steps
         .iter()
@@ -21903,6 +21961,7 @@ fn a_superseded_walkthrough_is_kept_but_not_opened_and_leaves_the_busy_row() {
     let mut app = scanned_app("walk-superseded");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let tour = |title: &str| walkthrough::Walkthrough {
+        made: None,
         title: title.into(),
         scope: String::new(),
         steps: vec![walkthrough::Step {
@@ -27948,6 +28007,71 @@ fn time_travel_steps_with_the_arrow_chords_only() {
     assert_eq!(idx(&app), 1, "⌘→ steps to the newer commit");
 }
 
+/// M16: an answer's ending — why it failed, that it was stopped — is said
+/// again in the language chosen: "Couldn't answer: …" stood in English
+/// above French answers in one conversation.
+#[test]
+fn an_answers_ending_is_said_again_in_the_language_chosen() {
+    use crate::i18n::{Lang, with_lang};
+    use clew_protocol::StreamOutcome;
+    let mut app = scanned_app("ask-ending-language");
+    let _rx = attach_server(&mut app);
+    for outcome in [
+        StreamOutcome::Stopped,
+        StreamOutcome::Failed("cancelled".into()),
+    ] {
+        let stream = app.mint_request_id();
+        let task = app.start_ask_stream(
+            PendingAsk {
+                stream,
+                question: "why?".into(),
+                sources: Vec::new(),
+                spoken: false,
+            },
+            unreachable_llm(),
+            "system".into(),
+            vec![llm::ChatMsg::user("why?")],
+        );
+        let _ = app.handle_server_event(clew_protocol::Event::ChatStreamDone { stream, outcome });
+        drive(&mut app, task, |m| {
+            matches!(m, Message::Ask(AskMsg::StreamEnded { .. }))
+        });
+    }
+    let english: Vec<String> = app
+        .proj
+        .ask_turns
+        .iter()
+        .map(|t| t.answer_md.clone())
+        .collect();
+    assert_eq!(english.len(), 2);
+    let _ = with_lang(Lang::Fr, || app.respeak_turn_endings());
+    for (turn, was) in app.proj.ask_turns.iter().zip(&english) {
+        let (end, said) = turn.extras.ended.clone().expect("how it ended");
+        assert_ne!(&turn.answer_md, was, "still in English");
+        assert_eq!(turn.answer_md, said);
+        assert_eq!(
+            said,
+            with_lang(Lang::Fr, || crate::app::ask::turn_end_words(&end))
+        );
+        assert!(!turn.answer.is_empty(), "not drawn again");
+    }
+    // Said again in the language it is in: nothing changes.
+    let french: Vec<String> = app
+        .proj
+        .ask_turns
+        .iter()
+        .map(|t| t.answer_md.clone())
+        .collect();
+    let _ = with_lang(Lang::Fr, || app.respeak_turn_endings());
+    let again: Vec<String> = app
+        .proj
+        .ask_turns
+        .iter()
+        .map(|t| t.answer_md.clone())
+        .collect();
+    assert_eq!(again, french);
+}
+
 /// CP#2: a Stop the server reports arrives TYPED (`StreamOutcome::Stopped`)
 /// and reads as stopped. It used to travel as an error string compared
 /// against one spelling, so a server that said "cancelled" turned every Stop
@@ -27967,7 +28091,7 @@ fn a_stopped_server_stream_reads_as_stopped_not_failed() {
         ),
         (
             StreamOutcome::Failed("cancelled".into()),
-            "Ask failed: cancelled",
+            "Couldn't answer: cancelled",
             "Couldn't answer: cancelled",
         ),
     ] {
@@ -28000,10 +28124,21 @@ fn a_stopped_server_stream_reads_as_stopped_not_failed() {
         // asked for, does neither.
         assert_eq!(
             turn.extras.failed,
-            status.starts_with("Ask failed"),
+            status.starts_with("Couldn't answer"),
             "{status}"
         );
     }
+    // M1: said on the status bar — with its Try again — only while Ask is
+    // put away to its pill; open, the conversation says it, alone.
+    let notice = app.failure_notice.clone().expect("Ask put away: a notice");
+    assert_eq!(notice.of, crate::app::state::FailureOf::Ask);
+    assert!(matches!(
+        notice.retry,
+        Some(Message::Ask(AskMsg::AskAgain(_)))
+    ));
+    app.ask_view = crate::AskView::Compact;
+    assert!(app.failure_shown().is_none(), "said twice");
+    app.ask_view = crate::AskView::Hidden;
 
     let turns = app.proj.ask_turns.len();
     let task = app.start_agent_ask("how?".into(), false);
@@ -29884,6 +30019,7 @@ fn a_walkthrough_step_the_reader_left_never_moves_the_cursor_later() {
     let mut app = scanned_app("walk-anchor-stale");
     app.proj.symbol_index_by_file.clear(); // the index has not reached it
     app.proj.walk.library = vec![walkthrough::Walkthrough {
+        made: None,
         title: "Tour".into(),
         scope: "tour".into(),
         steps: vec![walkthrough::Step {
@@ -29919,6 +30055,7 @@ fn a_jump_within_the_steps_file_supersedes_the_step() {
     let mut app = scanned_app("walk-anchor-same-file");
     app.proj.symbol_index_by_file.clear(); // the index has not reached it
     app.proj.walk.library = vec![walkthrough::Walkthrough {
+        made: None,
         title: "Tour".into(),
         scope: "tour".into(),
         steps: vec![walkthrough::Step {
@@ -29965,6 +30102,7 @@ fn a_jump_within_the_steps_file_supersedes_the_step() {
 /// at `line`.
 fn walk_tour(symbol: &str, line: Option<usize>) -> Vec<walkthrough::Walkthrough> {
     vec![walkthrough::Walkthrough {
+        made: None,
         title: "Tour".into(),
         scope: "tour".into(),
         steps: vec![walkthrough::Step {
@@ -30323,6 +30461,7 @@ fn markdown_step_landed(tag: &str) -> (App, Task<Message>) {
     scan_synchronously(&mut app, root);
     app.proj.symbol_index_by_file.clear(); // the index has not reached it
     app.proj.walk.library = vec![walkthrough::Walkthrough {
+        made: None,
         title: "Tour".into(),
         scope: "tour".into(),
         steps: vec![walkthrough::Step {
@@ -32799,6 +32938,7 @@ fn walkthrough_rows_act_on_the_tour_they_show() {
     let mut app = scanned_app("walk-by-scope");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let tour = |scope: &str| walkthrough::Walkthrough {
+        made: None,
         title: scope.into(),
         scope: scope.into(),
         steps: Vec::new(),
@@ -32883,6 +33023,7 @@ fn a_walkthrough_step_whose_symbol_is_missing_says_so_once_its_file_lands() {
         stop: None,
     };
     app.proj.walk.library = vec![walkthrough::Walkthrough {
+        made: None,
         title: "Tour".into(),
         scope: "tour".into(),
         steps: vec![
@@ -34965,6 +35106,42 @@ fn a_gutter_tip_waits_for_the_pointer_to_rest_on_its_line() {
     assert!(app.proj.gutter_tip.is_none(), "left the gutter");
 }
 
+/// M8: the code seen made shorter — the bottom panel opened for a fake
+/// run — keeps the cursor's line in sight: tax() at line 27, seen, went
+/// under the panel with the margin's card. A line not seen before is not
+/// sought out, and a taller view moves nothing.
+#[test]
+fn a_shorter_code_view_keeps_the_cursor_line_in_sight() {
+    let mut app = scanned_app("caret-kept-in-sight");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let lh = app.line_height();
+    let pane = app.proj.active;
+    let set = |app: &mut App, caret: usize, scroll: f32, h: f32| {
+        let v = app.active_viewer_mut().unwrap();
+        v.viewport_measured = true;
+        v.viewport_h = h;
+        v.scroll_y = scroll;
+        v.caret = Some((caret, 0));
+    };
+    let measured = |app: &mut App, h: f32| {
+        let _ = app.update(Message::Editor(EditorMsg::ViewMeasured { pane, height: h }));
+        app.active_viewer().unwrap().scroll_y
+    };
+    // Seen at the foot of a tall view; the view made short: still seen,
+    // with lines under it.
+    set(&mut app, 26, 0.0, 30.0 * lh);
+    let y = measured(&mut app, 16.0 * lh);
+    let top = 26.0 * lh;
+    assert!(top >= y && top + lh <= y + 16.0 * lh, "out of sight at {y}");
+    assert!(y > 0.0, "not scrolled");
+    // Not seen before: left where it was.
+    set(&mut app, 26, 0.0, 10.0 * lh);
+    assert_eq!(measured(&mut app, 8.0 * lh), 0.0);
+    // Taller: nothing moves.
+    set(&mut app, 5, 0.0, 10.0 * lh);
+    assert_eq!(measured(&mut app, 30.0 * lh), 0.0);
+}
+
 /// The Glossary page (⋯ menu → Glossary) covers the code like the overview
 /// and the stats do, leaves for a file the way they do, and only opens on a
 /// project.
@@ -35093,6 +35270,7 @@ fn an_export_names_a_runs_tour_in_the_language_spoken() {
         .walk
         .library
         .push(crate::ai::walkthrough::Walkthrough {
+            made: None,
             title: crate::ai::walkthrough::plain_run_title("main.py"),
             scope: "@trace main.py".into(),
             steps: Vec::new(),
@@ -35143,6 +35321,7 @@ fn export_notes_writes_the_markdown_where_picked() {
         .walk
         .library
         .push(crate::ai::walkthrough::Walkthrough {
+            made: None,
             title: "A tour".into(),
             scope: String::new(),
             steps: Vec::new(),
@@ -37276,6 +37455,7 @@ fn the_reading_guide_is_written_kept_and_regenerated_as_a_guide() {
         stop: None,
     };
     let guide = walkthrough::Walkthrough {
+        made: None,
         title: "Where to start".into(),
         scope: String::new(),
         steps: vec![step("Start", 0), step("Then", 1)],

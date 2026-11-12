@@ -595,13 +595,15 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .into(),
     ];
     // The stack's column: two parts of the panel's, less the gaps between
-    // the columns and its rows' padding.
+    // the columns, the column's own padding (`debug_col`'s 6 a side), its
+    // rows' padding (6 a side) and a pixel's rounding — the column's
+    // padding uncounted, "pricing.py:20" lost its last digit uncut.
     let portions = if session.output.is_empty() {
         12.0
     } else {
         14.0
     };
-    let stack_room = ((panel_w - 3.0 * 6.0) * 2.0 / portions - 12.0).max(0.0);
+    let stack_room = ((panel_w - 3.0 * 6.0) * 2.0 / portions - 2.0 * 6.0 - 12.0 - 2.0).max(0.0);
     for f in &session.frames {
         let loc = f
             .path
@@ -1123,7 +1125,11 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         // Context-aware starter questions — click one to ask it.
         let suggestions = app.suggested_questions();
         let coming = app.suggestions_coming();
-        if (!suggestions.is_empty() || coming) && !app.voice.is_listening() {
+        // Questions about a codebase, with none open: not offered.
+        if app.proj.project.is_some()
+            && (!suggestions.is_empty() || coming)
+            && !app.voice.is_listening()
+        {
             // A question asked at a click is an answer paid for: marked so,
             // as every control that spends is, and said where the pointer
             // rests — they looked like plain links.
@@ -1170,7 +1176,25 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     // Why the last question could not be asked, where it was — the status
     // line said it alone, and the card seemed to ignore the question.
     let notice: Option<Element<'_, Message>> = app.proj.ask_notice.as_ref().map(|why| {
-        row![
+        // With the way to what it asks for: a folder to open, the
+        // embedding endpoint to set — said as plain words, they led
+        // nowhere.
+        let way = if app.proj.project.is_none() {
+            Some((
+                tr!("Open Folder…"),
+                Message::Project(ProjectMsg::OpenFolderPressed),
+            ))
+        } else if *why == crate::app::embedding::why_no_embeddings() {
+            Some((
+                tr!("Settings"),
+                Message::Settings(SettingsMsg::OpenAt(
+                    crate::app::state::SettingsPage::Embeddings,
+                )),
+            ))
+        } else {
+            None
+        };
+        let mut said = row![
             glyph::icon(Glyph::Info, theme::warning(), 14.0),
             text(crate::i18n::message(why))
                 .size(ts::SMALL)
@@ -1179,8 +1203,16 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 .wrapping(Wrapping::WordOrGlyph),
         ]
         .spacing(8)
-        .align_y(iced::Center)
-        .into()
+        .align_y(iced::Center);
+        if let Some((label, msg)) = way {
+            said = said.push(
+                button(text(label).size(ts::SMALL).color(theme::accent()))
+                    .style(theme::toolbar_button)
+                    .padding([2, 8])
+                    .on_press(super::heard::said(label, msg)),
+            );
+        }
+        said.into()
     });
     for (n, turn) in app.proj.ask_turns.iter().enumerate() {
         // A question said rather than typed is marked so, over it (with
