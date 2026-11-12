@@ -123,7 +123,7 @@ pub(crate) fn pane_cover(app: &App) -> Option<PaneCover<'_>> {
 
 pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
     if let Some(cover) = pane_cover(app) {
-        return editor_shell(match cover {
+        let page = match cover {
             PaneCover::Scanning => empty_state(Glyph::Search, tr!("Scanning project…"), "", None),
             PaneCover::Welcome => welcome(app),
             PaneCover::Docs(page) => docs_page(page),
@@ -131,7 +131,21 @@ pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
             PaneCover::Stats => stats_home(app),
             PaneCover::WeakSpots => super::weakspots::weak_home(app),
             PaneCover::Glossary => glossary_home(app),
-        });
+        };
+        // The Ask pill floats over a page's foot at its right: the page
+        // ends above it, so no row is under it, scrolled to its end or
+        // not — room only after the last row, the rows on their way there
+        // were (a file's language in the statistics, a term's meaning in
+        // the glossary). The same column either way, its foot empty while
+        // the pill is elsewhere: as one thing or the other, the page's
+        // scroll was a new widget's as Ask opened or closed.
+        let foot: Element<'_, Message> = if cover.is_page() && super::askfloat::pill_over_page(app)
+        {
+            super::askfloat::pill_foot()
+        } else {
+            space().height(0).into()
+        };
+        return editor_shell(column![page, foot].into());
     }
     // Always two slots, so toggling the split never moves pane 0's subtree
     // (and with it the state of its code view) to another place in the tree.
@@ -555,7 +569,6 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         );
     }
 
-    blocks.push(super::askfloat::pill_foot());
     // From its top for each item picked (`fresh`), not where the last was
     // scrolled to.
     let body = crate::ui::fresh::fresh_for(
@@ -637,7 +650,6 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     items.extend(map);
     if generated {
         items.extend(render_prepared(app, &app.proj.overview.prepared));
-        items.push(super::askfloat::pill_foot());
     } else if generating {
         items.push(
             container(
@@ -1079,9 +1091,6 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         space().height(14),
         section(tr!("Largest files")),
         files,
-        // Room under the last row clear of the Ask pill floating at the
-        // window's foot, which covered it.
-        super::askfloat::pill_foot(),
     ]
     .spacing(8)
     .width(Fill)
@@ -1271,7 +1280,6 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         );
     }
 
-    items.push(super::askfloat::pill_foot());
     // One column, as wide as its terms read well: the list was held to it
     // and the filter and header ran on to the panel's edge, the locations
     // ending some 215 px short of the filter's end.

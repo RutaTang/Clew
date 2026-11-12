@@ -4086,9 +4086,11 @@ fn the_context_menu_has_each_languages_own_rows() {
     );
 }
 
-/// A page over the code, scrolled to its end, has nothing under the Ask
-/// pill floating at the window's foot: its last row stands clear of it
-/// (the weak spots here; the glossary, the overview and a docs page alike).
+/// A page over the code has nothing under the Ask pill floating at the
+/// window's foot, scrolled to its end or not: it ends above the pill (the
+/// weak spots here; the statistics, the glossary, the overview and a docs
+/// page alike). With room only after its last row, the rows on their way
+/// there were under it — a file's language in the statistics.
 #[test]
 fn a_pages_last_row_scrolls_clear_of_the_ask_pill() {
     use clew_core::weakspots::{Reason, Spot};
@@ -4109,6 +4111,20 @@ fn a_pages_last_row_scrolls_clear_of_the_ask_pill() {
     ));
     let pill = super::askfloat::ask_corner_rect(&app);
     let mut sim = sim_of(&app);
+    // At rest: what is shown of the page ends above the pill.
+    let page = text_at(&mut sim, |t| t.starts_with("spot"), 0).expect("a row");
+    let lowest = (0..40)
+        .filter_map(|i| {
+            let name = format!("spot{i:02}");
+            text_at(&mut sim, move |t| t == name, 0)
+        })
+        .filter(|r| r.height > 1.0)
+        .map(|r| r.y + r.height)
+        .fold(page.y, f32::max);
+    assert!(
+        lowest <= pill.y,
+        "a row at {lowest} under the pill at {pill:?}"
+    );
     sim.point_at(Point::new(WINDOW.width / 2.0, WINDOW.height / 2.0));
     let _ = sim.simulate([Event::Mouse(mouse::Event::WheelScrolled {
         delta: mouse::ScrollDelta::Pixels {
@@ -13311,7 +13327,9 @@ fn the_tour_sheet_says_why_it_cannot_start_yet() {
 /// While jump mode's codes are up, what to do with them is said whole on
 /// the status line, a failure standing there or not — after the failure's
 /// words it was cut to "Type the code on a…" — and the failure's controls
-/// stay, to be pressed by their codes.
+/// stay, to be pressed by their codes, after what failed: without it,
+/// "Try again  Settings ×" stood with nothing said of what they were
+/// about.
 #[test]
 fn the_jump_hint_is_said_whole_beside_a_failure() {
     let mut app = reader_app();
@@ -13328,8 +13346,11 @@ fn the_jump_hint_is_said_whole_beside_a_failure() {
         text_at(&mut sim, |t| t == hint, 0).is_some(),
         "the hint, whole"
     );
-    assert!(text_at(&mut sim, |t| t == "Try again", 0).is_some());
-    assert!(!shows(&mut sim, "Couldn't explain"));
+    let again = text_at(&mut sim, |t| t == "Try again", 0).expect("Try again");
+    let failed = text_at(&mut sim, |t| t == "Couldn't explain lib.rs", 0)
+        .expect("what failed, before its controls");
+    assert!(failed.x < again.x);
+    assert!(!shows(&mut sim, "couldn't reach the AI provider"));
     drop(sim);
     // Out of jump mode, the failure is said again.
     app.jump = None;
@@ -13972,6 +13993,21 @@ fn the_margin_says_why_it_is_hidden_and_follows_the_pane_left() {
         other => format!("{other:?}"),
     };
     assert_eq!(named(&app), "line_10");
+    // Closed from the right half, the pane read is the one kept, its card
+    // with it.
+    app.proj.active = 1;
+    let _ = app.update(Message::Editor(crate::EditorMsg::ToggleSplit));
+    assert!(!app.proj.split);
+    assert_eq!(named(&app), "line_10", "the card of the pane kept");
+    // Closed from the left half, the left pane is kept: the card is of
+    // its caret, not of the pane closed.
+    let _ = app.update(Message::Editor(crate::EditorMsg::ToggleSplit));
+    app.proj.panes[1].as_mut().unwrap().caret = Some((10, 0));
+    app.proj.panes[0].as_mut().unwrap().caret = Some((0, 0));
+    app.proj.active = 1;
+    let _ = app.follow_caret(iced::Task::none());
+    assert_eq!(named(&app), "line_10");
+    app.proj.active = 0;
     let _ = app.update(Message::Editor(crate::EditorMsg::ToggleSplit));
     assert!(!app.proj.split);
     assert_eq!(named(&app), "line_0", "the card of the pane closed");
@@ -14294,8 +14330,10 @@ fn the_stats_page_reads_cleanly() {
     assert_eq!(super::lang_color(n + 1), super::lang_color(n));
 
     let size = Size::new(WINDOW.width, 600.0);
-    let view =
-        || iced_test::Simulator::with_size(Default::default(), size, super::stats_home(&app));
+    // As the page is shown over the panes, with its foot.
+    app.proj.stats.showing = true;
+    app.ask_view = crate::AskView::Hidden;
+    let view = || iced_test::Simulator::with_size(Default::default(), size, super::pane_area(&app));
     let mut sim = view();
     assert!(shows(&mut sim, "120"), "the project's files");
     assert!(shows(&mut sim, "87"), "its code files");
@@ -14320,6 +14358,22 @@ fn the_stats_page_reads_cleanly() {
     assert!(
         last.y + last.height <= pill_top,
         "{last:?} under the pill from {pill_top}"
+    );
+    drop(sim);
+    // At rest too: a row on its way to the end was under it.
+    let mut sim = view();
+    let lowest = (0..30)
+        .filter_map(|i| {
+            let name = format!("src/file{i:02}.rs");
+            text_at(&mut sim, move |t| t == name, 0)
+        })
+        .filter(|r| r.height > 1.0)
+        .map(|r| r.y + r.height)
+        .fold(0.0, f32::max);
+    assert!(lowest > 0.0, "rows shown");
+    assert!(
+        lowest <= pill_top,
+        "a row at {lowest} under the pill from {pill_top}"
     );
 }
 
@@ -14843,35 +14897,64 @@ fn the_ask_header_has_one_way_away_and_names_esc_once() {
 
 /// The Ask card keeps its height while an answer comes in: fitted to it,
 /// the card grew up the window a line at a time, its header moving with
-/// every line said.
+/// every line said. Nor does it move as an answer fails, as Try again is
+/// pressed ("Thinking…" is shorter than a failure), or as an answer ends:
+/// fitted to each, it jumped, its × moved from under the pointer.
 #[test]
 fn the_ask_card_holds_still_while_an_answer_comes_in() {
+    use clew_protocol::StreamOutcome;
     let mut app = reader_app();
     app.ask_view = crate::AskView::Compact;
-    app.proj.ask_turns.push(crate::app::model::AskTurn {
-        stream: 4,
-        question: "What does it do?".into(),
-        streaming: true,
-        ..Default::default()
-    });
-    app.proj.link.agent_stream = Some(4);
-    let _ = app.on_ask_delta(4, "It reads the file.\n\n".into());
+    // A tall window, where the card fitted to a failure is well short of
+    // as tall as it may be.
+    let size = Size::new(1440.0, 900.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
     // Where the card's header is drawn: its session's name.
     let header_y = |app: &App| {
         let name = app.ask_session_title();
-        text_at(&mut sim_of(app), move |t| t == name, 0)
+        text_at(&mut sim_sized(app, size), move |t| t == name, 0)
             .expect("the card's header")
             .y
     };
-    let before = header_y(&app);
+    let ask = |app: &mut App, stream: u64| {
+        app.proj.ask_turns.push(crate::app::model::AskTurn {
+            stream,
+            question: "What does it do?".into(),
+            streaming: true,
+            ..Default::default()
+        });
+        app.proj.link.agent_stream = Some(stream);
+    };
+    let empty = header_y(&app);
+    ask(&mut app, 3);
+    let asked = header_y(&app);
+    assert!(asked < empty, "as tall as it may be once asked");
+    // Failed before a word came, and asked again.
+    let _ = app.on_ask_stream_ended(3, StreamOutcome::Failed("server disconnected".into()));
+    app.proj.link.agent_stream = None;
+    assert!(!app.ask_stream_active());
+    assert!(app.proj.ask_turns[0].extras.failed);
+    assert_eq!(header_y(&app), asked, "the header moved as it failed");
+    app.proj.ask_turns.clear();
+    ask(&mut app, 4);
+    assert_eq!(header_y(&app), asked, "the header moved for Thinking…");
+    let _ = app.on_ask_delta(4, "It reads the file.\n\n".into());
     for n in 0..12 {
         let _ = app.on_ask_delta(4, format!("- line {n} of what it does\n"));
     }
     assert_eq!(
         header_y(&app),
-        before,
+        asked,
         "the header moved as the answer came in"
     );
+    // Ended, short: it stays where it was.
+    let _ = app.on_ask_stream_ended(4, StreamOutcome::Done);
+    app.proj.link.agent_stream = None;
+    app.proj.ask_turns[0].answer_md = "It reads the file.".into();
+    app.proj.ask_turns[0].answer.clear();
+    app.proj.ask_turns[0].settled = 0;
+    assert_eq!(header_y(&app), asked, "the header moved as it ended");
 }
 
 /// The strip's tools that read a project do nothing with none open, and are
@@ -19440,6 +19523,27 @@ fn shift_f10_opens_the_menu_of_what_the_keyboard_is_on() {
         "{menu:?} {panes:?}"
     );
     assert!(app.proj.tree_menu.is_none());
+
+    // Not with a page over the code (the statistics, Weak Spots): the menu
+    // opened over the page, for a line no one could see.
+    app.proj.context_menu = None;
+    let _ = app.update(Message::Overview(crate::OverviewMsg::ShowStats));
+    assert!(super::pane_cover(&app).is_some_and(|c| c.is_page()));
+    app.code_focused = true;
+    let _ = app.update(Message::Editor(crate::EditorMsg::KeyPressed(
+        Key::Named(Named::F10),
+        keyboard::Modifiers::SHIFT,
+    )));
+    assert!(app.proj.context_menu.is_none(), "over the statistics");
+    let _ = app.update(Message::Overview(crate::OverviewMsg::Close));
+    // Nor under the large Ask window.
+    app.ask_view = crate::AskView::Expanded;
+    app.code_focused = true;
+    let _ = app.update(Message::Editor(crate::EditorMsg::KeyPressed(
+        Key::Named(Named::ContextMenu),
+        keyboard::Modifiers::empty(),
+    )));
+    assert!(app.proj.context_menu.is_none(), "under Ask");
 }
 
 /// With a menu up, a right-click on another row puts it away and opens

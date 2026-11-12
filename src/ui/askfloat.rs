@@ -36,12 +36,18 @@ pub(crate) const ASK_LARGE_SHARE: f32 = 0.72;
 /// Height of the pill Ask hides to.
 pub(crate) const PILL_H: f32 = 40.0;
 
-/// Room under the last row of a page over the code (the glossary, the
-/// statistics, the overview, a docs page, the weak spots), clear of the
-/// pill floating at the window's foot: scrolled to its end, nothing of the
-/// page is under the pill.
+/// Room at the foot of what the pill floats over (a page over the code,
+/// the bottom panel's output), kept clear of it: what is above ends above
+/// the pill, so nothing of it is under the pill, scrolled or not.
 pub(crate) fn pill_foot<'a, M: 'a>() -> Element<'a, M> {
     space().height(PILL_H + ASK_MARGIN).into()
+}
+
+/// Whether the pill floats over a page over the panes (the glossary, the
+/// statistics, the overview, a docs page, the weak spots): Ask hidden to
+/// it, and nothing else under it there — no margin, no bottom panel.
+pub(crate) fn pill_over_page(app: &App) -> bool {
+    app.ask_view == AskView::Hidden && !right_panel_shown(app) && !app.show_bottom
 }
 
 /// How far up from the foot of `pane`'s code view the pill floats over its
@@ -646,11 +652,14 @@ const ASK_HEADER_PAD: Padding = Padding {
 /// approval is given up to half the card, the conversation over it what is
 /// left, so the input stays in view under them however long either runs.
 fn card_fits(app: &App) -> bool {
-    // While an answer comes in, the card is as tall as it may be: fitted,
-    // it grew up the window a line at a time, its header moving with every
-    // line said. (Its menu of sessions drops over the window, and leaves
-    // the card as it was.)
-    ask_is_card(app) && !app.ask_stream_active()
+    // Once a question is asked, the card is as tall as it may be, and stays
+    // so: fitted to an answer, it grew up the window a line at a time, its
+    // header moving with every line said; fitted to a failure, it jumped as
+    // Try again was pressed ("Thinking…" is shorter) and again as it failed,
+    // its × moved from under the pointer each time. Fitted only to what an
+    // empty conversation offers. (Its menu of sessions drops over the
+    // window, and leaves the card as it was.)
+    ask_is_card(app) && app.proj.ask_turns.is_empty() && !app.ask_stream_active()
 }
 
 /// The card: its header (what it is, what is being read, size, close),

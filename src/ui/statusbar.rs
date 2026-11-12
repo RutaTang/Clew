@@ -635,10 +635,36 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     {
         let whole = words_of(&failure.shown());
         let (controls, controls_w) = failure_controls(failure, room - least - STATUS_GAP);
-        // While the codes are up, what to do with them is said instead:
-        // after the failure's words it was cut to "Type the code on a…".
-        // Its controls stay, each with its code.
+        // What failed: its words before the reason — ": ", or the
+        // full-width "：" Chinese and Japanese write.
+        let head = [": ", "："]
+            .iter()
+            .filter_map(|sep| whole.find(sep))
+            .min()
+            .map_or(whole.as_str(), |at| &whole[..at]);
+        // While the codes are up, what to do with them is said whole —
+        // after the failure's words it was cut to "Type the code on a…" —
+        // and what failed is said before its controls, in what room is
+        // left: without it, "Try again  Settings ×" stood with nothing
+        // said of what they were about. Its controls stay, each with its
+        // code; the whole failure is where the pointer rests.
         if app.jump.is_some() {
+            let hint_w = width(&words_of(&app.status));
+            let free = room - controls_w - 3.0 * STATUS_GAP - chips_w - hint_w;
+            let words = width(head).min(free);
+            if words >= least {
+                let shown = super::steady::cut(head, words, ts::SMALL, font);
+                let line = status_text(shown)
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .color(theme::danger());
+                row = row.push(super::toolbar::tip_at(
+                    line,
+                    whole.clone(),
+                    None,
+                    tooltip::Position::Top,
+                ));
+                used += words + STATUS_GAP;
+            }
             row = row.push(controls);
             used += controls_w + STATUS_GAP;
         } else {
@@ -648,13 +674,6 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             // pointer rests.
             let free = room - controls_w - 2.0 * STATUS_GAP - chips_w;
             let kept = (free / 2.0).clamp(SAID_MIN_W, SAID_KEPT_MAX_W);
-            // Before the reason: ": ", or the full-width "：" Chinese and
-            // Japanese write.
-            let head = [": ", "："]
-                .iter()
-                .filter_map(|sep| whole.find(sep))
-                .min()
-                .map_or(whole.as_str(), |at| &whole[..at]);
             let floor = (width(head) + width("…")).min(free - SAID_MIN_W);
             let words = (free - kept).max(floor).max(least).min(width(&whole));
             row = row.push(line_of(whole, words, Some(theme::danger())));

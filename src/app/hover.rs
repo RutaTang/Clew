@@ -499,6 +499,12 @@ impl App {
     /// ⇧F10 or the Menu key in the code: its menu at the caret, as a
     /// right-click there opens it — the menu was the pointer's alone.
     pub(crate) fn open_context_menu_at_caret(&mut self) -> Task<Message> {
+        // Not for code that is not on screen: a page over it (Weak Spots,
+        // the statistics, a doc page), or the large Ask window. The menu
+        // opened over the page, for a line no one could see.
+        if crate::ui::pane_cover(self).is_some() || self.ask_view == crate::AskView::Expanded {
+            return Task::none();
+        }
         let pane = self.proj.active;
         let Some(v) = self.active_viewer() else {
             return Task::none();

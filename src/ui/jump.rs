@@ -74,6 +74,11 @@ struct Dealing {
     len: usize,
     /// The marks dealt a code so far, with their presses.
     dealt: Vec<(String, Message)>,
+    /// Where their badges went: a badge goes clear of them.
+    badges: Vec<Rectangle>,
+    /// The controls marked so far, as seen: a badge keeps off them where
+    /// it can.
+    controls: Vec<Rectangle>,
 }
 
 /// The layers a press reaches: the one on top only, when it holds the
@@ -810,6 +815,8 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Root<'_> {
                     reach: self.reach,
                     len: self.len,
                     dealt: Vec::new(),
+                    badges: Vec::new(),
+                    controls: Vec::new(),
                 });
             });
         }
@@ -929,11 +936,16 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Mark<'_> {
             }
             let code = code(d.dealt.len(), d.len);
             d.dealt.push((code.clone(), self.message.clone()));
+            // Placed whether shown or not, so a badge stays where it is as
+            // the codes are typed.
+            let at = place(seen, *viewport, code.len(), &d.badges, &d.controls);
+            d.badges.push(at);
+            d.controls.push(seen);
             let shown = code.starts_with(&d.typed);
-            shown.then_some((code, d.typed.len()))
+            shown.then_some((at, code, d.typed.len()))
         });
-        if let Some((code, typed)) = shown {
-            badge(renderer, seen, *viewport, &code, typed);
+        if let Some((at, code, typed)) = shown {
+            badge(renderer, at, &code, typed);
         }
     }
 }
@@ -1003,11 +1015,13 @@ fn badge_bounds(at: Rectangle, room: Rectangle, letters: usize) -> Rectangle {
     }
     // A bar that clips what it holds (the status bar): its controls fill
     // it, so there is no room above them in it — the badge stands above
-    // the bar, over the edge of what is above it. Set beside a control,
-    // it lay over the words of the one before ("DG y aga DH Settin DQ"
-    // for "Try again  Settings ×"); pushed down, over its own.
-    if room.height <= BAR_MAX_H && above >= 0.0 {
-        return at_y(above);
+    // the bar, over the edge of what is above it, clear of the words it
+    // marks. Set beside a control, it lay over the words of the one
+    // before ("DG y aga DH Settin DQ" for "Try again  Settings ×"); pushed
+    // down, over its own; down as far as others, its edge touched their
+    // first letters.
+    if in_bar(at, room) {
+        return at_y(at.y + BAR_OVER - height);
     }
     // At the window's top (the title bar), nothing above: below it, just
     // over its lower edge, as above it would have been.
@@ -1024,12 +1038,114 @@ fn badge_bounds(at: Rectangle, room: Rectangle, letters: usize) -> Rectangle {
 /// the title bar's height.
 const BAR_MAX_H: f32 = super::toolbar::TOOLBAR_H;
 
-/// A code's badge on the top-left corner of `at`, standing out over it,
-/// within `room` (what of the window is seen), the letters already typed
+/// How much of a badge comes down over a bar's control: its padding, with
+/// room left above the words in it.
+const BAR_OVER: f32 = 1.0;
+
+/// Whether `at` is a control of a bar that clips what it holds (the status
+/// bar), whose badge stands above the bar.
+fn in_bar(at: Rectangle, room: Rectangle) -> bool {
+    at.y + BADGE_OVER - (BADGE_SIZE + 4.0).round() < room.y
+        && room.height <= BAR_MAX_H
+        && at.y + BAR_OVER - (BADGE_SIZE + 4.0).round() >= 0.0
+}
+
+/// How tall a control's words or icon are, in the middle of it: the rest
+/// of it is room round them, which a badge may be over.
+const WORDS_H: f32 = 16.0;
+
+/// The tallest a control is that is a line of words with no room round
+/// them (a step of a chain of calls, a link): its badge goes before it,
+/// where it can — above it, it lay over its first letters and the line
+/// above.
+const INLINE_MAX_H: f32 = 20.0;
+
+/// Where the badge of a `letters`-long code goes for the control at `at`,
+/// within `room`: where [`badge_bounds`] puts it, unless that is over a
+/// badge already placed (`badges`) or a control already marked
+/// (`controls`) — then before the control, along its top past the badge
+/// in the way, or under it, the first of those that is clear. Over a
+/// badge, one of them could not be read ("A" under "DH" on the strip,
+/// "AJ" and "SP" over each other on the margin's tabs), so not typed;
+/// over a control, which a code was for was a guess.
+fn place(
+    at: Rectangle,
+    room: Rectangle,
+    letters: usize,
+    badges: &[Rectangle],
+    controls: &[Rectangle],
+) -> Rectangle {
+    let first = badge_bounds(at, room, letters);
+    let (width, height) = (first.width, first.height);
+    // A badge apart from another by a pixel at least.
+    let clear_of_badges = |b: &Rectangle| !badges.iter().any(|o| o.intersects(&b.expand(1.0)));
+    // Off a control's words (or icon): its padding may be under a badge —
+    // the room round a line's height of words, and a little at its sides.
+    // One the control is in (a card it is a link of) is not in the way.
+    let clear_of_controls = |b: &Rectangle| {
+        !controls.iter().any(|c| {
+            let holds = c.x <= at.x
+                && c.y <= at.y
+                && c.x + c.width >= at.x + at.width
+                && c.y + c.height >= at.y + at.height;
+            let side = 4.0_f32.min(c.width / 4.0);
+            let round = ((c.height - WORDS_H) / 2.0).max(2.0_f32.min(c.height / 4.0));
+            let words = Rectangle {
+                x: c.x + side,
+                y: c.y + round,
+                width: (c.width - 2.0 * side).max(0.0),
+                height: (c.height - 2.0 * round).max(0.0),
+            };
+            !holds && words.intersects(b)
+        })
+    };
+    let before = Rectangle {
+        x: (at.x + 2.0 - width).round(),
+        y: (at.center_y() - height / 2.0).round(),
+        width,
+        height,
+    };
+    let under = Rectangle {
+        y: (at.y + at.height - BADGE_OVER).round(),
+        ..first
+    };
+    let bar = in_bar(at, room);
+    let mut tries = Vec::with_capacity(4);
+    let has_before = !bar && before.x >= room.x;
+    let inline = at.height <= INLINE_MAX_H;
+    if has_before && inline {
+        tries.push(before);
+    }
+    tries.push(first);
+    if has_before && !inline {
+        tries.push(before);
+    }
+    // Along its top, past the badges in the way, as far as it reaches.
+    let mut along = first;
+    while let Some(o) = badges.iter().find(|o| o.intersects(&along.expand(1.0))) {
+        along.x = (o.x + o.width + 2.0).round();
+        if along.x + along.width > at.x + at.width {
+            break;
+        }
+    }
+    if along.x + along.width <= at.x + at.width {
+        tries.push(along);
+    }
+    if !bar {
+        tries.push(under);
+    }
+    tries
+        .iter()
+        .find(|b| clear_of_badges(b) && clear_of_controls(b))
+        .or_else(|| tries.iter().find(|b| clear_of_badges(b)))
+        .copied()
+        .unwrap_or(first)
+}
+
+/// A code's badge at `bounds` (see [`place`]), the letters already typed
 /// dimmed.
-fn badge(renderer: &mut iced::Renderer, at: Rectangle, room: Rectangle, code: &str, typed: usize) {
+fn badge(renderer: &mut iced::Renderer, bounds: Rectangle, code: &str, typed: usize) {
     let palette = crate::theme::active();
-    let bounds = badge_bounds(at, room, code.chars().count());
     let height = bounds.height;
     let room = Rectangle {
         x: bounds.x - 1.0,
@@ -1135,7 +1251,9 @@ mod tests {
         let bar = Rectangle::new(Point::new(0.0, 868.0), Size::new(1440.0, 32.0));
         let again = Rectangle::new(Point::new(600.0, 872.0), Size::new(70.0, 24.0));
         let b = badge_bounds(again, bar, 2);
-        assert!(b.y + b.height <= again.y + BADGE_OVER, "above: {b:?}");
+        // Clear of its words: down as far as elsewhere, its edge touched
+        // their first letters.
+        assert!(b.y + b.height <= again.y + BAR_OVER, "above: {b:?}");
         assert!(b.y < bar.y, "out of the bar: {b:?}");
         assert!(b.x >= again.x - BADGE_OUT, "not over the one before: {b:?}");
         // At the window's top (the title bar): below the control, over its
@@ -1149,6 +1267,71 @@ mod tests {
         let row = Rectangle::new(Point::new(0.0, 200.0), Size::new(300.0, 10.0));
         let b = badge_bounds(row, list, 2);
         assert_eq!((b.x, b.y), (0.0, 200.0), "kept in the list");
+    }
+
+    /// A badge goes clear of those placed before it: over one, one of
+    /// them could not be read ("A" under "DH" on the strip, "AJ" and "SP"
+    /// over each other on the margin's tabs), so not typed. A step of a
+    /// chain of calls has its badge before it, off the step before; above
+    /// it, the badge lay over its first letters and the line above.
+    #[test]
+    fn badges_go_clear_of_each_other_and_of_the_words_marked() {
+        let room = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        // Two buttons side by side, close: the second's badge is not over
+        // the first's.
+        let one = Rectangle::new(Point::new(100.0, 100.0), Size::new(24.0, 24.0));
+        let two = Rectangle::new(Point::new(112.0, 100.0), Size::new(40.0, 24.0));
+        let first = place(one, room, 2, &[], &[]);
+        assert_eq!(first, badge_bounds(one, room, 2), "nothing in the way");
+        let second = place(two, room, 2, &[first], &[one]);
+        assert!(
+            !second.intersects(&first.expand(1.0)),
+            "{first:?} {second:?}"
+        );
+        // A third, under the first, after both: clear of both.
+        let three = Rectangle::new(Point::new(104.0, 106.0), Size::new(24.0, 24.0));
+        let third = place(three, room, 2, &[first, second], &[one, two]);
+        assert!(!third.intersects(&first.expand(1.0)), "{third:?}");
+        assert!(!third.intersects(&second.expand(1.0)), "{third:?}");
+        // A chain "checkout() › total()": total()'s badge goes before it,
+        // over the arrow, clear of checkout()'s words; above it, it lay
+        // over the line above and total()'s first letters.
+        let checkout = Rectangle::new(Point::new(40.0, 200.0), Size::new(70.0, 18.0));
+        let total = Rectangle::new(Point::new(123.0, 200.0), Size::new(50.0, 18.0));
+        let first = place(checkout, room, 2, &[], &[]);
+        let b = place(total, room, 2, &[first], &[checkout]);
+        assert!(b.x + b.width <= total.x + 2.0, "before it: {b:?}");
+        assert!(
+            b.y >= total.y - 1.0 && b.y + b.height <= total.y + total.height + 1.0,
+            "on its line: {b:?}"
+        );
+        assert!(
+            b.x >= checkout.x + checkout.width - 3.0,
+            "off checkout(): {b:?}"
+        );
+        // Buttons stacked 4 apart (the strip): each badge above its own,
+        // in a line, over the room round the one above's icon — sent
+        // before some and above others, they did not line up.
+        let a = Rectangle::new(Point::new(1064.0, 100.0), Size::new(28.0, 28.0));
+        let b2 = Rectangle::new(Point::new(1064.0, 132.0), Size::new(28.0, 28.0));
+        let first = place(a, room_wide(), 2, &[], &[]);
+        let second = place(b2, room_wide(), 2, &[first], &[a]);
+        assert_eq!(second, badge_bounds(b2, room_wide(), 2), "{second:?}");
+        assert_eq!(first.x, second.x);
+        // At the edge of what is seen, there is no room before it: above.
+        let edge = Rectangle::new(Point::new(4.0, 300.0), Size::new(50.0, 18.0));
+        let b = place(edge, room, 2, &[], &[]);
+        assert_eq!(b, badge_bounds(edge, room, 2));
+        // In a bar, never before it, over the words of the one before.
+        let bar = Rectangle::new(Point::new(0.0, 868.0), Size::new(1440.0, 32.0));
+        let again = Rectangle::new(Point::new(600.0, 875.0), Size::new(70.0, 18.0));
+        let b = place(again, bar, 2, &[], &[]);
+        assert!(b.y + b.height <= again.y + BAR_OVER, "{b:?}");
+        assert!(b.x >= again.x - BADGE_OUT, "{b:?}");
+    }
+
+    fn room_wide() -> Rectangle {
+        Rectangle::new(Point::ORIGIN, Size::new(1100.0, 700.0))
     }
 
     #[test]
