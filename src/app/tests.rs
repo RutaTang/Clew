@@ -15071,7 +15071,17 @@ fn a_disconnect_closes_server_turns_with_their_text_and_spares_the_local_stream(
     assert!(app.proj.inflight.ask_local.is_some());
     let closed = turn(remote);
     assert!(!closed.streaming);
-    assert_eq!(closed.answer_md, "Half an answer");
+    // What was written stays, and it is said where it stops that the rest
+    // could not come, with a way to ask again.
+    assert!(
+        closed.answer_md.starts_with("Half an answer")
+            && closed
+                .answer_md
+                .contains("Couldn't finish: server disconnected"),
+        "{}",
+        closed.answer_md
+    );
+    assert!(closed.extras.failed, "not to be asked again");
     assert!(
         !closed.answer.is_empty(),
         "the closed turn has nothing to show"
