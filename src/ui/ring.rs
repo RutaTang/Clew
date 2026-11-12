@@ -26,6 +26,9 @@ pub(crate) struct MarkSeen {
     pub(crate) layer: Layer,
     pub(crate) press: crate::Message,
     pub(crate) name: Option<String>,
+    /// Whether the field round it names it ahead of `name`: a drop-down,
+    /// "Display language: English".
+    pub(crate) in_field: bool,
 }
 
 /// A part of the window a stop's place is read from.
@@ -245,9 +248,16 @@ impl Operation for Census {
             // The tree's rows are walked by its own keys: the tree is one
             // stop, its field's.
             if self.tree == 0 {
+                let field = seen.in_field.then(|| self.names.last().cloned()).flatten();
                 let stop = self.push(StopKind::Mark(seen.id), layer, bounds);
                 stop.press = Some(seen.press.clone());
-                stop.name = seen.name.clone();
+                stop.name = match (field, &seen.name) {
+                    (Some(field), Some(value)) if !value.is_empty() => {
+                        Some(format!("{field}: {value}"))
+                    }
+                    (Some(field), _) => Some(field),
+                    (None, name) => name.clone(),
+                };
             }
             return;
         }

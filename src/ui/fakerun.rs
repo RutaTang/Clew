@@ -119,33 +119,53 @@ pub(crate) fn fake_sheet<'a>(sheet: &'a Sheet) -> Element<'a, Message> {
         let input = super::jump::field_named(input, &named);
         fields.push(column![label, input, assumed].spacing(4).into());
     }
+    // With no inputs to give it — no parameters, no list of inputs — what
+    // is suggested is what it depends on: "Suggest inputs" offered what it
+    // could not have.
+    let has_inputs = sheet
+        .fields
+        .iter()
+        .any(|f| matches!(f, Field::Param { .. } | Field::Inputs));
+    let (suggest_name, suggest_tip) = if has_inputs {
+        (
+            tr!("Suggest inputs"),
+            tr!("Suggest inputs with AI (one AI call)"),
+        )
+    } else {
+        (
+            tr!("Suggest what it depends on"),
+            tr!("Suggest what it depends on with AI (one AI call)"),
+        )
+    };
     let suggest_label = if sheet.suggesting.is_some() {
         tr!("Suggesting…")
     } else {
-        tr!("Suggest inputs")
+        suggest_name
     };
     // Both ask the AI: marked so, each with what it costs where the
     // pointer rests.
-    let suggest =
-        super::toolbar::tip_at(
-            button(super::toolbar::ai_words(
-                suggest_label,
-                ts::BODY,
-                if sheet.suggesting.is_some() {
-                    theme::dim()
-                } else {
-                    theme::fg()
-                },
-            ))
-            .style(theme::toolbar_button)
-            .padding([4, 12])
-            .on_press_maybe(sheet.suggesting.is_none().then(|| {
-                super::heard::said(tr!("Suggest inputs"), Message::Fake(FakeMsg::Suggest))
-            })),
-            tr!("Suggest inputs with AI (one AI call)"),
-            None,
-            iced::widget::tooltip::Position::Top,
-        );
+    let suggest = super::toolbar::tip_at(
+        button(super::toolbar::ai_words(
+            suggest_label,
+            ts::BODY,
+            if sheet.suggesting.is_some() {
+                theme::dim()
+            } else {
+                theme::fg()
+            },
+        ))
+        .style(theme::toolbar_button)
+        .padding([4, 12])
+        .on_press_maybe(
+            sheet
+                .suggesting
+                .is_none()
+                .then(|| super::heard::said(suggest_name, Message::Fake(FakeMsg::Suggest))),
+        ),
+        suggest_tip,
+        None,
+        iced::widget::tooltip::Position::Top,
+    );
     let cancel_b = button(text(tr!("Cancel")).size(ts::BODY))
         .style(theme::toolbar_button)
         .padding([4, 12])

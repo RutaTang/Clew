@@ -323,29 +323,58 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     // its steps inline (accordion) and its narration into the bottom pane — no
     // separate "back to library" navigation. Generation is shown per-row, so the
     // rest of the library stays usable while a tour is being built.
-    let list = walk_library(app);
     let Some(wt) = app.proj.walk.open_tour() else {
-        return column![header, review, hairline(), list]
+        return column![header, review, hairline(), walk_library(app)]
             .height(Fill)
             .into();
     };
 
-    let narration_block = walk_narration(app, wt);
     // The divider says where the pointer is in the window; the narration
-    // is inside its frame.
+    // is inside its frame. The narration as tall as the room leaves the
+    // list its steps (`narration_room`).
     let frame = app.window_frame;
-    column![
-        header,
-        review,
-        hairline(),
-        list,
-        crate::resize::Divider::horizontal(move |v| {
-            Message::Walk(WalkMsg::ResizeNarration(v - frame))
-        }),
-        narration_block,
-    ]
-    .height(Fill)
-    .into()
+    let set = app.walk_ui.narration_height;
+    // Built only when laid out, which a gathering of what voice can press
+    // never does: built once more for it, here, so the tours' rows and the
+    // narration's buttons are said as clicked.
+    if super::heard::gathering() {
+        drop(walk_library(app));
+        drop(walk_narration(app, wt, NARRATION_TALL));
+    }
+    let lower = iced::widget::responsive(move |room| {
+        column![
+            walk_library(app),
+            crate::resize::Divider::horizontal(move |v| {
+                Message::Walk(WalkMsg::ResizeNarration(v - frame))
+            }),
+            walk_narration(app, wt, narration_room(set, room.height)),
+        ]
+        .height(Fill)
+        .into()
+    });
+    column![header, review, hairline(), lower]
+        .height(Fill)
+        .into()
+}
+
+/// The most the open tour's narration takes until the reader sets it.
+const NARRATION_TALL: f32 = 240.0;
+/// The least it takes: its nav row and a line or two of its words.
+const NARRATION_SHORT: f32 = 90.0;
+/// The least the tours' list keeps above it: the open tour's row and a
+/// step or two under it.
+const STEPS_ROOM: f32 = 150.0;
+
+/// How tall the open tour's narration is, of `room` it shares with the
+/// list of tours above it: the height the reader `set` by the divider, or
+/// two fifths of the room up to [`NARRATION_TALL`] — each short of the
+/// list's [`STEPS_ROOM`]. 240 tall in any window, it left a short one's
+/// list (French, 1100×700) a tour's title, why it has fewer steps than
+/// stops, and half a step, over a narration of three lines and blank.
+pub(crate) fn narration_room(set: Option<f32>, room: f32) -> f32 {
+    let most = (room - STEPS_ROOM).max(NARRATION_SHORT);
+    set.unwrap_or_else(|| (room * 0.4).clamp(NARRATION_SHORT, NARRATION_TALL))
+        .min(most)
 }
 
 /// A tour's title as shown: a run's plain one ("Run: main.py", kept in
@@ -924,6 +953,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
 pub(crate) fn walk_narration<'a>(
     app: &'a App,
     wt: &'a crate::walkthrough::Walkthrough,
+    height: f32,
 ) -> Element<'a, Message> {
     let n = wt.steps.len();
     let cur = app.proj.walk.step.min(n.saturating_sub(1));
@@ -1038,7 +1068,7 @@ pub(crate) fn walk_narration<'a>(
     );
 
     container(column![nav, note, narration])
-        .height(Length::Fixed(app.walk_ui.narration_height))
+        .height(Length::Fixed(height))
         .into()
 }
 
@@ -2489,10 +2519,24 @@ fn notes_export(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Every reading note in the project, file by file.
+/// Every reading note in the project, file by file — the notes on
+/// symbols, then those on bookmarks: a note written on a bookmark was in
+/// Bookmarks alone, and this view, which says it holds the reader's notes,
+/// said there were none.
 fn notes_list(app: &App) -> Element<'_, Message> {
-    if app.proj.notes.is_empty() {
-        return empty_state(Glyph::Note, tr!("No notes of your own yet"), "", None);
+    let marked: Vec<&crate::bookmarks::Bookmark> = app
+        .proj
+        .bookmarks
+        .iter()
+        .filter(|b| b.note.as_deref().is_some_and(|n| !n.trim().is_empty()))
+        .collect();
+    if app.proj.notes.is_empty() && marked.is_empty() {
+        return empty_state(
+            Glyph::Note,
+            tr!("No notes of your own yet"),
+            tr!("A note you write on a symbol or a bookmark is listed here."),
+            None,
+        );
     }
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
@@ -2644,6 +2688,77 @@ fn notes_list(app: &App) -> Element<'_, Message> {
                 .align_y(iced::Center)
                 .into(),
         );
+    }
+
+    // The notes written on bookmarks: each opens its line, as its row in
+    // Bookmarks does; its pencil edits it there.
+    if !marked.is_empty() {
+        rows.push(
+            container(
+                text(tr!("On bookmarks"))
+                    .size(ts::SMALL)
+                    .font(crate::fonts::UI_SEMIBOLD)
+                    .color(theme::dim()),
+            )
+            .padding(Padding {
+                top: 10.0,
+                right: 6.0,
+                bottom: 2.0,
+                left: 8.0,
+            })
+            .into(),
+        );
+        for bm in marked {
+            let place = format!("{}:{}", bm.rel, bm.line);
+            let note = bm.note.clone().unwrap_or_default();
+            let main = column![
+                row![
+                    glyph::icon(Glyph::Bookmark, theme::dim(), 12.0),
+                    text(place.clone())
+                        .size(ts::CAPTION)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::None),
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
+                text(note)
+                    .size(ts::CAPTION)
+                    .color(theme::fg_muted())
+                    .wrapping(Wrapping::Word),
+            ]
+            .spacing(1)
+            .width(Fill);
+            let jump = button(main)
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding(Padding {
+                    top: 2.0,
+                    right: 4.0,
+                    bottom: 2.0,
+                    left: 8.0,
+                })
+                .on_press(super::heard::row(
+                    || place.clone(),
+                    Message::Editor(EditorMsg::OpenRel {
+                        rel: bm.rel.clone(),
+                        line: Some(bm.line),
+                    }),
+                ));
+            let pencil = super::toolbar::tip_at(
+                button(glyph::icon(Glyph::Edit, theme::accent(), 13.0))
+                    .style(theme::list_row(false))
+                    .padding([2, 6])
+                    .on_press(super::heard::said_to_with(
+                        tr!("Edit note"),
+                        || place.clone(),
+                        Message::Reading(ReadingMsg::BookmarkNoteEdit(bm.rel.clone(), bm.line)),
+                    )),
+                tr!("Edit note"),
+                None,
+                tooltip::Position::Bottom,
+            );
+            rows.push(row![jump, pencil].spacing(1).align_y(iced::Center).into());
+        }
     }
 
     column![
@@ -2938,7 +3053,15 @@ fn walk_action<'a>(
     // One that writes with the model is marked so, as every such control
     // is: "Where to start reading" looked like the free rows beside it.
     let spends = press.as_ref().is_some_and(crate::app::palette::spends_ai) || spends;
-    let press = press.map(|msg| super::heard::said(spoken.as_deref().unwrap_or(&label), msg));
+    // Said by its short name, and named on the ring as it shows ("Walk
+    // the last run (10 stops)"): the ring said the short name alone.
+    let press = press.map(|msg| {
+        let msg = super::heard::said(spoken.as_deref().unwrap_or(&label), msg);
+        match &spoken {
+            Some(_) => super::heard::said_with(|| label.clone(), msg),
+            None => msg,
+        }
+    });
     let face = row![
         if spends {
             crate::glyph::icon(Glyph::Sparkle, theme::accent(), 13.0)

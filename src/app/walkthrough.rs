@@ -216,6 +216,23 @@ impl App {
         Task::none()
     }
 
+    /// The tour open is left for `next` (none, `""`): a failure said of it
+    /// — its narration that could not be written — goes with it. It stood
+    /// on the status line for the rest of the session, over other files,
+    /// Settings and later runs, cut to "Impossible de racon…" at 1100.
+    fn leave_tour_failure(&mut self, next: &str) {
+        if self
+            .proj
+            .walk
+            .open
+            .as_deref()
+            .is_some_and(|open| open != next)
+            && self.proj.walk.generating.is_none()
+        {
+            self.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
+        }
+    }
+
     /// Mark a walkthrough generation for `scope` as the one in flight and mint
     /// its request id: only that request's `WalkMsg::Done` may clear the busy
     /// row, retry, or open the tour.
@@ -1014,11 +1031,13 @@ impl App {
                 if !self.proj.walk.library.iter().any(|w| w.scope == scope) {
                     return Task::none();
                 }
+                self.leave_tour_failure(&scope);
                 self.proj.walk.open = Some(scope);
                 self.proj.walk.step = 0;
                 self.walkthrough_goto(0)
             }
             WalkMsg::Back => {
+                self.leave_tour_failure("");
                 self.proj.walk.open = None;
                 self.proj.walk.forget_vanished_tour();
                 Task::none()
@@ -1046,7 +1065,7 @@ impl App {
                 // Narration height = distance from the drag point to the window
                 // bottom, clamped so neither block collapses.
                 let max = (self.window_height - 160.0).max(120.0);
-                self.walk_ui.narration_height = (self.window_height - y).clamp(90.0, max);
+                self.walk_ui.narration_height = Some((self.window_height - y).clamp(90.0, max));
                 Task::none()
             }
         }

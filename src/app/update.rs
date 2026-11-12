@@ -21,6 +21,7 @@ impl App {
         let left_focus = ui::active_overlay(self).and_then(|o| o.leaves_focus());
         let task = self.dispatch(message);
         self.drop_stale_tree_menu();
+        self.drop_stale_picker();
         // What this window's own model calls spent since: counted where it
         // is shown (the server's are counted as their `Usage` comes).
         self.take_local_spent();
@@ -475,6 +476,7 @@ impl App {
             Message::Fake(message) => self.update_fake(message),
             Message::Proof(message) => self.update_proof(message),
             Message::Weak(message) => self.update_weak(message),
+            Message::Picker(message) => self.update_picker(message),
             Message::Tick => self.on_tick(),
             Message::Noop => Task::none(),
             Message::Placed { question, place } => self.on_placed(question, place),

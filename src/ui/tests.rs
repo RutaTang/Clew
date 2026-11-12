@@ -55,6 +55,8 @@ fn reader_app() -> App {
     });
     app.proj.panes[0] = Some(viewer);
     app.proj.active = 0;
+    // Its code's language, as an open finds it in its files.
+    app.proj.code_languages = vec!["rust".into()];
     // No repository at a path that is not there: no branch to read.
     app.proj.head_stale = false;
     app.proj.repo_tip_stale = false;
@@ -3000,6 +3002,103 @@ fn the_ring_says_each_controls_own_name() {
     );
 }
 
+/// A drop-down is worked from the keyboard as from the pointer: the ring
+/// names it by its field and the value it shows; Enter opens its list, the
+/// value as it was; the arrows, Home and End and a letter walk the rows; Esc
+/// puts the list away and leaves Settings up; Tab puts it away and moves
+/// on; Enter picks. Pressed from the ring it moved on to the next value at
+/// each Enter — Display language went to French, then Chinese, then
+/// Korean — and the ring named it by the value it would switch to.
+#[test]
+fn a_drop_down_opens_and_is_walked_from_the_keyboard() {
+    use crate::llm::Provider;
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::LanguageModel,
+    )));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::ProviderPicked(
+        Provider::Anthropic,
+    )));
+    let mut driven = Driven::new(&app);
+    let to_provider = |driven: &mut Driven, app: &mut App| {
+        let mut steps = 0;
+        while !app.status.starts_with("Provider") {
+            let _ = driven.tab(app, false);
+            steps += 1;
+            assert!(
+                steps < 80,
+                "the ring never reached Provider: {}",
+                app.status
+            );
+        }
+    };
+    to_provider(&mut driven, &mut app);
+    assert_eq!(
+        app.status, "Provider: Anthropic",
+        "named by field and value"
+    );
+    // Enter opens the list, and changes nothing.
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    let at = |app: &App| app.picker.as_ref().map(|p| p.at);
+    assert_eq!(at(&app), Some(0), "open, on the value shown");
+    assert_eq!(
+        app.settings.provider,
+        Provider::Anthropic,
+        "Enter changed it"
+    );
+    // The arrows walk its rows, not the ring.
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert_eq!(at(&app), Some(2));
+    assert_eq!(app.status, "Provider: Anthropic", "the ring moved");
+    let _ = driven.key(&mut app, Key::Named(Named::End), none);
+    assert_eq!(at(&app), Some(3));
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert_eq!(at(&app), Some(3), "past the last row");
+    let _ = driven.key(&mut app, Key::Named(Named::Home), none);
+    assert_eq!(at(&app), Some(0));
+    let _ = driven.key(&mut app, Key::Character("d".into()), none);
+    assert_eq!(at(&app), Some(2), "a letter: the row beginning with it");
+    // Esc puts the list away, nothing picked, Settings still up.
+    let _ = driven.key(&mut app, Key::Named(Named::Escape), none);
+    assert!(app.picker.is_none(), "Esc left the list up");
+    assert!(app.settings.open, "Esc closed Settings with the list");
+    assert_eq!(app.settings.provider, Provider::Anthropic);
+    // Tab puts it away too, and moves on.
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.picker.is_some());
+    let _ = driven.tab(&mut app, false);
+    assert!(app.picker.is_none(), "Tab left the list up");
+    assert!(
+        !app.status.starts_with("Provider"),
+        "Tab stayed: {}",
+        app.status
+    );
+    // Enter picks the row the keys are on.
+    let _ = driven.tab(&mut app, true);
+    to_provider(&mut driven, &mut app);
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.picker.is_none(), "picked, and put away");
+    assert_eq!(app.settings.provider, Provider::DeepSeek);
+    assert!(app.settings.open);
+    assert_eq!(
+        app.status, "Provider: DeepSeek",
+        "the ring on it, named anew"
+    );
+    // Settings closed under an open list: the next key is not the list's.
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.picker.is_some());
+    app.settings.open = false;
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert!(app.picker.is_none(), "a list not drawn held the keys");
+}
+
 /// A control built as a dialog is laid out (a `responsive`'s) is in the
 /// dialog: the ring there reaches it.
 #[test]
@@ -4586,7 +4685,10 @@ fn the_walkthrough_player_stops_at_its_ends_and_closes() {
     };
     let sent = |app: &App, n: usize, label: &str| {
         let tour = tour(n);
-        click(sim_elem(super::sidebar::walk_narration(app, &tour)), label)
+        click(
+            sim_elem(super::sidebar::walk_narration(app, &tour, 240.0)),
+            label,
+        )
     };
     let stepped = |m: &Message, by: i32| matches!(m, Message::Walk(WalkMsg::Step(d)) if *d == by);
     app.proj.walk.step = 0;
@@ -4598,7 +4700,7 @@ fn the_walkthrough_player_stops_at_its_ends_and_closes() {
     assert!(!sent(&app, 2, "›").iter().any(|m| stepped(m, 1)));
     let tour = tour(1);
     let closed = click_right_of(
-        || sim_elem(super::sidebar::walk_narration(&app, &tour)),
+        || sim_elem(super::sidebar::walk_narration(&app, &tour, 240.0)),
         "›",
         |m| matches!(m, Message::Walk(WalkMsg::Back)),
     );
@@ -5152,7 +5254,7 @@ fn reading_panels_are_drawn_fresh_for_what_they_show() {
     };
     let at = |app: &mut App, n| {
         app.proj.walk.step = n;
-        keys_in(&super::sidebar::walk_narration(app, &tour))
+        keys_in(&super::sidebar::walk_narration(app, &tour, 240.0))
     };
     let first = at(&mut app, 0);
     assert_ne!(first, at(&mut app, 1));
@@ -6818,7 +6920,8 @@ fn a_question_moved_or_out_of_view_waits_again() {
                     overlay.push(open);
                     let _ = app.update(message);
                 }
-                Message::Placed { .. } => {
+                // A drop-down's own: it opens, and closes, by the App.
+                Message::Placed { .. } | Message::Picker(_) => {
                     let _ = app.update(message);
                 }
                 _ => {}
@@ -10591,6 +10694,85 @@ fn a_run_tour_says_why_it_has_fewer_steps_than_stops() {
     assert_eq!(super::folded_stops(&run), None, "not a run's");
 }
 
+/// L5: in a short window the open tour's narration leaves the list its
+/// steps. 240 tall wherever it stood, it left a French run's tour at
+/// 1100×700 its title over two lines, why it has fewer steps than stops
+/// over four, and half a step — over three lines of narration and blank.
+/// A height the reader set by the divider is kept, short of the list's
+/// room.
+#[test]
+fn a_short_windows_tour_keeps_room_for_its_steps() {
+    use crate::walkthrough::{Step, StopFacts, Walkthrough};
+    let step = |ordinal: usize, name: &str| Step {
+        title: name.into(),
+        file: format!("teashop/{name}.py"),
+        symbol: Some(name.into()),
+        line: Some(30),
+        narration: "Stepped in.".into(),
+        depth: 0,
+        stop: Some(StopFacts {
+            ordinal,
+            reason: "step".into(),
+            caller: None,
+            of: 10,
+        }),
+    };
+    let run = Walkthrough {
+        made: None,
+        title: crate::walkthrough::plain_run_title("main.py"),
+        scope: "@trace main.py".into(),
+        steps: vec![
+            step(1, "alpha"),
+            step(4, "beta"),
+            step(7, "gamma"),
+            step(10, "delta"),
+        ],
+    };
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    app.proj.walk.library.push(run.clone());
+    app.proj.walk.open = Some(run.scope.clone());
+    app.proj.walk.step = 3;
+    let size = Size::new(1100.0, 700.0);
+    app.window_height = size.height;
+    crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
+        let mut sim = sim_sized(&app, size);
+        let nav = text_at(&mut sim, |t| t == "teashop/delta.py", 0).expect("the narration's head");
+        for name in ["alpha", "beta"] {
+            let row = text_at(&mut sim, |t| t.ends_with(name), 0)
+                .unwrap_or_else(|| panic!("no step {name}"));
+            assert!(
+                row.y + row.height <= nav.y,
+                "step {name} under the narration: {row:?} {nav:?}"
+            );
+        }
+    });
+    // Laid out for the room it has, it is still offered to a voice: the
+    // window gathered without a layout built none of it.
+    let heard: Vec<String> = super::heard::gather(&app)
+        .into_iter()
+        .map(|t| t.title)
+        .collect();
+    for word in ["Previous step", "Close"] {
+        assert!(
+            heard.iter().any(|t| t == word),
+            "{word} not heard: {heard:?}"
+        );
+    }
+    assert!(
+        heard.iter().any(|t| t.contains("Debug run of main.py")),
+        "the tour's row not heard: {heard:?}"
+    );
+    // Tall windows keep the narration as tall as it was; a height set by
+    // the divider is kept, short of the list's room.
+    assert_eq!(super::sidebar::narration_room(None, 900.0), 240.0);
+    assert_eq!(super::sidebar::narration_room(None, 380.0), 152.0);
+    assert_eq!(super::sidebar::narration_room(Some(300.0), 600.0), 300.0);
+    assert_eq!(super::sidebar::narration_room(Some(300.0), 380.0), 230.0);
+    assert_eq!(super::sidebar::narration_room(None, 100.0), 90.0);
+}
+
 /// The room beside the call graph's title is one width whatever stands in
 /// it — the button, refining's count, the result — so its header keeps its
 /// lines: as wide as its words, the header changed lines as refining ended,
@@ -12163,7 +12345,7 @@ fn settings_draws_every_shortcut_as_key_caps() {
 fn the_target_picker_shows_for_languages_the_platform_dims() {
     let mut app = reader_app();
     let label = format!(
-        "Reading for {}",
+        "Built for {}",
         super::statusbar::target_name(&app.proj.reading_target)
     );
     for (lang, shown) in [
@@ -12439,6 +12621,45 @@ fn no_line_of_a_runs_output_is_under_the_ask_pill() {
     assert!(
         shown.y + shown.height <= pill_top,
         "{shown:?} runs under the pill from {pill_top}"
+    );
+}
+
+/// M1: a run's output is shown at its end — its last line, most often the
+/// result or the error — not at its first, with the rest below the panel's
+/// foot and nothing to say there was more.
+#[test]
+fn a_runs_output_is_shown_at_its_end() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let output = (1..=120)
+        .map(|n| ("stdout".to_string(), format!("printed line {n}\n")))
+        .collect();
+    app.debug.no_debug = true;
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Running,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output,
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.show_bottom = true;
+    app.ask_view = crate::AskView::Hidden;
+    let mut sim = sim_of(&app);
+    assert!(
+        text_at(&mut sim, |t| t == "printed line 120", 0).is_some(),
+        "its last line is below the panel's foot"
+    );
+    assert!(
+        text_at(&mut sim, |t| t == "printed line 1", 0).is_none(),
+        "all of it fits: the test shows nothing"
     );
 }
 
@@ -13055,6 +13276,11 @@ fn an_empty_ask_shows_questions_not_instructions() {
     // said to configure embeddings, as plain words, under questions about
     // "this codebase" there was none of.
     let mut app = blank_app();
+    // L14: said as the card opens, before anything is asked — it stood
+    // blank until a question was sent.
+    let mut sim = sim_elem(super::ask_panel(&app, 560.0));
+    assert!(shows(&mut sim, "Open a folder to ask about its code"));
+    drop(sim);
     app.proj.ask_input = "what is this?".into();
     let _ = app.update(Message::Ask(AskMsg::Submit));
     assert_eq!(
@@ -15011,7 +15237,7 @@ fn a_chip_with_no_room_is_no_stop() {
     assert!(presses_setup(1280.0), "a stop where there is room");
     // Its right side's words — the language, the server, the caret — took
     // the room a window shows them in; here, the window's own narrowness.
-    assert!(!presses_setup(400.0), "none where there is not");
+    assert!(!presses_setup(330.0), "none where there is not");
 }
 
 /// What the status bar lays out for its room — the chip that sets up
@@ -15557,15 +15783,110 @@ fn explain_with_nothing_to_explain_says_so_once() {
     let mut sim = sim_elem(super::sidebar::files_tab(&app));
     assert!(shows(&mut sim, "This folder has no files Clew can read."));
     drop(sim);
+    // M3: nor does the overview offer an Explain All with nothing for it,
+    // nor the pane send the reader to a tree with nothing in it.
+    app.proj.code_languages.clear();
+    let mut sim = sim_elem(super::docs_stats::overview_home(&app));
+    assert!(shows(&mut sim, "There is no code here for an overview."));
+    assert!(!shows(&mut sim, "Explain All…"), "a dead end offered");
+    drop(sim);
+    // The pane, with the setup sheet put aside: it stands over the window.
+    let sheet = app.setup.take();
+    app.proj.panes[0] = None;
+    let mut sim = sim_of(&app);
+    assert!(!shows(&mut sim, "Pick a file from the tree."));
+    assert!(shows(&mut sim, "Nothing here to read"));
+    drop(sim);
+    let sent = click(sim_of(&app), "Open Folder…");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Project(ProjectMsg::OpenFolderPressed))),
+        "the way to a folder with something in it: {sent:?}"
+    );
+    app.setup = sheet;
     // A first open's sheet is about its own folder, whatever is open (or
     // nothing): it said "Nothing left to explain." of a folder with no
-    // code opened from the welcome screen.
+    // code opened from the welcome screen — and "Ready." of its servers.
     app.proj.project = None;
     let setup = app.setup.as_mut().unwrap();
     setup.mode = SetupMode::Open;
     setup.explain = true;
     assert_eq!(count(&app, "There is no code here to explain."), 1);
     assert_eq!(count(&app, "left to explain"), 0);
+    assert_eq!(count(&app, "No code here for them to read."), 1);
+    assert_eq!(count(&app, "Ready."), 0, "servers said ready for no code");
+}
+
+/// L2: Explain on an empty file says the file is empty — the pass found
+/// nothing in it, and said it was "no longer part of the project" — and
+/// spends nothing.
+#[test]
+fn explain_on_an_empty_file_says_it_is_empty() {
+    let mut app = reader_app();
+    app.llm_available = true;
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.proj.panes[0] = Some(Viewer::new(
+        abs.clone(),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(String::new()),
+        crate::highlight::plain_lines(""),
+    ));
+    let _ = app.update(Message::Explain(ExplainMsg::Explain(
+        crate::explain::Node::File(abs),
+    )));
+    assert_eq!(
+        app.status,
+        "This file is empty: there is nothing in it to explain."
+    );
+    assert!(!app.proj.explain.running, "a pass began");
+}
+
+/// M4: a note written on a bookmark is among the reader's notes: it was in
+/// Bookmarks alone, and "Your notes" said there were none. Its row opens
+/// its line; with neither kind, the empty view says where notes come from.
+#[test]
+fn a_bookmarks_note_is_among_your_notes() {
+    let mut app = reader_app();
+    app.proj.panes[0] = None;
+    let mut sim = sim_elem(super::sidebar::notes_tab(&app));
+    assert!(shows(&mut sim, "No notes of your own yet"));
+    assert!(shows(
+        &mut sim,
+        "A note you write on a symbol or a bookmark is listed here."
+    ));
+    drop(sim);
+    app.proj.bookmarks = vec![
+        crate::bookmarks::Bookmark {
+            rel: "src/lib.rs".into(),
+            line: 3,
+            preview: "fn line_2() {}".into(),
+            note: Some("Sum of all lines before any discount".into()),
+        },
+        crate::bookmarks::Bookmark {
+            rel: "src/lib.rs".into(),
+            line: 9,
+            preview: "fn line_8() {}".into(),
+            note: None,
+        },
+    ];
+    let mut sim = sim_elem(super::sidebar::notes_tab(&app));
+    assert!(!shows(&mut sim, "No notes of your own yet"));
+    assert!(shows(&mut sim, "On bookmarks"));
+    assert!(shows(&mut sim, "Sum of all lines before any discount"));
+    assert!(!shows(&mut sim, "src/lib.rs:9"), "a bookmark with no note");
+    drop(sim);
+    let sent = click(
+        sim_elem(super::sidebar::notes_tab(&app)),
+        "Sum of all lines before any discount",
+    );
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Editor(EditorMsg::OpenRel { rel, line: Some(3) }) if rel == "src/lib.rs"
+        )),
+        "{sent:?}"
+    );
 }
 
 /// The setup sheet with no AI key offers where one is added, a click away:
@@ -15801,7 +16122,7 @@ fn the_context_menu_waits_for_the_language_server() {
     );
     // Each row names the keys that do it in the code, on its own line.
     let trace = app.keymap.chord(crate::keymap::Action::TraceValue).caps();
-    for (row, keys) in [("Go to Definition", "gd"), ("Trace Value", trace.as_str())] {
+    for (row, keys) in [("Go to Definition", "F12"), ("Trace Value", trace.as_str())] {
         let mut sim = sim_of(&app);
         let at = |sim: &mut Sim<'_>, t: &str| {
             let t = t.to_string();
@@ -19943,7 +20264,11 @@ fn the_keys_land_where_a_keyboard_menu_leaves_them() {
     let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
     let _ = driven.send(&mut app, &[]);
     assert!(app.proj.tree_menu.is_none() && app.ring.is_none());
-    assert!(app.code_focused, "the opened file has the keys");
+    assert!(
+        app.code_focused,
+        "the opened file has the keys: {:?}",
+        app.status
+    );
     assert!(!app.tree_focused, "not the tree the menu was opened from");
 
     // A menu the ring opened: Enter on View, then Esc.
@@ -20394,16 +20719,24 @@ fn a_notes_failure_settings_can_fix_has_its_settings() {
         plain.iter().zip(&fixed).any(|(p, f)| f > p),
         "never counted"
     );
-    // L6: at the margin's width Ask stays on the row of Try again — it fell
-    // onto a line of its own, under the two — Settings its icon alone
-    // where the three would not fit, its name in its tip.
+    // L6: at the margin's width nothing falls onto a line of its own —
+    // Ask fell under the two — and Settings says its name beside Try again
+    // (a bare gear read as nothing the status bar and the Ask card call
+    // "Settings"): Ask, which has its pill, is its icon alone first.
     let mut sim = sim_of(&app);
     let again = text_at(&mut sim, |t| t == "Try again", 0).expect("Try again");
-    let ask = text_at(&mut sim, |t| t == "Ask", 0).expect("Ask");
+    let settings = text_at(&mut sim, |t| t == "Settings", 0).expect("Settings, by name");
     assert!(
-        (again.center_y() - ask.center_y()).abs() < 2.0,
-        "Ask on a line of its own: {again:?} {ask:?}"
+        (again.center_y() - settings.center_y()).abs() < 2.0,
+        "Settings on a line of its own: {again:?} {settings:?}"
     );
+    for nth in 0..4 {
+        let Some(ask) = text_at(&mut sim, |t| t == "Ask", nth) else {
+            break;
+        };
+        let under = ask.y > again.y + 4.0 && ask.y < again.y + 40.0;
+        assert!(!under, "Ask on a line of its own: {again:?} {ask:?}");
+    }
     drop(sim);
     // M2: in French at 1100 px, where even Settings' icon and Ask's name
     // do not fit beside Try again, Ask is its icon too: "Questions" fell

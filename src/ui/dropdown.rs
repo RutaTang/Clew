@@ -20,6 +20,7 @@ pub(crate) fn dropdown<'a, Message: 'a>(
         anchor: anchor.into(),
         menu,
         offset,
+        dismiss: None,
     }
 }
 
@@ -27,9 +28,21 @@ pub(crate) struct Dropdown<'a, Message> {
     anchor: Element<'a, Message>,
     menu: Option<Element<'a, Message>>,
     offset: Vector,
+    /// Sent by a press of the pointer away from the menu and what opened
+    /// it, while it is open.
+    dismiss: Option<Message>,
 }
 
-impl<Message> Widget<Message, Theme, Renderer> for Dropdown<'_, Message> {
+impl<Message> Dropdown<'_, Message> {
+    /// Send `message` when the pointer presses away from the open menu
+    /// and what opened it.
+    pub(crate) fn dismiss(mut self, message: Message) -> Self {
+        self.dismiss = Some(message);
+        self
+    }
+}
+
+impl<Message: Clone> Widget<Message, Theme, Renderer> for Dropdown<'_, Message> {
     fn size(&self) -> Size<Length> {
         self.anchor.as_widget().size()
     }
@@ -157,12 +170,14 @@ impl<Message> Widget<Message, Theme, Renderer> for Dropdown<'_, Message> {
         );
         let anchor = layout.bounds() + translation;
         let offset = self.offset;
+        let dismiss = self.dismiss.clone();
         let menu = match (self.menu.as_mut(), menu_tree) {
             (Some(menu), Some(tree)) => Some(overlay::Element::new(Box::new(Dropped {
                 anchor,
                 offset,
                 menu,
                 tree,
+                dismiss,
             }))),
             _ => None,
         };
@@ -173,7 +188,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Dropdown<'_, Message> {
     }
 }
 
-impl<'a, Message: 'a> From<Dropdown<'a, Message>> for Element<'a, Message> {
+impl<'a, Message: Clone + 'a> From<Dropdown<'a, Message>> for Element<'a, Message> {
     fn from(dropdown: Dropdown<'a, Message>) -> Self {
         Element::new(dropdown)
     }
@@ -186,6 +201,7 @@ struct Dropped<'a, 'b, Message> {
     offset: Vector,
     menu: &'b mut Element<'a, Message>,
     tree: &'b mut Tree,
+    dismiss: Option<Message>,
 }
 
 /// The room a menu opened from `anchor` has under it and over it, in a
@@ -219,7 +235,7 @@ fn dropped_at(anchor: Rectangle, offset: Vector, size: Size, window: Size) -> Po
     )
 }
 
-impl<Message> overlay::Overlay<Message, Theme, Renderer> for Dropped<'_, '_, Message> {
+impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for Dropped<'_, '_, Message> {
     fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
         // No taller than the larger side's room: a menu fitting neither
         // side was clamped over what opened it. Its list scrolls.
@@ -283,6 +299,15 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Dropped<'_, '_, Mes
             shell,
             &layout.bounds(),
         );
+        // A press away from it, and from what opened it (whose own press
+        // closes it), puts it away.
+        if let Some(dismiss) = &self.dismiss
+            && matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)))
+            && !cursor.is_over(layout.bounds())
+            && !cursor.is_over(self.anchor)
+        {
+            shell.publish(dismiss.clone());
+        }
         // The menu is the pointer's over all of it, its rim too: a press or
         // a wheel there reached the code or the card under it.
         if cursor.is_over(layout.bounds())

@@ -180,7 +180,7 @@ fn caret_commands_run_where_the_caret_is() {
         .iter()
         .find(|c| c.title == "Go to Definition")
         .unwrap();
-    assert_eq!(goto.keys.as_deref(), Some("gd"));
+    assert_eq!(goto.keys.as_deref(), Some("F12"));
     assert!(matches!(
         goto.action,
         PaletteAction::Goto(GotoKind::Definition)

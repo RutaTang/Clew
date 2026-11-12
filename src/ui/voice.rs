@@ -224,7 +224,7 @@ fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a
         rows.push(form::item(
             tr!("Voice"),
             None,
-            form::pick(choices, selected, |c: VoiceChoice| {
+            form::pick(tr!("Voice"), choices, selected, |c: VoiceChoice| {
                 Message::Voice(VoiceMsg::PickSpeechVoice {
                     model: c.model,
                     voice: c.voice.id,
@@ -395,6 +395,7 @@ fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
             .into(),
         ),
         form::pick(
+            tr!("Read answers aloud"),
             &crate::app::voice::ReadAloud::ALL[..],
             Some(app.voice.prefs.read_aloud),
             |read_aloud| Message::Voice(VoiceMsg::SetSpeak(read_aloud)),
@@ -408,7 +409,7 @@ fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
     rows.push(form::item(
         tr!("Speed"),
         None,
-        form::pick(speeds, selected, |s: SpeedChoice| {
+        form::pick(tr!("Speed"), speeds, selected, |s: SpeedChoice| {
             Message::Voice(VoiceMsg::SetSpeed(s.0))
         }),
     ));
@@ -435,7 +436,7 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
         listening.push(form::item(
             tr!("Language"),
             None,
-            form::pick(choices, selected, |c: LanguageChoice| {
+            form::pick(tr!("Language"), choices, selected, |c: LanguageChoice| {
                 Message::Voice(VoiceMsg::SetLanguage(c.0))
             }),
         ));

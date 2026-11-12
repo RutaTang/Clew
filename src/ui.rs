@@ -4,8 +4,8 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Row, center, column, container, mouse_area, opaque, pick_list, row, scrollable, slider,
-    space, stack, text, text_input, tooltip,
+    Column, Row, center, column, container, mouse_area, opaque, row, scrollable, slider, space,
+    stack, text, text_input, tooltip,
 };
 use iced::{Element, Fill, Length, Padding, Task};
 
@@ -30,6 +30,7 @@ mod clipped;
 mod corner_safe;
 mod dropdown;
 mod escape_clears;
+pub(crate) mod picker;
 mod right_press;
 pub(crate) use right_press::{MenuBackdrop, RightPress};
 mod ring;
@@ -727,6 +728,7 @@ pub(crate) fn escape_message(app: &App) -> Option<Message> {
 pub fn view(app: &App) -> Element<'_, Message> {
     // Jump mode's codes, when they are up, go on what is built now.
     jump::begin(app.jump.is_some() || app.ring.is_some());
+    picker::set_open(app.picker.as_ref());
     heard::layer(heard::Layer::Window);
     // The divider says where the pointer is in the window; the sidebar is
     // inside its frame.

@@ -48,6 +48,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     };
 
     let provider = form::pick(
+        tr!("Provider"),
         Provider::ALL.map(ProviderChoice),
         Some(ProviderChoice(app.settings.provider)),
         |v: ProviderChoice| Message::Settings(SettingsMsg::ProviderPicked(v.0)),
@@ -146,11 +147,13 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     // Which theme fills the light slot, and the dark.
     use crate::theme::ThemeChoice;
     let language = form::pick(
+        tr!("Display language"),
         crate::i18n::LangPref::all(),
         Some(crate::i18n::pref()),
         |p| Message::Settings(SettingsMsg::SetLanguage(p)),
     );
     let light_pick = form::pick(
+        tr!("Light theme"),
         crate::theme::light_choices(),
         Some(ThemeChoice(crate::theme::current_light())),
         |c: ThemeChoice| {
@@ -161,6 +164,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         },
     );
     let dark_pick = form::pick(
+        tr!("Dark theme"),
         crate::theme::dark_choices(),
         Some(ThemeChoice(crate::theme::current_dark())),
         |c: ThemeChoice| {
@@ -988,6 +992,10 @@ pub(super) fn rust_block<'a>(
     let rust = choices.rust.clone().unwrap_or_default();
     let check = |label: &'static str, on: bool, set: fn(&mut clew_protocol::RustChoices, bool)| {
         let press = choose_with(choices, |c| set(c.rust.get_or_insert_default(), !on));
+        // Said as every switch is: by its name, and "on" or "off".
+        super::heard::switch(label, on, |v| {
+            choose_with(choices, |c| set(c.rust.get_or_insert_default(), v))
+        });
         super::jump::mark(
             iced::widget::checkbox(on)
                 .style(theme::check)
@@ -1077,7 +1085,7 @@ pub(super) fn rust_block<'a>(
     targets.retain(|t| seen.insert(t.clone()));
     let selected = rust.target.clone().unwrap_or_else(|| host_choice().into());
     let target = column![
-        form::pick(targets, Some(selected), move |t: String| {
+        form::pick(tr!("Target"), targets, Some(selected), move |t: String| {
             choose_with(choices, |c| {
                 c.rust.get_or_insert_default().target = (t != host_choice()).then_some(t)
             })
@@ -1174,7 +1182,7 @@ pub(super) fn go_block<'a>(
                     .font(crate::fonts::CODE)
                     .color(theme::dim())
                     .width(60),
-                form::pick(list, Some(selected), move |v: String| {
+                form::pick(label, list, Some(selected), move |v: String| {
                     choose_with(choices, |c| {
                         set(
                             c.go.get_or_insert_default(),
@@ -1501,6 +1509,7 @@ fn servers_block(app: &App) -> Vec<Element<'_, Message>> {
         tr!("programming language\u{4}Language"),
         None,
         form::pick_with(
+            tr!("programming language\u{4}Language"),
             languages,
             drafts.server_language.clone(),
             |l: String| Message::Languages(L::ServerLanguage(l)),
@@ -1604,21 +1613,13 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 Some(Status::Idle) | None => (tr!("Not connected yet").to_string(), theme::dim()),
             };
             let name = server.name.clone();
-            if super::heard::gathering() {
-                for a in clew_core::mcp::Approve::ALL {
-                    super::heard::said(
-                        &ApproveChoice(a).to_string(),
-                        Message::Integrations(M::McpApprove(server.name.clone(), a)),
-                    );
-                }
-            }
-            let policy = pick_list(
+            // Each policy said by what the list shows for it.
+            let policy = super::picker::picker(
                 clew_core::mcp::Approve::ALL.map(ApproveChoice),
                 Some(ApproveChoice(server.approve)),
                 move |a: ApproveChoice| Message::Integrations(M::McpApprove(name.clone(), a.0)),
             )
-            .style(theme::pick)
-            .menu_style(theme::pick_menu)
+            .label(tr!("Tool calls"))
             .text_size(ts::BODY)
             .padding([4, 8]);
             // An HTTP server reached without a header of the user's signs in.

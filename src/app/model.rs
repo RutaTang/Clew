@@ -64,6 +64,9 @@ pub struct LspStagedCommand {
 /// for an empty store (which the next save would have written over it).
 pub struct LoadedProjectState {
     pub history: Option<Result<History, String>>,
+    /// The files the trail read that are no longer there: left out of it
+    /// from the start, not only once one is gone to again.
+    pub gone: Vec<PathBuf>,
     pub bookmarks: Option<Result<Vec<Bookmark>, String>>,
     pub notes: Option<Result<Vec<notes::Note>, String>>,
     /// `Err` = a malformed `lsp.toml`, surfaced rather than replaced by
@@ -93,11 +96,20 @@ pub struct LoadedProjectState {
     pub unread: Option<String>,
 }
 
+/// Whether `file`, of the project at `root` on this machine, is gone: not
+/// there, while the project is — not on a drive unplugged or a share
+/// offline, whose files all went with it, nor one that could not be looked
+/// at (no leave to read).
+pub(crate) fn gone(root: &Path, file: &Path) -> bool {
+    matches!(file.try_exists(), Ok(false)) && root.is_dir()
+}
+
 impl LoadedProjectState {
     /// The state of a read that failed as a whole (`why`): no store was read.
     pub(crate) fn unread(why: String) -> Self {
         LoadedProjectState {
             history: None,
+            gone: Vec::new(),
             bookmarks: None,
             notes: None,
             lsp_config: None,
@@ -130,8 +142,22 @@ impl LoadedProjectState {
             ),
             None => (explain::Cache::new(), None),
         };
+        let history = local.then(|| checked(history::load_checked(root)));
+        let gone = match &history {
+            Some(Ok(trail)) => {
+                let mut seen = std::collections::HashSet::new();
+                trail
+                    .flatten()
+                    .into_iter()
+                    .map(|v| v.loc.path)
+                    .filter(|path| seen.insert(path.clone()) && gone(root, path))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
         LoadedProjectState {
-            history: local.then(|| checked(history::load_checked(root))),
+            history,
+            gone,
             bookmarks: local.then(|| checked(bookmarks::load_checked(root))),
             notes: local.then(|| checked(notes::load_checked(root))),
             lsp_config: local.then(|| lsp::config::ProjectLspConfig::load(root)),
@@ -2182,6 +2208,26 @@ pub struct RemoteBrowser {
 #[cfg(test)]
 mod tests {
     use super::Questions;
+
+    /// A file is gone only while its project is there: one under a root
+    /// out of reach for now — a drive unplugged, a share offline — is not
+    /// called deleted, nor left out of the trail; nor is one still there.
+    #[test]
+    fn a_file_is_gone_only_while_its_project_is_there() {
+        let dir = clew_core::testutil::TempDir::new("gone-root");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let kept = root.join("kept.rs");
+        std::fs::write(&kept, "fn main() {}\n").unwrap();
+        let deleted = root.join("deleted.rs");
+        assert!(!super::gone(&root, &kept), "still there");
+        assert!(super::gone(&root, &deleted), "deleted");
+        let away = dir.path().join("unplugged");
+        assert!(
+            !super::gone(&away, &away.join("deleted.rs")),
+            "its whole drive away"
+        );
+    }
 
     /// Each question asked is answered by its own number only: a question
     /// replaced in place is a new one, and an answer to one no longer on

@@ -2335,7 +2335,17 @@ pub(crate) fn target_menu(app: &App) -> Element<'_, Message> {
             .into()
         })
         .collect();
-    let panel = container(Column::with_children(items).spacing(1))
+    // What choosing does, over the choices: a list of platforms alone said
+    // nothing of what would change.
+    let head: Element<'_, Message> = container(
+        text(tr!("Read the code as built for"))
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .wrapping(Wrapping::WordOrGlyph),
+    )
+    .padding([4, 8])
+    .into();
+    let panel = container(Column::with_children(std::iter::once(head).chain(items)).spacing(1))
         .width(TARGET_MENU_W)
         .padding(MENU_PAD)
         .style(theme::modal_panel);

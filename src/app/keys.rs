@@ -464,6 +464,13 @@ impl App {
         if self.jump.is_some() {
             return self.jump_key(&key, modifiers);
         }
+        // A drop-down is open: its rows are walked and picked from, ahead
+        // of the ring it was opened from (`picker_key`).
+        if self.picker.is_some()
+            && let Some(task) = self.picker_key(&key, modifiers)
+        {
+            return task;
+        }
         // The tutorial holds the keys: no ring over it.
         if self.tutorial.is_some() {
             let _ = self.end_ring(false);

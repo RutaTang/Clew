@@ -36,6 +36,12 @@ pub(crate) fn servers_row(
     {
         None => Some((true, false, tr!("Checking the project…").to_string())),
         Some([]) if remote && mode == SetupMode::Open => None,
+        // A folder with no code: none to read, not all of them ready.
+        Some([]) if setup.is_some_and(|s| s.no_code) => Some((
+            false,
+            false,
+            tr!("No code here for them to read.").to_string(),
+        )),
         Some([]) => Some((true, false, tr!("Ready.").to_string())),
         Some(list) => Some((setup.is_some_and(|s| s.servers), true, servers_line(list))),
     }

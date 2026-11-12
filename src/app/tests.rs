@@ -512,9 +512,6 @@ fn writes_clipboard(task: Task<Message>) -> bool {
         .any(|action| matches!(action, iced_test::runtime::Action::Clipboard(_)))
 }
 
-/// Complete the project-state load the way its blocking job would — the same
-/// `LoadedProjectState::read` — so a test sees the stored trail, bookmarks,
-/// notes and caches as soon as the project is open.
 /// The user's choices for the open project's languages, read as the open's
 /// task would and handed in at once — which language servers wait for.
 fn load_choices_synchronously(app: &mut App) {
@@ -530,6 +527,9 @@ fn load_choices_synchronously(app: &mut App) {
     }
 }
 
+/// Complete the project-state load the way its blocking job would — the same
+/// `LoadedProjectState::read` — so a test sees the stored trail, bookmarks,
+/// notes and caches as soon as the project is open.
 fn load_state_synchronously(app: &mut App) {
     let Some(root) = app.proj.project.as_ref().map(|p| p.root.clone()) else {
         return;
@@ -1166,6 +1166,15 @@ fn a_reopened_project_goes_back_where_it_was_read() {
         app.proj.link.pane_pending[0].is_none(),
         "opened under the tour"
     );
+
+    // M3: a folder with no code opens on no overview of it: it offered an
+    // Explain All with nothing to explain.
+    let root = fixture_project("back-where-read-no-code");
+    std::fs::remove_file(root.join("src/lib.rs")).unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root);
+    assert!(app.proj.code_languages.is_empty());
+    assert!(!app.proj.overview.showing, "an overview of no code");
 }
 
 fn scanned_app(tag: &str) -> App {
@@ -23749,6 +23758,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             state: Handoff::new(LoadedProjectState {
                 history: None,
+                gone: Vec::new(),
                 bookmarks: None,
                 notes: None,
                 lsp_config: None,
@@ -37094,33 +37104,117 @@ fn f12_goes_to_the_definition_and_shift_f12_finds_references() {
 fn a_deleted_file_is_said_gone_and_leaves_the_trail() {
     let mut app = scanned_app("deleted-trail");
     let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("src/util.rs"), "pub fn util() {}\n").unwrap();
+    open_synchronously(&mut app, "src/util.rs", None);
     open_synchronously(&mut app, "notes.txt", None);
     open_synchronously(&mut app, "src/lib.rs", None);
     dismiss_overlays(&mut app);
-    std::fs::remove_file(root.join("notes.txt")).unwrap();
+    let notes = root.join("notes.txt");
+    let lib = root.join("src/lib.rs");
+    let current = |app: &App| {
+        app.proj
+            .history
+            .flatten()
+            .into_iter()
+            .find(|v| v.is_current)
+            .map(|v| v.loc.path)
+    };
+    let fresh = |app: &mut App| {
+        app.proj.gone_files.clear();
+        app.status.clear();
+    };
+    // Gone before it was asked for: said so at once, and the trail stays
+    // on the file read — it took the gone file as the place read.
+    std::fs::remove_file(&notes).unwrap();
     let _ = app.update(Message::Editor(EditorMsg::OpenRel {
         rel: "notes.txt".into(),
         line: None,
     }));
+    assert_eq!(app.status, "notes.txt is no longer there");
+    assert!(
+        app.proj.gone_files.contains(&notes),
+        "marked gone, for the trail to leave out"
+    );
+    assert!(app.proj.link.pane_pending[app.proj.active].is_none());
+    assert_eq!(current(&app), Some(lib.clone()));
+
+    // Gone while it loads: said so as it fails, and the trail goes back to
+    // the file still shown.
+    fresh(&mut app);
+    std::fs::write(&notes, "hello\n").unwrap();
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "notes.txt".into(),
+        line: None,
+    }));
+    assert_eq!(current(&app), Some(notes.clone()));
+    std::fs::remove_file(&notes).unwrap();
     let pane = app.proj.active;
     let req = app.proj.link.pane_pending[pane].expect("a load");
     let _ = app.update(Message::Editor(EditorMsg::FileLoaded {
         stamp: app.stamp(),
         req,
         pane,
-        abs: root.join("notes.txt"),
+        abs: notes.clone(),
         target: None,
         result: Err("cannot resolve path: No such file or directory (os error 2)".into()),
     }));
     assert_eq!(app.status, "notes.txt is no longer there");
-    assert!(
-        app.proj.gone_files.contains(&root.join("notes.txt")),
-        "marked gone, for the trail to leave out"
+    assert!(app.proj.gone_files.contains(&notes));
+    assert_eq!(
+        current(&app),
+        Some(lib.clone()),
+        "the trail kept the gone file"
     );
+
+    // Gone to from the trail: said so, and the trail stays on the file read
+    // — it moved to the gone file, and the status said the system's error.
+    fresh(&mut app);
+    let gone = app.proj.history.loc(1).cloned().unwrap();
+    assert_eq!(gone.path, notes);
+    let _ = app.update(Message::Reading(ReadingMsg::HistoryJump {
+        id: 1,
+        loc: gone,
+    }));
+    assert_eq!(app.status, "notes.txt is no longer there");
+    assert!(app.proj.gone_files.contains(&notes));
+    assert_eq!(
+        current(&app),
+        Some(lib.clone()),
+        "the trail moved to a file not there"
+    );
+
+    // Back goes past it, to the file read before: it stopped there, and
+    // the next Back stopped there again.
+    fresh(&mut app);
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    assert_eq!(current(&app), Some(root.join("src/util.rs")));
+    assert!(app.proj.gone_files.contains(&notes), "passed, and left out");
+    // Forward, the same way back.
+    let _ = app.update(Message::Reading(ReadingMsg::GoForward));
+    assert_eq!(current(&app), Some(lib.clone()));
+    // With only gone files back there, it stays, and says so.
+    std::fs::remove_file(root.join("src/util.rs")).unwrap();
+    fresh(&mut app);
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    assert_eq!(current(&app), Some(lib.clone()));
+    assert_eq!(app.status, "src/util.rs is no longer there");
+
+    // Opened again later, the trail it left leaves the gone files out from
+    // the start, not only once one is gone to again.
+    let text = crate::history::to_text(&root, &app.proj.history).unwrap();
+    crate::history::save_text(&root, Some(&text)).unwrap();
+    let state = LoadedProjectState::read(&root, None, true);
+    let mut said = state.gone.clone();
+    said.sort();
+    assert_eq!(said, vec![notes.clone(), root.join("src/util.rs")]);
+    fresh(&mut app);
+    let _ = app.on_project_state_loaded(state);
+    assert!(app.proj.gone_files.contains(&notes));
+
     // Back again: in the trail again.
-    std::fs::write(root.join("notes.txt"), "hello\n").unwrap();
+    std::fs::write(&notes, "hello\n").unwrap();
     open_synchronously(&mut app, "notes.txt", None);
-    assert!(!app.proj.gone_files.contains(&root.join("notes.txt")));
+    assert!(!app.proj.gone_files.contains(&notes));
 }
 
 /// A page over the code — the overview, the statistics, a doc page — is put

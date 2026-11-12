@@ -660,6 +660,18 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
             .center_x(Fill)
             .into(),
         );
+    } else if app.proj.code_languages.is_empty() {
+        // No code: nothing to explain, and no step to offer — Explain All
+        // here said there was nothing for it to do.
+        items.push(
+            container(
+                text(tr!("There is no code here for an overview."))
+                    .size(ts::BODY)
+                    .color(theme::dim()),
+            )
+            .center_x(Fill)
+            .into(),
+        );
     } else if !ready {
         // What it is written from, and the one step that gets there — a
         // way each: the page was a dead end ("Run Explain All first.").
@@ -1289,10 +1301,20 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
             header,
             filter,
             count,
-            scrollable(Column::with_children(items).spacing(16).width(Fill))
-                .direction(thin_scroll())
-                .style(theme::overlay_scrollbar)
-                .height(Fill),
+            // The scrollbar's room kept at the right: the locations end
+            // there, and it was drawn over their last digits.
+            scrollable(
+                Column::with_children(items)
+                    .spacing(16)
+                    .width(Fill)
+                    .padding(Padding {
+                        right: SCROLLBAR_W + 4.0,
+                        ..Padding::ZERO
+                    })
+            )
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Fill),
         ]
         .spacing(10)
         .max_width(GLOSSARY_W),

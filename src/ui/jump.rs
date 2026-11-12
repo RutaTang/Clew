@@ -171,6 +171,35 @@ pub(crate) fn mark_named<'a>(
     message: Message,
     name: Option<String>,
 ) -> Element<'a, Message> {
+    mark_as(content, message, name, false)
+}
+
+/// [`mark`], for a control that shows a value — a drop-down — named by the
+/// field it is in and the value it shows ("Display language: English"),
+/// or by `label` and its value outside a field.
+pub(crate) fn mark_field<'a>(
+    content: impl Into<Element<'a, Message>>,
+    message: Message,
+    value: String,
+    label: Option<String>,
+) -> Element<'a, Message> {
+    let named = label.is_none();
+    let name = match label {
+        Some(label) if value.is_empty() => label,
+        Some(label) => format!("{label}: {value}"),
+        None => value,
+    };
+    mark_as(content, message, Some(name), named)
+}
+
+/// A mark, `name`d — or by its press, as built — and, `in_field`, named by
+/// the field round it ahead of that.
+fn mark_as<'a>(
+    content: impl Into<Element<'a, Message>>,
+    message: Message,
+    name: Option<String>,
+    in_field: bool,
+) -> Element<'a, Message> {
     let content = content.into();
     if !wanted() {
         return content;
@@ -192,6 +221,7 @@ pub(crate) fn mark_named<'a>(
         layer,
         id,
         name,
+        in_field,
     })
 }
 
@@ -279,6 +309,7 @@ pub(crate) fn root<'a>(
         scene,
         reach,
         len: code_len(marks),
+        choosing: super::picker::is_open(),
     })
 }
 
@@ -406,6 +437,9 @@ struct Root<'a> {
     scene: Option<String>,
     reach: Reach,
     len: usize,
+    /// A drop-down is open: the arrows walk its rows, not the ring; Tab
+    /// puts it away as the ring moves on.
+    choosing: bool,
 }
 
 /// A control marked with its press.
@@ -418,6 +452,9 @@ struct Mark<'a> {
     /// What its control is called, as it said when built (while the ring
     /// or the codes are up).
     name: Option<String>,
+    /// Whether the field round it names it, ahead of `name`
+    /// ([`mark_field`]).
+    in_field: bool,
 }
 
 /// A field, named to the ring's census ([`field_named`]).
@@ -718,12 +755,23 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Root<'_> {
                 let step = match key.as_ref() {
                     keyboard::Key::Named(Named::Tab) => Some(!modifiers.shift()),
                     // The arrows move the ring too, while no field holds
-                    // the keys (they are the field's then).
-                    keyboard::Key::Named(Named::ArrowDown | Named::ArrowRight) => Some(true),
-                    keyboard::Key::Named(Named::ArrowUp | Named::ArrowLeft) => Some(false),
+                    // the keys (they are the field's then), nor a
+                    // drop-down is open (they walk its rows).
+                    keyboard::Key::Named(Named::ArrowDown | Named::ArrowRight)
+                        if !self.choosing =>
+                    {
+                        Some(true)
+                    }
+                    keyboard::Key::Named(Named::ArrowUp | Named::ArrowLeft) if !self.choosing => {
+                        Some(false)
+                    }
                     _ => None,
                 };
                 let is_tab = matches!(key.as_ref(), keyboard::Key::Named(Named::Tab));
+                // Tab from an open drop-down puts it away, nothing picked.
+                if is_tab && self.choosing {
+                    shell.publish(Message::Picker(crate::app::pickers::PickerMsg::Close));
+                }
                 match (self.ring, step) {
                     // The first Tab: the window puts the ring up — after the
                     // field holding the keys, if one does.
@@ -939,6 +987,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Mark<'_> {
                 layer: self.layer,
                 press: self.message.clone(),
                 name: self.name.clone(),
+                in_field: self.in_field,
             },
         );
         self.content
@@ -1106,6 +1155,14 @@ const WORDS_H: f32 = 16.0;
 /// above.
 const INLINE_MAX_H: f32 = 20.0;
 
+/// How many times wider than tall a control is to be a row of a list,
+/// whose badge goes on it ([`place`]).
+const ROW_WIDE: f32 = 4.0;
+
+/// A row's first line: a badge on a row of two lines (a note card's) is
+/// on its first.
+const ROW_LINE_H: f32 = 26.0;
+
 /// Where the badge of a `letters`-long code goes for the control at `at`,
 /// within `room`: where [`badge_bounds`] puts it, unless that is over a
 /// badge already placed (`badges`) or a control already marked
@@ -1156,9 +1213,28 @@ fn place(
         ..first
     };
     let bar = in_bar(at, room);
-    let mut tries = Vec::with_capacity(4);
+    let mut tries = Vec::with_capacity(6);
     let has_before = !bar && before.x >= room.x;
     let inline = at.height <= INLINE_MAX_H;
+    // A row of a list (a tree's, a card's): its badge on it, at its start,
+    // on its first line — stacked rows have no room between them, and a
+    // badge above or under one read as the next one's ("AU" under
+    // `__init__.py`, just over `api.py`, opened `__init__.py`). Past the
+    // badges in the way along its line, never up or down to a neighbour.
+    if !bar && !inline && at.width >= ROW_WIDE * at.height {
+        let mut on = Rectangle {
+            x: (at.x + 2.0).round(),
+            y: (at.y + (at.height.min(ROW_LINE_H) - height) / 2.0).round(),
+            width,
+            height,
+        };
+        while let Some(o) = badges.iter().find(|o| o.intersects(&on.expand(1.0))) {
+            on.x = (o.x + o.width + 2.0).round();
+        }
+        if on.x + on.width <= at.x + at.width {
+            tries.push(on);
+        }
+    }
     if has_before && inline {
         tries.push(before);
     }
@@ -1374,6 +1450,43 @@ mod tests {
         let b = place(again, bar, 2, &[], &[]);
         assert!(b.y + b.height <= again.y + BAR_OVER, "{b:?}");
         assert!(b.x >= again.x - BADGE_OUT, "{b:?}");
+    }
+
+    /// A row of a list has its badge on it, at its start, on its first
+    /// line — within the row, nearer it than either neighbour: above or
+    /// under it, a badge read as the next row's, and pressing it opened
+    /// that one. One in the way is passed along the row, not up or down.
+    #[test]
+    fn a_rows_badge_is_on_its_own_row() {
+        let room = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let rows: Vec<Rectangle> = (0..4)
+            .map(|i| {
+                Rectangle::new(
+                    Point::new(10.0, 100.0 + 22.0 * i as f32),
+                    Size::new(220.0, 22.0),
+                )
+            })
+            .collect();
+        let mut placed: Vec<Rectangle> = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            let b = place(*row, room, 2, &placed, &rows[..i]);
+            assert!(
+                b.y >= row.y && b.y + b.height <= row.y + row.height,
+                "row {i}: {b:?} off {row:?}"
+            );
+            assert!(b.x >= row.x && b.x < row.x + 8.0, "at its start: {b:?}");
+            placed.push(b);
+        }
+        // A card's row of two lines: on its first.
+        let card = Rectangle::new(Point::new(10.0, 300.0), Size::new(260.0, 44.0));
+        let b = place(card, room, 2, &[], &[]);
+        assert!(
+            b.y + b.height <= card.y + ROW_LINE_H,
+            "on its first line: {b:?}"
+        );
+        // One in the way: along the row.
+        let b2 = place(card, room, 2, &[b], &[]);
+        assert!(b2.x > b.x + b.width && (b2.y - b.y).abs() < 1.0, "{b2:?}");
     }
 
     fn room_wide() -> Rectangle {

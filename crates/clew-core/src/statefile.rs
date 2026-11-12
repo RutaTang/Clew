@@ -261,6 +261,19 @@ pub fn remove(path: &Path) -> std::io::Result<()> {
 /// writing through whatever is there, and [`lock`]'s `.lock` file — the one
 /// leaf a repository can plant a link at without also having to supply its
 /// contents — opens with `O_NOFOLLOW` and type-checks its handle too.
+/// Whether `path` is under the `.clew` of a project folder no longer there:
+/// a write or a lock there made the folder anew — a project deleted while
+/// Clew had it open came back, holding only Clew's own state.
+fn project_gone(path: &Path) -> bool {
+    use std::path::PathBuf;
+    let comps: Vec<_> = path.components().collect();
+    let Some(pos) = comps.iter().position(|c| c.as_os_str() == ".clew") else {
+        return false;
+    };
+    let root: PathBuf = comps[..pos].iter().collect();
+    !root.as_os_str().is_empty() && matches!(root.try_exists(), Ok(false))
+}
+
 pub(crate) fn repo_dirs_are_real(path: &Path) -> bool {
     use std::path::PathBuf;
     let comps: Vec<_> = path.components().collect();
@@ -387,6 +400,12 @@ fn write_atomic_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::R
     if !repo_dirs_are_real(path) {
         return Err(std::io::Error::other(
             "a state directory is a symlink — refusing to write through it",
+        ));
+    }
+    if project_gone(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the project folder is no longer there",
         ));
     }
     std::fs::create_dir_all(dir)?;
@@ -1421,6 +1440,12 @@ pub fn lock_named(path: &Path, lock_name: &str) -> std::io::Result<FileLock> {
     let dir = path
         .parent()
         .ok_or_else(|| std::io::Error::other("state path has no parent"))?;
+    if project_gone(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the project folder is no longer there",
+        ));
+    }
     std::fs::create_dir_all(dir)?;
     ensure_clew_gitignore(path);
     lock_file(&dir.join(lock_name))
@@ -1718,6 +1743,27 @@ mod tests {
     /// The first write into a project's `.clew/` leaves an ignore file behind
     /// that keeps per-reader state out of `git status` — and never replaces
     /// one the user or the repository already has.
+    /// A project folder deleted while Clew had it open is not made again
+    /// by Clew writing or locking its own state there: it came back,
+    /// holding only `.clew`. Its `.clew` gone alone is made again, as
+    /// on a first open.
+    #[test]
+    fn a_project_folder_gone_is_not_made_again_for_its_state() {
+        let d = dir("clew-statefile-gone");
+        let root = d.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let state = root.join(".clew").join("history.json");
+        write_atomic(&state, b"{}").unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        let err = write_atomic(&state, b"{}").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+        assert!(lock_named(&state, "history.json.lock").is_err());
+        assert!(!root.exists(), "the deleted project came back");
+        std::fs::create_dir_all(&root).unwrap();
+        write_atomic(&state, b"{}").unwrap();
+        assert!(state.is_file(), "its .clew not made again");
+    }
+
     #[test]
     fn the_first_clew_write_adds_a_gitignore_but_never_replaces_one() {
         let d = dir("clew-statefile-gitignore");
@@ -1741,6 +1787,7 @@ mod tests {
 
         // A nested write (`.clew/cache/…`) puts it in `.clew`, not in `cache`.
         let nested = d.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
         write_atomic(&nested.join(".clew/cache/walkthroughs.json"), b"[]").unwrap();
         assert!(nested.join(".clew/.gitignore").is_file());
         assert!(!nested.join(".clew/cache/.gitignore").exists());

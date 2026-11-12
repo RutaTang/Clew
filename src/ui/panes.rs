@@ -57,6 +57,27 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
                 code_pane(app, pane, v)
             }
         }
+        // A folder with no file Clew reads: there is no tree to pick from
+        // ("Pick a file from the tree" over "Nothing here to read").
+        (None, None)
+            if app
+                .proj
+                .project
+                .as_ref()
+                .is_some_and(|p| p.tree.dirs.is_empty() && p.tree.files.is_empty()) =>
+        {
+            mouse_area(empty_state(
+                Glyph::Folder,
+                tr!("Nothing here to read"),
+                tr!("This folder has no files Clew can read."),
+                Some((
+                    tr!("Open Folder…"),
+                    Message::Project(ProjectMsg::OpenFolderPressed),
+                )),
+            ))
+            .on_press(Message::Editor(EditorMsg::PaneFocused(pane)))
+            .into()
+        }
         (None, None) => mouse_area(empty_state(
             Glyph::Note,
             tr!("No file open"),
@@ -1668,15 +1689,18 @@ fn note_action_w(label: &str, accent: bool, room: Option<f32>) -> f32 {
 }
 
 /// Whether a failed card's Settings says its name: where Try again,
-/// Settings and Ask fit one row of a card `width` wide. Where they do not,
-/// it is its icon alone, its name in its tip — "Ask" fell onto a line of
-/// its own, under the two.
+/// Settings and Ask's icon fit one row of a card `width` wide. Where they
+/// do not, it is its icon alone, its name in its tip — "Ask" fell onto a
+/// line of its own, under the two.
 fn card_settings_words(width: f32) -> bool {
+    // Beside Ask's icon alone: Ask is the one to go to its icon first — it
+    // has its pill, and a bare gear read as nothing the status bar and the
+    // Ask card call "Settings".
     let room = width - ACTIVE_NOTE_TEXT_INSET + NOTE_ACTION_PAD_X;
     let row = [
         note_action_w("", true, Some(note_explain_room())),
         note_action_w(tr!("Settings"), false, None),
-        note_action_w(tr!("Ask"), true, None),
+        note_action_w("", true, None),
     ];
     wrapped_lines(&row, room) == 1
 }
@@ -2954,12 +2978,17 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         };
 
         let mut col = Column::new().spacing(1).push(label);
+        // What a row's second line has, beside its indent and the list's
+        // scrollbar: its words cut to it with an ellipsis — cut at 52
+        // characters, then at the panel's edge, they ended mid-word.
+        let line_room = (app.sidebar_width - 44.0 - 6.0 - SCROLLBAR_W - 12.0).max(40.0);
+        let fit = |s: &str| super::steady::cut(s, line_room, ts::CAPTION, crate::fonts::UI);
         if let Some(full) = summary {
             // A one-line table-of-contents entry: the first sentence, truncated
             // with an ellipsis and clipped so it never wraps or overflows the
             // panel. The complete explanation shows in a bubble on hover.
             let clean = strip_backticks(&full);
-            let one_line = truncate_ellipsis(&first_sentence(&clean), 52);
+            let one_line = fit(&first_sentence(&clean));
             let line = container(
                 text(one_line)
                     .size(ts::CAPTION)
@@ -2991,13 +3020,13 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             // bubble on hover: the outline's follow counts its rows' lines
             // (`App::outline_offset`), and a note wrapped over many threw it
             // off by as many.
-            let first = n.text.lines().next().unwrap_or_default();
-            let mut one_line = truncate_ellipsis(first, 52);
-            if one_line == first && n.text.trim_end() != first {
-                one_line.push('…');
+            let first = format!("\u{270e} {}", n.text.lines().next().unwrap_or_default());
+            let mut one_line = fit(&first);
+            if one_line == first && n.text.trim_end().lines().count() > 1 {
+                one_line = fit(&format!("{first} …"));
             }
             let line = container(
-                text(format!("\u{270e} {one_line}"))
+                text(one_line)
                     .size(ts::CAPTION)
                     .color(theme::accent())
                     .wrapping(Wrapping::None),

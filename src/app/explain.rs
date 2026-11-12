@@ -907,6 +907,20 @@ impl App {
     /// (`explain::Reuse::Node`). Explain All is the way to explain all of
     /// it, bottom up.
     pub(crate) fn on_explain_node(&mut self, node: explain::Node) -> Task<Message> {
+        // An empty file has nothing to explain: said so — the pass found
+        // nothing in it to write about, and said it was no longer part of
+        // the project.
+        if let explain::Node::File(abs) = &node
+            && self
+                .proj
+                .panes
+                .iter()
+                .flatten()
+                .any(|v| &v.abs == abs && v.source.is_empty())
+        {
+            self.status = tr!("This file is empty: there is nothing in it to explain.").into();
+            return Task::none();
+        }
         let shown = self.update_explain(ExplainMsg::Show(node.clone()));
         if self.proj.explain.cache.contains_key(&node) {
             return shown;

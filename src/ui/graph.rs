@@ -71,6 +71,11 @@ pub(crate) fn graph_modal_frame<'a>(
     // the map starts (its zoom, its pan, its turn), the 2D/3D projection,
     // and Heat. Each icon shows the action / the mode it switches to.
     let mut map_controls: Vec<Element<'a, Message>> = Vec::new();
+    // In 2D its place is kept, empty: gone, the controls after it moved
+    // 36 px — "Find in the graph" jumped under the pointer at each switch.
+    if graph_mode && !graph_3d {
+        map_controls.push(space().width(Length::Fixed(16.0 + 16.0)).into());
+    }
     if graph_mode && graph_3d {
         map_controls.push(if graph_spin {
             icon_btn(
@@ -148,7 +153,7 @@ pub(crate) fn graph_modal_frame<'a>(
         let lead_w =
             measure(title, ts::TITLE) + extra.as_ref().map_or(0.0, |(_, w)| w + HEADER_GAP);
         let map_w = if graph_mode {
-            let spin = if graph_3d { icon + HEADER_GAP } else { 0.0 };
+            let spin = icon + HEADER_GAP;
             let search = if search.is_some() {
                 GRAPH_SEARCH_W + HEADER_GAP
             } else {
@@ -3320,22 +3325,12 @@ pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
         // too, a line above.
         0 => None,
         _ => Some(
-            {
-                // Each map said by its name.
-                if super::heard::gathering() {
-                    for c in &choices {
-                        super::heard::said(
-                            &c.title,
-                            Message::Graph(GraphMsg::SelectMap(c.id.clone())),
-                        );
-                    }
-                }
-                pick_list(choices, selected, |c: MapChoice| {
-                    Message::Graph(GraphMsg::SelectMap(c.id))
-                })
-            }
-            .style(theme::pick)
-            .menu_style(theme::pick_menu)
+            // Each map said by its name; opened, walked and picked from by
+            // the keys too.
+            super::picker::picker(choices, selected, |c: MapChoice| {
+                Message::Graph(GraphMsg::SelectMap(c.id))
+            })
+            .label(tr!("Graph"))
             .text_size(ts::SMALL)
             .padding([3, 8])
             .into(),

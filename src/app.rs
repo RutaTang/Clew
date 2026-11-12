@@ -94,6 +94,7 @@ mod runtime;
 pub use runtime::note_window_system;
 pub(crate) mod choices;
 pub(crate) mod onscreen;
+pub(crate) mod pickers;
 mod semantic;
 pub(crate) mod server;
 mod settings;

@@ -20,6 +20,24 @@ pub(crate) fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message>
     .into()
 }
 
+/// A program's output: [`debug_col`], kept at its end as lines come and
+/// as the run ends — its last line, most often the result or the error,
+/// was below the pane's foot with nothing to say more was there — and its
+/// scrollbar showing, faintly, while there is more than the pane holds.
+fn output_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
+    container(
+        scrollable(Column::with_children(rows).spacing(1).width(Fill))
+            .direction(thin_scroll())
+            .anchor_bottom()
+            .style(theme::cue_scrollbar)
+            .height(Fill),
+    )
+    .width(Fill)
+    .height(Fill)
+    .padding([4, 6])
+    .into()
+}
+
 /// The collapsible bottom panel: a tab for every run — of the program (Run,
 /// Debug) and worked out by the model (Fake Run, Fake Debug) — open at
 /// once, in the order they were opened, the one on screen drawn below its
@@ -626,6 +644,28 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     );
     let cols_w = panel_w - cols_reach;
     let stack_room = ((cols_w - 3.0 * 6.0) * 2.0 / portions - 2.0 * 6.0 - 12.0 - 2.0).max(0.0);
+    // The output takes the room a run's lines need: half the panel beside
+    // the debugger's three columns, all of it for a plain run.
+    // The variables, what a reader opens the debugger for, take twice a
+    // column's room — and the output's, while the program has printed
+    // nothing: values were cut at 180 px beside an empty column.
+    let quiet = session.output.is_empty();
+    // And the watches, a share of that room when there are any: their
+    // values were cut to a few letters beside the empty output. The
+    // columns' shares add up the same either way, the call stack's too.
+    let (vars_portion, watch_portion) = match (quiet, app.debug.watches.is_empty()) {
+        (true, false) => (5, 3),
+        (true, true) => (6, 2),
+        (false, _) => (4, 2),
+    };
+    // Each column's room for its words, as the stack's: what does not fit
+    // is cut with an ellipsis — cut at the column's edge, "0x7ffb69015i"
+    // and "_run_module_as_ma" read as whole.
+    let column_room = |portion: u16| {
+        ((cols_w - 3.0 * 6.0) * f32::from(portion) / portions - 2.0 * 6.0 - 12.0 - 2.0).max(0.0)
+    };
+    let vars_room = column_room(vars_portion);
+    let watch_room = column_room(watch_portion);
     for f in &session.frames {
         let loc = f
             .path
@@ -636,10 +676,11 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         // stay: cut at its end, "teashop/checkout.py:" lost the line, the
         // one thing a reader looks at it for. Whole on hover.
         let shown = super::steady::elide_start(&loc, ts::CAPTION, crate::fonts::UI, stack_room);
-        let cut = shown != loc;
+        let name = super::steady::cut(&f.name, stack_room, ts::SMALL, crate::fonts::UI);
+        let cut = shown != loc || name != f.name;
         let mut b = button(
             column![
-                text(f.name.clone())
+                text(name)
                     .size(ts::SMALL)
                     .color(theme::accent())
                     .wrapping(Wrapping::None),
@@ -663,7 +704,12 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             ));
         }
         stack_rows.push(if cut {
-            super::toolbar::tip_at(b, loc, None, tooltip::Position::Bottom)
+            super::toolbar::tip_at(
+                b,
+                format!("{}  {loc}", f.name),
+                None,
+                tooltip::Position::Bottom,
+            )
         } else {
             b.into()
         });
@@ -683,7 +729,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 .color(theme::dim())
                 .into(),
         );
-        push_var_rows(app, &sc.vars, 0, &mut var_rows);
+        push_var_rows(app, &sc.vars, 0, vars_room, &mut var_rows);
     }
 
     // Program output.
@@ -756,6 +802,13 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             let val: String = val.chars().take(600).collect();
             format!("{expr} = {val}")
         });
+        let w = |s: &str| super::steady::width_of(s, ts::SMALL, crate::fonts::UI);
+        let val = super::steady::cut(
+            &val,
+            (watch_room - 22.0 - w(expr) - w(" = ")).max(0.0),
+            ts::SMALL,
+            crate::fonts::UI,
+        );
         let line: Element<'_, Message> = row![
             // By identity (the expression): an index into the list drawn
             // here can name another watch once the list changes.
@@ -788,20 +841,6 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         });
     }
 
-    // The output takes the room a run's lines need: half the panel beside
-    // the debugger's three columns, all of it for a plain run.
-    // The variables, what a reader opens the debugger for, take twice a
-    // column's room — and the output's, while the program has printed
-    // nothing: values were cut at 180 px beside an empty column.
-    let quiet = session.output.is_empty();
-    // And the watches, a share of that room when there are any: their
-    // values were cut to a few letters beside the empty output. The
-    // columns' shares add up the same either way, the call stack's too.
-    let (vars_portion, watch_portion) = match (quiet, app.debug.watches.is_empty()) {
-        (true, false) => (5, 3),
-        (true, true) => (6, 2),
-        (false, _) => (4, 2),
-    };
     // The pill floats over the panel's foot at its right, where the output
     // is: the output's column ends above it, so no line runs under it —
     // scrolled to its end alone, the lines on their way there did.
@@ -813,7 +852,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     } else {
         space().height(0).into()
     };
-    let output: Element<'_, Message> = column![debug_col(out_rows), foot].height(Fill).into();
+    let output: Element<'_, Message> = column![output_col(out_rows), foot].height(Fill).into();
     let panels = if output_only {
         row![output]
     } else {
@@ -1242,7 +1281,15 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     let bubble_max = BUBBLE_SHARE * conversation_width(app);
     // Why the last question could not be asked, where it was — the status
     // line said it alone, and the card seemed to ignore the question.
-    let notice: Option<Element<'_, Message>> = app.proj.ask_notice.as_ref().map(|why| {
+    // With no folder open, said from the first: the card opened blank, and
+    // said so only once a question was sent.
+    let why_now: Option<String> = app.proj.ask_notice.clone().or_else(|| {
+        app.proj
+            .project
+            .is_none()
+            .then(|| tr_noop!("Open a folder to ask about its code").to_string())
+    });
+    let notice: Option<Element<'_, Message>> = why_now.as_ref().map(|why| {
         // With the way to what it asks for: a folder to open, the
         // embedding endpoint to set — said as plain words, they led
         // nowhere.
@@ -1652,6 +1699,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         None if app.voice.speech.is_speaking() => tr!("Speaking…").to_string(),
         None if app.voice.is_listening() => tr!("Listening…").to_string(),
         None if !app.proj.ask_turns.is_empty() => tr!("Reply…").to_string(),
+        // No codebase open to say "this" of.
+        None if app.proj.project.is_none() => tr!("Ask about a codebase…").to_string(),
         None => tr!("Ask about this codebase…").to_string(),
     };
     // The question, in lines that wrap and grow — to a few, then it
@@ -1775,14 +1824,13 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                         .color(theme::dim()),
                     ask_picker(
                         app,
-                        pick_list(choices, selected, move |c: OptionChoice| {
+                        super::picker::picker(choices, selected, move |c: OptionChoice| {
                             Message::Ask(AskMsg::AcpOption {
                                 option: id.clone(),
                                 value: c.value,
                             })
                         })
-                        .style(theme::pick)
-                        .menu_style(theme::pick_menu)
+                        .label(option.name.clone())
                         .text_size(ts::CAPTION)
                         .padding([2, 6]),
                     ),
@@ -1818,11 +1866,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             .or_else(|| choices.first().cloned());
         agent = container(ask_picker(
             app,
-            pick_list(choices, selected, |c: AgentChoice| {
+            super::picker::picker(choices, selected, |c: AgentChoice| {
                 Message::Ask(AskMsg::PickAgent(c.name))
             })
-            .style(theme::pick)
-            .menu_style(theme::pick_menu)
+            .label(tr!("Agent"))
             .text_size(ts::SMALL)
             .padding([6, 8]),
         ))
@@ -3249,6 +3296,7 @@ fn push_var_rows<'a>(
     app: &'a App,
     vars: &'a [crate::dap::Variable],
     depth: usize,
+    room: f32,
     out: &mut Vec<Element<'a, Message>>,
 ) {
     for v in vars {
@@ -3282,13 +3330,22 @@ fn push_var_rows<'a>(
         .spacing(3)
         .align_y(iced::Center);
         if !v.value.is_empty() {
+            // What is left of the column for the value, cut to it with an
+            // ellipsis; whole where the pointer rests (below).
+            let w = |s: &str| super::steady::width_of(s, ts::SMALL, crate::fonts::UI);
+            let left = room - depth as f32 * 12.0 - 10.0 - w(&v.name) - w("=") - 3.0 * 3.0;
             line = line
                 .push(text("=").size(ts::SMALL).color(theme::dim()))
                 .push(
-                    text(v.value.clone())
-                        .size(ts::SMALL)
-                        .color(theme::fg())
-                        .wrapping(Wrapping::None),
+                    text(super::steady::cut(
+                        &v.value,
+                        left.max(0.0),
+                        ts::SMALL,
+                        crate::fonts::UI,
+                    ))
+                    .size(ts::SMALL)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
                 );
         }
         let row: Element<'a, Message> = if opens {
@@ -3318,7 +3375,7 @@ fn push_var_rows<'a>(
         });
         if open {
             match app.debug.var_children.get(&reference) {
-                Some(children) => push_var_rows(app, children, depth + 1, out),
+                Some(children) => push_var_rows(app, children, depth + 1, room, out),
                 None => out.push(
                     row![
                         space().width((depth + 1) as f32 * 12.0 + 13.0),

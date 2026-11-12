@@ -136,6 +136,7 @@ impl App {
             margin_tab: MarginTab::default(),
             show_view_menu: false,
             show_views_menu: false,
+            picker: None,
             file_filter: String::new(),
             tree_focused: false,
             keymap: keymap::Keymap::load(),

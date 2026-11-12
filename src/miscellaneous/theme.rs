@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
-use iced::widget::{button, checkbox, container, pick_list, progress_bar, scrollable, text_input};
+use iced::widget::{button, checkbox, container, progress_bar, scrollable, text_input};
 use iced::{Border, Color, Theme};
 
 /// Build a `Color` from a `0xRRGGBB` literal.
@@ -2128,23 +2128,54 @@ pub fn input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
     }
 }
 
-/// A drop-down: the same rounded well as a field ([`input`]), its edge lit
-/// while it is open.
-pub fn pick(_theme: &Theme, status: pick_list::Status) -> pick_list::Style {
-    pick_list::Style {
+/// A drop-down's well (`ui::picker`): the same rounded well as a field
+/// ([`input`]), its edge lit while its list is open.
+pub fn pick_well(open: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| button::Style {
+        background: Some(wash(if is_light() { 0.035 } else { 0.045 }).into()),
         text_color: fg(),
-        placeholder_color: dim(),
-        handle_color: dim(),
-        background: wash(if is_light() { 0.035 } else { 0.045 }).into(),
         border: Border {
-            color: match status {
-                pick_list::Status::Opened { .. } => with_alpha(accent(), 0.65),
-                pick_list::Status::Hovered => wash(0.16),
-                pick_list::Status::Active => hairline(),
+            color: if open {
+                with_alpha(accent(), 0.65)
+            } else {
+                match status {
+                    button::Status::Hovered | button::Status::Pressed => wash(0.16),
+                    _ => hairline(),
+                }
             },
             width: 1.0,
             radius: 9.0.into(),
         },
+        ..button::Style::default()
+    }
+}
+
+/// A drop-down's list (`ui::picker`): [`pick_menu`]'s panel.
+pub fn pick_list_panel(theme: &Theme) -> container::Style {
+    let menu = pick_menu(theme);
+    container::Style {
+        background: Some(menu.background),
+        text_color: Some(menu.text_color),
+        border: menu.border,
+        shadow: menu.shadow,
+        ..container::Style::default()
+    }
+}
+
+/// A row of a drop-down's list: lit where the keys rest (`lit`), and under
+/// the pointer.
+pub fn pick_row(lit: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: (lit || hovered).then(|| wash(if lit { 0.1 } else { 0.06 }).into()),
+            text_color: if lit { fg_bright() } else { fg() },
+            border: Border {
+                radius: 7.0.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
+        }
     }
 }
 

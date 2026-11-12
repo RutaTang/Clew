@@ -54,6 +54,31 @@ impl App {
     /// sync and a rename) ran on this thread on every navigation. One write
     /// at a time, in order, and only the newest trail waits behind the one
     /// running. The returned task is that write, when one starts.
+    /// Back or Forward (`step`), past visits to files of this machine's no
+    /// longer there, as the trail leaves them out: each is marked gone. The
+    /// way back stopped at a deleted file — its open failed with the
+    /// system's error, the trail moved onto it, and the next Back stopped
+    /// there again. With only gone files that way, the trail stays where it
+    /// is and says so.
+    fn step_trail(&mut self, step: fn(&mut History, usize) -> Option<Loc>) -> Task<Message> {
+        let before = self.proj.history.clone();
+        let rows = self.first_rows();
+        let mut gone = None;
+        while let Some(loc) = step(&mut self.proj.history, rows) {
+            if !self.is_gone(&loc.path) {
+                let saved = self.save_history();
+                return Task::batch([saved, self.open_file(loc.path, loc.line, false)]);
+            }
+            self.proj.gone_files.insert(loc.path.clone());
+            gone = Some(loc.path);
+        }
+        if let Some(path) = gone {
+            self.proj.history = before;
+            self.say_gone(&path);
+        }
+        Task::none()
+    }
+
     pub(crate) fn save_history(&mut self) -> Task<Message> {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
@@ -635,25 +660,21 @@ impl App {
             ReadingMsg::GoBack if self.active_viewer().is_some() && self.put_away_page() => {
                 Task::none()
             }
-            ReadingMsg::GoBack => match self.proj.history.back_showing(self.first_rows()) {
-                Some(loc) => {
-                    let saved = self.save_history();
-                    Task::batch([saved, self.open_file(loc.path, loc.line, false)])
-                }
-                None => Task::none(),
-            },
-            ReadingMsg::GoForward => match self.proj.history.forward_showing(self.first_rows()) {
-                Some(loc) => {
-                    let saved = self.save_history();
-                    Task::batch([saved, self.open_file(loc.path, loc.line, false)])
-                }
-                None => Task::none(),
-            },
+            ReadingMsg::GoBack => self.step_trail(History::back_showing),
+            ReadingMsg::GoForward => self.step_trail(History::forward_showing),
             // A click names the visit it drew: an id that no longer points
             // there (renumbered by an eviction, or a trail replaced since)
             // is dropped rather than jumping to whatever holds it now.
             ReadingMsg::HistoryJump { id, loc } => {
                 if self.proj.history.loc(id) != Some(&loc) {
+                    return Task::none();
+                }
+                // A file of this machine's deleted since it was read: said
+                // so, and the trail left where it is — it moved on to the
+                // gone file, said the system's error, and named as read a
+                // file the pane did not show.
+                if self.is_gone(&loc.path) {
+                    self.say_gone(&loc.path);
                     return Task::none();
                 }
                 match self.proj.history.goto(id) {

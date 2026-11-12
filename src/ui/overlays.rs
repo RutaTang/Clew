@@ -182,9 +182,12 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         able: menu.served,
         ai: false,
     };
+    // F12 and ⇧F12, as most editors name them — where most learn them; the
+    // `g` pairs, which only reading-key users know, hid them.
+    let refs = crate::keymap::local_keys("⇧F12");
     let mut navigate = vec![
-        goto(GotoKind::Definition, "gd"),
-        goto(GotoKind::References, "gr"),
+        goto(GotoKind::Definition, "F12"),
+        goto(GotoKind::References, &refs),
         goto(GotoKind::Implementation, "gi"),
         goto(GotoKind::TypeDefinition, "gy"),
         Row {

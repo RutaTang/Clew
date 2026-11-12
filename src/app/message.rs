@@ -110,6 +110,9 @@ pub enum Message {
     /// The weak spots page. Handled in `app::weakspots`
     /// (`App::update_weak`).
     Weak(WeakMsg),
+    /// The drop-down open in the window. Handled in `app::pickers`
+    /// (`App::update_picker`).
+    Picker(crate::app::pickers::PickerMsg),
     /// The refresh tick, while something is changing (see
     /// `App::window_subscription`): language servers starting or indexing,
     /// the server panel, an auto-refresh waiting out its cooldown.
@@ -2520,6 +2523,7 @@ impl Message {
             Message::Fake(m) => m.origin(),
             Message::Proof(m) => m.origin(),
             Message::Weak(m) => m.origin(),
+            Message::Picker(_) => None,
             Message::Tick
             | Message::Noop
             | Message::Placed { .. }

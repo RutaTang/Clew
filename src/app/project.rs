@@ -441,15 +441,17 @@ impl App {
             .map(crate::app::ask_sessions::load)
             .unwrap_or_default();
         self.proj.ask_session = None;
-        // Land on the architecture-overview home (filled from the cache when
-        // the project's state has loaded).
-        self.proj.overview.showing = true;
         self.refresh_embeddings();
         // A project open re-reads the AI config (another window may have
         // saved Settings).
         self.invalidate_llm_config();
         self.proj.project_languages = served_languages(&result.files);
         self.proj.code_languages = super::setup::setup_languages(&result.files);
+        // Land on the architecture-overview home (filled from the cache when
+        // the project's state has loaded) — where there is code for it to
+        // be of: over a folder with none it opened by itself, offering an
+        // Explain All with nothing to explain.
+        self.proj.overview.showing = !self.proj.code_languages.is_empty();
         self.proj.file_languages = file_languages(&result.files);
         // A folder on this machine, opened: offered again on the welcome
         // screen — not the tour's sample, which the tour brings itself.
@@ -830,6 +832,7 @@ impl App {
             problems.push(tr!("the project's saved state ({error})", error = why));
         }
 
+        self.proj.gone_files.extend(state.gone);
         if let Some(loaded) = state.history {
             match loaded {
                 Ok(loaded) => {

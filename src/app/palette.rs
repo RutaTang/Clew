@@ -841,14 +841,14 @@ impl App {
         // At the caret: what the context menu and the reading keys do there.
         if project && self.caret().is_some() {
             for (kind, keys) in [
-                (GotoKind::Definition, "gd"),
-                (GotoKind::References, "gr"),
-                (GotoKind::Implementation, "gi"),
-                (GotoKind::TypeDefinition, "gy"),
+                (GotoKind::Definition, "F12".to_string()),
+                (GotoKind::References, crate::keymap::local_keys("⇧F12")),
+                (GotoKind::Implementation, "gi".to_string()),
+                (GotoKind::TypeDefinition, "gy".to_string()),
             ] {
                 add(
                     kind.name().to_string(),
-                    Some(keys.into()),
+                    Some(keys),
                     PaletteAction::Goto(kind),
                 );
             }

@@ -330,8 +330,11 @@ impl App {
         self.show_bottom = true;
         self.debug.no_debug = no_debug;
         self.debug.trail_fns.clear();
-        // A new run: its trace starts empty.
+        // A new run: its trace starts empty — and what was said of the last
+        // one's tour (its narration failed) is of a run no longer the one
+        // traced.
         self.debug.trace.clear();
+        self.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
         self.debug.trace_cut = false;
         self.debug.trace_rev += 1;
         self.debug.trace_program = program

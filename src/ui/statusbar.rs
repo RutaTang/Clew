@@ -399,7 +399,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
                 &[&at_rest[0], &at_rest[1]],
                 ts::SMALL,
             );
-            (slot, (shown != said).then_some(said))
+            (slot, (shown != said).then(|| said.clone()))
         };
         // A server's state opens the page that lists them, where what it
         // says to do ("…, or choose where it is") is done — as the place
@@ -410,9 +410,15 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             .style(theme::icon_button(false))
             .padding([2, 8]);
         if server.is_some() {
-            lsp_button = lsp_button.on_press(super::heard::said(
+            let press = super::heard::said(
                 tr!("Language servers"),
                 Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::Languages)),
+            );
+            // Named on the ring by what it shows, then where it leads:
+            // "Python: pyright ready" was announced "Language servers".
+            lsp_button = lsp_button.on_press(super::heard::said_with(
+                || format!("{said} — {}", tr!("Language servers")),
+                press,
             ));
         }
         let open = tr!("Open Settings → Language servers");
@@ -508,7 +514,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             row![
                 ts::set_in(
                     text(tr!(
-                        "Reading for {target}",
+                        "Built for {target}",
                         target = target_name(&app.proj.reading_target)
                     ))
                     .font(crate::fonts::in_control(crate::fonts::UI_MEDIUM))
@@ -527,13 +533,21 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         .on_press(super::heard::said_with(
             || {
                 tr!(
-                    "Reading for {target}",
+                    "Built for {target}",
                     target = target_name(&app.proj.reading_target)
                 )
             },
             Message::Window(WindowMsg::ToggleTargetMenu),
         ));
-        bar = bar.push(picker);
+        // "Reading for Linux" said nothing of what it changes: named by
+        // what the code is read as, and what that does said where the
+        // pointer rests.
+        bar = bar.push(super::toolbar::tip_at(
+            picker,
+            tr!("Code built only for other platforms is dimmed"),
+            None,
+            tooltip::Position::Top,
+        ));
     }
 
     // The design's 20 px in from the left and 14 from the right, less the

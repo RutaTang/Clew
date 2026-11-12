@@ -54,6 +54,21 @@ impl App {
         line: Option<usize>,
         push: bool,
     ) -> Task<Message> {
+        // A package (a Go or Java import names its directory, a C# `using`
+        // its namespace: the Imports tab's row, the map's) opens at its first
+        // file: neither is a file. Looked up whatever the name: a namespace's
+        // node (`namespace Acme.Core`) reads as though it had an extension.
+        let abs = self.proj.import_graph.package_file(&abs).unwrap_or(abs);
+        // A jump to a file of this machine's deleted since it was listed (a
+        // tree row, a result, a citation) is said so before anything is left
+        // for it: the trail took it as the place read, and the page over the
+        // code, the Ask window, Time Travel went for a pane that then showed
+        // what it showed before, with the system's error under it.
+        if push && self.is_gone(&abs) {
+            self.proj.landing_next = None;
+            self.say_gone(&abs);
+            return Task::none();
+        }
         // A jump supersedes a walkthrough step still waiting for its file's
         // symbols (`PendingAnchor`): settled afterwards, the step moved the
         // cursor off where the reader went — even within the step's own
@@ -69,11 +84,6 @@ impl App {
         self.proj.landing = self.proj.landing_next.take();
         // The Files view's keyboard rests on the file being read.
         self.proj.tree_cursor = None;
-        // A package (a Go or Java import names its directory, a C# `using`
-        // its namespace: the Imports tab's row, the map's) opens at its first
-        // file: neither is a file. Looked up whatever the name: a namespace's
-        // node (`namespace Acme.Core`) reads as though it had an extension.
-        let abs = self.proj.import_graph.package_file(&abs).unwrap_or(abs);
         // Opening a file leaves the overview / stats / docs page for the code, and
         // ends any time-travel session (which would otherwise stay active-but-hidden
         // and keep capturing Esc/←/→ for a file that's no longer shown).
@@ -443,6 +453,24 @@ impl App {
         )
     }
 
+    /// Whether `abs` is a file of this machine's project that is no longer
+    /// there ([`crate::app::model::gone`]).
+    pub(crate) fn is_gone(&self, abs: &Path) -> bool {
+        !self.connection.is_remote()
+            && self
+                .proj
+                .project
+                .as_ref()
+                .is_some_and(|p| crate::app::model::gone(&p.root, abs))
+    }
+
+    /// `abs`, a file of this machine's, found no longer there: said so, and
+    /// marked for the reading trail to leave out.
+    pub(crate) fn say_gone(&mut self, abs: &Path) {
+        self.status = tr!("{file} is no longer there", file = self.rel_of(abs));
+        self.proj.gone_files.insert(abs.to_path_buf());
+    }
+
     pub(crate) fn on_file_loaded(
         &mut self,
         req: u64,
@@ -456,7 +484,12 @@ impl App {
         // issued before a project switch must not resurrect into it.
         if self.proj.link.pane_pending.get(pane).copied().flatten() != Some(req) {
             if let Err(e) = &result {
-                let said = format!("{}: {e}", self.rel_of(&abs));
+                let said = if self.is_gone(&abs) {
+                    self.proj.gone_files.insert(abs.clone());
+                    tr!("{file} is no longer there", file = self.rel_of(&abs))
+                } else {
+                    format!("{}: {e}", self.rel_of(&abs))
+                };
                 self.fail_superseded_open(req, said);
             }
             return Task::none();
@@ -468,14 +501,26 @@ impl App {
                 // A file of this machine's no longer there is said so, and
                 // left out of the trail: "empty.py: cannot resolve path: No
                 // such file or directory (os error 2)" stood for it.
-                if !self.connection.is_remote() && !abs.exists() {
-                    self.status = tr!("{file} is no longer there", file = rel);
-                    self.proj.gone_files.insert(abs.clone());
+                let mut saved = Task::none();
+                if self.is_gone(&abs) {
+                    self.say_gone(&abs);
+                    // Gone between the jump and its load: the trail goes
+                    // back to the visit still shown, not on as though it
+                    // had been read.
+                    if self
+                        .proj
+                        .history
+                        .current_loc()
+                        .is_some_and(|l| l.path == abs)
+                    {
+                        self.proj.history.back();
+                        saved = self.save_history();
+                    }
                 } else {
                     self.status = format!("{rel}: {e}");
                 }
                 self.forget_history_open(&abs);
-                return Task::none();
+                return saved;
             }
             Ok(content) => content,
         };

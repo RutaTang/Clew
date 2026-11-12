@@ -735,9 +735,11 @@ pub struct WalkUi {
     pub input: String,
     /// Whether the top input searches the library or generates a new tour.
     pub mode: WalkMode,
-    /// Height of the narration block in the WALK tab; the steps list above it
-    /// takes the rest. The divider between them is draggable.
-    pub narration_height: f32,
+    /// Height of the narration block in the WALK tab, once the reader set
+    /// it by the divider between it and the steps list above; until then
+    /// it is as much of the room as leaves the list its steps
+    /// (`ui::sidebar::narration_room`).
+    pub narration_height: Option<f32>,
 }
 
 impl Default for WalkUi {
@@ -745,7 +747,7 @@ impl Default for WalkUi {
         Self {
             input: String::new(),
             mode: WalkMode::Search,
-            narration_height: 240.0,
+            narration_height: None,
         }
     }
 }
@@ -1606,6 +1608,8 @@ pub struct App {
     pub show_view_menu: bool,
     /// The sidebar's More views menu (the ⋯ after its views) is open.
     pub show_views_menu: bool,
+    /// The drop-down open in the window (`ui::picker`), if one is.
+    pub picker: Option<crate::app::pickers::Picker>,
     /// What the Files view is narrowed to; empty shows the whole tree.
     pub file_filter: String,
     /// Whether the Files view's tree has the keyboard (`ui::tree_keys`).
