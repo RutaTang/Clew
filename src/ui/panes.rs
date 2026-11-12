@@ -1111,21 +1111,68 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
         Message::Tutorial(crate::TutorialMsg::Start),
     ));
 
-    center(
-        column![
-            brand,
-            space().height(4),
-            text(subtitle).size(ts::BASE).color(theme::fg_muted()),
-            space().height(22),
-            actions,
-            space().height(10),
-            tour,
-        ]
-        .spacing(6)
-        .align_x(iced::Center),
-    )
-    .into()
+    let mut page = column![
+        brand,
+        space().height(4),
+        text(subtitle).size(ts::BASE).color(theme::fg_muted()),
+        space().height(22),
+        actions,
+        space().height(10),
+        tour,
+    ]
+    .spacing(6)
+    .align_x(iced::Center);
+    // The folders opened here before, to open again in a click: every
+    // return to a project went through the folder dialog.
+    if !app.connection.is_remote() && !app.recent_folders.is_empty() {
+        let rows = app.recent_folders.iter().map(|folder| {
+            let (name, place) = crate::app::recent::said(folder);
+            let row = row![
+                glyph::icon(Glyph::Folder, theme::fg_muted(), 14.0),
+                text(name.clone())
+                    .size(ts::BODY)
+                    .color(theme::accent())
+                    .wrapping(Wrapping::None),
+                text(place.clone())
+                    .size(ts::SMALL)
+                    .color(theme::dim())
+                    .wrapping(Wrapping::None),
+            ]
+            .spacing(8)
+            .align_y(iced::Center);
+            let open = button(container(row).width(Fill).clip(true))
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding([4, 8])
+                .on_press(super::heard::said_to(
+                    tr!("Open"),
+                    &name,
+                    Message::Project(ProjectMsg::FolderPicked(Some(folder.clone()))),
+                ));
+            super::toolbar::tip_at(
+                open,
+                folder.display().to_string(),
+                None,
+                tooltip::Position::Bottom,
+            )
+        });
+        page = page.push(space().height(18)).push(
+            column![
+                text(tr!("Recent"))
+                    .size(ts::CAPTION)
+                    .font(crate::fonts::UI_MEDIUM)
+                    .color(theme::dim()),
+                Column::with_children(rows).spacing(2),
+            ]
+            .spacing(6)
+            .width(Length::Fixed(RECENT_W)),
+        );
+    }
+    center(page).into()
 }
+
+/// The width of the welcome screen's recent folders.
+const RECENT_W: f32 = 360.0;
 
 /// The Clew "C" mark (monochrome arcs, transparent background) for the welcome
 /// screen. Rendered with a theme-adaptive tint (see `welcome`), so the asset's

@@ -282,14 +282,15 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     // A plain run (Run, not Debug) never stops: no stack, no variables, no
     // watches, nothing to step — its output, and how it ended.
     let plain = app.debug.no_debug;
-    // A debug run that ended without ever stopping is laid out the same —
-    // its empty stack and variables took half the panel from its output —
-    // though it is still a debug run, to run again as one.
+    // A debug run that ended with nothing left to show of a stop is laid
+    // out the same — its empty stack and variables took half the panel,
+    // or two thirds of it once it had stopped, its output wrapped a word a
+    // line beside them — though it is still a debug run, to run again as
+    // one, its stops still there to walk.
     let output_only = plain
         || (session.status == DebugStatus::Terminated
             && session.frames.is_empty()
-            && session.scopes.is_empty()
-            && app.debug.trace.is_empty());
+            && session.scopes.is_empty());
     let (status_txt, status_color) = match (session.status, session.exit_code) {
         (DebugStatus::Launching, _) => (tr!("launching…").to_string(), theme::dim()),
         (DebugStatus::Running, _) => (tr!("running").to_string(), theme::success()),
@@ -424,6 +425,83 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         ]
     }
     .spacing(4);
+    // Clear of the Ask card in the corner: it sat over Continue, Step and
+    // Stop (the panel's foot is the status bar's top; its header, some 40
+    // px under the panel's top).
+    let panel_top = app.window_height - super::STATUSBAR_H - app.bottom_shown_height();
+    let reach = super::askfloat::card_reach(
+        app,
+        app.window_width - super::toolbar::STRIP_W,
+        panel_top + 44.0,
+    );
+    // What the controls take, and what is said before them at the least
+    // (the run, its state, the trace and Walk this run): where the panel
+    // left of the card holds less, the controls go under it, on a row of
+    // their own. Clipped to fit, everything said before them went — "Walk
+    // this run" with it — whenever the Ask card was open at a laptop's
+    // width.
+    let w = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
+    let controls_w = if output_only {
+        stop_w + 2.0
+    } else {
+        [tr!("▶ Continue"), tr!("⤼ Over"), tr!("⤓ In"), tr!("⤒ Out")]
+            .iter()
+            .map(|label| w(label, ts::BODY) + 16.0)
+            .sum::<f32>()
+            + stop_w
+            + 2.0
+            + 4.0 * 4.0
+    };
+    // Every gap of its row counted (the note's slot, empty, keeps its two),
+    // and the hover switch where it is shown: two gaps short and without
+    // it, the header stayed on one row where it cut Walk this run.
+    let said_w = w(if plain { tr!("Run") } else { tr!("Debug") }, ts::BASE)
+        + 4.0 * 8.0
+        + status_w
+        + if plain { 0.0 } else { trace_control_w(app) }
+        + hover_eval_w(app);
+    let sidebar = if app.show_left_sidebar {
+        app.sidebar_width
+    } else {
+        0.0
+    };
+    // Less the panel's own padding, either side.
+    let panel_w = app.window_width
+        - super::toolbar::STRIP_W
+        - super::sheet::SHEET_GAP
+        - sidebar
+        - 2.0 * DEBUG_PANEL_PAD_X;
+    let stacked = panel_w - reach < said_w + 21.0 + controls_w;
+    // What ran instead, named, where the file read does not run itself.
+    let ran_note: Option<String> = app.debug.ran_for.as_deref().map(|file| {
+        let program = app
+            .debug
+            .session
+            .as_ref()
+            .filter(|_| !app.connection.is_remote())
+            .and_then(|s| s.program.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        match program {
+            Some(program) => tr!(
+                "{file} does not run on its own, so {program} ran",
+                file = file,
+                program = program
+            ),
+            None => tr!("{file} does not run on its own", file = file),
+        }
+    });
+    // Said on the header's row where it fits there whole; else on a line
+    // of its own under the header, whole: in French, beside the longer
+    // step controls, it was cut to "pricing.py ne s’exécute p…", or not
+    // shown at all, at a desktop's width.
+    let note_room = if stacked {
+        panel_w - reach - said_w
+    } else {
+        panel_w - reach - said_w - 21.0 - controls_w
+    };
+    let note_inline = ran_note
+        .as_deref()
+        .is_none_or(|n| w(n, ts::SMALL) + 8.0 <= note_room);
     // The controls whole at the right; what is said before them takes the
     // room left, cut short where a language's words need more.
     let said = container(
@@ -440,30 +518,13 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             // said here, with the run, for as long as it is shown.
             // What ran instead, named: the reader had to work it out from
             // the tab's name.
-            match app.debug.ran_for.as_deref() {
-                Some(file) => {
-                    let program = app
-                        .debug
-                        .session
-                        .as_ref()
-                        .filter(|_| !app.connection.is_remote())
-                        .and_then(|s| s.program.file_name())
-                        .map(|n| n.to_string_lossy().into_owned());
-                    let said = match program {
-                        Some(program) => tr!(
-                            "{file} does not run on its own, so {program} ran",
-                            file = file,
-                            program = program
-                        ),
-                        None => tr!("{file} does not run on its own", file = file),
-                    };
-                    // What gives way where the panel is narrow, cut short
-                    // with an ellipsis: kept whole, it squeezed the trace's
-                    // count to a word a line ("Tra / 1 / sto") and pushed
-                    // "Walk this run" out of the panel. Cut, the whole of
-                    // it is said where the pointer rests; with too little
-                    // room to say anything ("pricin…", or "…" alone in
-                    // Chinese), it is not shown at all.
+            match ran_note.clone().filter(|_| note_inline) {
+                Some(said) => {
+                    // Cut short with an ellipsis where it still meets less
+                    // room than measured (a font's rounding): whole where
+                    // the pointer rests; with too little room to say
+                    // anything ("pricin…", or "…" alone in Chinese), it is
+                    // not shown at all.
                     Element::from(
                         container(iced::widget::responsive(move |room| {
                             let cut = super::steady::elide_end(
@@ -518,53 +579,6 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             ..Default::default()
         }
     });
-    // Clear of the Ask card in the corner: it sat over Continue, Step and
-    // Stop (the panel's foot is the status bar's top; its header, some 40
-    // px under the panel's top).
-    let panel_top = app.window_height - super::STATUSBAR_H - app.bottom_shown_height();
-    let reach = super::askfloat::card_reach(
-        app,
-        app.window_width - super::toolbar::STRIP_W,
-        panel_top + 44.0,
-    );
-    // What the controls take, and what is said before them at the least
-    // (the run, its state, the trace and Walk this run): where the panel
-    // left of the card holds less, the controls go under it, on a row of
-    // their own. Clipped to fit, everything said before them went — "Walk
-    // this run" with it — whenever the Ask card was open at a laptop's
-    // width.
-    let w = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
-    let controls_w = if output_only {
-        stop_w + 2.0
-    } else {
-        [tr!("▶ Continue"), tr!("⤼ Over"), tr!("⤓ In"), tr!("⤒ Out")]
-            .iter()
-            .map(|label| w(label, ts::BODY) + 16.0)
-            .sum::<f32>()
-            + stop_w
-            + 2.0
-            + 4.0 * 4.0
-    };
-    // Every gap of its row counted (the note's slot, empty, keeps its two),
-    // and the hover switch where it is shown: two gaps short and without
-    // it, the header stayed on one row where it cut Walk this run.
-    let said_w = w(if plain { tr!("Run") } else { tr!("Debug") }, ts::BASE)
-        + 4.0 * 8.0
-        + status_w
-        + if plain { 0.0 } else { trace_control_w(app) }
-        + hover_eval_w(app);
-    let sidebar = if app.show_left_sidebar {
-        app.sidebar_width
-    } else {
-        0.0
-    };
-    // Less the panel's own padding, either side.
-    let panel_w = app.window_width
-        - super::toolbar::STRIP_W
-        - super::sheet::SHEET_GAP
-        - sidebar
-        - 2.0 * DEBUG_PANEL_PAD_X;
-    let stacked = panel_w - reach < said_w + 21.0 + controls_w;
     let header: Element<'_, Message> = if stacked {
         container(
             column![
@@ -603,7 +617,15 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     } else {
         14.0
     };
-    let stack_room = ((panel_w - 3.0 * 6.0) * 2.0 / portions - 2.0 * 6.0 - 12.0 - 2.0).max(0.0);
+    // The columns keep clear of the Ask card in the corner, as the header's
+    // controls do: over them, it hid the watches and the output whole.
+    let cols_reach = super::askfloat::card_reach(
+        app,
+        app.window_width - super::toolbar::STRIP_W,
+        app.window_height - super::STATUSBAR_H,
+    );
+    let cols_w = panel_w - cols_reach;
+    let stack_room = ((cols_w - 3.0 * 6.0) * 2.0 / portions - 2.0 * 6.0 - 12.0 - 2.0).max(0.0);
     for f in &session.frames {
         let loc = f
             .path
@@ -781,10 +803,25 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         ]
     }
     .spacing(6)
+    .padding(Padding {
+        right: cols_reach,
+        ..Padding::ZERO
+    })
     .height(Fill);
 
+    // The note on what ran, on a line of its own where the header's row
+    // had no room for it whole.
+    let note_line: Option<Element<'_, Message>> = ran_note.filter(|_| !note_inline).map(|said| {
+        text(said)
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .wrapping(Wrapping::WordOrGlyph)
+            .into()
+    });
     container(
-        column![header, panels]
+        column![header]
+            .push(note_line)
+            .push(panels)
             .spacing(6)
             .padding([8.0, DEBUG_PANEL_PAD_X]),
     )

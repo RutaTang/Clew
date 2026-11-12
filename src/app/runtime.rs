@@ -212,6 +212,13 @@ impl App {
             tutorial_layout: None,
             tour_prep: None,
             tour_sample: None,
+            // Read where clew starts; a test's app starts with none, its
+            // data directory shared with every other test's.
+            recent_folders: if cfg!(test) {
+                Vec::new()
+            } else {
+                crate::app::recent::load()
+            },
             tour_then: None,
             window_width: 1280.0,
             window_height: 800.0,

@@ -1572,6 +1572,9 @@ pub struct App {
     /// The sample this window's tour is on: set as the window opens it,
     /// for the tour to begin once it is open.
     pub(crate) tour_sample: Option<crate::app::tour_sample::Placed>,
+    /// Folders opened on this machine before, newest first: offered on the
+    /// welcome screen (`crate::app::recent`).
+    pub(crate) recent_folders: Vec<PathBuf>,
     /// What the step on screen shows once the file it opened has loaded.
     pub(crate) tour_then: Option<(PathBuf, Message)>,
     /// The status-bar `#[cfg]` target dropdown is open.

@@ -601,26 +601,32 @@ fn reached_from_rows<'a>(
                     .map(|k| crate::i18n::lookup(k.label()))
                     .unwrap_or(tr!("test"));
                 let w = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
-                entry_w = w(&format!("{}()", n.name), ts::SMALL)
-                    + 4.0
-                    + w(kind, ts::CAPTION)
-                    + 10.0
-                    + 8.0
-                    + 4.0
-                    + w("›", ts::SMALL);
+                let whole = format!("{}()", n.name);
+                // Its tag, its arrow, and the padding round them.
+                let around = 4.0 + w(kind, ts::CAPTION) + 10.0 + 8.0 + 4.0 + w("›", ts::SMALL);
+                // A name longer than the line is cut with an ellipsis, whole
+                // where the pointer rests: "test_tax_is_on_the_discounted_
+                // amount()" ran its tag past the margin's edge.
+                let shown = super::steady::cut(&whole, room - around, ts::SMALL, crate::fonts::UI);
+                entry_w = w(&shown, ts::SMALL) + around;
                 // Its kind as a tag, set apart from its name: side by
                 // side in one face, "main main" read as the name twice.
-                row![
-                    text(format!("{}()", n.name))
+                let entry = row![
+                    text(shown.clone())
                         .size(ts::SMALL)
-                        .color(theme::success()),
+                        .color(theme::success())
+                        .wrapping(iced::widget::text::Wrapping::None),
                     container(text(kind).size(ts::CAPTION).color(theme::dim()))
                         .padding([0, 5])
                         .style(theme::chip),
                 ]
                 .spacing(4)
-                .align_y(iced::Center)
-                .into()
+                .align_y(iced::Center);
+                if shown == whole {
+                    entry.into()
+                } else {
+                    super::toolbar::tip_at(entry, whole, None, tooltip::Position::Top)
+                }
             } else {
                 // A function, said as one, as the last step is.
                 text(format!("{}()", n.name))

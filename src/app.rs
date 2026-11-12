@@ -88,6 +88,7 @@ mod overview;
 pub(crate) mod palette;
 mod project;
 mod reading;
+pub(crate) mod recent;
 mod remote_state;
 mod runtime;
 pub use runtime::note_window_system;

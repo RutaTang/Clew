@@ -1175,6 +1175,19 @@ fn scanned_app(tag: &str) -> App {
     app
 }
 
+/// A folder opened on this machine is offered again on the welcome screen:
+/// first, once, and kept for the next run of clew.
+#[test]
+fn an_opened_folder_is_remembered_for_the_welcome_screen() {
+    let app = scanned_app("recent-remembered");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    assert_eq!(app.recent_folders.first(), Some(&root));
+    assert!(
+        crate::app::recent::load().contains(&root),
+        "kept for the next run"
+    );
+}
+
 /// Build the message the off-thread rehash sends back for `events`: stamped
 /// with the project it was computed for and with the registry versions each
 /// path was hashed against, exactly as `on_files_changed` collects them (an

@@ -3134,27 +3134,38 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
 pub(crate) struct MapChoice {
     pub(crate) id: String,
     pub(crate) title: String,
-    pub(crate) nodes: usize,
+    /// How many of what it is named for there are: its nodes, where all
+    /// are of one kind (its tables); none said where they are of several —
+    /// "Routes (6)" counted three routes and their three handlers.
+    pub(crate) count: Option<usize>,
+}
+
+impl MapChoice {
+    pub(crate) fn of(m: &clew_protocol::ProjectMap) -> MapChoice {
+        let one_kind = m.nodes.windows(2).all(|w| w[0].kind == w[1].kind);
+        MapChoice {
+            id: m.id.clone(),
+            title: m.title.clone(),
+            count: one_kind.then_some(m.nodes.len()),
+        }
+    }
 }
 
 impl std::fmt::Display for MapChoice {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The title, from clew-core, in the reader's language.
-        write!(out, "{} ({})", crate::i18n::lookup(&self.title), self.nodes)
+        let title = crate::i18n::lookup(&self.title);
+        match self.count {
+            Some(n) => write!(out, "{title} ({n})"),
+            None => write!(out, "{title}"),
+        }
     }
 }
 
 /// The picker of the project's maps, while there is more than one.
 pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
     let maps = &app.proj.maps;
-    let choices: Vec<MapChoice> = maps
-        .iter()
-        .map(|m| MapChoice {
-            id: m.id.clone(),
-            title: m.title.clone(),
-            nodes: m.nodes.len(),
-        })
-        .collect();
+    let choices: Vec<MapChoice> = maps.iter().map(MapChoice::of).collect();
     let selected = app
         .selected_map_index()
         .and_then(|i| choices.get(i).cloned());
@@ -3300,9 +3311,11 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
             }
             for (to, label) in &out_edges[i] {
                 let target = &map.nodes[*to].label;
+                // What the arrow says, then where it goes, as it is read:
+                // "→ list_teas (handled by)" read backwards.
                 lines.push(match label.is_empty() {
                     true => format!("  → {target}"),
-                    false => format!("  → {target} ({})", map_text(label)),
+                    false => format!("  {} → {target}", map_text(label)),
                 });
             }
             if !lines.is_empty() {

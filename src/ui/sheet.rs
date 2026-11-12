@@ -176,30 +176,60 @@ const TITLE_MIN_W: f32 = 160.0;
 /// alone for a folder's sake; and rather than as a stub ("…op").
 const FOLDER_MIN_W: f32 = 96.0;
 
-/// Width of the header's tools, Explain through View, labelled or `short`.
-fn file_tools_w(short: bool) -> f32 {
-    let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
-        .iter()
-        .map(|l| file_tool_w(l, short))
-        .sum::<f32>();
-    tools + TOOLS_RULE_W + view_button_w(short) + 5.0 * TOOLS_SPACING
+/// What the header's tools say beside their glyphs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolWords {
+    /// Each its name.
+    All,
+    /// Explain its name, the others their glyphs alone: the one that
+    /// spends an AI call, and what a reader new to Clew looks for.
+    Explain,
+    /// Their glyphs alone, their names in their tooltips.
+    None,
 }
 
-/// Whether the header's tools are said short — their glyphs alone, their
-/// names in their tooltips: where, labelled, they would leave the file's
-/// name less than its room. In a narrow window, or a language of longer
-/// words, the labelled tools took the whole row and the name was cut to
-/// nothing.
-fn file_tools_short(app: &App) -> bool {
+impl ToolWords {
+    /// Whether the tool named `explain` (or another) is said short.
+    fn short(self, explain: bool) -> bool {
+        match self {
+            ToolWords::All => false,
+            ToolWords::Explain => !explain,
+            ToolWords::None => true,
+        }
+    }
+}
+
+/// Width of the header's tools, Explain through View, saying `words`.
+fn file_tools_w(words: ToolWords) -> f32 {
+    let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
+        .iter()
+        .enumerate()
+        .map(|(i, l)| file_tool_w(l, words.short(i == 0)))
+        .sum::<f32>();
+    tools + TOOLS_RULE_W + view_button_w(words.short(false)) + 5.0 * TOOLS_SPACING
+}
+
+/// What the header's tools say: their names, where the file's name keeps
+/// its room beside them; else Explain's alone; else their glyphs alone,
+/// their names in their tooltips. In a narrow window, or a language of
+/// longer words, the labelled tools took the whole row and the name was
+/// cut to nothing — and with a name a few letters longer at 1100 px,
+/// every word went where Explain's alone had room ("test_pricing.py"
+/// showed ✦ ⤫ ⟲ ◷ where "pricing.py" showed their names).
+fn file_tool_words(app: &App) -> ToolWords {
     let Some(v) = app.active_viewer() else {
-        return false;
+        return ToolWords::All;
     };
     let (name, _) = title_parts(v);
     // The name: its folder gives way before the tools' words do
     // (`folder_shown`), the tools being what a reader new to Clew reads.
     let title = text_width(&name, ts::EMPHASIS, TITLE_FONT).min(TITLE_MIN_W);
     let room = header_right(app) - HEADER_PAD_RIGHT - (sheet_content_left(app) + HEADER_PAD_X);
-    room - TITLE_GAP / 2.0 - file_tools_w(false) < title
+    let fits = |words| room - TITLE_GAP / 2.0 - file_tools_w(words) >= title;
+    [ToolWords::All, ToolWords::Explain]
+        .into_iter()
+        .find(|&words| fits(words))
+        .unwrap_or(ToolWords::None)
 }
 
 /// The open file's `folder` as the header has room to show it beside
@@ -209,7 +239,7 @@ fn folder_shown(app: &App, name: &str, folder: &str) -> String {
     if folder.is_empty() {
         return String::new();
     }
-    let short = file_tools_short(app);
+    let words = file_tool_words(app);
     let markdown = app.active_viewer().is_some_and(|v| v.md.is_some());
     let toggle = if markdown {
         file_tool_w(tr!("Rendered"), false).max(file_tool_w(tr!("Source"), false)) + TITLE_SPACING
@@ -220,7 +250,7 @@ fn folder_shown(app: &App, name: &str, folder: &str) -> String {
         - HEADER_PAD_RIGHT
         - (sheet_content_left(app) + HEADER_PAD_X)
         - TITLE_GAP
-        - file_tools_w(short)
+        - file_tools_w(words)
         - text_width(name, ts::EMPHASIS, TITLE_FONT)
         - TITLE_SPACING
         - toggle;
@@ -285,7 +315,7 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
         return None;
     }
     let row_left = sheet_content_left(app) + HEADER_PAD_X;
-    let width = file_tools_w(file_tools_short(app));
+    let width = file_tools_w(file_tool_words(app));
     let x = (header_right(app) - HEADER_PAD_RIGHT - width).max(row_left);
     Some(iced::Rectangle {
         x,
@@ -299,7 +329,7 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
 /// of the file tools.
 pub(crate) fn view_button_rect(app: &App) -> Option<iced::Rectangle> {
     let tools = file_tools_rect(app)?;
-    let w = view_button_w(file_tools_short(app));
+    let w = view_button_w(file_tool_words(app).short(false));
     Some(iced::Rectangle {
         x: tools.x + tools.width - w,
         width: w,
@@ -523,8 +553,10 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             }),
     )
     .padding([0.0, (TOOLS_RULE_W - 1.0) / 2.0]);
-    // Said short where the file's name would otherwise lose its room.
-    let short = file_tools_short(app);
+    // Said short where the file's name would otherwise lose its room:
+    // Explain the last to give its name up.
+    let words = file_tool_words(app);
+    let short = words.short(false);
     let mut view_face = row![glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0)]
         .spacing(6)
         .align_y(iced::Center);
@@ -574,7 +606,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             Message::Explain(ExplainMsg::Explain(crate::explain::Node::File(
                 v.abs.clone(),
             ))),
-            short,
+            words.short(true),
         ),
         file_tool(
             Glyph::Skim,

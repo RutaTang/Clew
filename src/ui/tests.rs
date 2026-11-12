@@ -9536,6 +9536,49 @@ fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
         !shows(&mut sim, "REACHED FROM"),
         "a test is an entry of its own kind"
     );
+    drop(sim);
+    // A test whose name is longer than the margin's line: cut with an
+    // ellipsis, its tag inside the margin — its tag ran past the edge.
+    let long = "test_tax_is_on_the_discounted_amount_after_every_rule";
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call(long, vec![], vec![1]),
+                    call("total", vec![0], vec![2]),
+                    call("discounts", vec![1], vec![]),
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(vec![
+            symbol(long, 1, None, true),
+            symbol("total", 2, None, false),
+            symbol("discounts", 3, None, false),
+        ]),
+    );
+    app.proj.symbol_index_rev += 1;
+    app.proj.project_calls.graph_rev += 1;
+    let width = super::panes::margin_w(&app);
+    let mut sim = iced_test::Simulator::with_size(
+        Default::default(),
+        Size::new(width, 400.0),
+        Element::from(iced::widget::Column::with_children(super::call_flow_rows(
+            &app,
+            &node("discounts"),
+        ))),
+    );
+    let name = text_at(&mut sim, |t| t.starts_with("test_tax"), 0).expect("the test");
+    let tag = text_at(&mut sim, |t| t == "test", 0).expect("its tag");
+    assert!(
+        tag.x + tag.width <= width,
+        "past the edge: {tag:?} in {width}"
+    );
+    assert!(name.x + name.width <= tag.x, "{name:?} {tag:?}");
 }
 
 /// The graph overlays' MOST CHANGED section lists the hottest files with
@@ -9818,7 +9861,8 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
     assert!(shows(&mut sim, "TABLE"));
     assert!(shows(&mut sim, "db/schema.sql:7"));
     assert!(shows(&mut sim, "user_id int → users"));
-    assert!(shows(&mut sim, "→ users (user_id)"));
+    // What the arrow says, then where it goes (L4).
+    assert!(shows(&mut sim, "user_id → users"));
     drop(sim);
     app.proj.maps_selected = Some("routes".into());
     let mut sim = sim_elem(super::project_maps_body(&app));
@@ -9826,12 +9870,22 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
     assert!(shows(&mut sim, "GET /users"));
     drop(sim);
     assert!(super::map_picker(&app).is_some());
-    let choice = super::MapChoice {
-        id: "routes".into(),
-        title: "Routes".into(),
-        nodes: 1,
-    };
-    assert_eq!(choice.to_string(), "Routes (1)");
+    // Counted where its nodes are of one kind; a route and its handler are
+    // not two routes (L4).
+    assert_eq!(
+        super::MapChoice::of(&app.proj.maps[0]).to_string(),
+        "Database schema (2)"
+    );
+    let mut routes = app.proj.maps[1].clone();
+    routes
+        .nodes
+        .push(node("list_users", "handler", "app.py", 3, ""));
+    routes.edges.push(clew_protocol::MapEdge {
+        from: 0,
+        to: 1,
+        label: "handled by".into(),
+    });
+    assert_eq!(super::MapChoice::of(&routes).to_string(), "Routes");
     // From the graph: a node opens where it is defined; one defined nowhere,
     // nothing.
     let layout = crate::app::project_map_layout(&app.proj.maps[0], &root);
@@ -10027,7 +10081,21 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
         assert!(!shows(&mut sim, "CALL STACK"));
     }
     assert!(!stops(&app));
-    // One that stopped keeps its columns.
+    // L12: one that stopped on its way, ended with nothing left of a stop
+    // to show: its output has the panel too — its empty stack and
+    // variables kept two thirds of it, "3" wrapped under "Darjeeling
+    // left:" — and Walk this run stays.
+    app.debug.trace = vec![crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: Vec::new(),
+    }];
+    app.debug.trace_rev += 1;
+    {
+        let mut sim = sim_elem(super::debug_panel(&app));
+        assert!(!shows(&mut sim, "CALL STACK"));
+        assert!(shows(&mut sim, "Walk this run"));
+    }
+    // One that stopped and still shows where keeps its columns.
     let mut stopped = session(crate::DebugStatus::Terminated, None);
     stopped.frames = vec![crate::dap::StackFrame {
         id: 1,
@@ -15801,8 +15869,11 @@ fn the_headers_folder_is_cut_with_an_ellipsis_not_clipped() {
         for width in (760..=1280).rev().step_by(20) {
             app.window_width = width as f32;
             let mut sim = sim_of(&app);
-            let Some(tools) = text_at(&mut sim, |t| t == "Expliquer", 0) else {
+            // Skim's name goes before Explain's (L15).
+            if text_at(&mut sim, |t| t == "Survol", 0).is_none() {
                 words_given_up = true;
+            }
+            let Some(tools) = text_at(&mut sim, |t| t == "Expliquer", 0) else {
                 continue;
             };
             let full = text_at(&mut sim, |t| t == "tests/integration", 0);
@@ -15834,6 +15905,61 @@ fn the_headers_folder_is_cut_with_an_ellipsis_not_clipped() {
             "a narrow window's tools give up their words"
         );
     });
+}
+
+/// The welcome screen offers the folders opened here before, newest
+/// first, each opened again in a click: every return to a project went
+/// through the folder dialog. A remote host's welcome has none of them.
+#[test]
+fn the_welcome_screen_offers_recent_folders() {
+    let mut app = blank_app();
+    assert!(
+        !shows(&mut sim_of(&app), "Recent"),
+        "none yet: nothing said"
+    );
+    let dir = crate::app::tests::test_dir("ui-recent-folder");
+    let shop = dir.join("teashop");
+    std::fs::create_dir_all(&shop).unwrap();
+    app.recent_folders = vec![shop.clone()];
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Recent"));
+    assert!(shows(&mut sim, "teashop"));
+    drop(sim);
+    let sent = click(sim_of(&app), "teashop");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Project(ProjectMsg::FolderPicked(Some(p))) if *p == shop
+        )),
+        "{sent:?}"
+    );
+}
+
+/// L15: where the header has room for Explain's name and not every
+/// tool's, Explain keeps it — the one that spends an AI call, and what a
+/// reader new to Clew looks for. At 1100 px "test_pricing.py" showed
+/// ✦ ⤫ ⟲ ◷ alone, where "pricing.py" showed their names.
+#[test]
+fn explain_keeps_its_name_the_longest() {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.show_right_panel = true;
+    let mut kept_alone = false;
+    for width in (760..=1440).rev().step_by(10) {
+        app.window_width = width as f32;
+        app.proj.panes[0].as_mut().unwrap().rel = "tests/test_pricing.py".into();
+        let mut sim = sim_of(&app);
+        let explain = text_at(&mut sim, |t| t == "Explain", 0).is_some();
+        let skim = text_at(&mut sim, |t| t == "Skim", 0).is_some();
+        assert!(explain || !skim, "{width}: Skim named, Explain not");
+        kept_alone |= explain && !skim;
+        // The file's name is never what gave way for it.
+        assert!(
+            text_at(&mut sim, |t| t == "test_pricing.py", 0).is_some(),
+            "{width}: the name cut for the tools' words"
+        );
+    }
+    assert!(kept_alone, "Explain never kept its name alone");
 }
 
 /// A file's card has no way to a function's calls: the margin's Calls tab
@@ -19621,6 +19747,57 @@ fn the_debug_header_keeps_walk_this_run_beside_the_ask_card() {
     );
 }
 
+/// The Ask card in the corner sits beside the debugger's columns, not
+/// over them: open, it hid the watches and the output whole, as it once
+/// hid the header's controls.
+#[test]
+fn the_debug_columns_keep_clear_of_the_ask_card() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: None,
+        frames: vec![crate::dap::StackFrame {
+            id: 1,
+            name: "main".into(),
+            path: Some(root.join("main.py")),
+            line: 3,
+            column: 1,
+        }],
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        // Nothing printed yet: the watches and the output at the right,
+        // where the card is.
+        output: Vec::new(),
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.show_bottom = true;
+    crate::fonts::load();
+    let size = Size::new(1440.0, 900.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    app.ask_view = crate::AskView::Compact;
+    let card = super::askfloat::ask_corner_rect(&app);
+    let mut sim = sim_sized(&app, size);
+    assert!(
+        card.y < size.height - 200.0,
+        "the card over the panel: {card:?}"
+    );
+    for heading in ["WATCH", "OUTPUT"] {
+        let at = text_at(&mut sim, move |t| t == heading, 0).expect(heading);
+        assert!(
+            at.x + at.width <= card.x,
+            "{heading} under the card: {at:?} {card:?}"
+        );
+    }
+}
+
 /// M6: a run's steps made without a model are told apart by their stop —
 /// a breakpoint hit again and again in one function listed "discounts",
 /// "discounts", "discounts"; a narrated step keeps the title it was given.
@@ -19769,6 +19946,64 @@ fn the_debug_notes_cut_sentence_is_whole_in_its_tip_and_gone_when_it_says_nothin
         shows(&mut sim, whole),
         "{width}: the whole of it where the pointer rests"
     );
+}
+
+/// L13: in French, at a desktop's width, the note on what ran is said
+/// whole where there is room for it: "pricing.py ne s’exécute p…" was cut
+/// with room to spare beside it.
+#[test]
+fn the_debug_note_is_whole_in_french_where_there_is_room() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.ran_for = Some("pricing.py".into());
+    app.debug.trace = vec![crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: Vec::new(),
+    }];
+    app.debug.trace_rev += 1;
+    app.show_bottom = true;
+    app.show_left_sidebar = true;
+    let size = Size::new(1440.0, 900.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    crate::app::tests::isolated_data_dir();
+    crate::fonts::load();
+    // The panel's width beside the sidebar and the strip.
+    let panel_w = size.width - app.sidebar_width - super::toolbar::STRIP_W;
+    with_lang(Lang::Fr, || {
+        let mut sim = iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(panel_w, 260.0),
+            super::debug_panel(&app),
+        );
+        let whole = crate::tr!(
+            "{file} does not run on its own, so {program} ran",
+            file = "pricing.py",
+            program = "main.py"
+        );
+        let note = text_at(&mut sim, move |t| t == whole, 0).expect("the note, whole");
+        // Under the header, where its row had no room: not over the
+        // columns' headings.
+        let stack = text_at(&mut sim, |t| t.starts_with("PILE"), 0).expect("the stack");
+        assert!(note.y + note.height <= stack.y, "{note:?} {stack:?}");
+        assert!(text_at(&mut sim, |t| t.starts_with("Parcourir"), 0).is_some());
+    });
 }
 
 /// At a laptop's width, the debug panel's header keeps its trace whole —

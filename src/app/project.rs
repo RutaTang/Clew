@@ -451,6 +451,18 @@ impl App {
         self.proj.project_languages = served_languages(&result.files);
         self.proj.code_languages = super::setup::setup_languages(&result.files);
         self.proj.file_languages = file_languages(&result.files);
+        // A folder on this machine, opened: offered again on the welcome
+        // screen — not the tour's sample, which the tour brings itself.
+        let sample = self
+            .tour_sample
+            .as_ref()
+            .is_some_and(|s| s.root == result.root);
+        if local_state && !sample {
+            crate::app::recent::remember(&result.root);
+            self.recent_folders.retain(|r| *r != result.root);
+            self.recent_folders.insert(0, result.root.clone());
+            self.recent_folders.truncate(crate::app::recent::KEPT);
+        }
         let files = Arc::new(result.files);
         self.proj.project = Some(Project {
             root: result.root,

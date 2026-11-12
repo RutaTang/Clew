@@ -1110,6 +1110,9 @@ pub(crate) const GLOSSARY_ROWS_SHOWN: usize = 200;
 
 /// The Glossary page: the project's terms, in sections by kind, each a
 /// button to its definition; a filter on top (`app::glossary`).
+/// The glossary's column, header to list: as wide as its terms read well.
+const GLOSSARY_W: f32 = 860.0;
+
 pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
     super::heard::list();
     use crate::app::glossary::TermKind;
@@ -1269,22 +1272,21 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
     }
 
     items.push(super::askfloat::pill_foot());
+    // One column, as wide as its terms read well: the list was held to it
+    // and the filter and header ran on to the panel's edge, the locations
+    // ending some 215 px short of the filter's end.
     container(
         column![
             header,
             filter,
             count,
-            scrollable(
-                Column::with_children(items)
-                    .spacing(16)
-                    .width(Fill)
-                    .max_width(860)
-            )
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(Fill),
+            scrollable(Column::with_children(items).spacing(16).width(Fill))
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(Fill),
         ]
-        .spacing(10),
+        .spacing(10)
+        .max_width(GLOSSARY_W),
     )
     .width(Fill)
     .height(Fill)
