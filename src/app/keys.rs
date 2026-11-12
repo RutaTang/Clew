@@ -96,6 +96,7 @@ impl App {
         }
         if self.ring.is_none() {
             self.ring_code = self.code_focused;
+            self.ring_menu = ui::active_overlay(self).is_some_and(|o| o.is_menu());
         }
         self.ring = Some(if field {
             ui::RingAsk::AfterFocused { forward }
@@ -131,6 +132,7 @@ impl App {
     /// status bar goes with it.
     pub(crate) fn end_ring(&mut self, give_back: bool) -> Option<Task<Message>> {
         self.ring.take()?;
+        self.ring_menu = false;
         if self.status == self.ring_said {
             self.status.clear();
         }
@@ -147,6 +149,46 @@ impl App {
             return None;
         }
         ui::jump::ring_from(self.main_window).map(operation::focus)
+    }
+
+    /// A menu come up or gone, as the last message left it. Gone: the ring
+    /// that came up on it goes with it, the keys back where they were —
+    /// left up, it went on to a control of the window, whose name took
+    /// the status line from what the menu's row had said there — and the
+    /// tree, which gives up the keys while its menu is up, has them again,
+    /// unless what was picked gave them to the code (a file opened).
+    /// Before, the keys were the tree's when the menu went, and nothing's.
+    pub(crate) fn sync_menu_keys(&mut self) -> Option<Task<Message>> {
+        let up = ui::active_overlay(self).is_some_and(|o| o.is_menu());
+        let was = std::mem::replace(&mut self.menu_up, up);
+        if up && !was {
+            self.menu_tree_keys = self.tree_focused;
+        }
+        if up || !was {
+            return None;
+        }
+        let held = ui::active_overlay(self).is_some_and(|o| o.holds_keys())
+            || self.tutorial.is_some()
+            || self.ask_view == crate::AskView::Expanded;
+        // A dialog its row opened in its place: the ring goes on there, on
+        // the dialog's first stop.
+        let ring = if self.ring_menu && !held {
+            self.end_ring(true)
+        } else {
+            self.ring_menu = false;
+            None
+        };
+        let tree = std::mem::take(&mut self.menu_tree_keys)
+            && !self.code_focused
+            && !held
+            && self.show_left_sidebar
+            && self.sidebar == crate::SidebarTab::Files
+            && ui::tree_has_rows(self);
+        let tree = tree.then(|| operation::focus(ui::files_tree_keys_id()));
+        match (ring, tree) {
+            (None, None) => None,
+            (ring, tree) => Some(Task::batch(ring.into_iter().chain(tree))),
+        }
     }
 
     /// What pressing a control sends, sent as its click sends it: through
@@ -189,6 +231,16 @@ impl App {
                 }
                 Some(task)
             }
+            // On a menu, the menu goes with it, and the keys go back where
+            // they were: put away alone, it left the menu up, holding them,
+            // and the next Esc closed the menu with the keys nowhere.
+            Key::Named(Named::Escape) if self.ring_menu => {
+                let closed = ui::escape_message(self).map(|close| self.update(close));
+                // Closing it put the ring away (`sync_menu_keys`) unless it
+                // did not close.
+                let ended = self.end_ring(true);
+                Some(Task::batch(closed.into_iter().chain(ended)))
+            }
             Key::Named(Named::Escape) => Some(self.end_ring(true).unwrap_or_else(Task::none)),
             // Any other key puts the ring away and does what it does. Given
             // back to the field the ring came up from, what is typed is the
@@ -198,24 +250,8 @@ impl App {
             // pressed twice.
             _ => {
                 let give_back = self.end_ring(true)?;
-                let shortcut = !plain
-                    || matches!(
-                        key.as_ref(),
-                        Key::Named(
-                            Named::F1
-                                | Named::F2
-                                | Named::F3
-                                | Named::F4
-                                | Named::F5
-                                | Named::F6
-                                | Named::F7
-                                | Named::F8
-                                | Named::F9
-                                | Named::F10
-                                | Named::F11
-                                | Named::F12
-                        )
-                    );
+                let shortcut =
+                    !plain || matches!(key.as_ref(), Key::Named(named) if is_function_key(named));
                 Some(if shortcut {
                     give_back.chain(Task::done(Message::Editor(EditorMsg::KeyPressed(
                         key.clone(),
@@ -477,7 +513,7 @@ impl App {
         // takes its own before anything under it — a time-travel session
         // included, whose swallow below used to drop the finder's ↑/↓. (Esc,
         // which every overlay takes, went to the one on top above.)
-        if let Some(task) = self.overlay_key(&key) {
+        if let Some(task) = self.overlay_key(&key, modifiers) {
             return task;
         }
         // The debugger's function keys, as editors have them — F9 a
@@ -701,16 +737,26 @@ impl App {
     /// selection; a menu's, which put the keyboard's ring on its first row
     /// (↓) or its last (↑), from where the arrows walk its rows and Enter
     /// presses one — they did nothing, and a menu was the mouse's alone.
-    /// `None` when the key is not the overlay's to take.
-    fn overlay_key(&mut self, key: &keyboard::Key) -> Option<Task<Message>> {
+    /// Any other plain key, a menu up, is its to swallow: ←, →, j, k, Enter
+    /// moved and stepped the code under the menu — and once the ring was
+    /// up, ← and → walked the menu instead. A function key or a chord does
+    /// what it does. `None` when the key is not the overlay's to take.
+    fn overlay_key(
+        &mut self,
+        key: &keyboard::Key,
+        modifiers: keyboard::Modifiers,
+    ) -> Option<Task<Message>> {
         use keyboard::Key;
         use keyboard::key::Named;
         let overlay = ui::active_overlay(self)?;
         if overlay.is_menu() && self.ring.is_none() {
+            let chord = modifiers.command() || modifiers.control() || modifiers.alt();
             return match key.as_ref() {
                 Key::Named(Named::ArrowDown) => Some(self.on_tab(true, false)),
                 Key::Named(Named::ArrowUp) => Some(self.on_tab(false, false)),
-                _ => None,
+                Key::Named(named) if chord || is_function_key(named) => None,
+                _ if chord => None,
+                _ => Some(Task::none()),
             };
         }
         let delta = match (overlay, key.as_ref()) {
@@ -885,4 +931,25 @@ fn ring_name(app: &App, press: &Message) -> Option<String> {
         .into_iter()
         .find(|t| format!("{:?}", t.message) == wanted)
         .map(|t| t.shown)
+}
+
+/// Whether `named` is a function key (F1–F12): a shortcut of its own, as
+/// a chord is, never typing.
+fn is_function_key(named: keyboard::key::Named) -> bool {
+    use keyboard::key::Named;
+    matches!(
+        named,
+        Named::F1
+            | Named::F2
+            | Named::F3
+            | Named::F4
+            | Named::F5
+            | Named::F6
+            | Named::F7
+            | Named::F8
+            | Named::F9
+            | Named::F10
+            | Named::F11
+            | Named::F12
+    )
 }

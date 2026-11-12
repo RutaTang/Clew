@@ -222,7 +222,10 @@ fn amount(currency: &str, value: &str) -> String {
         "USD" => value.trim().parse::<f64>().map_or_else(
             |_| format!("${value}"),
             |v| {
-                let places = value.split_once('.').map_or(0, |(_, cents)| cents.len());
+                let places = value
+                    .trim()
+                    .split_once('.')
+                    .map_or(0, |(_, cents)| cents.len());
                 usage::dollars_said(v, places)
             },
         ),
@@ -460,7 +463,7 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
     }
     let shown = app.usage.price_draft.clone().unwrap_or_else(|| {
         known.map_or_else(Default::default, |p| {
-            [p.input, p.cached, p.output].map(usage::price_text)
+            [p.input, p.cached, p.output].map(usage::price_typed)
         })
     });
     // What is wrong with a field as typed, said under its name: "abc"
@@ -469,7 +472,7 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
         let v = value.trim();
         if v.is_empty() {
             (drafted && which != PriceField::Cached).then(|| tr!("Needed to save.").to_string())
-        } else if !v.parse::<f64>().is_ok_and(|n| n.is_finite() && n >= 0.0) {
+        } else if usage::parse_price(v).is_none() {
             Some(tr!("Enter a number.").to_string())
         } else {
             None
@@ -481,20 +484,23 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
         // set at the right as the page's other figures are. A field that
         // is wrong is marked, as the Connect form marks one, and says why
         // under its name in the danger colour.
-        let control = row![
-            text("$").size(ts::BODY).color(theme::dim()),
-            form::input("0", &value)
-                .on_input(move |v| Message::Usage(UsageMsg::Price(which, v)))
-                .style(if wrong.is_some() {
-                    theme::input_marked
-                } else {
-                    theme::input
-                })
-                .width(Length::Fixed(96.0)),
-            text(tr!("per 1M tokens"))
-                .size(ts::SMALL)
-                .color(theme::dim()),
-        ]
+        // The sign where the reader writes it: "$0.30", in French "0,30 $".
+        let sign = || text("$").size(ts::BODY).color(theme::dim());
+        let input = form::input("0", &value)
+            .on_input(move |v| Message::Usage(UsageMsg::Price(which, v)))
+            .style(if wrong.is_some() {
+                theme::input_marked
+            } else {
+                theme::input
+            })
+            .width(Length::Fixed(96.0));
+        let per = text(tr!("per 1M tokens"))
+            .size(ts::SMALL)
+            .color(theme::dim());
+        let control = match crate::i18n::current() {
+            crate::i18n::Lang::Fr => row![input, sign(), per],
+            _ => row![sign(), input, per],
+        }
         .spacing(6)
         .align_y(iced::Center);
         let control = container(control)

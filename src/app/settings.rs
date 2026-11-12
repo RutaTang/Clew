@@ -785,21 +785,21 @@ fn connection_failure(err: &crate::app::rpc::CallError, cfg: &llm::Config) -> St
         ExplainFailure::Unreached(detail) => tr!(
             "Couldn't reach {host} ({detail}). Check the base URL and your network.",
             host = host_of(&cfg.base_url),
-            detail = detail
+            detail = crate::app::tasks::plain_detail(&detail)
         ),
         // Reached, then lost or timed out while it answered: the address
         // is right, so it is not the base URL to check.
         ExplainFailure::Network(detail) => tr!(
             "The connection to {host} was lost before it answered ({detail}). Try again in a moment.",
             host = host_of(&cfg.base_url),
-            detail = detail
+            detail = crate::app::tasks::plain_detail(&detail)
         ),
         ExplainFailure::Rejected {
             what: Rejection::Key,
             detail,
         } => tr!(
             "The provider rejected the API key ({detail}). Check it, or paste a new one.",
-            detail = detail
+            detail = crate::app::tasks::plain_detail(&detail)
         ),
         ExplainFailure::Rejected {
             what: Rejection::Model(model),
@@ -807,14 +807,14 @@ fn connection_failure(err: &crate::app::rpc::CallError, cfg: &llm::Config) -> St
         } => tr!(
             "The provider has no model “{model}” at this address ({detail}). Check the model's name.",
             model = model,
-            detail = detail
+            detail = crate::app::tasks::plain_detail(&detail)
         ),
         ExplainFailure::Rejected {
             what: Rejection::Endpoint,
             detail,
         } => tr!(
             "Nothing answers at this base URL ({detail}). Check it.",
-            detail = detail
+            detail = crate::app::tasks::plain_detail(&detail)
         ),
         // A 429 for the account, not the moment: out of credit, over a
         // quota. "Try again in a minute" was never true of it.
@@ -823,12 +823,12 @@ fn connection_failure(err: &crate::app::rpc::CallError, cfg: &llm::Config) -> St
         {
             tr!(
                 "The provider refused for your account's quota or credit ({detail}). Check your plan.",
-                detail = detail
+                detail = crate::app::tasks::plain_detail(&detail)
             )
         }
         ExplainFailure::Unavailable(detail) | ExplainFailure::Busy(detail) => tr!(
             "The provider is busy or down right now ({detail}). Try again in a minute.",
-            detail = detail
+            detail = crate::app::tasks::plain_detail(&detail)
         ),
         other => {
             let said = other.describe();

@@ -12470,6 +12470,31 @@ fn the_tour_sheet_says_why_it_cannot_start_yet() {
         "The tour starts once Tea Shop is ready (step 3)."
     ));
     assert!(!says(&app, "answers a test"));
+    // Tea Shop could not be written: said so, not as a start to come — it
+    // never would — and its step has Try again, which writes it anew.
+    let prep = crate::app::tutorial::TourPrep {
+        sample: Some(Err("disk full".into())),
+        ..Default::default()
+    };
+    let mut sim = sim_elem(super::tutorial::tour_prep_sheet(&app, &prep));
+    assert!(shows(&mut sim, "Tea Shop could not be set up (step 3)."));
+    assert!(!shows(&mut sim, "The tour starts once Tea Shop is ready"));
+    assert!(shows(&mut sim, "disk full"));
+    drop(sim);
+    assert!(matches!(
+        click(
+            sim_elem(super::tutorial::tour_prep_sheet(&app, &prep)),
+            "Try again"
+        )
+        .as_slice(),
+        [Message::Tutorial(crate::TutorialMsg::RetrySample)]
+    ));
+    app.tour_prep = Some(prep);
+    let _ = app.update(Message::Tutorial(crate::TutorialMsg::RetrySample));
+    assert!(
+        app.tour_prep.as_ref().is_some_and(|p| p.sample.is_none()),
+        "written anew: getting ready again"
+    );
 }
 
 /// While jump mode's codes are up, what to do with them is said whole on
@@ -17803,6 +17828,83 @@ fn the_arrows_walk_a_menu_and_enter_presses_its_row() {
     let row = app.status.clone();
     let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
     assert!(app.proj.tree_menu.is_none(), "{row:?} was not pressed");
+}
+
+/// A menu's ring goes with the menu, and the keys go back where they
+/// were. Walked with ↓ and put away with Esc, the code's menu left the keys
+/// nowhere: j moved nothing until the code was clicked. A row pressed with
+/// Enter left the ring up, on a control of the window whose name took the
+/// status line from what the row had said. The tree, which gives up the
+/// keys while its menu is up, has them again as it goes. And with a menu
+/// up, the reading keys are the menu's: under the Tools menu they moved
+/// the code.
+#[test]
+fn a_menus_ring_goes_with_it_and_the_keys_go_back() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: Vec::new(),
+        files: vec!["README.md".into(), "main.py".into()],
+    };
+    let caret = |app: &App| app.proj.panes[0].as_ref().and_then(|v| v.caret);
+    app.code_focused = true;
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.caret = Some((2, 0));
+    }
+    let mut driven = Driven::sized(&app, size);
+    // Under the Tools menu, j and → are the menu's, not the code's.
+    app.show_tools_menu = true;
+    let _ = driven.send(&mut app, &[]);
+    let _ = driven.key(&mut app, Key::Character("j".into()), none);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowRight), none);
+    assert_eq!(
+        caret(&app),
+        Some((2, 0)),
+        "the code under the menu kept still"
+    );
+    assert!(app.show_tools_menu);
+    let _ = driven.key(&mut app, Key::Named(Named::Escape), none);
+    assert!(!app.show_tools_menu);
+    // The code's menu, from the keyboard in the code.
+    let _ = driven.key(&mut app, Key::Named(Named::ContextMenu), none);
+    assert!(app.proj.context_menu.is_some(), "the code's menu");
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert!(app.ring.is_some(), "walked");
+    let _ = driven.key(&mut app, Key::Named(Named::Escape), none);
+    assert!(
+        app.proj.context_menu.is_none(),
+        "the menu went with the ring"
+    );
+    assert!(app.ring.is_none());
+    assert!(app.code_focused, "the keys are the code's again");
+    let _ = driven.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(caret(&app), Some((3, 0)), "j moves the caret");
+
+    // The tree's menu, the tree holding the keys.
+    app.code_focused = false;
+    app.proj.tree_cursor = Some("main.py".into());
+    driven.focus(&app, super::files_tree_keys_id());
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.tree_focused, "the tree has the keys");
+    let _ = driven.key(&mut app, Key::Named(Named::F10), keyboard::Modifiers::SHIFT);
+    assert!(app.proj.tree_menu.is_some(), "the tree's menu");
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
+    assert_eq!(app.status, "Show in File Manager", "on its last row");
+    // Up to Copy Relative Path, and pressed.
+    while app.status != "Copy Relative Path" {
+        let said = app.status.clone();
+        let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
+        assert_ne!(app.status, said, "stuck on {said:?}");
+    }
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.proj.tree_menu.is_none(), "pressed");
+    assert!(app.ring.is_none(), "the ring went with the menu");
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.status.starts_with("Copied"), "{:?}", app.status);
+    assert!(app.tree_focused, "the keys are the tree's again");
 }
 
 /// ⇧F10 (or the Menu key) opens a menu from the keyboard, as a right-click

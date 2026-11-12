@@ -796,7 +796,27 @@ pub(crate) fn tour_prep_sheet<'a>(
                     .into(),
             ],
         ),
-        step(3, Need::Server, tr!("Tea Shop"), false, shop, Vec::new()),
+        step(
+            3,
+            Need::Server,
+            tr!("Tea Shop"),
+            false,
+            shop,
+            if matches!(sample, Some(Err(_))) {
+                vec![
+                    button(text(tr!("Try again")).size(ts::BODY))
+                        .style(theme::toolbar_button)
+                        .padding([4, 12])
+                        .on_press(super::heard::said(
+                            tr!("Try again"),
+                            Message::Tutorial(TutorialMsg::RetrySample),
+                        ))
+                        .into(),
+                ]
+            } else {
+                Vec::new()
+            },
+        ),
     ]
     .spacing(18);
 
@@ -824,6 +844,10 @@ pub(crate) fn tour_prep_sheet<'a>(
             tr!("The tour needs a language model first (step 1).")
         } else if !prep.met(app, Need::Model) {
             tr!("The tour starts once the model answers a test (step 1).")
+        } else if matches!(sample, Some(Err(_))) {
+            // It never will by itself: said as it is, with Try again on
+            // its step — it promised a start that never came.
+            tr!("Tea Shop could not be set up (step 3).")
         } else {
             tr!("The tour starts once Tea Shop is ready (step 3).")
         })

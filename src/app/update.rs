@@ -93,6 +93,11 @@ impl App {
         };
         // The tree's keyboard does not outlast the tree on screen.
         self.sync_tree_focus();
+        // A menu gone: its ring with it, and the keys back where they were.
+        let task = match self.sync_menu_keys() {
+            Some(back) => Task::batch([task, back]),
+            None => task,
+        };
         // The status bar names the branch checked out.
         let task = match self.sync_head() {
             Some(read) => Task::batch([task, read]),

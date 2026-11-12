@@ -1766,6 +1766,11 @@ pub enum TimeTravelMsg {
     ToggleScope,
     /// Generate the LLM "what & why" summary of the current commit's diff.
     Why,
+    /// Ask again for the summary of commit `sha` in session `session`, the
+    /// one whose summary failed: the status bar's Try again. It asked about
+    /// the commit on screen — another, scrubbed to meanwhile, paid for
+    /// unasked — and, the session gone, did nothing.
+    WhyOf { session: u64, sha: String },
     /// A "what & why" summary finished for commit `sha`. `session` is the
     /// time-travel SESSION it was asked in ([`crate::TimeTravel::session`]),
     /// not the per-step load generation: scrubbing to another commit while
@@ -2422,6 +2427,8 @@ pub enum TutorialMsg {
     Start,
     /// The sample is written, and looked at — or could not be.
     SampleWritten(Result<(crate::app::tour_sample::Placed, crate::app::setup::Census), String>),
+    /// The sample, which could not be written, written again.
+    RetrySample,
     /// The sheet's way to what a step needs: Settings, at its page.
     SetUp(SettingsPage),
     /// Find by meaning, passed over for this tour.
@@ -3041,6 +3048,7 @@ impl TimeTravelMsg {
             | TimeTravelMsg::SelectDrag { .. }
             | TimeTravelMsg::ToggleScope
             | TimeTravelMsg::Why
+            | TimeTravelMsg::WhyOf { .. }
             | TimeTravelMsg::Story
             | TimeTravelMsg::Exit => None,
         }
@@ -3379,6 +3387,7 @@ impl TutorialMsg {
         match self {
             TutorialMsg::Start
             | TutorialMsg::SampleWritten(_)
+            | TutorialMsg::RetrySample
             | TutorialMsg::SetUp(_)
             | TutorialMsg::SkipEmbeddings
             | TutorialMsg::PrepClose

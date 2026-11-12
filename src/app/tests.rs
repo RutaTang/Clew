@@ -14713,14 +14713,53 @@ fn an_agent_failure_with_nothing_to_fall_back_to_keeps_the_question() {
     let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
         stamp: app.stamp(),
         stream,
-        outcome: clew_protocol::StreamOutcome::Failed("401 bad key".into()),
+        outcome: clew_protocol::StreamOutcome::Failed("the model is overloaded".into()),
     }));
     let turn = app.proj.ask_turns.last().expect("the question is kept");
     assert_eq!(turn.question, "where is auth?");
     assert!(!turn.streaming);
-    assert!(turn.answer_md.contains("401 bad key"), "{}", turn.answer_md);
-    assert!(app.status.contains("401 bad key"), "{}", app.status);
+    assert!(turn.answer_md.contains("overloaded"), "{}", turn.answer_md);
+    assert!(app.status.contains("overloaded"), "{}", app.status);
     assert!(app.status.contains("semantic index"), "{}", app.status);
+}
+
+/// An agent turn failed because the provider could not be reached, or
+/// refused the key, does not fall back to the index: that answer is the
+/// same provider's, and failed the same way after as long again. The turn
+/// says the provider's failure at once.
+#[test]
+fn an_agent_failure_the_provider_would_repeat_does_not_fall_back() {
+    for reason in [
+        "request failed: Connection refused (os error 111)",
+        "HTTP 401: invalid api key",
+    ] {
+        let mut app = scanned_app("ask-agent-no-fallback");
+        let stream = app.mint_request_id();
+        app.proj.ask_turns.push(AskTurn {
+            stream,
+            question: "where is auth?".into(),
+            spoken: false,
+            answer_md: String::new(),
+            answer: Vec::new(),
+            settled: 0,
+            draft_from: None,
+            sources: Vec::new(),
+            steps: Vec::new(),
+            streaming: true,
+            extras: Default::default(),
+        });
+        app.proj.link.agent_stream = Some(stream);
+        let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
+            stamp: app.stamp(),
+            stream,
+            outcome: clew_protocol::StreamOutcome::Failed(reason.into()),
+        }));
+        assert!(!app.proj.asking, "{reason}: fell back");
+        assert!(app.proj.inflight.ask_retrieval.is_none(), "{reason}");
+        let turn = app.proj.ask_turns.last().expect("the question is kept");
+        assert!(!turn.streaming && turn.extras.failed, "{reason}");
+        assert!(!app.status.contains("semantic index"), "{}", app.status);
+    }
 }
 
 /// A lost transport ends the Ask streams it carried, and only those: the
@@ -15031,10 +15070,15 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
     // passing text it had no controls, and was cut short after an older one.
     let notice = app.failure_shown().expect("a standing failure");
     assert_eq!(notice.of, crate::app::state::FailureOf::Summary);
-    assert!(matches!(
-        notice.retry,
-        Some(Message::TimeTravel(TimeTravelMsg::Why))
-    ));
+    assert!(
+        matches!(
+            &notice.retry,
+            Some(Message::TimeTravel(TimeTravelMsg::WhyOf { session: s, sha }))
+                if *s == session && sha == "bbbb2222"
+        ),
+        "its Try again names the commit it failed on: {:?}",
+        notice.retry
+    );
     assert_eq!(
         notice.about, None,
         "nothing about the base URL in a rate limit"
@@ -15046,6 +15090,24 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
     );
     let _again = app.update(Message::TimeTravel(TimeTravelMsg::Why));
     assert!(tt(&app).0, "a failed summary is asked again");
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
+        stamp: app.stamp(),
+        session,
+        sha: "bbbb2222".into(),
+        result: Err("rate limited".into()),
+    }));
+
+    // Its Try again asks about the commit that failed, shown again — not
+    // the one scrubbed to meanwhile, which it paid to summarize unasked.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Goto(0)));
+    let retry = app
+        .failure_shown()
+        .and_then(|n| n.retry.clone())
+        .expect("its Try again");
+    let _ = app.update(retry);
+    let t = app.proj.time_travel.as_ref().unwrap();
+    assert_eq!(t.idx, 1, "the commit it failed on, on screen again");
+    assert!(t.why_pending.contains("bbbb2222"), "{:?}", t.why_pending);
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
         stamp: app.stamp(),
         session,
@@ -15104,6 +15166,19 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
     }));
     let t = app.proj.time_travel.as_ref().unwrap();
     assert!(!t.story_loading && t.story.is_some());
+
+    // A summary's failure goes with its session: its Try again, standing
+    // after Time Travel was left, had nothing to ask about.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
+        stamp: app.stamp(),
+        session,
+        sha: "aaaa1111".into(),
+        result: Err("rate limited".into()),
+    }));
+    assert!(app.failure_shown().is_some());
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Exit));
+    assert!(app.failure_shown().is_none(), "it outlived Time Travel");
 }
 
 /// With a past revision of the file on screen, ⌘D and "trace this value"
@@ -34530,6 +34605,33 @@ fn hovering_a_glossary_term_shows_its_definition() {
     app.proj.docs.files.clear();
     app.proj.docs.generation += 1;
     assert_eq!(app.hover_summary(0, 0, 11), None);
+}
+
+/// A run's tour is exported as the sidebar names it, in the language
+/// spoken — it was "Run: main.py" in English whatever the export's
+/// language — and its scope as the sidebar says it, not "@trace main.py".
+#[test]
+fn an_export_names_a_runs_tour_in_the_language_spoken() {
+    let mut app = scanned_app("export-run-tour");
+    app.proj
+        .walk
+        .library
+        .push(crate::ai::walkthrough::Walkthrough {
+            title: crate::ai::walkthrough::plain_run_title("main.py"),
+            scope: "@trace main.py".into(),
+            steps: Vec::new(),
+        });
+    let written =
+        crate::i18n::with_lang(crate::i18n::Lang::Fr, || app.export_markdown()).expect("an export");
+    let title = crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
+        tr!("Run: {program}", program = "main.py")
+    });
+    let scope = crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
+        tr!("Debug run ({program})", program = "main.py")
+    });
+    assert!(written.contains(&format!("### {title}")), "{written}");
+    assert!(written.contains(&scope), "{written}");
+    assert!(!written.contains("@trace"), "{written}");
 }
 
 /// Export Notes writes the reading notes where the save dialog pointed, and

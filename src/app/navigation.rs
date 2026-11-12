@@ -865,9 +865,14 @@ impl App {
                     self.proj.finder.refresh_files(&files, &symbols, &recent);
                 }
                 // No file or symbol by that name: what the command bar finds
-                // for it — its commands first ("settings").
-                if self.proj.finder.results.is_empty()
-                    && !self.proj.finder.query.trim().is_empty()
+                // for it — its commands first ("settings"). Nor where it
+                // reads as a question: the bar's way to ask it, which the
+                // field over the window answered with "No matches", or with
+                // files whose letters a sentence held.
+                let query = self.proj.finder.query.trim();
+                if (self.proj.finder.results.is_empty()
+                    || crate::app::palette::looks_like_a_question(query))
+                    && !query.is_empty()
                     && !self.proj.finder.is_line_query()
                 {
                     self.proj.finder.bar_fallback = true;

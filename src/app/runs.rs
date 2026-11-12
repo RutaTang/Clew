@@ -506,6 +506,7 @@ impl App {
                 f.failed = None;
                 f.last = None;
                 f.tab = 0;
+                self.forget_failure_of(crate::app::state::FailureOf::FakeRun);
                 ended
             }
             RunTab::Fake(id) => {

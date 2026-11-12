@@ -47,10 +47,25 @@ fn ask_title(question: &str) -> String {
 
 const ASK_PREFIX: &str = "Ask Clew: \u{201c}";
 const ASK_SUFFIX: &str = "\u{201d}";
+/// The end of the title of a row that only puts what was typed in Ask's
+/// field (`draft_title`): the ellipsis of a command that asks for more.
+const DRAFT_SUFFIX: &str = "\u{201d}\u{2026}";
 
 /// The question a command bar row titled `title` asks, if it asks one.
 pub(crate) fn asked_in(title: &str) -> Option<&str> {
     title.strip_prefix(ASK_PREFIX)?.strip_suffix(ASK_SUFFIX)
+}
+
+/// The command bar's title for opening Ask with `typed` in its field,
+/// asking nothing yet: read back by [`drafted_in`].
+fn draft_title(typed: &str) -> String {
+    format!("{ASK_PREFIX}{typed}{DRAFT_SUFFIX}")
+}
+
+/// What a command bar row titled `title` puts in Ask's field, if it is
+/// such a row.
+pub(crate) fn drafted_in(title: &str) -> Option<&str> {
+    title.strip_prefix(ASK_PREFIX)?.strip_suffix(DRAFT_SUFFIX)
 }
 
 /// The command bar's row that asks `question` of Clew, in the Ask window.
@@ -63,10 +78,23 @@ fn ask_command(question: &str) -> PaletteCommand {
     }
 }
 
+/// The command bar's row offered where nothing matched what was typed and
+/// it reads as no question — a name mistyped, likely: it opens Ask with
+/// the words in its field, to be asked once they are. Asked at once, as a
+/// question's row is, Enter on "mian.rs" spent an AI call on a typo.
+fn draft_command(typed: &str) -> PaletteCommand {
+    PaletteCommand {
+        title: draft_title(typed),
+        keys: None,
+        action: PaletteAction::Send(Message::Ask(AskMsg::Open)),
+        shown_as: Some(tr!("Ask Clew about “{question}”…", question = typed)),
+    }
+}
+
 /// Whether what was typed into the command bar reads as a question to ask:
 /// it has a question mark, or three words or more — "how is tax
 /// computed" — where a command's or a file's name is a word or two.
-fn looks_like_a_question(typed: &str) -> bool {
+pub(crate) fn looks_like_a_question(typed: &str) -> bool {
     typed.contains(['?', '？']) || typed.split_whitespace().count() >= 3
 }
 
@@ -450,17 +478,25 @@ impl App {
         // commands — its title holds every word typed, and would have
         // been the one "worded" match that put the rest out — but added
         // after them, the files' places moved one on.
+        // In the bar, and in the file picker searching as the bar does
+        // (`bar_fallback`): the field over the window, and Ctrl+P.
         let question = self.proj.finder.query.trim().to_string();
-        if self.proj.finder.bar && !question.is_empty() {
+        if (self.proj.finder.bar || self.proj.finder.bar_fallback) && !question.is_empty() {
             let ask_at = self.palette.len();
-            self.palette.push(ask_command(&question));
+            let asks = looks_like_a_question(&question);
+            self.palette.push(if asks {
+                ask_command(&question)
+            } else {
+                draft_command(&question)
+            });
             let results = &mut self.proj.finder.results;
             for i in results.iter_mut().filter(|i| **i >= ask_at) {
                 *i += 1;
             }
             // Offered where it reads as a question — several words, or a
-            // question mark — or where nothing else was found.
-            if looks_like_a_question(&question) || results.is_empty() {
+            // question mark — or, to be asked once written, where nothing
+            // else was found.
+            if asks || results.is_empty() {
                 results.push(ask_at);
             }
         }
@@ -667,11 +703,27 @@ impl App {
     /// [`Self::run_palette`], which never reaches what is on screen.
     pub(crate) fn run_from_bar(&mut self, title: &str) -> Task<Message> {
         // What was typed, asked: the Ask window opened on its answer.
+        // Asked first, the window opened after: opened first, on an empty
+        // conversation, it asked the model for questions to suggest — a
+        // call paid for, its answer never shown.
         if let Some(question) = asked_in(title).map(str::to_string) {
             self.proj.finder.open = false;
+            let asked = self.ask_typed(question);
             let open = self.update(Message::Ask(AskMsg::Open));
-            let asked = self.update(Message::Ask(AskMsg::Suggested(question)));
-            return Task::batch([open, asked]);
+            return Task::batch([asked, open]);
+        }
+        // What was typed, put in Ask's field to be asked once written: after
+        // a draft there, which it keeps.
+        if let Some(typed) = drafted_in(title).map(str::to_string) {
+            self.proj.finder.open = false;
+            let draft = self.proj.ask_input.trim_end();
+            self.proj.ask_input = if draft.is_empty() {
+                typed
+            } else {
+                format!("{draft}\n\n{typed}")
+            };
+            self.proj.ask_spoken = false;
+            return self.update(Message::Ask(AskMsg::Open));
         }
         if self.palette_commands().iter().any(|c| c.title == title) {
             return self.run_palette(title);

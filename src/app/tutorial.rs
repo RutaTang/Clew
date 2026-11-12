@@ -776,6 +776,16 @@ impl App {
         match message {
             TutorialMsg::Start => self.on_tour_prepare(),
             TutorialMsg::SampleWritten(written) => self.on_sample_written(written),
+            TutorialMsg::RetrySample => {
+                let Some(prep) = self.tour_prep.as_mut() else {
+                    return Task::none();
+                };
+                if !matches!(prep.sample, Some(Err(_))) {
+                    return Task::none();
+                }
+                prep.sample = None;
+                self.write_sample()
+            }
             TutorialMsg::SetUp(page) => Task::done(Message::Settings(SettingsMsg::OpenAt(page))),
             TutorialMsg::SkipEmbeddings => {
                 if let Some(prep) = self.tour_prep.as_mut() {

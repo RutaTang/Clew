@@ -3250,9 +3250,6 @@ pub(crate) fn guide_indent(
 #[cfg(test)]
 mod tests {
 
-    /// The minimap draws bars at least 2px apart with a gap between them —
-    /// a long file used to fill the band solid — and a short file's rows
-    /// each get their own bar.
     /// A file indented by two has a guide at every level; one indented
     /// by four, every four columns; alignment by one is not a level.
     #[test]
@@ -3285,11 +3282,6 @@ mod tests {
         assert_eq!((0..at(2)).step_by(4).collect::<Vec<_>>(), [0]);
     }
 
-    /// A bookmark and a conditional breakpoint each say so by a shape, not
-    /// by a colour alone: the bookmark a ribbon down the gutter's edge (its
-    /// line number tinted was all it had), the conditional breakpoint a
-    /// rounded square beside the plain one's dot, a refused one a ring. And
-    /// both on one line, side by side.
     /// The gutter shows, faintly, the breakpoint a click there would set —
     /// only where none is set, and not over a bookmark's ribbon.
     #[test]
@@ -3317,6 +3309,11 @@ mod tests {
         assert!(both[1].color.a < 0.5);
     }
 
+    /// A bookmark and a conditional breakpoint each say so by a shape, not
+    /// by a colour alone: the bookmark a notched ribbon at the gutter's edge
+    /// (its line number tinted was all it had), the conditional breakpoint
+    /// a rounded square beside the plain one's dot, a refused one a ring.
+    /// And both on one line, side by side.
     #[test]
     fn gutter_marks_are_shapes_not_only_colours() {
         use super::{BreakpointMark, gutter_marks};
@@ -3400,6 +3397,9 @@ mod tests {
         );
     }
 
+    /// The minimap draws bars at least 2px apart with a gap between them —
+    /// a long file used to fill the band solid — and a short file's rows
+    /// each get their own bar.
     #[test]
     fn minimap_bars_keep_a_gap_between_them() {
         // A long file: half a pixel a row; every fourth row, 1.2px bars.
@@ -4551,6 +4551,8 @@ mod font_tests {
         texts: Vec<(String, iced::advanced::text::Shaping)>,
         /// Each text's content, where it is drawn, and the box it is clipped to.
         boxes: Vec<(String, iced::Point, iced::Rectangle)>,
+        /// Each quad's box and colour.
+        quads: Vec<(iced::Rectangle, iced::Color)>,
     }
 
     impl iced::advanced::Renderer for Recorder {
@@ -4558,7 +4560,14 @@ mod font_tests {
         fn end_layer(&mut self) {}
         fn start_transformation(&mut self, _: iced::Transformation) {}
         fn end_transformation(&mut self) {}
-        fn fill_quad(&mut self, _: iced::advanced::renderer::Quad, _: impl Into<iced::Background>) {
+        fn fill_quad(
+            &mut self,
+            quad: iced::advanced::renderer::Quad,
+            background: impl Into<iced::Background>,
+        ) {
+            if let iced::Background::Color(color) = background.into() {
+                self.quads.push((quad.bounds, color));
+            }
         }
         fn reset(&mut self, _: iced::Rectangle) {}
         fn allocate_image(
@@ -4696,6 +4705,66 @@ mod font_tests {
                 "{text:?} at {at:?} is clipped to {clip:?}, not its row"
             );
         }
+    }
+
+    /// The pointer over the gutter's row shows, faintly, the breakpoint a
+    /// click there would set — at that row, and only while the pointer is
+    /// there: the marks alone were tested, and the draw could have left it
+    /// out.
+    #[test]
+    fn the_pointer_over_the_gutter_shows_the_dot_a_click_would_set() {
+        use iced::advanced::Widget;
+        use iced::advanced::widget::Tree;
+        let source: String = (1..=20).map(|n| format!("let x{n} = {n};\n")).collect();
+        let lines = crate::highlight::plain_lines(&source);
+        let lh = 20.0;
+        let mut view = crate::codeview::CodeView::new(
+            &lines,
+            20,
+            13.0,
+            lh,
+            iced::Color::WHITE,
+            |_| (),
+            |_| (),
+            |_, _| (),
+        )
+        .on_breakpoint(|_| ());
+        let widget: &mut dyn Widget<(), iced::Theme, Recorder> = &mut view;
+        let mut tree = Tree::new(&*widget);
+        let mut renderer = Recorder::default();
+        let node = widget.layout(
+            &mut tree,
+            &renderer,
+            &iced::advanced::layout::Limits::new(
+                iced::Size::ZERO,
+                iced::Size::new(800.0, f32::INFINITY),
+            ),
+        );
+        let viewport = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 400.0));
+        let mut faint_rows = |cursor: iced::mouse::Cursor| {
+            renderer.quads.clear();
+            widget.draw(
+                &tree,
+                &mut renderer,
+                &iced::Theme::Dark,
+                &iced::advanced::renderer::Style::default(),
+                iced::advanced::Layout::new(&node),
+                cursor,
+                &viewport,
+            );
+            // A dot's size, drawn faint, in the gutter.
+            renderer
+                .quads
+                .iter()
+                .filter(|(b, c)| c.a < 0.5 && c.a > 0.05 && b.width < 12.0 && b.width == b.height)
+                .map(|(b, _)| (b.center_y() / lh) as usize)
+                .collect::<Vec<_>>()
+        };
+        let over_row_6 = iced::mouse::Cursor::Available(iced::Point::new(4.0, 6.0 * lh + 5.0));
+        assert_eq!(faint_rows(over_row_6), [6], "the dot a click would set");
+        assert!(faint_rows(iced::mouse::Cursor::Unavailable).is_empty());
+        let over_code = iced::mouse::Cursor::Available(iced::Point::new(400.0, 6.0 * lh + 5.0));
+        assert!(faint_rows(over_code).is_empty(), "not over the code");
     }
 
     /// A folded line's blame starts past its `⋯`, with the gap a line that

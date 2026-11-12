@@ -353,6 +353,19 @@ fn a_failed_run_says_why_and_can_be_tried_again() {
     }));
     assert!(app.proj.fake.sim.is_none());
     assert_eq!(app.proj.fake.failed, stopped);
+    // Its panel closed, a failure goes with it: the status bar's Try
+    // again stood for a panel no longer there.
+    app.say_failure_again(
+        || "The fake run failed".into(),
+        Some(Message::Fake(FakeMsg::EditInputs)),
+        crate::app::state::FailureOf::FakeRun,
+    );
+    assert!(app.failure_shown().is_some());
+    let _ = app.update(Message::Fake(FakeMsg::Close));
+    assert!(
+        app.failure_shown().is_none(),
+        "its panel closed, the failure stood on"
+    );
 }
 
 /// Fake runs run side by side, each in its own tab: a second does not stop

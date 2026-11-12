@@ -88,7 +88,9 @@ impl App {
         }
         self.proj.glossary.showing = false;
         self.proj.docs.page = None;
-        self.proj.time_travel = None;
+        if self.proj.time_travel.take().is_some() {
+            self.forget_failure_of(crate::app::state::FailureOf::Summary);
+        }
         // (A revision still loading goes with the session: its load answers
         // to the session's own request.) A history still loading is given up
         // only if landing, it would undo this jump: in its own pane, to its

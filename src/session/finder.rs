@@ -258,9 +258,73 @@ fn rank_commands(query: &str, titles: &[&str]) -> (Vec<usize>, bool) {
         .filter(|&i| contains_words(titles[i], query))
         .collect();
     let is_worded = !worded.is_empty();
-    let mut ranked = if is_worded { worded } else { ranked };
+    let mut ranked = if is_worded {
+        worded
+    } else {
+        // Only its letters: kept where they come in runs that each begin a
+        // word, as "gtl" does in Go to Line. Strewn over a title they read
+        // as nothing — "tax" listed "Window: Toggle Maximize", alone.
+        ranked
+            .into_iter()
+            .filter(|&i| runs_from_word_starts(titles[i], query))
+            .collect()
+    };
     ranked.truncate(BAR_COMMANDS);
     (ranked, is_worded)
+}
+
+/// Whether `query`'s letters (its spaces aside) are found in `name` in
+/// runs, each beginning a word of it — after a space or a mark, or at a
+/// capital after a small letter — and running on letter by letter: "gtl"
+/// in "Go to Line", "opfol" in "Open Folder…", not "tax" in "Toggle
+/// Maximize". Case aside.
+fn runs_from_word_starts(name: &str, query: &str) -> bool {
+    let name: Vec<char> = name.chars().collect();
+    let query: Vec<char> = query
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    let starts: Vec<bool> = (0..name.len())
+        .map(|i| {
+            i == 0
+                || !name[i - 1].is_alphanumeric()
+                || (name[i - 1].is_lowercase() && name[i].is_uppercase())
+        })
+        .collect();
+    let same = |i: usize, q: char| name[i].to_lowercase().eq(std::iter::once(q));
+    // (letters matched, place in the name) found to lead nowhere.
+    let mut dead = std::collections::HashSet::new();
+    fn go(
+        q: usize,
+        at: usize,
+        query: &[char],
+        n: usize,
+        starts: &[bool],
+        same: &dyn Fn(usize, char) -> bool,
+        dead: &mut std::collections::HashSet<(usize, usize)>,
+    ) -> bool {
+        if q == query.len() {
+            return true;
+        }
+        if dead.contains(&(q, at)) {
+            return false;
+        }
+        // On with the run: the next letter right after the last one.
+        if at > 0 && at < n && same(at, query[q]) && go(q + 1, at + 1, query, n, starts, same, dead)
+        {
+            return true;
+        }
+        // Or a new run, at the start of a word further on.
+        for i in at..n {
+            if starts[i] && same(i, query[q]) && go(q + 1, i + 1, query, n, starts, same, dead) {
+                return true;
+            }
+        }
+        dead.insert((q, at));
+        false
+    }
+    go(0, 0, &query, name.len(), &starts, &same, &mut dead)
 }
 
 /// Whether `name` holds every word of `query` as it is spelled (case
@@ -348,6 +412,23 @@ pub(crate) fn rank<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command matched by its letters alone is kept where they run from
+    /// the starts of its words, not strewn over it: "tax" listed "Window:
+    /// Toggle Maximize", alone.
+    #[test]
+    fn letters_strewn_over_a_title_do_not_match_it() {
+        assert!(runs_from_word_starts("Go to Line…", "gtl"));
+        assert!(runs_from_word_starts("Open Folder…", "opfol"));
+        assert!(runs_from_word_starts("Window: Toggle Maximize", "togmax"));
+        assert!(runs_from_word_starts("Explain All", "ex all"));
+        assert!(runs_from_word_starts("showInFinder", "sif"));
+        assert!(!runs_from_word_starts("Window: Toggle Maximize", "tax"));
+        assert!(!runs_from_word_starts("Settings…", "setgs"));
+        let titles = ["Window: Toggle Maximize", "Go to Line…"];
+        assert_eq!(rank_commands("tax", &titles).0, Vec::<usize>::new());
+        assert_eq!(rank_commands("gtl", &titles).0, vec![1]);
+    }
 
     /// The command bar lists the commands that say what was typed, when
     /// some do — not every title holding its letters somewhere — and

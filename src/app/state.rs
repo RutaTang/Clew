@@ -1664,6 +1664,14 @@ pub struct App {
     /// it is on): taken away with the ring, unless something else has been
     /// said there since.
     pub(crate) ring_said: String,
+    /// Whether the ring came up on a menu: it goes with the menu, and Esc
+    /// puts both away, the keys going back where they were.
+    pub(crate) ring_menu: bool,
+    /// Whether a menu was up as the last message was handled, and whether
+    /// the tree held the keys as it came up: they are the tree's again as
+    /// it goes (`App::sync_menu_keys`).
+    pub(crate) menu_up: bool,
+    pub(crate) menu_tree_keys: bool,
     /// The region F6 last put the keys in (`App::cycle_region`).
     pub(crate) region: crate::app::keys::Region,
     /// Pending `g` prefix for two-key motions (gg / gd / gr / gi / gy).

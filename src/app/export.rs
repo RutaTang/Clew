@@ -143,12 +143,15 @@ pub(crate) fn render(x: &Export<'_>) -> String {
         out.push_str(&format!("_{}_\n\n", tr!("No walkthroughs.")));
     }
     for t in x.tours {
-        out.push_str(&format!("### {}\n\n", md(t.title.trim())));
+        // Named and scoped as the sidebar names them, in the language
+        // spoken: a run's tour was "Run: main.py" in English whatever the
+        // export's language, and its scope the raw "@trace main.py".
+        out.push_str(&format!("### {}\n\n", md(crate::ui::walk_title(t).trim())));
         let scope = t.scope.trim();
         if !scope.is_empty() {
             out.push_str(&format!(
                 "_{}_\n\n",
-                tr!("Scope: {scope}", scope = md(scope))
+                tr!("Scope: {scope}", scope = md(&crate::ui::scope_label(scope)))
             ));
         }
         for (i, s) in t.steps.iter().enumerate() {

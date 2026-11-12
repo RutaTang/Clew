@@ -685,6 +685,21 @@ mod path_tests {
             root.join("src").join("app").join("main.rs")
         );
         assert_eq!(rel_abs(root, "README.md"), root.join("README.md"));
+        // Pinned on every OS, not only where `\` is the separator: joined
+        // whole, a path with a slash before it left the root behind, and
+        // one with two together kept them.
+        assert_eq!(
+            rel_abs(root, "/etc/passwd"),
+            root.join("etc").join("passwd")
+        );
+        assert_eq!(
+            rel_abs(root, "src//app/main.rs").display().to_string(),
+            root.join("src")
+                .join("app")
+                .join("main.rs")
+                .display()
+                .to_string()
+        );
         #[cfg(windows)]
         assert_eq!(
             rel_abs(Path::new(r"C:\proj"), "src/app/main.rs")

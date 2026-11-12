@@ -292,7 +292,7 @@ pub(crate) fn save_own_price(model: &str, price: Option<Price>) -> Result<(), St
 pub(crate) fn draft_price(draft: &[String; 3]) -> Option<Price> {
     let field = |f: PriceField| {
         let v = draft[f as usize].trim();
-        (!v.is_empty()).then(|| v.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0))
+        (!v.is_empty()).then(|| parse_price(v))
     };
     let input = field(PriceField::Input)??;
     let output = field(PriceField::Output)??;
@@ -610,15 +610,19 @@ fn one_place(x: f64, unit: &str) -> String {
 
 /// An amount in dollars as the reader writes one: "$0.30"; in French
 /// "0,30 $", the mark a comma and the sign after it.
+/// One owed is said so, its sign first: "-$5" ("-5 $") — a balance of -5
+/// was said as $0.
 pub(crate) fn dollars_said(amount: f64, places: usize) -> String {
+    let sign = if amount < 0.0 { "-" } else { "" };
+    let amount = amount.abs();
     let figures = if places == 0 && amount == amount.trunc() {
-        format!("{}", amount as u64)
+        format!("{amount:.0}")
     } else {
         crate::i18n::decimal(amount, places)
     };
     match crate::i18n::current() {
-        crate::i18n::Lang::Fr => format!("{figures}\u{a0}$"),
-        _ => format!("${figures}"),
+        crate::i18n::Lang::Fr => format!("{sign}{figures}\u{a0}$"),
+        _ => format!("{sign}${figures}"),
     }
 }
 
@@ -869,7 +873,7 @@ impl App {
                 let model = self.usage.model.clone();
                 let mut draft = self.usage.price_draft.clone().unwrap_or_else(|| {
                     price_of(&model).map_or_else(Default::default, |p| {
-                        [p.input, p.cached, p.output].map(price_text)
+                        [p.input, p.cached, p.output].map(price_typed)
                     })
                 });
                 draft[field as usize] = value;
@@ -1017,6 +1021,35 @@ impl App {
 }
 
 /// A price as its field shows it: no trailing zeros.
+/// A price as the reader types one — in French "0,3", the mark a comma —
+/// for its field: shown "0.3", it read as no price of theirs.
+pub(crate) fn price_typed(n: f64) -> String {
+    let text = price_text(n);
+    match crate::i18n::current() {
+        crate::i18n::Lang::Fr => text.replace('.', ","),
+        _ => text,
+    }
+}
+
+/// A price typed into its field, if it reads as one: "0.30", or "0,30"
+/// as French writes it (and as the page writes a price in French), with
+/// or without its "$". "0,30" was "Enter a number.", and could not be
+/// saved.
+pub(crate) fn parse_price(typed: &str) -> Option<f64> {
+    let v: String = typed
+        .trim()
+        .trim_matches('$')
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '\u{a0}')
+        .collect();
+    let v = if v.contains(',') && !v.contains('.') {
+        v.replacen(',', ".", 1)
+    } else {
+        v
+    };
+    v.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0)
+}
+
 pub(crate) fn price_text(n: f64) -> String {
     let s = format!("{n:.4}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
@@ -1192,6 +1225,19 @@ mod tests {
         assert_eq!(draft_price(&draft("1", "x", "2")), None);
         assert_eq!(draft_price(&draft("", "0.1", "2")), None);
         assert_eq!(draft_price(&draft("1", "0.1", "-2")), None);
+        // As French writes a price, and as the page writes it in French:
+        // "0,30" was "Enter a number.", and could not be saved.
+        assert_eq!(
+            draft_price(&draft("0,30", "", "1,2")).map(|p| (p.input, p.output)),
+            Some((0.3, 1.2))
+        );
+        assert_eq!(parse_price(" 0,30\u{a0}$ "), Some(0.3));
+        assert_eq!(parse_price("$1.5"), Some(1.5));
+        assert_eq!(parse_price("1,5,0"), None);
+        crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
+            assert_eq!(price_typed(0.3), "0,3");
+        });
+        assert_eq!(price_typed(0.3), "0.3");
     }
 
     #[test]
@@ -1210,6 +1256,9 @@ mod tests {
         assert_eq!(money(0.00001), "<$0.0001");
         assert_eq!(price_text(0.15), "0.15");
         assert_eq!(price_text(2.0), "2");
+        // What is owed, said so: -5 was said as $0.
+        assert_eq!(dollars_said(-5.0, 0), "-$5");
+        assert_eq!(dollars_said(-3.1, 2), "-$3.10");
         // In French: a comma for the mark, the sign after the amount.
         crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
             assert_eq!(money(0.0), "0\u{a0}$");

@@ -256,6 +256,28 @@ impl App {
         self.on_open_ask()
     }
 
+    /// `question`, typed elsewhere (the command bar), asked — and kept, if
+    /// it could not be: no key, nothing to answer from. In the field, with
+    /// a draft there after it; put back over it, the question was in no
+    /// turn, no queue and not the field. (A suggestion chip, asked so, is
+    /// still there to press again: its question gives the draft its place.)
+    pub(crate) fn ask_typed(&mut self, question: String) -> Task<Message> {
+        let draft = std::mem::replace(&mut self.proj.ask_input, question);
+        let draft_spoken = std::mem::replace(&mut self.proj.ask_spoken, false);
+        let task = self.on_ask_submit();
+        // Whatever takes a question clears the field.
+        let taken = self.proj.ask_input.trim().is_empty();
+        if draft.trim().is_empty() {
+            // Not taken: the question stays in the field, alone.
+        } else if taken {
+            self.proj.ask_input = draft;
+            self.proj.ask_spoken = draft_spoken;
+        } else {
+            self.proj.ask_input = format!("{}\n\n{}", self.proj.ask_input.trim_end(), draft);
+        }
+        task
+    }
+
     /// Open the Ask window (a card, unless it is open already in either
     /// size) and give its input the keyboard.
     pub(crate) fn on_open_ask(&mut self) -> Task<Message> {
@@ -1441,8 +1463,12 @@ impl App {
         // notification can still report `Failed` (the cancel racing a
         // provider error), and a turn superseded by a newer question must not
         // start a second, billed answer beside it.
+        // Not where the provider could not be reached or refused the key:
+        // the index's answer is the same provider's, and failed the same
+        // way after as long again.
         if let clew_protocol::StreamOutcome::Failed(reason) = &outcome
             && live
+            && !crate::app::tasks::provider_refuses_all(reason)
             && !self.ask_stream_active()
             && self.proj.ask_turns[idx].steps.is_empty()
             && self.proj.ask_turns[idx].answer_md.trim().is_empty()
@@ -1457,7 +1483,7 @@ impl App {
             if self.proj.asking {
                 self.proj.ask_turns.remove(idx);
                 self.status = tr!(
-                    "Agent mode unavailable ({reason}) — answering from the semantic index",
+                    "Answering from the semantic index instead ({reason})",
                     reason = crate::app::tasks::plain_detail(&reason)
                 );
                 return fallback;

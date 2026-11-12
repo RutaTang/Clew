@@ -571,6 +571,7 @@ impl App {
         // while the new scope loaded lands in it, both requests standing;
         // it used to give the re-scope up. Not the story, which tells the
         // old scope's commits (`TimeTravel::scoped`).
+        let new_session = kept.is_none();
         let (session, why, why_pending) = match kept {
             Some(tt) => (tt.session, tt.why, tt.why_pending),
             None => (generation, HashMap::new(), HashSet::new()),
@@ -609,6 +610,11 @@ impl App {
             story_loading: false,
         };
         tt.sync_why_loading();
+        // A new session: the old one's summary failure goes with it. (One
+        // re-scoped is the same session, its commits kept.)
+        if new_session {
+            self.forget_failure_of(crate::app::state::FailureOf::Summary);
+        }
         self.proj.time_travel = Some(tt);
         // A drag begun in the view this replaced ends with it.
         if shown_before || ui::time_travel_on_screen(self).is_some() {
@@ -1157,8 +1163,8 @@ impl App {
                 // Kept as it came: worded where it is drawn, in the
                 // language spoken then, with a way to Settings when the
                 // base URL is to blame.
-                tt.why.insert(sha, Err(e.clone()));
-                Some(e)
+                tt.why.insert(sha.clone(), Err(e.clone()));
+                Some((sha, e))
             }
         };
         if let Some(tt) = self.proj.time_travel.as_mut() {
@@ -1168,7 +1174,7 @@ impl App {
             // The failure the status bar stands for, with its Try again
             // (and Settings): said only as passing text, it was squeezed
             // in after an older failure, cut short, with no controls.
-            Some(e) => {
+            Some((failed_sha, e)) => {
                 let about = crate::app::tasks::unreached(&e)
                     .then_some(crate::app::state::LlmField::BaseUrl);
                 self.say_failure_again(
@@ -1178,7 +1184,10 @@ impl App {
                             error = crate::app::tasks::ai_reason(&e)
                         )
                     },
-                    Some(Message::TimeTravel(TimeTravelMsg::Why)),
+                    Some(Message::TimeTravel(TimeTravelMsg::WhyOf {
+                        session,
+                        sha: failed_sha,
+                    })),
                     crate::app::state::FailureOf::Summary,
                 );
                 self.failure_about(about);
@@ -1588,12 +1597,38 @@ impl App {
                 } else {
                     Task::none()
                 };
+                // A summary's failure goes with its session: its Try again
+                // had nothing left to ask about.
+                self.forget_failure_of(crate::app::state::FailureOf::Summary);
                 // Restore the live pane to where the reader was before entering
                 // — both offsets (its scrollable remounts at the top otherwise).
                 let restored = self.restore_code_scroll(self.proj.active);
                 Task::batch([gave_way, restored])
             }
             TimeTravelMsg::Why => self.on_time_travel_why(),
+            TimeTravelMsg::WhyOf { session, sha } => {
+                // The commit it failed on, shown again, and asked about.
+                let at = self
+                    .proj
+                    .time_travel
+                    .as_ref()
+                    .filter(|tt| tt.session == session)
+                    .and_then(|tt| tt.commits.iter().position(|c| c.sha == sha));
+                let Some(at) = at else {
+                    return Task::none();
+                };
+                let shown = if self
+                    .proj
+                    .time_travel
+                    .as_ref()
+                    .is_some_and(|tt| tt.idx != at)
+                {
+                    self.on_time_travel_goto(at)
+                } else {
+                    Task::none()
+                };
+                Task::batch([shown, self.on_time_travel_why()])
+            }
             TimeTravelMsg::WhyDone {
                 session,
                 sha,

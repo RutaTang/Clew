@@ -2243,7 +2243,7 @@ impl ExplainFailure {
                 detail,
             } => tr!(
                 "the provider rejected the API key ({detail}) — check it in Settings",
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Length,
@@ -2251,7 +2251,7 @@ impl ExplainFailure {
             } => tr!(
                 "the prompt is too long for the model ({detail}) — a model with a larger \
                  context window can explain it",
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Model(model),
@@ -2260,26 +2260,26 @@ impl ExplainFailure {
                 "the provider has no model `{model}` at this endpoint ({detail}) — check the \
                  model and endpoint in Settings",
                 model = model,
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Endpoint,
                 detail,
             } => tr!(
                 "the endpoint was not found ({detail}) — check the base URL in Settings",
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Request,
                 detail,
             } => tr!(
                 "the request was refused ({detail}) — check the model and endpoint in Settings",
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::Unavailable(detail) | ExplainFailure::Busy(detail) => {
                 tr!(
                     "the provider was unavailable ({detail}) — try again later",
-                    detail = detail
+                    detail = plain_detail(detail)
                 )
             }
             // Said once, the same way everywhere a call failed so: what
@@ -2303,19 +2303,19 @@ impl ExplainFailure {
             ExplainFailure::Unusable(detail) => tr!(
                 "the provider's answer could not be used ({detail}) — check the model and \
                  endpoint in Settings",
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::Cancelled => {
                 tr!("its requests were cancelled — run it again to finish").to_string()
             }
             ExplainFailure::Internal(detail) => tr!(
                 "Clew failed internally ({detail}) — try again, and report it if it happens again",
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::ProjectUnreadable(detail) => tr!(
                 "the project folder could not be read ({detail}) — nothing was changed; check \
                  that it is still there",
-                detail = detail
+                detail = plain_detail(detail)
             ),
         }
     }
@@ -2409,10 +2409,14 @@ fn is_length_refusal(kind: Option<&str>, message: &str) -> bool {
     kind.is_some_and(|kind| KINDS.contains(&kind)) || WORDS.iter().any(|w| message.contains(w))
 }
 
-/// An error's first line, trimmed and capped: what the status line quotes.
+/// An error's first line, trimmed and capped: what the status line quotes,
+/// kept in the words it came in — said in plain words ([`plain_detail`])
+/// where it is described, in the language spoken then: made plain as it
+/// failed, it stayed in that language ("couldn't reach the AI provider
+/// (该地址没有响应)" once switched back to English).
 fn first_line(err: &str) -> String {
     let line = err.trim().lines().next().unwrap_or_default().trim();
-    plain_detail(&line.chars().take(160).collect::<String>())
+    line.chars().take(160).collect()
 }
 
 /// A failed call's words as a reader takes them: without the transport's
@@ -2479,6 +2483,26 @@ pub(crate) fn unreached(raw: &str) -> bool {
     REFUSED
         .iter()
         .chain(NO_SUCH_HOST)
+        .any(|w| lower.contains(w))
+}
+
+/// Whether a failed AI call's `raw` words say every call to the provider
+/// fails alike: nothing could reach it, or it refused the key. Another
+/// call — Ask's answer from the index after its tools failed — only fails
+/// again, as long after.
+pub(crate) fn provider_refuses_all(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    unreached(raw)
+        || [
+            "401",
+            "403",
+            "unauthorized",
+            "invalid api key",
+            "invalid_api_key",
+            "incorrect api key",
+            "authentication",
+        ]
+        .iter()
         .any(|w| lower.contains(w))
 }
 
@@ -4481,6 +4505,29 @@ mod pass_tests {
                 outcome.failures
             );
         }
+    }
+
+    /// A failure is said in the language spoken where it is said, all of
+    /// it: made plain as it failed, its detail stayed in that language —
+    /// "couldn't reach the AI provider (该地址没有响应)" in English.
+    #[test]
+    fn a_failures_detail_is_said_in_the_language_spoken_now() {
+        let raw = CallError::Rpc(RpcError {
+            code: Some(clew_protocol::ErrorCode::Provider(
+                clew_protocol::ProviderFailure::Unreached,
+            )),
+            message: "request failed: Connection refused (os error 111)".into(),
+        });
+        let failed =
+            crate::i18n::with_lang(crate::i18n::Lang::Zh, || ExplainFailure::of_call(&raw, "m"));
+        let said = failed.describe();
+        assert!(said.contains("nothing answered at that address"), "{said}");
+        assert!(
+            !said.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+            "{said}"
+        );
+        let in_chinese = crate::i18n::with_lang(crate::i18n::Lang::Zh, || failed.describe());
+        assert!(!in_chinese.contains("nothing answered"), "{in_chinese}");
     }
 
     /// Only a connection that could not be made is said to be the base

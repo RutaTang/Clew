@@ -413,8 +413,12 @@ fn the_command_bar_keeps_to_worded_titles_in_another_language() {
 /// what it found above it, and Enter on it asks it: only the empty bar
 /// offered Ask, so "how is tax computed" found commands and files and no
 /// way to ask. A word or two is a name, not a question; where nothing else
-/// is found it is offered too. Its row does not crowd out what the letters
-/// typed still find ("gtl", Go to Line…).
+/// is found it is offered, to be asked once written: Enter opens Ask with
+/// the words in its field — asked at once, a typo ("mian.rs") cost an AI
+/// call. Its row does not crowd out what the letters typed still find
+/// ("gtl", Go to Line…). Asked, no questions to suggest are paid for and
+/// never shown; not asked, the question is kept, with the draft in the
+/// field.
 #[test]
 fn a_question_typed_in_the_command_bar_can_be_asked() {
     let mut app = scanned_app("palette-ask-typed");
@@ -454,9 +458,21 @@ fn a_question_typed_in_the_command_bar_can_be_asked() {
     typed(&mut app, "gtl");
     assert!(titles(&app).iter().any(|t| t == "Go to Line…"));
     typed(&mut app, "zzqqxx");
-    assert_eq!(titles(&app), ["Ask Clew: \u{201c}zzqqxx\u{201d}"]);
+    assert_eq!(titles(&app), ["Ask Clew: \u{201c}zzqqxx\u{201d}\u{2026}"]);
+    // Enter on it: Ask opened with the words in its field, nothing asked.
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    assert!(!app.proj.finder.open);
+    assert_ne!(app.ask_view, crate::app::model::AskView::Hidden);
+    assert_eq!(app.proj.ask_input, "zzqqxx");
+    assert!(app.proj.inflight.ask_retrieval.is_none() && app.proj.ask_turns.is_empty());
+    app.proj.ask_input.clear();
+    app.ask_view = crate::app::model::AskView::Hidden;
 
-    // Enter on it: asked, in the Ask window.
+    // Enter on a question: asked, in the Ask window — and no questions
+    // to suggest asked for an empty conversation it no longer is.
+    app.llm_available = true;
+    app.suggest_questions = true;
+    open_palette(&mut app);
     typed(&mut app, question);
     app.proj.finder.selected = app.proj.finder.results.len() - 1;
     let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
@@ -469,4 +485,59 @@ fn a_question_typed_in_the_command_bar_can_be_asked() {
     );
     assert!(app.proj.ask_input.is_empty(), "{:?}", app.proj.ask_input);
     assert_ne!(app.ask_view, crate::app::model::AskView::Hidden);
+    assert_eq!(app.proj.suggest_asked, None, "suggestions paid for, unseen");
+}
+
+/// The file picker — Ctrl+P, and the field over the window — offers a
+/// question to Ask as the command bar does: it answered "how is tax
+/// computed" with "No matches", the most visible way in a dead end.
+#[test]
+fn a_question_typed_in_the_file_picker_can_be_asked() {
+    let mut app = scanned_app("picker-ask-typed");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    assert!(app.proj.finder.open && !app.proj.finder.bar);
+    let question = "how is the origin computed";
+    typed(&mut app, question);
+    let asks = format!("Ask Clew: \u{201c}{question}\u{201d}");
+    assert_eq!(titles(&app).last(), Some(&asks), "{:?}", titles(&app));
+    // A file's name still finds the file, and offers no Ask.
+    typed(&mut app, "lib");
+    assert!(!titles(&app).iter().any(|t| t.starts_with("Ask Clew")));
+    // Enter on it: asked.
+    typed(&mut app, question);
+    app.proj.finder.selected = app.proj.finder.results.len() - 1;
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    assert!(!app.proj.finder.open);
+    assert!(
+        app.proj.inflight.ask_retrieval.is_some()
+            || app.proj.ask_turns.iter().any(|t| t.question == question),
+        "not asked"
+    );
+}
+
+/// A question from the command bar that cannot be asked — no key — is
+/// kept in Ask's field with the draft there: the draft put back over it,
+/// it was in no turn, no queue and not the field.
+#[test]
+fn a_question_from_the_bar_not_asked_is_kept_with_the_draft() {
+    let mut app = scanned_app("palette-ask-kept");
+    app.llm_config_cache = Some(None);
+    app.llm_available = false;
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.proj.ask_input = "my draft".into();
+    let question = "how is the origin computed";
+    let _ = app.run_from_bar(&format!("Ask Clew: \u{201c}{question}\u{201d}"));
+    assert!(app.proj.ask_turns.is_empty(), "asked without a key");
+    assert!(
+        app.proj.ask_input.contains(question),
+        "{:?}",
+        app.proj.ask_input
+    );
+    assert!(
+        app.proj.ask_input.contains("my draft"),
+        "{:?}",
+        app.proj.ask_input
+    );
 }

@@ -881,6 +881,9 @@ impl App {
                     let stopped = self.stop_fake_work();
                     self.proj.fake.sim = None;
                     self.proj.fake.failed = None;
+                    // Its failure goes with it: the status bar's Try again
+                    // stood for a panel no longer there.
+                    self.forget_failure_of(crate::app::state::FailureOf::FakeRun);
                     stopped
                 }
                 tab => self.close_run_tab(crate::app::state::RunTab::Fake(tab)),

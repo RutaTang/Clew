@@ -236,7 +236,10 @@ pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> El
 pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     let placeholder = match app.proj.finder.mode {
         _ if app.proj.finder.bar => tr!("Run a command or open a file"),
-        FinderMode::Files => tr!("Open a file, or type > for a command, :123 for a line"),
+        // A question typed here is offered to Ask: said, as the rest is.
+        FinderMode::Files => {
+            tr!("Open a file, ask a question, or type > for a command, :123 for a line")
+        }
         FinderMode::Symbols => tr!("Go to a symbol"),
     };
     let glyph = match app.proj.finder.mode {
