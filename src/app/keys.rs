@@ -496,6 +496,20 @@ impl App {
             self.pending_z = false;
             return self.update(msg);
         }
+        // Enter on a sheet presses its main button — as its "yes" by voice
+        // does, and only once it can be pressed (a first open's Open waits
+        // to be read). Opened from a shortcut, the cost sheet took no
+        // Enter: the ring had nothing on it. A field holding the keys sends
+        // its own Enter before it gets here.
+        if matches!(key.as_ref(), Key::Named(Named::Enter))
+            && !(cmd || modifiers.control() || modifiers.alt() || modifiers.shift())
+            && ui::active_overlay(self).is_some_and(|o| o.enter_answers())
+            && let Some(yes) = ui::heard::gather(self).into_iter().find(|t| {
+                t.answer == Some(ui::heard::Answer::Yes) && t.layer >= ui::heard::Layer::Overlay
+            })
+        {
+            return self.update(yes.message);
+        }
         // The large Ask window is over everything but the overlays: Esc
         // makes it a card first, before it reaches what is under it.
         if matches!(key.as_ref(), Key::Named(Named::Escape)) && self.ask_view == AskView::Expanded {

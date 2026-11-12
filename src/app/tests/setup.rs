@@ -756,3 +756,67 @@ fn a_server_on_this_computer_is_used_not_installed_again() {
         "none here: Clew's copy"
     );
 }
+
+/// Enter on a sheet presses its main button, as its "yes" by voice does:
+/// the cost sheet Explain All's shortcut opens took no Enter, the ring
+/// having nothing on it. Not before the button can be pressed — while the
+/// project is still being looked at — and not on a question of trust.
+#[test]
+fn enter_on_a_sheet_presses_its_main_button() {
+    let data = test_dir("setup-data-enter");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("config.toml"),
+        "[llm]\napi_key = \"sk\"\nbase_url = \"http://127.0.0.1:9/v1\"\n",
+    )
+    .unwrap();
+    let _env = data_dir_override(&data);
+    let mut app = scanned_app("setup-enter");
+    app.invalidate_llm_config();
+    assert!(app.llm_available);
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let enter = || {
+        key_press(
+            keyboard::Key::Named(keyboard::key::Named::Enter),
+            keyboard::Modifiers::default(),
+        )
+    };
+    let _ = app.show_setup(SetupMode::Explain, root.clone());
+    // Still counting: Explain cannot be pressed, and Enter does nothing.
+    let _ = app.update(enter());
+    assert!(app.setup.is_some(), "pressed before it could be");
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root,
+        census: Census {
+            servers: Vec::new(),
+            calls: Some(10),
+        },
+    }));
+    assert!(app.setup.is_some());
+    let _ = app.update(enter());
+    assert!(app.setup.is_none(), "Enter pressed Explain");
+    assert!(app.proj.explain.running, "and explaining began");
+}
+
+/// Enter allows no question of trust: a language server's download, put
+/// on screen as a file opens, stays asked after Enter — only its own
+/// Allow (or "yes" said to it) allows it.
+#[test]
+fn enter_allows_no_question_of_trust() {
+    let store = test_dir("setup-enter-trust-store");
+    let _ = std::fs::remove_dir_all(&store);
+    let _env = data_dir_override(&store);
+    let mut app = scanned_app("setup-enter-trust");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    assert!(!app.proj.pending_lsp_consent.is_empty(), "asked");
+    let _ = app.update(key_press(
+        keyboard::Key::Named(keyboard::key::Named::Enter),
+        keyboard::Modifiers::default(),
+    ));
+    assert!(!app.proj.pending_lsp_consent.is_empty(), "allowed by Enter");
+    assert!(matches!(
+        app.proj.link.lsp.get("rust"),
+        Some(LspSlot::AwaitingConsent)
+    ));
+}

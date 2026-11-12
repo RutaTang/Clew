@@ -2208,8 +2208,8 @@ impl GraphCanvas<'_> {
     }
 
     /// One node label at opacity `alpha`, on the node's right or — `side`
-    /// 1 — its left; between, on both, cross-faded, as a label changing
-    /// sides is drawn.
+    /// 1 — its left; between, as a label changing sides is drawn
+    /// ([`label_on_side`]).
     #[allow(clippy::too_many_arguments)]
     fn draw_label(
         &self,
@@ -2221,11 +2221,10 @@ impl GraphCanvas<'_> {
         side: f32,
         hover: bool,
     ) {
-        for (left, share) in [(false, 1.0 - side), (true, side)] {
-            let a = alpha.min(1.0) * share;
-            if a >= 0.01 {
-                self.draw_label_at(frame, i, (x, y), r, a, left, hover);
-            }
+        let (left, share) = label_on_side(side);
+        let a = alpha.min(1.0) * share;
+        if a >= 0.01 {
+            self.draw_label_at(frame, i, (x, y), r, a, left, hover);
         }
     }
 
@@ -2285,6 +2284,19 @@ impl GraphCanvas<'_> {
                 });
             }
         }
+    }
+}
+
+/// Which side of its node a label changing sides (`side`, 0 right … 1
+/// left) is drawn on, and how much of it: out on the one, then in on the
+/// other. Cross-faded, it showed on both sides of its node at once —
+/// "pricing.py" twice, one dim, one bright, over a neighbour's.
+fn label_on_side(side: f32) -> (bool, f32) {
+    let side = side.clamp(0.0, 1.0);
+    if side < 0.5 {
+        (false, 1.0 - 2.0 * side)
+    } else {
+        (true, 2.0 * side - 1.0)
     }
 }
 
@@ -3775,6 +3787,28 @@ mod tests {
             r,
             depth,
             index,
+        }
+    }
+
+    /// A label changing sides goes out on the one before it comes in on
+    /// the other — never on both at once, which drew "pricing.py" twice
+    /// beside its node — and is whole at either end.
+    #[test]
+    fn a_label_changing_sides_is_never_on_both() {
+        assert_eq!(label_on_side(0.0), (false, 1.0));
+        assert_eq!(label_on_side(1.0), (true, 1.0));
+        assert_eq!(label_on_side(0.5).1, 0.0, "gone between");
+        let mut last = None;
+        for k in 0..=20 {
+            let (left, share) = label_on_side(k as f32 / 20.0);
+            assert!((0.0..=1.0).contains(&share));
+            // One side at a time: the side turns once, through nothing.
+            if let Some((was, was_share)) = last
+                && was != left
+            {
+                assert!(was_share <= 0.11 && share <= 0.11, "both shown at {k}");
+            }
+            last = Some((left, share));
         }
     }
 

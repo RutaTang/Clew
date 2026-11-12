@@ -549,6 +549,22 @@ impl<'a> ActiveOverlay<'a> {
         !matches!(self, Self::Hover(_))
     }
 
+    /// Whether Enter presses its main button, as its "yes" by voice does:
+    /// a sheet opened from a shortcut — Explain All's cost sheet — took no
+    /// Enter, the ring having nothing on it yet. Not a question of trust (a
+    /// language server's command, a host's key), where Enter could allow
+    /// by mistake, nor a form, whose fields send their own Enter.
+    pub(crate) fn enter_answers(&self) -> bool {
+        matches!(
+            self,
+            Self::Consent(_)
+                | Self::Setup(_)
+                | Self::FakeRun(_)
+                | Self::UpdateNotes
+                | Self::TourPrep(_)
+        )
+    }
+
     /// Whether it is a menu: a list of rows, one pressed and it goes —
     /// the arrows walk it.
     pub(crate) fn is_menu(&self) -> bool {
