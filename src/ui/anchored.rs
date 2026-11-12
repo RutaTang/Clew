@@ -22,6 +22,11 @@ pub(crate) enum Anchoring {
     /// A menu: its corner at the point, opening down-right and flipping up
     /// and/or left when it would cross the bottom / right edge.
     Corner,
+    /// A menu under a line whose top is at `line_top`: as [`Corner`], but
+    /// flipped up it ends at the line's top, not over the line.
+    ///
+    /// [`Corner`]: Anchoring::Corner
+    UnderLine { line_top: f32 },
 }
 
 /// Where a popup of `size` goes for an anchor at `anchor` in a window of
@@ -49,14 +54,18 @@ pub(crate) fn place_popup(
             };
             (anchor.x, y)
         }
-        Anchoring::Corner => {
+        Anchoring::Corner | Anchoring::UnderLine { .. } => {
             let x = if anchor.x + size.width > window.width - margin {
                 anchor.x - size.width
             } else {
                 anchor.x
             };
+            let above = match anchoring {
+                Anchoring::UnderLine { line_top } => line_top,
+                _ => anchor.y,
+            };
             let y = if anchor.y + size.height > window.height - margin {
-                anchor.y - size.height
+                above - size.height
             } else {
                 anchor.y
             };
@@ -383,6 +392,24 @@ mod tests {
             ),
             Point::new(740.0, 380.0)
         );
+    }
+
+    /// L17: a menu opened from the keys under the caret's line, with no
+    /// room below, opens above the line: flipped up from under it, it
+    /// ended at the line's foot, over the line it was for.
+    #[test]
+    fn a_menu_under_a_line_flips_above_the_line() {
+        let menu = Size::new(210.0, 320.0);
+        let under = Anchoring::UnderLine { line_top: 680.0 };
+        // Room below: under the line, as a click's.
+        assert_eq!(
+            place_popup(Point::new(100.0, 100.0), menu, WINDOW, under, 8.0),
+            Point::new(100.0, 100.0)
+        );
+        // None: above it, its foot at the line's top.
+        let at = place_popup(Point::new(100.0, 700.0), menu, WINDOW, under, 8.0);
+        assert_eq!(at, Point::new(100.0, 680.0 - 320.0));
+        assert!(at.y + menu.height <= 680.0);
     }
 
     #[test]

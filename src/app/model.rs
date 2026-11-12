@@ -996,6 +996,10 @@ pub struct ContextMenu {
     /// the caret, which has no place on the screen: a popup asked from it
     /// opens where one asked from the keyboard does.
     pub by_pointer: bool,
+    /// Opened from the keys at the caret: the top of its line, in window
+    /// coordinates. With no room below the line, the menu opens above it —
+    /// flipped up from under it, it covered the line it was for.
+    pub line_top: Option<f32>,
 }
 
 /// What a language can say about the code under the cursor that no other

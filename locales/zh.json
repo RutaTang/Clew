@@ -6,6 +6,7 @@
  "'{arg1}' not found in archive": "压缩包中找不到 '{arg1}'",
  "'{binary}' not found on PATH — {arg1}, or choose where it is": "在 PATH 中找不到 '{binary}'：{arg1}；也可以指定它的位置",
  "'{tool}' is required to install this server but was not found on PATH; install it, or choose a server program of your own": "安装此服务器需要 '{tool}'，但在 PATH 中找不到它。请先安装，或自行选择服务器程序",
+ "(blank line)": "（空行）",
  "(line not read)": "（未读取该行）",
  "(no arguments)": "（无参数）",
  "(optional) ~/.ssh/id_ed25519": "（可选）~/.ssh/id_ed25519",

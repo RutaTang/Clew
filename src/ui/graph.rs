@@ -3233,24 +3233,22 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// A map in the Maps overlay's picker: its title and size.
+/// A map in the Maps overlay's picker: its title. No count beside it: one
+/// of its nodes counted only where they were all of one kind (a schema's
+/// tables) — "Routes (6)" had counted three routes and their three
+/// handlers — and the one map with a number read as if the others had
+/// none, or nothing in them. What each holds is said under the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MapChoice {
     pub(crate) id: String,
     pub(crate) title: String,
-    /// How many of what it is named for there are: its nodes, where all
-    /// are of one kind (its tables); none said where they are of several —
-    /// "Routes (6)" counted three routes and their three handlers.
-    pub(crate) count: Option<usize>,
 }
 
 impl MapChoice {
     pub(crate) fn of(m: &clew_protocol::ProjectMap) -> MapChoice {
-        let one_kind = m.nodes.windows(2).all(|w| w[0].kind == w[1].kind);
         MapChoice {
             id: m.id.clone(),
             title: m.title.clone(),
-            count: one_kind.then_some(m.nodes.len()),
         }
     }
 }
@@ -3258,11 +3256,7 @@ impl MapChoice {
 impl std::fmt::Display for MapChoice {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The title, from clew-core, in the reader's language.
-        let title = crate::i18n::lookup(&self.title);
-        match self.count {
-            Some(n) => write!(out, "{title} ({n})"),
-            None => write!(out, "{title}"),
-        }
+        write!(out, "{}", crate::i18n::lookup(&self.title))
     }
 }
 

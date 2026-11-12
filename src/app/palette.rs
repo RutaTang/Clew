@@ -785,6 +785,7 @@ impl App {
                     insight,
                     served,
                     by_pointer: false,
+                    line_top: None,
                 });
                 self.update(message)
             }

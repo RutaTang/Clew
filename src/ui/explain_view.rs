@@ -616,9 +616,16 @@ fn reached_from_rows<'a>(
                         .size(ts::SMALL)
                         .color(theme::success())
                         .wrapping(iced::widget::text::Wrapping::None),
-                    container(text(kind).size(ts::CAPTION).color(theme::dim()))
-                        .padding([0, 5])
-                        .style(theme::chip),
+                    // Its tag on one line: in Chinese, "测试" was set a
+                    // character to a line, the row as tall as two.
+                    container(
+                        text(kind)
+                            .size(ts::CAPTION)
+                            .color(theme::dim())
+                            .wrapping(iced::widget::text::Wrapping::None)
+                    )
+                    .padding([0, 5])
+                    .style(theme::chip),
                 ]
                 .spacing(4)
                 .align_y(iced::Center);

@@ -2775,7 +2775,7 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
         );
         for root in ids {
             for id in tree.visible_under(root) {
-                rows.push(flow_row(tree, id, token));
+                rows.push(flow_row(app, tree, id, token));
             }
         }
     }
@@ -2788,9 +2788,24 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
 
 /// One occurrence: its role tag, file and line, the line's text; a
 /// `Passed` row's unfold button follows the value into the callee.
-fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element<'_, Message> {
+fn flow_row<'a>(
+    app: &App,
+    tree: &'a crate::app::flow::FlowTree,
+    id: usize,
+    token: u64,
+) -> Element<'a, Message> {
     let node = tree.node(id);
     let indent = 10.0 + 14.0 * node.depth as f32;
+    // The room its line has: the sidebar's, less the indent, the chevron
+    // and the gap after it, the row's padding and the scrollbar.
+    let room = (app.sidebar_width
+        - indent
+        - super::sidebar::CHEVRON_W
+        - 2.0
+        - 6.0
+        - 2.0 * 6.0
+        - crate::ui::SCROLLBAR_W)
+        .max(0.0);
     let unfold: Element<'_, Message> = if node.loading {
         text("…")
             .size(ts::SMALL)
@@ -2826,6 +2841,25 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
     } else {
         space().width(0).into()
     };
+    let code_line: Element<'a, Message> = if node.classified {
+        let shown = super::steady::cut(&node.text, room, ts::SMALL, crate::fonts::CODE);
+        let line = text(shown.clone())
+            .size(ts::SMALL)
+            .font(crate::fonts::CODE)
+            .color(theme::fg())
+            .wrapping(Wrapping::None);
+        if shown == node.text {
+            line.into()
+        } else {
+            super::toolbar::tip_at(line, node.text.clone(), None, tooltip::Position::Bottom)
+        }
+    } else {
+        text(tr!("(line not read)"))
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .wrapping(Wrapping::None)
+            .into()
+    };
     let body = column![
         row![
             text(label).size(ts::CAPTION).color(theme::accent()),
@@ -2833,19 +2867,9 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
             changed,
         ]
         .spacing(6),
-        text(if node.classified {
-            node.text.clone()
-        } else {
-            tr!("(line not read)").to_string()
-        })
-        .size(ts::SMALL)
-        .font(crate::fonts::CODE)
-        .color(if node.classified {
-            theme::fg()
-        } else {
-            theme::dim()
-        })
-        .wrapping(Wrapping::None),
+        // Cut with an ellipsis where it is longer than the room, whole where
+        // the pointer rests: it ended at the sidebar's edge mid-word.
+        code_line,
     ]
     .spacing(1);
     let open = button(body)

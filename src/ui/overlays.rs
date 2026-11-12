@@ -480,7 +480,10 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
     let placed = Anchored::new(
         opaque(panel),
         iced::Point::new(menu.x, menu.y),
-        Anchoring::Corner,
+        match menu.line_top {
+            Some(line_top) => Anchoring::UnderLine { line_top },
+            None => Anchoring::Corner,
+        },
     );
     // A full-size backdrop closes the menu on any outside click.
     // A click of either button outside it puts it away — a right one going

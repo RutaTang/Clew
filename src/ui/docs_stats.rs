@@ -1120,7 +1120,7 @@ pub(crate) const GLOSSARY_ROWS_SHOWN: usize = 200;
 /// The Glossary page: the project's terms, in sections by kind, each a
 /// button to its definition; a filter on top (`app::glossary`).
 /// The glossary's column, header to list: as wide as its terms read well.
-const GLOSSARY_W: f32 = 860.0;
+pub(crate) const GLOSSARY_W: f32 = 860.0;
 
 pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
     super::heard::list();
@@ -1299,5 +1299,8 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
     .width(Fill)
     .height(Fill)
     .padding([20, 28])
+    // In the middle of a wider page: held to the left, the page's right
+    // was a band of nothing as wide as a sidebar.
+    .align_x(iced::Center)
     .into()
 }

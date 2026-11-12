@@ -6,6 +6,7 @@
  "'{arg1}' not found in archive": "アーカイブに '{arg1}' が見つかりません",
  "'{binary}' not found on PATH — {arg1}, or choose where it is": "'{binary}' が PATH に見つかりません。インストールするか（{arg1}）、場所を指定してください",
  "'{tool}' is required to install this server but was not found on PATH; install it, or choose a server program of your own": "このサーバーのインストールには '{tool}' が必要ですが、PATH に見つかりません。インストールするか、サーバーのプログラムを自分で指定してください",
+ "(blank line)": "（空行）",
  "(line not read)": "（行を読み込んでいません）",
  "(no arguments)": "（引数なし）",
  "(optional) ~/.ssh/id_ed25519": "（任意）~/.ssh/id_ed25519",

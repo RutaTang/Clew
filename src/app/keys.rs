@@ -684,6 +684,25 @@ impl App {
                     _ => self.move_cursor(viewer::Motion::LineEnd),
                 }
             }
+            // F12 and ⇧F12: Go to Definition and Find References, as most
+            // editors have them — F12 did nothing, and said nothing (`gd`
+            // and `gr` do the same).
+            Key::Named(Named::F12)
+                if self.code_focused
+                    && !(cmd || modifiers.alt() || modifiers.control())
+                    && !self.proj.finder.open
+                    && self.proj.context_menu.is_none()
+                    && ui::pane_cover(self).is_none()
+                    && self.active_viewer().is_some() =>
+            {
+                self.pending_g = false;
+                self.pending_z = false;
+                self.goto_at_cursor(if modifiers.shift() {
+                    GotoKind::References
+                } else {
+                    GotoKind::Definition
+                })
+            }
             // -------- Vim-style read-only cursor (only when the code view has
             // focus, so it never steals keys from a text input) --------
             _ if cmd

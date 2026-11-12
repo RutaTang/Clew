@@ -2206,23 +2206,29 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         }
         // Clip the preview to its own column so a long line never draws over the
         // trailing pencil/✕ icons; truncate with an ellipsis for the cut affordance.
+        // A blank line says so: its row showed its number and nothing else.
+        let line_text = crate::highlight::line_in_order(&bm.preview);
+        let preview = if line_text.trim().is_empty() {
+            text(tr!("(blank line)"))
+                .size(ts::BODY)
+                .color(theme::dim())
+                .wrapping(Wrapping::None)
+        } else {
+            text(super::steady::cut(
+                &line_text,
+                preview_room,
+                ts::BODY,
+                crate::fonts::UI,
+            ))
+            .size(ts::BODY)
+            .wrapping(Wrapping::None)
+        };
         let top = row![
             text(bm.line.to_string())
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .width(36),
-            container(
-                text(super::steady::cut(
-                    &crate::highlight::line_in_order(&bm.preview),
-                    preview_room,
-                    ts::BODY,
-                    crate::fonts::UI,
-                ))
-                .size(ts::BODY)
-                .wrapping(Wrapping::None)
-            )
-            .clip(true)
-            .width(Fill),
+            container(preview).clip(true).width(Fill),
         ]
         .spacing(4)
         .width(Fill);

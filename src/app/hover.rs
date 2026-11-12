@@ -476,6 +476,7 @@ impl App {
             insight,
             served,
             by_pointer: true,
+            line_top: None,
         });
         // The menu acts where it was opened: the caret goes there, as a
         // click puts it — the code said nothing of what it would act on. A
@@ -536,6 +537,11 @@ impl App {
         let (sx, sy) = (v.scroll_x, v.scroll_y);
         // In the content's space, as a click's point comes.
         let opened = self.on_context_menu_opened(pane, line, col, x + sx, y + sy);
+        // Where its line starts: with no room below it, the menu opens
+        // above the line, not over it.
+        if let Some(menu) = self.proj.context_menu.as_mut() {
+            menu.line_top = Some((y - lh).max(panes.y));
+        }
         // Opened from the keys, on its first row: Enter runs it. With
         // nothing chosen, Enter did nothing until ↓ was pressed.
         let ring = self.on_tab(true, false);

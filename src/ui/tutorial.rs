@@ -575,6 +575,25 @@ fn progress_bar<'a>(done: f32) -> Element<'a, Message> {
     .into()
 }
 
+/// Whether a step of the sheet before the tour failed — its model could
+/// not be reached, Tea Shop could not be made ready — and is said in the
+/// colour failures are said in.
+pub(crate) fn step_failed(
+    app: &App,
+    prep: &crate::app::tutorial::TourPrep,
+    need: crate::app::tutorial::Need,
+) -> bool {
+    use crate::app::state::ConnectionTest;
+    use crate::app::tutorial::Need;
+    match need {
+        Need::Model => {
+            app.llm_available && matches!(app.model_check.result, ConnectionTest::Failed(_))
+        }
+        Need::Server => matches!(prep.sample, Some(Err(_))),
+        Need::Embeddings => false,
+    }
+}
+
 /// The sheet before the tour (see `crate::app::tutorial::TourPrep`): what
 /// the tour needs, one step at a time — the step it is on lit and its
 /// button the one to press, a step done ticked — and Start the Tour once
@@ -670,11 +689,19 @@ pub(crate) fn tour_prep_sheet<'a>(
         if optional {
             title = title.push(text(tr!("Optional")).size(ts::SMALL).color(theme::dim()));
         }
+        // A step that failed says so in the colour failures are said in:
+        // "Couldn't reach …" stood in the grey of the help beside it, where
+        // Settings says the same in red.
+        let failed = step_failed(app, prep, need);
         let mut lines = column![
             title,
             text(about)
                 .size(ts::BODY)
-                .color(theme::fg_muted())
+                .color(if failed {
+                    theme::danger()
+                } else {
+                    theme::fg_muted()
+                })
                 .wrapping(Wrapping::Word),
         ]
         .spacing(4);

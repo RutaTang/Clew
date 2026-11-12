@@ -1641,6 +1641,7 @@ fn a_functions_explain_writes_its_own_explanation() {
             insight: None,
             served: true,
             by_pointer: true,
+            line_top: None,
         });
     };
     let origin = explain::Node::Function {
@@ -3236,6 +3237,7 @@ fn the_context_menu_bookmarks_its_line_with_a_note() {
             insight: None,
             served: true,
             by_pointer: true,
+            line_top: None,
         });
     };
     // Toggle Bookmark: on the menu's line (0-based 3: line 4), the caret
@@ -10043,6 +10045,7 @@ fn add_to_ask_without_a_selection_adds_the_line_clicked() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     };
     // `pub fn origin() -> Point {`, the third line.
     app.proj.context_menu = Some(menu(2));
@@ -10101,6 +10104,7 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
         insight,
         served: true,
         by_pointer: true,
+        line_top: None,
     };
     app.proj.context_menu = Some(menu(None));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyIsThisHere));
@@ -10158,6 +10162,7 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
     // Nor does the language's answer, from a menu no pointer opened.
     app.proj.context_menu = Some(ContextMenu {
         by_pointer: false,
+        line_top: None,
         ..menu(Some(crate::InsightKind::ExpandMacro))
     });
     let _ = app.update(Message::Hover(HoverMsg::Insight));
@@ -13985,6 +13990,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     app.proj.find.open = true;
     app.proj.find.query = "Point".into();
@@ -21253,6 +21259,7 @@ fn expand_macro_waits_for_the_server() {
         insight: Some(crate::InsightKind::ExpandMacro),
         served,
         by_pointer: true,
+        line_top: None,
     };
     let offered = |app: &App| {
         crate::ui::heard::gather(app)
@@ -23189,6 +23196,7 @@ fn opening_a_text_input_form_takes_the_keyboard_from_the_code() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
     assert_eq!(app.proj.bp_cond_edit.as_ref().map(|e| &e.0), Some(&abs));
@@ -24608,6 +24616,7 @@ fn fill_project_session(app: &mut App) {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     p.diff = Some(DiffState::new(
         file.clone(),
@@ -31918,6 +31927,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 insight: None,
                 served: true,
                 by_pointer: true,
+                line_top: None,
             })
         }),
         Box::new(|a| {
@@ -37023,6 +37033,50 @@ fn a_notice_on_the_status_line_goes_once_read() {
     let _ = app.update(Message::Noop);
     let _ = app.update(Message::Tick);
     assert_eq!(app.status, "Copied 3 lines");
+}
+
+/// F12 is Go to Definition and ⇧F12 Find References, as most editors have
+/// them: F12 did nothing, and said nothing. Here, with no language server
+/// up, each says so, as `gd` and `gr` do.
+#[test]
+fn f12_goes_to_the_definition_and_shift_f12_finds_references() {
+    use keyboard::key::Named;
+    let mut app = scanned_app("f12-goto");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    app.code_focused = true;
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.caret = Some((0, 4));
+    }
+    let said = |app: &mut App, shift: bool| {
+        app.status.clear();
+        let modifiers = if shift {
+            keyboard::Modifiers::SHIFT
+        } else {
+            keyboard::Modifiers::empty()
+        };
+        let _ = app.update(key_press(keyboard::Key::Named(Named::F12), modifiers));
+        app.status.clone()
+    };
+    let by_gd = {
+        app.status.clear();
+        let _ = app.update(key_press(
+            keyboard::Key::Character("g".into()),
+            keyboard::Modifiers::empty(),
+        ));
+        let _ = app.update(key_press(
+            keyboard::Key::Character("d".into()),
+            keyboard::Modifiers::empty(),
+        ));
+        app.status.clone()
+    };
+    assert!(!by_gd.is_empty(), "gd said nothing");
+    assert_eq!(said(&mut app, false), by_gd, "F12 is gd");
+    assert!(!said(&mut app, true).is_empty(), "⇧F12 said nothing");
+    // Not with a page over the code.
+    let _ = app.update(Message::Overview(OverviewMsg::ShowStats));
+    app.code_focused = true;
+    assert_eq!(said(&mut app, false), "");
 }
 
 /// A page over the code — the overview, the statistics, a doc page — is put

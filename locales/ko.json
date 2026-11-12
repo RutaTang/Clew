@@ -6,6 +6,7 @@
  "'{arg1}' not found in archive": "아카이브에 '{arg1}' 파일이 없음",
  "'{binary}' not found on PATH — {arg1}, or choose where it is": "PATH에서 '{binary}' 프로그램을 찾을 수 없음 — 설치하거나({arg1}) 위치를 직접 지정하세요",
  "'{tool}' is required to install this server but was not found on PATH; install it, or choose a server program of your own": "이 서버를 설치하려면 '{tool}' 프로그램이 필요하지만 PATH에서 찾을 수 없음 — 설치하거나 서버 프로그램을 직접 지정하세요",
+ "(blank line)": "(빈 줄)",
  "(line not read)": "(읽지 않은 줄)",
  "(no arguments)": "(인수 없음)",
  "(optional) ~/.ssh/id_ed25519": "(선택 사항) ~/.ssh/id_ed25519",

@@ -3734,6 +3734,7 @@ fn escape_names_the_topmost_overlay() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     assert!(matches!(
         super::escape_message(&app),
@@ -3798,6 +3799,7 @@ fn escape_closes_overlays_one_at_a_time() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     open_tools_menu(&mut app);
     let escape = || {
@@ -4056,6 +4058,7 @@ fn the_context_menu_has_each_languages_own_rows() {
         insight: crate::InsightKind::for_lang("rust"),
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Memory Layout"));
@@ -4448,6 +4451,7 @@ fn the_code_menu_shows_the_breakpoints_key() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     let mut sim = sim_of(&app);
     let row = text_at(&mut sim, |t| t == "Toggle Breakpoint", 0).expect("the row");
@@ -4587,6 +4591,7 @@ fn a_breakpoints_condition_dialog_edits_and_removes_it() {
             insight: None,
             served: true,
             by_pointer: true,
+            line_top: None,
         });
     };
     menu(&mut app);
@@ -9455,6 +9460,82 @@ fn a_long_entry_puts_its_chain_under_it() {
     );
 }
 
+/// L5: an entry's tag stays on one line in Chinese — "测试" was set a
+/// character to a line beside a long test's name, the row as tall as two.
+#[test]
+fn an_entrys_tag_stays_on_one_line_in_chinese() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let long_entry = "test_tax_is_on_the_discounted_amount";
+    let step = "total";
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            callers,
+            callees,
+        };
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call(long_entry, vec![], vec![1]),
+                    call(step, vec![0], vec![2]),
+                    call("work", vec![1], vec![]),
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    let symbol = |name: &str, line: usize, entry: Option<crate::index::EntryKind>| {
+        crate::index::SymbolEntry {
+            name: name.into(),
+            kind: "function".into(),
+            rel: "src/lib.rs".into(),
+            abs: lib.clone(),
+            line,
+            is_test: name == long_entry,
+            entry,
+        }
+    };
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(vec![
+            symbol(long_entry, 1, None),
+            symbol(step, 2, None),
+            symbol("work", 3, None),
+        ]),
+    );
+    app.proj.symbol_index_rev += 1;
+    crate::fonts::load();
+    let width = super::panes::margin_w(&app) - 24.0;
+    let node = crate::explain::Node::Function {
+        file: lib.clone(),
+        name: "work".into(),
+        ordinal: 0,
+    };
+    let tag = crate::i18n::with_lang(crate::i18n::Lang::Zh, || {
+        let mut sim = iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(width, 600.0),
+            Element::from(iced::widget::Column::with_children(super::call_flow_rows(
+                &app, &node,
+            ))),
+        );
+        text_at(&mut sim, |t| t == "测试", 0)
+    });
+    let tag = tag.expect("the test's tag");
+    let line = super::steady::width_of("测", super::ts::CAPTION, crate::fonts::UI);
+    assert!(
+        tag.width >= 1.5 * line && tag.height < 1.6 * super::ts::CAPTION * 1.3,
+        "on one line: {tag:?}"
+    );
+}
+
 /// The REACHED FROM section: the chain from an entry point down to the
 /// explained function, entry first, each step a button; an entry point says
 /// so instead; a function no entry reaches says that; and a project without
@@ -9924,11 +10005,12 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
     assert!(shows(&mut sim, "GET /users"));
     drop(sim);
     assert!(super::map_picker(&app).is_some());
-    // Counted where its nodes are of one kind; a route and its handler are
-    // not two routes (L4).
+    // Each map by its name alone: a count beside one (where its nodes were
+    // all of one kind) read as if the others had nothing in them (L18),
+    // and a route and its handler are not two routes (L4).
     assert_eq!(
         super::MapChoice::of(&app.proj.maps[0]).to_string(),
-        "Database schema (2)"
+        "Database schema"
     );
     let mut routes = app.proj.maps[1].clone();
     routes
@@ -10452,11 +10534,26 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
     ));
     tree.push_root(node(Role::Passed, "render", 3, "render(total)"));
     tree.push_root(node(Role::Read, "", 9, ""));
+    // L14: a line longer than the sidebar is cut with an ellipsis, whole
+    // where the pointer rests: it ended at the sidebar's edge mid-word.
+    let long = "off = cents(rule.amount_off(order, base, members_only_discount_table))";
+    tree.push_root(node(Role::Read, "", 12, long));
     app.proj.flow = Some(tree);
     app.sidebar = crate::SidebarTab::Flow;
+    app.sidebar_width = 260.0;
+    let mut sim = sim_elem(super::flow_tab(&app));
+    assert!(!shows(&mut sim, long), "whole, past the sidebar's edge");
+    let cut = text_at(
+        &mut sim,
+        |t| t.starts_with("off = cents(") && t.ends_with('…'),
+        0,
+    )
+    .expect("cut, and said so");
+    assert!(cut.x + cut.width <= app.sidebar_width, "{cut:?}");
+    drop(sim);
     let mut sim = sim_elem(super::flow_tab(&app));
     assert!(shows(&mut sim, "total"));
-    assert!(shows(&mut sim, "3 places"));
+    assert!(shows(&mut sim, "4 places"));
     assert!(shows(&mut sim, "ASSIGNED"));
     assert!(shows(&mut sim, "= compute()"));
     assert!(shows(&mut sim, "PASSED TO"));
@@ -10490,6 +10587,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     assert!(shows(&mut sim_of(&app), "Trace Value"));
     app.proj.context_menu = None;
@@ -10621,6 +10719,28 @@ fn the_docs_grouping_follows_the_installed_index() {
     assert!(
         !shows(&mut sim, "src/main.rs"),
         "the first index's grouping was served"
+    );
+}
+
+/// L8: a bookmark on a blank line says so — its row showed its number
+/// and nothing else.
+#[test]
+fn a_bookmark_on_a_blank_line_says_so() {
+    let mut app = reader_app();
+    app.proj.bookmarks = vec![crate::Bookmark {
+        rel: "a.rs".into(),
+        line: 13,
+        preview: "    ".into(),
+        note: None,
+    }];
+    app.sidebar = crate::SidebarTab::Marks;
+    app.show_left_sidebar = true;
+    let mut sim = sim_of(&app);
+    let number = text_at(&mut sim, |t| t == "13", 0).expect("its line");
+    let said = text_at(&mut sim, |t| t == "(blank line)", 0).expect("said blank");
+    assert!(
+        (said.center_y() - number.center_y()).abs() < 2.0,
+        "on its row"
     );
 }
 
@@ -11342,6 +11462,22 @@ fn a_long_glossary_section_does_not_hide_the_next() {
         "the modules after a capped section"
     );
     assert!(shows(&mut sim, "Talks to the server"));
+    drop(sim);
+    // L20: on a page wider than its column, the column is in the middle:
+    // held to the left, the page's right was a band of nothing.
+    let wide = 1600.0;
+    let mut sim = iced_test::Simulator::with_size(
+        Default::default(),
+        Size::new(wide, 900.0),
+        super::glossary_home(&app),
+    );
+    let title = text_at(&mut sim, |t| t == "Glossary", 0).expect("its title");
+    let left = title.x;
+    let right = wide - (left + super::docs_stats::GLOSSARY_W);
+    assert!(
+        (left - right).abs() < 4.0,
+        "in the middle: {left} left, {right} right"
+    );
 }
 
 /// The settings' build choices, language by language: what each group
@@ -11809,6 +11945,7 @@ fn the_context_menu_offers_the_languages_own_action() {
         insight,
         served: true,
         by_pointer: true,
+        line_top: None,
     };
     app.proj.context_menu = Some(menu(Some(crate::InsightKind::ExpandMacro)));
     assert!(shows(&mut sim_of(&app), "Expand Macro"));
@@ -13250,9 +13387,20 @@ fn the_tour_sheet_says_all_set_only_of_a_model_that_answered() {
     assert!(says(&app, "Couldn't reach 127.0.0.1:9"));
     assert!(!says(&app, "All set."));
     assert_eq!(prep.current(&app), Some(crate::app::tutorial::Need::Model));
+    // Said as a failure, in its colour: it stood in the grey of the help.
+    assert!(super::tutorial::step_failed(
+        &app,
+        &prep,
+        crate::app::tutorial::Need::Model
+    ));
     app.model_check.result = ConnectionTest::Answered("m".into());
     assert!(says(&app, "All set."));
     assert!(!says(&app, "Test connection"));
+    assert!(!super::tutorial::step_failed(
+        &app,
+        &prep,
+        crate::app::tutorial::Need::Model
+    ));
     assert_ne!(prep.current(&app), Some(crate::app::tutorial::Need::Model));
     // Settings, opened from the sheet's next step, tests its own form: the
     // sheet's check stands. It went back to "Check that it answers".
@@ -15310,6 +15458,7 @@ fn the_context_menu_waits_for_the_language_server() {
         insight: None,
         served,
         by_pointer: true,
+        line_top: None,
     };
     app.proj.context_menu = Some(menu(false));
     for waits in ["Go to Definition", "Find References", "Call Hierarchy"] {
@@ -17367,6 +17516,7 @@ fn audited_states() -> Vec<(String, App)> {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     states.push(("the context menu".into(), app));
     let mut app = base_clone(&base);
@@ -19517,6 +19667,13 @@ fn shift_f10_opens_the_menu_of_what_the_keyboard_is_on() {
     )));
     let menu = app.proj.context_menu.as_ref().expect("the code's menu");
     assert_eq!((menu.line, menu.col), (line, 4));
+    // It knows its line, to open above it where there is no room below.
+    let line_h = app.line_height();
+    assert!(
+        menu.line_top
+            .is_some_and(|top| (menu.y - top - line_h).abs() < 0.5),
+        "{menu:?}"
+    );
     let panes = super::panes_rect(&app).expect("the panes");
     assert!(
         panes.contains(iced::Point::new(menu.x, menu.y)),
