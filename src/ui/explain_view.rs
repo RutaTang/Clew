@@ -50,6 +50,57 @@ pub(crate) fn render_answer<'a>(
     )
 }
 
+/// A cited path's words held on one line: a path broke after a `/`
+/// ("(teashop/" over "pricing.py:32)") and a line number after its `:`.
+/// A word joiner after each, which draws nothing — in what is shown
+/// only: the link goes where it went. Only a citation (code with a link):
+/// other code wraps as it did.
+pub(crate) fn held_together<L>(
+    mut span: iced::widget::text::Span<'static, L>,
+    code: iced::Font,
+) -> iced::widget::text::Span<'static, L> {
+    if span.link.is_some() && span.font == Some(code) && span.text.contains(['/', '\\', ':']) {
+        let mut held = String::with_capacity(span.text.len() + 12);
+        for c in span.text.chars() {
+            held.push(c);
+            if matches!(c, '/' | '\\' | ':') {
+                held.push('\u{2060}');
+            }
+        }
+        span.text = held.into();
+    }
+    span
+}
+
+/// The markdown viewer of prose set in no type of its own: iced's own
+/// look, a citation's path held on one line ([`held_together`]).
+#[derive(Clone, Copy)]
+struct Plain;
+
+impl<'a> iced::widget::markdown::Viewer<'a, Message> for Plain {
+    fn on_link_click(url: iced::widget::markdown::Uri) -> Message {
+        Message::Content(ContentMsg::OpenLink(url))
+    }
+
+    fn paragraph(
+        &self,
+        settings: iced::widget::markdown::Settings,
+        text: &iced::widget::markdown::Text,
+    ) -> Element<'a, Message> {
+        let code = settings.style.inline_code_font;
+        let spans: Vec<_> = text
+            .spans(settings.style)
+            .iter()
+            .cloned()
+            .map(|span| held_together(span, code))
+            .collect();
+        iced::widget::rich_text(spans)
+            .size(settings.text_size)
+            .on_link_click(Self::on_link_click)
+            .into()
+    }
+}
+
 /// A margin note's text size.
 pub(crate) const NOTE_SIZE: f32 = 13.0;
 /// A margin note's line height, relative to its size.
@@ -125,8 +176,14 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for Prose {
                 .line_height(line)
         };
         let mut spans = Vec::new();
-        for span in text.spans(settings.style).iter().cloned() {
-            if span.font == Some(settings.style.inline_code_font) {
+        let code = settings.style.inline_code_font;
+        for span in text
+            .spans(settings.style)
+            .iter()
+            .cloned()
+            .map(|span| held_together(span, code))
+        {
+            if span.font == Some(code) {
                 spans.push(room());
                 spans.push(
                     span.size(PROSE_CODE_SIZE)
@@ -167,10 +224,11 @@ fn render_segments<'a>(
                     &prose,
                 ))
             }
-            PreparedSeg::Markdown(items) => out.push(
-                iced::widget::markdown::view(items, theme::markdown_settings())
-                    .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string()))),
-            ),
+            PreparedSeg::Markdown(items) => out.push(iced::widget::markdown::view_with(
+                items,
+                theme::markdown_settings(),
+                &Plain,
+            )),
             PreparedSeg::DisplayMath(key, tex) => out.push(match app.proj.explain.svgs.get(key) {
                 Some(sv) => container(svg_widget(sv))
                     .width(Fill)
@@ -199,10 +257,17 @@ fn render_segments<'a>(
                         // The prose around an equation is markdown too
                         // (bold, code, `clew:` citation links), not raw text.
                         PreparedInline::Text(piece) => line.push(
-                            iced::widget::rich_text(piece.spans(theme::markdown_settings().style))
-                                .color(theme::fg())
-                                .on_link_click(|v| Message::Content(ContentMsg::OpenLink(v)))
-                                .into(),
+                            iced::widget::rich_text({
+                                let style = theme::markdown_settings().style;
+                                piece
+                                    .spans(style)
+                                    .into_iter()
+                                    .map(|span| held_together(span, style.inline_code_font))
+                                    .collect::<Vec<_>>()
+                            })
+                            .color(theme::fg())
+                            .on_link_click(|v| Message::Content(ContentMsg::OpenLink(v)))
+                            .into(),
                         ),
                         PreparedInline::Math(key, tex) => {
                             line.push(match app.proj.explain.svgs.get(key) {

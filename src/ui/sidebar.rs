@@ -359,6 +359,27 @@ pub(crate) fn walk_title(wt: &crate::walkthrough::Walkthrough) -> String {
     }
 }
 
+/// Why a run's tour has fewer steps than the run had stops, when it has:
+/// steps through one function make one step, and a stop outside the
+/// project makes none. `None` for any other tour, and for a run's whose
+/// every stop is a step.
+pub(crate) fn folded_stops(wt: &crate::walkthrough::Walkthrough) -> Option<String> {
+    let stops = wt
+        .steps
+        .iter()
+        .filter_map(|s| s.stop.as_ref().map(|f| f.ordinal))
+        .max()?;
+    let steps = wt.steps.len();
+    (stops > steps).then(|| {
+        trn!(
+            "1 step from {stops} stops: a function stepped through is one step, and stops outside the project are left out.",
+            "{n} steps from {stops} stops: a function stepped through is one step, and stops outside the project are left out.",
+            steps,
+            stops = stops
+        )
+    })
+}
+
 /// The program a run's tour made without a model is of: its title, as
 /// shown, already names it.
 fn plain_run_of(wt: &crate::walkthrough::Walkthrough) -> Option<&str> {
@@ -821,6 +842,25 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
 
         // Expanded: the tour's steps, indented, current one highlighted.
         if is_open {
+            // A run's tour has fewer steps than the run had stops: said
+            // why, above them — "Stop 1" then "Stop 4" said nothing of 2
+            // and 3, under "Walk the last run (4 stops)".
+            if let Some(why) = folded_stops(wt) {
+                list = list.push(
+                    container(
+                        text(why)
+                            .size(ts::CAPTION)
+                            .color(theme::dim())
+                            .wrapping(iced::widget::text::Wrapping::Word),
+                    )
+                    .padding(Padding {
+                        top: 2.0,
+                        right: 8.0,
+                        bottom: 4.0,
+                        left: 22.0,
+                    }),
+                );
+            }
             // A reading guide is a tree: each step under the one it is read
             // from, by its depth, with a branch mark where a tour numbers it.
             let tree = crate::walkthrough::is_guide(wt);

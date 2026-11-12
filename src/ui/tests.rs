@@ -10490,6 +10490,85 @@ fn walkthroughs_are_named_as_their_actions_in_the_language_spoken_now() {
     });
 }
 
+/// A cited path is held on one line in prose: a run's tour said
+/// "(teashop/" on one line and "pricing.py:32)" on the next. Held only in
+/// what is shown — the link goes where it went — and only a citation's:
+/// other code wraps as it did.
+#[test]
+fn a_cited_path_is_held_on_one_line() {
+    use iced::widget::markdown::{Item, parse};
+    let md = crate::richmd::linkify_citations(
+        "Called from `teashop/pricing.py:32`, see `a/b` too.",
+        |p| (p == "teashop/pricing.py").then(|| p.to_string()),
+    );
+    let items: Vec<Item> = parse(&md).collect();
+    let Some(Item::Paragraph(text)) = items.first() else {
+        panic!("a paragraph: {md}");
+    };
+    let style = crate::theme::markdown_settings().style;
+    let spans: Vec<_> = text
+        .spans(style)
+        .iter()
+        .cloned()
+        .map(|span| super::explain_view::held_together(span, style.inline_code_font))
+        .collect();
+    let cited = spans
+        .iter()
+        .find(|s| s.link.is_some())
+        .expect("the citation, a link");
+    assert_eq!(cited.text, "teashop/\u{2060}pricing.py:\u{2060}32");
+    let link = format!("{:?}", cited.link);
+    assert!(
+        link.contains("teashop/pricing.py") && !link.contains('\u{2060}'),
+        "the link as it was: {link}"
+    );
+    let plain = spans
+        .iter()
+        .find(|s| s.link.is_none() && s.text == "a/b")
+        .map(|s| s.text.to_string());
+    assert_eq!(plain.as_deref(), Some("a/b"), "other code as it was");
+}
+
+/// A run's tour with fewer steps than the run had stops says why, above
+/// its steps: "Stop 1" then "Stop 4" said nothing of 2 and 3. Not said
+/// where every stop is a step, nor for a tour that is not a run's.
+#[test]
+fn a_run_tour_says_why_it_has_fewer_steps_than_stops() {
+    use crate::walkthrough::{Step, StopFacts, Walkthrough};
+    let step = |ordinal: usize| Step {
+        title: "discounts".into(),
+        file: "teashop/pricing.py".into(),
+        symbol: Some("discounts".into()),
+        line: Some(30),
+        narration: String::new(),
+        depth: 0,
+        stop: Some(StopFacts {
+            ordinal,
+            reason: "step".into(),
+            caller: None,
+        }),
+    };
+    let mut run = Walkthrough {
+        made: None,
+        title: crate::walkthrough::plain_run_title("main.py"),
+        scope: "@trace main.py".into(),
+        steps: vec![step(1), step(4)],
+    };
+    let said = "2 steps from 4 stops: a function stepped through is one step, and stops outside the project are left out.";
+    assert_eq!(super::folded_stops(&run).as_deref(), Some(said));
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    app.proj.walk.library.push(run.clone());
+    app.proj.walk.open = Some(run.scope.clone());
+    let mut sim = sim_elem(super::walk_library(&app));
+    assert!(shows(&mut sim, said), "said above its steps");
+    run.steps = vec![step(1), step(2)];
+    assert_eq!(super::folded_stops(&run), None, "every stop a step");
+    run.steps.iter_mut().for_each(|s| s.stop = None);
+    assert_eq!(super::folded_stops(&run), None, "not a run's");
+}
+
 /// A tour's row, and its Regenerate and Delete, are heard by the title its
 /// row shows — the Tab ring and the voice said "Debug run (main.py)" and
 /// "Delete: Debug run (main.py)" beside a row that read "Debug run of
