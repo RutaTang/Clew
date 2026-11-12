@@ -258,9 +258,10 @@ pub(crate) fn time_travel_banner<'a>(
         ]
         .spacing(8)
         .align_y(iced::Center);
-        // Where it says to check the base URL, the way there.
-        if crate::app::tasks::unreached(why) {
-            row = row.push(settings_fix_button(crate::app::state::LlmField::BaseUrl));
+        // Where it points at a setting (the base URL, the key), the way
+        // there.
+        if let Some(field) = crate::app::tasks::setting_to_fix(why) {
+            row = row.push(settings_fix_button(field));
         }
         row.into()
     } else {

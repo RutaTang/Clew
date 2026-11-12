@@ -1176,8 +1176,7 @@ impl App {
             // (and Settings): said only as passing text, it was squeezed
             // in after an older failure, cut short, with no controls.
             Some((failed_sha, e)) => {
-                let about = crate::app::tasks::unreached(&e)
-                    .then_some(crate::app::state::LlmField::BaseUrl);
+                let about = crate::app::tasks::setting_to_fix(&e);
                 self.say_failure_again(
                     move || {
                         tr!(
@@ -1603,6 +1602,11 @@ impl App {
                         return Task::none();
                     }
                 }
+                // What failed in the scope left goes with it: a story's Try
+                // again did nothing in the whole file's scope, and a
+                // commit's, gone from the new history, nothing either.
+                self.forget_failure_of(crate::app::state::FailureOf::Story);
+                self.forget_failure_of(crate::app::state::FailureOf::Summary);
                 Task::done(Message::TimeTravel(TimeTravelMsg::Start { symbol }))
             }
             TimeTravelMsg::Exit => {
@@ -1640,7 +1644,10 @@ impl App {
                     .as_ref()
                     .filter(|tt| tt.session == session)
                     .and_then(|tt| tt.commits.iter().position(|c| c.sha == sha));
+                // Gone from the history shown: said, not a click that did
+                // nothing.
                 let Some(at) = at else {
+                    self.status = tr!("That commit is no longer in this history").into();
                     return Task::none();
                 };
                 let shown = if self

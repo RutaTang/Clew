@@ -61,7 +61,14 @@ pub struct Step {
     /// ([`Step::said`]). Kept as a sentence, it stayed in the language
     /// spoken when the run was walked ("Stop 1 (breakpoint) in discounts…"
     /// in a French window).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Read leniently: a step whose `stop` is not Clew's own shape (a
+    /// model's echo of it, `1.0` for its number) is a step without one, not
+    /// a walkthrough that fails to parse.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_stop"
+    )]
     pub stop: Option<StopFacts>,
 }
 
@@ -520,7 +527,17 @@ pub fn plain_run_title(program: &str) -> String {
 /// function does drawn from the code's summaries where there are any.
 pub fn trace_prompt(project_name: &str, plain: &Walkthrough, summaries: &str) -> String {
     use clew_core::explain::{UNTRUSTED_NOTE, fenced, prompt_label};
-    let steps = serde_json::to_string_pretty(&plain.steps).unwrap_or_default();
+    // The steps as the model is to give them back: Clew's own facts of
+    // each stop (`stop`) are not for it to echo.
+    let steps: Vec<Step> = plain
+        .steps
+        .iter()
+        .map(|s| Step {
+            stop: None,
+            ..s.clone()
+        })
+        .collect();
+    let steps = serde_json::to_string_pretty(&steps).unwrap_or_default();
     format!(
         "Project: {}\nNarrating: {}.\n\n{UNTRUSTED_NOTE}\n\n\
          The run's steps, in the order the program ran them (keep every step, \
@@ -731,6 +748,15 @@ pub fn parse(response: &str) -> Result<Walkthrough, Failure> {
 /// A step's `line`, however the model wrote it: `42`, `42.0` or `"42"`.
 /// Anything else (a negative, text, an object) is no line at all rather than
 /// a failed parse of the whole tour.
+/// A step's `stop`, if it is one: anything else is none at all.
+fn lenient_stop<'de, D>(deserializer: D) -> Result<Option<StopFacts>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
+}
+
 fn lenient_line<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1424,6 +1450,15 @@ mod trace_tests {
         )
         .unwrap();
         assert_eq!(narrated.steps[0].said(), "Mine.");
+        // A stop echoed in another shape is no stop, not an answer that
+        // fails to parse — and the prompt gives the model none to echo.
+        let echoed = parse(
+            r#"{"title":"t","steps":[{"title":"x","file":"pricing.py","narration":"Mine.",
+                "stop":{"ordinal":1.0,"caller":{"name":"total"}}}]}"#,
+        )
+        .expect("parsed, its stop dropped");
+        assert_eq!(echoed.steps[0].said(), "Mine.");
+        assert!(!trace_prompt("p", &kept[0], "").contains("\"stop\""));
     }
 
     /// A guide's depths are made a tree: it starts at 0, no step is more

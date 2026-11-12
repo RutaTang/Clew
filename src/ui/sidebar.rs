@@ -597,17 +597,16 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                 &label,
                 Message::Walk(WalkMsg::ForgetFailure),
             ));
-        // Where it says to check the base URL, the way there: beside Try
-        // again and as it is, not plain words on a line of their own.
-        let settings = crate::app::tasks::unreached(why).then(|| {
+        // Where it points at a setting (the base URL, the key), the way
+        // there: beside Try again and as it is, not plain words on a line
+        // of their own.
+        let settings = crate::app::tasks::setting_to_fix(why).map(|field| {
             button(text(tr!("Settings")).size(ts::SMALL).color(theme::accent()))
                 .style(theme::toolbar_button)
                 .padding([4, 8])
                 .on_press(super::heard::said(
                     tr!("Settings"),
-                    Message::Settings(crate::SettingsMsg::Fix(
-                        crate::app::state::LlmField::BaseUrl,
-                    )),
+                    Message::Settings(crate::SettingsMsg::Fix(field)),
                 ))
         });
         // Its controls on its title's line, and why it failed under them

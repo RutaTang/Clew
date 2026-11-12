@@ -545,17 +545,25 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             + 2.0
             + 4.0 * 4.0
     };
+    // Every gap of its row counted (the note's slot, empty, keeps its two),
+    // and the hover switch where it is shown: two gaps short and without
+    // it, the header stayed on one row where it cut Walk this run.
     let said_w = w(if plain { tr!("Run") } else { tr!("Debug") }, ts::BASE)
-        + 8.0
+        + 4.0 * 8.0
         + status_w
-        + 8.0
-        + if plain { 0.0 } else { trace_control_w(app) };
+        + if plain { 0.0 } else { trace_control_w(app) }
+        + hover_eval_w(app);
     let sidebar = if app.show_left_sidebar {
         app.sidebar_width
     } else {
         0.0
     };
-    let panel_w = app.window_width - super::toolbar::STRIP_W - super::sheet::SHEET_GAP - sidebar;
+    // Less the panel's own padding, either side.
+    let panel_w = app.window_width
+        - super::toolbar::STRIP_W
+        - super::sheet::SHEET_GAP
+        - sidebar
+        - 2.0 * DEBUG_PANEL_PAD_X;
     let stacked = panel_w - reach < said_w + 21.0 + controls_w;
     let header: Element<'_, Message> = if stacked {
         container(
@@ -756,11 +764,32 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     .spacing(6)
     .height(Fill);
 
-    container(column![header, panels].spacing(6).padding([8, 12]))
-        .width(Fill)
-        .height(Fill)
-        .style(theme::on_sheet)
-        .into()
+    container(
+        column![header, panels]
+            .spacing(6)
+            .padding([8.0, DEBUG_PANEL_PAD_X]),
+    )
+    .width(Fill)
+    .height(Fill)
+    .style(theme::on_sheet)
+    .into()
+}
+
+/// The debug panel's padding at its sides.
+const DEBUG_PANEL_PAD_X: f32 = 12.0;
+
+/// How wide [`hover_eval_control`] is where it is shown: its box, the gap
+/// and its words; nothing where it is not.
+fn hover_eval_w(app: &App) -> f32 {
+    let ended = app
+        .debug
+        .session
+        .as_ref()
+        .is_none_or(|s| s.status == crate::DebugStatus::Terminated);
+    if app.debug.hover_safe || ended || app.debug.no_debug {
+        return 0.0;
+    }
+    14.0 + 6.0 + super::steady::width_of(tr!("Evaluate on hover"), ts::SMALL, crate::fonts::UI)
 }
 
 /// The least room the debug header's note on what ran is cut to: with

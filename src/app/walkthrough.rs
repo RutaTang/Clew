@@ -197,8 +197,7 @@ impl App {
         if self.proj.walk.seq != seq || !shown {
             return Task::none();
         }
-        let about =
-            crate::app::tasks::unreached(&why).then_some(crate::app::state::LlmField::BaseUrl);
+        let about = crate::app::tasks::setting_to_fix(&why);
         self.say_failure_again(
             move || {
                 tr!(
@@ -471,12 +470,7 @@ impl App {
                 }
                 // The tour on screen says it is done; a save failure said
                 // above stays.
-                self.settle_status(&[
-                    tr!("Generating walkthrough…"),
-                    tr!("Narrating the run…"),
-                    tr!("Reviewing changes…"),
-                    tr!("Retrying walkthrough…"),
-                ]);
+                self.settle_walk_status();
                 // By scope: the merge re-reads a library another window may
                 // have appended to, which moves every index.
                 self.proj.walk.open = Some(scope);
@@ -510,13 +504,17 @@ impl App {
                 // it is read, each with a way to try again — as it failed,
                 // said in the language spoken when it is shown.
                 let raw = e.to_string();
-                let about = crate::app::tasks::unreached(&raw)
-                    .then_some(crate::app::state::LlmField::BaseUrl);
+                let about = crate::app::tasks::setting_to_fix(&raw);
                 self.proj.walk.failed = Some((scope.clone(), raw.clone()));
                 // Said there, in the walkthroughs' own row, with its Try
                 // again: on the status line too, it said the same thing
                 // twice, side by side.
+                // What was being said of it goes, as an older failure's notice
+                // does: "Generating walkthrough…" stood for good beside the
+                // row's "Failed: …".
                 if self.show_left_sidebar && self.sidebar == crate::SidebarTab::Walk {
+                    self.settle_walk_status();
+                    self.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
                     return Task::none();
                 }
                 self.say_failure_again(
@@ -666,6 +664,18 @@ impl App {
         }
         let i = (self.proj.walk.step as i32 + delta).clamp(0, n as i32 - 1) as usize;
         self.walkthrough_goto(i)
+    }
+
+    /// What the status line said while a walkthrough was being made, gone
+    /// once it is done or has failed.
+    fn settle_walk_status(&mut self) {
+        self.settle_status(&[
+            tr!("Generating walkthrough…"),
+            tr!("Writing the reading guide…"),
+            tr!("Narrating the run…"),
+            tr!("Reviewing changes…"),
+            tr!("Retrying walkthrough…"),
+        ]);
     }
 
     /// The open tour's step said again in the language spoken now: a run's

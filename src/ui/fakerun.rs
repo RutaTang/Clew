@@ -153,10 +153,30 @@ pub(crate) fn fake_sheet<'a>(sheet: &'a Sheet) -> Element<'a, Message> {
     ]
     .spacing(8)
     .align_y(iced::Center);
+    // Why no inputs came, with the way to the setting it points at;
+    // Suggest inputs, beside it, asks again.
+    let failed: Element<'_, Message> = match &sheet.suggest_failed {
+        Some(why) => row![
+            text(tr!(
+                "No inputs suggested: {why}",
+                why = crate::app::tasks::ai_reason(why)
+            ))
+            .size(ts::SMALL)
+            .color(theme::danger())
+            .wrapping(Wrapping::WordOrGlyph)
+            .width(Fill),
+        ]
+        .extend(crate::app::tasks::setting_to_fix(why).map(super::panes::settings_fix_button))
+        .spacing(8)
+        .align_y(iced::Center)
+        .into(),
+        None => space().height(0).into(),
+    };
     let panel = container(
         column![
             title,
             Column::with_children(fields).spacing(10),
+            failed,
             row![suggest, space().width(Fill), cancel_b, run_b].spacing(8),
         ]
         .spacing(12),
@@ -262,14 +282,13 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
             ]
             .spacing(4)
             .align_y(iced::Center);
-            // Where it says to check the base URL, the way there: it said
-            // "in Settings" with only Try again and Close beside it.
-            if crate::app::tasks::unreached(why) {
+            // Where it points at a setting (the base URL, the key), the
+            // way there: it said "in Settings" with only Try again and
+            // Close beside it.
+            if let Some(field) = crate::app::tasks::setting_to_fix(why) {
                 header = header.push(control(
                     tr!("Settings"),
-                    Message::Settings(crate::SettingsMsg::Fix(
-                        crate::app::state::LlmField::BaseUrl,
-                    )),
+                    Message::Settings(crate::SettingsMsg::Fix(field)),
                     true,
                 ));
             }

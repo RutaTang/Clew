@@ -517,6 +517,64 @@ fn a_question_typed_in_the_file_picker_can_be_asked() {
     );
 }
 
+/// Words that read as a question in the file picker keep what the picker
+/// finds for them — the symbol "parse config file" names — before the way
+/// to ask them: the bar's commands and files in their place dropped every
+/// symbol a three-word query named.
+#[test]
+fn the_file_picker_keeps_its_symbols_for_a_question() {
+    let mut app = scanned_app("picker-keeps-symbols");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(vec![crate::index::SymbolEntry {
+            name: "parse_config_file".into(),
+            kind: "function".into(),
+            rel: "src/lib.rs".into(),
+            abs: lib.clone(),
+            line: 3,
+            is_test: false,
+            entry: None,
+        }]),
+    );
+    app.proj.symbol_index_stale = true;
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    typed(&mut app, "parse config file");
+    let files = app.proj.project.as_ref().unwrap().files.len();
+    let n = app.palette.len();
+    let symbols: Vec<String> = app
+        .proj
+        .finder
+        .results
+        .iter()
+        .filter_map(|&i| i.checked_sub(n + files))
+        .filter_map(|s| app.proj.symbol_index.get(s).map(|e| e.name.clone()))
+        .collect();
+    assert_eq!(
+        symbols,
+        ["parse_config_file"],
+        "{:?}",
+        app.proj.finder.results
+    );
+    assert_eq!(
+        titles(&app).last().map(String::as_str),
+        Some("Ask Clew: \u{201c}parse config file\u{201d}")
+    );
+    // Picked, it opens where the symbol is.
+    let at = app
+        .proj
+        .finder
+        .results
+        .iter()
+        .position(|&i| i >= n + files)
+        .unwrap();
+    app.proj.finder.selected = at;
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    assert!(!app.proj.finder.open);
+}
+
 /// A question from the command bar that cannot be asked — no key — is
 /// kept in Ask's field with the draft there: the draft put back over it,
 /// it was in no turn, no queue and not the field.

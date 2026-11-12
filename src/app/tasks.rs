@@ -2503,18 +2503,30 @@ pub(crate) fn setting_to_fix(raw: &str) -> Option<crate::app::state::LlmField> {
         return Some(LlmField::BaseUrl);
     }
     let lower = raw.to_lowercase();
-    [
-        "401",
-        "403",
-        "unauthorized",
-        "invalid api key",
-        "invalid_api_key",
-        "incorrect api key",
-        "authentication",
-    ]
-    .iter()
-    .any(|w| lower.contains(w))
+    (has_code(&lower, "401")
+        || has_code(&lower, "403")
+        || [
+            "unauthorized",
+            "invalid api key",
+            "invalid_api_key",
+            "incorrect api key",
+            "authentication",
+        ]
+        .iter()
+        .any(|w| lower.contains(w)))
     .then_some(LlmField::Key)
+}
+
+/// Whether `text` holds the status `code` as a number of its own: "HTTP
+/// 401", "(403)" — not inside another ("140123 tokens", "req_4031",
+/// "403ms"), where the key was blamed and Ask's answer from the index was
+/// not tried.
+fn has_code(text: &str, code: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(code).any(|(at, _)| {
+        !text[..at].chars().next_back().is_some_and(word)
+            && !text[at + code.len()..].chars().next().is_some_and(word)
+    })
 }
 
 /// How a refused connection is worded: by Linux and macOS ("Connection
@@ -4515,6 +4527,29 @@ mod pass_tests {
                 "{gone:?}: {calls} calls, {:?}",
                 outcome.failures
             );
+        }
+    }
+
+    /// A refused key is told by its status as a number of its own: "401"
+    /// inside a token count or a request id blamed the key, and kept Ask
+    /// from answering from the index.
+    #[test]
+    fn a_key_is_blamed_for_401_and_403_alone() {
+        use crate::app::state::LlmField;
+        for raw in [
+            "HTTP 401: invalid api key",
+            "provider said (403) forbidden",
+            "status: 401",
+        ] {
+            assert_eq!(setting_to_fix(raw), Some(LlmField::Key), "{raw}");
+        }
+        for raw in [
+            "this model's maximum context length is 128000 tokens; your messages resulted in 140123 tokens",
+            "request req_4031 failed",
+            "rate limited: retry after 403ms",
+        ] {
+            assert_eq!(setting_to_fix(raw), None, "{raw}");
+            assert!(!provider_refuses_all(raw), "{raw}");
         }
     }
 

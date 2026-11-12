@@ -82,6 +82,10 @@ pub struct Sheet {
     pub(crate) values: Vec<String>,
     /// A suggestion of inputs is being asked for: its number.
     pub(crate) suggesting: Option<u64>,
+    /// Why the last suggestion of inputs failed, as the provider said it:
+    /// said in the sheet, beside Suggest inputs. On the status bar, under
+    /// the sheet, its Try again closed the sheet or did nothing.
+    pub(crate) suggest_failed: Option<String>,
     /// Fake Debug: the trace is stepped through from its first line. Fake
     /// Run lands on its end, on what it returns.
     pub(crate) debug: bool,
@@ -188,6 +192,7 @@ impl App {
             fields,
             values,
             suggesting: None,
+            suggest_failed: None,
             debug,
         });
         // A new run, in a tab of its own.
@@ -499,8 +504,7 @@ impl App {
                 // Kept as it came: worded where it is drawn, with a way to
                 // Settings when the base URL is to blame — on its panel,
                 // and on the status bar with its Try again.
-                let about = crate::app::tasks::unreached(&why)
-                    .then_some(crate::app::state::LlmField::BaseUrl);
+                let about = crate::app::tasks::setting_to_fix(&why);
                 self.proj.fake.failed = Some(why.clone());
                 self.say_failure_again(
                     move || {
@@ -686,6 +690,7 @@ impl App {
             return Task::none();
         };
         sheet.suggesting = Some(seq);
+        sheet.suggest_failed = None;
         let prompt = suggest_prompt(&sheet.target, &sheet.fields);
         let n = sheet.fields.len();
         let ai = self.ai_client();
@@ -783,23 +788,11 @@ impl App {
                             }
                         }
                     }
-                    Err(why) => {
-                        // A failure standing on the status bar, with its
-                        // Try again (and Settings): a grey line at its far
-                        // end, cut short, was the only sign.
-                        let about = crate::app::tasks::setting_to_fix(&why);
-                        self.say_failure_again(
-                            move || {
-                                tr!(
-                                    "No inputs suggested: {why}",
-                                    why = crate::app::tasks::ai_reason(&why)
-                                )
-                            },
-                            Some(Message::Fake(FakeMsg::Suggest)),
-                            crate::app::state::FailureOf::FakeRun,
-                        );
-                        self.failure_about(about);
-                    }
+                    // Said in the sheet, where Suggest inputs is asked again
+                    // (and Settings is, where it points at one): a grey line
+                    // at the status bar's far end was the only sign, and a
+                    // notice there was under the sheet.
+                    Err(why) => sheet.suggest_failed = Some(why),
                 }
                 Task::none()
             }

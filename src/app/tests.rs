@@ -15020,6 +15020,66 @@ fn a_stop_holds_the_queue_and_send_now_asks() {
     );
 }
 
+/// A story's failure goes when the scope changes — its Try again did
+/// nothing in the whole file's scope — and a commit's Try again, the
+/// commit gone from the history shown, says so rather than nothing.
+#[test]
+fn time_travel_failures_go_with_the_scope_they_were_of() {
+    let mut app = scanned_app("tt-failure-scope");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let commit = |sha: &str| git::HistCommit {
+        sha: sha.into(),
+        author: "a".into(),
+        time: 0,
+        subject: format!("subject {sha}"),
+        path: "src/lib.rs".into(),
+    };
+    let asked = app.await_history(root.join("src/lib.rs"), app.proj.active, false, "");
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Ready {
+        stamp: app.stamp(),
+        generation: asked,
+        abs: root.join("src/lib.rs"),
+        rel: "src/lib.rs".into(),
+        lang: None,
+        scope: TimeScope::Symbol {
+            name: "origin".into(),
+            kind: "fn".into(),
+            start: 3,
+            end: 5,
+            ordinal: 0,
+        },
+        commits: Ok(vec![commit("aaaa1111"), commit("bbbb2222")]),
+    }));
+    let session = app.proj.time_travel.as_ref().expect("a session").session;
+    let _story = app.update(Message::TimeTravel(TimeTravelMsg::Story));
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::StoryDone {
+        stamp: app.stamp(),
+        session,
+        result: Err("boom".into()),
+    }));
+    assert_eq!(
+        app.failure_shown().map(|f| f.of),
+        Some(crate::app::state::FailureOf::Story)
+    );
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::ToggleScope));
+    assert!(
+        app.failure_shown().is_none(),
+        "left standing with the scope gone"
+    );
+    // A commit no longer in the history: said.
+    app.status.clear();
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyOf {
+        session,
+        sha: "cccc3333".into(),
+    }));
+    assert!(
+        app.status.contains("no longer in this history"),
+        "{}",
+        app.status
+    );
+}
+
 /// D1-3: a "what & why" summary and the story belong to the time-travel SESSION
 /// they were asked in. Scrubbing moves the per-step generation, and keying on
 /// it dropped the reply and left its spinner up for good; a failure must clear
@@ -21561,6 +21621,43 @@ fn a_superseded_overview_or_search_leaves_the_newer_requests_spinner_alone() {
     }));
     assert!(!app.proj.searching_semantic);
     assert_eq!(app.status, "Search failed: boom");
+}
+
+/// A walkthrough that fails in the Walk view, where its row says why,
+/// leaves nothing it was saying behind on the status line: "Generating
+/// walkthrough…" stood there for good beside the row's "Failed: …" — nor
+/// an older walkthrough's notice, whose Try again asked for the old one.
+#[test]
+fn a_walkthrough_failing_in_view_leaves_no_busy_words() {
+    let mut app = scanned_app("walk-fail-in-view");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    app.say_failure_again(
+        || "Walkthrough failed: before".to_string(),
+        Some(Message::Walk(WalkMsg::Generate("before".into()))),
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    app.proj.walk.seq += 1;
+    let seq = app.proj.walk.seq;
+    app.proj.walk.pending = Some(seq);
+    app.proj.walk.generating = Some("checkout".into());
+    app.status = crate::tr!("Generating walkthrough…").into();
+    let _ = app.update(Message::Walk(WalkMsg::Done {
+        stamp: Stamp {
+            root: Some(root.clone()),
+            epoch: app.project_epoch,
+            conn: None,
+        },
+        seq,
+        scope: "checkout".into(),
+        result: Err(walkthrough::Failure::from(
+            "request failed: Connection refused".to_string(),
+        )),
+    }));
+    assert!(app.proj.walk.failed.is_some(), "its row says why");
+    assert!(!app.status.ends_with('…'), "{:?}", app.status);
+    assert!(app.failure_shown().is_none(), "an older notice stood");
 }
 
 /// D1-9: a walkthrough generation the user has since replaced keeps what it
@@ -31178,6 +31275,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 values: vec![String::new()],
                 target,
                 suggesting: None,
+                suggest_failed: None,
                 debug: false,
             })
         }),

@@ -605,6 +605,15 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
             ));
             continue;
         }
+        // Past the files, the symbols the file picker found (Ctrl+P, a
+        // question typed: what it found, then the way to ask it).
+        if let Some(symbol) = (idx - app.palette.len()).checked_sub(files.len()) {
+            rows.push(match app.proj.symbol_index.get(symbol) {
+                Some(entry) => symbol_row(entry, selected),
+                None => stale_finder_row(selected),
+            });
+            continue;
+        }
         let Some(entry) = files.get(idx - app.palette.len()) else {
             rows.push(stale_finder_row(selected));
             continue;

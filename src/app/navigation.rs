@@ -870,13 +870,25 @@ impl App {
                 // field over the window answered with "No matches", or with
                 // files whose letters a sentence held.
                 let query = self.proj.finder.query.trim();
-                if (self.proj.finder.results.is_empty()
-                    || crate::app::palette::looks_like_a_question(query))
+                let question = crate::app::palette::looks_like_a_question(query);
+                if (self.proj.finder.results.is_empty() || question)
                     && !query.is_empty()
                     && !self.proj.finder.is_line_query()
                 {
+                    let found = std::mem::take(&mut self.proj.finder.results);
                     self.proj.finder.bar_fallback = true;
                     self.refresh_bar();
+                    // What the picker found for it — its files and symbols,
+                    // in its own order — then the way to ask it: the bar's
+                    // commands and files in their place dropped every symbol
+                    // three words named ("parse config file").
+                    if !found.is_empty() {
+                        let ask_at = self.palette.len() - 1;
+                        let past = self.palette.len();
+                        let mut results: Vec<usize> = found.into_iter().map(|i| i + past).collect();
+                        results.push(ask_at);
+                        self.proj.finder.results = results;
+                    }
                 }
             }
             FinderMode::Symbols => {

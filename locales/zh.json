@@ -1623,6 +1623,7 @@
  "Tests of {name}": "{name} 的测试",
  "That call waited too long — the agent went on without it": "该调用等待过久，智能体已跳过它继续执行",
  "That command waited too long — the agent went on without it": "该命令等待过久，智能体已跳过它继续执行",
+ "That commit is no longer in this history": "该提交已不在这段历史中",
  "That needs an AI model: add an API key below, then try it again.": "这需要 AI 模型：请在下方添加 API 密钥，然后再试一次。",
  "The AI writes a tour of the path the last run took": "由 AI 写一份上次运行所经路径的导览",
  "The AI writes a tour of this branch's changes, or of the last commit when there are none": "由 AI 写一份本分支改动的导览；分支没有改动时，改为最近一次提交",

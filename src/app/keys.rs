@@ -140,8 +140,10 @@ impl App {
         if !give_back {
             return None;
         }
-        // Ask made large holds them too, as a dialog does.
-        let held_above = ui::active_overlay(self).is_some_and(|o| o.holds_keys())
+        // Ask made large holds them too, as a dialog does. A menu still up
+        // does not: it lets keys through to nothing and goes with Esc, and
+        // counted, the keys were nowhere once it had gone.
+        let held_above = ui::active_overlay(self).is_some_and(|o| o.holds_keys() && !o.is_menu())
             || self.tutorial.is_some()
             || self.ask_view == crate::AskView::Expanded;
         self.code_focused = self.ring_code && !held_above;
@@ -163,6 +165,13 @@ impl App {
         let was = std::mem::replace(&mut self.menu_up, up);
         if up && !was {
             self.menu_tree_keys = self.tree_focused;
+            // Come up under the ring (Enter on the View button): the ring's
+            // menu as one Tab opened on is — Esc closed the ring alone and
+            // left the menu holding the keys, and a pick left the ring on a
+            // control of the window.
+            if self.ring.is_some() {
+                self.ring_menu = true;
+            }
         }
         if up || !was {
             return None;
@@ -173,6 +182,12 @@ impl App {
         // A dialog its row opened in its place: the ring goes on there, on
         // the dialog's first stop.
         let ring = if self.ring_menu && !held {
+            // What was picked gave the code the keys (Open, from the tree's
+            // menu): theirs once the ring is put away — it gave them back
+            // to the tree the ring came up from.
+            if self.code_focused {
+                self.ring_code = true;
+            }
             self.end_ring(true)
         } else {
             self.ring_menu = false;

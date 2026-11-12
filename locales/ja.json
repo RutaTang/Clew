@@ -1623,6 +1623,7 @@
  "Tests of {name}": "{name} のテスト",
  "That call waited too long — the agent went on without it": "承認の待ち時間を過ぎたため、エージェントはこの呼び出しを実行せずに続行しました",
  "That command waited too long — the agent went on without it": "承認の待ち時間を過ぎたため、エージェントはこのコマンドを実行せずに続行しました",
+ "That commit is no longer in this history": "そのコミットはもうこの履歴にありません",
  "That needs an AI model: add an API key below, then try it again.": "これには AI モデルが必要です。下に API キーを追加して、もう一度お試しください。",
  "The AI writes a tour of the path the last run took": "AI が前回の実行がたどった経路のウォークスルーを書きます",
  "The AI writes a tour of this branch's changes, or of the last commit when there are none": "AI がこのブランチの変更のウォークスルーを書きます（変更がなければ直近のコミット）",

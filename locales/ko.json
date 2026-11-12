@@ -1623,6 +1623,7 @@
  "Tests of {name}": "{name}의 테스트",
  "That call waited too long — the agent went on without it": "호출 대기 시간이 너무 길어 에이전트가 이를 건너뛰고 계속 진행했습니다",
  "That command waited too long — the agent went on without it": "명령 대기 시간이 너무 길어 에이전트가 이를 건너뛰고 계속 진행했습니다",
+ "That commit is no longer in this history": "그 커밋은 더 이상 이 기록에 없습니다",
  "That needs an AI model: add an API key below, then try it again.": "AI 모델이 필요합니다. 아래에 API 키를 추가한 뒤 다시 시도하세요.",
  "The AI writes a tour of the path the last run took": "AI가 마지막 실행이 지나간 경로의 코드 투어를 작성합니다",
  "The AI writes a tour of this branch's changes, or of the last commit when there are none": "AI가 이 브랜치 변경 사항의 코드 투어를 작성합니다. 변경 사항이 없으면 마지막 커밋을 다룹니다",

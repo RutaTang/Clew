@@ -15967,6 +15967,7 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
         fields,
         target,
         suggesting: None,
+        suggest_failed: None,
         debug: false,
     });
     let mut sim = sim_of(&app);
@@ -15981,6 +15982,20 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
         run.iter()
             .any(|m| matches!(m, Message::Fake(crate::FakeMsg::Run))),
         "{run:?}"
+    );
+    // No inputs came: said in the sheet, with the way to the setting it
+    // points at — not on the status bar, under the sheet.
+    drop(sim);
+    app.proj.fake.sheet.as_mut().unwrap().suggest_failed =
+        Some("request failed: Connection refused (os error 111)".into());
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "No inputs suggested: couldn't reach"));
+    let settings = click(sim_of(&app), "Settings");
+    assert!(
+        settings
+            .iter()
+            .any(|m| matches!(m, Message::Settings(crate::SettingsMsg::Fix(_)))),
+        "{settings:?}"
     );
 }
 
@@ -17965,6 +17980,20 @@ fn ai_failures_are_said_where_the_action_was_taken() {
             "{sent:?}"
         );
     }
+    {
+        // Refused for its key: the way to the key, as every other AI
+        // failure has — only an unreached base URL had a Settings here.
+        let mut app = reader_app();
+        app.proj.walk.failed = Some(("checkout".into(), "HTTP 401: invalid api key".into()));
+        let sent = click(sim_elem(super::sidebar::walk_library(&app)), "Settings");
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                Message::Settings(crate::SettingsMsg::Fix(crate::app::state::LlmField::Key))
+            )),
+            "{sent:?}"
+        );
+    }
 
     let node = crate::explain::Node::Function {
         file: std::path::PathBuf::from("/p/src/lib.rs"),
@@ -18200,6 +18229,82 @@ fn a_menus_ring_goes_with_it_and_the_keys_go_back() {
     let _ = driven.send(&mut app, &[]);
     assert!(app.status.starts_with("Copied"), "{:?}", app.status);
     assert!(app.tree_focused, "the keys are the tree's again");
+}
+
+/// Where the keys are once a menu worked from the keyboard has gone: the
+/// opened file's after Open on the tree's menu (they went back to the tree
+/// the ring came up from, and j walked the tree); the code's after a menu
+/// the ring opened (Enter on View) is put away with Esc, and after the
+/// ring on a menu is put away by another key and the menu then with Esc —
+/// both left the keys nowhere.
+#[test]
+fn the_keys_land_where_a_keyboard_menu_leaves_them() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: Vec::new(),
+        files: vec!["README.md".into(), "main.py".into()],
+    };
+    let caret = |app: &App| app.proj.panes[0].as_ref().and_then(|v| v.caret);
+    let mut driven = Driven::sized(&app, size);
+
+    // Open, from the tree's menu.
+    app.code_focused = false;
+    app.proj.tree_cursor = Some("main.py".into());
+    driven.focus(&app, super::files_tree_keys_id());
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.tree_focused, "the tree has the keys");
+    let _ = driven.key(&mut app, Key::Named(Named::F10), keyboard::Modifiers::SHIFT);
+    assert!(app.proj.tree_menu.is_some(), "the tree's menu");
+    let mut steps = 0;
+    while app.status != "Open" {
+        let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+        steps += 1;
+        assert!(steps < 10, "no Open row: {:?}", app.status);
+    }
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.proj.tree_menu.is_none() && app.ring.is_none());
+    assert!(app.code_focused, "the opened file has the keys");
+    assert!(!app.tree_focused, "not the tree the menu was opened from");
+
+    // A menu the ring opened: Enter on View, then Esc.
+    app.code_focused = true;
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.caret = Some((2, 0));
+    }
+    let _ = driven.send(&mut app, &[]);
+    let _ = driven.key(&mut app, Key::Named(Named::Tab), none);
+    let mut steps = 0;
+    while app.status != "View" {
+        let _ = driven.key(&mut app, Key::Named(Named::Tab), none);
+        steps += 1;
+        assert!(steps < 80, "the ring never reached View");
+    }
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.show_view_menu, "the View menu, from the ring");
+    let _ = driven.key(&mut app, Key::Named(Named::Escape), none);
+    assert!(!app.show_view_menu, "Esc put the menu away");
+    assert!(app.ring.is_none());
+    assert!(app.code_focused, "the keys are the code's again");
+    let _ = driven.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(caret(&app), Some((3, 0)), "j moves the caret");
+
+    // The ring on the code's menu put away by another key, then the menu.
+    let _ = driven.key(&mut app, Key::Named(Named::ContextMenu), none);
+    assert!(app.proj.context_menu.is_some(), "the code's menu");
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert!(app.ring.is_some(), "walked");
+    let _ = driven.key(&mut app, Key::Character("j".into()), none);
+    assert!(app.ring.is_none(), "put away by the key");
+    let _ = driven.key(&mut app, Key::Named(Named::Escape), none);
+    assert!(app.proj.context_menu.is_none());
+    assert!(app.code_focused, "the keys are the code's again");
+    let _ = driven.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(caret(&app), Some((4, 0)), "j moves the caret");
 }
 
 /// ⇧F10 (or the Menu key) opens a menu from the keyboard, as a right-click
@@ -18579,6 +18684,64 @@ fn a_failures_settings_link_puts_the_keys_in_the_field_to_fix() {
     ] {
         window.deliver(&mut app, Message::Settings(crate::SettingsMsg::Fix(field)));
         assert_eq!(window.focused(&app), Some(id), "{field:?}");
+    }
+}
+
+/// At every width with the Ask card open, a paused run's header shows Walk
+/// this run whole: counted two gaps, the panel's padding and the "Evaluate
+/// on hover" switch short, it stayed on one row in a band of widths where
+/// the row cut Walk this run.
+#[test]
+fn walk_this_run_is_never_cut_whatever_the_width() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.hover_safe = false;
+    app.debug.trace = vec![crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: Vec::new(),
+    }];
+    app.debug.trace_rev += 1;
+    app.show_bottom = true;
+    app.ask_view = crate::AskView::Compact;
+    crate::fonts::load();
+    // Its width where there is room for all of it.
+    let whole = {
+        let size = Size::new(2400.0, 700.0);
+        app.window_width = size.width;
+        app.window_height = size.height;
+        let mut sim = sim_sized(&app, size);
+        text_at(&mut sim, |t| t == "Walk this run", 0)
+            .expect("Walk this run")
+            .width
+    };
+    let mut width = 1000.0;
+    while width <= 1700.0 {
+        let size = Size::new(width, 700.0);
+        app.window_width = size.width;
+        app.window_height = size.height;
+        let mut sim = sim_sized(&app, size);
+        assert!(shows(&mut sim, "Evaluate on hover"), "{width}: the switch");
+        let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
+        assert!(
+            walk.width >= whole - 1.0,
+            "{width}: cut to {walk:?} of {whole}"
+        );
+        width += 10.0;
     }
 }
 

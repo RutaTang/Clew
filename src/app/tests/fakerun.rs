@@ -456,8 +456,9 @@ fn suggested_inputs_fill_only_the_empty_fields() {
     let sheet = app.proj.fake.sheet.as_ref().unwrap();
     assert_eq!(sheet.values, ["Point { x: 2.0 }", "p.x", ""]);
     assert_eq!(sheet.suggesting, None);
-    // None came: a failure standing on the status bar, with its Try again
-    // and the way to Settings — a grey line at its far end was all.
+    // None came: said in the sheet, where Suggest inputs asks again — on
+    // the status bar, under the sheet, its Try again closed the sheet (a
+    // click on the backdrop) or, the sheet closed, did nothing.
     let _ = app.update(Message::Fake(FakeMsg::Suggest));
     let seq = app.proj.fake.sheet.as_ref().unwrap().suggesting.unwrap();
     let _ = app.update(Message::Fake(FakeMsg::Suggested {
@@ -465,17 +466,20 @@ fn suggested_inputs_fill_only_the_empty_fields() {
         seq,
         result: Err("request failed: Connection refused (os error 111)".into()),
     }));
-    let notice = app.failure_shown().expect("a standing failure");
+    let sheet = app.proj.fake.sheet.as_ref().unwrap();
+    assert!(sheet.suggest_failed.is_some());
+    assert!(app.failure_shown().is_none(), "nothing under the sheet");
+    // Asked again, the failure goes while it is asked.
+    let _ = app.update(Message::Fake(FakeMsg::Suggest));
     assert!(
-        notice.said.starts_with("No inputs suggested"),
-        "{}",
-        notice.said
+        app.proj
+            .fake
+            .sheet
+            .as_ref()
+            .unwrap()
+            .suggest_failed
+            .is_none()
     );
-    assert!(matches!(
-        notice.retry,
-        Some(Message::Fake(FakeMsg::Suggest))
-    ));
-    assert_eq!(notice.about, Some(crate::app::state::LlmField::BaseUrl));
 }
 
 /// Ask why sends the step — where it is, what the model said of it, its
