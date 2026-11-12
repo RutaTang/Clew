@@ -1,4 +1,4 @@
-//! A drop-down the keyboard can work as well as the pointer ([`picker`]):
+//! A drop-down the keyboard can work as well as the pointer ([`picker()`]):
 //! a well showing the value chosen, which opens a list under it. Pressed
 //! from the keyboard's ring, by its jump code or with Enter or Space, it
 //! opens, the arrows walk its rows, Enter or Space picks one and Esc puts
@@ -96,7 +96,7 @@ where
     }
 }
 
-/// A drop-down as [`picker`] builds it.
+/// A drop-down as [`picker()`] builds it.
 pub(crate) struct Pick<'a> {
     /// Each row's text, and what picking it sends.
     picks: Vec<(String, Message)>,
