@@ -42,6 +42,17 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
                 // A markdown file renders as a document; a toggle in the
                 // breadcrumb switches to the raw source.
                 markdown_pane(app, pane, v, md)
+            } else if v.source.is_empty() {
+                // A file with nothing in it says so: it opened as a blank
+                // pane, with no line number, read as one still loading.
+                mouse_area(empty_state(
+                    Glyph::Note,
+                    tr!("This file is empty"),
+                    "",
+                    None,
+                ))
+                .on_press(Message::Editor(EditorMsg::PaneFocused(pane)))
+                .into()
             } else {
                 code_pane(app, pane, v)
             }
@@ -1127,13 +1138,19 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
     if !app.connection.is_remote() && !app.recent_folders.is_empty() {
         let rows = app.recent_folders.iter().map(|folder| {
             let (name, place) = crate::app::recent::said(folder);
+            // Where it is, cut from the middle: its end tells two folders
+            // apart, and cut at the end ("/tmp/claude-0/-home-user-Cl") it
+            // was the part lost.
+            let name_w = super::steady::width_of(&name, ts::BODY, crate::fonts::UI);
+            let room = (RECENT_W - RECENT_ROW_AROUND - name_w).max(0.0);
+            let place = super::steady::cut_middle(&place, room, ts::SMALL);
             let row = row![
                 glyph::icon(Glyph::Folder, theme::fg_muted(), 14.0),
                 text(name.clone())
                     .size(ts::BODY)
                     .color(theme::accent())
                     .wrapping(Wrapping::None),
-                text(place.clone())
+                text(place)
                     .size(ts::SMALL)
                     .color(theme::dim())
                     .wrapping(Wrapping::None),
@@ -1149,12 +1166,28 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
                     &name,
                     Message::Project(ProjectMsg::FolderPicked(Some(folder.clone()))),
                 ));
-            super::toolbar::tip_at(
+            let open = super::toolbar::tip_at(
                 open,
                 folder.display().to_string(),
                 None,
                 tooltip::Position::Bottom,
-            )
+            );
+            // Taken off the list: a folder moved or no longer wanted stayed
+            // on it for good.
+            let forget = super::toolbar::tip_at(
+                button(glyph::icon(Glyph::Close, theme::dim(), 12.0))
+                    .style(theme::icon_button(false))
+                    .padding(6)
+                    .on_press(super::heard::said_to(
+                        tr!("Remove from Recent"),
+                        &name,
+                        Message::Project(ProjectMsg::ForgetRecent(folder.clone())),
+                    )),
+                tr!("Remove from Recent"),
+                None,
+                tooltip::Position::Bottom,
+            );
+            row![open, forget].spacing(2).align_y(iced::Center).into()
         });
         page = page.push(space().height(18)).push(
             column![
@@ -1173,6 +1206,10 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
 
 /// The width of the welcome screen's recent folders.
 const RECENT_W: f32 = 360.0;
+
+/// What a recent folder's row takes beside its name and place: the row's
+/// padding, the folder icon, the gaps, and the × after it.
+const RECENT_ROW_AROUND: f32 = 2.0 * 8.0 + 14.0 + 2.0 * 8.0 + 2.0 + 12.0 + 2.0 * 6.0 + 4.0;
 
 /// The Clew "C" mark (monochrome arcs, transparent background) for the welcome
 /// screen. Rendered with a theme-adaptive tint (see `welcome`), so the asset's
@@ -1864,7 +1901,9 @@ fn notes_beside_code<'a>(
         // whatever of the diff was there.
         let replaced = code_replaced(app, v);
         let mut notes: Vec<(f32, f32, Element<'_, Message>)> = Vec::new();
-        if matches!(active, Some(Node::File(_))) {
+        // A file with nothing in it has no note to offer: its card offered
+        // Explain and Ask of an empty file.
+        if matches!(active, Some(Node::File(_))) && !v.source.trim().is_empty() {
             let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
             // As tall as what it says, up to the margin's foot, as a
             // function's card is: it was four lines, the fifth cut through

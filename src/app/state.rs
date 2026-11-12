@@ -874,6 +874,19 @@ pub enum LlmField {
 }
 
 impl FailureNotice {
+    /// Whether trying again asks first — Explain All's cost, a key, a fake
+    /// run's inputs to look at — and is said so ("Try again…"). Pressed,
+    /// it leaves the failure standing until the work is started again:
+    /// put away there, it was gone with nothing tried.
+    pub fn asks_first(&self) -> bool {
+        matches!(
+            self.retry,
+            Some(crate::Message::Project(crate::ProjectMsg::SetupShow(_)))
+                | Some(crate::Message::Settings(crate::SettingsMsg::NeedKey))
+                | Some(crate::Message::Fake(crate::FakeMsg::EditInputs))
+        )
+    }
+
     /// What it says now, in the language spoken now.
     pub fn shown(&self) -> String {
         self.again
@@ -2422,6 +2435,10 @@ pub struct ProjectSession {
     pub trail_fn: HashMap<(PathBuf, usize), String>,
     /// Trail nodes whose subtree is collapsed in the TRAIL view.
     pub trail_collapsed: std::collections::HashSet<usize>,
+    /// Files gone to and found no longer there: the trail leaves them out.
+    /// A deleted file stayed in it, and a press on it said only an error
+    /// of the system's ("cannot resolve path: No such file or directory").
+    pub gone_files: std::collections::HashSet<PathBuf>,
     /// The `History::renumbering` stamp `trail_collapsed` was recorded under:
     /// when the history's node ids change meaning (an eviction renumbers the
     /// survivors, a clear empties the tree) the marks are dropped (see
@@ -2826,6 +2843,7 @@ impl Default for ProjectSession {
             history: Default::default(),
             trail_fn: Default::default(),
             trail_collapsed: Default::default(),
+            gone_files: Default::default(),
             trail_renumbering: Default::default(),
             bookmarks: Default::default(),
             note_edit: Default::default(),

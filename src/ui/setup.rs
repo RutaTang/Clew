@@ -75,6 +75,20 @@ pub(crate) fn setup_sheet<'a>(
                 String::new()
             },
         ),
+        // A folder with no code in it says so: "Nothing left to explain"
+        // read as if all of it had been explained.
+        None if counted == Some(0)
+            && app
+                .proj
+                .project
+                .as_ref()
+                .is_some_and(|p| p.files.is_empty()) =>
+        {
+            (
+                tr!("There is no code here to explain.").to_string(),
+                String::new(),
+            )
+        }
         None => (
             explain_line(app.llm_available, calls.flatten(), app.embed_available),
             String::new(),
@@ -448,14 +462,21 @@ pub(crate) fn setup_sheet<'a>(
     };
     // Why its main button waits, said beside it: greyed with nothing said,
     // Apply read as broken.
-    let why_not: Option<&str> = (!something && !looking).then(|| match (mode, setup) {
-        (SetupMode::Manage, Some(s))
-            if !s.explain && census.is_some_and(|c| c.servers.is_empty()) =>
-        {
-            tr!("Nothing to apply: the language servers are already set up.")
+    let why_not: Option<&str> = (!something && !looking).then_some(()).and_then(|()| {
+        match (mode, setup) {
+            (SetupMode::Manage, Some(s))
+                if !s.explain && census.is_some_and(|c| c.servers.is_empty()) =>
+            {
+                Some(tr!(
+                    "Nothing to apply: the language servers are already set up."
+                ))
+            }
+            // Said once: the line about explaining above says it already
+            // ("Nothing left to explain." twice, a line apart).
+            (SetupMode::Explain, Some(s)) if s.explain && counted == Some(0) => None,
+            (SetupMode::Explain, Some(s)) if s.explain => Some(tr!("Nothing is left to explain.")),
+            _ => Some(tr!("Nothing to apply: tick what to set up.")),
         }
-        (SetupMode::Explain, Some(s)) if s.explain => tr!("Nothing is left to explain."),
-        _ => tr!("Nothing to apply: tick what to set up."),
     });
     let left: Element<'a, Message> = match why_not {
         Some(why) => text(why)

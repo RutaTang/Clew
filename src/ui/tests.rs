@@ -3197,6 +3197,97 @@ fn the_trail_row_does_not_move_the_code_when_the_trail_begins() {
     assert!(shows(&mut sim, "line_39"));
 }
 
+/// L16: the margin's tabs fit over the margin in French at 1100 —
+/// "Explications · Appels · Historique" ran past its edge, the last tab's
+/// background cut there — and in English as they were.
+#[test]
+fn the_margin_tabs_fit_over_the_margin_in_french() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    // At 1100 with the sidebar open, the margin is as narrow as it goes.
+    app.window_width = 1100.0;
+    app.show_left_sidebar = true;
+    let room = super::panes::margin_w(&app) - 12.0 - 16.0;
+    assert!(room <= 240.0 - 28.0 + 0.5, "the narrowest margin: {room}");
+    for lang in [crate::i18n::Lang::Fr, crate::i18n::Lang::En] {
+        crate::i18n::with_lang(lang, || {
+            let mut sim = iced_test::Simulator::with_size(
+                Default::default(),
+                Size::new(room + 200.0, 60.0),
+                super::sheet::margin_tabs(&app, room),
+            );
+            for name in [
+                crate::tr!("Explanations"),
+                crate::tr!("Calls"),
+                crate::tr!("History"),
+            ] {
+                let at = text_at(&mut sim, |t| t == name || t.ends_with('…'), 0)
+                    .unwrap_or_else(|| panic!("{name} shown"));
+                assert!(at.x >= 0.0, "{name}: {at:?}");
+            }
+            let last = text_at(&mut sim, |t| t == crate::tr!("History"), 0)
+                .expect("the last tab named whole");
+            assert!(
+                last.x + last.width + 4.0 <= room,
+                "{lang:?}: past the margin's edge: {last:?} of {room}"
+            );
+        });
+    }
+}
+
+/// L19: an empty file says so in its pane — it opened blank, with no line
+/// number, read as one still loading — and the margin offers no Explain or
+/// Ask of a file with nothing in it.
+#[test]
+fn an_empty_file_says_so_and_offers_nothing_to_explain() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.proj.explain.view = Some(crate::explain::Node::File(abs.clone()));
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.symbols.clear();
+    }
+    // How many of `words` are on screen.
+    let count = |app: &App, words: &str| {
+        let mut sim = sim_of(app);
+        let mut n = 0;
+        while text_at(&mut sim, |t| t == words, n).is_some() {
+            n += 1;
+        }
+        n
+    };
+    assert_eq!(count(&app, "This file is empty"), 0);
+    // The file's card, with its Explain beside the header's.
+    assert_eq!(count(&app, "file"), 1, "a file's card");
+    assert_eq!(count(&app, "Explain"), 2);
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.source = std::sync::Arc::new(String::new());
+    }
+    assert_eq!(count(&app, "This file is empty"), 1);
+    assert_eq!(count(&app, "file"), 0, "no card");
+    assert_eq!(count(&app, "Explain"), 1, "the header's alone");
+}
+
+/// L9: a file found no longer there is left out of the reading trail: it
+/// stayed in it, and a press on it said only an error of the system's.
+#[test]
+fn the_trail_leaves_out_a_file_gone() {
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let gone = abs.with_file_name("gone_away.rs");
+    let at = |path: &std::path::Path, line| crate::history::Loc {
+        path: path.to_path_buf(),
+        line: Some(line),
+    };
+    app.proj.history.push(at(&gone, 1), None);
+    app.proj.history.push(at(&abs, 40), Some("line_39".into()));
+    assert!(shows(&mut sim_of(&app), "gone_away.rs"), "in the trail");
+    app.proj.gone_files.insert(gone);
+    let mut sim = sim_of(&app);
+    assert!(!shows(&mut sim, "gone_away.rs"), "left out");
+    assert!(shows(&mut sim, "line_39"));
+}
+
 /// A stop named for what is on its line — a type gone to — keeps its name
 /// while the caret is on that line: it read "lib.rs", where it read
 /// "Point". Left, the crumb says where the caret is: the file.
@@ -15252,6 +15343,58 @@ fn the_set_up_sheet_says_why_apply_waits() {
     assert!(!says(&app, "Nothing to apply"));
 }
 
+/// L10: Explain on a folder with nothing left to explain says it once —
+/// "Nothing left to explain." stood a line above "Nothing is left to
+/// explain." — and on a folder with no code at all, that there is none:
+/// "nothing left" read as if all of it had been explained. Its tree says
+/// so too, where it stood blank.
+#[test]
+fn explain_with_nothing_to_explain_says_so_once() {
+    use crate::app::setup::{Census, ProjectSetup, SetupMode};
+    let mut app = reader_app();
+    app.llm_available = true;
+    let root = PathBuf::from("/nonexistent/teashop");
+    let count = |app: &App, words: &str| {
+        let mut sim = sim_elem(super::setup::setup_sheet(
+            app,
+            &root,
+            app.setup.as_ref(),
+            true,
+        ));
+        let mut n = 0;
+        while text_at(&mut sim, |t| t.contains(words), n).is_some() {
+            n += 1;
+        }
+        n
+    };
+    app.setup = Some(ProjectSetup {
+        mode: SetupMode::Explain,
+        root: root.clone(),
+        servers: false,
+        servers_declined: false,
+        explain: true,
+        census: Some(Census {
+            servers: Vec::new(),
+            calls: Some(0),
+        }),
+    });
+    // A project with code, all of it explained.
+    app.proj.project.as_mut().unwrap().files = Arc::new(vec![crate::fs_scan::FileEntry {
+        abs: PathBuf::from("/nonexistent/teashop/pricing.py"),
+        rel: "pricing.py".into(),
+    }]);
+    assert_eq!(count(&app, "left to explain"), 1, "said once");
+    // No code at all.
+    if let Some(project) = app.proj.project.as_mut() {
+        project.files = std::sync::Arc::new(Vec::new());
+        project.tree = Default::default();
+    }
+    assert_eq!(count(&app, "left to explain"), 0);
+    assert_eq!(count(&app, "There is no code here to explain."), 1);
+    let mut sim = sim_elem(super::sidebar::files_tab(&app));
+    assert!(shows(&mut sim, "This folder has no files Clew can read."));
+}
+
 /// The setup sheet with no AI key offers where one is added, a click away:
 /// it said "Needs an API key in Settings." and left the reader to find it.
 #[test]
@@ -16331,6 +16474,43 @@ fn the_welcome_screen_offers_recent_folders() {
         )),
         "{sent:?}"
     );
+
+    // L1: a place longer than the row is cut from its middle, its end —
+    // what tells two folders apart — kept; cut at its end, that was lost.
+    let deep = dir
+        .join("a_rather_long_folder_name_for_the_place")
+        .join("and_another_one_below_it")
+        .join("scratchpad")
+        .join("r17");
+    let shop2 = deep.join("teashop");
+    std::fs::create_dir_all(&shop2).unwrap();
+    app.recent_folders = vec![shop2.clone()];
+    let (_, place) = crate::app::recent::said(&shop2);
+    let mut sim = sim_of(&app);
+    assert!(!shows(&mut sim, &place), "whole, past the row's end");
+    let cut = text_at(
+        &mut sim,
+        |t| t.contains('…') && t.ends_with("scratchpad/r17"),
+        0,
+    );
+    assert!(cut.is_some(), "cut from its middle, its end kept");
+    drop(sim);
+    // And taken off the list by its ×.
+    let sent = click_right_of(
+        || sim_of(&app),
+        "teashop",
+        |m| matches!(m, Message::Project(ProjectMsg::ForgetRecent(_))),
+    );
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Project(ProjectMsg::ForgetRecent(p)) if *p == shop2
+        )),
+        "{sent:?}"
+    );
+    let _ = app.update(Message::Project(ProjectMsg::ForgetRecent(shop2)));
+    assert!(app.recent_folders.is_empty());
+    assert!(!shows(&mut sim_of(&app), "Recent"));
 }
 
 /// M1: with a folder open, the folders opened before are still a click
@@ -20075,6 +20255,17 @@ fn a_retry_that_asks_first_says_so() {
     let mut sim = sim_elem(super::statusbar::statusbar(&app));
     assert!(text_at(&mut sim, |t| t == "Try again…", 0).is_some());
     drop(sim);
+    // L2: pressed, it opens the cost sheet and the failure stands until
+    // Explain All starts again: put away there, it was gone with nothing
+    // tried.
+    let _ = app.update(Message::Window(crate::WindowMsg::RetryFailure));
+    assert!(app.failure_notice.is_some(), "gone as the sheet opened");
+    let _ = app.update(Message::Project(crate::ProjectMsg::SetupClose));
+    assert!(app.setup.is_none());
+    assert!(
+        app.failure_notice.is_some(),
+        "the failure, with nothing tried"
+    );
     app.say_failure(
         "Explain couldn't continue: couldn't reach the AI provider".into(),
         Some(Message::Explain(crate::ExplainMsg::Refresh)),

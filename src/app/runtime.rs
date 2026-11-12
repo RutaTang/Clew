@@ -799,6 +799,17 @@ impl App {
             }
             // Tried again: the failure is not the news, what it tries is.
             WindowMsg::RetryFailure => {
+                // One that asks first (the cost sheet, the key, a fake run's
+                // inputs) stands until the work starts again: cancelled
+                // there, the failure was gone, and nothing had been tried.
+                if let Some(retry) = self
+                    .failure_notice
+                    .as_ref()
+                    .filter(|n| n.asks_first())
+                    .and_then(|n| n.retry.clone())
+                {
+                    return self.update(retry);
+                }
                 let Some(notice) = self.failure_notice.take() else {
                     return Task::none();
                 };

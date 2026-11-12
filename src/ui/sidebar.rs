@@ -1035,6 +1035,16 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
         };
     };
 
+    // A folder with nothing in it Clew reads says so: the tree stood
+    // blank, as if still loading.
+    if project.tree.dirs.is_empty() && project.tree.files.is_empty() {
+        return empty_state(
+            Glyph::Folder,
+            tr!("Nothing here to read"),
+            tr!("This folder has no files Clew can read."),
+            None,
+        );
+    }
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let filter = app.file_filter.trim();
     // The row the keyboard rests on, drawn so while the tree has it.

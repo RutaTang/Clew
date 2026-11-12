@@ -455,11 +455,35 @@ fn file_tool<'a>(
 
 /// The margin's tabs — Notes, Calls, History — in the header, over the
 /// margin they switch.
-fn margin_tabs(app: &App) -> Element<'_, Message> {
-    let tab = |label: &'static str, this: crate::MarginTab| {
+pub(crate) fn margin_tabs(app: &App, room: f32) -> Element<'_, Message> {
+    let labels = [
+        (tr!("Explanations"), crate::MarginTab::Notes),
+        (tr!("Calls"), crate::MarginTab::Calls),
+        (tr!("History"), crate::MarginTab::History),
+    ];
+    // As much room round each name as the margin has: in French at 1100,
+    // "Explications · Appels · Historique" ran past the margin's edge, the
+    // last tab's background cut there. Tighter first; then, where even
+    // that is too wide, each name cut short, whole in its tip.
+    let widths: Vec<f32> = labels
+        .iter()
+        .map(|(l, _)| super::steady::width_of(l, ts::BODY, FILE_TOOL_FONT))
+        .collect();
+    let words: f32 = widths.iter().sum();
+    let gaps = 2.0 * (labels.len() - 1) as f32;
+    let pad = ((room - words - gaps) / (2.0 * labels.len() as f32)).clamp(4.0, 10.0);
+    let over = words + gaps + 2.0 * pad * labels.len() as f32 - room;
+    let tab = |label: &'static str, width: f32, this: crate::MarginTab| {
         let chosen = app.margin_tab == this;
-        button(ts::set_in(
-            text(label)
+        // Each name gives up its share of what is over, by its width.
+        let keep = if over > 0.0 {
+            (width - over * width / words).max(0.0)
+        } else {
+            width
+        };
+        let shown = super::steady::cut(label, keep, ts::BODY, FILE_TOOL_FONT);
+        let face = button(ts::set_in(
+            text(shown.clone())
                 .font(FILE_TOOL_FONT)
                 .color(if chosen {
                     theme::fg()
@@ -472,19 +496,23 @@ fn margin_tabs(app: &App) -> Element<'_, Message> {
             ts::BODY,
         ))
         .style(theme::segment(chosen))
-        .padding([0, 10])
+        .padding([0.0, pad])
         .on_press(super::heard::said(
             label,
             Message::Window(WindowMsg::MarginTabPicked(this)),
-        ))
+        ));
+        if shown == label {
+            face.into()
+        } else {
+            tip_at(face, label, None, tooltip::Position::Bottom)
+        }
     };
-    row![
-        tab(tr!("Explanations"), crate::MarginTab::Notes),
-        tab(tr!("Calls"), crate::MarginTab::Calls),
-        tab(tr!("History"), crate::MarginTab::History),
-    ]
-    .spacing(2)
-    .into()
+    let tabs: Vec<Element<'_, Message>> = labels
+        .iter()
+        .zip(&widths)
+        .map(|((label, this), w)| tab(label, *w, *this))
+        .collect();
+    iced::widget::Row::with_children(tabs).spacing(2).into()
 }
 
 /// The sheet's header: the open file's name and folder, the tools that act
@@ -672,7 +700,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     // Over the margin, beside the divider, its tabs.
     let tabs: Element<'_, Message> = if right_panel(app).is_some() {
         // At the row's top, as the design has them: 14 down.
-        container(margin_tabs(app))
+        container(margin_tabs(app, super::panes::margin_w(app) - 12.0 - 16.0))
             .width(Length::Fixed(super::panes::margin_w(app)))
             .height(Length::Fixed(SHEET_HEADER_ROW_H))
             .align_y(iced::Top)
@@ -692,7 +720,16 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
 /// the reader came from, each a click back to it; the file on the sheet
 /// alone before there is a way back.
 fn trail_row(app: &App) -> Element<'_, Message> {
-    let stops = merged_stops(app.proj.history.recent_path(TRAIL_STOPS), app.first_rows());
+    // Files found no longer there are left out of it.
+    let stops = merged_stops(
+        app.proj
+            .history
+            .recent_path(TRAIL_STOPS)
+            .into_iter()
+            .filter(|(_, loc, _)| !app.proj.gone_files.contains(&loc.path))
+            .collect(),
+        app.first_rows(),
+    );
     let last = stops.len().saturating_sub(1);
     // Its icon says what the row is where the pointer rests: read as a
     // breadcrumb, "lib.rs › Frame" over another file was taken for that

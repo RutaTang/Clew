@@ -37079,6 +37079,44 @@ fn f12_goes_to_the_definition_and_shift_f12_finds_references() {
     assert_eq!(said(&mut app, false), "");
 }
 
+/// L9: a file deleted since it was read is said to be no longer there
+/// when it is gone to again, and marked for the reading trail to leave
+/// out (`ui::tests::the_trail_leaves_out_a_file_gone`): it stayed
+/// in the trail, and a press on it said only an error of the system's
+/// ("empty.py: cannot resolve path: No such file or directory").
+#[test]
+fn a_deleted_file_is_said_gone_and_leaves_the_trail() {
+    let mut app = scanned_app("deleted-trail");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    open_synchronously(&mut app, "notes.txt", None);
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    std::fs::remove_file(root.join("notes.txt")).unwrap();
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "notes.txt".into(),
+        line: None,
+    }));
+    let pane = app.proj.active;
+    let req = app.proj.link.pane_pending[pane].expect("a load");
+    let _ = app.update(Message::Editor(EditorMsg::FileLoaded {
+        stamp: app.stamp(),
+        req,
+        pane,
+        abs: root.join("notes.txt"),
+        target: None,
+        result: Err("cannot resolve path: No such file or directory (os error 2)".into()),
+    }));
+    assert_eq!(app.status, "notes.txt is no longer there");
+    assert!(
+        app.proj.gone_files.contains(&root.join("notes.txt")),
+        "marked gone, for the trail to leave out"
+    );
+    // Back again: in the trail again.
+    std::fs::write(root.join("notes.txt"), "hello\n").unwrap();
+    open_synchronously(&mut app, "notes.txt", None);
+    assert!(!app.proj.gone_files.contains(&root.join("notes.txt")));
+}
+
 /// A page over the code — the overview, the statistics, a doc page — is put
 /// away by Esc, and Back from it is to the file under it: Back went to the
 /// file read before, skipping the one the page covered, and Esc did nothing.

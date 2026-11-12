@@ -783,13 +783,7 @@ fn failure_controls(
     // Where trying again asks first — Explain All's cost, a key — it says
     // so, as a menu's row that opens a dialog does: "Try again" opened the
     // cost sheet where it read as done at once.
-    let asks = matches!(
-        failure.retry,
-        Some(Message::Project(crate::ProjectMsg::SetupShow(_)))
-            | Some(Message::Settings(crate::SettingsMsg::NeedKey))
-            // A fake run's: its inputs, to look at before it runs again.
-            | Some(Message::Fake(crate::FakeMsg::EditInputs))
-    );
+    let asks = failure.asks_first();
     let again = if asks {
         tr!("Try again…")
     } else {

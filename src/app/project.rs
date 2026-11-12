@@ -1331,6 +1331,13 @@ impl App {
                 Task::none()
             }
             ProjectMsg::CloseFolder => self.close_folder(),
+            ProjectMsg::ForgetRecent(folder) => {
+                self.recent_folders.retain(|r| *r != folder);
+                if let Some(store) = &self.recent_store {
+                    crate::app::recent::forget_in(store, &folder);
+                }
+                Task::none()
+            }
             ProjectMsg::RecentRead(read) => {
                 // After those opened meanwhile, which are newer.
                 let mut folders = std::mem::take(&mut self.recent_folders);

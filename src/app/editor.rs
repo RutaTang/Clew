@@ -465,12 +465,22 @@ impl App {
         let rel = self.rel_of(&abs);
         let content = match result {
             Err(e) => {
-                self.status = format!("{rel}: {e}");
+                // A file of this machine's no longer there is said so, and
+                // left out of the trail: "empty.py: cannot resolve path: No
+                // such file or directory (os error 2)" stood for it.
+                if !self.connection.is_remote() && !abs.exists() {
+                    self.status = tr!("{file} is no longer there", file = rel);
+                    self.proj.gone_files.insert(abs.clone());
+                } else {
+                    self.status = format!("{rel}: {e}");
+                }
                 self.forget_history_open(&abs);
                 return Task::none();
             }
             Ok(content) => content,
         };
+        // Back again (restored, or made anew): in the trail again.
+        self.proj.gone_files.remove(&abs);
 
         let lang_key = highlight::detect(&abs);
         let source = Arc::new(content);

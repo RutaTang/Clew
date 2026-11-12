@@ -296,6 +296,9 @@ pub enum ProjectMsg {
     /// Close the folder open, back to the welcome screen and its recent
     /// folders.
     CloseFolder,
+    /// Take a folder off the recent folders (the welcome screen's ×): a
+    /// stale one stayed for good.
+    ForgetRecent(PathBuf),
     /// The working tree's changes read, for the Files view's marks (see
     /// `App::sync_git_status`).
     GitStatusRead {
@@ -2585,6 +2588,7 @@ impl ProjectMsg {
             | ProjectMsg::FolderPicked(..)
             | ProjectMsg::RecentRead(..)
             | ProjectMsg::CloseFolder
+            | ProjectMsg::ForgetRecent(..)
             | ProjectMsg::ConsentAllowed(..)
             | ProjectMsg::OpenWithoutSetup(..)
             | ProjectMsg::ConsentDenied(..)
