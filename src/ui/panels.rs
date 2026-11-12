@@ -749,29 +749,43 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .find(|(e, _)| e == expr)
             .map(|(_, v)| v.clone())
             .unwrap_or_else(|| "…".into());
-        watch_rows.push(
-            row![
-                // By identity (the expression): an index into the list drawn
-                // here can name another watch once the list changes.
-                button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
-                    .style(theme::list_row(false))
-                    .padding([0, 4])
-                    .on_press(super::heard::said_to(
-                        tr!("Remove"),
-                        expr,
-                        Message::Debug(DebugMsg::WatchRemoveExpr(expr.clone())),
-                    )),
-                text(expr.clone()).size(ts::SMALL).color(theme::accent()),
-                text(" = ").size(ts::SMALL).color(theme::dim()),
-                text(val)
-                    .size(ts::SMALL)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
-            ]
-            .spacing(2)
-            .align_y(iced::Center)
-            .into(),
-        );
+        // Too long for its column, whole where the pointer rests, as a
+        // variable's value is: "off * 2 = ⚠ Na" could be read nowhere.
+        const SHOWN: usize = 24;
+        let whole = (expr.chars().count() + val.chars().count() > SHOWN).then(|| {
+            let val: String = val.chars().take(600).collect();
+            format!("{expr} = {val}")
+        });
+        let line: Element<'_, Message> = row![
+            // By identity (the expression): an index into the list drawn
+            // here can name another watch once the list changes.
+            button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
+                .style(theme::list_row(false))
+                .padding([0, 4])
+                .on_press(super::heard::said_to(
+                    tr!("Remove"),
+                    expr,
+                    Message::Debug(DebugMsg::WatchRemoveExpr(expr.clone())),
+                )),
+            text(expr.clone())
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .wrapping(Wrapping::None),
+            text(" = ").size(ts::SMALL).color(theme::dim()),
+            text(val)
+                .size(ts::SMALL)
+                .color(theme::fg())
+                .wrapping(Wrapping::None),
+        ]
+        .spacing(2)
+        .align_y(iced::Center)
+        .into();
+        watch_rows.push(match whole {
+            Some(whole) => {
+                super::toolbar::tip_wrapped(line, whole, iced::widget::tooltip::Position::Top)
+            }
+            None => line,
+        });
     }
 
     // The output takes the room a run's lines need: half the panel beside
@@ -780,6 +794,14 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     // column's room — and the output's, while the program has printed
     // nothing: values were cut at 180 px beside an empty column.
     let quiet = session.output.is_empty();
+    // And the watches, a share of that room when there are any: their
+    // values were cut to a few letters beside the empty output. The
+    // columns' shares add up the same either way, the call stack's too.
+    let (vars_portion, watch_portion) = match (quiet, app.debug.watches.is_empty()) {
+        (true, false) => (5, 3),
+        (true, true) => (6, 2),
+        (false, _) => (4, 2),
+    };
     // The pill floats over the panel's foot at its right, where the output
     // is: the output's column ends above it, so no line runs under it —
     // scrolled to its end alone, the lines on their way there did.
@@ -797,8 +819,8 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     } else {
         row![
             container(debug_col(stack_rows)).width(Length::FillPortion(2)),
-            container(debug_col(var_rows)).width(Length::FillPortion(if quiet { 6 } else { 4 })),
-            container(debug_col(watch_rows)).width(Length::FillPortion(2)),
+            container(debug_col(var_rows)).width(Length::FillPortion(vars_portion)),
+            container(debug_col(watch_rows)).width(Length::FillPortion(watch_portion)),
             container(output).width(Length::FillPortion(if quiet { 2 } else { 6 })),
         ]
     }

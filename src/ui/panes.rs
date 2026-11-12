@@ -1643,6 +1643,29 @@ fn card_settings_words(width: f32) -> bool {
     wrapped_lines(&row, room) == 1
 }
 
+/// Whether a card's Ask says its name: where it fits on the row with
+/// Explain (or Try again) and, for a failure Settings can put right,
+/// Settings. Where it does not, it is its icon alone, its name in its tip
+/// — in French at 1100 px "Questions" fell onto a line of its own, right
+/// over Ask's pill, which says the same.
+fn card_ask_words(width: f32, explain_slot: bool, fix: bool) -> bool {
+    if !explain_slot {
+        return true;
+    }
+    let room = width - ACTIVE_NOTE_TEXT_INSET + NOTE_ACTION_PAD_X;
+    let mut row = vec![note_action_w("", true, Some(note_explain_room()))];
+    if fix {
+        let settings = if card_settings_words(width) {
+            tr!("Settings")
+        } else {
+            ""
+        };
+        row.push(note_action_w(settings, false, None));
+    }
+    row.push(note_action_w(tr!("Ask"), true, None));
+    wrapped_lines(&row, room) == 1
+}
+
 /// How many lines a row of the card's actions `widths` wide (2 apart)
 /// takes where `room` is all there is, as iced wraps it.
 fn wrapped_lines(widths: &[f32], room: f32) -> usize {
@@ -1689,7 +1712,8 @@ fn card_extra_lines(app: &App, node: &crate::explain::Node, width: f32) -> usize
     if slot {
         actions.push(note_action_w("", true, Some(note_explain_room())));
     }
-    if slot && explain_failed_fix(app, node).is_some() {
+    let fix = slot && explain_failed_fix(app, node).is_some();
+    if fix {
         let words = card_settings_words(width);
         actions.push(note_action_w(
             if words { tr!("Settings") } else { "" },
@@ -1697,7 +1721,12 @@ fn card_extra_lines(app: &App, node: &crate::explain::Node, width: f32) -> usize
             None,
         ));
     }
-    actions.push(note_action_w(tr!("Ask"), true, None));
+    let ask_words = card_ask_words(width, slot, fix);
+    actions.push(note_action_w(
+        if ask_words { tr!("Ask") } else { "" },
+        true,
+        None,
+    ));
     wrapped_lines(&facts, room) + wrapped_lines(&actions, room) - 2
 }
 
@@ -2357,6 +2386,8 @@ fn active_note<'a>(
     // "2 callers" went to a row of its own, under the pointer, its tip
     // over the very word the reader waited for.
     let explain_room = note_explain_room();
+    // Whether Explain, Try again or Explaining… has its slot on the row.
+    let explain_slot = (unexplained && node.is_some()) || explaining;
     if unexplained && let Some(node) = node {
         // Marked as what spends an AI call is: the sparkle, and a tip.
         // (Never explained: not "Explain this again".)
@@ -2458,18 +2489,26 @@ fn active_note<'a>(
             tr!("Who calls it, and what it calls"),
         ));
     }
-    let actions = actions.push(action(
+    // Its name where the row has room for it; else its icon, named in its
+    // tip.
+    let ask_words = card_ask_words(width, explain_slot, explain_slot && fix.is_some());
+    let ask = action(
         Glyph::AskAi,
         tr!("Ask").into(),
         true,
         None,
-        true,
+        ask_words,
         Message::Ask(AskMsg::Suggested(tr!(
             "What does `{name}` in {file} do, and why is it written this way?",
             name = name,
             file = app.active_viewer().map_or("", |v| v.rel.as_str())
         ))),
-    ));
+    );
+    let actions = actions.push(if ask_words {
+        Element::from(ask)
+    } else {
+        chrome_tip(ask, tr!("Ask"), None)
+    });
     // Its Explain failed: why, in its place — "Not explained yet." above it
     // took the room the reason needed, and said what the failure says.
     let mut note = if failed.is_some() {

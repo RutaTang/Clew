@@ -8244,6 +8244,34 @@ fn the_debug_panel_removes_watches_by_identity_and_offers_hover_evaluation() {
     );
 }
 
+/// M3: a watch too long for its column says its whole value where the
+/// pointer rests on it, as a variable does: "off * 2 = ⚠ Na" could be read
+/// nowhere. A short one has no tip to wait for.
+#[test]
+fn a_long_watch_is_whole_in_its_tip() {
+    let mut app = reader_app();
+    let mut session = paused_debug_session();
+    let expr = "order.customer.email_address_that_is_long";
+    let value = "'someone.with.a.long.name@example.com'";
+    session.watches = vec![(expr.into(), value.into()), ("a".into(), "1".into())];
+    app.debug.session = Some(session);
+    app.debug.watches = vec![expr.into(), "a".into()];
+    let rested = |on: &'static str, tip: String| {
+        super::tip::warm_now();
+        let mut sim = sim_elem(super::debug_panel(&app));
+        let at = text_at(&mut sim, move |t| t == on, 0)
+            .expect("the watch")
+            .center();
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        shows(&mut sim, &tip)
+    };
+    assert!(rested(expr, format!("{expr} = {value}")), "no whole value");
+    assert!(!rested("a", "a = 1".into()), "a tip for a short one");
+}
+
 fn call_item(name: &str) -> crate::lsp::client::CallItem {
     crate::lsp::client::CallItem {
         name: name.into(),
@@ -8304,6 +8332,16 @@ fn a_reference_list_is_named_in_the_search_sidebar() {
     }
     assert!(app.proj.search.listing.is_none());
     assert!(app.proj.search.hits.is_empty());
+    // M4: Search Text (⌘⇧F) over a reference list puts it away, for the
+    // field to be there: the list stayed, with no field, and what was
+    // typed went nowhere.
+    app.proj.search.listing = Some("References to “origin”".into());
+    app.sidebar = crate::SidebarTab::Files;
+    let _ = app.run_command_action(crate::keymap::Action::ProjectSearch);
+    assert_eq!(app.sidebar, crate::SidebarTab::Search);
+    assert!(app.proj.search.listing.is_none(), "the list stayed");
+    let mut sim = sim_elem(super::sidebar::search_tab(&app));
+    assert!(!shows(&mut sim, "References to"), "the list is still up");
 }
 
 /// One letter in the search field is searched only on Enter, and the
@@ -16063,6 +16101,71 @@ fn the_welcome_screen_offers_recent_folders() {
     );
 }
 
+/// M1: with a folder open, the folders opened before are still a click
+/// away — under Open Folder… in the app menu, and in the command bar —
+/// and the folder open can be closed, back to the welcome screen. The
+/// welcome screen alone offered them, and only before a folder was open.
+/// The app menu in a window tall enough for all of it.
+fn tall_menu(app: &App) -> Sim<'_> {
+    iced_test::Simulator::with_size(
+        Default::default(),
+        Size::new(1440.0, 4000.0),
+        super::app_menu(app),
+    )
+}
+
+#[test]
+fn recent_folders_and_close_folder_are_in_the_app_menu() {
+    let mut app = reader_app();
+    // Tall enough for the whole menu: Close Folder is at its end.
+    app.window_height = 4000.0;
+    let dir = crate::app::tests::test_dir("ui-recent-menu");
+    let shop = dir.join("teashop");
+    std::fs::create_dir_all(&shop).unwrap();
+    let open = app.proj.project.as_ref().unwrap().root.clone();
+    app.recent_folders = vec![open.clone(), shop.clone()];
+    let mut sim = tall_menu(&app);
+    assert!(shows(&mut sim, "Open Recent"));
+    assert!(shows(&mut sim, "Close Folder"));
+    drop(sim);
+    // The folder open is not offered again.
+    let rows = super::app_menu_recent(&app);
+    assert_eq!(
+        rows.len(),
+        1,
+        "{:?}",
+        rows.iter().map(|r| &r.0).collect::<Vec<_>>()
+    );
+    let sent = click(tall_menu(&app), "teashop");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Project(ProjectMsg::FolderPicked(Some(p))) if *p == shop
+        )),
+        "{sent:?}"
+    );
+    assert!(super::closes_app_menu(&sent[0]));
+    // In the command bar too.
+    app.proj.finder.open = true;
+    app.proj.finder.query = ">recent".into();
+    app.refresh_palette();
+    assert!(shows(&mut sim_of(&app), "Open Recent: teashop"));
+    app.proj.finder.query = ">close folder".into();
+    app.refresh_palette();
+    assert!(shows(&mut sim_of(&app), "Close Folder"));
+    app.proj.finder.open = false;
+    // Closed: back to the welcome screen, its recent folders offered.
+    let _ = app.update(Message::Project(ProjectMsg::CloseFolder));
+    assert!(app.proj.project.is_none());
+    assert_eq!(app.status, "Folder closed");
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Recent"));
+    assert!(shows(&mut sim, "teashop"));
+    drop(sim);
+    // With no folder open, there is none to close.
+    assert!(!shows(&mut tall_menu(&app), "Close Folder"));
+}
+
 /// L15: where the header has room for Explain's name and not every
 /// tool's, Explain keeps it — the one that spends an AI call, and what a
 /// reader new to Clew looks for. At 1100 px "test_pricing.py" showed
@@ -19674,6 +19777,25 @@ fn a_notes_failure_settings_can_fix_has_its_settings() {
         (again.center_y() - ask.center_y()).abs() < 2.0,
         "Ask on a line of its own: {again:?} {ask:?}"
     );
+    drop(sim);
+    // M2: in French at 1100 px, where even Settings' icon and Ask's name
+    // do not fit beside Try again, Ask is its icon too: "Questions" fell
+    // onto a line of its own, right over Ask's pill saying the same.
+    use crate::i18n::{Lang, with_lang};
+    let size = Size::new(1100.0, 700.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    with_lang(Lang::Fr, || {
+        let mut sim = sim_sized(&app, size);
+        let again = text_at(&mut sim, |t| t == "Réessayer", 0).expect("Réessayer");
+        for nth in 0..4 {
+            let Some(ask) = text_at(&mut sim, |t| t == "Questions", nth) else {
+                break;
+            };
+            let under = ask.y > again.y + 4.0 && ask.y < again.y + 40.0;
+            assert!(!under, "Ask on a line of its own: {again:?} {ask:?}");
+        }
+    });
 }
 
 /// L2: a failure whose Try again asks first — Explain All's cost sheet —

@@ -794,9 +794,21 @@ impl App {
         Some(match action {
             OpenFile => self.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files))),
             OpenSymbol => self.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Symbols))),
-            ProjectSearch => self.update(Message::Window(WindowMsg::SidebarTabPicked(
-                SidebarTab::Search,
-            ))),
+            // Searching text: a list of references (or definitions) in the
+            // search's place is put away first, as its × does, for the
+            // field to be there — it stayed, with no field, and what was
+            // typed went nowhere.
+            ProjectSearch => {
+                let left = if self.proj.search.listing.is_some() {
+                    self.update(Message::Nav(NavMsg::ListingClosed))
+                } else {
+                    Task::none()
+                };
+                let shown = self.update(Message::Window(WindowMsg::SidebarTabPicked(
+                    SidebarTab::Search,
+                )));
+                Task::batch([left, shown])
+            }
             // Over a map, Find finds in the map.
             FindInFile
                 if self.graph_mode

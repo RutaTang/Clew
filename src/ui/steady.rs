@@ -137,6 +137,37 @@ pub(crate) fn slot<'a, Message: 'a>(
         .into()
 }
 
+/// `content` as it fits in `room` at `size` in the UI font: whole, or with
+/// its middle let go for an ellipsis — for a path, whose start says where
+/// it is and whose end which one it is (cut at its end, two folders under
+/// one long place read the same).
+pub(crate) fn cut_middle(content: &str, room: f32, size: f32) -> String {
+    let font = crate::fonts::UI;
+    if width_of(content, size, font) <= room {
+        return content.to_string();
+    }
+    let chars: Vec<char> = content.chars().collect();
+    let with = |n: usize| {
+        let head = n.div_ceil(2);
+        let tail = n / 2;
+        let mut cut: String = chars[..head].iter().collect();
+        cut.push('…');
+        cut.extend(&chars[chars.len() - tail..]);
+        cut
+    };
+    // The most characters that, with the ellipsis, still fit.
+    let (mut lo, mut hi) = (0usize, chars.len().saturating_sub(1));
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if width_of(&with(mid), size, font) <= room {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    with(lo)
+}
+
 /// `content` as it fits in `room` at `size` in `font`: whole, or cut short
 /// with an ellipsis where it would run past.
 pub(crate) fn cut(content: &str, room: f32, size: f32, font: Font) -> String {

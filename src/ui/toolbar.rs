@@ -2032,6 +2032,13 @@ fn app_menu_w(app: &App) -> f32 {
         .into_iter()
         .map(|(_, label, keys, _)| (label.to_string(), keys.as_deref().map_or(0.0, chord)))
         .collect();
+    // A recent folder's row: its name, its place beside it.
+    for (name, place, _) in app_menu_recent(app) {
+        rows.push((name, chord(&place).min(RECENT_PLACE_MAX_W)));
+    }
+    if app.proj.project.is_some() {
+        rows.push((tr!("Close Folder").to_string(), 0.0));
+    }
     for action in Action::ALL {
         let title = crate::i18n::lookup(action.menu().title).to_string();
         rows.push((title, chord(&app.keymap.chord(action).caps())));
@@ -2040,6 +2047,33 @@ fn app_menu_w(app: &App) -> f32 {
     let rows: Vec<(&str, f32)> = rows.iter().map(|(l, w)| (l.as_str(), *w)).collect();
     // And its scroller's lane, at the right of its rows (`APP_MENU_LANE`).
     menu_w(280.0, &rows, &[]) + APP_MENU_LANE
+}
+
+/// The most a recent folder's place takes beside its name in the app menu;
+/// a longer one is cut from its middle.
+const RECENT_PLACE_MAX_W: f32 = 200.0;
+
+/// The folders opened here before, offered in the app menu under Open
+/// Folder… — those not open now, newest first: each its name, its place
+/// and the way to it. The welcome screen alone offered them, and once a
+/// folder was open there was no way back to them but the folder dialog.
+pub(crate) fn app_menu_recent(app: &App) -> Vec<(String, String, Message)> {
+    if app.connection.is_remote() {
+        return Vec::new();
+    }
+    let open = app.proj.project.as_ref().map(|p| p.root.as_path());
+    app.recent_folders
+        .iter()
+        .filter(|folder| Some(folder.as_path()) != open)
+        .map(|folder| {
+            let (name, place) = crate::app::recent::said(folder);
+            (
+                name,
+                place,
+                Message::Project(ProjectMsg::FolderPicked(Some(folder.clone()))),
+            )
+        })
+        .collect()
 }
 
 /// The lane the app menu's scroller runs in, right of its rows: over them,
@@ -2076,7 +2110,11 @@ pub(crate) fn closes_app_menu(message: &Message) -> bool {
     matches!(
         message,
         Message::Editor(EditorMsg::RunAction(_))
-            | Message::Project(ProjectMsg::OpenFolderPressed)
+            | Message::Project(
+                ProjectMsg::OpenFolderPressed
+                    | ProjectMsg::FolderPicked(_)
+                    | ProjectMsg::CloseFolder
+            )
             | Message::Connect(ConnectMsg::Open)
             | Message::Settings(SettingsMsg::Open)
             | Message::Window(WindowMsg::Close)
@@ -2159,6 +2197,34 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
         };
         items.push(menu_item(Some(glyph), label.into(), trailing, Some(msg)));
     }
+    // The folders opened before, under Open Folder…, each where it is.
+    let recent = app_menu_recent(app);
+    if !recent.is_empty() {
+        items.push(menu_separator());
+        items.push(
+            container(text(tr!("Open Recent")).size(ts::SMALL).color(theme::dim()))
+                .padding(Padding {
+                    top: 2.0,
+                    right: 8.0,
+                    bottom: 2.0,
+                    left: 37.0,
+                })
+                .into(),
+        );
+        for (name, place, msg) in recent {
+            let shown = super::steady::cut_middle(&place, RECENT_PLACE_MAX_W, ts::SMALL);
+            items.push(tip_wrapped(
+                menu_item(
+                    Some(Glyph::Folder),
+                    name,
+                    text(shown).size(ts::SMALL).color(theme::dim()).into(),
+                    Some(msg),
+                ),
+                place,
+                tooltip::Position::Right,
+            ));
+        }
+    }
     for section in MenuSection::ALL {
         items.push(menu_separator());
         items.push(
@@ -2192,6 +2258,16 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
         }
     }
     items.push(menu_separator());
+    // The folder open closed, back to the welcome screen — beside closing
+    // the window, as the two are told apart.
+    if app.proj.project.is_some() {
+        items.push(menu_item(
+            Some(Glyph::Folder),
+            tr!("Close Folder").into(),
+            slot(),
+            Some(Message::Project(ProjectMsg::CloseFolder)),
+        ));
+    }
     items.push(menu_item(
         Some(Glyph::Close),
         tr!("Close Window").into(),

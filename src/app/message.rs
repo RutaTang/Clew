@@ -293,6 +293,9 @@ pub enum ProjectMsg {
     /// The folders opened here before, read as the window opened (see
     /// `crate::app::recent`).
     RecentRead(Vec<PathBuf>),
+    /// Close the folder open, back to the welcome screen and its recent
+    /// folders.
+    CloseFolder,
     /// The working tree's changes read, for the Files view's marks (see
     /// `App::sync_git_status`).
     GitStatusRead {
@@ -2581,6 +2584,7 @@ impl ProjectMsg {
             ProjectMsg::OpenFolderPressed
             | ProjectMsg::FolderPicked(..)
             | ProjectMsg::RecentRead(..)
+            | ProjectMsg::CloseFolder
             | ProjectMsg::ConsentAllowed(..)
             | ProjectMsg::OpenWithoutSetup(..)
             | ProjectMsg::ConsentDenied(..)

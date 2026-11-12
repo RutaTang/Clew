@@ -167,7 +167,11 @@ impl PaletteCommand {
                         Action::ExplainAll | Action::StartDebug | Action::Run
                     )) | Message::Debug(_)
                         | Message::Explain(_)
-                        | Message::Project(ProjectMsg::OpenFolderPressed)
+                        | Message::Project(
+                            ProjectMsg::OpenFolderPressed
+                                | ProjectMsg::FolderPicked(_)
+                                | ProjectMsg::CloseFolder
+                        )
                         | Message::Connect(ConnectMsg::Open)
                         | Message::Export(_)
                 ),
@@ -306,9 +310,13 @@ impl PaletteCommand {
                 Glyph::Sparkle,
                 tr!("This uses the AI model, which costs money."),
             ),
-            Message::Project(ProjectMsg::OpenFolderPressed) => (
+            Message::Project(ProjectMsg::OpenFolderPressed | ProjectMsg::FolderPicked(_)) => (
                 Glyph::FolderOpen,
                 tr!("This opens another folder in this window."),
+            ),
+            Message::Project(ProjectMsg::CloseFolder) => (
+                Glyph::Close,
+                tr!("This closes the folder open in this window."),
             ),
             Message::Connect(ConnectMsg::Open) => {
                 (Glyph::Remote, tr!("This connects to another computer."))
@@ -1245,6 +1253,25 @@ impl App {
                     shown_as: Some(choice.shown),
                 });
             }
+        }
+        // The folders opened before, by their names ("Open Recent:
+        // teashop"), as the app menu lists them; and the way back to the
+        // welcome screen.
+        for (name, place, message) in crate::ui::app_menu_recent(self) {
+            out.push(PaletteCommand {
+                title: format!("Open Recent: {name} ({place})"),
+                keys: None,
+                action: PaletteAction::Send(message),
+                shown_as: Some(tr!("Open Recent: {name}", name = name)),
+            });
+        }
+        if self.proj.project.is_some() {
+            out.push(PaletteCommand {
+                title: tr_noop!("Close Folder").into(),
+                keys: None,
+                action: PaletteAction::Send(Message::Project(ProjectMsg::CloseFolder)),
+                shown_as: None,
+            });
         }
         out
     }

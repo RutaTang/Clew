@@ -669,6 +669,24 @@ impl App {
         Some(self.status.clone())
     }
 
+    /// Close the folder open: its work stopped and its session forgotten, as
+    /// opening another does, and the welcome screen back with the folders
+    /// opened before. Once a folder was open, the only way to another was
+    /// the folder dialog.
+    pub(crate) fn close_folder(&mut self) -> Task<Message> {
+        if self.proj.project.is_none() {
+            return Task::none();
+        }
+        let stop = self.drop_project_work();
+        // Its late answers carry the old epoch, and are dropped.
+        self.project_epoch += 1;
+        let discarded = self.forget_project_state();
+        self.pending_open = None;
+        self.pending_open_line = None;
+        self.status = discarded.unwrap_or_else(|| tr!("Folder closed").to_string());
+        stop
+    }
+
     /// Stop everything running FOR the project being left — the work itself,
     /// not just its results.
     ///
@@ -1312,6 +1330,7 @@ impl App {
                 }
                 Task::none()
             }
+            ProjectMsg::CloseFolder => self.close_folder(),
             ProjectMsg::RecentRead(read) => {
                 // After those opened meanwhile, which are newer.
                 let mut folders = std::mem::take(&mut self.recent_folders);
