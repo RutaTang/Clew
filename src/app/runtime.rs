@@ -73,6 +73,7 @@ impl App {
             pending_open_line: None,
             pending_consent: None,
             setup: None,
+            setup_counted_at: None,
             pending_setup: None,
             trust: clew_core::trust::Trust::load(),
             scanning: false,

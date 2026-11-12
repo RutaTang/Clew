@@ -90,6 +90,11 @@ pub struct StopFacts {
     /// of the call; none where no project code called it.
     #[serde(default)]
     pub caller: Option<(String, String, usize)>,
+    /// How many stops the run made in all — those outside the project
+    /// and after the last kept included; 0 for a tour saved before this
+    /// was kept.
+    #[serde(default)]
+    pub of: usize,
 }
 
 impl Step {
@@ -504,6 +509,7 @@ pub fn from_trace(root: &Path, program: &str, stops: &[crate::TraceStop]) -> Opt
             ordinal,
             reason: stop.reason.clone(),
             caller,
+            of: stops.len(),
         };
         steps.push(Step {
             title: name.clone(),
@@ -1353,6 +1359,12 @@ mod trace_tests {
         ];
         let wt = from_trace(root, "app", &stops).expect("a tour");
         assert_eq!(wt.title, "Run: app");
+        // Each step knows how many stops the run made in all.
+        assert!(
+            wt.steps
+                .iter()
+                .all(|s| s.stop.as_ref().is_some_and(|f| f.of == stops.len()))
+        );
         let steps: Vec<(&str, &str, Option<usize>)> = wt
             .steps
             .iter()

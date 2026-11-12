@@ -76,19 +76,12 @@ pub(crate) fn setup_sheet<'a>(
             },
         ),
         // A folder with no code in it says so: "Nothing left to explain"
-        // read as if all of it had been explained.
-        None if counted == Some(0)
-            && app
-                .proj
-                .project
-                .as_ref()
-                .is_some_and(|p| p.files.is_empty()) =>
-        {
-            (
-                tr!("There is no code here to explain.").to_string(),
-                String::new(),
-            )
-        }
+        // read as if all of it had been explained. The sheet's folder, as
+        // its look found it — on a first open, not the project open now.
+        None if counted == Some(0) && setup.is_some_and(|s| s.no_code) => (
+            tr!("There is no code here to explain.").to_string(),
+            String::new(),
+        ),
         None => (
             explain_line(app.llm_available, calls.flatten(), app.embed_available),
             String::new(),

@@ -497,13 +497,13 @@ impl App {
             return self.update(msg);
         }
         // Enter on a sheet presses its main button — as its "yes" by voice
-        // does, and only once it can be pressed (a first open's Open waits
-        // to be read). Opened from a shortcut, the cost sheet took no
-        // Enter: the ring had nothing on it. A field holding the keys sends
-        // its own Enter before it gets here.
+        // does — where that is safe and only once it can be pressed and
+        // read (`ActiveOverlay::enter_answers`). Opened from a shortcut,
+        // the cost sheet took no Enter: the ring had nothing on it. A field
+        // holding the keys sends its own Enter before it gets here.
         if matches!(key.as_ref(), Key::Named(Named::Enter))
             && !(cmd || modifiers.control() || modifiers.alt() || modifiers.shift())
-            && ui::active_overlay(self).is_some_and(|o| o.enter_answers())
+            && ui::active_overlay(self).is_some_and(|o| o.enter_answers(self))
             && let Some(yes) = ui::heard::gather(self).into_iter().find(|t| {
                 t.answer == Some(ui::heard::Answer::Yes) && t.layer >= ui::heard::Layer::Overlay
             })
@@ -700,12 +700,13 @@ impl App {
             }
             // F12 and ⇧F12: Go to Definition and Find References, as most
             // editors have them — F12 did nothing, and said nothing (`gd`
-            // and `gr` do the same).
+            // and `gr` do the same). Not under a menu or a dialog holding
+            // the keys: menus let function keys through, and it went to a
+            // definition under the open menu.
             Key::Named(Named::F12)
                 if self.code_focused
                     && !(cmd || modifiers.alt() || modifiers.control())
-                    && !self.proj.finder.open
-                    && self.proj.context_menu.is_none()
+                    && !ui::active_overlay(self).is_some_and(|o| o.holds_keys())
                     && ui::pane_cover(self).is_none()
                     && self.active_viewer().is_some() =>
             {

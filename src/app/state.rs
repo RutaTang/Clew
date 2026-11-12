@@ -1363,6 +1363,10 @@ pub struct App {
     pub pending_consent: Option<PathBuf>,
     /// The setup sheet on screen, if any (see `crate::app::setup`).
     pub setup: Option<crate::app::setup::ProjectSetup>,
+    /// When the sheet's estimate came in (`setup`'s census): Enter presses
+    /// its Explain only once it has stood a moment to be read
+    /// ([`crate::app::setup::SHEET_READ`]).
+    pub setup_counted_at: Option<std::time::Instant>,
     /// What a first open's sheet asked for, waiting for the project to be
     /// open and its state loaded.
     pub pending_setup: Option<crate::app::setup::SetupIntent>,

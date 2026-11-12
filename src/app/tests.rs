@@ -37073,6 +37073,12 @@ fn f12_goes_to_the_definition_and_shift_f12_finds_references() {
     assert!(!by_gd.is_empty(), "gd said nothing");
     assert_eq!(said(&mut app, false), by_gd, "F12 is gd");
     assert!(!said(&mut app, true).is_empty(), "⇧F12 said nothing");
+    // Not under a menu: menus let function keys through, and it went to a
+    // definition under the open menu.
+    app.show_app_menu = true;
+    app.code_focused = true;
+    assert_eq!(said(&mut app, false), "", "under the menu");
+    app.show_app_menu = false;
     // Not with a page over the code.
     let _ = app.update(Message::Overview(OverviewMsg::ShowStats));
     app.code_focused = true;

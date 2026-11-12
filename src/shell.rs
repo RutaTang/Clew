@@ -1607,8 +1607,20 @@ fn route(event: iced::Event, status: iced::event::Status, window: window::Id) ->
             key,
             modified_key,
             modifiers,
+            repeat,
             ..
         }) => {
+            // A held Enter presses once: its repeats pressed again what the
+            // first had just put up — the sheet a command opened, its main
+            // button, unread — or the ring's control over and over.
+            if repeat
+                && matches!(
+                    key.as_ref(),
+                    keyboard::Key::Named(keyboard::key::Named::Enter)
+                )
+            {
+                return None;
+            }
             let key = typed_key(key, modified_key, modifiers);
             forward_key(&key, modifiers, status).then(|| {
                 Shell::Window(
@@ -4268,6 +4280,22 @@ mod tests {
             })
         };
         assert!(route(press("j"), iced::event::Status::Captured, id).is_none());
+        // A held Enter's repeats are not routed: only its first press is.
+        let enter = |repeat: bool| {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Enter),
+                modified_key: keyboard::Key::Named(keyboard::key::Named::Enter),
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: None,
+                repeat,
+            })
+        };
+        assert!(route(enter(false), iced::event::Status::Ignored, id).is_some());
+        assert!(route(enter(true), iced::event::Status::Ignored, id).is_none());
         assert!(matches!(
             route(press("j"), iced::event::Status::Ignored, id),
             Some(Shell::Window(w, Message::Editor(EditorMsg::KeyPressed(..)))) if w == id

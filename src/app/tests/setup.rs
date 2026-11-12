@@ -358,6 +358,28 @@ fn the_count_leaves_out_what_is_explained() {
     }));
     let calls = app.setup.as_ref().unwrap().census.as_ref().unwrap().calls;
     assert_eq!(calls, Some(9));
+    assert!(!app.setup.as_ref().unwrap().no_code);
+    // All of it explained is not "no code": the count, less what is
+    // explained, is 0 either way; the folder's own count tells them apart.
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root: root.clone(),
+        census: Census {
+            servers: Vec::new(),
+            calls: Some(1),
+        },
+    }));
+    let setup = app.setup.as_ref().unwrap();
+    assert_eq!(setup.census.as_ref().unwrap().calls, Some(0));
+    assert!(!setup.no_code, "all explained, not no code");
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root,
+        census: Census {
+            servers: Vec::new(),
+            calls: Some(0),
+        },
+    }));
+    assert!(app.setup.as_ref().unwrap().no_code);
 }
 
 /// The sheet asking about the open project — "Set Up Project…", Explain
@@ -757,12 +779,15 @@ fn a_server_on_this_computer_is_used_not_installed_again() {
     );
 }
 
-/// Enter on a sheet presses its main button, as its "yes" by voice does:
-/// the cost sheet Explain All's shortcut opens took no Enter, the ring
-/// having nothing on it. Not before the button can be pressed — while the
-/// project is still being looked at — and not on a question of trust.
+/// Enter on Explain All's sheet presses its Explain, as its "yes" by voice
+/// does: the sheet the shortcut opens took no Enter, the ring having
+/// nothing on it. Not while the project is still being counted, nor before
+/// the estimate has stood to be read — a held or doubled Enter started a
+/// paid pass whose cost was never on screen. And it sets up no language
+/// server: the sheet shows none, and its Explain downloaded them, gave
+/// them leave to build, and asked again about those left for later.
 #[test]
-fn enter_on_a_sheet_presses_its_main_button() {
+fn enter_on_explain_alls_sheet_presses_explain_once_read() {
     let data = test_dir("setup-data-enter");
     let _ = std::fs::remove_dir_all(&data);
     std::fs::create_dir_all(&data).unwrap();
@@ -775,6 +800,7 @@ fn enter_on_a_sheet_presses_its_main_button() {
     let mut app = scanned_app("setup-enter");
     app.invalidate_llm_config();
     assert!(app.llm_available);
+    app.proj.servers_not_now = true;
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let enter = || {
         key_press(
@@ -787,16 +813,59 @@ fn enter_on_a_sheet_presses_its_main_button() {
     let _ = app.update(enter());
     assert!(app.setup.is_some(), "pressed before it could be");
     let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
-        root,
+        root: root.clone(),
         census: Census {
-            servers: Vec::new(),
+            servers: vec![builds_and_downloads()],
             calls: Some(10),
         },
     }));
-    assert!(app.setup.is_some());
+    // Counted this instant: not read yet.
+    let _ = app.update(enter());
+    assert!(app.setup.is_some(), "pressed before it could be read");
+    app.setup_counted_at = Some(
+        std::time::Instant::now()
+            - crate::app::setup::SHEET_READ
+            - std::time::Duration::from_millis(5),
+    );
     let _ = app.update(enter());
     assert!(app.setup.is_none(), "Enter pressed Explain");
     assert!(app.proj.explain.running, "and explaining began");
+    assert!(
+        !clew_core::trust::Trust::load().is_build_trusted(None, &root, "rust-analyzer"),
+        "no leave to build given unseen"
+    );
+    assert!(
+        app.proj.servers_not_now,
+        "the servers left for later stay so"
+    );
+}
+
+/// Enter does not answer a sheet whose Open or Apply downloads language
+/// servers and gives them leave to build the project: Set Up Project's
+/// stays up, nothing recorded.
+#[test]
+fn enter_does_not_apply_set_up_project() {
+    let data = test_dir("setup-data-enter-manage");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let mut app = scanned_app("setup-enter-manage");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let _ = app.show_setup(SetupMode::Manage, root.clone());
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root: root.clone(),
+        census: Census {
+            servers: vec![builds_and_downloads()],
+            calls: Some(10),
+        },
+    }));
+    app.setup_counted_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+    let _ = app.update(key_press(
+        keyboard::Key::Named(keyboard::key::Named::Enter),
+        keyboard::Modifiers::default(),
+    ));
+    assert!(app.setup.is_some(), "applied by Enter");
+    assert!(!clew_core::trust::Trust::load().is_build_trusted(None, &root, "rust-analyzer"));
 }
 
 /// Enter allows no question of trust: a language server's download, put

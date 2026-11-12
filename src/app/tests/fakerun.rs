@@ -439,6 +439,36 @@ fn closing_a_set_aside_fake_run_leaves_the_shown_one_said_to_work() {
     assert_eq!(app.status, said, "said no longer to work");
 }
 
+/// The other way round: the run on screen is done, and the one set aside
+/// still works. Closed, it takes its "Working out what … does…" with it:
+/// put back as the shown run's, it stood for good over a run done.
+#[test]
+fn closing_a_set_aside_fake_run_over_a_done_one_says_nothing_works() {
+    use crate::app::state::RunTab;
+    let mut app = fake_app("fake-close-parked-over-done");
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: false }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let first = app.proj.fake.tab;
+    let first_seq = app.proj.fake.working.as_ref().unwrap().seq;
+    let _ = app.update(Message::Fake(FakeMsg::Answered {
+        stamp: app.stamp(),
+        seq: first_seq,
+        result: Ok(TRACE.into()),
+    }));
+    assert!(app.proj.fake.working.is_none(), "the first is done");
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let second = app.proj.fake.tab;
+    assert!(app.status.contains("Working out"), "{}", app.status);
+    let _ = app.update(Message::Debug(DebugMsg::ShowTab(RunTab::Fake(first))));
+    assert_eq!(app.shown_run_tab(), Some(RunTab::Fake(first)));
+    let _ = app.update(Message::Debug(DebugMsg::CloseTab(RunTab::Fake(second))));
+    assert_eq!(app.run_tabs(), [RunTab::Fake(first)]);
+    assert!(!app.status.contains("Working out"), "{}", app.status);
+}
+
 /// Fake runs run side by side, each in its own tab: a second does not stop
 /// the first; the first's answer, come while the second is on screen, is
 /// taken in its own tab and shows nothing; Edit inputs runs again in the

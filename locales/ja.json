@@ -2649,6 +2649,7 @@
  "pulls in {project} project files and {system} system headers": "取り込み: プロジェクトのファイル {project} 個、システムヘッダー {system} 個",
  "put them in its setting, as {example}": "設定に入れてください（例: {example}）",
  "pytest fixtures": "pytest フィクスチャ",
+ "pytest is not installed for this Python, so this test file ran as a script: it defines its tests and runs none of them. Install pytest in the project's environment to run them.": "この Python には pytest がインストールされていないため、このテストファイルはスクリプトとして実行されました。テストを定義するだけで、どれも実行していません。テストを実行するには、プロジェクトの環境に pytest をインストールしてください。",
  "query does not compile: {e}": "クエリをコンパイルできません: {e}",
  "re-export": "再エクスポート",
  "read failed: {e}": "読み取りに失敗しました: {e}",

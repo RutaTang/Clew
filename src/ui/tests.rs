@@ -3288,10 +3288,17 @@ fn the_trail_leaves_out_a_file_gone() {
     app.proj.history.push(at(&gone, 1), None);
     app.proj.history.push(at(&abs, 40), Some("line_39".into()));
     assert!(shows(&mut sim_of(&app), "gone_away.rs"), "in the trail");
+    assert!(shows(
+        &mut sim_elem(super::sidebar::trail_tab(&app)),
+        "gone_away.rs"
+    ));
     app.proj.gone_files.insert(gone);
     let mut sim = sim_of(&app);
     assert!(!shows(&mut sim, "gone_away.rs"), "left out");
     assert!(shows(&mut sim, "line_39"));
+    // The sidebar's Reading trail leaves it out too.
+    let mut tab = sim_elem(super::sidebar::trail_tab(&app));
+    assert!(!shows(&mut tab, "gone_away.rs"), "left out of the tab");
 }
 
 /// A stop named for what is on its line — a type gone to — keeps its name
@@ -5868,6 +5875,7 @@ fn the_setup_sheet_says_what_each_choice_takes() {
         servers: true,
         servers_declined: false,
         explain: false,
+        no_code: false,
         census: Some(Census {
             servers: vec![SetupServer {
                 language: "rust".into(),
@@ -5958,6 +5966,7 @@ fn the_setup_sheet_holds_still_while_it_looks() {
         servers: true,
         servers_declined: false,
         explain: false,
+        no_code: false,
         census: None,
     });
     fn sheet<'a>(
@@ -10546,6 +10555,7 @@ fn a_run_tour_says_why_it_has_fewer_steps_than_stops() {
             ordinal,
             reason: "step".into(),
             caller: None,
+            of: 0,
         }),
     };
     let mut run = Walkthrough {
@@ -10565,8 +10575,37 @@ fn a_run_tour_says_why_it_has_fewer_steps_than_stops() {
     assert!(shows(&mut sim, said), "said above its steps");
     run.steps = vec![step(1), step(2)];
     assert_eq!(super::folded_stops(&run), None, "every stop a step");
+    // Stops left out at the end (outside the project) are counted as the
+    // run made them: the last kept stop is not the last stop.
+    run.steps = vec![step(1), step(2), step(3)];
+    for s in &mut run.steps {
+        s.stop.as_mut().unwrap().of = 4;
+    }
+    assert_eq!(
+        super::folded_stops(&run).as_deref(),
+        Some(
+            "3 steps from 4 stops: a function stepped through is one step, and stops outside the project are left out."
+        )
+    );
     run.steps.iter_mut().for_each(|s| s.stop = None);
     assert_eq!(super::folded_stops(&run), None, "not a run's");
+}
+
+/// The room beside the call graph's title is one width whatever stands in
+/// it — the button, refining's count, the result — so its header keeps its
+/// lines: as wide as its words, the header changed lines as refining ended,
+/// and the search field moved with it, losing its caret mid-word.
+#[test]
+fn the_call_graphs_title_keeps_one_room_beside_it() {
+    let mut app = reader_app();
+    let calls = crate::Overlay::ProjectCalls;
+    let idle = super::graph::graph_extra_w(&app, calls);
+    app.proj.project_calls.refine_progress = Some((3, 40));
+    assert_eq!(super::graph::graph_extra_w(&app, calls), idle, "refining");
+    app.proj.project_calls.refine_progress = None;
+    app.proj.project_calls.precise = true;
+    assert!(app.precise_label().is_some());
+    assert_eq!(super::graph::graph_extra_w(&app, calls), idle, "refined");
 }
 
 /// A tour's row, and its Regenerate and Delete, are heard by the title its
@@ -15400,6 +15439,7 @@ fn settings_opened_from_the_projects_sheet_is_over_it() {
         servers: true,
         servers_declined: false,
         explain: false,
+        no_code: false,
         census: None,
     });
     assert!(matches!(
@@ -15441,6 +15481,7 @@ fn the_set_up_sheet_says_why_apply_waits() {
         servers,
         servers_declined: false,
         explain,
+        no_code: false,
         census: Some(census),
     };
     // Every server set up, Explain not ticked: nothing to apply, and why.
@@ -15493,6 +15534,7 @@ fn explain_with_nothing_to_explain_says_so_once() {
         servers: false,
         servers_declined: false,
         explain: true,
+        no_code: false,
         census: Some(Census {
             servers: Vec::new(),
             calls: Some(0),
@@ -15504,7 +15546,8 @@ fn explain_with_nothing_to_explain_says_so_once() {
         rel: "pricing.py".into(),
     }]);
     assert_eq!(count(&app, "left to explain"), 1, "said once");
-    // No code at all.
+    // No code at all, as the look at the sheet's folder found.
+    app.setup.as_mut().unwrap().no_code = true;
     if let Some(project) = app.proj.project.as_mut() {
         project.files = std::sync::Arc::new(Vec::new());
         project.tree = Default::default();
@@ -15513,6 +15556,16 @@ fn explain_with_nothing_to_explain_says_so_once() {
     assert_eq!(count(&app, "There is no code here to explain."), 1);
     let mut sim = sim_elem(super::sidebar::files_tab(&app));
     assert!(shows(&mut sim, "This folder has no files Clew can read."));
+    drop(sim);
+    // A first open's sheet is about its own folder, whatever is open (or
+    // nothing): it said "Nothing left to explain." of a folder with no
+    // code opened from the welcome screen.
+    app.proj.project = None;
+    let setup = app.setup.as_mut().unwrap();
+    setup.mode = SetupMode::Open;
+    setup.explain = true;
+    assert_eq!(count(&app, "There is no code here to explain."), 1);
+    assert_eq!(count(&app, "left to explain"), 0);
 }
 
 /// The setup sheet with no AI key offers where one is added, a click away:

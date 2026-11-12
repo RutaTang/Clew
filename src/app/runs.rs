@@ -515,13 +515,22 @@ impl App {
                 };
                 let mut p = self.proj.fake.parked.remove(i);
                 self.swap_fake(&mut p);
-                // The status line is the run on screen's: stopping this
-                // one settled its "Working out…" by name, the same words
-                // as the shown run's still working.
+                // Stopping this one settles its "Working out…" by name: put
+                // back only where it is the shown run's own, the same words
+                // of a run still working. Put back whatever it was, the
+                // closed run's stood for good over a run done.
                 let status = self.status.clone();
                 let ended = self.stop_fake_work();
-                self.status = status;
                 self.swap_fake(&mut p);
+                let shown_working = self
+                    .proj
+                    .fake
+                    .working
+                    .as_ref()
+                    .map(|w| tr!("Working out what {name} does…", name = w.target.name));
+                if shown_working.as_deref() == Some(status.as_str()) {
+                    self.status = status;
+                }
                 ended
             }
         };

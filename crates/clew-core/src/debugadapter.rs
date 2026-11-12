@@ -403,6 +403,11 @@ const ZIG_BACKEND_NOTICE: &str = "This program's debug information is Zig's own 
      variables from it: breakpoints and stepping work, but no variables show. Build it with \
      -fllvm (or .use_llvm = true in build.zig) to see them.";
 
+/// What a Python test file run without pytest is told.
+pub const NO_PYTEST_NOTICE: &str = "pytest is not installed for this Python, so this test file \
+     ran as a script: it defines its tests and runs none of them. Install pytest in the \
+     project's environment to run them.";
+
 /// How long building a Zig program for a session may take.
 const ZIG_BUILD_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -860,15 +865,21 @@ fn python_with(
     // and runs them. Run as a script it defined its tests and ended, and
     // Run picked the project's program instead, saying the test "does not
     // run on its own".
-    if probe.has_pytest
-        && is_python_test(Path::new(program))
+    if is_python_test(Path::new(program))
         && let Some(launch) = launch.as_object_mut()
     {
-        launch.remove("program");
-        launch.insert("module".into(), json!("pytest"));
-        let mut test_args = vec![json!(program)];
-        test_args.extend(args.iter().map(|a| json!(a)));
-        launch.insert("args".into(), json!(test_args));
+        if probe.has_pytest {
+            launch.remove("program");
+            launch.insert("module".into(), json!("pytest"));
+            let mut test_args = vec![json!(program)];
+            test_args.extend(args.iter().map(|a| json!(a)));
+            launch.insert("args".into(), json!(test_args));
+        } else {
+            // Without pytest it runs as a script, which only defines its
+            // tests: said, or the run ended having done nothing, with
+            // nothing said why.
+            launch.insert(NOTICE.into(), json!(NO_PYTEST_NOTICE));
+        }
     }
     Ok(Resolution::Ready(AdapterSpec {
         command: python.to_path_buf(),
@@ -1705,6 +1716,10 @@ mod tests {
         let without = fake_python(&dir, "echo '1 1 0'");
         let test = launch(&without, "/p/tests/test_pricing.py");
         assert_eq!(test["program"], "/p/tests/test_pricing.py");
+        // Run as a script, it says why it runs no tests.
+        assert_eq!(test[NOTICE], NO_PYTEST_NOTICE);
+        assert!(script.get(NOTICE).is_none(), "a script runs as it is");
+        assert!(launch(&without, "/p/main.py").get(NOTICE).is_none());
         assert!(is_python_test(Path::new("a/b_test.py")));
         assert!(!is_python_test(Path::new("a/testing.py")));
         assert!(!is_python_test(Path::new("a/test_x.txt")));

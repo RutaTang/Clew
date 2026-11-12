@@ -364,10 +364,13 @@ pub(crate) fn walk_title(wt: &crate::walkthrough::Walkthrough) -> String {
 /// project makes none. `None` for any other tour, and for a run's whose
 /// every stop is a step.
 pub(crate) fn folded_stops(wt: &crate::walkthrough::Walkthrough) -> Option<String> {
+    // How many the run made: as kept with its steps, else (a tour saved
+    // before it was) at least the last one it kept — stops left out at
+    // the end, outside the project, went uncounted.
     let stops = wt
         .steps
         .iter()
-        .filter_map(|s| s.stop.as_ref().map(|f| f.ordinal))
+        .filter_map(|s| s.stop.as_ref().map(|f| f.ordinal.max(f.of)))
         .max()?;
     let steps = wt.steps.len();
     (stops > steps).then(|| {
@@ -2053,7 +2056,16 @@ fn file_stop_label(loc: &crate::history::Loc) -> String {
 /// click a node to jump. Rows are the panel's width, as the file tree's are;
 /// a name too long for it is cut at the edge.
 pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
-    let visits = app.proj.history.flatten_with(&app.proj.trail_collapsed);
+    // Files found no longer there are left out of it, as the sheet's trail
+    // row leaves them: listed here, a press on one said only the system's
+    // error.
+    let visits: Vec<_> = app
+        .proj
+        .history
+        .flatten_with(&app.proj.trail_collapsed)
+        .into_iter()
+        .filter(|v| !app.proj.gone_files.contains(&v.loc.path))
+        .collect();
     if visits.is_empty() {
         return empty_state(Glyph::Minimap, tr!("No reading trail yet"), "", None);
     }

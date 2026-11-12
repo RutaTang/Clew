@@ -248,6 +248,10 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
     let title = crate::i18n::lookup(graph_title(overlay));
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
+        // Each state in the room the button takes (`calls_extra_room`),
+        // what does not fit whole where the pointer rests: as wide as its
+        // words, the header changed lines as refining ended — the search
+        // field moved with it, and lost its caret mid-word.
         crate::Overlay::ProjectCalls => Some(if let Some(progress) = app.refine_progress_label() {
             // As wide as it reads at its end: counting, its left edge — and
             // what it said — shook at every file.
@@ -257,16 +261,23 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
                 }
                 _ => progress.clone(),
             };
-            super::steady::slot(
+            let label = super::steady::slot(
                 text(progress.clone())
                     .size(ts::SMALL)
-                    .color(theme::warning()),
+                    .color(theme::warning())
+                    .wrapping(iced::widget::text::Wrapping::None),
                 &progress,
                 &[&widest],
                 ts::SMALL,
-            )
+            );
+            in_calls_room(label, progress)
         } else if let Some(precise) = app.precise_label() {
-            text(precise).size(ts::SMALL).color(theme::accent()).into()
+            let label = text(precise.clone())
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .wrapping(iced::widget::text::Wrapping::None)
+                .into();
+            in_calls_room(label, precise)
         } else {
             // With no project there is nothing to refine.
             // In words, with what it does said where the pointer rests:
@@ -358,27 +369,38 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
     )
 }
 
+/// The room beside the call graph's title, whatever stands there: the
+/// button's, which every state of it keeps.
+pub(crate) fn calls_extra_room() -> f32 {
+    super::steady::width_of(
+        tr!("Check calls with the language server"),
+        ts::SMALL,
+        crate::fonts::UI,
+    ) + 20.0
+}
+
+/// `label` in the call graph's room beside the title, cut at its edge and
+/// said whole (`said`) where the pointer rests.
+fn in_calls_room<'a>(label: Element<'a, Message>, said: String) -> Element<'a, Message> {
+    super::toolbar::tip_at(
+        container(label)
+            .width(calls_extra_room())
+            .align_x(iced::Right)
+            .clip(true),
+        said,
+        None,
+        iced::widget::tooltip::Position::Bottom,
+    )
+}
+
 /// How wide the control beside a graph dialog's title is, as
 /// `project_graph_modal` draws it — measured in the words of the language
 /// spoken, for the header to know whether the map's controls fit beside it.
-fn graph_extra_w(app: &App, overlay: crate::Overlay) -> f32 {
+pub(crate) fn graph_extra_w(app: &App, overlay: crate::Overlay) -> f32 {
     let measure = |s: &str| super::steady::width_of(s, ts::SMALL, crate::fonts::UI);
     match overlay {
-        crate::Overlay::ProjectCalls => {
-            if let Some(progress) = app.refine_progress_label() {
-                let widest = match app.proj.project_calls.refine_progress {
-                    Some((_, total)) if total > 0 => {
-                        tr!("Refining {done}/{total}…", done = total, total = total)
-                    }
-                    _ => progress,
-                };
-                measure(&widest)
-            } else if let Some(precise) = app.precise_label() {
-                measure(&precise)
-            } else {
-                measure(tr!("Check calls with the language server")) + 20.0
-            }
-        }
+        // One room whatever stands in it, so the header keeps its lines.
+        crate::Overlay::ProjectCalls => calls_extra_room(),
         crate::Overlay::ProjectImports => 0.0,
         crate::Overlay::ProjectTypes => measure(tr!("Building the API docs…")),
         // The picker as wide as its widest map, its padding and its arrow.
@@ -2221,7 +2243,7 @@ impl GraphCanvas<'_> {
         side: f32,
         hover: bool,
     ) {
-        let (left, share) = label_on_side(side);
+        let (left, share) = label_side_drawn(side, hover);
         let a = alpha.min(1.0) * share;
         if a >= 0.01 {
             self.draw_label_at(frame, i, (x, y), r, a, left, hover);
@@ -2297,6 +2319,17 @@ fn label_on_side(side: f32) -> (bool, f32) {
         (false, 1.0 - 2.0 * side)
     } else {
         (true, 2.0 * side - 1.0)
+    }
+}
+
+/// [`label_on_side`], but the label of the node under the pointer is
+/// whole on the side it is going to: faded through nothing, the name of
+/// the node pointed at was gone for frames.
+fn label_side_drawn(side: f32, hover: bool) -> (bool, f32) {
+    if hover {
+        (side >= 0.5, 1.0)
+    } else {
+        label_on_side(side)
     }
 }
 
@@ -3798,6 +3831,12 @@ mod tests {
         assert_eq!(label_on_side(0.0), (false, 1.0));
         assert_eq!(label_on_side(1.0), (true, 1.0));
         assert_eq!(label_on_side(0.5).1, 0.0, "gone between");
+        // The pointed-at node's label never goes: whole, on its way.
+        for k in 0..=20 {
+            let side = k as f32 / 20.0;
+            assert_eq!(label_side_drawn(side, true), (side >= 0.5, 1.0));
+            assert_eq!(label_side_drawn(side, false), label_on_side(side));
+        }
         let mut last = None;
         for k in 0..=20 {
             let (left, share) = label_on_side(k as f32 / 20.0);

@@ -66,6 +66,12 @@ impl SetupServer {
     }
 }
 
+/// How long the sheet's estimate stands before Enter presses its Explain:
+/// a held or doubled Enter — the first opening the sheet from the command
+/// bar — started a paid pass whose cost was never on screen to be read.
+/// A press of the button itself is not held back.
+pub const SHEET_READ: std::time::Duration = std::time::Duration::from_millis(700);
+
 /// What a look at the project found.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Census {
@@ -90,6 +96,10 @@ pub struct ProjectSetup {
     pub servers_declined: bool,
     pub explain: bool,
     pub census: Option<Census>,
+    /// The look found no code to explain in the sheet's folder — not
+    /// "all of it explained already", which the count less what is
+    /// explained also makes 0.
+    pub no_code: bool,
 }
 
 /// What a first open's answer asked for, carried out once the project is
@@ -394,14 +404,18 @@ impl App {
             // Servers are ticked: they cost nothing but the download, and
             // without them go-to-definition is a guess. Explaining costs
             // money, so it waits for a tick — except where the sheet is
-            // Explain All asking first.
-            servers: true,
+            // Explain All asking first, which shows no servers and sets
+            // none up: ticked there, its Explain downloaded them and gave
+            // them leave to build, unseen, over a decline.
+            servers: mode != SetupMode::Explain,
             servers_declined: false,
             explain: mode == SetupMode::Explain,
             // A project on another machine cannot be looked at from here:
             // its servers run there and ask there, as they need.
             census: remote.then(Census::default),
+            no_code: false,
         });
+        self.setup_counted_at = remote.then(std::time::Instant::now);
         if remote {
             return Task::none();
         }
@@ -434,13 +448,16 @@ impl App {
         } else {
             0
         };
+        let no_code = census.calls == Some(0);
         census.calls = census.calls.map(|c| c.saturating_sub(explained));
         if let Some(setup) = self.setup.as_mut().filter(|s| s.root == root) {
+            setup.no_code = no_code;
             // Nothing to set up for the servers: nothing ticked for them.
             if census.servers.is_empty() {
                 setup.servers = false;
             }
             setup.census = Some(census);
+            self.setup_counted_at = Some(std::time::Instant::now());
         }
         Task::none()
     }
@@ -511,8 +528,13 @@ impl App {
             self.setup = Some(setup);
             return Task::none();
         }
-        let servers = Self::ticked_servers(&setup);
-        let mut tasks = vec![self.set_up_servers(&setup.root, &servers)];
+        // Explain All's sheet sets up only the explaining it asks about: the
+        // servers left for later stay so.
+        let mut tasks = Vec::new();
+        if setup.mode != SetupMode::Explain {
+            let servers = Self::ticked_servers(&setup);
+            tasks.push(self.set_up_servers(&setup.root, &servers));
+        }
         if setup.explain {
             tasks.push(self.on_explain_project(false));
         }

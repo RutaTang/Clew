@@ -2649,6 +2649,7 @@
  "pulls in {project} project files and {system} system headers": "entraîne {project} fichiers du projet et {system} en-têtes système",
  "put them in its setting, as {example}": "placez-les dans son réglage, comme {example}",
  "pytest fixtures": "Fixtures pytest",
+ "pytest is not installed for this Python, so this test file ran as a script: it defines its tests and runs none of them. Install pytest in the project's environment to run them.": "pytest n’est pas installé pour ce Python : ce fichier de tests s’est donc exécuté comme un script, qui définit ses tests sans en lancer aucun. Installez pytest dans l’environnement du projet pour les exécuter.",
  "query does not compile: {e}": "la requête ne compile pas : {e}",
  "re-export": "réexport",
  "read failed: {e}": "échec de la lecture : {e}",

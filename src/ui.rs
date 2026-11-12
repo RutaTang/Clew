@@ -551,18 +551,24 @@ impl<'a> ActiveOverlay<'a> {
 
     /// Whether Enter presses its main button, as its "yes" by voice does:
     /// a sheet opened from a shortcut — Explain All's cost sheet — took no
-    /// Enter, the ring having nothing on it yet. Not a question of trust (a
-    /// language server's command, a host's key), where Enter could allow
-    /// by mistake, nor a form, whose fields send their own Enter.
-    pub(crate) fn enter_answers(&self) -> bool {
-        matches!(
-            self,
-            Self::Consent(_)
-                | Self::Setup(_)
-                | Self::FakeRun(_)
-                | Self::UpdateNotes
-                | Self::TourPrep(_)
-        )
+    /// Enter, the ring having nothing on it yet. Explain All's sheet once
+    /// its estimate has stood to be read ([`crate::app::setup::SHEET_READ`]),
+    /// and a fake run's inputs (whose fields send Run on Enter too). Not a
+    /// first open's sheet or Set Up's, whose Open and Apply download
+    /// language servers and give them leave to build the project; not a
+    /// question of trust (a language server's command, a host's key);
+    /// nothing else that installs or starts something.
+    pub(crate) fn enter_answers(&self, app: &App) -> bool {
+        match self {
+            Self::Setup(setup) => {
+                setup.mode == crate::app::setup::SetupMode::Explain
+                    && app
+                        .setup_counted_at
+                        .is_some_and(|at| at.elapsed() >= crate::app::setup::SHEET_READ)
+            }
+            Self::FakeRun(_) => true,
+            _ => false,
+        }
     }
 
     /// Whether it is a menu: a list of rows, one pressed and it goes —

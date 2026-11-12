@@ -2649,6 +2649,7 @@
  "pulls in {project} project files and {system} system headers": "프로젝트 파일 {project}개와 시스템 헤더 {system}개를 끌어옴",
  "put them in its setting, as {example}": "설정에 넣으세요. 예: {example}",
  "pytest fixtures": "pytest 픽스처",
+ "pytest is not installed for this Python, so this test file ran as a script: it defines its tests and runs none of them. Install pytest in the project's environment to run them.": "이 Python에는 pytest가 설치되어 있지 않아 이 테스트 파일이 스크립트로 실행되었습니다. 테스트를 정의만 하고 하나도 실행하지 않았습니다. 테스트를 실행하려면 프로젝트 환경에 pytest를 설치하세요.",
  "query does not compile: {e}": "쿼리를 컴파일할 수 없음: {e}",
  "re-export": "다시 내보내기",
  "read failed: {e}": "읽기 실패: {e}",

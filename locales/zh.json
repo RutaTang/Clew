@@ -2649,6 +2649,7 @@
  "pulls in {project} project files and {system} system headers": "引入了 {project} 个项目文件和 {system} 个系统头文件",
  "put them in its setting, as {example}": "请将其写入它的设置，例如 {example}",
  "pytest fixtures": "pytest fixture",
+ "pytest is not installed for this Python, so this test file ran as a script: it defines its tests and runs none of them. Install pytest in the project's environment to run them.": "此 Python 未安装 pytest，因此这个测试文件以脚本方式运行：它只定义了测试，一个也没有执行。请在项目的环境中安装 pytest 以运行这些测试。",
  "query does not compile: {e}": "查询无法编译：{e}",
  "re-export": "重新导出",
  "read failed: {e}": "读取失败：{e}",

@@ -30,10 +30,12 @@ pub(crate) fn store() -> Option<PathBuf> {
     Some(clew_core::lsp::store::data_root()?.join(FILE))
 }
 
-/// The folders opened here before, newest first — those still there. Off
+/// The folders opened here before, newest first — those there now. Off
 /// the UI thread: each is looked at on disk, and one on a network share no
-/// longer reachable waits for its timeout. Those no longer there are taken
-/// out of the file, or they kept places the welcome screen could offer.
+/// longer reachable waits for its timeout. One deleted is taken out of the
+/// file, or it kept a place the welcome screen could offer; one out of
+/// reach only for now — on a drive not plugged in, a share offline, a
+/// folder it may not read — is kept for when it is back ([`deleted`]).
 pub(crate) fn load_from(store: &Path) -> Vec<PathBuf> {
     let Some(text) = clew_core::statefile::read_capped(store, MAX_BYTES) else {
         return Vec::new();
@@ -41,14 +43,25 @@ pub(crate) fn load_from(store: &Path) -> Vec<PathBuf> {
     let Ok(file) = serde_json::from_str::<RecentFile>(&text) else {
         return Vec::new();
     };
-    let (live, gone): (Vec<PathBuf>, Vec<PathBuf>) = file
+    let (live, away): (Vec<PathBuf>, Vec<PathBuf>) = file
         .folders
         .into_iter()
         .partition(|p| p.is_absolute() && p.is_dir());
+    let gone: Vec<PathBuf> = away.into_iter().filter(|p| deleted(p)).collect();
     if !gone.is_empty() {
         edit(store, |folders| folders.retain(|p| !gone.contains(p)));
     }
     live.into_iter().take(KEPT).collect()
+}
+
+/// Whether `folder` is gone for good: not there, though the folder it was
+/// in is — not on a drive unplugged or a share offline, whose folders all
+/// went with it, nor one that could not be looked at (no leave to read).
+/// Each was forgotten as Clew started without it, and stayed so once back.
+fn deleted(folder: &Path) -> bool {
+    !folder.is_absolute()
+        || (matches!(folder.try_exists(), Ok(false))
+            && folder.parent().is_some_and(|parent| parent.is_dir()))
 }
 
 impl crate::App {
@@ -167,6 +180,18 @@ mod tests {
         let kept = load_from(&store);
         assert_eq!(kept.len(), KEPT);
         assert_eq!(kept[0], dirs[6]);
+        // One out of reach for now — its whole drive away — is not
+        // offered, and is kept for when it is back.
+        let away = data.path().join("drive");
+        let on_drive = away.join("project");
+        std::fs::create_dir_all(&on_drive).unwrap();
+        remember_in(&store, &on_drive);
+        let unplugged = data.path().join("drive-unplugged");
+        std::fs::rename(&away, &unplugged).unwrap();
+        assert!(!load_from(&store).contains(&on_drive), "offered while away");
+        std::fs::rename(&unplugged, &away).unwrap();
+        assert_eq!(load_from(&store)[0], on_drive, "forgotten while away");
+        forget_in(&store, &on_drive);
         std::fs::remove_dir(&dirs[6]).unwrap();
         assert_eq!(
             load_from(&store)[0],

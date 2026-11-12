@@ -279,6 +279,9 @@ pub(crate) const NOTICES: &[&str] = &[
     tr_noop!(
         "This program's debug information is Zig's own (from Zig's built-in code generator, the default for Debug builds on x86-64), and lldb reads no variables from it: breakpoints and stepping work, but no variables show. Build it with -fllvm (or .use_llvm = true in build.zig) to see them."
     ),
+    tr_noop!(
+        "pytest is not installed for this Python, so this test file ran as a script: it defines its tests and runs none of them. Install pytest in the project's environment to run them."
+    ),
     tr_noop!("larger than 64 MB"),
     tr_noop!("not a regular file inside the project (a link, or moved since the scan)"),
 ];

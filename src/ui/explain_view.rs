@@ -96,6 +96,9 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for Plain {
             .collect();
         iced::widget::rich_text(spans)
             .size(settings.text_size)
+            // A cited path held together is one word: longer than the
+            // column, it breaks by letter rather than run past its edge.
+            .wrapping(Wrapping::WordOrGlyph)
             .on_link_click(Self::on_link_click)
             .into()
     }
@@ -203,6 +206,7 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for Prose {
         iced::widget::rich_text(spans)
             .size(settings.text_size)
             .line_height(line)
+            .wrapping(Wrapping::WordOrGlyph)
             .on_link_click(Self::on_link_click)
             .into()
     }
@@ -266,6 +270,7 @@ fn render_segments<'a>(
                                     .collect::<Vec<_>>()
                             })
                             .color(theme::fg())
+                            .wrapping(Wrapping::WordOrGlyph)
                             .on_link_click(|v| Message::Content(ContentMsg::OpenLink(v)))
                             .into(),
                         ),
