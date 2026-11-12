@@ -877,13 +877,16 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
     let search = container(
         row![
             glyph::icon(Glyph::Search, theme::fg_muted(), 14.0),
-            text_input(tr!("Search sessions"), &app.ask_sessions_query)
-                .id(crate::ui::ask_sessions_search_id())
-                .on_input(|q| Message::Ask(AskMsg::SessionsQuery(q)))
-                .on_submit(Message::Ask(AskMsg::OpenFirstFound))
-                .size(ts::BASE)
-                .padding([5, 0])
-                .style(theme::bare_input),
+            super::jump::field_named(
+                text_input(tr!("Search sessions"), &app.ask_sessions_query)
+                    .id(crate::ui::ask_sessions_search_id())
+                    .on_input(|q| Message::Ask(AskMsg::SessionsQuery(q)))
+                    .on_submit(Message::Ask(AskMsg::OpenFirstFound))
+                    .size(ts::BASE)
+                    .padding([5, 0])
+                    .style(theme::bare_input),
+                tr!("Search sessions"),
+            ),
         ]
         .spacing(8)
         .align_y(iced::Center),

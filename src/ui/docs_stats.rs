@@ -1172,6 +1172,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         .size(ts::BODY)
         .padding(6)
         .width(Fill);
+    let filter = super::jump::field_named(filter, tr!("Filter terms…"));
     let query = app.proj.glossary.filter.trim().to_lowercase();
     let matching: Vec<&crate::app::glossary::Term> = glossary.matching(&query).collect();
     // While a filter narrows the list, how many of the terms it kept.

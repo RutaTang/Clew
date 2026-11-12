@@ -289,21 +289,24 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     let input = container(
         row![
             glyph::icon(glyph, theme::dim(), 16.0),
-            ts::field_in(
-                text_input(placeholder, &app.proj.finder.query)
-                    .id(finder_input_id())
-                    .on_input({
-                        // What is said that names no row is typed in it.
-                        super::heard::field(&app.proj.finder.query, |v| {
-                            Message::Nav(NavMsg::FinderQueryChanged(v))
-                        });
-                        |v| Message::Nav(NavMsg::FinderQueryChanged(v))
-                    })
-                    .on_submit(Message::Nav(NavMsg::FinderConfirm))
-                    .style(theme::bare_input),
-                FINDER_INPUT_H,
-                ts::INTER,
-                ts::SUBTITLE,
+            super::jump::field_named(
+                ts::field_in(
+                    text_input(placeholder, &app.proj.finder.query)
+                        .id(finder_input_id())
+                        .on_input({
+                            // What is said that names no row is typed in it.
+                            super::heard::field(&app.proj.finder.query, |v| {
+                                Message::Nav(NavMsg::FinderQueryChanged(v))
+                            });
+                            |v| Message::Nav(NavMsg::FinderQueryChanged(v))
+                        })
+                        .on_submit(Message::Nav(NavMsg::FinderConfirm))
+                        .style(theme::bare_input),
+                    FINDER_INPUT_H,
+                    ts::INTER,
+                    ts::SUBTITLE,
+                ),
+                placeholder
             ),
         ]
         .spacing(11)

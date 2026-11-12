@@ -2202,11 +2202,13 @@ fn tab_walks_the_controls_and_fields_and_enter_presses() {
     window.tab(&mut app, false);
     // On, to the filter: it holds the keys; then the tree, one stop.
     let mut reached = Vec::new();
+    let mut said = Vec::new();
     for _ in 0..count {
         window.tab(&mut app, false);
         let held = window.focused(&app);
         if let Some(id) = held.clone() {
             reached.push(id);
+            said.push(app.status.clone());
         }
         if held == Some(super::files_tree_keys_id()) {
             break;
@@ -2217,6 +2219,10 @@ fn tab_walks_the_controls_and_fields_and_enter_presses() {
         [super::file_filter_id(), super::files_tree_keys_id()],
         "the filter, then the tree"
     );
+    // Each named as a control is: a field by what it asks for — the
+    // status bar was left blank on one.
+    assert_eq!(said[0], "Filter files", "the filter named");
+    assert!(!said[1].is_empty(), "the tree named");
     assert!(
         ring_at(&app).2.is_none(),
         "a field is not pressed by the ring"
@@ -10482,6 +10488,41 @@ fn walkthroughs_are_named_as_their_actions_in_the_language_spoken_now() {
     with_lang(Lang::Fr, || {
         assert_eq!(super::walk_title(&narrated), "Checkout totals the cart");
     });
+}
+
+/// A tour's row, and its Regenerate and Delete, are heard by the title its
+/// row shows — the Tab ring and the voice said "Debug run (main.py)" and
+/// "Delete: Debug run (main.py)" beside a row that read "Debug run of
+/// main.py".
+#[test]
+fn a_tours_row_is_heard_by_the_title_it_shows() {
+    use crate::walkthrough::Walkthrough;
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    app.proj.walk.library.push(Walkthrough {
+        made: None,
+        title: crate::walkthrough::plain_run_title("main.py"),
+        scope: "@trace main.py".into(),
+        steps: Vec::new(),
+    });
+    let heard: Vec<String> = super::heard::gather(&app)
+        .into_iter()
+        .filter(|t| matches!(t.message, Message::Walk(_)))
+        .map(|t| t.shown)
+        .collect();
+    assert!(
+        heard.iter().any(|s| s == "Debug run of main.py"),
+        "the row: {heard:?}"
+    );
+    assert!(
+        heard.iter().any(|s| s == "Delete: Debug run of main.py"),
+        "its Delete: {heard:?}"
+    );
+    assert!(
+        !heard.iter().any(|s| s.contains("Debug run (main.py)")),
+        "another name than the one shown: {heard:?}"
+    );
 }
 
 #[test]

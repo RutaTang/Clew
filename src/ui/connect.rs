@@ -2322,7 +2322,11 @@ pub(crate) fn connect_picker<'a>(
     let mut col = Column::new().spacing(12);
 
     // New-connection form. Enter in any field connects, like the button.
-    let field = |title: &str, input: Element<'a, Message>| column![label(title), input].spacing(3);
+    // Each field named by its label for the ring, as a form's row names
+    // its own.
+    let field = |title: &str, input: Element<'a, Message>| {
+        column![label(title), super::jump::field_named(input, title)].spacing(3)
+    };
     // A field what is wrong is about is marked, until it is edited.
     let input = |placeholder: &str, value: &str, f: ConnectField| {
         text_input(placeholder, value)
@@ -2876,9 +2880,12 @@ fn registry_group(draft: &crate::app::integrations::IntegrationsDraft) -> Elemen
     let reg = &draft.registry;
     let searching = reg.searching.is_some();
     let search = row![
-        form::input(tr!("Search, e.g. github, postgres, browser"), &reg.query)
-            .on_input(|v| Message::Integrations(M::RegistryQuery(v)))
-            .on_submit(Message::Integrations(M::RegistrySearch)),
+        super::jump::field_named(
+            form::input(tr!("Search, e.g. github, postgres, browser"), &reg.query)
+                .on_input(|v| Message::Integrations(M::RegistryQuery(v)))
+                .on_submit(Message::Integrations(M::RegistrySearch)),
+            tr!("Search, e.g. github, postgres, browser"),
+        ),
         form::action(
             if searching {
                 tr!("Searching…")

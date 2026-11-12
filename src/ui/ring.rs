@@ -39,6 +39,12 @@ pub(crate) enum ScopeTag {
     Tree,
 }
 
+/// What a field asks for — its placeholder — said to the ring's census
+/// round it ([`super::jump::field_named`]): `Some` where it begins, `None`
+/// where it ends. A field has no press to be named by: Tab onto one left
+/// the status bar blank, where every other stop said its name.
+pub(crate) struct FieldNamed(pub(crate) Option<String>);
+
 /// Where a part begins and ends, said to an operation.
 pub(crate) enum Edge {
     Begin(ScopeTag),
@@ -154,6 +160,8 @@ pub(crate) struct Census {
     /// jump mode deals.
     pub(crate) marks: Vec<Layer>,
     layers: Vec<Layer>,
+    /// The names of the fields being read ([`FieldNamed`]).
+    names: Vec<String>,
     chrome: usize,
     tree: usize,
     focusables: usize,
@@ -221,8 +229,10 @@ impl Operation for Census {
         if self.tree == 0 {
             let layer = self.layer(Layer::Window);
             let focused = state.is_focused();
-            self.push(StopKind::Field { index, focused }, layer, bounds)
-                .id = id.cloned();
+            let name = self.names.last().cloned();
+            let stop = self.push(StopKind::Field { index, focused }, layer, bounds);
+            stop.id = id.cloned();
+            stop.name = name;
         }
     }
 
@@ -238,6 +248,15 @@ impl Operation for Census {
                 let stop = self.push(StopKind::Mark(seen.id), layer, bounds);
                 stop.press = Some(seen.press.clone());
                 stop.name = seen.name.clone();
+            }
+            return;
+        }
+        if let Some(FieldNamed(named)) = state.downcast_ref::<FieldNamed>() {
+            match named {
+                Some(name) => self.names.push(name.clone()),
+                None => {
+                    self.names.pop();
+                }
             }
             return;
         }

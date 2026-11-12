@@ -77,6 +77,7 @@ pub(crate) fn fake_sheet<'a>(sheet: &'a Sheet) -> Element<'a, Message> {
     let mut fields: Vec<Element<'a, Message>> = Vec::new();
     for (i, (field, value)) in sheet.fields.iter().zip(&sheet.values).enumerate() {
         let (label, hint) = field_words(field);
+        let named = label.clone();
         let label = match field {
             Field::Param { .. } => text(label)
                 .size(ts::SMALL)
@@ -115,6 +116,7 @@ pub(crate) fn fake_sheet<'a>(sheet: &'a Sheet) -> Element<'a, Message> {
             }
             _ => space().height(0).into(),
         };
+        let input = super::jump::field_named(input, &named);
         fields.push(column![label, input, assumed].spacing(4).into());
     }
     let suggest_label = if sheet.suggesting.is_some() {

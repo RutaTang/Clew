@@ -207,6 +207,24 @@ pub(crate) fn scope<'a>(
     })
 }
 
+/// `field`, named for the ring by what it asks for (`name`, its
+/// placeholder): the ring says it in the status bar as it says a
+/// control's name. Wrapped only while names are kept ([`naming`]); the
+/// same tree either way.
+pub(crate) fn field_named<'a>(
+    field: impl Into<Element<'a, Message>>,
+    name: &str,
+) -> Element<'a, Message> {
+    let content = field.into();
+    if !naming() || name.trim().is_empty() {
+        return content;
+    }
+    Element::new(FieldName {
+        content,
+        name: name.trim().to_string(),
+    })
+}
+
 /// How the window being built stands: the layer on top — the tutorial, a
 /// dialog holding the keys, else Ask over the window — and, for a dialog,
 /// which one it is.
@@ -400,6 +418,12 @@ struct Mark<'a> {
     /// What its control is called, as it said when built (while the ring
     /// or the codes are up).
     name: Option<String>,
+}
+
+/// A field, named to the ring's census ([`field_named`]).
+struct FieldName<'a> {
+    content: Element<'a, Message>,
+    name: String,
 }
 
 /// A part of the window, said to the ring's operations ([`scope`]).
@@ -831,6 +855,28 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Root<'_> {
                 .unwrap_or_default();
             DEALT.with(|d| d.borrow_mut().insert(self.window, dealt));
         }
+    }
+}
+
+impl Widget<Message, iced::Theme, iced::Renderer> for FieldName<'_> {
+    transparent!();
+    transparent_layout!();
+    transparent_update!();
+    transparent_draw!();
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        let bounds = layout.bounds();
+        operation.custom(None, bounds, &mut ring::FieldNamed(Some(self.name.clone())));
+        self.content
+            .as_widget_mut()
+            .operate(tree, layout, renderer, operation);
+        operation.custom(None, bounds, &mut ring::FieldNamed(None));
     }
 }
 

@@ -480,7 +480,9 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
         // Enter submits the same way the Generate button does ("" = whole codebase).
         input = input.on_submit(Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone())));
     }
-    let mut field = row![input].spacing(6).align_y(iced::Center);
+    let mut field = row![super::jump::field_named(input, placeholder)]
+        .spacing(6)
+        .align_y(iced::Center);
     if !is_search {
         // It writes with the model: marked so, and said so where the
         // pointer rests — Enter in the field does the same.
@@ -726,7 +728,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
             left: 8.0,
         })
         .on_press(super::heard::row(
-            || scope_label(&wt.scope),
+            || walk_title(wt),
             if is_open {
                 Message::Walk(WalkMsg::Back)
             } else {
@@ -744,9 +746,9 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                 button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
                     .style(theme::toolbar_button)
                     .padding([7, 9])
-                    .on_press(super::heard::said_to(
+                    .on_press(super::heard::said_to_with(
                         tr!("Stop"),
-                        &scope_label(&wt.scope),
+                        || walk_title(wt),
                         Message::Walk(WalkMsg::Cancel),
                     ))
                     .into(),
@@ -763,9 +765,9 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
             .style(theme::toolbar_button)
             .padding([6, 9])
             .on_press_maybe(again.then(|| {
-                super::heard::said_to(
+                super::heard::said_to_with(
                     tr!("Regenerate"),
-                    &scope_label(&wt.scope),
+                    || walk_title(wt),
                     Message::Walk(WalkMsg::Regenerate(wt.scope.clone())),
                 )
             }));
@@ -789,9 +791,9 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                     button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
                         .style(theme::toolbar_button)
                         .padding([7, 9])
-                        .on_press(super::heard::said_to(
+                        .on_press(super::heard::said_to_with(
                             tr!("Delete"),
-                            &scope_label(&wt.scope),
+                            || walk_title(wt),
                             Message::Walk(WalkMsg::Delete(wt.scope.clone())),
                         ))
                         .into(),
@@ -1098,10 +1100,13 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
             at as f32 * (TREE_ROW_H + TREE_ROW_GAP) - scrolled
         })
     };
-    super::tree_keys::TreeKeys::new(tree, super::files_tree_keys_id())
-        .release(app.code_focused || held_above)
-        .cursor_row_y(cursor_row_y)
-        .into()
+    // Named for the ring, as the view it is: the status bar was blank on it.
+    super::jump::field_named(
+        super::tree_keys::TreeKeys::new(tree, super::files_tree_keys_id())
+            .release(app.code_focused || held_above)
+            .cursor_row_y(cursor_row_y),
+        tr!("Files"),
+    )
 }
 
 /// What the working tree changes in the file at `rel`, as git letters it —
@@ -1657,6 +1662,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         .on_submit(Message::Nav(NavMsg::SearchSubmitted))
         .size(ts::BASE)
         .padding(7);
+    let input = super::jump::field_named(input, tr!("Search text…"));
 
     // Match-option toggles: case-sensitive, whole-word, regex — as round as
     // the fields, outlined while off, filled in the accent while on. Beside
@@ -1711,12 +1717,14 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     .on_submit(Message::Nav(NavMsg::SearchSubmitted))
     .size(ts::BODY)
     .padding(5);
+    let include = super::jump::field_named(include, tr!("files to include (e.g. src/**)"));
     let exclude = text_input(tr!("files to exclude"), &app.proj.search.exclude)
         .style(theme::input)
         .on_input(|v| Message::Nav(NavMsg::SearchExcludeChanged(v)))
         .on_submit(Message::Nav(NavMsg::SearchSubmitted))
         .size(ts::BODY)
         .padding(5);
+    let exclude = super::jump::field_named(exclude, tr!("files to exclude"));
 
     let status_line = if let Some(err) = &app.proj.search.error {
         // As clew-core, or the host, said it: in the reader's language.
@@ -2640,6 +2648,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         .on_submit(Message::Semantic(SemanticMsg::Search))
         .size(ts::BASE)
         .padding(7);
+    let input = super::jump::field_named(input, tr!("Search by meaning…"));
 
     let building = app.proj.building_embeddings;
     // It is built from the notes Explain All writes, by an embedding model:
@@ -2926,7 +2935,10 @@ pub(crate) fn filter_field<'a>(
     }
     let mut field = row![
         glyph::icon(Glyph::Filter, theme::dim(), 13.0),
-        ts::field_in(input, FILTER_H - 2.0, ts::INTER, ts::BODY),
+        super::jump::field_named(
+            ts::field_in(input, FILTER_H - 2.0, ts::INTER, ts::BODY),
+            placeholder,
+        ),
     ]
     .spacing(8)
     .height(Fill)

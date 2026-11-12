@@ -143,9 +143,13 @@ pub(crate) fn item_saying<'a>(
     wrong: bool,
     control: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
+    // A field in the row is named by it, for the ring: its placeholder is
+    // an example, not what it is.
+    let name = name.into();
+    let control = super::jump::field_named(control, &name);
     row![
-        container(label_saying(name.into(), about, wrong)).width(Fill),
-        control.into(),
+        container(label_saying(name, about, wrong)).width(Fill),
+        control,
     ]
     .spacing(16)
     .align_y(iced::Center)
@@ -161,14 +165,16 @@ pub(crate) fn field<'a>(
     about: Option<String>,
     control: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
+    let name = name.into();
+    let control = super::jump::field_named(control, &name);
     row![
-        container(label(name.into(), about))
+        container(label(name, about))
             .width(LABEL_W)
             .padding(Padding {
                 top: VALUE_TOP,
                 ..Padding::ZERO
             }),
-        container(control.into()).width(Fill),
+        container(control).width(Fill),
     ]
     .spacing(12)
     .padding([ROW_PAD_Y - 2.0, ROW_PAD_X])
@@ -183,14 +189,16 @@ pub(crate) fn field_wrong<'a>(
     problem: String,
     control: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
+    let name = name.into();
+    let control = super::jump::field_named(control, &name);
     row![
-        container(label_saying(name.into(), Some(problem), true))
+        container(label_saying(name, Some(problem), true))
             .width(LABEL_W)
             .padding(Padding {
                 top: VALUE_TOP,
                 ..Padding::ZERO
             }),
-        container(control.into()).width(Fill),
+        container(control).width(Fill),
     ]
     .spacing(12)
     .padding([ROW_PAD_Y - 2.0, ROW_PAD_X])

@@ -916,6 +916,7 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
         .size(ts::BASE)
         .padding([4, 8])
         .width(190);
+    let input = super::jump::field_named(input, tr!("Find in file…"));
 
     let btn = |g: Glyph, msg: Message| {
         button(glyph::icon(g, theme::fg_muted(), 12.0))

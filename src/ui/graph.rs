@@ -530,14 +530,17 @@ pub(crate) fn graph_search_field(app: &App) -> Element<'_, Message> {
         )
     };
     row![
-        text_input(tr!("Find in the graph"), &app.graph_search)
-            .id(super::graph_search_id())
-            .on_input(|q| Message::Graph(GraphMsg::Search(q)))
-            .on_submit(Message::Graph(GraphMsg::SearchStep(true)))
-            .style(theme::input)
-            .size(ts::SMALL)
-            .padding([4, 8])
-            .width(190),
+        super::jump::field_named(
+            text_input(tr!("Find in the graph"), &app.graph_search)
+                .id(super::graph_search_id())
+                .on_input(|q| Message::Graph(GraphMsg::Search(q)))
+                .on_submit(Message::Graph(GraphMsg::SearchStep(true)))
+                .style(theme::input)
+                .size(ts::SMALL)
+                .padding([4, 8])
+                .width(190),
+            tr!("Find in the graph"),
+        ),
         container(count)
             .width(72)
             .align_x(iced::alignment::Horizontal::Center),

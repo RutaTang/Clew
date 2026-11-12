@@ -733,15 +733,15 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .color(theme::dim())
             .into(),
     ];
-    watch_rows.push(
+    watch_rows.push(super::jump::field_named(
         text_input(tr!("Add watch…"), &app.debug.watch_input)
             .style(theme::input)
             .on_input(|v| Message::Debug(DebugMsg::WatchInput(v)))
             .on_submit(Message::Debug(DebugMsg::WatchAdd))
             .size(ts::SMALL)
-            .padding(3)
-            .into(),
-    );
+            .padding(3),
+        tr!("Add watch…"),
+    ));
     for expr in &app.debug.watches {
         let val = session
             .watches
@@ -1662,7 +1662,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     let pad_y = ((ROUND_BUTTON - line_h) / 2.0).max(0.0);
     let input: Element<'_, Message> = iced::widget::text_editor(&app.proj.ask_editor)
         .id(ask_input_id())
-        .placeholder(placeholder)
+        .placeholder(placeholder.clone())
         .on_action(|a| Message::Ask(AskMsg::Edit(a)))
         .key_binding(|press| {
             use iced::keyboard::{Key, key::Named};
@@ -1686,6 +1686,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .max_height(line_h * COMPOSER_LINES + 2.0 * pad_y)
         .style(theme::bare_editor)
         .into();
+    let input = super::jump::field_named(input, &placeholder);
     // The send button is the composer's primary action, a round button in
     // the accent — and the one way to stop an answer coming in: while one
     // is, with nothing typed, it stops it (any answer — an agent turn, a
