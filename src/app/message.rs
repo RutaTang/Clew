@@ -35,6 +35,9 @@ pub enum Message {
     Reading(ReadingMsg),
     /// The Calls tab's call hierarchy. Handled in `app::calls` (`App::update_calls`).
     Calls(CallsMsg),
+    /// The History view: the project's commits. Handled in `app::history`
+    /// (`App::update_history`).
+    History(HistoryMsg),
     /// The FLOW tab's value trace. Handled in `app::flow` (`App::update_flow`).
     Flow(FlowMsg),
     /// The project graphs and their overlays: imports and the call graph. Handled in
@@ -86,6 +89,9 @@ pub enum Message {
     /// Auto-update: checking, downloading and installing a release. Handled in `app::updater`
     /// (`App::update_updater`).
     Updater(UpdaterMsg),
+    /// What the AI key spends: the Usage page, its ledger and balance.
+    /// Handled in `app::usage` (`App::update_usage`).
+    Usage(UsageMsg),
     /// The window and its chrome: controls, layout, panels, menus, the shortcuts modal. Handled
     /// in `app::runtime` (`App::update_window`).
     Window(WindowMsg),
@@ -94,6 +100,19 @@ pub enum Message {
     /// Talking to the window: listening, the words heard, the speech
     /// models. Handled in `app::voice` (`App::update_voice`).
     Voice(crate::VoiceMsg),
+    /// Fake run and fake debug: the inputs sheet, the run the model works
+    /// out, the trace stepped through. Handled in `app::fakerun`
+    /// (`App::update_fake`).
+    Fake(FakeMsg),
+    /// Step Through Proof (Lean): a tactic proof walked one tactic at a
+    /// time. Handled in `app::proof` (`App::update_proof`).
+    Proof(ProofMsg),
+    /// The weak spots page. Handled in `app::weakspots`
+    /// (`App::update_weak`).
+    Weak(WeakMsg),
+    /// The drop-down open in the window. Handled in `app::pickers`
+    /// (`App::update_picker`).
+    Picker(crate::app::pickers::PickerMsg),
     /// The refresh tick, while something is changing (see
     /// `App::window_subscription`): language servers starting or indexing,
     /// the server panel, an auto-refresh waiting out its cooldown.
@@ -274,11 +293,25 @@ pub enum ProjectMsg {
     SetupExplain(bool),
     /// The sheet's Apply (or Explain).
     SetupApply,
+    /// The folders opened here before, read as the window opened (see
+    /// `crate::app::recent`).
+    RecentRead(Vec<PathBuf>),
+    /// Close the folder open, back to the welcome screen and its recent
+    /// folders.
+    CloseFolder,
+    /// Take a folder off the recent folders (the welcome screen's ×): a
+    /// stale one stayed for good.
+    ForgetRecent(PathBuf),
     /// The working tree's changes read, for the Files view's marks (see
     /// `App::sync_git_status`).
     GitStatusRead {
         stamp: Stamp,
         result: Result<Vec<(String, char)>, String>,
+    },
+    /// What HEAD is, read for the status bar (see `App::sync_head`).
+    HeadRead {
+        stamp: Stamp,
+        result: Result<Option<clew_protocol::HeadName>, String>,
     },
     /// A look at what the open project's language servers still take to
     /// set up is in (see `App::look_for_missing_setup`); `seq` says which.
@@ -325,6 +358,18 @@ pub enum ProjectMsg {
         report: fs_scan::ScanReport,
     },
     ToggleDir(String),
+    /// A tree row was right-clicked: the file or folder (`dir`) it is.
+    TreeMenuFor {
+        rel: String,
+        dir: bool,
+    },
+    /// Where, in the window: the tree's menu opens there.
+    TreeMenuAt {
+        x: f32,
+        y: f32,
+    },
+    TreeMenuClosed,
+    TreeMenuAct(crate::app::state::TreeAct),
 }
 
 /// Keeping the index current: watcher batches, the symbol and structure indexes.
@@ -390,6 +435,14 @@ pub enum EditorMsg {
         line: Option<usize>,
         push: bool,
     },
+    /// Open a search result, line `line` (1-based) of `abs`: at `at` (a
+    /// language server's place on the line) where it has one, else on what
+    /// the search matched in it.
+    OpenHit {
+        abs: PathBuf,
+        line: usize,
+        at: Option<(usize, crate::viewer::PositionEncoding)>,
+    },
     FileLoaded {
         stamp: Stamp,
         /// The load token minted at request time; applied only while the pane
@@ -447,6 +500,14 @@ pub enum EditorMsg {
         info: Result<Option<Arc<git::GitInfo>>, String>,
     },
     Scrolled(usize, scrollable::Viewport),
+    /// The code view of `pane` is shown, or took a new height: measured by
+    /// itself, as the scroll reports it only while the code overflows —
+    /// grown until the code fit, the view was never told so, and kept a
+    /// scroll that left it empty under the last lines.
+    ViewMeasured {
+        pane: usize,
+        height: f32,
+    },
     PaneFocused(usize),
     ToggleSplit,
     SelectStart {
@@ -577,6 +638,20 @@ pub enum HoverMsg {
     },
     /// The cursor left the code — clear any open peek.
     Cleared,
+    /// The pointer rests on gutter line `line` (0-based) of `pane`, at `x`,
+    /// `y` in the code's scrolled space — or has left the gutter (`None`).
+    Gutter {
+        pane: usize,
+        line: Option<usize>,
+        x: f32,
+        y: f32,
+    },
+    /// It rested there long enough: its tip shows, if the pointer is still
+    /// on the line `generation` was taken for.
+    GutterDue {
+        stamp: Stamp,
+        generation: u64,
+    },
     /// The cursor entered (true) or left (false) the hover tooltip itself.
     Pin(bool),
     /// The context menu's language action ([`crate::ContextMenu::insight`]),
@@ -584,6 +659,9 @@ pub enum HoverMsg {
     Insight,
     /// The same at the caret (`ge`).
     InsightAtCursor,
+    /// One of the language's other actions ([`crate::InsightKind::more_for_lang`])
+    /// at the context menu's position.
+    InsightOf(crate::app::model::InsightKind),
     /// The language's answer: `None` when it had nothing to say there.
     InsightAnswered {
         stamp: Stamp,
@@ -697,6 +775,13 @@ pub enum NavMsg {
         caller_line: usize,
         callee: String,
     },
+    /// The line of the call [`NavMsg::JumpToCall`] asked for, found off the
+    /// update loop — or the caller's own, not found.
+    CallSiteFound {
+        stamp: Stamp,
+        caller_file: PathBuf,
+        line: usize,
+    },
 }
 
 /// The reading session: bookmarks, notes, the trail, the reading target.
@@ -711,6 +796,12 @@ pub enum ReadingMsg {
     },
     /// Open the note editor for the bookmark at (rel, 1-based line).
     BookmarkNoteEdit(String, usize),
+    /// From the code's context menu, on the line it was opened on: the
+    /// bookmark put on or taken off, or (`note`) a note written for it —
+    /// the bookmark put on as the note is saved.
+    BookmarkFromMenu {
+        note: bool,
+    },
     /// The bookmark-note draft text changed.
     BookmarkNoteInput(String),
     /// Save the bookmark note draft.
@@ -774,6 +865,58 @@ pub enum ReadingMsg {
     TargetSelected(inactive::Target),
 }
 
+/// The History view: the project's commits.
+#[derive(Debug, Clone)]
+pub enum HistoryMsg {
+    /// Show the History view: of `path` (a file or folder), or of the whole
+    /// project.
+    Show { path: Option<String> },
+    /// The filter as typed: words of the message, `@author`, a commit id.
+    Query(String),
+    /// The filter as it stood a moment after it was typed (`n`, its
+    /// number): read then, if no key came since — a read per key walked the
+    /// whole history once for each.
+    QuerySettled(u64),
+    /// Every branch's commits, or only HEAD's.
+    AllBranches(bool),
+    /// The whole project's commits, not only one path's.
+    WholeProject,
+    /// The next page.
+    More,
+    /// The list scrolled: near its end, the next page comes.
+    Scrolled { near_end: bool },
+    /// A page read.
+    Loaded {
+        stamp: Stamp,
+        generation: u64,
+        skip: usize,
+        result: Result<clew_protocol::LogPage, String>,
+    },
+    /// Open (or close) a commit to its message and files.
+    Toggle(String),
+    /// A commit read whole.
+    DetailRead {
+        stamp: Stamp,
+        sha: String,
+        result: Result<Option<clew_protocol::CommitDetail>, String>,
+    },
+    /// Open (or close) the uncommitted changes to their files.
+    ToggleChanges,
+    /// Read file `rel` as commit `sha` left it, in Time Travel.
+    OpenAt { sha: String, rel: String },
+    /// Open the changed file `rel` in its Diff.
+    OpenChanged(String),
+    /// Copy commit `sha`'s whole id.
+    CopyId(String),
+    /// Read the history again from its top.
+    Refresh,
+    /// The project's newest commit read (`App::sync_repo_tip`).
+    TipRead {
+        stamp: Stamp,
+        result: Result<Option<String>, String>,
+    },
+}
+
 /// The Calls tab's call hierarchy.
 #[derive(Debug, Clone)]
 pub enum CallsMsg {
@@ -796,6 +939,9 @@ pub enum CallsMsg {
         direction: callgraph::Direction,
         lang: &'static str,
         items: Vec<lsp::client::CallItem>,
+        /// A tree traced again ([`CallsMsg::Refresh`]): whether the one it
+        /// replaces was expanded in full. `None` for a new one.
+        again: Option<bool>,
     },
     /// Expand (fetch children of, or toggle) node `id` of the call tree
     /// identified by `token` — ignored when the tree was replaced since the
@@ -835,6 +981,12 @@ pub enum GraphMsg {
     Picked(Option<crate::app::model::GraphPick>),
     /// Put the map's camera back where it starts: zoom, pan and turn.
     FitView,
+    /// What the map's search field says now: the camera goes to the best
+    /// match, lit, the rest stepped back; empty, back over the whole map.
+    Search(String),
+    /// On to the next match (or, with Shift held or `false`, the one
+    /// before).
+    SearchStep(bool),
     /// A remote project's tsconfig/jsconfig path mappings were fetched from
     /// the host (see `App::fetch_remote_ts_configs`); applied only to the
     /// project instance they were fetched for, and only while no later fetch
@@ -879,7 +1031,8 @@ pub enum GraphMsg {
     OpenOverlay(Overlay),
     /// Close the project-graph overlay.
     CloseOverlay,
-    /// From an overlay: open a file, focus the Imports tab, and close the overlay.
+    /// From an overlay or the overview's map: open a file and close the
+    /// overlay, leaving the sidebar as it is.
     OverlayOpenImports(PathBuf),
     /// From an overlay: open a file at a line and close the overlay.
     OverlayOpenAt { abs: PathBuf, line: usize },
@@ -993,6 +1146,10 @@ pub enum ExplainMsg {
     },
     /// Show a file's / folder's explanation (Cmd+click in the tree).
     Show(explain::Node),
+    /// The file's Explain: its explanation shown — written first, it alone,
+    /// when it has none. It only showed one, and for a file not yet
+    /// explained said "Not explained yet." and did nothing.
+    Explain(explain::Node),
     /// Re-explain the node in the open explanation modal: it, and what quotes
     /// its summary (`explain::Reuse::Node`).
     ReexplainNode,
@@ -1105,6 +1262,15 @@ pub enum WalkMsg {
         /// answer being one a generation is retried once for.
         result: Result<walkthrough::Walkthrough, walkthrough::Failure>,
     },
+    /// The run's walkthrough was opened as recorded, without the AI's
+    /// narration, which failed (`why`): said, with a way to try again.
+    Unnarrated { stamp: Stamp, seq: u64, why: String },
+    /// Take the failed generation's row out of the list
+    /// (`WalkState::failed`).
+    ForgetFailure,
+    /// Stop the generation under way (`WalkState::generating`): its request
+    /// is dropped, and nothing it would have brought is kept.
+    Cancel,
     /// Open the library tour with this scope for reading.
     Open(String),
     /// Return from a tour to the library list.
@@ -1196,6 +1362,10 @@ pub enum AskMsg {
     Submit,
     /// Ask a suggested (context-aware) question: fill the input and submit it.
     Suggested(String),
+    /// Try again: ask the question of turn `n`, whose answer failed, in its
+    /// place — the failed turn goes, rather than a second copy of the
+    /// question and its failure under it.
+    AskAgain(usize),
     /// The model's questions for "Try asking" came, for where the reader
     /// was (`app::suggest`).
     SuggestionsCame {
@@ -1237,6 +1407,23 @@ pub enum AskMsg {
         stamp: Stamp,
         stream: u64,
         text: String,
+    },
+    /// Text an agent step on `stream` is writing, as it comes: shown, and
+    /// said, as the answer — until [`AskMsg::DraftEnd`] says whether it was
+    /// the answer or a remark before tool calls.
+    Draft {
+        stamp: Stamp,
+        stream: u64,
+        text: String,
+    },
+    /// The text since the last [`AskMsg::Draft`] began was the answer
+    /// (`kept`), or a remark before tool calls, taken back out of it — or
+    /// is taken back as its step is asked `again`.
+    DraftEnd {
+        stamp: Stamp,
+        stream: u64,
+        kept: bool,
+        again: bool,
     },
     /// The streamed answer on `stream` ended — finished, stopped on request,
     /// or failed. Identified like [`AskMsg::Delta`].
@@ -1373,6 +1560,17 @@ pub enum IntegrationsMsg {
     McpExtra(String),
     /// Add the server the form describes.
     McpAdd,
+    /// The MCP registry search's words.
+    RegistryQuery(String),
+    /// Search the MCP registry for them.
+    RegistrySearch,
+    /// What search `seq` found.
+    RegistryFound {
+        seq: u64,
+        result: Result<Vec<clew_core::mcp::registry::Entry>, String>,
+    },
+    /// Fill the add-a-server form from the found entry at this index.
+    RegistryUse(usize),
     McpRemove(String),
     McpEnable(String, bool),
     McpApprove(String, clew_core::mcp::Approve),
@@ -1412,6 +1610,10 @@ impl IntegrationsMsg {
             | IntegrationsMsg::McpTarget(..)
             | IntegrationsMsg::McpExtra(..)
             | IntegrationsMsg::McpAdd
+            | IntegrationsMsg::RegistryQuery(..)
+            | IntegrationsMsg::RegistrySearch
+            | IntegrationsMsg::RegistryFound { .. }
+            | IntegrationsMsg::RegistryUse(..)
             | IntegrationsMsg::McpRemove(..)
             | IntegrationsMsg::McpEnable(..)
             | IntegrationsMsg::McpApprove(..)
@@ -1555,6 +1757,8 @@ pub enum TimeTravelMsg {
     },
     /// Close the "why is this here?" popup.
     BlameWhyClose,
+    /// Ask the popup's question again, its answer having failed.
+    BlameWhyAgain,
     /// Enter git time travel for the active file; `symbol` scopes it to the
     /// function under the cursor.
     Start { symbol: bool },
@@ -1590,6 +1794,11 @@ pub enum TimeTravelMsg {
     ToggleScope,
     /// Generate the LLM "what & why" summary of the current commit's diff.
     Why,
+    /// Ask again for the summary of commit `sha` in session `session`, the
+    /// one whose summary failed: the status bar's Try again. It asked about
+    /// the commit on screen — another, scrubbed to meanwhile, paid for
+    /// unasked — and, the session gone, did nothing.
+    WhyOf { session: u64, sha: String },
     /// A "what & why" summary finished for commit `sha`. `session` is the
     /// time-travel SESSION it was asked in ([`crate::TimeTravel::session`]),
     /// not the per-step load generation: scrubbing to another commit while
@@ -1619,6 +1828,9 @@ pub enum TimeTravelMsg {
 pub enum DebugMsg {
     /// Start (or restart) a debug session from the project's launch config.
     Start,
+    /// Run the program the same way, without the debugger: the adapter is
+    /// told `noDebug`, and no breakpoint is set in it.
+    Run,
     /// The adapter is ready; carry its handle + the TCP address it announced
     /// (for child sessions).
     /// Every DAP-side message names the `run` it belongs to (`App::debug_run`):
@@ -1722,6 +1934,13 @@ pub enum DebugMsg {
     },
     /// End the debug session.
     Stop,
+    /// Show a tab of the bottom panel: its run comes on screen.
+    ShowTab(crate::app::state::RunTab),
+    /// Close a tab of the bottom panel, ending its run if it still runs.
+    CloseTab(crate::app::state::RunTab),
+    /// The ended run on screen, run again as it was (Run or Debug): in its
+    /// own tab.
+    Again,
     /// Toggle a breakpoint at (file, 1-based line) — from the code context menu.
     BreakpointToggle { path: PathBuf, line: usize },
     /// Toggle a breakpoint at the right-clicked line (code context menu).
@@ -1734,6 +1953,8 @@ pub enum DebugMsg {
     BpConditionSet,
     /// Close the condition editor.
     BpConditionCancel,
+    /// Remove the breakpoint the condition editor is open on, and close it.
+    BpConditionRemove,
     /// The add-watch input changed.
     WatchInput(String),
     /// Add the current input as a watch expression.
@@ -1970,6 +2191,9 @@ pub enum SettingsMsg {
     /// `OpenAt` on the one a flow needs (Voice, for a model to download).
     Open,
     OpenAt(SettingsPage),
+    /// An AI action asked with no key: the Language model page, saying so,
+    /// its key field taking the keyboard.
+    NeedKey,
     Close,
     /// Put the AI fields back as Settings opened on them: what was typed
     /// there is kept as Settings closes, unless discarded first.
@@ -1979,10 +2203,19 @@ pub enum SettingsMsg {
     /// Ask the model the Language model page's fields name for a word, to
     /// see that they reach it.
     TestConnection,
+    /// The same, of the model as saved — where no form is open (the
+    /// tutorial's check before its tour spends calls on it).
+    TestSavedConnection,
+    /// Settings, at the Language model field a failure is about, the
+    /// keyboard in it (a failure's Settings on the status line).
+    Fix(crate::app::state::LlmField),
     /// What Test connection `number` found: the model's name, or why not.
+    /// `saved`: of the model as saved ([`SettingsMsg::TestSavedConnection`]),
+    /// not the form's fields.
     ConnectionTested {
         number: u64,
-        result: Result<String, String>,
+        saved: bool,
+        result: Result<String, crate::app::state::TestFailure>,
     },
     /// LLM settings draft edits.
     ProviderPicked(llm::Provider),
@@ -1991,6 +2224,33 @@ pub enum SettingsMsg {
     BaseUrlChanged(String),
     /// Save the LLM settings to the global config.
     Saved,
+}
+
+/// What the AI key spends: Settings → Usage.
+#[derive(Debug, Clone)]
+pub enum UsageMsg {
+    /// The ledger, read back.
+    Read(Vec<crate::app::usage::Entry>),
+    /// A call's line was kept in the ledger — or why not.
+    Written(Option<String>),
+    /// Read the account's balance again.
+    RefreshBalance,
+    /// The balance, as the provider told it (`None`: it tells nothing).
+    BalanceRead(Result<Option<Vec<(String, String)>>, String>),
+    /// Open the provider's billing page.
+    OpenBilling,
+    /// A price field of the model in use, typed in.
+    Price(crate::app::usage::PriceField, String),
+    /// Back to Clew's own price for the model in use.
+    ResetPrice,
+    /// Show (`true`) or put away the fields of prices Clew knows.
+    EditPrices(bool),
+    /// A price was kept in `config.toml` — or why not.
+    PriceSaved(Result<(), String>),
+    /// Whether explanations are refreshed by themselves as code changes.
+    KeepFresh(bool),
+    /// Whether Ask's questions to try are written by the model.
+    SuggestQuestions(bool),
 }
 
 /// Auto-update: checking, downloading and installing a release.
@@ -2032,6 +2292,37 @@ pub enum UpdaterMsg {
     SetAuto(bool),
 }
 
+/// What a key does in the Files view's tree while it has the keyboard
+/// (`ui::tree_keys`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeKey {
+    /// ↑ / ↓: the row before, the row after.
+    Up,
+    Down,
+    /// ←: a folder open is closed; else to the folder holding the row.
+    Left,
+    /// →: a folder closed is opened; an open one, to its first row.
+    Right,
+    /// Home / End: the first row, the last.
+    First,
+    Last,
+    /// Page Up / Page Down: a treeful of rows up, down.
+    PageUp,
+    PageDown,
+    /// Enter: a file is opened, the keyboard going to its code; a folder
+    /// is opened or closed.
+    Open,
+    /// Space: a file is opened, the keyboard staying in the tree; a folder
+    /// is opened or closed.
+    Preview,
+    /// Esc: the keyboard goes back to the code.
+    Leave,
+    /// ⇧F10 or the Menu key: the row's menu, as a right-click opens it.
+    Menu,
+    /// A letter: the filter above takes it, narrowing the tree.
+    Type(char),
+}
+
 /// The window and its chrome: controls, layout, panels, menus, the shortcuts modal.
 #[derive(Debug, Clone)]
 pub enum WindowMsg {
@@ -2052,6 +2343,12 @@ pub enum WindowMsg {
     FocusChanged(bool),
     /// The pointer entered or left the traffic-light cluster (shows the icons).
     ControlsHover(bool),
+    /// Take the failure the status line stands for off it
+    /// (`App::failure_notice`): read, and nothing more to do about it.
+    DismissFailure,
+    /// Try the failed action on the status line again, and take the
+    /// failure off it (`App::failure_notice`).
+    RetryFailure,
     /// Custom window controls (frameless window has no OS buttons).
     Close,
     Minimize,
@@ -2071,6 +2368,9 @@ pub enum WindowMsg {
     CollapseBottom,
     /// Show / hide the toolbar's "More" overflow menu.
     ToggleToolsMenu,
+    /// Open or close the strip's Run menu (Run, Debug, Fake Run, Fake
+    /// Debug).
+    ToggleRunMenu,
     ToggleTargetMenu,
     /// Show the keyboard shortcuts: Settings, on its Keyboard shortcuts
     /// page.
@@ -2099,6 +2399,8 @@ pub enum WindowMsg {
     ToggleAppMenu,
     /// Open / close the reader's View menu (the file tools' View ▾).
     ToggleViewMenu,
+    /// Open / close the sidebar's More views menu (the ⋯ after its views).
+    ToggleViewsMenu,
     /// The Files view's filter changed.
     FileFilterChanged(String),
     /// Enter in the Files view's filter: open the first file it lists.
@@ -2110,6 +2412,28 @@ pub enum WindowMsg {
     ToggleMaximize,
     /// The reading panel's view picked.
     MarginTabPicked(MarginTab),
+    /// ↓ in the Files view's filter, while it has the keyboard: the
+    /// keyboard goes down to the tree (`ui::escape_clears`).
+    FileFilterDown,
+    /// Tab or Shift-Tab (`forward` or not), once it is known whether a
+    /// field holds the keys (`field`): it moves among the fields, else the
+    /// keyboard's ring among the controls (`ui::jump`).
+    TabPressed {
+        forward: bool,
+        field: bool,
+    },
+    /// The pointer pressed, or a field took the keys: the keyboard's ring
+    /// is put away.
+    RingEnd,
+    /// The keyboard's ring is on another stop now: what pressing it sends,
+    /// for a control (none for a field, which holds the keys), and what the
+    /// control is called, as it said when built.
+    RingMoved(Option<Box<Message>>, Option<String>),
+    /// A key the Files view's tree took, while it has the keyboard
+    /// (`ui::tree_keys`).
+    TreeKey(TreeKey),
+    /// The Files view's tree has the keyboard now, or no longer.
+    TreeFocused(bool),
     /// The Files view's tree scrolled: where it is, and how much of it
     /// shows.
     FilesTreeScrolled {
@@ -2129,8 +2453,26 @@ pub enum WindowMsg {
 /// The guided tour.
 #[derive(Debug, Clone)]
 pub enum TutorialMsg {
-    /// Start the interactive tutorial (from the More menu).
+    /// The tour, asked for: the sheet that gets it ready first.
     Start,
+    /// The sample is written, and looked at — or could not be.
+    SampleWritten(Result<(crate::app::tour_sample::Placed, crate::app::setup::Census), String>),
+    /// The sample, which could not be written, written again.
+    RetrySample,
+    /// The sheet's way to what a step needs: Settings, at its page.
+    SetUp(SettingsPage),
+    /// Find by meaning, passed over for this tour.
+    SkipEmbeddings,
+    /// The sheet, closed: no tour.
+    PrepClose,
+    /// The sheet's Start the Tour.
+    Go,
+    /// Open a window and begin the tour in it: taken by the shell.
+    InNewWindow(crate::app::tutorial::TourStart),
+    /// Open the sample in this window, and begin the tour once it is open.
+    BeginIn(crate::app::tutorial::TourStart),
+    /// Begin the tour, on the sample now open.
+    Begin,
     /// Move the tutorial by `delta` steps (+1 next, -1 back); past the end ends it.
     Step(i32),
     /// End the tutorial.
@@ -2155,6 +2497,7 @@ impl Message {
             Message::Nav(m) => m.origin(),
             Message::Reading(m) => m.origin(),
             Message::Calls(m) => m.origin(),
+            Message::History(m) => m.origin(),
             Message::Flow(m) => m.origin(),
             Message::Graph(m) => m.origin(),
             Message::Explain(m) => m.origin(),
@@ -2173,9 +2516,14 @@ impl Message {
             Message::Export(m) => m.origin(),
             Message::Settings(m) => m.origin(),
             Message::Updater(m) => m.origin(),
+            Message::Usage(m) => m.origin(),
             Message::Window(m) => m.origin(),
             Message::Tutorial(m) => m.origin(),
             Message::Voice(m) => m.origin(),
+            Message::Fake(m) => m.origin(),
+            Message::Proof(m) => m.origin(),
+            Message::Weak(m) => m.origin(),
+            Message::Picker(_) => None,
             Message::Tick
             | Message::Noop
             | Message::Placed { .. }
@@ -2238,9 +2586,13 @@ impl ProjectMsg {
             | ProjectMsg::StateLoaded { stamp, .. }
             | ProjectMsg::TreeUpdated { stamp, .. }
             | ProjectMsg::MissingSetupFound { stamp, .. }
-            | ProjectMsg::GitStatusRead { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | ProjectMsg::GitStatusRead { stamp, .. }
+            | ProjectMsg::HeadRead { stamp, .. } => Some(Origin::Stamped(stamp)),
             ProjectMsg::OpenFolderPressed
             | ProjectMsg::FolderPicked(..)
+            | ProjectMsg::RecentRead(..)
+            | ProjectMsg::CloseFolder
+            | ProjectMsg::ForgetRecent(..)
             | ProjectMsg::ConsentAllowed(..)
             | ProjectMsg::OpenWithoutSetup(..)
             | ProjectMsg::ConsentDenied(..)
@@ -2251,7 +2603,11 @@ impl ProjectMsg {
             | ProjectMsg::SetupApply
             | ProjectMsg::SetUpMissing
             | ProjectMsg::SetupClose
-            | ProjectMsg::ToggleDir(..) => None,
+            | ProjectMsg::ToggleDir(..)
+            | ProjectMsg::TreeMenuFor { .. }
+            | ProjectMsg::TreeMenuAt { .. }
+            | ProjectMsg::TreeMenuClosed
+            | ProjectMsg::TreeMenuAct(..) => None,
         }
     }
 }
@@ -2281,7 +2637,9 @@ impl EditorMsg {
             | EditorMsg::DiffLoaded { stamp, .. } => Some(Origin::Stamped(stamp)),
             EditorMsg::OpenRel { .. }
             | EditorMsg::OpenAbs { .. }
+            | EditorMsg::OpenHit { .. }
             | EditorMsg::Scrolled(..)
+            | EditorMsg::ViewMeasured { .. }
             | EditorMsg::PaneFocused(..)
             | EditorMsg::ToggleSplit
             | EditorMsg::SelectStart { .. }
@@ -2324,8 +2682,10 @@ impl HoverMsg {
         match self {
             HoverMsg::Dwell { stamp, .. }
             | HoverMsg::Answered { stamp, .. }
+            | HoverMsg::GutterDue { stamp, .. }
             | HoverMsg::InsightAnswered { stamp, .. } => Some(Origin::Stamped(stamp)),
-            HoverMsg::ContextMenuOpened { .. }
+            HoverMsg::Gutter { .. }
+            | HoverMsg::ContextMenuOpened { .. }
             | HoverMsg::ContextMenuClosed
             | HoverMsg::ContextGoto(..)
             | HoverMsg::Requested { .. }
@@ -2333,6 +2693,7 @@ impl HoverMsg {
             | HoverMsg::Pin(..)
             | HoverMsg::Insight
             | HoverMsg::InsightAtCursor
+            | HoverMsg::InsightOf(_)
             | HoverMsg::InsightClose
             | HoverMsg::InsightOpenDefinition => None,
         }
@@ -2349,7 +2710,8 @@ impl NavMsg {
             | NavMsg::DefinitionResult { stamp, .. }
             | NavMsg::ReferencesResult { stamp, .. }
             | NavMsg::LocationPreviews { stamp, .. }
-            | NavMsg::PreviewsStyled { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | NavMsg::PreviewsStyled { stamp, .. }
+            | NavMsg::CallSiteFound { stamp, .. } => Some(Origin::Stamped(stamp)),
             NavMsg::SearchQueryChanged(..)
             | NavMsg::ListingClosed
             | NavMsg::SearchSubmitted
@@ -2378,6 +2740,7 @@ impl ReadingMsg {
             ReadingMsg::BookmarkToggled
             | ReadingMsg::BookmarkRemoved { .. }
             | ReadingMsg::BookmarkNoteEdit(..)
+            | ReadingMsg::BookmarkFromMenu { .. }
             | ReadingMsg::BookmarkNoteInput(..)
             | ReadingMsg::BookmarkNoteSave
             | ReadingMsg::BookmarkNoteCancel
@@ -2395,6 +2758,31 @@ impl ReadingMsg {
             | ReadingMsg::HistoryClear
             | ReadingMsg::TrailSaved { .. }
             | ReadingMsg::TargetSelected(..) => None,
+        }
+    }
+}
+
+impl HistoryMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            HistoryMsg::Loaded { stamp, .. }
+            | HistoryMsg::DetailRead { stamp, .. }
+            | HistoryMsg::TipRead { stamp, .. } => Some(Origin::Stamped(stamp)),
+            HistoryMsg::Show { .. }
+            | HistoryMsg::Query(_)
+            | HistoryMsg::QuerySettled(_)
+            | HistoryMsg::AllBranches(_)
+            | HistoryMsg::WholeProject
+            | HistoryMsg::More
+            | HistoryMsg::Scrolled { .. }
+            | HistoryMsg::Toggle(_)
+            | HistoryMsg::ToggleChanges
+            | HistoryMsg::OpenAt { .. }
+            | HistoryMsg::OpenChanged(_)
+            | HistoryMsg::CopyId(_)
+            | HistoryMsg::Refresh => None,
         }
     }
 }
@@ -2446,6 +2834,8 @@ impl GraphMsg {
             | GraphMsg::ToggleHeat
             | GraphMsg::Picked(..)
             | GraphMsg::FitView
+            | GraphMsg::Search(_)
+            | GraphMsg::SearchStep(_)
             | GraphMsg::SelectMap(..)
             | GraphMsg::RefineProjectCalls => None,
         }
@@ -2467,6 +2857,7 @@ impl ExplainMsg {
             | ExplainMsg::Cancel
             | ExplainMsg::RefreshAll
             | ExplainMsg::Show(..)
+            | ExplainMsg::Explain(..)
             | ExplainMsg::ReexplainNode
             | ExplainMsg::ToggleBlocks
             | ExplainMsg::Blocks(..) => None,
@@ -2563,16 +2954,33 @@ impl FlowMsg {
 }
 
 impl WalkMsg {
+    /// What generates the tour of `scope` again: a change review re-runs
+    /// the diff, a run's tour narrates the last run, any other is generated
+    /// anew.
+    pub(crate) fn again(scope: &str) -> WalkMsg {
+        if scope.starts_with("@diff") {
+            WalkMsg::GenerateDiff
+        } else if scope.starts_with("@trace ") {
+            WalkMsg::GenerateTrace
+        } else {
+            WalkMsg::Generate(scope.to_string())
+        }
+    }
+
     /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
     /// new variant cannot compile until it is classified here.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            WalkMsg::Done { stamp, .. } => Some(Origin::Stamped(stamp)),
+            WalkMsg::Done { stamp, .. } | WalkMsg::Unnarrated { stamp, .. } => {
+                Some(Origin::Stamped(stamp))
+            }
             WalkMsg::Generate(..)
             | WalkMsg::GenerateDiff
             | WalkMsg::GenerateTrace
             | WalkMsg::Regenerate(..)
             | WalkMsg::Delete(..)
+            | WalkMsg::ForgetFailure
+            | WalkMsg::Cancel
             | WalkMsg::Open(..)
             | WalkMsg::Back
             | WalkMsg::ToggleMode
@@ -2608,6 +3016,8 @@ impl AskMsg {
             AskMsg::Retrieved { stamp, .. }
             | AskMsg::ContextReady { stamp, .. }
             | AskMsg::Delta { stamp, .. }
+            | AskMsg::Draft { stamp, .. }
+            | AskMsg::DraftEnd { stamp, .. }
             | AskMsg::StreamEnded { stamp, .. }
             | AskMsg::AgentStepped { stamp, .. }
             | AskMsg::AgentTurnEnded { stamp, .. }
@@ -2637,6 +3047,7 @@ impl AskMsg {
             | AskMsg::Edit(..)
             | AskMsg::Submit
             | AskMsg::Suggested(..)
+            | AskMsg::AskAgain(..)
             | AskMsg::Stop
             | AskMsg::SendQueuedNow(..)
             | AskMsg::DropQueued(..)
@@ -2666,6 +3077,7 @@ impl TimeTravelMsg {
             TimeTravelMsg::WhyIsThisHere
             | TimeTravelMsg::StartAt { .. }
             | TimeTravelMsg::BlameWhyClose
+            | TimeTravelMsg::BlameWhyAgain
             | TimeTravelMsg::Start { .. }
             | TimeTravelMsg::Goto(..)
             | TimeTravelMsg::Scrolled(..)
@@ -2673,6 +3085,7 @@ impl TimeTravelMsg {
             | TimeTravelMsg::SelectDrag { .. }
             | TimeTravelMsg::ToggleScope
             | TimeTravelMsg::Why
+            | TimeTravelMsg::WhyOf { .. }
             | TimeTravelMsg::Story
             | TimeTravelMsg::Exit => None,
         }
@@ -2680,6 +3093,43 @@ impl TimeTravelMsg {
 }
 
 impl DebugMsg {
+    /// The run a message from the debug adapter's side belongs to; `None`
+    /// for the reader's own (a press, a key), which is the run on screen's.
+    pub fn run(&self) -> Option<u64> {
+        match self {
+            DebugMsg::DapStarted { run, .. }
+            | DebugMsg::DapChildStarted { run, .. }
+            | DebugMsg::DapEvent { run, .. }
+            | DebugMsg::DapChildEvent { run, .. }
+            | DebugMsg::DapStopInspected { run, .. }
+            | DebugMsg::DapControlFailed { run, .. }
+            | DebugMsg::DapControlled { run, .. }
+            | DebugMsg::DapBreakpointsAnswered { run, .. }
+            | DebugMsg::DapConfigured { run, .. }
+            | DebugMsg::WatchesEvaluated { run, .. }
+            | DebugMsg::VarChildren { run, .. }
+            | DebugMsg::Failed { run, .. }
+            | DebugMsg::ChildFailed { run, .. }
+            | DebugMsg::NeedsInstall { run, .. } => Some(*run),
+            _ => None,
+        }
+    }
+
+    /// Whether this is a stop of the program: a run paused at one comes on
+    /// screen — unless the one on screen is paused too, being read.
+    pub fn is_stop(&self) -> bool {
+        matches!(
+            self,
+            DebugMsg::DapEvent {
+                event: crate::dap::DapEvent::Stopped(_),
+                ..
+            } | DebugMsg::DapChildEvent {
+                event: crate::dap::DapEvent::Stopped(_),
+                ..
+            }
+        )
+    }
+
     /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
     /// new variant cannot compile until it is classified here.
     /// `AdapterInstalled` carries a stamp but is not checked here: the install
@@ -2703,14 +3153,19 @@ impl DebugMsg {
             | DebugMsg::ChildFailed { stamp, .. }
             | DebugMsg::NeedsInstall { stamp, .. } => Some(Origin::Stamped(stamp)),
             DebugMsg::Start
+            | DebugMsg::Run
             | DebugMsg::Control(..)
             | DebugMsg::Stop
+            | DebugMsg::ShowTab(..)
+            | DebugMsg::CloseTab(..)
+            | DebugMsg::Again
             | DebugMsg::BreakpointToggle { .. }
             | DebugMsg::ToggleBreakpointFromMenu
             | DebugMsg::ConditionalBreakpointFromMenu
             | DebugMsg::BpConditionInput(..)
             | DebugMsg::BpConditionSet
             | DebugMsg::BpConditionCancel
+            | DebugMsg::BpConditionRemove
             | DebugMsg::WatchInput(..)
             | DebugMsg::WatchAdd
             | DebugMsg::WatchRemoveExpr(..)
@@ -2830,6 +3285,8 @@ impl SettingsMsg {
         match self {
             SettingsMsg::SetThemePref(..)
             | SettingsMsg::TestConnection
+            | SettingsMsg::TestSavedConnection
+            | SettingsMsg::Fix(..)
             | SettingsMsg::ConnectionTested { .. }
             | SettingsMsg::SetLanguage(..)
             | SettingsMsg::SystemAppearanceChanged
@@ -2847,6 +3304,7 @@ impl SettingsMsg {
             | SettingsMsg::EmbedModelRemoved(..)
             | SettingsMsg::Open
             | SettingsMsg::OpenAt(..)
+            | SettingsMsg::NeedKey
             | SettingsMsg::Close
             | SettingsMsg::Discard
             | SettingsMsg::Page(..)
@@ -2855,6 +3313,26 @@ impl SettingsMsg {
             | SettingsMsg::ModelChanged(..)
             | SettingsMsg::BaseUrlChanged(..)
             | SettingsMsg::Saved => None,
+        }
+    }
+}
+
+impl UsageMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            UsageMsg::Read(..)
+            | UsageMsg::Written(..)
+            | UsageMsg::RefreshBalance
+            | UsageMsg::BalanceRead(..)
+            | UsageMsg::OpenBilling
+            | UsageMsg::Price(..)
+            | UsageMsg::ResetPrice
+            | UsageMsg::EditPrices(..)
+            | UsageMsg::PriceSaved(..)
+            | UsageMsg::KeepFresh(..)
+            | UsageMsg::SuggestQuestions(..) => None,
         }
     }
 }
@@ -2893,6 +3371,8 @@ impl WindowMsg {
             | WindowMsg::ResizeDragged(..)
             | WindowMsg::FocusChanged(..)
             | WindowMsg::ControlsHover(..)
+            | WindowMsg::DismissFailure
+            | WindowMsg::RetryFailure
             | WindowMsg::Close
             | WindowMsg::Minimize
             | WindowMsg::ToggleFullscreen
@@ -2903,6 +3383,7 @@ impl WindowMsg {
             | WindowMsg::ShowDebugPanel
             | WindowMsg::CollapseBottom
             | WindowMsg::ToggleToolsMenu
+            | WindowMsg::ToggleRunMenu
             | WindowMsg::ToggleTargetMenu
             | WindowMsg::OpenShortcuts
             | WindowMsg::RebindStart(..)
@@ -2917,9 +3398,16 @@ impl WindowMsg {
             | WindowMsg::NoFileDialog
             | WindowMsg::ToggleAppMenu
             | WindowMsg::ToggleViewMenu
+            | WindowMsg::ToggleViewsMenu
             | WindowMsg::FileFilterChanged(..)
             | WindowMsg::FileFilterSubmitted
             | WindowMsg::FileFilterEscaped
+            | WindowMsg::FileFilterDown
+            | WindowMsg::TabPressed { .. }
+            | WindowMsg::RingEnd
+            | WindowMsg::RingMoved(..)
+            | WindowMsg::TreeKey(..)
+            | WindowMsg::TreeFocused(..)
             | WindowMsg::ToggleMaximize
             | WindowMsg::MarginTabPicked(..)
             | WindowMsg::FilesTreeScrolled { .. }
@@ -2935,7 +3423,18 @@ impl TutorialMsg {
     /// new variant cannot compile until it is classified here.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            TutorialMsg::Start | TutorialMsg::Step(..) | TutorialMsg::Exit => None,
+            TutorialMsg::Start
+            | TutorialMsg::SampleWritten(_)
+            | TutorialMsg::RetrySample
+            | TutorialMsg::SetUp(_)
+            | TutorialMsg::SkipEmbeddings
+            | TutorialMsg::PrepClose
+            | TutorialMsg::Go
+            | TutorialMsg::InNewWindow(_)
+            | TutorialMsg::BeginIn(_)
+            | TutorialMsg::Begin
+            | TutorialMsg::Step(..)
+            | TutorialMsg::Exit => None,
         }
     }
 }
@@ -3008,5 +3507,195 @@ impl<T> Clone for Handoff<T> {
 impl<T> std::fmt::Debug for Handoff<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Handoff(..)")
+    }
+}
+
+/// The weak spots page (`app::weakspots`).
+#[derive(Debug, Clone)]
+pub enum WeakMsg {
+    /// Show the page, measuring the project if it changed since.
+    Show,
+    /// Measure it again.
+    Refresh,
+    /// A pass's spots, ranked; `files` is how many files it measured.
+    Built {
+        stamp: Stamp,
+        /// The file registry's revision it measured.
+        rev: u64,
+        files: usize,
+        result: Result<Vec<clew_core::weakspots::Spot>, String>,
+    },
+    /// Open the `0`th spot's code.
+    Open(usize),
+    /// Ask about the `0`th spot.
+    AskWhy(usize),
+    /// Put the page away.
+    Close,
+}
+
+impl WeakMsg {
+    /// Where the message comes from, for `dispatch`'s ownership check.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            WeakMsg::Built { stamp, .. } => Some(Origin::Stamped(stamp)),
+            WeakMsg::Show
+            | WeakMsg::Refresh
+            | WeakMsg::Open(_)
+            | WeakMsg::AskWhy(_)
+            | WeakMsg::Close => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ProofMsg {
+    /// Step Through Proof from the code's context menu.
+    FromMenu,
+    /// The Lean server's goals after each step of the proof asked.
+    Answered {
+        stamp: Stamp,
+        /// Which asking it answers ([`crate::app::proof::ProofWalk::token`]).
+        token: u64,
+        result: Result<Vec<Option<Vec<String>>>, String>,
+    },
+    /// One step on (`true`) or back.
+    Step(bool),
+    /// Go to step `0`.
+    Goto(usize),
+    /// Put the proof away.
+    Close,
+}
+
+impl ProofMsg {
+    /// Where the message comes from, for `dispatch`'s ownership check.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            ProofMsg::Answered { stamp, .. } => Some(Origin::Stamped(stamp)),
+            ProofMsg::FromMenu | ProofMsg::Step(_) | ProofMsg::Goto(_) | ProofMsg::Close => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum FakeMsg {
+    /// Fake Run… (or, `debug`, Fake Debug…) from the code's context menu.
+    FromMenu { debug: bool },
+    /// Fake Run (or, `debug`, Fake Debug) on the definition the caret is in
+    /// (the shortcut, the palette, the strip's Run menu).
+    AtCaret { debug: bool },
+    /// The sheet's `0`th field now holds `1`.
+    Field(usize, String),
+    /// Ask the model for inputs to fill the empty fields with.
+    Suggest,
+    /// The suggested inputs, one per field.
+    Suggested {
+        stamp: Stamp,
+        seq: u64,
+        result: Result<Vec<String>, String>,
+    },
+    /// Run it with the sheet's inputs.
+    Run,
+    /// Close the sheet without running.
+    CloseSheet,
+    /// The run's agent turn did something (read a file, searched): what
+    /// its step says.
+    Read {
+        stamp: Stamp,
+        stream: u64,
+        title: String,
+    },
+    /// Its answer's tokens.
+    Delta {
+        stamp: Stamp,
+        stream: u64,
+        text: String,
+    },
+    /// A step's text, the answer only if the step ends without tools.
+    Draft {
+        stamp: Stamp,
+        stream: u64,
+        text: String,
+    },
+    /// Whether that text was the answer.
+    DraftEnd {
+        stamp: Stamp,
+        stream: u64,
+        kept: bool,
+    },
+    /// The turn asked for a tool of the window's, which it was not offered.
+    ToolCalled {
+        stamp: Stamp,
+        stream: u64,
+        call: u64,
+    },
+    /// The turn ended.
+    TurnEnded {
+        stamp: Stamp,
+        stream: u64,
+        outcome: clew_protocol::StreamOutcome,
+    },
+    /// The answer of a run asked in one call.
+    Answered {
+        stamp: Stamp,
+        seq: u64,
+        result: Result<String, String>,
+    },
+    /// Stop the run being worked out.
+    Stop,
+    /// A debugger step command, on the trace.
+    Step(SimCmd),
+    /// Go to the trace's step `0` (a frame of the stack).
+    Goto(usize),
+    /// Ask about the step shown.
+    AskWhy,
+    /// Open the sheet on the inputs last run.
+    EditInputs,
+    /// Close the fake debug session.
+    Close,
+}
+
+/// A debugger's step commands, on a fake run's trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimCmd {
+    /// The line before.
+    Back,
+    /// The next line no deeper in calls.
+    Over,
+    /// The next line, into what this one calls.
+    Into,
+    /// Back in the caller.
+    Out,
+    /// On to the next breakpoint, or the end.
+    Continue,
+    /// The first line again.
+    Restart,
+}
+
+impl FakeMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            FakeMsg::Suggested { stamp, .. }
+            | FakeMsg::Read { stamp, .. }
+            | FakeMsg::Delta { stamp, .. }
+            | FakeMsg::Draft { stamp, .. }
+            | FakeMsg::DraftEnd { stamp, .. }
+            | FakeMsg::ToolCalled { stamp, .. }
+            | FakeMsg::TurnEnded { stamp, .. }
+            | FakeMsg::Answered { stamp, .. } => Some(Origin::Stamped(stamp)),
+            FakeMsg::FromMenu { .. }
+            | FakeMsg::AtCaret { .. }
+            | FakeMsg::Field(..)
+            | FakeMsg::Suggest
+            | FakeMsg::Run
+            | FakeMsg::CloseSheet
+            | FakeMsg::Stop
+            | FakeMsg::Step(..)
+            | FakeMsg::Goto(..)
+            | FakeMsg::AskWhy
+            | FakeMsg::EditInputs
+            | FakeMsg::Close => None,
+        }
     }
 }

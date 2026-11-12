@@ -137,8 +137,13 @@ impl<Message> Widget<Message, Theme, Renderer> for Tip<'_, Message> {
         ) {
             let state = tree.state.downcast_mut::<State>();
             let now = Instant::now();
-            let over = cursor.position_over(layout.bounds()).is_some();
-            let pressed = matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
+            let moved = matches!(event, Event::Mouse(mouse::Event::CursorMoved { .. }));
+            let on = cursor.position_over(layout.bounds()).is_some();
+            let over = rests(*state, on, moved);
+            // A press on it puts its tip away whether or not the pointer
+            // rested there first: a control come up under a still pointer,
+            // clicked, showed its tip at the first nudge after the click.
+            let pressed = on && matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
             let next = step(*state, over, pressed, now);
             if next != *state {
                 // Shown or put away: the overlay comes or goes.
@@ -248,10 +253,18 @@ impl<Message> Widget<Message, Theme, Renderer> for Tip<'_, Message> {
     }
 }
 
+/// Whether the pointer, `over` what a tooltip names, is resting there for
+/// it: one that moved onto it, or is still where it was. One that never
+/// moved, a control come up under it — the Ask card's mic under the pill
+/// just pressed — is not: its tip came up over the suggestions under it.
+fn rests(state: State, over: bool, moved: bool) -> bool {
+    over && (moved || !matches!(state, State::Idle))
+}
+
 /// Where a tooltip goes from `state`, the pointer `over` what it names or
-/// not, a button `pressed`, at `now`.
+/// not (resting there, `rests`), a button `pressed` on it, at `now`.
 fn step(state: State, over: bool, pressed: bool, now: Instant) -> State {
-    if over && pressed {
+    if pressed {
         return State::PutAway;
     }
     match (state, over) {
@@ -388,6 +401,21 @@ mod tests {
         ));
     }
 
+    /// L13: a control come up under a pointer that has not moved is not
+    /// rested on — its tip waits for the pointer to move onto it.
+    #[test]
+    fn a_control_come_up_under_a_still_pointer_shows_no_tip() {
+        assert!(!rests(State::Idle, true, false), "came up under it");
+        assert!(rests(State::Idle, true, true), "moved onto it");
+        let t0 = Instant::now();
+        assert!(
+            rests(State::Resting { at: t0 }, true, false),
+            "still resting"
+        );
+        assert!(rests(State::Shown, true, false), "still shown");
+        assert!(!rests(State::Shown, false, true), "left it");
+    }
+
     /// A click puts it away, and it stays away while the pointer stays.
     #[test]
     fn a_click_puts_it_away_until_the_pointer_leaves() {
@@ -397,5 +425,13 @@ mod tests {
         assert_eq!(s, State::PutAway);
         assert_eq!(step(s, true, false, t0 + DELAY * 4), State::PutAway);
         assert_eq!(step(s, false, false, t0 + DELAY * 4), State::Idle);
+        // Pressed on a control come up under a still pointer, not rested on
+        // (`rests` is false): put away all the same, and the next nudge
+        // shows nothing.
+        assert!(!rests(State::Idle, true, false));
+        let s = step(State::Idle, false, true, t0);
+        assert_eq!(s, State::PutAway);
+        assert!(rests(s, true, true));
+        assert_eq!(step(s, true, false, t0 + DELAY * 4), State::PutAway);
     }
 }

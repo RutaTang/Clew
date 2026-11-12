@@ -65,10 +65,10 @@ fn scan_summary(report: &fs_scan::ScanReport) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("; "))
 }
 
-/// The status line for a project's file set: "120 files · 1042 symbols".
+/// The status line for a project's file set: "120 files, 1042 symbols".
 pub(crate) fn size_status(files: usize, symbols: usize) -> String {
     format!(
-        "{} · {}",
+        "{}, {}",
         trn!("1 file", "{n} files", files),
         trn!("1 symbol", "{n} symbols", symbols)
     )
@@ -348,6 +348,7 @@ impl App {
         self.pending_consent = None;
         if !with_setup && let Some(setup) = self.setup.as_mut().filter(|s| s.root == root) {
             setup.servers = false;
+            setup.servers_declined = true;
             setup.explain = false;
         }
         // Consent is recorded outside the project (see `request_open`): a
@@ -411,6 +412,11 @@ impl App {
         {
             self.pending_setup = None;
         }
+        // Opened without its servers set up: none is asked about now.
+        self.proj.servers_not_now = self
+            .pending_setup
+            .as_ref()
+            .is_some_and(|intent| intent.servers_not_now);
         // Tracked files the ignore rules hid, listed anyway: marked in the tree.
         self.proj.tracked_ignored = report.tracked_ignored.into_iter().collect();
         // Persisted project state (`.clew/`) lives WITH the project. For a
@@ -435,16 +441,32 @@ impl App {
             .map(crate::app::ask_sessions::load)
             .unwrap_or_default();
         self.proj.ask_session = None;
-        // Land on the architecture-overview home (filled from the cache when
-        // the project's state has loaded).
-        self.proj.overview.showing = true;
         self.refresh_embeddings();
         // A project open re-reads the AI config (another window may have
         // saved Settings).
         self.invalidate_llm_config();
         self.proj.project_languages = served_languages(&result.files);
         self.proj.code_languages = super::setup::setup_languages(&result.files);
+        // Land on the architecture-overview home (filled from the cache when
+        // the project's state has loaded) — where there is code for it to
+        // be of: over a folder with none it opened by itself, offering an
+        // Explain All with nothing to explain.
+        self.proj.overview.showing = super::setup::has_code(&result.files);
         self.proj.file_languages = file_languages(&result.files);
+        // A folder on this machine, opened: offered again on the welcome
+        // screen — not the tour's sample, which the tour brings itself.
+        let sample = self
+            .tour_sample
+            .as_ref()
+            .is_some_and(|s| s.root == result.root);
+        if local_state && !sample {
+            if let Some(store) = &self.recent_store {
+                crate::app::recent::remember_in(store, &result.root);
+            }
+            self.recent_folders.retain(|r| *r != result.root);
+            self.recent_folders.insert(0, result.root.clone());
+            self.recent_folders.truncate(crate::app::recent::KEPT);
+        }
         let files = Arc::new(result.files);
         self.proj.project = Some(Project {
             root: result.root,
@@ -533,7 +555,8 @@ impl App {
                     .as_ref()
                     .is_some_and(|p| file.starts_with(&p.root)) =>
             {
-                self.open_file(file, None, true) // clears show_overview
+                let line = self.pending_open_line.take();
+                self.open_file(file, line, true) // clears show_overview
             }
             _ => Task::none(),
         };
@@ -579,6 +602,14 @@ impl App {
     /// line already held read as no notice at all.
     pub(crate) fn forget_project_state(&mut self) -> Option<String> {
         let left = std::mem::take(&mut self.proj);
+        // A failure standing on the status bar is the project's: its Try
+        // again acted on the next one — a walkthrough of the project left,
+        // generated (and paid for) in the one opened.
+        if let Some(notice) = self.failure_notice.take()
+            && notice.said == self.status
+        {
+            self.status.clear();
+        }
         // What the project left still waits for is forgotten with it: its
         // answers, arriving late, are nobody's (`App::session_first_req`).
         self.session_first_req = self.next_req_id.load(std::sync::atomic::Ordering::Relaxed);
@@ -640,6 +671,24 @@ impl App {
         Some(self.status.clone())
     }
 
+    /// Close the folder open: its work stopped and its session forgotten, as
+    /// opening another does, and the welcome screen back with the folders
+    /// opened before. Once a folder was open, the only way to another was
+    /// the folder dialog.
+    pub(crate) fn close_folder(&mut self) -> Task<Message> {
+        if self.proj.project.is_none() {
+            return Task::none();
+        }
+        let stop = self.drop_project_work();
+        // Its late answers carry the old epoch, and are dropped.
+        self.project_epoch += 1;
+        let discarded = self.forget_project_state();
+        self.pending_open = None;
+        self.pending_open_line = None;
+        self.status = discarded.unwrap_or_else(|| tr!("Folder closed").to_string());
+        stop
+    }
+
     /// Stop everything running FOR the project being left — the work itself,
     /// not just its results.
     ///
@@ -670,6 +719,11 @@ impl App {
         if let Some(handle) = self.proj.explain.abort.take() {
             handle.abort();
         }
+        // A walkthrough being generated, the same: its request runs on, and
+        // is billed, after its project is gone.
+        if let Some(handle) = self.proj.walk.abort.take() {
+            handle.abort();
+        }
         // The LSP refine holds CLONES of the old project's language-server
         // clients, so dropping them with the session does not stop it.
         self.abort_refine();
@@ -689,7 +743,7 @@ impl App {
         // teardown the Stop button performs, rather than a copy of it that
         // reads the same: the copy was where the breakpoint-verdict reset would
         // have gone missing.
-        Task::batch([stop_ask, self.stop_debug_session()])
+        Task::batch([stop_ask, self.stop_every_debug_run()])
     }
 
     /// Read the open project's persisted state on the blocking pool (see
@@ -727,6 +781,39 @@ impl App {
         }
     }
 
+    /// Back where the reader was: the file and line the reading trail
+    /// stands on, opened as the project opens on its overview — every
+    /// session started from the top, the overview, then "No file open".
+    /// Not where a file is open already (one clew was started with, one
+    /// opened meanwhile) or another page was gone to, nor for a file no
+    /// longer in the project. The overview stays a click away.
+    pub(crate) fn back_where_read(&mut self) -> Option<Task<Message>> {
+        // The tour's sample, opened for a tour: the tour sets out what is
+        // shown, and gives back the layout it found — a file opened here
+        // as it began left the reader, at its end, on the last file the
+        // tour showed, out of step with the trail.
+        let sample = self
+            .tour_sample
+            .as_ref()
+            .is_some_and(|s| self.proj.project.as_ref().is_some_and(|p| p.root == s.root));
+        if sample
+            || self.active_viewer().is_some()
+            || !self.proj.overview.showing
+            || self.pending_open.is_some()
+        {
+            return None;
+        }
+        let loc = self.proj.history.current_loc()?.clone();
+        let listed = self
+            .proj
+            .project
+            .as_ref()?
+            .files
+            .iter()
+            .any(|f| f.abs == loc.path);
+        listed.then(|| self.open_file(loc.path, loc.line, false))
+    }
+
     /// The project's persisted state arrived (`ProjectMsg::StateLoaded`). Adopt each
     /// store the user has not changed meanwhile, report any that could not be
     /// read (they are left untouched on disk), replay trail visits made while
@@ -745,6 +832,7 @@ impl App {
             problems.push(tr!("the project's saved state ({error})", error = why));
         }
 
+        self.proj.gone_files.extend(state.gone);
         if let Some(loaded) = state.history {
             match loaded {
                 Ok(loaded) => {
@@ -760,6 +848,8 @@ impl App {
                     self.proj.trail_collapsed.clear();
                     if replayed {
                         tasks.push(self.save_history());
+                    } else if let Some(task) = self.back_where_read() {
+                        tasks.push(task);
                     }
                 }
                 Err(e) => problems.push(format!("history.json {e}")),
@@ -1010,6 +1100,73 @@ impl App {
         self.reresolve_import_graph()
     }
 
+    /// What the file tree's right-click menu does, on its file or folder.
+    fn on_tree_menu_act(&mut self, act: crate::app::state::TreeAct) -> Task<Message> {
+        use crate::app::state::TreeAct;
+        let Some(menu) = self.proj.tree_menu.take() else {
+            return Task::none();
+        };
+        let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let abs = crate::app::content::rel_abs(&root, &menu.rel);
+        // A name with a line break (or any control character) in it is
+        // not put on the clipboard: pasted into a terminal, the part after
+        // the break runs as a command of its own — a repository's file
+        // named for that.
+        if matches!(act, TreeAct::CopyPath | TreeAct::CopyRelativePath)
+            && menu.rel.chars().any(char::is_control)
+        {
+            self.status =
+                tr!("Didn't copy it: its name has a line break or another control character")
+                    .to_string();
+            return Task::none();
+        }
+        match act {
+            TreeAct::Open if menu.dir => self.on_toggle_dir(menu.rel),
+            TreeAct::Open => self.update(Message::Editor(EditorMsg::OpenRel {
+                rel: menu.rel,
+                line: None,
+            })),
+            // Beside what is read: in the split's other half, opened if
+            // it is not — the left half from the right one too, not over
+            // the file being read.
+            TreeAct::OpenToSide => {
+                let split = if self.proj.split {
+                    self.proj.active = 1 - self.proj.active.min(1);
+                    Task::none()
+                } else {
+                    self.on_toggle_split()
+                };
+                let open = self.update(Message::Editor(EditorMsg::OpenRel {
+                    rel: menu.rel,
+                    line: None,
+                }));
+                Task::batch([split, open])
+            }
+            TreeAct::CopyPath => {
+                // A remote project's path as its host writes it.
+                let path = if self.connection.is_remote() {
+                    crate::ui::remote_join(&root.display().to_string(), &menu.rel)
+                } else {
+                    crate::app::content::plain_path(&abs)
+                };
+                self.status = tr!("Copied {path}", path = path.clone());
+                iced::clipboard::write(path)
+            }
+            TreeAct::CopyRelativePath => {
+                self.status = tr!("Copied {path}", path = menu.rel.clone());
+                iced::clipboard::write(menu.rel)
+            }
+            TreeAct::Reveal => {
+                if let Err(why) = crate::app::content::reveal_in_file_manager(&abs) {
+                    self.status = why;
+                }
+                Task::none()
+            }
+        }
+    }
+
     pub(crate) fn on_toggle_dir(&mut self, rel: String) -> Task<Message> {
         // Cmd+click a folder shows its architectural explanation instead
         // of expanding it.
@@ -1021,8 +1178,10 @@ impl App {
             return self.show_explanation(node);
         }
         if !self.proj.expanded.remove(&rel) {
-            self.proj.expanded.insert(rel);
+            self.proj.expanded.insert(rel.clone());
         }
+        // The keyboard rests where the pointer last pressed.
+        self.proj.tree_cursor = Some(rel);
         Task::none()
     }
 
@@ -1165,6 +1324,33 @@ impl App {
             // in a folder that does not exist.
             ProjectMsg::FolderPicked(Some(root)) if !root.is_dir() => {
                 self.status = tr!("No folder at {path}", path = root.display());
+                // A recent folder gone since: no longer offered.
+                if self.recent_folders.contains(&root) {
+                    self.recent_folders.retain(|r| *r != root);
+                    if let Some(store) = &self.recent_store {
+                        crate::app::recent::forget_in(store, &root);
+                    }
+                }
+                Task::none()
+            }
+            ProjectMsg::CloseFolder => self.close_folder(),
+            ProjectMsg::ForgetRecent(folder) => {
+                self.recent_folders.retain(|r| *r != folder);
+                if let Some(store) = &self.recent_store {
+                    crate::app::recent::forget_in(store, &folder);
+                }
+                Task::none()
+            }
+            ProjectMsg::RecentRead(read) => {
+                // After those opened meanwhile, which are newer.
+                let mut folders = std::mem::take(&mut self.recent_folders);
+                for r in read {
+                    if !folders.contains(&r) {
+                        folders.push(r);
+                    }
+                }
+                folders.truncate(crate::app::recent::KEPT);
+                self.recent_folders = folders;
                 Task::none()
             }
             ProjectMsg::FolderPicked(Some(root)) => {
@@ -1218,6 +1404,7 @@ impl App {
             ProjectMsg::SetupServers(on) => {
                 if let Some(setup) = self.setup.as_mut() {
                     setup.servers = on;
+                    setup.servers_declined = !on;
                 }
                 Task::none()
             }
@@ -1235,6 +1422,12 @@ impl App {
                 self.proj.git_status_loading = false;
                 // Not a repository (or git refused): no marks, not old ones.
                 self.proj.git_status = result.unwrap_or_default().into_iter().collect();
+                Task::none()
+            }
+            ProjectMsg::HeadRead { result, .. } => {
+                self.proj.head_loading = false;
+                // Not a repository (or git refused): no branch, not the old one.
+                self.proj.head = result.ok().flatten();
                 Task::none()
             }
             ProjectMsg::SetUpMissing => self.on_set_up_missing(),
@@ -1275,6 +1468,30 @@ impl App {
                 ..
             } => self.on_tree_updated(seq, result, report),
             ProjectMsg::ToggleDir(rel) => self.on_toggle_dir(rel),
+            ProjectMsg::TreeMenuFor { rel, dir } => {
+                self.proj.tree_menu_for = Some((rel, dir));
+                self.proj.tree_menu_keys = false;
+                Task::none()
+            }
+            ProjectMsg::TreeMenuAt { x, y } => {
+                if let Some((rel, dir)) = self.proj.tree_menu_for.take() {
+                    self.proj.context_menu = None;
+                    self.proj.tree_cursor = Some(rel.clone());
+                    self.proj.tree_menu = Some(crate::app::state::TreeMenu { rel, dir, x, y });
+                    // Opened from the keys (⇧F10, the Menu key): on its
+                    // first row, Enter runs it — with nothing chosen,
+                    // Enter did nothing until ↓ was pressed.
+                    if std::mem::take(&mut self.proj.tree_menu_keys) {
+                        return self.on_tab(true, false);
+                    }
+                }
+                Task::none()
+            }
+            ProjectMsg::TreeMenuClosed => {
+                self.proj.tree_menu = None;
+                Task::none()
+            }
+            ProjectMsg::TreeMenuAct(act) => self.on_tree_menu_act(act),
         }
     }
 }

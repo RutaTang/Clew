@@ -19,8 +19,10 @@ pub enum Direction {
 impl Direction {
     pub fn label(self) -> &'static str {
         match self {
-            Direction::Incoming => tr!("Callers"),
-            Direction::Outgoing => tr!("Callees"),
+            // As the margin says them: "Callers / Callees" here beside
+            // "Called by / Calls" there named one thing two ways.
+            Direction::Incoming => tr!("Called by"),
+            Direction::Outgoing => tr!("Calls"),
         }
     }
 

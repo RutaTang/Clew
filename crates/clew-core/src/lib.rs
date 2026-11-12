@@ -96,6 +96,7 @@ pub mod imports;
 pub mod inactive;
 pub mod incremental;
 pub(crate) mod lean;
+pub mod leanproof;
 pub mod linerpc;
 pub mod llm;
 pub mod lsp;
@@ -117,6 +118,7 @@ pub mod structure;
 pub mod testutil;
 pub mod trust;
 pub mod update;
+pub mod weakspots;
 
 /// A project-relative path as Clew writes one — in the protocol, in its
 /// state files, on the screen: `src/app/main.rs`, separated by `/` on every

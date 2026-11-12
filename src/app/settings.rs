@@ -26,6 +26,17 @@ impl App {
     pub(crate) fn invalidate_llm_config(&mut self) {
         self.llm_config_cache = None;
         self.llm_available = llm::Config::available();
+        // The saved model changed: a check of the one before is not of it.
+        if self.model_check.of.is_some() {
+            let now = self.llm_config();
+            if now.as_ref().map(crate::app::state::ModelCheck::of_config) != self.model_check.of {
+                self.model_check = Default::default();
+            }
+        }
+        // What estimates and the Usage page read prices for, and the prices
+        // as they are now (another window may have changed them).
+        crate::app::usage::forget_own_prices();
+        self.refresh_usage_model();
     }
 
     /// The one gate every flow that needs a chat model goes through: the
@@ -40,9 +51,7 @@ impl App {
                 // Not where the key is kept: Settings, opened here, is where
                 // it is added (the file's whole path filled the status line).
                 self.status = tr!("Add an API key in Settings").into();
-                Err(Task::done(Message::Settings(SettingsMsg::OpenAt(
-                    SettingsPage::LanguageModel,
-                ))))
+                Err(Task::done(Message::Settings(SettingsMsg::NeedKey)))
             }
         }
     }
@@ -50,37 +59,77 @@ impl App {
     /// Test connection: one word asked of the model the Language model
     /// page's fields name, as they stand — saved or not.
     pub(crate) fn on_test_connection(&mut self) -> Task<Message> {
-        self.settings.connection_tests += 1;
-        let number = self.settings.connection_tests;
         let cfg = llm::Config::from_form(
             self.settings.provider,
             self.settings.key.clone(),
             self.settings.model.clone(),
             self.settings.base_url.clone(),
         );
+        self.test_connection_of(cfg, false)
+    }
+
+    /// Test connection of the model as saved: what every call uses.
+    pub(crate) fn on_test_saved_connection(&mut self) -> Task<Message> {
+        match self.llm_config() {
+            Some(cfg) => {
+                self.model_check.of = Some(crate::app::state::ModelCheck::of_config(&cfg));
+                self.test_connection_of(cfg, true)
+            }
+            None => Task::done(Message::Settings(SettingsMsg::NeedKey)),
+        }
+    }
+
+    /// One word asked of the model `cfg` names: what Test connection finds
+    /// — of the form's fields (`SettingsDraft::connection_test`), or
+    /// `saved`, of the model as saved (`App::model_check`).
+    fn test_connection_of(&mut self, cfg: llm::Config, saved: bool) -> Task<Message> {
+        use crate::app::state::ConnectionTest;
+        self.settings.connection_tests += 1;
+        let number = self.settings.connection_tests;
+        let found = if saved {
+            &mut self.model_check.result
+        } else {
+            &mut self.settings.connection_test
+        };
         if cfg.base_url.is_empty() || cfg.model.is_empty() {
-            self.settings.connection_test = crate::app::state::ConnectionTest::Failed(
+            *found = ConnectionTest::Failed(crate::app::state::TestFailure::Said(
                 tr_noop!("Name the model and its endpoint first.").to_string(),
-            );
+            ));
             return Task::none();
         }
-        self.settings.connection_test = crate::app::state::ConnectionTest::Testing(number);
+        // No key, for a service that takes one: said as that, not as the
+        // server's "no AI chat config". A custom endpoint may need none.
+        if cfg.api_key.trim().is_empty() && cfg.provider != llm::Provider::Custom {
+            *found = ConnectionTest::Failed(crate::app::state::TestFailure::Said(
+                tr_noop!("Enter the API key first.").to_string(),
+            ));
+            return Task::none();
+        }
+        *found = ConnectionTest::Testing(number);
         // Asked the way every call is made: through the server, for a
         // project on another machine.
         let ai = self.ai_client();
         Task::perform(
             async move {
                 let model = cfg.model.clone();
-                ai.complete(
-                    cfg,
+                ai.complete_typed(
+                    cfg.clone(),
+                    crate::app::usage::KEY_TEST,
                     "Reply with the single word OK.",
                     "OK?".into(),
                     CONNECTION_TEST_TOKENS,
                 )
                 .await
                 .map(|_| model)
+                .map_err(|e| connection_failure(&e, &cfg))
             },
-            move |result| Message::Settings(SettingsMsg::ConnectionTested { number, result }),
+            move |result| {
+                Message::Settings(SettingsMsg::ConnectionTested {
+                    number,
+                    saved,
+                    result,
+                })
+            },
         )
     }
 
@@ -356,6 +405,7 @@ impl App {
             }
         }
         self.settings.open = false;
+        self.settings.key_asked = false;
         self.rebinding = None;
         self.keymap_notice = None;
         // A model's failed download is said under it, in here; once
@@ -375,7 +425,8 @@ impl App {
         self.theme_pref = pref;
         theme::apply_pref(pref);
         self.restyle_svgs();
-        self.status = tr!("Appearance: {mode}", mode = pref.label());
+        // Named as its row is, "Mode".
+        self.status = tr!("Mode: {mode}", mode = pref.label());
         self.persist_theme();
     }
 
@@ -434,6 +485,44 @@ fn saved_field_name(key: &str) -> &str {
 }
 
 impl App {
+    /// What the provider — or, `embeddings`, the embeddings source — just
+    /// picked still needs before it works: the page that asks for it, and
+    /// what to say; `None` when it is ready to be kept.
+    fn picked_needs(&self, embeddings: bool) -> Option<(SettingsPage, String)> {
+        let s = &self.settings;
+        if embeddings {
+            if s.embed_here && !clew_core::embed::local::installed() {
+                return Some((
+                    SettingsPage::Embeddings,
+                    tr!("Download the embedding model to make embeddings on this computer").into(),
+                ));
+            }
+            if !s.embed_here && s.embed_key.is_empty() && !s.embed_key_from_env {
+                return Some((
+                    SettingsPage::Embeddings,
+                    tr!("Add the embedding service's API key to use it").into(),
+                ));
+            }
+            return None;
+        }
+        let chat = llm::Config::from_form(
+            s.provider,
+            s.key.clone(),
+            s.model.clone(),
+            s.base_url.clone(),
+        );
+        if chat.api_key.is_empty() {
+            return Some((
+                SettingsPage::LanguageModel,
+                tr!(
+                    "Add your {provider} API key to use it",
+                    provider = s.provider.label()
+                ),
+            ));
+        }
+        None
+    }
+
     /// Handle a [`SettingsMsg`]: this feature's share of what `dispatch` routes
     /// (after its one ownership check and the menu bookkeeping).
     pub(crate) fn update_settings(&mut self, message: SettingsMsg) -> Task<Message> {
@@ -441,12 +530,25 @@ impl App {
             // Picked with Settings shut — said, or run from the command bar:
             // picked as its page would pick it, and kept as closing it
             // keeps it. Only its draft changed, which nothing then saved.
+            // What the pick still needs — a key for that provider, the model
+            // to make embeddings here — is asked for on its page, left open;
+            // nothing is saved meanwhile. Kept, the keyboard is where it was.
             msg @ (SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
                 if !self.settings.open =>
             {
+                let focused = self.code_focused;
                 let opened = self.on_open_settings();
+                let embeddings = matches!(msg, SettingsMsg::EmbedHere(_));
                 let picked = self.update_settings(msg);
+                if let Some((page, wanted)) = self.picked_needs(embeddings) {
+                    self.settings.page = page;
+                    self.status = wanted;
+                    return Task::batch([opened, picked]);
+                }
                 let closed = self.close_settings();
+                if !self.settings.open {
+                    self.code_focused = focused;
+                }
                 Task::batch([opened, picked, closed])
             }
             SettingsMsg::SetThemePref(pref) => {
@@ -454,7 +556,9 @@ impl App {
                 Task::none()
             }
             SettingsMsg::SetLanguage(pref) => {
-                if let Err(e) = crate::i18n::apply_and_save(pref) {
+                let saved = crate::i18n::apply_and_save(pref);
+                self.status_follows_language();
+                if let Err(e) = saved {
                     self.status = tr!("Could not save the language: {error}", error = e);
                 }
                 // Every window speaks it: the others are told to draw again
@@ -463,7 +567,14 @@ impl App {
                 // window's AI calls is told which language to answer in.
                 theme::redraw_everywhere();
                 self.send_ai_config();
-                self.respeak_explanation()
+                // What is said of embeddings was put in words once, in the
+                // language then: said again in this one.
+                self.refresh_embeddings();
+                Task::batch([
+                    self.respeak_explanation(),
+                    self.respeak_walk_step(),
+                    self.respeak_turn_endings(),
+                ])
             }
             SettingsMsg::SetThemeVariant { id, is_light } => {
                 self.set_theme_variant(id, is_light);
@@ -472,10 +583,16 @@ impl App {
             SettingsMsg::ThemeResynced => {
                 self.theme_pref = theme::current_pref();
                 self.restyle_svgs();
+                self.status_follows_language();
                 // It may have been the language another window chose: this
                 // window's server answers in it too.
                 self.send_ai_config();
-                self.respeak_explanation()
+                self.refresh_embeddings();
+                Task::batch([
+                    self.respeak_explanation(),
+                    self.respeak_walk_step(),
+                    self.respeak_turn_endings(),
+                ])
             }
             SettingsMsg::SystemAppearanceChanged => {
                 // Only follow the OS when the preference is System; re-color
@@ -504,19 +621,80 @@ impl App {
             | SettingsMsg::EmbedModelRemoved(..)) => self.on_local_embedding(msg),
             SettingsMsg::Open => {
                 let opened = self.on_open_settings();
-                Task::batch([opened, self.sync_server_listing()])
+                let usage = self.on_usage_page();
+                Task::batch([opened, self.sync_server_listing(), usage])
             }
             SettingsMsg::OpenAt(page) => {
                 self.settings.page = page;
                 let opened = self.on_open_settings();
-                Task::batch([opened, self.sync_server_listing()])
+                let usage = self.on_usage_page();
+                // "Add an API Key…": the keyboard in the field it is added
+                // to, while there is none.
+                let key =
+                    if page == SettingsPage::LanguageModel && self.settings.key.trim().is_empty() {
+                        self.code_focused = false;
+                        operation::focus(ui::settings_key_id())
+                    } else {
+                        Task::none()
+                    };
+                Task::batch([
+                    opened,
+                    self.sync_server_listing(),
+                    settings_to_top(),
+                    key,
+                    usage,
+                ])
+            }
+            SettingsMsg::Fix(field) => {
+                use crate::app::state::LlmField;
+                self.settings.page = SettingsPage::LanguageModel;
+                let opened = self.on_open_settings();
+                self.code_focused = false;
+                let id = match field {
+                    LlmField::Key => ui::settings_key_id(),
+                    LlmField::Model => ui::settings_model_id(),
+                    LlmField::BaseUrl => ui::settings_base_url_id(),
+                };
+                Task::batch([
+                    opened,
+                    self.sync_server_listing(),
+                    settings_to_top(),
+                    operation::focus(id),
+                ])
+            }
+            SettingsMsg::NeedKey => {
+                self.settings.page = SettingsPage::LanguageModel;
+                let opened = self.on_open_settings();
+                self.settings.key_asked = true;
+                // The keyboard where the key goes.
+                self.code_focused = false;
+                Task::batch([
+                    opened,
+                    self.sync_server_listing(),
+                    settings_to_top(),
+                    operation::focus(ui::settings_key_id()),
+                ])
             }
             SettingsMsg::Page(page) => {
+                let other = self.settings.page != page;
                 self.settings.page = page;
                 // A shortcut half rebound stays with the page it was on.
                 self.rebinding = None;
                 self.keymap_notice = None;
-                self.sync_server_listing()
+                // Another page opens at its top: the scroll is one for
+                // every page, and kept where the last page was left — the
+                // Integrations page opened half way down, mid-form.
+                let top = if other {
+                    settings_to_top()
+                } else {
+                    Task::none()
+                };
+                let usage = if other {
+                    self.on_usage_page()
+                } else {
+                    Task::none()
+                };
+                Task::batch([self.sync_server_listing(), top, usage])
             }
             SettingsMsg::Close => self.close_settings(),
             SettingsMsg::Discard => {
@@ -543,17 +721,28 @@ impl App {
                 // URL as they were then, so a wrong pick undone costs nothing.
                 // Another provider: its defaults (the user can still edit
                 // them).
-                let (model, base_url) = match &self.settings.ai_snapshot.0 {
-                    opened if opened.provider == p => {
-                        (opened.model.clone(), opened.base_url.clone())
-                    }
+                // The key, too: one kept for another provider is that
+                // provider's secret, never sent to this one — its own
+                // variable, if it has one set, stands in.
+                let (model, base_url, key) = match &self.settings.ai_snapshot.0 {
+                    opened if opened.provider == p => (
+                        opened.model.clone(),
+                        opened.base_url.clone(),
+                        opened.api_key.clone(),
+                    ),
                     _ => (
                         p.default_model().to_string(),
                         p.default_base_url().to_string(),
+                        String::new(),
                     ),
                 };
+                self.settings.key_from_env = key.is_empty()
+                    && !llm::Config::from_form(p, String::new(), model.clone(), base_url.clone())
+                        .api_key
+                        .is_empty();
                 self.settings.model = model;
                 self.settings.base_url = base_url;
+                self.settings.key = key;
                 Task::none()
             }
             SettingsMsg::KeyChanged(s) => {
@@ -572,13 +761,22 @@ impl App {
                 Task::none()
             }
             SettingsMsg::TestConnection => self.on_test_connection(),
-            SettingsMsg::ConnectionTested { number, result } => {
-                if self.settings.connection_test
-                    == crate::app::state::ConnectionTest::Testing(number)
-                {
-                    self.settings.connection_test = match result {
-                        Ok(model) => crate::app::state::ConnectionTest::Answered(model),
-                        Err(e) => crate::app::state::ConnectionTest::Failed(e),
+            SettingsMsg::TestSavedConnection => self.on_test_saved_connection(),
+            SettingsMsg::ConnectionTested {
+                number,
+                saved,
+                result,
+            } => {
+                use crate::app::state::ConnectionTest;
+                let found = if saved {
+                    &mut self.model_check.result
+                } else {
+                    &mut self.settings.connection_test
+                };
+                if *found == ConnectionTest::Testing(number) {
+                    *found = match result {
+                        Ok(model) => ConnectionTest::Answered(model),
+                        Err(e) => ConnectionTest::Failed(e),
                     };
                 }
                 Task::none()
@@ -588,9 +786,199 @@ impl App {
     }
 }
 
+/// What Test connection says of a call that failed: what went wrong, what
+/// to check, and the provider's or the connection's own words — what tells
+/// a certificate a proxy swapped from an address that refuses
+/// connections, or an account out of credit from a provider that is busy.
+/// It said only the connection's words ("request failed: Connection
+/// refused (os error 111)"), naming neither the address nor the field
+/// that holds it.
+fn connection_failure(
+    err: &crate::app::rpc::CallError,
+    cfg: &llm::Config,
+) -> crate::app::state::TestFailure {
+    crate::app::state::TestFailure::Call {
+        failure: crate::app::tasks::ExplainFailure::of_call(err, &cfg.model),
+        host: host_of(&cfg.base_url).to_string(),
+    }
+}
+
+/// [`connection_failure`]'s failure in words, in the language spoken now.
+pub(crate) fn connection_failure_said(
+    failure: &crate::app::tasks::ExplainFailure,
+    host: &str,
+) -> String {
+    use crate::app::tasks::{ExplainFailure, Rejection};
+    match failure.clone() {
+        ExplainFailure::Unreached(detail) => tr!(
+            "Couldn't reach {host} ({detail}). Check the base URL and your network.",
+            host = host,
+            detail = crate::app::tasks::plain_detail(&detail)
+        ),
+        // Reached, then lost or timed out while it answered: the address
+        // is right, so it is not the base URL to check.
+        ExplainFailure::Network(detail) => tr!(
+            "The connection to {host} was lost before it answered ({detail}). Try again in a moment.",
+            host = host,
+            detail = crate::app::tasks::plain_detail(&detail)
+        ),
+        ExplainFailure::Rejected {
+            what: Rejection::Key,
+            detail,
+        } => tr!(
+            "The provider rejected the API key ({detail}). Check it, or paste a new one.",
+            detail = crate::app::tasks::plain_detail(&detail)
+        ),
+        ExplainFailure::Rejected {
+            what: Rejection::Model(model),
+            detail,
+        } => tr!(
+            "The provider has no model “{model}” at this address ({detail}). Check the model's name.",
+            model = model,
+            detail = crate::app::tasks::plain_detail(&detail)
+        ),
+        ExplainFailure::Rejected {
+            what: Rejection::Endpoint,
+            detail,
+        } => tr!(
+            "Nothing answers at this base URL ({detail}). Check it.",
+            detail = crate::app::tasks::plain_detail(&detail)
+        ),
+        // A 429 for the account, not the moment: out of credit, over a
+        // quota. "Try again in a minute" was never true of it.
+        ExplainFailure::Unavailable(detail) | ExplainFailure::Busy(detail)
+            if is_about_billing(&detail) =>
+        {
+            tr!(
+                "The provider refused for your account's quota or credit ({detail}). Check your plan.",
+                detail = crate::app::tasks::plain_detail(&detail)
+            )
+        }
+        ExplainFailure::Unavailable(detail) | ExplainFailure::Busy(detail) => tr!(
+            "The provider is busy or down right now ({detail}). Try again in a minute.",
+            detail = crate::app::tasks::plain_detail(&detail)
+        ),
+        other => {
+            let said = other.describe();
+            let mut chars = said.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}.", first.to_uppercase(), chars.as_str()),
+                None => said,
+            }
+        }
+    }
+}
+
+/// Whether a provider's words are about the account's money rather than
+/// its load: OpenAI's `insufficient_quota`, a billing limit, no credit. A
+/// quota per minute, a rate, a lack of capacity is load, and passes: Gemini's
+/// "Quota exceeded for quota metric '… per minute'" read as out of credit.
+fn is_about_billing(words: &str) -> bool {
+    let words = words.to_ascii_lowercase();
+    let load = [
+        "per minute",
+        "per second",
+        "per day",
+        "rate limit",
+        "rate_limit",
+        "capacity",
+    ]
+    .iter()
+    .any(|w| words.contains(w));
+    !load
+        && ["quota", "billing", "credit", "insufficient", "payment"]
+            .iter()
+            .any(|w| words.contains(w))
+}
+
+/// The host and port a base URL names: what a connection that could not
+/// be made was made to — never a user name or password written into it.
+fn host_of(base_url: &str) -> &str {
+    let rest = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if host.is_empty() { base_url } else { host }
+}
+
+/// The Settings page's scroll back at its top.
+fn settings_to_top() -> Task<Message> {
+    iced::widget::operation::scroll_to(
+        crate::ui::settings_scroll_id(),
+        iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test connection says what failed, what to check, and the provider's
+    /// or the connection's own words: an account out of credit is not "busy",
+    /// and a certificate a proxy swapped is not a wrong address. The address
+    /// it names never carries a password written into the base URL.
+    #[test]
+    fn a_failed_connection_test_says_why_in_plain_words_and_its_own() {
+        use crate::app::rpc::CallError;
+        let cfg = |base: &str| {
+            llm::Config::from_form(
+                llm::Provider::Custom,
+                String::new(),
+                "m".into(),
+                base.into(),
+            )
+        };
+        let local = cfg("http://127.0.0.1:9/v1");
+        let refused = CallError::Llm(llm::LlmError::Connect(
+            "Connection refused (os error 111)".into(),
+        ));
+        let said = connection_failure(&refused, &local).said();
+        assert!(said.contains("Couldn't reach 127.0.0.1:9"), "{said}");
+        assert!(said.contains("nothing answered at that address"), "{said}");
+        assert!(!said.contains("os error"), "{said}");
+        // Reached, then lost: not the base URL to check.
+        let lost = CallError::Llm(llm::LlmError::Transport(
+            "timed out reading response".into(),
+        ));
+        let said = connection_failure(&lost, &local).said();
+        assert!(said.contains("was lost before it answered"), "{said}");
+        assert!(!said.contains("base URL"), "{said}");
+        let tls = CallError::Llm(llm::LlmError::Connect(
+            "invalid peer certificate: UnknownIssuer".into(),
+        ));
+        assert!(
+            connection_failure(&tls, &local)
+                .said()
+                .contains("UnknownIssuer")
+        );
+        let quota = CallError::Llm(llm::LlmError::Status {
+            who: "OpenAI".into(),
+            code: 429,
+            kind: Some("insufficient_quota".into()),
+            message: "You exceeded your current quota".into(),
+        });
+        let said = connection_failure(&quota, &local).said();
+        assert!(said.contains("quota or credit"), "{said}");
+        assert!(!said.contains("busy"), "{said}");
+        // Kept as what failed: said in the language spoken when it is
+        // shown, not the one spoken when it was tested — the tour's sheet
+        // kept its English sentence among French words.
+        let failed = connection_failure(&refused, &local);
+        let in_french = crate::i18n::with_lang(crate::i18n::Lang::Fr, || failed.said());
+        assert!(!in_french.contains("Couldn't reach"), "{in_french}");
+        assert!(in_french.contains("127.0.0.1:9"), "{in_french}");
+        for (base, host) in [
+            ("https://user:secret@llm.corp:8443/v1", "llm.corp:8443"),
+            ("http://[::1]:8080/v1", "[::1]:8080"),
+            ("llm.corp/v1", "llm.corp"),
+            ("", ""),
+        ] {
+            assert_eq!(host_of(base), host, "{base}");
+        }
+    }
 
     /// One indexed unit, with a vector that makes it the obvious hit for
     /// anything (so a stale index answering a query would be conspicuous).

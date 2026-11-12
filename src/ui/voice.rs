@@ -48,15 +48,20 @@ fn model_row_of<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message>
             Message::Voice(VoiceMsg::CancelDownload(model.id)),
         )
     } else if installed {
+        // Just downloaded: only that it is, where Cancel was — a click meant
+        // for Cancel removed what had just arrived.
+        let remove = (!just_downloaded(app, model.id)).then(|| {
+            form::action(
+                tr!("Remove"),
+                Some(Message::Voice(VoiceMsg::RemoveModel(model.id))),
+            )
+        });
         row![
             text(tr!("Downloaded"))
                 .size(ts::SMALL)
                 .color(theme::success()),
-            form::action(
-                tr!("Remove"),
-                Some(Message::Voice(VoiceMsg::RemoveModel(model.id)))
-            ),
         ]
+        .push(remove)
         .spacing(8)
         .align_y(iced::Center)
         .into()
@@ -161,6 +166,13 @@ fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a
             d.total.unwrap_or(model.bytes()),
             Message::Voice(VoiceMsg::CancelSpeechDownload(model.id)),
         )
+    } else if installed && just_downloaded(app, model.id) {
+        // Just downloaded: only that it is, where Cancel was — a click meant
+        // for Cancel removed what had just arrived.
+        text(tr!("Downloaded"))
+            .size(ts::SMALL)
+            .color(theme::success())
+            .into()
     } else if installed {
         row![
             form::action(
@@ -185,14 +197,9 @@ fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a
             form::action(&label, msg).into()
         }
     };
-    let about = tr!(
-        "{about} {license} license.",
-        about = crate::i18n::lookup(model.about),
-        license = model.license
-    );
     let mut rows = vec![form::item(
         crate::i18n::lookup(model.name),
-        Some(about),
+        Some(crate::i18n::lookup(model.about).to_string()),
         state,
     )];
     if let Some(e) = app.voice.speech.download_errors.get(model.id) {
@@ -217,7 +224,7 @@ fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a
         rows.push(form::item(
             tr!("Voice"),
             None,
-            form::pick(choices, selected, |c: VoiceChoice| {
+            form::pick(tr!("Voice"), choices, selected, |c: VoiceChoice| {
                 Message::Voice(VoiceMsg::PickSpeechVoice {
                     model: c.model,
                     voice: c.voice.id,
@@ -230,6 +237,15 @@ fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a
 
 /// A download under way: how far it is, and its Cancel. The share is said
 /// in a slot as wide as "100%" reads, so its bar does not move as it grows.
+/// Whether model `id` finished downloading a moment ago: its row says so
+/// where its Cancel was, before Remove takes the place.
+fn just_downloaded(app: &App, id: &str) -> bool {
+    app.voice
+        .downloaded_at
+        .get(id)
+        .is_some_and(|at| at.elapsed() < crate::app::embedding::JUST_DOWNLOADED)
+}
+
 pub(crate) fn getting<'a>(done: u64, total: u64, cancel: Message) -> Element<'a, Message> {
     let share = (done as f32 / total.max(1) as f32).clamp(0.0, 1.0);
     let percent = |share: f64| tr!("{percent}%", percent = crate::i18n::decimal(share, 0));
@@ -282,10 +298,9 @@ fn turn_rows_of(app: &App) -> Vec<Element<'_, Message>> {
         .into()
     };
     let about = tr!(
-        "Hears when you have finished speaking: a finished sentence is acted on at once, and a pause to think is waited through. {license} license.",
-        license = MODEL.license
+        "Hears when you have finished speaking: a finished sentence is acted on at once, and a pause to think is waited through."
     );
-    let mut rows = vec![form::item(MODEL.name, Some(about), state)];
+    let mut rows = vec![form::item(MODEL.name, Some(about.to_string()), state)];
     let warning = |said: String| {
         form::plain(
             text(said)
@@ -305,14 +320,86 @@ fn turn_rows_of(app: &App) -> Vec<Element<'_, Message>> {
     rows
 }
 
+/// Listening when called: the switch, and the keyword spotter that hears
+/// the call — at its right whether it is here — Remove — its download, or
+/// getting it; and what last went wrong with it, or with waiting.
+fn wake_rows(app: &App) -> Vec<Element<'_, Message>> {
+    let mut rows = vec![form::toggle(
+        tr!("Start listening when you say “Hey, Clew”"),
+        Some(
+            tr!(
+                "Say “Bye, Clew” or “Stop listening” to stop listening. While Clew waits, the microphone stays on, but what it hears goes only to a small model on this computer."
+            )
+            .into(),
+        ),
+        app.voice.prefs.wake,
+        |v| Message::Voice(VoiceMsg::SetWake(v)),
+    )];
+    let name = crate::i18n::lookup(clew_voice::wake::MODEL.name);
+    rows.extend(super::heard::about(name, || wake_model_rows(app)));
+    rows
+}
+
+fn wake_model_rows(app: &App) -> Vec<Element<'_, Message>> {
+    use clew_voice::wake::{self as spot, MODEL};
+    let installed = app.voice.store.as_ref().is_some_and(spot::installed);
+    let state: Element<'_, Message> = if let Some(d) = &app.voice.wake.download {
+        getting(
+            d.done,
+            d.total.unwrap_or(MODEL.bytes),
+            Message::Voice(VoiceMsg::CancelWakeDownload),
+        )
+    } else if installed {
+        form::action(tr!("Remove"), Some(Message::Voice(VoiceMsg::RemoveWake))).into()
+    } else {
+        form::action(
+            &tr!("Download ({size} MB)", size = MODEL.size_mb()),
+            Some(Message::Voice(VoiceMsg::DownloadWake)),
+        )
+        .into()
+    };
+    let about = tr!("Hears “Hey, Clew”, and nothing else.");
+    let mut rows = vec![form::item(
+        crate::i18n::lookup(MODEL.name),
+        Some(about.to_string()),
+        state,
+    )];
+    let warning = |said: String| {
+        form::plain(
+            text(said)
+                .size(ts::SMALL)
+                .color(theme::warn())
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+    };
+    if installed && app.voice.wake.spotters.is_none() {
+        rows.push(warning(
+            tr!("clew-speak, which runs it, is not installed beside Clew").into(),
+        ));
+    }
+    if let Some(e) = &app.voice.wake.error {
+        rows.push(warning(crate::i18n::message(e)));
+    }
+    rows
+}
+
 /// How Clew answers aloud: whether it does, how fast, and the models it
 /// speaks with.
 fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
-    let mut rows = vec![form::toggle(
+    let mut rows = vec![form::item(
         tr!("Read answers aloud"),
-        Some(tr!("Answers to spoken questions are read aloud on this computer.").into()),
-        app.voice.prefs.speak,
-        |v| Message::Voice(VoiceMsg::SetSpeak(v)),
+        Some(
+            tr!(
+                "Read on this computer: the answers to spoken questions only, or to every question."
+            )
+            .into(),
+        ),
+        form::pick(
+            tr!("Read answers aloud"),
+            &crate::app::voice::ReadAloud::ALL[..],
+            Some(app.voice.prefs.read_aloud),
+            |read_aloud| Message::Voice(VoiceMsg::SetSpeak(read_aloud)),
+        ),
     )];
     let speeds: Vec<SpeedChoice> = SPEEDS.iter().map(|s| SpeedChoice(*s)).collect();
     let selected = speeds
@@ -322,7 +409,7 @@ fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
     rows.push(form::item(
         tr!("Speed"),
         None,
-        form::pick(speeds, selected, |s: SpeedChoice| {
+        form::pick(tr!("Speed"), speeds, selected, |s: SpeedChoice| {
             Message::Voice(VoiceMsg::SetSpeed(s.0))
         }),
     ));
@@ -349,7 +436,7 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
         listening.push(form::item(
             tr!("Language"),
             None,
-            form::pick(choices, selected, |c: LanguageChoice| {
+            form::pick(tr!("Language"), choices, selected, |c: LanguageChoice| {
                 Message::Voice(VoiceMsg::SetLanguage(c.0))
             }),
         ));
@@ -366,6 +453,13 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
         app.voice.prefs.send_questions,
         |v| Message::Voice(VoiceMsg::SetSendQuestions(v)),
     ));
+    listening.push(form::toggle(
+        tr!("Talk over Clew while it speaks"),
+        None,
+        app.voice.prefs.talk_over,
+        |v| Message::Voice(VoiceMsg::SetTalkOver(v)),
+    ));
+    listening.extend(wake_rows(app));
     listening.extend(turn_rows(app));
     // Groups, and no captions around them: the voice key is on the button
     // it starts, and where models are kept is no setting.

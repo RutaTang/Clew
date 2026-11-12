@@ -53,9 +53,9 @@ pub(crate) fn render(x: &Export<'_>) -> String {
             String::new()
         };
         out.push_str(&format!(
-            "- `{}` · `{}`{mark}\n",
-            code(&n.rel),
-            code(&n.symbol)
+            "- `{}` in `{}`{mark}\n",
+            code(&n.symbol),
+            code(&n.rel)
         ));
         for line in n.text.lines().filter(|l| !l.trim().is_empty()) {
             out.push_str(&format!("  > {}\n", md(line.trim_end())));
@@ -143,12 +143,15 @@ pub(crate) fn render(x: &Export<'_>) -> String {
         out.push_str(&format!("_{}_\n\n", tr!("No walkthroughs.")));
     }
     for t in x.tours {
-        out.push_str(&format!("### {}\n\n", md(t.title.trim())));
+        // Named and scoped as the sidebar names them, in the language
+        // spoken: a run's tour was "Run: main.py" in English whatever the
+        // export's language, and its scope the raw "@trace main.py".
+        out.push_str(&format!("### {}\n\n", md(crate::ui::walk_title(t).trim())));
         let scope = t.scope.trim();
         if !scope.is_empty() {
             out.push_str(&format!(
                 "_{}_\n\n",
-                tr!("Scope: {scope}", scope = md(scope))
+                tr!("Scope: {scope}", scope = md(&crate::ui::scope_label(scope)))
             ));
         }
         for (i, s) in t.steps.iter().enumerate() {
@@ -165,7 +168,7 @@ pub(crate) fn render(x: &Export<'_>) -> String {
                 .map(|sym| format!(" (`{}`)", code(sym)))
                 .unwrap_or_default();
             out.push_str(&format!("{}. **{}** — `{at}`{symbol}\n", i + 1, md(title)));
-            for line in s.narration.lines() {
+            for line in s.said().lines() {
                 out.push_str(&format!("   {}\n", line.trim_end()));
             }
             out.push('\n');
@@ -182,7 +185,7 @@ pub(crate) fn render(x: &Export<'_>) -> String {
     }
     for t in terms {
         out.push_str(&format!(
-            "- **`{}`** ({}) — {} · `{}`\n",
+            "- **`{}`** ({}) — {} (`{}`)\n",
             code(&t.name),
             t.badge,
             md(&t.definition),
@@ -408,6 +411,7 @@ mod export_tests {
         );
         let trail = history.flatten();
         let tours = vec![Walkthrough {
+            made: None,
             title: "Startup".into(),
             scope: "boot".into(),
             steps: vec![walkthrough::Step {
@@ -416,6 +420,8 @@ mod export_tests {
                 symbol: Some("main".into()),
                 line: Some(1),
                 narration: "Where it starts.\nTwo lines.".into(),
+                depth: 0,
+                stop: None,
             }],
         }];
         let mut glossary_files = vec![clew_protocol::DocFile {
@@ -449,10 +455,10 @@ Exported from Clew.
 
 ## Notes (2)
 
-- `src/lib.rs` · `parse` ✓ understood
+- `parse` in `src/lib.rs` ✓ understood
   > tricky
   > second \\`line\\`
-- `src/main.rs` · `main`
+- `main` in `src/main.rs`
 
 ## Bookmarks (2)
 
@@ -477,7 +483,7 @@ _Scope: boot_
 
 ## Glossary (1)
 
-- **`Parser`** (struct) — Reads tokens · `src/lib.rs:2`
+- **`Parser`** (struct) — Reads tokens (`src/lib.rs:2`)
 ";
         assert_eq!(md, expected);
 
@@ -529,6 +535,7 @@ _Scope: boot_
         history.push(at("c.rs"), Some("__init__".into()));
         let trail = history.flatten();
         let tours = vec![Walkthrough {
+            made: None,
             title: "__init__ and *ptr".into(),
             scope: String::new(),
             steps: vec![walkthrough::Step {
@@ -537,6 +544,8 @@ _Scope: boot_
                 symbol: Some("__init__".into()),
                 line: Some(1),
                 narration: String::new(),
+                depth: 0,
+                stop: None,
             }],
         }];
         let glossary = Glossary::default();

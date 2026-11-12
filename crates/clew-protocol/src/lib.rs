@@ -123,7 +123,27 @@ pub use payload::*;
 ///
 /// v21: [`GitOp::WorkingStatus`] reads the working tree's changes, for the
 /// Files view's marks.
-pub const PROTOCOL_VERSION: u32 = 21;
+///
+/// v22: an agent step's text streams as it is written ([`Event::AgentDraft`]),
+/// then is kept as the answer or dropped as a remark before tool calls
+/// ([`Event::AgentDraftEnd`]): an answer given in an ordinary step is shown,
+/// and said aloud, as it comes rather than once it is whole.
+///
+/// v23: [`Event::AgentDraftEnd`] says when the step is asked `again` (cut
+/// at its length): its text comes anew, and reading it aloud goes on from
+/// where the first try had come to — it was said through, then said again.
+///
+/// v24: [`GitOp::Head`] reads what HEAD is ([`HeadName`]): the branch the
+/// status bar names, or the commit a detached HEAD is at.
+///
+/// v25: [`GitOp::Log`] pages through the project's commits ([`LogPage`]),
+/// and [`GitOp::CommitDetail`] reads one whole ([`CommitDetail`]): the
+/// History view.
+///
+/// v26: every model call the server makes for the client says what it used
+/// ([`Event::Usage`]), and [`Request::Chat`] / [`Request::ChatStream`] say
+/// what they are for (`purpose`): the client's ledger of what its key spent.
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -420,6 +440,29 @@ pub enum GitOp {
     /// those git does not track yet — under the project directory: what the
     /// Files view marks.
     WorkingStatus,
+    /// What HEAD is: the branch checked out, or the commit a detached HEAD
+    /// is at — what the status bar names.
+    Head,
+    /// The project's commits, newest first, a page at a time: those HEAD
+    /// reaches (`all` false), or those of every branch, remote branch and
+    /// tag; that touched `rel` (a file or a folder), or anything in the
+    /// project; whose author holds `author` and whose message holds `grep`
+    /// (plain text, any case; both, when both are given). The first `skip`
+    /// are passed over, and at most `limit` come back.
+    Log {
+        all: bool,
+        rel: Option<Rel>,
+        author: Option<String>,
+        grep: Option<String>,
+        skip: usize,
+        limit: usize,
+    },
+    /// One commit whole ([`CommitDetail`]): its message, its parents, and the
+    /// files it changed under the project — against its first parent — with
+    /// the lines each gained and lost. `sha` may be any unambiguous prefix.
+    CommitDetail {
+        sha: String,
+    },
 }
 
 /// One file's entry in a `ProjectSymbols` snapshot.
@@ -821,6 +864,9 @@ pub enum Request {
         system: String,
         messages: Vec<AiChatMsg>,
         max_tokens: u32,
+        /// What the completion is for, as the client's ledger names it
+        /// (`explain`, `walkthrough`, …): told back on its [`Event::Usage`].
+        purpose: String,
     },
     /// Embed texts with the server's stored embedding config. Reply:
     /// `Embeddings`. Cancellable by its request id.
@@ -833,6 +879,8 @@ pub enum Request {
         system: String,
         messages: Vec<AiChatMsg>,
         max_tokens: u32,
+        /// As [`Request::Chat`]'s.
+        purpose: String,
     },
     /// Run an agent turn for the Ask panel: the server explores the project with
     /// tools (search / read / outline / …) and streams its progress back —
@@ -1334,8 +1382,40 @@ pub enum Event {
     },
     /// One token of an agent turn's final answer (a notification).
     AgentDelta { stream: u64, text: String },
+    /// One token of the text an agent step is writing (a notification):
+    /// the answer, if the step ends without tool calls, else a remark the
+    /// model makes before calling them. Shown, and said, as it comes;
+    /// [`Event::AgentDraftEnd`] says which it was.
+    AgentDraft { stream: u64, text: String },
+    /// The step's text so far ([`Event::AgentDraft`]) was the answer —
+    /// `kept`, and the answer goes on from it — or a remark before tool
+    /// calls, to be taken back out of the answer (a notification). Also
+    /// sent, not kept, before a step is asked `again`: the same text comes
+    /// anew, and what of it was said is not said again.
+    AgentDraftEnd {
+        stream: u64,
+        kept: bool,
+        again: bool,
+    },
     /// An agent turn ended (a notification), and how.
     AgentDone { stream: u64, outcome: StreamOutcome },
+    /// One model call the server made for the client used this much (a
+    /// notification), as its provider reported it: `work` is the request id
+    /// of the `Chat`, or the `stream` of the `ChatStream` or `AgentAsk`, it
+    /// was made for, and `purpose` what that said it was for (`ask` for an
+    /// agent turn). A call stopped part way says nothing: its provider did
+    /// not tell.
+    Usage {
+        work: u64,
+        purpose: String,
+        model: String,
+        input: u64,
+        cached: u64,
+        /// Of `input`, those written to the provider's prompt cache, which
+        /// bill above its input price.
+        written: u64,
+        output: u64,
+    },
     /// A one-line notice for the status bar about the connection's background
     /// work — never a reply, never about one request: the project cannot be
     /// watched (or the watcher reported trouble, so external changes may be

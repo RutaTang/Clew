@@ -42,7 +42,7 @@ pub(crate) use graph::{
     callgraph, graphlayout, imports, index, projectcalls, structure, typegraph,
 };
 mod ai;
-pub(crate) use ai::{overview, render, richmd, walkthrough};
+pub(crate) use ai::{fakerun, overview, render, richmd, walkthrough};
 mod session;
 pub(crate) use session::{bookmarks, cache, finder, history, notes, reading};
 mod backend;
@@ -54,16 +54,17 @@ mod app;
 mod shell;
 pub use app::message::{
     AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
-    FlowMsg, GlossaryMsg, GraphMsg, HoverMsg, IntegrationsMsg, LangField, LanguagesMsg, LspMsg,
-    Message, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg, SemanticMsg, ServerMsg, SettingsMsg,
-    TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WatchMsg, WindowMsg,
+    FakeMsg, FlowMsg, GlossaryMsg, GraphMsg, HistoryMsg, HoverMsg, IntegrationsMsg, LangField,
+    LanguagesMsg, LspMsg, Message, NavMsg, OverviewMsg, ProjectMsg, ProofMsg, ReadingMsg,
+    SemanticMsg, ServerMsg, SettingsMsg, SimCmd, TimeTravelMsg, TutorialMsg, UpdaterMsg, UsageMsg,
+    WalkMsg, WatchMsg, WeakMsg, WindowMsg,
 };
 pub(crate) use app::message::{Handoff, Origin, Stamp};
 pub(crate) use app::model::*;
 pub(crate) use app::rpc::*;
 pub use app::state::{
-    App, AvailableUpdate, DEFAULT_FONT_SIZE, DebugState, DocsState, DocsView, EditIds,
-    ExplainState, ImportWork, InFlight, LostEdits, OverviewState, PaneOpen, PendingAnchor,
+    App, AvailableUpdate, CheckOutcome, DEFAULT_FONT_SIZE, DebugState, DocsState, DocsView,
+    EditIds, ExplainState, ImportWork, InFlight, LostEdits, OverviewState, PaneOpen, PendingAnchor,
     PendingAsk, ProjectCallsState, ProjectLink, ProjectSession, RemoteEdit, SettingsDraft,
     SettingsPage, StatsState, SupersededOpen, UpdatePhase, UpdateState, WalkState, WalkUi,
 };

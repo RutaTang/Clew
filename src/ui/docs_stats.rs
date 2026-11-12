@@ -69,6 +69,8 @@ pub(crate) enum PaneCover<'a> {
     Overview,
     /// The code statistics.
     Stats,
+    /// The weak spots.
+    WeakSpots,
     /// The project glossary.
     Glossary,
 }
@@ -110,6 +112,8 @@ pub(crate) fn pane_cover(app: &App) -> Option<PaneCover<'_>> {
         PaneCover::Overview
     } else if app.proj.stats.showing {
         PaneCover::Stats
+    } else if app.proj.weak.showing {
+        PaneCover::WeakSpots
     } else if app.proj.glossary.showing {
         PaneCover::Glossary
     } else {
@@ -119,14 +123,29 @@ pub(crate) fn pane_cover(app: &App) -> Option<PaneCover<'_>> {
 
 pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
     if let Some(cover) = pane_cover(app) {
-        return editor_shell(match cover {
+        let page = match cover {
             PaneCover::Scanning => empty_state(Glyph::Search, tr!("Scanning project…"), "", None),
             PaneCover::Welcome => welcome(app),
             PaneCover::Docs(page) => docs_page(page),
             PaneCover::Overview => overview_home(app),
             PaneCover::Stats => stats_home(app),
+            PaneCover::WeakSpots => super::weakspots::weak_home(app),
             PaneCover::Glossary => glossary_home(app),
-        });
+        };
+        // The Ask pill floats over a page's foot at its right: the page
+        // ends above it, so no row is under it, scrolled to its end or
+        // not — room only after the last row, the rows on their way there
+        // were (a file's language in the statistics, a term's meaning in
+        // the glossary). The same column either way, its foot empty while
+        // the pill is elsewhere: as one thing or the other, the page's
+        // scroll was a new widget's as Ask opened or closed.
+        let foot: Element<'_, Message> = if cover.is_page() && super::askfloat::pill_over_page(app)
+        {
+            super::askfloat::pill_foot()
+        } else {
+            space().height(0).into()
+        };
+        return editor_shell(column![page, foot].into());
     }
     // Always two slots, so toggling the split never moves pane 0's subtree
     // (and with it the state of its code view) to another place in the tree.
@@ -223,6 +242,13 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
     }
 }
 
+/// Why this window cannot build the project's docs, when it cannot: it is
+/// working without its clew-server (the binary is missing, or the link gave
+/// up), which is what reads the project for doc comments.
+fn docs_unbuildable(app: &App) -> Option<&str> {
+    app.handshake_failure.as_deref()
+}
+
 /// The DOCS sidebar tab: a filterable tree of files → public API items. Clicking
 /// an item opens its doc page in the main pane.
 pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
@@ -230,6 +256,18 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     if app.proj.docs.files.is_empty() {
         return if app.docs_loading() {
             empty_state(Glyph::Sparkle, tr!("Building docs…"), "", None)
+        } else if let Some(why) = docs_unbuildable(app) {
+            // Without its clew-server the window cannot read the project for
+            // doc comments: "No documentation" and a Look again that did
+            // nothing read as a documented project with no docs.
+            empty_state(Glyph::Note, tr!("API docs need clew-server"), why, None)
+        } else if app.proj.docs.generation > 0 {
+            empty_state(
+                Glyph::Note,
+                tr!("Nothing documented"),
+                tr!("No doc comments were found in this project's code."),
+                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
+            )
         } else {
             // Nothing was built to build again: the project is read for its
             // doc comments once more.
@@ -242,34 +280,36 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         };
     }
 
-    // Toolbar: a filter on top, then the grouping / visibility / rebuild
-    // controls (two rows so they fit a narrow sidebar).
-    let filter = text_input(tr!("Filter docs…"), &app.proj.docs.filter)
-        .style(theme::input)
-        .on_input(|v| Message::Docs(DocsMsg::FilterChanged(v)))
-        .size(ts::BODY)
-        .padding(6)
-        .width(Fill);
-    let chip = |label: String, msg: Message| {
-        button(text(label.clone()).size(ts::SMALL))
-            .style(theme::toolbar_button)
-            .padding([4, 8])
-            .on_press(super::heard::said(&label, msg))
+    // Toolbar: a filter on top — the Files view's, as it looks there —
+    // then the grouping / visibility / rebuild controls.
+    let filter = super::sidebar::filter_field(
+        tr!("Filter docs…"),
+        &app.proj.docs.filter,
+        None,
+        |v| Message::Docs(DocsMsg::FilterChanged(v)),
+        None,
+        Message::Docs(DocsMsg::FilterChanged(String::new())),
+        None,
+    );
+    // Each a pair whose chosen half is raised (a chip that said what was
+    // on, "Files" or "Public", and flipped when pressed read as two tabs
+    // with neither picked); the two share the row, each across its half.
+    let pair = |a: (&'static str, bool), b: (&'static str, bool), flip: Message| {
+        super::form::segmented_across([
+            (a.0.to_string(), a.1, flip.clone()),
+            (b.0.to_string(), b.1, flip),
+        ])
     };
-    let group_btn = chip(
-        if app.docs_view.by_module {
-            tr!("Modules").into()
-        } else {
-            tr!("Files").into()
-        },
+    let by_module = app.docs_view.by_module;
+    let show_all = app.docs_view.show_all;
+    let group = pair(
+        (tr!("Files"), !by_module),
+        (tr!("Modules"), by_module),
         Message::Docs(DocsMsg::ToggleGrouping),
     );
-    let vis_btn = chip(
-        if app.docs_view.show_all {
-            tr!("All").into()
-        } else {
-            tr!("Public").into()
-        },
+    let visible = pair(
+        (tr!("Public"), !show_all),
+        (tr!("All"), show_all),
         Message::Docs(DocsMsg::ToggleShowAll),
     );
     let refresh = super::toolbar::icon_action(
@@ -277,10 +317,16 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         tr!("Rebuild"),
         Some(Message::Docs(DocsMsg::Refresh)),
     );
-    let controls = row![group_btn, vis_btn, space().width(Fill), refresh]
-        .spacing(4)
-        .align_y(iced::Center);
-    let toolbar = column![filter, controls].spacing(4);
+    let controls = row![group, visible, refresh]
+        .spacing(6)
+        .align_y(iced::Center)
+        .padding(Padding {
+            top: 0.0,
+            right: 6.0,
+            bottom: 0.0,
+            left: 10.0,
+        });
+    let toolbar = column![filter, controls];
 
     let query = app.proj.docs.filter.trim().to_lowercase();
     let selected_line = app.proj.docs.page.as_ref().and_then(|p| {
@@ -388,7 +434,12 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     }
 
     column![
-        container(toolbar).padding([6, 6]),
+        container(toolbar).padding(Padding {
+            top: 6.0,
+            right: 0.0,
+            bottom: 6.0,
+            left: 0.0,
+        }),
         scrollable(Column::with_children(rows).width(Fill))
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
@@ -526,11 +577,13 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
             Column::with_children(blocks)
                 .spacing(4)
                 .width(Fill)
+                // Under the header's path, 16 in as it is: 8 put the page
+                // closer to the sheet's edge than its own header.
                 .padding(Padding {
                     top: 6.0,
                     right: 20.0,
                     bottom: 24.0,
-                    left: 8.0,
+                    left: 16.0,
                 }),
         )
         .direction(thin_scroll())
@@ -544,136 +597,203 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         .into()
 }
 
-/// The architecture-overview "home": the generated overview, a prompt to
-/// generate it, or a generation-in-progress note.
+/// The architecture-overview "home": the module map and, under it, the
+/// written overview — or what it is waiting for. Writing it, and writing it
+/// again, is one icon beside the close button, as the chrome's actions are:
+/// a primary button floated alone under the map, and the page was replaced
+/// by a line of words while it wrote.
 pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     let close = || Message::Overview(OverviewMsg::Close);
-    if app.proj.overview.generating {
-        return closable_center(
-            text(tr!("Generating architecture overview…"))
-                .size(ts::EMPHASIS)
-                .color(theme::dim()),
-            close(),
+    let generated = app.proj.overview.markdown.is_some();
+    let generating = app.proj.overview.generating;
+    let ready = app.llm_available && !app.proj.explain.cache.is_empty();
+
+    // Named by its tooltip, turning while it writes; the height of the
+    // header's title line, so the page below sits where it did.
+    let write = (generated || generating || ready).then(|| {
+        let (glyph, name, tip) = if generated {
+            (
+                Glyph::Refresh,
+                tr!("Regenerate overview"),
+                tr!("Regenerate overview with AI (one AI call)"),
+            )
+        } else {
+            (
+                Glyph::Sparkle,
+                tr!("Generate overview"),
+                tr!("Generate overview with AI (one AI call)"),
+            )
+        };
+        super::toolbar::busy_action_tip(
+            glyph,
+            name,
+            tip,
+            Some(Message::Overview(OverviewMsg::Generate)),
+            generating,
+        )
+    });
+    let header = row![
+        text(tr!("Architecture Overview"))
+            .size(ts::HEADING)
+            .color(theme::fg()),
+        space().width(Fill),
+    ]
+    .push(write)
+    .push(super::chrome::close_button(close()))
+    .spacing(8)
+    .align_y(iced::Center);
+
+    // The architecture, drawn from the imports, before any prose about it.
+    let mut items: Vec<Element<'_, Message>> = Vec::new();
+    let map = module_map(app);
+    let has_map = map.is_some();
+    items.extend(map);
+    if generated {
+        items.extend(render_prepared(app, &app.proj.overview.prepared));
+    } else if generating {
+        items.push(
+            container(
+                text(tr!("Generating architecture overview…"))
+                    .size(ts::BODY)
+                    .color(theme::dim()),
+            )
+            .center_x(Fill)
+            .into(),
+        );
+    } else if app.no_code() {
+        // No code: nothing to explain — Explain All here said there was
+        // nothing for it to do — and a page as every empty one is, with the
+        // way to a folder with some: a small dim line at the page's top
+        // was easy to miss.
+        items.push(super::sidebar::empty_state(
+            Glyph::Folder,
+            tr!("No code here"),
+            tr!("There is no code here for an overview."),
+            Some((
+                tr!("Open Folder…"),
+                Message::Project(ProjectMsg::OpenFolderPressed),
+            )),
+        ));
+    } else if !ready {
+        // What it is written from, and the one step that gets there — a
+        // way each: the page was a dead end ("Run Explain All first.").
+        let step = |label: &'static str, msg: Message| {
+            // Explain All spends AI calls: marked so, as everywhere.
+            let face: Element<'_, Message> = if label == tr!("Explain All…") {
+                super::toolbar::ai_words(label, ts::BODY, theme::on_accent())
+            } else {
+                text(label).size(ts::BODY).into()
+            };
+            button(face)
+                .style(theme::primary_button)
+                .padding([5, 14])
+                .on_press(super::heard::said(label, msg))
+        };
+        let (why, action) = if !app.llm_available {
+            (
+                tr!("The overview is written by the AI model you choose in Settings."),
+                step(
+                    tr!("Add an API Key…"),
+                    Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
+                ),
+            )
+        } else {
+            (
+                tr!(
+                    "The overview is written from the project's explanations, which Explain All writes."
+                ),
+                step(
+                    tr!("Explain All…"),
+                    super::toolbar::explain_all_message(app),
+                ),
+            )
+        };
+        items.push(
+            container(
+                column![
+                    text(why)
+                        .size(ts::BODY)
+                        .color(theme::fg_muted())
+                        .align_x(iced::Center),
+                    action,
+                ]
+                .spacing(12)
+                .align_x(iced::Center)
+                .max_width(560),
+            )
+            .center_x(Fill)
+            .into(),
+        );
+    } else if !has_map {
+        // Nothing drawn and nothing written yet: the page says so, and
+        // the icon above writes it.
+        items.push(
+            container(
+                text(tr!("No overview yet."))
+                    .size(ts::BODY)
+                    .color(theme::dim()),
+            )
+            .center_x(Fill)
+            .into(),
         );
     }
 
-    if app.proj.overview.markdown.is_some() {
-        let header = row![
-            text(tr!("Architecture Overview"))
-                .size(ts::HEADING)
-                .color(theme::fg()),
-            space().width(Fill),
-            // An icon, as the chrome's actions are, named by its tooltip —
-            // the height of the header's title line: the page below sits
-            // where it did.
-            super::toolbar::busy_action(
-                Glyph::Refresh,
-                tr!("Regenerate"),
-                Some(Message::Overview(OverviewMsg::Generate)),
-                app.proj.overview.generating,
-            ),
-            super::chrome::close_button(close()),
-        ]
-        .spacing(8)
-        .align_y(iced::Center);
-        // The module map, drawn natively (same engine as the Import Graph
-        // overlay), sits at the top; the LLM prose follows.
-        let mut items: Vec<Element<'_, Message>> = Vec::new();
-        if let Some(layout) = app
-            .proj
-            .overview
-            .map
-            .as_ref()
-            .filter(|l| !l.nodes.is_empty())
-        {
-            items.push(
-                column![
-                    text(tr!("Module map"))
-                        .size(ts::SUBTITLE)
-                        .color(theme::fg_muted()),
-                    container(
-                        iced::widget::canvas::Canvas::new(overview_map_canvas(app, layout))
-                            .width(Fill)
-                            .height(iced::Length::Fixed(OVERVIEW_MAP_H)),
-                    )
-                    .width(Fill),
-                ]
-                .spacing(6)
-                .into(),
-            );
-        }
-        items.extend(render_prepared(app, &app.proj.overview.prepared));
-        return container(
-            column![
-                header,
-                scrollable(
-                    Column::with_children(items)
-                        .spacing(10)
-                        .width(Fill)
-                        .max_width(860)
-                )
-                .direction(thin_scroll())
-                .style(theme::overlay_scrollbar)
-                .height(Fill),
-            ]
-            .spacing(14),
-        )
-        .width(Fill)
-        .height(Fill)
-        .padding([20, 28])
-        .into();
-    }
-
-    // Not generated yet: what it is written from, and the one step that
-    // gets there — a button, each of them. They were words alone ("Run
-    // Explain All first."), and the page a dead end.
-    let step = |label: &'static str, msg: Message| {
-        button(text(label).size(ts::BODY))
-            .style(theme::primary_button)
-            .padding([5, 14])
-            .on_press(super::heard::said(label, msg))
-    };
-    let (why, action) = if !app.llm_available {
-        (
-            tr!("The overview is written by the AI model you choose in Settings."),
-            step(
-                tr!("Add an API Key…"),
-                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
-            ),
-        )
-    } else if app.proj.explain.cache.is_empty() {
-        (
-            tr!("The overview is written from the project's notes, which Explain All writes."),
-            step(
-                tr!("Explain All…"),
-                super::toolbar::explain_all_message(app),
-            ),
-        )
-    } else {
-        (
-            tr!("A map of the project's parts, written from its notes."),
-            step(
-                tr!("Generate overview"),
-                Message::Overview(OverviewMsg::Generate),
-            ),
-        )
-    };
-    closable_center(
+    container(
         column![
-            text(tr!("Architecture Overview"))
-                .size(ts::HEADING)
-                .color(theme::fg()),
-            text(why)
-                .size(ts::BODY)
-                .color(theme::fg_muted())
-                .align_x(iced::Center),
-            action,
+            header,
+            scrollable(
+                Column::with_children(items)
+                    .spacing(10)
+                    .width(Fill)
+                    .max_width(860)
+            )
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Fill),
         ]
-        .spacing(12)
-        .align_x(iced::Center)
-        .max_width(560),
-        close(),
+        .spacing(14),
     )
+    .width(Fill)
+    .height(Fill)
+    .padding([20, 28])
+    .into()
+}
+
+/// The overview's module map — the project's most connected files and the
+/// imports between them, drawn as the Import Graph is — when there is
+/// structure enough to draw.
+fn module_map(app: &App) -> Option<Element<'_, Message>> {
+    let layout = app
+        .proj
+        .overview
+        .map
+        .as_ref()
+        .filter(|l| !l.nodes.is_empty())?;
+    Some(
+        column![
+            text(tr!("Module graph"))
+                .size(ts::SUBTITLE)
+                .color(theme::fg_muted()),
+            // Clipped to its frame: a canvas draws where its geometry
+            // says, and a map zoomed or panned drew over the page around
+            // it.
+            super::clipped::Clipped::new(
+                iced::widget::canvas::Canvas::new(overview_map_canvas(app, layout))
+                    .width(Fill)
+                    .height(iced::Length::Fixed(overview_map_h(app.window_height))),
+            ),
+        ]
+        .spacing(6)
+        .into(),
+    )
+}
+
+/// The module map's height in a window `window_h` tall: over half of it.
+/// At a fixed 320 the map, fitted to hold at every angle of its spin, was a
+/// knot some 200 high across a page 900 wide, its labels running into one
+/// another; the written overview follows it, a scroll away.
+pub(crate) fn overview_map_h(window_h: f32) -> f32 {
+    (window_h * 0.55).clamp(OVERVIEW_MAP_H, 640.0)
 }
 
 /// Group a large integer with thousands separators, e.g. `12345` → `12,345`
@@ -917,7 +1037,23 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
 
     // Largest files: click a row to open it.
     let root = app.proj.project.as_ref().map(|p| p.root.clone());
-    let mut files = Column::new().spacing(2);
+    // Its columns named, as the table's above are: a bare number beside
+    // each file did not say it was its lines. Lined up with the rows'
+    // cells inside their padding.
+    let files_header = row![
+        space().width(Fill),
+        head(tr!("Lines"), 80.0),
+        head(tr!("programming language\u{4}Language"), 90.0),
+    ]
+    .spacing(8)
+    .padding(Padding {
+        top: 0.0,
+        right: 8.0,
+        bottom: 0.0,
+        left: 8.0,
+    })
+    .align_y(iced::Center);
+    let mut files = Column::new().spacing(2).push(files_header);
     for f in &report.top_files {
         let inner = row![
             text(f.rel.clone())
@@ -969,9 +1105,6 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         space().height(14),
         section(tr!("Largest files")),
         files,
-        // Room under the last row clear of the Ask pill floating at the
-        // window's foot, which covered it.
-        space().height(super::askfloat::PILL_H + super::askfloat::ASK_MARGIN),
     ]
     .spacing(8)
     .width(Fill)
@@ -1000,6 +1133,9 @@ pub(crate) const GLOSSARY_ROWS_SHOWN: usize = 200;
 
 /// The Glossary page: the project's terms, in sections by kind, each a
 /// button to its definition; a filter on top (`app::glossary`).
+/// The glossary's column, header to list: as wide as its terms read well.
+pub(crate) const GLOSSARY_W: f32 = 860.0;
+
 pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
     super::heard::list();
     use crate::app::glossary::TermKind;
@@ -1017,6 +1153,16 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
                 tr!("Building the glossary…"),
                 tr!("Reading the project's doc comments."),
                 None,
+            )
+        } else if let Some(why) = docs_unbuildable(app) {
+            (tr!("The glossary needs clew-server"), why, None)
+        } else if app.proj.docs.generation > 0 {
+            (
+                tr!("No terms found"),
+                tr!(
+                    "The glossary is made from doc comments and explanations; this project has none yet."
+                ),
+                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
             )
         } else {
             (
@@ -1040,6 +1186,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         .size(ts::BODY)
         .padding(6)
         .width(Fill);
+    let filter = super::jump::field_named(filter, tr!("Filter terms…"));
     let query = app.proj.glossary.filter.trim().to_lowercase();
     let matching: Vec<&crate::app::glossary::Term> = glossary.matching(&query).collect();
     // While a filter narrows the list, how many of the terms it kept.
@@ -1148,25 +1295,37 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         );
     }
 
+    // One column, as wide as its terms read well: the list was held to it
+    // and the filter and header ran on to the panel's edge, the locations
+    // ending some 215 px short of the filter's end.
     container(
         column![
             header,
             filter,
             count,
+            // The scrollbar's room kept at the right: the locations end
+            // there, and it was drawn over their last digits.
             scrollable(
                 Column::with_children(items)
                     .spacing(16)
                     .width(Fill)
-                    .max_width(860)
+                    .padding(Padding {
+                        right: SCROLLBAR_W + 4.0,
+                        ..Padding::ZERO
+                    })
             )
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
             .height(Fill),
         ]
-        .spacing(10),
+        .spacing(10)
+        .max_width(GLOSSARY_W),
     )
     .width(Fill)
     .height(Fill)
     .padding([20, 28])
+    // In the middle of a wider page: held to the left, the page's right
+    // was a band of nothing as wide as a sidebar.
+    .align_x(iced::Center)
     .into()
 }

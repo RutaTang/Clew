@@ -59,7 +59,7 @@ fn the_palette_opens_ranks_runs_and_remembers() {
     for expected in [
         "Call Graph",
         "Go to File…",
-        "Overview",
+        "Architecture Overview",
         "Settings",
         "Sidebar: Files",
         "View: Show Minimap",
@@ -136,7 +136,11 @@ fn the_palette_opens_ranks_runs_and_remembers() {
     // Typing `>` in the file finder gives the commands.
     let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
     typed(&mut app, ">stats");
-    assert_eq!(titles(&app).first().map(String::as_str), Some("Stats"));
+    assert_eq!(
+        titles(&app).first().map(String::as_str),
+        Some("Code Statistics"),
+        "found by the word people use"
+    );
     let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
     assert!(!app.proj.finder.open);
 }
@@ -176,11 +180,21 @@ fn caret_commands_run_where_the_caret_is() {
         .iter()
         .find(|c| c.title == "Go to Definition")
         .unwrap();
-    assert_eq!(goto.keys.as_deref(), Some("gd"));
+    assert_eq!(goto.keys.as_deref(), Some("F12"));
     assert!(matches!(
         goto.action,
         PaletteAction::Goto(GotoKind::Definition)
     ));
+    // The rows that call the AI model are marked (a sparkle), the rest not.
+    let spends = |title: &str| {
+        app.palette
+            .iter()
+            .find(|c| c.title == title)
+            .unwrap_or_else(|| panic!("{title} listed"))
+            .spends_ai()
+    };
+    assert!(spends("Explain"));
+    assert!(!spends("Go to Definition") && !spends("Toggle Breakpoint"));
     typed(&mut app, ">toggle breakpoint");
     let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
     let lib = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");
@@ -226,7 +240,12 @@ fn without_a_project_only_what_needs_none_is_listed() {
     ] {
         assert!(all.iter().any(|t| t == expected), "{expected} in {all:?}");
     }
-    for absent in ["Call Graph", "Go to File…", "Sidebar: Files", "Overview"] {
+    for absent in [
+        "Call Graph",
+        "Go to File…",
+        "Sidebar: Files",
+        "Architecture Overview",
+    ] {
         assert!(!all.iter().any(|t| t == absent), "{absent} in {all:?}");
     }
     // The window's own preference: the palette in effect is the process's,
@@ -339,4 +358,254 @@ fn the_command_bar_suggests_what_to_do_here() {
     enter(&mut app);
     assert!(!app.proj.finder.open);
     assert!(app.ask_view.is_open());
+}
+
+/// A command is found by the other words it goes by, though its row does
+/// not show them: "map" finds the two graphs once called maps — Project
+/// Graphs (Project Maps) and Type Graph (Type Map) — first, in English and
+/// in another language alike.
+#[test]
+fn a_command_is_found_by_the_words_it_also_goes_by() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = scanned_app("palette-aliases");
+    open_commands(&mut app);
+    typed(&mut app, ">map");
+    let found = titles(&app);
+    let mut first: Vec<&str> = found.iter().take(2).map(String::as_str).collect();
+    first.sort_unstable();
+    assert_eq!(first, ["Project Graphs", "Type Graph"], "{found:?}");
+    with_lang(Lang::Fr, || {
+        open_commands(&mut app);
+        typed(&mut app, ">map");
+        let found = titles(&app);
+        assert!(found.iter().any(|t| t == "Project Graphs"), "{found:?}");
+    });
+}
+
+/// In another language too, the command bar lists the commands that say
+/// what was typed — in that language or in English — and not those that
+/// only hold its letters: "ligne" brought back "Thème clair : One Light",
+/// and "go to line" typed in French came after six loose matches.
+#[test]
+fn the_command_bar_keeps_to_worded_titles_in_another_language() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = scanned_app("palette-worded-fr");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    with_lang(Lang::Fr, || {
+        for query in ["ligne", "go to line"] {
+            open_palette(&mut app);
+            typed(&mut app, query);
+            let found = titles(&app);
+            assert!(
+                found.iter().any(|t| t == "Go to Line…"),
+                "{query}: {found:?}"
+            );
+            assert!(
+                !found.iter().any(|t| t.to_lowercase().contains("theme")),
+                "{query}: {found:?}"
+            );
+            let _ = app.update(Message::Nav(NavMsg::FinderClosed));
+        }
+    });
+}
+
+/// A question typed into the command bar is offered to Ask, last, with
+/// what it found above it, and Enter on it asks it: only the empty bar
+/// offered Ask, so "how is tax computed" found commands and files and no
+/// way to ask. A word or two is a name, not a question; where nothing else
+/// is found it is offered, to be asked once written: Enter opens Ask with
+/// the words in its field — asked at once, a typo ("mian.rs") cost an AI
+/// call. Its row does not crowd out what the letters typed still find
+/// ("gtl", Go to Line…). Asked, no questions to suggest are paid for and
+/// never shown; not asked, the question is kept, with the draft in the
+/// field.
+#[test]
+fn a_question_typed_in_the_command_bar_can_be_asked() {
+    let mut app = scanned_app("palette-ask-typed");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    open_synchronously(&mut app, "src/lib.rs", None);
+    open_palette(&mut app);
+    let question = "how is the origin computed";
+    let asks = format!("Ask Clew: \u{201c}{question}\u{201d}");
+    typed(&mut app, question);
+    let found = titles(&app);
+    assert_eq!(found.last(), Some(&asks), "{found:?}");
+    assert_eq!(
+        found.iter().filter(|t| t.starts_with("Ask Clew")).count(),
+        1
+    );
+    typed(&mut app, "lib");
+    let found = titles(&app);
+    assert!(
+        !found.iter().any(|t| t.starts_with("Ask Clew")),
+        "{found:?}"
+    );
+    // The files are still where their rows say: the Ask row did not move
+    // their places in the list.
+    let files: Vec<&str> = app
+        .proj
+        .finder
+        .results
+        .iter()
+        .filter(|&&i| i >= app.palette.len())
+        .map(|&i| {
+            app.proj.project.as_ref().unwrap().files[i - app.palette.len()]
+                .rel
+                .as_str()
+        })
+        .collect();
+    assert!(files.contains(&"src/lib.rs"), "{files:?}");
+    typed(&mut app, "gtl");
+    assert!(titles(&app).iter().any(|t| t == "Go to Line…"));
+    typed(&mut app, "zzqqxx");
+    assert_eq!(titles(&app), ["Ask Clew: \u{201c}zzqqxx\u{201d}\u{2026}"]);
+    // Enter on it: Ask opened with the words in its field, nothing asked.
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    assert!(!app.proj.finder.open);
+    assert_ne!(app.ask_view, crate::app::model::AskView::Hidden);
+    assert_eq!(app.proj.ask_input, "zzqqxx");
+    assert!(app.proj.inflight.ask_retrieval.is_none() && app.proj.ask_turns.is_empty());
+    app.proj.ask_input.clear();
+    app.ask_view = crate::app::model::AskView::Hidden;
+
+    // Enter on a question: asked, in the Ask window — and no questions
+    // to suggest asked for an empty conversation it no longer is.
+    app.llm_available = true;
+    app.suggest_questions = true;
+    open_palette(&mut app);
+    typed(&mut app, question);
+    app.proj.finder.selected = app.proj.finder.results.len() - 1;
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    assert!(!app.proj.finder.open, "the bar stays open");
+    // On its way: being looked up, or already a turn.
+    assert!(
+        app.proj.inflight.ask_retrieval.is_some()
+            || app.proj.ask_turns.iter().any(|t| t.question == question),
+        "not asked"
+    );
+    assert!(app.proj.ask_input.is_empty(), "{:?}", app.proj.ask_input);
+    assert_ne!(app.ask_view, crate::app::model::AskView::Hidden);
+    assert_eq!(app.proj.suggest_asked, None, "suggestions paid for, unseen");
+}
+
+/// The file picker — Ctrl+P, and the field over the window — offers a
+/// question to Ask as the command bar does: it answered "how is tax
+/// computed" with "No matches", the most visible way in a dead end.
+#[test]
+fn a_question_typed_in_the_file_picker_can_be_asked() {
+    let mut app = scanned_app("picker-ask-typed");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    assert!(app.proj.finder.open && !app.proj.finder.bar);
+    let question = "how is the origin computed";
+    typed(&mut app, question);
+    let asks = format!("Ask Clew: \u{201c}{question}\u{201d}");
+    assert_eq!(titles(&app).last(), Some(&asks), "{:?}", titles(&app));
+    // A file's name still finds the file, and offers no Ask.
+    typed(&mut app, "lib");
+    assert!(!titles(&app).iter().any(|t| t.starts_with("Ask Clew")));
+    // Enter on it: asked.
+    typed(&mut app, question);
+    app.proj.finder.selected = app.proj.finder.results.len() - 1;
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    assert!(!app.proj.finder.open);
+    assert!(
+        app.proj.inflight.ask_retrieval.is_some()
+            || app.proj.ask_turns.iter().any(|t| t.question == question),
+        "not asked"
+    );
+}
+
+/// Words that read as a question in the file picker keep what the picker
+/// finds for them — the symbol "parse config file" names — before the way
+/// to ask them: the bar's commands and files in their place dropped every
+/// symbol a three-word query named.
+#[test]
+fn the_file_picker_keeps_its_symbols_for_a_question() {
+    let mut app = scanned_app("picker-keeps-symbols");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(vec![crate::index::SymbolEntry {
+            name: "parse_config_file".into(),
+            kind: "function".into(),
+            rel: "src/lib.rs".into(),
+            abs: lib.clone(),
+            line: 3,
+            is_test: false,
+            entry: None,
+        }]),
+    );
+    app.proj.symbol_index_stale = true;
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    typed(&mut app, "parse config file");
+    let files = app.proj.project.as_ref().unwrap().files.len();
+    let n = app.palette.len();
+    let symbols: Vec<String> = app
+        .proj
+        .finder
+        .results
+        .iter()
+        .filter_map(|&i| i.checked_sub(n + files))
+        .filter_map(|s| app.proj.symbol_index.get(s).map(|e| e.name.clone()))
+        .collect();
+    assert_eq!(
+        symbols,
+        ["parse_config_file"],
+        "{:?}",
+        app.proj.finder.results
+    );
+    assert_eq!(
+        titles(&app).last().map(String::as_str),
+        Some("Ask Clew: \u{201c}parse config file\u{201d}")
+    );
+    // Picked, it opens where the symbol is.
+    let at = app
+        .proj
+        .finder
+        .results
+        .iter()
+        .position(|&i| i >= n + files)
+        .unwrap();
+    app.proj.finder.selected = at;
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    assert!(!app.proj.finder.open);
+    // R16-9a: opened at the symbol's own line — closing the picker alone
+    // said nothing of what was opened.
+    assert!(
+        app.proj.link.pane_pending[app.proj.active].is_some(),
+        "nothing opened"
+    );
+    land_active_load(&mut app, lib.clone(), Some(3));
+    let v = app.active_viewer().expect("the file opened");
+    assert_eq!(v.rel, "src/lib.rs");
+    assert_eq!(v.caret.map(|(line, _)| line), Some(2), "not at the symbol");
+}
+
+/// A question from the command bar that cannot be asked — no key — is
+/// kept in Ask's field with the draft there: the draft put back over it,
+/// it was in no turn, no queue and not the field.
+#[test]
+fn a_question_from_the_bar_not_asked_is_kept_with_the_draft() {
+    let mut app = scanned_app("palette-ask-kept");
+    app.llm_config_cache = Some(None);
+    app.llm_available = false;
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.proj.ask_input = "my draft".into();
+    let question = "how is the origin computed";
+    let _ = app.run_from_bar(&format!("Ask Clew: \u{201c}{question}\u{201d}"));
+    assert!(app.proj.ask_turns.is_empty(), "asked without a key");
+    assert!(
+        app.proj.ask_input.contains(question),
+        "{:?}",
+        app.proj.ask_input
+    );
+    assert!(
+        app.proj.ask_input.contains("my draft"),
+        "{:?}",
+        app.proj.ask_input
+    );
 }

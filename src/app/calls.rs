@@ -67,6 +67,7 @@ impl App {
                     direction,
                     lang,
                     items,
+                    again: None,
                 })
             },
         )
@@ -105,9 +106,10 @@ impl App {
     }
 
     /// The open call tree traced again from its own function — asked where
-    /// the tree found it, of the server the tree was built with, the way it
-    /// reads — as code it was traced from has changed. The caret is not
-    /// asked: it may be on another name by now.
+    /// it is now (lines added above it move it), of the server the tree was
+    /// built with, the way it reads, expanded as it was — as code it was
+    /// traced from has changed. The caret is not asked: it may be on another
+    /// name by now.
     pub(crate) fn refresh_call_hierarchy(&mut self) -> Task<Message> {
         let Some(tree) = &self.proj.call_graph else {
             return Task::none();
@@ -115,8 +117,8 @@ impl App {
         let Some(root) = tree.roots().first().and_then(|&r| tree.get(r)) else {
             return Task::none();
         };
-        let (lang, direction) = (tree.lang, tree.direction);
-        let (path, line, character) = (root.item.path.clone(), root.item.line, root.item.character);
+        let (lang, direction, full) = (tree.lang, tree.direction, tree.full);
+        let item = root.item.clone();
         let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get(lang) else {
             self.status = tr!(
                 "No {language} server ready",
@@ -125,6 +127,29 @@ impl App {
             return Task::none();
         };
         let client = client.clone();
+        let path = item.path.clone();
+        let (line, character) = match self.lines_of(&path) {
+            // Its text unread (a remote project's file not open): where it
+            // was.
+            None => (item.line, item.character),
+            Some(lines) => match name_nearest(&lines, &item.name, item.line) {
+                Some((line, col)) => (
+                    line,
+                    viewer::Col(col).to_offset(&lines[line], client.encoding),
+                ),
+                None => {
+                    self.status = tr!(
+                        "{function} is no longer in {file}",
+                        function = item.name,
+                        file = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    );
+                    return Task::none();
+                }
+            },
+        };
         self.status = tr!("Building call hierarchy…").into();
         self.call_token += 1;
         let token = self.call_token;
@@ -139,24 +164,70 @@ impl App {
                     direction,
                     lang,
                     items,
+                    again: Some(full),
                 })
             },
         )
     }
 
+    /// The text of `path`, by line: an open pane's, else — the project on
+    /// this machine — the file's on disk, read as the index reads it.
+    fn lines_of(&self, path: &Path) -> Option<Vec<String>> {
+        let text = self
+            .proj
+            .panes
+            .iter()
+            .flatten()
+            .find(|v| v.abs == path)
+            .map(|v| v.source.as_ref().clone())
+            .or_else(|| {
+                self.proj
+                    .project
+                    .as_ref()
+                    .filter(|_| self.local_project_state())
+                    .and_then(|p| {
+                        clew_core::fs_scan::read_confined_capped(
+                            &p.root,
+                            path,
+                            index::MAX_INDEX_FILE_BYTES,
+                        )
+                    })
+            })?;
+        Some(text.lines().map(str::to_string).collect())
+    }
+
+    /// `again`: a tree traced again (`Some`), and whether it was expanded in
+    /// full.
     pub(crate) fn on_call_hierarchy_prepared(
         &mut self,
         token: u64,
         direction: callgraph::Direction,
         lang: &'static str,
         items: Vec<lsp::client::CallItem>,
+        again: Option<bool>,
     ) -> Task<Message> {
         if items.is_empty() {
-            self.status = tr!("No call hierarchy for the symbol under the cursor").into();
+            self.status = match self.proj.call_graph.as_ref().filter(|_| again.is_some()) {
+                // The tree stays, as it was: its function could not be
+                // found again where it was looked for.
+                Some(tree) => tr!(
+                    "Could not trace {function} again",
+                    function = tree
+                        .roots()
+                        .first()
+                        .and_then(|&r| tree.get(r))
+                        .map(|n| n.item.name.clone())
+                        .unwrap_or_default()
+                ),
+                None => tr!("No call hierarchy for the symbol under the cursor").into(),
+            };
             return Task::none();
         }
         // The new tree inherits the prepare request's token (already unique).
-        self.proj.call_graph = Some(callgraph::CallTree::new(token, direction, lang, items));
+        let mut tree = callgraph::CallTree::new(token, direction, lang, items);
+        // Expanded in full as the tree it replaces was.
+        tree.full = again.unwrap_or(false);
+        self.proj.call_graph = Some(tree);
         self.sidebar = SidebarTab::Calls;
         // The tree is now the feedback; clear the transient "Building…"
         // status so it doesn't linger after results appear.
@@ -366,13 +437,14 @@ impl App {
                 direction,
                 lang,
                 items,
+                again,
                 ..
             } => {
                 // Only the awaited prepare may install a tree.
                 if self.proj.call_pending.take_if(|t| *t == token).is_none() {
                     return Task::none();
                 }
-                self.on_call_hierarchy_prepared(token, direction, lang, items)
+                self.on_call_hierarchy_prepared(token, direction, lang, items, again)
             }
             CallsMsg::ExpandNode { token, id } => {
                 // The view named the tree it drew; a click that raced a
@@ -400,6 +472,16 @@ impl App {
 
 /// The display column where `name` first stands as a whole word on `line` —
 /// a function's name on the line that defines it, past `def`, `fn`, `pub`.
+/// The line of `lines` nearest `near` that names `name` as a whole word, and
+/// the display column it starts at there.
+fn name_nearest(lines: &[String], name: &str, near: usize) -> Option<(usize, usize)> {
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| name_col(l, name).map(|col| (i, col)))
+        .min_by_key(|(i, _)| i.abs_diff(near))
+}
+
 pub(crate) fn name_col(line: &str, name: &str) -> Option<usize> {
     let word = |c: char| c.is_alphanumeric() || c == '_';
     line.match_indices(name)

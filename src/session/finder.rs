@@ -33,6 +33,14 @@ pub struct Finder {
     /// Opened as the command bar (Cmd+Shift+P): with nothing typed it
     /// suggests what to do; a query matches commands, then files.
     pub bar: bool,
+    /// Go to File found no file by the query: its results are the command
+    /// bar's — the commands it names, then files. "settings" said only "No
+    /// matches" there, though the field over the window that opens it
+    /// says it searches commands too.
+    pub bar_fallback: bool,
+    /// The command bar's commands are those whose titles hold every word
+    /// typed ([`rank_commands`]), not merely its letters.
+    pub bar_worded: bool,
 }
 
 impl Finder {
@@ -40,6 +48,31 @@ impl Finder {
     pub fn goto_line(&self) -> Option<usize> {
         let n: usize = self.query.trim().strip_prefix(':')?.trim().parse().ok()?;
         (n > 0).then_some(n)
+    }
+
+    /// A `file:N` query — "pricing.py:37", as a compiler or a stack trace
+    /// writes a place: the file part, and the 1-based line to open it at.
+    /// It found "No matches", the `:37` taken as part of the name. A column
+    /// after the line ("main.rs:12:5", as rustc, gcc and tsc write it) is
+    /// let go: it read as file "main.rs:12", line 5.
+    pub fn file_line(&self) -> Option<(&str, usize)> {
+        let number = |s: &str| s.trim().parse::<usize>().ok().filter(|n| *n > 0);
+        let (head, last) = self.query.trim().rsplit_once(':')?;
+        let last = number(last)?;
+        let (file, line) = match head.rsplit_once(':') {
+            Some((file, line)) if number(line).is_some() => (file, number(line)?),
+            _ => (head, last),
+        };
+        let file = file.trim();
+        (!file.is_empty()).then_some((file, line))
+    }
+
+    /// What files are matched by: the query, less a `:N` line after it.
+    fn file_query(&self) -> String {
+        self.file_line().map_or_else(
+            || self.query.trim().to_string(),
+            |(file, _)| file.to_string(),
+        )
     }
 
     /// Whether the query asks for a line (`:`, as Go to Line opens it) —
@@ -62,7 +95,10 @@ impl Finder {
     /// The command bar with a query that is neither `>` commands nor a
     /// `:N` line: the commands it matches, then the files.
     pub fn is_bar_search(&self) -> bool {
-        self.bar && !self.is_home() && !self.is_commands() && !self.query.trim().starts_with(':')
+        (self.bar || self.bar_fallback)
+            && !self.is_home()
+            && !self.is_commands()
+            && !self.query.trim().starts_with(':')
     }
 
     /// The query less its `>`.
@@ -86,7 +122,8 @@ impl Finder {
         recent: &[&std::path::Path],
     ) {
         self.selected = 0;
-        let query = self.query.trim();
+        let query = self.file_query();
+        let query = query.as_str();
         let mut results = if query.is_empty() {
             let mut order: Vec<usize> = recent
                 .iter()
@@ -101,7 +138,7 @@ impl Finder {
             order
         } else {
             rank(
-                &self.query,
+                query,
                 files.iter().map(|f| f.rel.as_str()),
                 MAX_RESULTS,
                 true,
@@ -112,7 +149,7 @@ impl Finder {
             results.extend(
                 tests_last(
                     rank(
-                        &self.query,
+                        query,
                         symbols.iter().map(|s| s.name.as_str()),
                         usize::MAX,
                         true,
@@ -123,6 +160,17 @@ impl Finder {
                 .take(FILE_FINDER_SYMBOLS)
                 .map(|i| i + n),
             );
+            // What the query names leads: "tot" listed every file under
+            // `teashop/` (t…o…t through the folder) above the function
+            // `total`. Files and symbols each keep their rank within a tier.
+            let tier = |i: usize| match i.checked_sub(n) {
+                Some(s) => symbols
+                    .get(s)
+                    .map_or(4, |s| if contains_words(&s.name, query) { 1 } else { 3 }),
+                None => files.get(i).map_or(4, |f| file_tier(&f.rel, query)),
+            };
+            // Each key worked out once: a file's builds a matcher.
+            results.sort_by_cached_key(|&i| tier(i));
         }
         self.results = results;
     }
@@ -166,19 +214,22 @@ impl Finder {
     /// file at that index less `titles.len()`.
     pub fn refresh_bar(&mut self, titles: &[&str], files: &[FileEntry]) {
         self.selected = 0;
-        let query = self.query.trim();
-        let mut results = rank(query, titles.iter().copied(), BAR_COMMANDS, false);
+        let query = self.query.trim().to_string();
+        let query = query.as_str();
+        let (mut results, worded) = rank_commands(query, titles);
+        self.bar_worded = worded;
         let n = titles.len();
-        results.extend(
-            rank(
-                query,
-                files.iter().map(|f| f.rel.as_str()),
-                MAX_RESULTS,
-                true,
-            )
-            .into_iter()
-            .map(|i| i + n),
+        // A file asked for at a line is matched by its name.
+        let file_query = self.file_query();
+        let mut ranked = rank(
+            &file_query,
+            files.iter().map(|f| f.rel.as_str()),
+            MAX_RESULTS,
+            true,
         );
+        // Files the query names ahead of those it reaches through a folder.
+        ranked.sort_by_key(|&i| files.get(i).map_or(4, |f| file_tier(&f.rel, &file_query)));
+        results.extend(ranked.into_iter().map(|i| i + n));
         self.results = results;
     }
 
@@ -189,6 +240,126 @@ impl Finder {
         }
         let len = self.results.len() as i32;
         self.selected = (self.selected as i32 + delta).rem_euclid(len) as usize;
+    }
+}
+
+/// The best few of the commands titled `titles` for the command bar's
+/// `query`: those whose titles hold every word typed, when some do, else
+/// those that hold its letters in order ("gtl" still finds Go to Line…).
+/// Each word was matched by its letters anywhere in a title: "go to line"
+/// listed "Light theme: One Light", "Rosé Pine Dawn" and "Start
+/// listening…" under Go to Line….
+/// Also whether they are the worded ones.
+fn rank_commands(query: &str, titles: &[&str]) -> (Vec<usize>, bool) {
+    let ranked = rank(query, titles.iter().copied(), titles.len(), false);
+    let worded: Vec<usize> = ranked
+        .iter()
+        .copied()
+        .filter(|&i| contains_words(titles[i], query))
+        .collect();
+    let is_worded = !worded.is_empty();
+    let mut ranked = if is_worded {
+        worded
+    } else {
+        // Only its letters: kept where they come in runs that each begin a
+        // word, as "gtl" does in Go to Line. Strewn over a title they read
+        // as nothing — "tax" listed "Window: Toggle Maximize", alone.
+        ranked
+            .into_iter()
+            .filter(|&i| runs_from_word_starts(titles[i], query))
+            .collect()
+    };
+    ranked.truncate(BAR_COMMANDS);
+    (ranked, is_worded)
+}
+
+/// Whether `query`'s letters (its spaces aside) are found in `name` in
+/// runs, each beginning a word of it — after a space or a mark, or at a
+/// capital after a small letter — and running on letter by letter: "gtl"
+/// in "Go to Line", "opfol" in "Open Folder…", not "tax" in "Toggle
+/// Maximize". Case aside.
+fn runs_from_word_starts(name: &str, query: &str) -> bool {
+    let name: Vec<char> = name.chars().collect();
+    let query: Vec<char> = query
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    let starts: Vec<bool> = (0..name.len())
+        .map(|i| {
+            i == 0
+                || !name[i - 1].is_alphanumeric()
+                || (name[i - 1].is_lowercase() && name[i].is_uppercase())
+        })
+        .collect();
+    let same = |i: usize, q: char| name[i].to_lowercase().eq(std::iter::once(q));
+    // (letters matched, place in the name) found to lead nowhere.
+    let mut dead = std::collections::HashSet::new();
+    fn go(
+        q: usize,
+        at: usize,
+        query: &[char],
+        n: usize,
+        starts: &[bool],
+        same: &dyn Fn(usize, char) -> bool,
+        dead: &mut std::collections::HashSet<(usize, usize)>,
+    ) -> bool {
+        if q == query.len() {
+            return true;
+        }
+        if dead.contains(&(q, at)) {
+            return false;
+        }
+        // On with the run: the next letter right after the last one.
+        if at > 0 && at < n && same(at, query[q]) && go(q + 1, at + 1, query, n, starts, same, dead)
+        {
+            return true;
+        }
+        // Or a new run, at the start of a word further on.
+        for i in at..n {
+            if starts[i] && same(i, query[q]) && go(q + 1, i + 1, query, n, starts, same, dead) {
+                return true;
+            }
+        }
+        dead.insert((q, at));
+        false
+    }
+    go(0, 0, &query, name.len(), &starts, &same, &mut dead)
+}
+
+/// Whether `name` holds every word of `query` as it is spelled (case
+/// aside): a name that says what was typed, not one that merely has its
+/// letters in order.
+fn contains_words(name: &str, query: &str) -> bool {
+    let name = name.to_lowercase();
+    let mut words = query.split_whitespace().peekable();
+    words.peek().is_some() && words.all(|w| name.contains(&w.to_lowercase()))
+}
+
+/// How well a file's path answers `query`, best first: 0 when its name
+/// holds the query's words, 2 when its name has the query's letters in
+/// order, 4 when only its path does (the query reached it through a
+/// folder). Between them sit a symbol named by the query (1) and one
+/// matched by its letters (3). A query with a `/` asks for a path, and
+/// every file it matches is of one tier, ranked by the match alone.
+fn file_tier(rel: &str, query: &str) -> u8 {
+    if query.contains('/') || query.contains('\\') {
+        return 0;
+    }
+    let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
+    if contains_words(name, query) {
+        return 0;
+    }
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    let mut buf = Vec::new();
+    if pattern
+        .score(Utf32Str::new(name, &mut buf), &mut matcher)
+        .is_some()
+    {
+        2
+    } else {
+        4
     }
 }
 
@@ -241,6 +412,79 @@ pub(crate) fn rank<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command matched by its letters alone is kept where they run from
+    /// the starts of its words, not strewn over it: "tax" listed "Window:
+    /// Toggle Maximize", alone.
+    #[test]
+    fn letters_strewn_over_a_title_do_not_match_it() {
+        assert!(runs_from_word_starts("Go to Line…", "gtl"));
+        assert!(runs_from_word_starts("Open Folder…", "opfol"));
+        assert!(runs_from_word_starts("Window: Toggle Maximize", "togmax"));
+        assert!(runs_from_word_starts("Explain All", "ex all"));
+        assert!(runs_from_word_starts("showInFinder", "sif"));
+        assert!(!runs_from_word_starts("Window: Toggle Maximize", "tax"));
+        assert!(!runs_from_word_starts("Settings…", "setgs"));
+        let titles = ["Window: Toggle Maximize", "Go to Line…"];
+        assert_eq!(rank_commands("tax", &titles).0, Vec::<usize>::new());
+        assert_eq!(rank_commands("gtl", &titles).0, vec![1]);
+    }
+
+    /// The command bar lists the commands that say what was typed, when
+    /// some do — not every title holding its letters somewhere — and
+    /// falls back to the letters when none says it.
+    #[test]
+    fn the_command_bar_lists_commands_that_say_what_was_typed() {
+        let titles = [
+            "Light theme: One Light",
+            "Rosé Pine Dawn",
+            "Start listening… On/Off",
+            "Go to Line…",
+            "Go to File…",
+        ];
+        let bar = |query: &str| {
+            let mut f = Finder {
+                query: query.into(),
+                ..Default::default()
+            };
+            f.refresh_bar(&titles, &[]);
+            f.results.iter().map(|&i| titles[i]).collect::<Vec<_>>()
+        };
+        assert_eq!(bar("go to line"), ["Go to Line…"]);
+        assert_eq!(bar("go to"), ["Go to Line…", "Go to File…"]);
+        // An abbreviation says no title's words: its letters find it.
+        assert!(bar("gtl").contains(&"Go to Line…"), "{:?}", bar("gtl"));
+    }
+
+    #[test]
+    fn a_file_at_a_line_is_found_by_its_name() {
+        let mut f = Finder {
+            query: "pricing.py:37".into(),
+            ..Finder::default()
+        };
+        assert_eq!(f.file_line(), Some(("pricing.py", 37)));
+        let files: Vec<FileEntry> = ["teashop/pricing.py", "teashop/models.py"]
+            .iter()
+            .map(|rel| FileEntry {
+                rel: rel.to_string(),
+                abs: std::path::PathBuf::from("/p").join(rel),
+            })
+            .collect();
+        f.refresh_files(&files, &[], &[]);
+        assert_eq!(f.results.first(), Some(&0), "{:?}", f.results);
+        f.refresh_bar(&["Open Folder…"], &files);
+        assert!(f.results.contains(&1), "{:?}", f.results);
+        // A column after the line, as compilers write a place, is let go.
+        f.query = "pricing.py:37:5".into();
+        assert_eq!(f.file_line(), Some(("pricing.py", 37)));
+        f.query = r"C:\shop\pricing.py:37".into();
+        assert_eq!(f.file_line(), Some((r"C:\shop\pricing.py", 37)));
+        // A line alone, or no line, is not a file at a line.
+        for query in [":37", "pricing.py", "pricing.py:", "pricing.py:0", ":37:5"] {
+            f.query = query.into();
+            assert_eq!(f.file_line(), None, "{query}");
+        }
+    }
 
     #[test]
     fn goto_line_parses_colon_queries() {
@@ -389,6 +633,49 @@ mod tests {
             .map(|i| i - 1)
             .collect();
         assert!(named[..2].iter().all(|&i| !symbols[i].is_test), "{named:?}");
+    }
+
+    /// "tot" reached every file under `teashop/` through its folder, and
+    /// those were listed above the function `total`, which it names.
+    #[test]
+    fn what_the_query_names_leads_what_it_reaches_through_a_folder() {
+        let files = files(&[
+            "teashop/catalog.py",
+            "teashop/checkout.py",
+            "teashop/totals.py",
+            "teashop/top_list.py",
+        ]);
+        let symbol = |name: &str| SymbolEntry {
+            name: name.into(),
+            kind: "function".into(),
+            rel: "teashop/checkout.py".into(),
+            abs: "/p/teashop/checkout.py".into(),
+            line: 1,
+            is_test: false,
+            entry: None,
+        };
+        let symbols = [symbol("total"), symbol("to_text")];
+        let mut f = Finder {
+            query: "tot".into(),
+            ..Default::default()
+        };
+        f.refresh_files(&files, &symbols, &[]);
+        let n = files.len();
+        // totals.py names it; then `total`; then the file whose name has its
+        // letters (top_list.py); then `to_text`; the folder matches last.
+        assert_eq!(f.results[0], 2, "{:?}", f.results);
+        assert_eq!(f.results[1], n, "{:?}", f.results);
+        assert_eq!(f.results[2], 3, "{:?}", f.results);
+        assert_eq!(f.results[3], n + 1, "{:?}", f.results);
+        assert!(f.results[4..].iter().all(|&i| i < 2), "{:?}", f.results);
+        // A path asks for the path: its files keep the match's order.
+        f.query = "teashop/ch".into();
+        f.refresh_files(&files, &symbols, &[]);
+        assert_eq!(f.results.first(), Some(&1), "{:?}", f.results);
+        // The command bar's files are ordered the same way.
+        f.query = "tot".into();
+        f.refresh_bar(&[], &files);
+        assert_eq!(f.results[..2], [2, 3], "{:?}", f.results);
     }
 
     #[test]

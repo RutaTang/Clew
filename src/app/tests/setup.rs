@@ -89,10 +89,15 @@ fn not_now_opens_the_project_with_nothing_set_up() {
     let trust = clew_core::trust::Trust::load();
     assert!(trust.is_root_trusted(None, &root), "not asked again");
     assert!(!trust.is_build_trusted(None, &root, "rust-analyzer"));
+    let intent = app
+        .pending_setup
+        .as_ref()
+        .expect("the answer, for the open");
     assert!(
-        app.pending_setup.is_none(),
+        intent.fetch.is_empty() && !intent.explain,
         "nothing downloaded, nothing explained"
     );
+    assert!(intent.servers_not_now, "and no server asked about");
 }
 
 /// Not now answers the sheet's question as Open does: pressed before the
@@ -152,12 +157,20 @@ fn opening_records_the_leave_to_build_and_queues_the_downloads() {
     assert!(trust.is_root_trusted(None, &root));
     assert!(trust.is_build_trusted(None, &root, "rust-analyzer"));
     let intent = app.pending_setup.as_ref().expect("the downloads wait");
-    assert_eq!(intent.fetch, vec!["rust".to_string()]);
+    assert_eq!(
+        intent
+            .fetch
+            .iter()
+            .map(|(l, _)| l.as_str())
+            .collect::<Vec<_>>(),
+        ["rust"]
+    );
     assert!(!intent.explain);
 }
 
-/// Servers unticked: nothing recorded, nothing queued — they ask as ever,
-/// when a file of their language opens.
+/// Servers unticked: nothing recorded, nothing fetched — and none asked
+/// about when a file of its language opens (see
+/// `opened_without_setup_no_server_is_asked_about`).
 #[test]
 fn servers_unticked_leave_the_questions_for_later() {
     let data = test_dir("setup-data-unticked");
@@ -179,7 +192,100 @@ fn servers_unticked_leave_the_questions_for_later() {
     let _ = app.update(Message::Project(ProjectMsg::SetupServers(false)));
     let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(root.clone())));
     assert!(!clew_core::trust::Trust::load().is_build_trusted(None, &root, "rust-analyzer"));
-    assert!(app.pending_setup.is_none());
+    let intent = app
+        .pending_setup
+        .as_ref()
+        .expect("the answer, for the open");
+    assert!(intent.fetch.is_empty() && intent.servers_not_now);
+}
+
+/// Opened without setup (Not now, or the servers unticked), a file of the
+/// language does not pop the question the sheet just had answered: its
+/// server is left "not set up", for the status bar's Set up — and asked
+/// about again once the user asks for it ("Ask again").
+#[test]
+fn opened_without_setup_no_server_is_asked_about() {
+    let data = test_dir("setup-data-later");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let root = fixture_project("setup-later");
+    let mut app = blank_app();
+    let _ = app.update(Message::Project(ProjectMsg::FolderPicked(Some(
+        root.clone(),
+    ))));
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root: root.clone(),
+        census: Census {
+            servers: vec![builds_and_downloads()],
+            calls: Some(42),
+        },
+    }));
+    let _ = app.update(Message::Project(ProjectMsg::OpenWithoutSetup(root.clone())));
+    app.scanning = true;
+    app.pending_scan_root = Some(root.clone());
+    let _ = app.update(Message::Project(ProjectMsg::ScanDone {
+        stamp: app.transport_stamp(),
+        result: fs_scan::scan(root.clone()),
+        report: Default::default(),
+    }));
+    assert!(app.proj.servers_not_now);
+    open_synchronously(&mut app, "src/lib.rs", None);
+    load_state_synchronously(&mut app);
+    assert!(app.pending_setup.is_none(), "carried out");
+    assert!(app.proj.pending_lsp_consent.is_empty(), "not asked");
+    assert!(
+        matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Declined(_))),
+        "{:?}",
+        app.proj.link.lsp.get("rust")
+    );
+    // Asked for: the question comes, as ever — for this language; the
+    // others stay left for later.
+    let _ = app.update(Message::Lsp(LspMsg::DownloadFor("rust".into())));
+    assert!(app.proj.servers_not_now && app.proj.servers_asked.contains("rust"));
+    assert!(!app.server_left_for_later("rust"), "asked for");
+    assert!(
+        app.server_left_for_later("python"),
+        "the others still for later"
+    );
+    assert!(
+        !app.proj.pending_lsp_consent.is_empty()
+            || matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Starting)),
+        "{:?}",
+        app.proj.link.lsp.get("rust")
+    );
+}
+
+/// Open on a project the look found no server to set up for: nothing was
+/// declined, so a server that turns up later (a file of another language,
+/// a download it needs) is asked about as ever, not left "not set up".
+#[test]
+fn opening_with_nothing_to_set_up_declines_nothing() {
+    let data = test_dir("setup-data-nothing");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let root = fixture_project("setup-nothing");
+    let mut app = blank_app();
+    app.llm_available = true;
+    let _ = app.update(Message::Project(ProjectMsg::FolderPicked(Some(
+        root.clone(),
+    ))));
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root: root.clone(),
+        census: Census {
+            servers: vec![],
+            calls: Some(42),
+        },
+    }));
+    let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(root.clone())));
+    assert!(app.setup.is_none(), "answered");
+    assert!(
+        app.pending_setup
+            .as_ref()
+            .is_none_or(|intent| !intent.servers_not_now),
+        "nothing declined"
+    );
 }
 
 /// Without an AI key, explaining cannot be ticked; a look that found
@@ -252,6 +358,28 @@ fn the_count_leaves_out_what_is_explained() {
     }));
     let calls = app.setup.as_ref().unwrap().census.as_ref().unwrap().calls;
     assert_eq!(calls, Some(9));
+    assert!(!app.setup.as_ref().unwrap().no_code);
+    // All of it explained is not "no code": the count, less what is
+    // explained, is 0 either way; the folder's own count tells them apart.
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root: root.clone(),
+        census: Census {
+            servers: Vec::new(),
+            calls: Some(1),
+        },
+    }));
+    let setup = app.setup.as_ref().unwrap();
+    assert_eq!(setup.census.as_ref().unwrap().calls, Some(0));
+    assert!(!setup.no_code, "all explained, not no code");
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root,
+        census: Census {
+            servers: Vec::new(),
+            calls: Some(0),
+        },
+    }));
+    assert!(app.setup.as_ref().unwrap().no_code);
 }
 
 /// The sheet asking about the open project — "Set Up Project…", Explain
@@ -310,7 +438,14 @@ fn a_first_opens_sheet_is_not_replaced_by_another() {
     // Its Open carries out what it has ticked.
     let _ = app.update(Message::Project(ProjectMsg::ConsentAllowed(asked.clone())));
     let intent = app.pending_setup.as_ref().expect("the downloads wait");
-    assert_eq!(intent.fetch, vec!["rust".to_string()]);
+    assert_eq!(
+        intent
+            .fetch
+            .iter()
+            .map(|(l, _)| l.as_str())
+            .collect::<Vec<_>>(),
+        ["rust"]
+    );
 }
 
 /// A first open's answer is for the project it opened. Another opened
@@ -602,4 +737,182 @@ fn a_build_once_allowed_is_not_offered_again() {
     let _ = app.update(Message::Project(ProjectMsg::SetUpMissing));
     assert!(clew_core::trust::Trust::load().is_build_trusted(None, &root, "rust-analyzer"));
     assert!(app.missing_setup().is_empty(), "allowed: nothing to offer");
+}
+
+/// A server whose own program is already on this computer is set up as
+/// that program — chosen for the project, nothing installed — and the sheet
+/// and the tour say so; with none on the PATH, Clew's copy is fetched as
+/// before. The tour said "pyright: install with npm" with pyright on the
+/// PATH.
+#[cfg(unix)]
+#[test]
+fn a_server_on_this_computer_is_used_not_installed_again() {
+    use crate::app::setup::{ServerLook, servers_line};
+    use std::os::unix::fs::PermissionsExt;
+    let store = test_dir("on-path-setup-store");
+    let _ = std::fs::remove_dir_all(&store);
+    let _env = data_dir_override(&store);
+    let root = test_dir("on-path-setup-project");
+    let bin = test_dir("on-path-setup-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("pyright-langserver");
+    std::fs::write(&program, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let look = |path: &std::path::Path| ServerLook {
+        path: Some(path.into()),
+        ..Default::default()
+    };
+    let python = ["python".to_string()];
+
+    let servers = look(&bin).servers_for(&root, &python);
+    assert_eq!(servers.len(), 1, "{servers:?}");
+    assert_eq!(servers[0].fetch, Fetch::OnPath(program.clone()));
+    assert_eq!(servers_line(&servers), "pyright: already installed");
+
+    let empty = test_dir("on-path-setup-empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let servers = look(&empty).servers_for(&root, &python);
+    assert_eq!(
+        servers[0].fetch,
+        Fetch::Install("npm".into()),
+        "none here: Clew's copy"
+    );
+}
+
+/// Enter on Explain All's sheet presses its Explain, as its "yes" by voice
+/// does: the sheet the shortcut opens took no Enter, the ring having
+/// nothing on it. Not while the project is still being counted, nor before
+/// the estimate has stood to be read — a held or doubled Enter started a
+/// paid pass whose cost was never on screen. And it sets up no language
+/// server: the sheet shows none, and its Explain downloaded them, gave
+/// them leave to build, and asked again about those left for later.
+#[test]
+fn enter_on_explain_alls_sheet_presses_explain_once_read() {
+    let data = test_dir("setup-data-enter");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("config.toml"),
+        "[llm]\napi_key = \"sk\"\nbase_url = \"http://127.0.0.1:9/v1\"\n",
+    )
+    .unwrap();
+    let _env = data_dir_override(&data);
+    let mut app = scanned_app("setup-enter");
+    app.invalidate_llm_config();
+    assert!(app.llm_available);
+    app.proj.servers_not_now = true;
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let enter = || {
+        key_press(
+            keyboard::Key::Named(keyboard::key::Named::Enter),
+            keyboard::Modifiers::default(),
+        )
+    };
+    let _ = app.show_setup(SetupMode::Explain, root.clone());
+    // Still counting: Explain cannot be pressed, and Enter does nothing.
+    let _ = app.update(enter());
+    assert!(app.setup.is_some(), "pressed before it could be");
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root: root.clone(),
+        census: Census {
+            servers: vec![builds_and_downloads()],
+            calls: Some(10),
+        },
+    }));
+    // Counted this instant: not read yet.
+    let _ = app.update(enter());
+    assert!(app.setup.is_some(), "pressed before it could be read");
+    app.setup_counted_at = Some(
+        std::time::Instant::now()
+            - crate::app::setup::SHEET_READ
+            - std::time::Duration::from_millis(5),
+    );
+    let _ = app.update(enter());
+    assert!(app.setup.is_none(), "Enter pressed Explain");
+    assert!(app.proj.explain.running, "and explaining began");
+    assert!(
+        !clew_core::trust::Trust::load().is_build_trusted(None, &root, "rust-analyzer"),
+        "no leave to build given unseen"
+    );
+    assert!(
+        app.proj.servers_not_now,
+        "the servers left for later stay so"
+    );
+}
+
+/// Enter does not answer a sheet whose Open or Apply downloads language
+/// servers and gives them leave to build the project: Set Up Project's
+/// stays up, nothing recorded.
+#[test]
+fn enter_does_not_apply_set_up_project() {
+    let data = test_dir("setup-data-enter-manage");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let mut app = scanned_app("setup-enter-manage");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let _ = app.show_setup(SetupMode::Manage, root.clone());
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root: root.clone(),
+        census: Census {
+            servers: vec![builds_and_downloads()],
+            calls: Some(10),
+        },
+    }));
+    app.setup_counted_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+    let _ = app.update(key_press(
+        keyboard::Key::Named(keyboard::key::Named::Enter),
+        keyboard::Modifiers::default(),
+    ));
+    assert!(app.setup.is_some(), "applied by Enter");
+    assert!(!clew_core::trust::Trust::load().is_build_trusted(None, &root, "rust-analyzer"));
+}
+
+/// Enter allows no question of trust: a language server's download, put
+/// on screen as a file opens, stays asked after Enter — only its own
+/// Allow (or "yes" said to it) allows it.
+#[test]
+fn enter_allows_no_question_of_trust() {
+    let store = test_dir("setup-enter-trust-store");
+    let _ = std::fs::remove_dir_all(&store);
+    let _env = data_dir_override(&store);
+    let mut app = scanned_app("setup-enter-trust");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    assert!(!app.proj.pending_lsp_consent.is_empty(), "asked");
+    let _ = app.update(key_press(
+        keyboard::Key::Named(keyboard::key::Named::Enter),
+        keyboard::Modifiers::default(),
+    ));
+    assert!(!app.proj.pending_lsp_consent.is_empty(), "allowed by Enter");
+    assert!(matches!(
+        app.proj.link.lsp.get("rust"),
+        Some(LspSlot::AwaitingConsent)
+    ));
+}
+
+/// The estimate is nothing only where there is no code: a folder whose one
+/// file is too large to sample, or scripts with no functions in them, were
+/// said to have no code to explain.
+#[test]
+fn the_estimate_is_nothing_only_without_code() {
+    use crate::app::setup::{estimate_calls, has_code};
+    let dir = test_dir("setup-estimate-code");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = |name: &str, body: &str| {
+        let abs = dir.join(name);
+        std::fs::write(&abs, body).unwrap();
+        crate::fs_scan::FileEntry {
+            abs,
+            rel: name.into(),
+        }
+    };
+    let notes = vec![entry("notes.txt", "hello\n")];
+    assert_eq!(estimate_calls(&notes), 0);
+    assert!(!has_code(&notes));
+    let big = vec![entry("sqlite3.c", &"int x;\n".repeat(120_000))];
+    assert!(estimate_calls(&big) > 0, "a large file is no code");
+    let script = vec![entry("deploy.sh", "echo deploying\n")];
+    assert!(estimate_calls(&script) > 0, "a script is no code");
+    assert!(has_code(&script));
 }

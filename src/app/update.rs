@@ -19,7 +19,13 @@ impl App {
         // The overlay that left the keyboard where it was, as this message
         // arrives (see below).
         let left_focus = ui::active_overlay(self).and_then(|o| o.leaves_focus());
+        self.picked_elsewhere(&message);
         let task = self.dispatch(message);
+        self.drop_stale_tree_menu();
+        self.drop_stale_picker();
+        // What this window's own model calls spent since: counted where it
+        // is shown (the server's are counted as their `Usage` comes).
+        self.take_local_spent();
         // One such come up — opened by a chord from inside a field, or a
         // question arriving while the user types — takes the keyboard from
         // what is under it: the Ask input left focused under a graph took
@@ -57,6 +63,19 @@ impl App {
         self.note_status();
         // The question's field holds the question, however it was set.
         self.sync_ask_editor();
+        // Ask's menu of sessions is put away when something comes up over
+        // the window: drawn over everything, it stayed above the palette or a
+        // question, took its clicks — and, open, held that question's Allow.
+        // As it comes up, not while it is: the tour lets the card be used,
+        // and its toggle opened and shut the menu in one go. Closed, its
+        // search goes too.
+        let covered = self.tutorial.is_some()
+            || ui::active_overlay(self).is_some_and(|o| !matches!(o, ui::ActiveOverlay::Hover(_)));
+        if covered && !self.ask_menu_covered && self.ask_sessions_menu {
+            self.ask_sessions_menu = false;
+            self.ask_sessions_query.clear();
+        }
+        self.ask_menu_covered = covered;
         // The margin's History lists the commits of the file being read.
         // Batched only when it asks: a batch is a task even of none, and an
         // update that asks for nothing returns none.
@@ -72,6 +91,36 @@ impl App {
         };
         let task = match self.sync_git_status() {
             Some(read) => Task::batch([task, read]),
+            None => task,
+        };
+        // The tree's keyboard does not outlast the tree on screen.
+        self.sync_tree_focus();
+        // A menu gone: its ring with it, and the keys back where they were.
+        let task = match self.sync_menu_keys() {
+            Some(back) => Task::batch([task, back]),
+            None => task,
+        };
+        // The status bar names the branch checked out.
+        let task = match self.sync_head() {
+            Some(read) => Task::batch([task, read]),
+            None => task,
+        };
+        // The history read anew when the project's newest commit moved.
+        let task = match self.sync_repo_tip() {
+            Some(read) => Task::batch([task, read]),
+            None => task,
+        };
+        // The History view reads what it shows once it shows and has not
+        // asked: a new project, the sidebar back on it, a tutorial's sample
+        // put away. It stayed on "Reading the history…".
+        let task = if self.history_unread() {
+            Task::batch([task, self.sync_history()])
+        } else {
+            task
+        };
+        // A page put away from over the code: the code where it was.
+        let task = match self.sync_panes_uncovered() {
+            Some(scroll) => Task::batch([task, scroll]),
             None => task,
         };
         // An answer that came with Ask put away is read once its card is
@@ -382,6 +431,10 @@ impl App {
         if self.show_tools_menu && crate::app::tutorial::closes_tools_menu(&message) {
             self.show_tools_menu = false;
         }
+        // And from the Run menu: each of its rows.
+        if self.show_run_menu && crate::ui::closes_run_menu(&message) {
+            self.show_run_menu = false;
+        }
         // So does a pick from the app menu. The View menu's rows are
         // switches, and stay up as they are flipped, several in a row: it
         // goes as a click away from it, or Escape, puts it away.
@@ -398,6 +451,7 @@ impl App {
             Message::Nav(message) => self.update_nav(message),
             Message::Reading(message) => self.update_reading(message),
             Message::Calls(message) => self.update_calls(message),
+            Message::History(message) => self.update_history(message),
             Message::Flow(message) => self.update_flow(message),
             Message::Graph(message) => self.update_graph(message),
             Message::Explain(message) => self.update_explain(message),
@@ -416,9 +470,14 @@ impl App {
             Message::Export(message) => self.update_export(message),
             Message::Settings(message) => self.update_settings(message),
             Message::Updater(message) => self.update_updater(message),
+            Message::Usage(message) => self.update_usage(message),
             Message::Window(message) => self.update_window(message),
             Message::Tutorial(message) => self.update_tutorial(message),
             Message::Voice(message) => self.update_voice(message),
+            Message::Fake(message) => self.update_fake(message),
+            Message::Proof(message) => self.update_proof(message),
+            Message::Weak(message) => self.update_weak(message),
+            Message::Picker(message) => self.update_picker(message),
             Message::Tick => self.on_tick(),
             Message::Noop => Task::none(),
             Message::Placed { question, place } => self.on_placed(question, place),
@@ -428,6 +487,27 @@ impl App {
                 self.overlay_open = open;
                 Task::none()
             }
+        }
+    }
+}
+
+impl App {
+    /// The file tree's menu, put away once what it was opened over is
+    /// gone — the Files view hidden or left — or another overlay has come
+    /// up over it: it stayed, came back when that one closed, and acted on
+    /// a row no longer shown.
+    fn drop_stale_tree_menu(&mut self) {
+        if self.proj.tree_menu.is_none() {
+            return;
+        }
+        let files_shown = self.show_left_sidebar && self.sidebar == crate::SidebarTab::Files;
+        let on_top = matches!(
+            ui::active_overlay(self),
+            Some(ui::ActiveOverlay::TreeMenu(_))
+        );
+        if !files_shown || !on_top {
+            self.proj.tree_menu = None;
+            self.proj.tree_menu_for = None;
         }
     }
 }

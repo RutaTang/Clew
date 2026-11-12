@@ -144,6 +144,11 @@ pub(crate) fn path_at(history: &[git::HistCommit], sha: &str, rel: &str) -> Stri
 /// How many of a file's commits the margin's History lists.
 const MARGIN_HISTORY_COMMITS: usize = 30;
 
+/// The most an answer to "Why is this line here?" may run to: room for its
+/// few sentences in one call. At 512 one answer in two ran on into a second
+/// call, and the "one AI call" its link promises was two.
+const WHY_MAX_TOKENS: u32 = 1024;
+
 impl App {
     /// Resolve the scope a Time Travel run should use. `symbol` = the reader
     /// asked for "this symbol" (the toolbar entry asks for the whole file, the
@@ -224,8 +229,10 @@ impl App {
             self.status = tr!("Time Travel needs a git repository").into();
             return Task::none();
         };
+        // The file's other views give way (see `App::one_file_view`).
+        let others = self.one_file_view(crate::app::editor::FileView::TimeTravel);
         let Some(v) = self.active_viewer() else {
-            return Task::none();
+            return others;
         };
         let (abs, rel, lang) = (v.abs.clone(), v.rel.clone(), v.lang_key);
         // A start re-scopes the session on screen (its bar's toggle), which
@@ -337,7 +344,7 @@ impl App {
                 })
             },
         );
-        Task::batch([carried, history])
+        Task::batch([others, carried, history])
     }
 
     /// Await the history of `abs`, asked for in `pane`, as the one
@@ -564,6 +571,7 @@ impl App {
         // while the new scope loaded lands in it, both requests standing;
         // it used to give the re-scope up. Not the story, which tells the
         // old scope's commits (`TimeTravel::scoped`).
+        let new_session = kept.is_none();
         let (session, why, why_pending) = match kept {
             Some(tt) => (tt.session, tt.why, tt.why_pending),
             None => (generation, HashMap::new(), HashSet::new()),
@@ -587,6 +595,7 @@ impl App {
             scroll_x,
             caret,
             focus_line: None,
+            reveal_change: false,
             loading: true,
             // The start's own number until the session asks for a revision:
             // one the session it replaces was still loading is not this
@@ -601,6 +610,12 @@ impl App {
             story_loading: false,
         };
         tt.sync_why_loading();
+        // A new session: the old one's summary failure goes with it. (One
+        // re-scoped is the same session, its commits kept.)
+        if new_session {
+            self.forget_failure_of(crate::app::state::FailureOf::Summary);
+            self.forget_failure_of(crate::app::state::FailureOf::Story);
+        }
         self.proj.time_travel = Some(tt);
         // A drag begun in the view this replaced ends with it.
         if shown_before || ui::time_travel_on_screen(self).is_some() {
@@ -618,21 +633,29 @@ impl App {
             }
             None => {}
         }
-        // At the commit asked for (the margin's History), else the newest.
-        let first = self
-            .proj
-            .time_travel_at
-            .take()
-            .and_then(|sha| {
-                self.proj
-                    .time_travel
-                    .as_ref()?
-                    .commits
-                    .iter()
-                    .position(|c| c.sha == sha)
-            })
-            .unwrap_or(0);
-        Task::done(Message::TimeTravel(TimeTravelMsg::Goto(first)))
+        // At the commit asked for (the margin's History, the History view),
+        // else the newest — said so: one not among the file's commits it
+        // reads (a merge, another branch's, older than the newest it
+        // keeps) landed on the newest without a word.
+        let asked = self.proj.time_travel_at.take();
+        let found = asked.as_ref().and_then(|sha| {
+            self.proj
+                .time_travel
+                .as_ref()?
+                .commits
+                .iter()
+                .position(|c| c.sha == *sha)
+        });
+        if let Some(tt) = self.proj.time_travel.as_mut() {
+            tt.reveal_change = found.is_some();
+        }
+        if let (Some(sha), None) = (&asked, found) {
+            self.status = tr!(
+                "Time Travel does not reach {sha} (a merge, another branch's commit, or an old one): at the newest instead",
+                sha = sha.get(..7).unwrap_or(sha)
+            );
+        }
+        Task::done(Message::TimeTravel(TimeTravelMsg::Goto(found.unwrap_or(0))))
     }
 
     /// The commits that touched the file being read, asked for as the
@@ -778,6 +801,17 @@ impl App {
         step: Result<Box<TimeStep>, String>,
     ) -> Task<Message> {
         let line_height = self.line_height();
+        // The view the revision is shown in, as measured on the file's own
+        // pane: unmeasured, a short file's focus line near its end was put
+        // at the top, the file's start scrolled away.
+        let measured = self.proj.time_travel.as_ref().and_then(|tt| {
+            self.proj
+                .panes
+                .iter()
+                .flatten()
+                .find(|v| v.abs == tt.abs)
+                .map(|v| (v.viewport_h, v.viewport_measured, v.bounds_h))
+        });
         // Only the revision the session asks for now: not one it asked for
         // before a later scrub, nor one a session since replaced or left
         // was loading. A start leaves it be — as it did not while every
@@ -818,15 +852,25 @@ impl App {
             viewer::Viewer::new(tt.abs.clone(), tt.rel.clone(), tt.lang, source, step.lines);
         v.symbols = step.symbols;
         v.highlighted = true;
+        if let Some((h, measured, bounds)) = measured {
+            v.viewport_h = h;
+            v.viewport_measured = measured;
+            v.bounds_h = bounds;
+        }
         v.git = Some(std::sync::Arc::new(git::GitInfo {
             blame: Vec::new(),
             status,
             deleted_at: HashSet::new(),
         }));
         let last_line = v.lines.len().saturating_sub(1);
+        // A start at a commit asked for: its first revision opens on the
+        // first line that commit added, once.
+        let reveal = std::mem::take(&mut tt.reveal_change)
+            .then(|| step.added.iter().min().copied())
+            .flatten();
         // Block scope: bring the block into view. File scope: keep the
         // reader's caret and scroll position (carried from entry).
-        if let Some(fl) = step.focus_line {
+        if let Some(fl) = step.focus_line.or(reveal) {
             let head = (fl.saturating_sub(1), 0);
             v.caret = Some(head);
             tt.caret = Some(head);
@@ -962,6 +1006,12 @@ impl App {
             let offset = viewport.absolute_offset();
             tt.scroll_x = offset.x;
             tt.scroll_y = offset.y;
+            // Its own height, not the live view's it was given: shorter, under
+            // the commit's banner and over the scrubber, it scrolls further,
+            // and its sticky band is worked out from the line at its top.
+            if let Some(v) = tt.viewer.as_mut() {
+                v.bounds_h = viewport.bounds().height;
+            }
         }
         Task::none()
     }
@@ -1014,8 +1064,9 @@ impl App {
             let Some(c) = tt.commits.get(tt.idx) else {
                 return Task::none();
             };
-            // Already have it, or it is already being written.
-            if tt.why.contains_key(&c.sha) || tt.why_pending.contains(&c.sha) {
+            // Already have it, or it is already being written. One that
+            // failed is asked again.
+            if matches!(tt.why.get(&c.sha), Some(Ok(_))) || tt.why_pending.contains(&c.sha) {
                 return Task::none();
             }
             (c.sha.clone(), c.path.clone(), c.subject.clone(), tt.session)
@@ -1063,7 +1114,14 @@ impl App {
                     })
                     .await?;
                 let prompt = time_why_prompt(&path, &msg, &diff);
-                ai.complete(cfg, TIME_WHY_SYSTEM, prompt, 220).await
+                ai.complete(
+                    cfg,
+                    crate::app::usage::TIME_TRAVEL,
+                    TIME_WHY_SYSTEM,
+                    prompt,
+                    220,
+                )
+                .await
             },
             move |result| {
                 Message::TimeTravel(TimeTravelMsg::WhyDone {
@@ -1097,16 +1155,75 @@ impl App {
             return Task::none();
         };
         tt.why_pending.remove(&sha);
-        match result {
+        let failed = match result {
             Ok(text) => {
-                tt.why.insert(sha, text.trim().to_string());
+                tt.why.insert(sha.clone(), Ok(text.trim().to_string()));
+                None
             }
-            Err(e) => self.status = tr!("Couldn't summarize: {error}", error = e),
-        }
+            Err(e) => {
+                // Kept as it came: worded where it is drawn, in the
+                // language spoken then, with a way to Settings when the
+                // base URL is to blame.
+                tt.why.insert(sha.clone(), Err(e.clone()));
+                Some((sha.clone(), e))
+            }
+        };
         if let Some(tt) = self.proj.time_travel.as_mut() {
             tt.sync_why_loading();
         }
+        // The commit on screen — the view drawn, scrubbed to it: its
+        // failure is said in its banner, with Try again and Settings — on
+        // the status bar too, it was said twice. Behind the overview, or
+        // in the pane not shown, the banner says it to no one.
+        let on_screen = |app: &Self, sha: &str| {
+            crate::ui::time_travel_on_screen(app)
+                .and_then(|tt| tt.commits.get(tt.idx))
+                .is_some_and(|c| c.sha == sha)
+        };
+        match failed {
+            Some((failed_sha, _)) if on_screen(self, &failed_sha) => {
+                self.forget_summary_failure_of(&failed_sha);
+            }
+            // Scrubbed away from it: the failure the status bar stands
+            // for, with its Try again (and Settings) — said only as passing
+            // text, it was squeezed in after an older failure, cut short,
+            // with no controls.
+            Some((failed_sha, e)) => {
+                let about = crate::app::tasks::setting_to_fix(&e);
+                self.say_failure_again(
+                    move || {
+                        tr!(
+                            "Couldn't summarize: {error}",
+                            error = crate::app::tasks::ai_reason(&e)
+                        )
+                    },
+                    Some(Message::TimeTravel(TimeTravelMsg::WhyOf {
+                        session,
+                        sha: failed_sha,
+                    })),
+                    crate::app::state::FailureOf::Summary,
+                );
+                self.failure_about(about);
+            }
+            None => self.forget_summary_failure_of(&sha),
+        }
         Task::none()
+    }
+
+    /// Take away the standing summary failure of commit `sha`, and only
+    /// its: another commit's, asked about and failed while scrubbed away
+    /// from, went with any commit's answer, and was said nowhere until the
+    /// reader scrubbed back to it.
+    fn forget_summary_failure_of(&mut self, sha: &str) {
+        let its = self.failure_notice.as_ref().is_some_and(|f| {
+            matches!(
+                &f.retry,
+                Some(Message::TimeTravel(TimeTravelMsg::WhyOf { sha: of, .. })) if of == sha
+            )
+        });
+        if its {
+            self.forget_failure_of(crate::app::state::FailureOf::Summary);
+        }
     }
 
     pub(crate) fn on_time_travel_story(&mut self) -> Task<Message> {
@@ -1171,7 +1288,14 @@ impl App {
                     steps.push((sha, subject, diff));
                 }
                 let prompt = story_prompt(&name, &steps);
-                ai.complete(cfg, TIME_STORY_SYSTEM, prompt, 900).await
+                ai.complete(
+                    cfg,
+                    crate::app::usage::TIME_TRAVEL,
+                    TIME_STORY_SYSTEM,
+                    prompt,
+                    900,
+                )
+                .await
             },
             move |result| {
                 Message::TimeTravel(TimeTravelMsg::StoryDone {
@@ -1204,9 +1328,26 @@ impl App {
         };
         tt.story_loading = false;
         let md = match result {
-            Ok(md) => md,
+            Ok(md) => {
+                self.forget_failure_of(crate::app::state::FailureOf::Story);
+                md
+            }
             Err(e) => {
-                self.status = tr!("Couldn't write the story: {error}", error = e);
+                // The failure the status bar stands for, in plain words,
+                // with its Try again (and Settings): it said the raw error,
+                // grey, with nothing to do about it.
+                let about = crate::app::tasks::setting_to_fix(&e);
+                self.say_failure_again(
+                    move || {
+                        tr!(
+                            "Couldn't write the story: {error}",
+                            error = crate::app::tasks::ai_reason(&e)
+                        )
+                    },
+                    Some(Message::TimeTravel(TimeTravelMsg::Story)),
+                    crate::app::state::FailureOf::Story,
+                );
+                self.failure_about(about);
                 return Task::none();
             }
         };
@@ -1226,6 +1367,40 @@ impl App {
         if self.proj.project.is_none() {
             return Task::none();
         }
+        // Target line range (0-based inclusive): the selection, else the
+        // clicked/caret line.
+        let Some(range) = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .and_then(|v| match v.selection_ordered() {
+                Some(((a, _), (b, _))) => Some((a, b)),
+                None => menu_line.or(v.caret.map(|(l, _)| l)).map(|l| (l, l)),
+            })
+        else {
+            return Task::none();
+        };
+        self.ask_why(pane, range, anchor)
+    }
+
+    /// Ask why lines `l0..=l1` of `pane`'s file are there, from the commits
+    /// blame names for them: the popup shows the question and, once it is
+    /// in, the answer — or why there is none, with Try again.
+    fn ask_why(
+        &mut self,
+        pane: usize,
+        (l0, l1): (usize, usize),
+        anchor: Option<f32>,
+    ) -> Task<Message> {
+        // Nothing but blanks and comments: nothing to ask the model about,
+        // nothing paid for — and no key asked for first.
+        if let Some(v) = self.proj.panes.get(pane).and_then(Option::as_ref)
+            && !(l0..=l1).any(|l| v.has_code(l))
+        {
+            self.status = tr!("Put the cursor on a line of code to ask why it is there").into();
+            return Task::none();
+        }
         let cfg = match self.require_llm() {
             Ok(cfg) => cfg,
             Err(ask_for_key) => return ask_for_key,
@@ -1239,15 +1414,6 @@ impl App {
         let Some(git) = v.git.clone() else {
             self.status = tr!("No git history for this file").into();
             return Task::none();
-        };
-        // Target line range (0-based inclusive): the selection, else the
-        // clicked/caret line.
-        let (l0, l1) = match v.selection_ordered() {
-            Some(((a, _), (b, _))) => (a, b),
-            None => match menu_line.or(v.caret.map(|(l, _)| l)) {
-                Some(l) => (l, l),
-                None => return Task::none(),
-            },
         };
         // Distinct committed commits touching the range (a few at most).
         let mut seen = HashSet::new();
@@ -1274,6 +1440,7 @@ impl App {
             .collect::<Vec<_>>()
             .join("\n");
         let rel = v.rel.clone();
+        let abs = v.abs.clone();
         let title = if l0 == l1 {
             tr!("Why line {line} exists", line = l0 + 1)
         } else {
@@ -1292,6 +1459,9 @@ impl App {
             loading: true,
             prepared: Vec::new(),
             anchor,
+            fix: None,
+            asked: Some((abs, l0, l1)),
+            failed: false,
         });
         // The answer is only meaningful for the project it was asked in: its
         // stamp is checked on arrival, so a reply that outlives a project
@@ -1338,7 +1508,14 @@ impl App {
                     history.push((sha, msg, diff));
                 }
                 let prompt = why_prompt(&rel, (l0 + 1, last + 1), &code, &history);
-                ai.complete(cfg, WHY_SYSTEM, prompt, 512).await
+                ai.complete(
+                    cfg,
+                    crate::app::usage::WHY_LINE,
+                    WHY_SYSTEM,
+                    prompt,
+                    WHY_MAX_TOKENS,
+                )
+                .await
             },
             move |result| {
                 Message::TimeTravel(TimeTravelMsg::BlameWhyDone {
@@ -1367,19 +1544,28 @@ impl App {
         if self.proj.blame_why.as_ref().map(|b| b.token) != Some(token) {
             return Task::none();
         }
+        let mut fix = None;
+        let failed = result.is_err();
         let md = match result {
             Ok(m) => {
                 self.settle_status(&[tr!("Explaining why…")]);
                 m
             }
             Err(e) => {
-                self.status = tr!("Couldn't explain: {error}", error = e);
+                fix = crate::app::tasks::setting_to_fix(&e);
+                let e = crate::app::tasks::ai_reason(&e);
+                // Said in the popup, with its way to Settings: the status
+                // line said it again, grey, "Couldn't explain: …", of
+                // nothing it named.
+                self.settle_status(&[tr!("Explaining why…")]);
                 format!("*{}*", tr!("Couldn't explain why: {error}", error = e))
             }
         };
         let (prepared, task) = self.prepare_segments(&md);
-        // Where the question was asked, the answer stays.
+        // Where the question was asked, the answer stays — and what was
+        // asked, for its Try again.
         let anchor = self.proj.blame_why.as_ref().and_then(|b| b.anchor);
+        let asked = self.proj.blame_why.as_ref().and_then(|b| b.asked.clone());
         self.proj.blame_why = Some(BlameWhy {
             token,
             title,
@@ -1387,6 +1573,9 @@ impl App {
             loading: false,
             prepared,
             anchor,
+            fix,
+            asked,
+            failed,
         });
         task
     }
@@ -1409,6 +1598,43 @@ impl App {
                 self.proj.blame_why = None;
                 Task::none()
             }
+            // Asked again, of the same lines, where it was asked.
+            TimeTravelMsg::BlameWhyAgain => match self.proj.blame_why.as_ref() {
+                Some(bw) if !bw.loading => match bw.asked.clone() {
+                    Some((abs, l0, l1)) => {
+                        let anchor = bw.anchor;
+                        // The pane showing the file asked about, the
+                        // active one first; none now: said, and the popup
+                        // put away — it stood with a Try again that did
+                        // nothing.
+                        let shows = |p: usize| {
+                            self.proj
+                                .panes
+                                .get(p)
+                                .and_then(Option::as_ref)
+                                .is_some_and(|v| v.abs == abs)
+                        };
+                        let active = self.proj.active;
+                        match [active, active ^ 1].into_iter().find(|&p| shows(p)) {
+                            Some(pane) => self.ask_why(pane, (l0, l1), anchor),
+                            None => {
+                                self.proj.blame_why = None;
+                                let file = abs
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                self.status = tr!(
+                                    "{file} is no longer open: open it to ask again",
+                                    file = file
+                                );
+                                Task::none()
+                            }
+                        }
+                    }
+                    None => Task::none(),
+                },
+                _ => Task::none(),
+            },
             TimeTravelMsg::Start { symbol } => {
                 // A plain start lands on the newest commit, whatever a pick
                 // from the margin's History that never came to be asked.
@@ -1452,6 +1678,20 @@ impl App {
                 };
                 // File -> the function at the current focus/caret; Symbol -> File.
                 let symbol = matches!(tt.scope, TimeScope::File);
+                // No block under the caret: said, rather than the whole
+                // file's history loaded again with nothing changed.
+                if symbol {
+                    let (scope, refused) = self.time_travel_scope(true);
+                    if matches!(scope, TimeScope::File) && !refused {
+                        self.status = tr!("No function or class to follow at the cursor").into();
+                        return Task::none();
+                    }
+                }
+                // What failed in the scope left goes with it: a story's Try
+                // again did nothing in the whole file's scope. A commit's
+                // summary stays: the session and its answers are kept, and
+                // a commit gone from the new history says so when asked.
+                self.forget_failure_of(crate::app::state::FailureOf::Story);
                 Task::done(Message::TimeTravel(TimeTravelMsg::Start { symbol }))
             }
             TimeTravelMsg::Exit => {
@@ -1471,12 +1711,42 @@ impl App {
                 } else {
                     Task::none()
                 };
+                // A summary's failure goes with its session: its Try again
+                // had nothing left to ask about.
+                self.forget_failure_of(crate::app::state::FailureOf::Summary);
+                self.forget_failure_of(crate::app::state::FailureOf::Story);
                 // Restore the live pane to where the reader was before entering
                 // — both offsets (its scrollable remounts at the top otherwise).
                 let restored = self.restore_code_scroll(self.proj.active);
                 Task::batch([gave_way, restored])
             }
             TimeTravelMsg::Why => self.on_time_travel_why(),
+            TimeTravelMsg::WhyOf { session, sha } => {
+                // The commit it failed on, shown again, and asked about.
+                let at = self
+                    .proj
+                    .time_travel
+                    .as_ref()
+                    .filter(|tt| tt.session == session)
+                    .and_then(|tt| tt.commits.iter().position(|c| c.sha == sha));
+                // Gone from the history shown: said, not a click that did
+                // nothing.
+                let Some(at) = at else {
+                    self.status = tr!("That commit is no longer in this history").into();
+                    return Task::none();
+                };
+                let shown = if self
+                    .proj
+                    .time_travel
+                    .as_ref()
+                    .is_some_and(|tt| tt.idx != at)
+                {
+                    self.on_time_travel_goto(at)
+                } else {
+                    Task::none()
+                };
+                Task::batch([shown, self.on_time_travel_why()])
+            }
             TimeTravelMsg::WhyDone {
                 session,
                 sha,

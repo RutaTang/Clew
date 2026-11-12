@@ -71,12 +71,13 @@ pub(crate) fn title_of(question: &str) -> String {
 }
 
 /// A session's name as the menu and the card show it: as kept, but for
-/// [`UNTITLED`], said in the reader's language.
-pub(crate) fn shown_title(title: &str) -> &str {
+/// [`UNTITLED`], said in the reader's language — and its code marks as the
+/// reader's quotation marks ("What calls “cents”?"), not backticks.
+pub(crate) fn shown_title(title: &str) -> std::borrow::Cow<'_, str> {
     if title == UNTITLED {
-        crate::i18n::lookup(UNTITLED)
+        std::borrow::Cow::Borrowed(crate::i18n::lookup(UNTITLED))
     } else {
-        title
+        crate::i18n::quoted(title)
     }
 }
 
@@ -369,6 +370,9 @@ impl App {
         }
         self.keep_ask_session();
         self.proj.ask_turns.clear();
+        // A failure standing on the status bar was of that conversation:
+        // its Try again named a turn of it.
+        self.forget_failure_of(crate::app::state::FailureOf::Ask);
         // What was queued was for that conversation.
         self.proj.ask_queue.clear();
         self.proj.ask_queue_held = false;
@@ -451,6 +455,7 @@ impl App {
             self.stop_speaking();
             let stop = self.stop_ask_streams();
             self.proj.ask_turns.clear();
+            self.forget_failure_of(crate::app::state::FailureOf::Ask);
             self.proj.ask_queue.clear();
             self.proj.ask_queue_held = false;
             self.proj.ask_pins.clear();

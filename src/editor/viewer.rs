@@ -121,6 +121,9 @@ pub enum Motion {
     WordBack,
     FileStart,
     FileEnd,
+    /// The last line's first non-blank column, as vim's `G` goes (Ctrl+End
+    /// goes to its end, [`Motion::FileEnd`]).
+    LastLine,
 }
 
 /// The most sticky headers pinned over the top of a code view: the innermost
@@ -177,6 +180,10 @@ pub struct Viewer {
     /// the generous guess a pane starts with: only a measured height can say
     /// a jump target is already in view.
     pub viewport_measured: bool,
+    /// The code view's height exactly as the scrollable last reported it
+    /// (0 before it has): `viewport_h` is raised to the window's height on a
+    /// resize, a guess too big to fit a file's end to.
+    pub bounds_h: f32,
     pub target_line: Option<usize>, // 1-based jump target, drawn highlighted
     pub selection: Option<Selection>,
     /// Last clicked position as (0-based line, 0-based display column).
@@ -288,6 +295,7 @@ impl Viewer {
             // viewport; only affects how many rows are materialized.
             viewport_h: 2400.0,
             viewport_measured: false,
+            bounds_h: 0.0,
             target_line: None,
             selection: None,
             caret: None,
@@ -538,6 +546,13 @@ impl Viewer {
             }
             headers.pop();
         }
+        // Each named by the line its signature starts on: a function's body
+        // opens on rustfmt's lone `{` (or under a `where`), and the scope
+        // pinned over it read `{` — or `where` — not its `fn`.
+        for h in &mut headers {
+            *h = crate::analyze::signature_start(&self.lines, *h);
+        }
+        headers.dedup();
         headers
     }
 
@@ -576,8 +591,8 @@ impl Viewer {
     /// way, it expands them instead, so the same action enters and leaves skim.
     /// Unlike `collapse_all`, it leaves container folds (impl/mod) open so every
     /// signature stays visible.
-    pub fn skim_bodies(&mut self, sig_lines: &[usize]) {
-        let headers = self.skim_headers(sig_lines);
+    pub fn skim_bodies(&mut self, functions: &[(usize, usize)]) {
+        let headers = self.skim_headers(functions);
         if headers.is_empty() {
             return;
         }
@@ -595,29 +610,41 @@ impl Viewer {
 
     /// Whether the bodies [`Self::skim_bodies`] folds are (mostly) folded:
     /// what pressing Skim again would undo, so the button shows it pressed.
-    pub fn skimmed(&self, sig_lines: &[usize]) -> bool {
-        let headers = self.skim_headers(sig_lines);
+    pub fn skimmed(&self, functions: &[(usize, usize)]) -> bool {
+        let headers = self.skim_headers(functions);
         !headers.is_empty() && self.skimmed_among(&headers)
     }
 
-    /// The fold headers of the functions starting at `sig_lines` (0-based):
-    /// each the body's — of the regions headed in the few lines from its
-    /// signature (and before the next one's), the one that runs on longest.
-    /// The first header found was a signature's parameters when they ran
-    /// over several lines: Skim folded them and left the body open.
-    fn skim_headers(&self, sig_lines: &[usize]) -> Vec<usize> {
-        let mut starts: Vec<usize> = sig_lines.to_vec();
-        starts.sort_unstable();
-        starts
+    /// The fold headers of the `functions` (each its first and last line,
+    /// 0-based; `usize::MAX` for a last not known): each the body's — of the
+    /// regions headed in the few lines from its signature (and before the
+    /// next one's), the one that runs on longest, within the function. The
+    /// first header found was a signature's parameters when they ran over
+    /// several lines: Skim folded them and left the body open. And one that
+    /// ran past the function was another's: a function of one line before
+    /// `mod tests {` or an `impl` took that block for its body, and Skim
+    /// folded away every function in it.
+    fn skim_headers(&self, functions: &[(usize, usize)]) -> Vec<usize> {
+        let mut functions: Vec<(usize, usize)> = functions.to_vec();
+        functions.sort_unstable();
+        functions
             .iter()
             .enumerate()
-            .filter_map(|(i, &l0)| {
-                let next = starts.get(i + 1).copied().unwrap_or(usize::MAX);
+            .filter_map(|(i, &(l0, last_of_fn))| {
+                let next = functions.get(i + 1).map_or(usize::MAX, |&(n, _)| n);
                 let last = l0
                     .saturating_add(SKIM_SIGNATURE_LINES)
                     .min(next.saturating_sub(1));
+                // Its own: within it — and, its end not known, over before
+                // the next function begins.
+                let within = if last_of_fn == usize::MAX {
+                    next.saturating_sub(1)
+                } else {
+                    last_of_fn
+                };
                 (l0..=last)
                     .filter_map(|l| self.fold_at(l))
+                    .filter(|&(_, end)| end <= within)
                     .max_by_key(|&(_, end)| end)
                     .map(|(h, _)| h)
             })
@@ -714,10 +741,15 @@ impl Viewer {
                 // for the line there: three rows down from a line inside four
                 // nested blocks, the target was under their headers.
                 let row = self.row_of(l.saturating_sub(1));
-                if self.viewport_measured && (row + 4) as f32 * line_height <= self.viewport_h {
+                if self.viewport_measured
+                    && row.saturating_add(4) as f32 * line_height <= self.viewport_h
+                {
                     return 0.0;
                 }
-                let max_y = (self.content_rows().saturating_sub(1)) as f32 * line_height;
+                // No further than puts the last line at the view's foot: a
+                // jump near the end of a short file left its first lines
+                // scrolled away above, and the view below mostly empty.
+                let max_y = self.most_scroll(line_height);
                 let mut top = row.saturating_sub(3);
                 for _ in 0..8 {
                     let pinned = self.sticky_at_row(top).len();
@@ -730,6 +762,58 @@ impl Viewer {
             }
             None => 0.0,
         }
+    }
+
+    /// The furthest a jump scrolls: the last line at the foot of the view,
+    /// as measured — or, not measured yet, the last line at its top.
+    pub fn most_scroll(&self, line_height: f32) -> f32 {
+        let rows = self.content_rows();
+        let last_at_top = rows.saturating_sub(1) as f32 * line_height;
+        // A notebook's rendered cells are not its lines' height: no view-
+        // based limit is right for it.
+        if self.bounds_h > 0.0 && self.notebook.is_none() {
+            last_at_top.min((rows as f32 * line_height - self.bounds_h).max(0.0))
+        } else {
+            last_at_top.max(0.0)
+        }
+    }
+
+    /// The view's height, `height`, as just measured: kept, and where the
+    /// view must scroll to now, if anywhere — no further than puts the last
+    /// line at the view's foot ([`Self::most_scroll`]):
+    ///
+    /// - made taller (the window enlarged, a panel shut) while the reader
+    ///   was not past the file's end: a file that then fit began at line 9,
+    ///   and a longer one at the foot of a short view kept its last lines
+    ///   at the top over an empty view;
+    /// - measured for the first time, where a jump scrolled before the view
+    ///   had a height to keep the last line at its foot by.
+    ///
+    /// A long file the reader scrolled past its end stays so, a view that
+    /// shrank moves nothing, and a notebook's rendered cells are not its
+    /// lines' height.
+    pub fn measured(&mut self, height: f32, line_height: f32) -> Option<f32> {
+        // A view laid out to nothing (a window minimized) has no foot: kept,
+        // the next real height read as a first measure, and pulled a reader
+        // scrolled past the end back up.
+        if height <= 0.0 {
+            return None;
+        }
+        let first = self.bounds_h <= 0.0;
+        let grew = !first && height > self.bounds_h + 0.5;
+        // Where the foot was before: the reader at or above it was not
+        // past the end.
+        let was_most = self.most_scroll(line_height);
+        self.bounds_h = height;
+        if self.notebook.is_some() {
+            return None;
+        }
+        let most = self.most_scroll(line_height);
+        let moves = first || (grew && self.scroll_y <= was_most + 0.5);
+        (moves && self.scroll_y > most + 0.5).then(|| {
+            self.scroll_y = most;
+            most
+        })
     }
 
     /// Selection endpoints in document order (start ≤ end), if non-empty.
@@ -859,13 +943,28 @@ impl Viewer {
             }
             Motion::LineStart => col = 0,
             Motion::LineEnd => col = self.line_len(line),
+            // The file's very start, as Ctrl+Home goes in any editor: the
+            // column kept from where the caret was put it at column 23 of
+            // line 1.
             Motion::FileStart => {
                 line = 0;
-                col = col.min(self.line_len(line));
+                col = 0;
             }
+            // The file's very end, as Ctrl+End goes in any editor — its last
+            // column too, as Ctrl+Home goes to the first: the column kept put
+            // it at column 5 of the last line.
             Motion::FileEnd => {
                 line = self.visible.last().copied().unwrap_or(last_line);
-                col = col.min(self.line_len(line));
+                col = self.line_len(line);
+            }
+            Motion::LastLine => {
+                line = self.visible.last().copied().unwrap_or(last_line);
+                col = self
+                    .line_text(line + 1)
+                    .chars()
+                    .take_while(|c| c.is_whitespace())
+                    .count()
+                    .min(self.line_len(line));
             }
             Motion::WordForward => (line, col) = self.word_forward(line, col, last_line),
             Motion::WordBack => (line, col) = self.word_back(line, col),
@@ -939,6 +1038,17 @@ impl Viewer {
             c -= 1;
         }
         (line, c)
+    }
+
+    /// Whether line `line0` (from 0) holds code: something but blanks and
+    /// comments. "Why is this line here?" asked of a blank line paid to be
+    /// told it was a blank separator.
+    pub fn has_code(&self, line0: usize) -> bool {
+        self.lines.get(line0).is_some_and(|l| {
+            l.spans.iter().any(|(text, style)| {
+                !text.trim().is_empty() && !style.is_some_and(crate::highlight::style_is_comment)
+            })
+        })
     }
 
     /// Plain text of a line (cleaned spans, concatenated), for previews.
@@ -1060,12 +1170,43 @@ mod tests {
         // The parameters' region and the body's both open within the first
         // lines of `total`.
         assert!(v.is_fold_header(0) && v.is_fold_header(3), "{:?}", v.folds);
-        v.skim_bodies(&[0, 7, 8]);
+        v.skim_bodies(&[(0, usize::MAX), (7, usize::MAX), (8, usize::MAX)]);
         assert!(v.collapsed.contains(&3), "the body: {:?}", v.collapsed);
         assert!(!v.collapsed.contains(&0), "not the parameters");
         // `one` is a line of its own: nothing of `two`'s is folded for it.
         assert!(v.collapsed.contains(&8));
         assert_eq!(v.collapsed.len(), 2, "{:?}", v.collapsed);
+    }
+
+    /// A function of one line just before a block of others — `mod tests`,
+    /// an `impl` — does not take the block for its body: Skim folds the
+    /// block's functions, not the block, whether or not it knows where each
+    /// function ends.
+    #[test]
+    fn skim_folds_no_block_round_other_functions() {
+        let source = "fn one() -> u32 { 1 }\n\nmod tests {\n    fn two() -> u32 {\n        \
+                      2\n    }\n}\n";
+        let lines = plain_lines(source);
+        let viewer = || {
+            Viewer::new(
+                PathBuf::from("/tmp/blocks.rs"),
+                "blocks.rs".into(),
+                Some("rust"),
+                Arc::new(source.to_string()),
+                lines.clone(),
+            )
+        };
+        let mut v = viewer();
+        assert!(v.is_fold_header(2) && v.is_fold_header(3), "{:?}", v.folds);
+        v.skim_bodies(&[(0, 0), (3, 5)]);
+        assert_eq!(v.collapsed.iter().copied().collect::<Vec<_>>(), [3]);
+        let mut v = viewer();
+        v.skim_bodies(&[(0, usize::MAX), (3, usize::MAX)]);
+        assert_eq!(
+            v.collapsed.iter().copied().collect::<Vec<_>>(),
+            [3],
+            "its end not known"
+        );
     }
 
     /// The code view's caches know a document by its generation, which moves
@@ -1381,6 +1522,76 @@ mod tests {
         assert_eq!(v.scroll_offset_for(Some(100), LH), 96.0 * LH);
     }
 
+    /// A jump near the end of a short file stops with its last line at the
+    /// view's foot: the 33rd line of a 38-line file put lines 30 to 38 at
+    /// the top, the 29 before them scrolled away and the view below empty.
+    #[test]
+    fn a_jump_near_the_end_keeps_the_last_line_at_the_foot() {
+        let mut v = viewer_with_lines(38);
+        v.viewport_h = 20.0 * LH;
+        v.viewport_measured = true;
+        // Not measured exactly: as before, the last line may reach the top.
+        assert_eq!(v.scroll_offset_for(Some(33), LH), 29.0 * LH);
+        v.bounds_h = 20.0 * LH;
+        assert_eq!(v.most_scroll(LH), 18.0 * LH);
+        assert_eq!(v.scroll_offset_for(Some(33), LH), 18.0 * LH);
+        // A file that fits is never scrolled.
+        v.bounds_h = 40.0 * LH;
+        assert_eq!(v.most_scroll(LH), 0.0);
+        assert_eq!(v.scroll_offset_for(Some(33), LH), 0.0);
+    }
+
+    /// The view made taller until the file fits brings it back to its
+    /// start; a long file scrolled past its end, a view that shrank and a
+    /// notebook are left where they are.
+    #[test]
+    fn a_view_grown_to_fit_the_file_shows_it_from_its_start() {
+        let mut v = viewer_with_lines(28);
+        assert_eq!(v.measured(10.0 * LH, LH), None, "a first measure");
+        v.scroll_y = 8.0 * LH;
+        assert_eq!(v.measured(30.0 * LH, LH), Some(0.0));
+        assert_eq!(v.scroll_y, 0.0);
+        // Shrinking moves nothing.
+        v.scroll_y = 5.0 * LH;
+        assert_eq!(v.measured(12.0 * LH, LH), None);
+        // A long file past its end, the view grown but still too short.
+        let mut long = viewer_with_lines(2000);
+        long.measured(20.0 * LH, LH);
+        long.scroll_y = 1999.0 * LH;
+        assert_eq!(long.measured(25.0 * LH, LH), None);
+        assert_eq!(long.scroll_y, 1999.0 * LH);
+    }
+
+    /// A longer file read at its foot, the view grown — a panel shut —
+    /// keeps its last line at the foot: its last lines stayed at the top
+    /// over an empty view. A jump made before the view was measured comes
+    /// down to the foot once it is.
+    #[test]
+    fn a_view_grown_at_the_files_foot_keeps_the_last_line_there() {
+        let mut v = viewer_with_lines(38);
+        v.measured(10.0 * LH, LH);
+        // At the foot: lines 29 to 38 in view.
+        v.scroll_y = 28.0 * LH;
+        assert_eq!(v.measured(22.0 * LH, LH), Some(16.0 * LH));
+        assert_eq!(v.scroll_y, 16.0 * LH);
+        // Above the foot and still above it: left where it is.
+        v.scroll_y = 4.0 * LH;
+        assert_eq!(v.measured(25.0 * LH, LH), None);
+        // A jump to line 34, the view not yet measured: the last line at
+        // its top, until it is.
+        let mut jumped = viewer_with_lines(38);
+        jumped.scroll_y = 33.0 * LH;
+        assert_eq!(jumped.measured(20.0 * LH, LH), Some(18.0 * LH));
+        // A view laid out to nothing and back is no first measure: a reader
+        // past the end stays there.
+        let mut past = viewer_with_lines(2000);
+        past.measured(20.0 * LH, LH);
+        past.scroll_y = 1999.0 * LH;
+        assert_eq!(past.measured(0.0, LH), None);
+        assert_eq!(past.measured(20.0 * LH, LH), None);
+        assert_eq!(past.scroll_y, 1999.0 * LH);
+    }
+
     #[test]
     fn char_selection_orders_endpoints_and_extracts_text() {
         let mut v = viewer_with_lines(10);
@@ -1449,10 +1660,12 @@ mod tests {
         assert_eq!(v.caret, Some((1, 0)));
         v.move_caret(Motion::Left); // clamped at col 0
         assert_eq!(v.caret, Some((1, 0)));
-        v.move_caret(Motion::FileEnd);
+        v.move_caret(Motion::LastLine); // vim's G: the last line, where its text starts
         assert_eq!(v.caret, Some((9, 0)));
+        v.move_caret(Motion::FileEnd); // the end of the last line
+        assert_eq!(v.caret, Some((9, 6)));
         v.move_caret(Motion::Down); // clamped at last line
-        assert_eq!(v.caret, Some((9, 0)));
+        assert_eq!(v.caret, Some((9, 6)));
         v.move_caret(Motion::FileStart);
         assert_eq!(v.caret, Some((0, 0)));
         // Word motion within "line 0": "line" then "0".
@@ -1590,6 +1803,24 @@ mod tests {
         // covers it, nor the line before it with the last line under it.
         assert_eq!(v.sticky_at_row(5), Vec::<usize>::new());
         assert_eq!(v.sticky_at_row(4), vec![0]);
+    }
+
+    /// A function laid out by rustfmt — `where` and a lone `{` under its
+    /// signature — pins its `fn` line over its body, not the `{`.
+    #[test]
+    fn a_body_under_a_where_clause_pins_its_fn_line() {
+        let source = "impl X {\n    pub fn ser<S>(&self, s: S) -> R\n    where\n        S: Ser,\n    {\n        a();\n        b();\n        c();\n        d();\n    }\n}\n";
+        let v = Viewer::new(
+            PathBuf::from("/tmp/x.rs"),
+            "x.rs".into(),
+            Some("rust"),
+            Arc::new(source.to_string()),
+            plain_lines(source),
+        );
+        // `a();` (line 5) at the top: `impl X {` and the `fn` over it.
+        assert_eq!(v.sticky_at_row(5), vec![0, 1]);
+        // The fold itself still opens on the `{`: Skim folds the body.
+        assert!(v.is_fold_header(4), "{:?}", v.folds);
     }
 
     #[test]

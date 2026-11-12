@@ -53,7 +53,7 @@ pub(crate) fn validate_git_op(op: &clew_protocol::GitOp) -> Result<(), String> {
     match op {
         GitOp::FileHistory { rel, limit } => rel_ok(rel).and(limit_ok(*limit)),
         GitOp::Churn { commits } => limit_ok(*commits),
-        GitOp::WorkingStatus => Ok(()),
+        GitOp::WorkingStatus | GitOp::Head => Ok(()),
         GitOp::SymbolHistory { rel, limit, .. } => rel_ok(rel).and(limit_ok(*limit)),
         GitOp::FileAt { sha, rel } | GitOp::AddedLines { sha, rel } => sha_ok(sha).and(rel_ok(rel)),
         GitOp::CommitMessage { sha } => sha_ok(sha),
@@ -66,6 +66,27 @@ pub(crate) fn validate_git_op(op: &clew_protocol::GitOp) -> Result<(), String> {
         GitOp::ReviewBase => Ok(()),
         GitOp::CommitSubjects { base } | GitOp::ChangedFiles { base } => ref_ok(base),
         GitOp::RangePatch { base, max_bytes } => ref_ok(base).and(bytes_ok(*max_bytes)),
+        GitOp::Log {
+            rel,
+            author,
+            grep,
+            skip,
+            limit,
+            ..
+        } => {
+            rel.as_deref().map_or(Ok(()), rel_ok)?;
+            limit_ok(*limit)?;
+            // The same checks the local path makes (`clew_core::git::log`).
+            [author, grep]
+                .into_iter()
+                .flatten()
+                .try_for_each(|text| clew_core::git::check_log_text(text))
+                .map_err(|e| format!("refused: {e}"))?;
+            (*skip <= clew_core::git::MAX_LOG_SKIP)
+                .then_some(())
+                .ok_or_else(|| "refused: history offset too large".to_string())
+        }
+        GitOp::CommitDetail { sha } => sha_ok(sha),
     }
 }
 
@@ -127,5 +148,28 @@ mod tests {
         );
         assert!(validate_git_op(&GitOp::Churn { commits: 300 }).is_ok());
         assert!(validate_git_op(&GitOp::Churn { commits: 100_000 }).is_err());
+        // The log's filters are plain text, one line, bounded; its offset
+        // and page bounded; its path confined.
+        let log = |rel: Option<&str>, grep: Option<&str>, skip: usize, limit: usize| GitOp::Log {
+            all: false,
+            rel: rel.map(Into::into),
+            author: None,
+            grep: grep.map(Into::into),
+            skip,
+            limit,
+        };
+        assert!(validate_git_op(&log(Some("src"), Some("--output=x"), 100, 100)).is_ok());
+        assert!(validate_git_op(&log(None, Some("a\nb"), 0, 100)).is_err());
+        assert!(validate_git_op(&log(None, Some(" "), 0, 100)).is_err());
+        assert!(validate_git_op(&log(Some("../x"), None, 0, 100)).is_err());
+        assert!(validate_git_op(&log(None, None, usize::MAX, 100)).is_err());
+        assert!(validate_git_op(&log(None, None, 0, 100_000)).is_err());
+        assert!(
+            validate_git_op(&GitOp::CommitDetail {
+                sha: "abc1234".into()
+            })
+            .is_ok()
+        );
+        assert!(validate_git_op(&GitOp::CommitDetail { sha: "-p".into() }).is_err());
     }
 }

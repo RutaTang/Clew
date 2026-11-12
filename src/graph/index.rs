@@ -251,6 +251,8 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         .map(|(&line, &span)| (line, span))
         .collect();
     bodies.sort_unstable();
+    let mut accessed: Vec<usize> = calls.accessed.iter().copied().collect();
+    accessed.sort_unstable();
     CachedCalls {
         lang: calls.lang.key().to_string(),
         names,
@@ -262,6 +264,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
             .collect(),
         receivers,
         owners,
+        accessed,
     }
 }
 
@@ -336,6 +339,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
         declarations: cached.declarations.iter().copied().collect(),
         bodies,
         owners,
+        accessed: cached.accessed.iter().copied().collect(),
     })
 }
 

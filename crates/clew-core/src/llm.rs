@@ -455,6 +455,9 @@ pub struct StepOutput {
     /// Why the provider stopped (`end_turn`, `tool_use`, `stop`, `length`,
     /// `refusal`, `content_filter`, …), when it said.
     pub stop_reason: Option<String>,
+    /// The tokens the step used, as the provider counted them (zero where
+    /// it did not say).
+    pub usage: Usage,
 }
 
 /// A finished text completion.
@@ -464,6 +467,125 @@ pub struct Completion {
     /// The answer was cut off by the output budget (see [`StepOutput::truncated`]).
     pub truncated: bool,
     pub stop_reason: Option<String>,
+    /// The tokens every request of the answer used together (a carried-on
+    /// answer is several).
+    pub usage: Usage,
+}
+
+/// The tokens one model call used, as its provider reports them on the
+/// response — what it bills by.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    /// Prompt tokens, those read from the provider's prompt cache included.
+    pub input: u64,
+    /// Of `input`, those read from the prompt cache, which bill lower.
+    pub cached: u64,
+    /// Of `input`, those written to the prompt cache, which bill higher
+    /// (Anthropic's cache writes, at 1.25 times its input price): priced
+    /// as input, every Ask step on Anthropic came out a fifth low.
+    pub written: u64,
+    /// Tokens the model wrote.
+    pub output: u64,
+}
+
+impl Usage {
+    /// Whether the provider said nothing of what the call used.
+    pub fn is_empty(&self) -> bool {
+        self.input == 0 && self.output == 0
+    }
+}
+
+impl std::ops::AddAssign for Usage {
+    fn add_assign(&mut self, other: Usage) {
+        self.input += other.input;
+        self.cached += other.cached;
+        self.written += other.written;
+        self.output += other.output;
+    }
+}
+
+/// Read a response's `usage` object in `dialect`. Anthropic counts its
+/// cache reads and writes apart from `input_tokens`; OpenAI counts them in
+/// `prompt_tokens` and names the cached ones in its details, DeepSeek in
+/// `prompt_cache_hit_tokens`.
+fn usage_of(dialect: Dialect, usage: &Value) -> Usage {
+    let n = |ptr: &str| usage.pointer(ptr).and_then(Value::as_u64).unwrap_or(0);
+    match dialect {
+        Dialect::Anthropic => {
+            let read = n("/cache_read_input_tokens");
+            let written = n("/cache_creation_input_tokens");
+            Usage {
+                input: n("/input_tokens") + read + written,
+                cached: read,
+                written,
+                output: n("/output_tokens"),
+            }
+        }
+        Dialect::OpenAi => Usage {
+            input: n("/prompt_tokens"),
+            cached: n("/prompt_tokens_details/cached_tokens").max(n("/prompt_cache_hit_tokens")),
+            written: 0,
+            output: n("/completion_tokens"),
+        },
+    }
+}
+
+/// One model call's spending, told to the [`Meter`] it ran under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Spent {
+    pub provider: Provider,
+    pub model: String,
+    pub usage: Usage,
+    /// What the call was for, as [`metered`] was given it.
+    pub purpose: String,
+    /// The piece of work it was part of (a request id, a stream), as
+    /// [`metered`] was given it.
+    pub work: u64,
+}
+
+/// Where a thread's model calls report what they used ([`metered`]).
+pub type Meter = Arc<dyn Fn(Spent) + Send + Sync>;
+
+/// A thread's meter, with what it is told the calls are for.
+type Metering = (Meter, String, u64);
+
+thread_local! {
+    static METERED: std::cell::RefCell<Option<Metering>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f`, every model call it makes on this thread telling `meter` what it
+/// used, as spent on `purpose` for `work`. A call reports once its response
+/// has been read whole — a stream stopped part way reports nothing, as the
+/// provider said nothing of it.
+pub fn metered<T>(meter: Meter, purpose: &str, work: u64, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Metering>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let before = self.0.take();
+            METERED.with(|m| *m.borrow_mut() = before);
+        }
+    }
+    let before = METERED.with(|m| m.borrow_mut().replace((meter, purpose.to_string(), work)));
+    let _restore = Restore(before);
+    f()
+}
+
+/// Tell this thread's meter, if it has one, what a call to `cfg` used.
+fn spent(cfg: &Config, usage: Usage) {
+    if usage.is_empty() {
+        return;
+    }
+    let Some((meter, purpose, work)) = METERED.with(|m| m.borrow().clone()) else {
+        return;
+    };
+    meter(Spent {
+        provider: cfg.provider,
+        model: cfg.model.clone(),
+        usage,
+        purpose,
+        work,
+    });
 }
 
 /// Appended to an answer the provider cut off at its output limit — still cut
@@ -485,7 +607,7 @@ impl Completion {
 }
 
 mod carry;
-pub use carry::{Asking, CARRY_ON_PROMPT, CARRY_ONS, CarryRequest, Seam, carry_on};
+pub use carry::{Asking, CARRY_ON_FROM, CARRY_ON_PROMPT, CARRY_ONS, CarryRequest, Seam, carry_on};
 
 /// Whether a provider's stop reason means the output budget cut the answer.
 /// The values do not collide across dialects, so one predicate serves both.
@@ -643,7 +765,9 @@ fn complete_tools_raw(
     let body = tools_body(cfg, system, messages, tools, max_tokens, Wire::Blocking);
     let prepared = prepare(cfg, body, BLOCKING_LIMITS)?;
     let text = run_blocking(prepared, cancelled)?;
-    parse_response(cfg.provider.dialect(), &text)
+    let out = parse_response(cfg.provider.dialect(), &text)?;
+    spent(cfg, out.usage);
+    Ok(out)
 }
 
 /// One exploration step of a tool conversation, issued as a STREAM so that it
@@ -691,7 +815,7 @@ pub fn complete_tools_step_with(
 ) -> Result<StepOutput, LlmError> {
     let body = tools_body(cfg, system, messages, tools, max_tokens, Wire::Stream);
     let prepared = prepare(cfg, body, STREAM_LIMITS)?;
-    match stream_request(prepared, cfg.provider.dialect(), on_text, cancelled) {
+    match stream_request(prepared, cfg, on_text, cancelled) {
         // A stopped turn must not spend a second request on the fallback.
         Err(e) if e.stream_refused() && !cancelled() => {
             let out = complete_tools_raw(cfg, system, messages, tools, max_tokens, cancelled)?;
@@ -726,7 +850,7 @@ pub fn complete_tools_stream(
 ) -> Result<StepOutput, LlmError> {
     let body = tools_body(cfg, system, messages, tools, max_tokens, Wire::StreamAnswer);
     let prepared = prepare(cfg, body, STREAM_LIMITS)?;
-    stream_request(prepared, cfg.provider.dialect(), &mut on_delta, cancelled)
+    stream_request(prepared, cfg, &mut on_delta, cancelled)
 }
 
 /// A multi-turn completion: the whole conversation is sent so the model can
@@ -812,6 +936,7 @@ fn chat_once(
     let prepared = prepare(cfg, body, BLOCKING_LIMITS)?;
     let text = run_blocking(prepared, cancelled)?;
     let out = parse_response(cfg.provider.dialect(), &text)?;
+    spent(cfg, out.usage);
     if !out.text.is_empty() {
         on_text(&out.text);
     }
@@ -826,6 +951,7 @@ fn chat_once(
         text: out.text,
         truncated: out.truncated,
         stop_reason: out.stop_reason,
+        usage: out.usage,
     })
 }
 
@@ -904,11 +1030,12 @@ fn chat_stream_once(
 ) -> Result<Completion, LlmError> {
     let body = chat_body(cfg, system, messages, max_tokens, true);
     let prepared = prepare(cfg, body, STREAM_LIMITS)?;
-    let out = stream_request(prepared, cfg.provider.dialect(), on_delta, cancelled)?;
+    let out = stream_request(prepared, cfg, on_delta, cancelled)?;
     Ok(Completion {
         text: out.text,
         truncated: out.truncated,
         stop_reason: out.stop_reason,
+        usage: out.usage,
     })
 }
 
@@ -994,6 +1121,74 @@ fn prepare(cfg: &Config, body: String, limits: Limits) -> Result<Prepared, LlmEr
         who,
         via,
     })
+}
+
+/// Where a provider tells an API key what is left on its account, when it
+/// does: DeepSeek, and OpenRouter (a Custom endpoint at `openrouter.ai`).
+/// Anthropic and OpenAI tell an ordinary key nothing of it.
+pub fn balance_url(cfg: &Config) -> Option<String> {
+    let base = cfg.base_url.trim().trim_end_matches('/');
+    match cfg.provider {
+        Provider::DeepSeek => Some(format!("{}/user/balance", base.trim_end_matches("/v1"))),
+        Provider::Custom if is_openrouter(cfg) => Some(format!("{base}/credits")),
+        _ => None,
+    }
+}
+
+/// What is left on `cfg`'s account, as its provider tells it: an amount per
+/// currency (`("CNY", "110.00")`, `("USD", "4.20")`). It costs no tokens: a
+/// plain read of the account. `Ok(None)` for a provider that tells nothing
+/// of it ([`balance_url`]). Blocking.
+pub fn balance(cfg: &Config) -> Result<Option<Vec<(String, String)>>, LlmError> {
+    let Some(url) = balance_url(cfg) else {
+        return Ok(None);
+    };
+    let (agent, via) = agent_for(&url, BLOCKING_LIMITS)?;
+    let uri = crate::net::request_uri(&url).map_err(LlmError::Config)?;
+    let who = cfg.provider.label();
+    let resp = crate::net::guarded(|| {
+        agent
+            .get(uri.clone())
+            .header("Authorization", format!("Bearer {}", cfg.api_key))
+            .header("accept", "application/json")
+            .call()
+    })
+    .map_err(|e| LlmError::Connect(crate::net::failure(&e, via.as_ref())))?;
+    let code = resp.status().as_u16();
+    if !resp.status().is_success() {
+        return Err(status_error(who, code, resp));
+    }
+    let text = read_body(resp)?;
+    parse_balance(&text).map(Some)
+}
+
+/// The amounts of a balance reply: DeepSeek's `balance_infos`, or
+/// OpenRouter's credits less what they have been used for.
+fn parse_balance(text: &str) -> Result<Vec<(String, String)>, LlmError> {
+    let json: Value = serde_json::from_str(text)
+        .map_err(|e| LlmError::Protocol(format!("bad JSON response: {e}")))?;
+    if let Some(infos) = json.get("balance_infos").and_then(Value::as_array) {
+        return Ok(infos
+            .iter()
+            .filter_map(|info| {
+                let currency = info.get("currency")?.as_str()?.to_string();
+                let total = info.get("total_balance")?;
+                let amount = total
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| total.as_f64().map(|n| format!("{n:.2}")))?;
+                Some((currency, amount))
+            })
+            .collect());
+    }
+    if let Some(data) = json.get("data") {
+        let n = |k: &str| data.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+        return Ok(vec![(
+            "USD".into(),
+            format!("{:.2}", n("total_credits") - n("total_usage")),
+        )]);
+    }
+    Err(LlmError::Protocol("no balance in the response".into()))
 }
 
 /// Which field carries the output budget. Newer OpenAI models (gpt-5*,
@@ -1085,8 +1280,29 @@ fn chat_body(
     };
     if stream {
         body["stream"] = true.into();
+        ask_stream_usage(cfg, &mut body);
     }
     body.to_string()
+}
+
+/// Ask an OpenAI-dialect stream to end with what it used, which it only
+/// tells when asked. Only of the providers known to take the field —
+/// OpenRouter among the Custom endpoints: another may refuse a body with a
+/// field it does not know, and the answer is worth more than its count.
+/// OpenRouter's streams, every Ask answer among them, went uncounted.
+fn ask_stream_usage(cfg: &Config, body: &mut Value) {
+    if matches!(cfg.provider, Provider::OpenAI | Provider::DeepSeek) || is_openrouter(cfg) {
+        body["stream_options"] = json!({ "include_usage": true });
+    }
+}
+
+/// Whether `cfg` is a Custom endpoint at OpenRouter.
+fn is_openrouter(cfg: &Config) -> bool {
+    cfg.provider == Provider::Custom
+        && crate::net::request_uri(cfg.base_url.trim())
+            .ok()
+            .and_then(|u| u.host().map(str::to_ascii_lowercase))
+            .is_some_and(|h| h == "openrouter.ai" || h.ends_with(".openrouter.ai"))
 }
 
 /// The body of a tool-conversation request in `cfg`'s dialect.
@@ -1195,6 +1411,7 @@ fn anthropic_tools_body(
     });
     if wire != Wire::Blocking {
         body["stream"] = true.into();
+        ask_stream_usage(cfg, &mut body);
     }
     if wire == Wire::StreamAnswer {
         body["tool_choice"] = json!({ "type": "none" });
@@ -1259,6 +1476,7 @@ fn openai_tools_body(
     body[max_tokens_field(&cfg.model)] = max_tokens.into();
     if wire != Wire::Blocking {
         body["stream"] = true.into();
+        ask_stream_usage(cfg, &mut body);
     }
     if wire == Wire::StreamAnswer {
         body["tool_choice"] = "none".into();
@@ -1340,6 +1558,9 @@ fn parse_response(dialect: Dialect, text: &str) -> Result<StepOutput, LlmError> 
         }
     }
     out.truncated = out.stop_reason.as_deref().is_some_and(is_truncation);
+    if let Some(usage) = json.get("usage") {
+        out.usage = usage_of(dialect, usage);
+    }
     Ok(out)
 }
 
@@ -1389,6 +1610,10 @@ struct StreamState {
     /// the order they must be replayed in.
     calls: BTreeMap<u64, CallFragment>,
     stop_reason: Option<String>,
+    /// What the response says it used: Anthropic tells the prompt's count
+    /// as it starts and the output's as it ends, OpenAI both on a last
+    /// event of their own.
+    usage: Usage,
     /// Bytes reassembled so far, against `max_bytes`.
     bytes: usize,
     max_bytes: usize,
@@ -1407,6 +1632,7 @@ impl StreamState {
             text: String::new(),
             calls: BTreeMap::new(),
             stop_reason: None,
+            usage: Usage::default(),
             bytes: 0,
             max_bytes,
             max_calls,
@@ -1492,9 +1718,22 @@ impl StreamState {
                 // thinking is never requested (see the module docs).
                 _ => {}
             },
+            Some("message_start") => {
+                if let Some(usage) = json.pointer("/message/usage") {
+                    let prompt = usage_of(Dialect::Anthropic, usage);
+                    self.usage.input = prompt.input;
+                    self.usage.cached = prompt.cached;
+                    self.usage.written = prompt.written;
+                    self.usage.output = self.usage.output.max(prompt.output);
+                }
+            }
             Some("message_delta") => {
                 if let Some(reason) = json.pointer("/delta/stop_reason").and_then(Value::as_str) {
                     self.stop_reason = Some(reason.to_string());
+                }
+                // The count so far, not a step: the last one is the whole.
+                if let Some(n) = json.pointer("/usage/output_tokens").and_then(Value::as_u64) {
+                    self.usage.output = n;
                 }
             }
             _ => {}
@@ -1507,6 +1746,11 @@ impl StreamState {
         json: &Value,
         on_text: &mut dyn FnMut(&str),
     ) -> Result<(), LlmError> {
+        // Its own event, after the last choice (`stream_options`), or on the
+        // last chunk beside it.
+        if let Some(usage) = json.get("usage").filter(|u| u.is_object()) {
+            self.usage = usage_of(Dialect::OpenAi, usage);
+        }
         let Some(choice) = json.pointer("/choices/0") else {
             return Ok(());
         };
@@ -1581,6 +1825,7 @@ impl StreamState {
                 .collect(),
             truncated: self.stop_reason.as_deref().is_some_and(is_truncation),
             stop_reason: self.stop_reason,
+            usage: self.usage,
         }
     }
 }
@@ -1589,7 +1834,7 @@ impl StreamState {
 /// to `on_text` as it arrives.
 fn stream_request(
     prepared: Prepared,
-    dialect: Dialect,
+    cfg: &Config,
     on_text: &mut dyn FnMut(&str),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<StepOutput, LlmError> {
@@ -1597,7 +1842,9 @@ fn stream_request(
         send_with_retry(&prepared, abandoned)
             .map(|resp| -> Box<dyn Read + Send> { Box::new(resp.into_body().into_reader()) })
     })?;
-    collect_stream(stream, dialect, on_text, cancelled)
+    let out = collect_stream(stream, cfg.provider.dialect(), on_text, cancelled)?;
+    spent(cfg, out.usage);
+    Ok(out)
 }
 
 /// Reassemble a stream that is already being read.
@@ -2269,7 +2516,10 @@ fn send_with_retry(
             }
             Ok(r) => return Ok(r),
             // Nothing reached the provider: a failure to connect, resent
-            // only while another attempt may get further.
+            // only while another attempt may get further — sooner than a
+            // busy provider is: a provider still starting is up within a
+            // few seconds, and an address with nothing at it kept the
+            // reader looking at "Explaining…" for 7 s before it said so.
             Err(e) if crate::net::is_unreached(&e) => {
                 if last || !retryable_transport(&e) {
                     return Err(LlmError::Connect(crate::net::failure(
@@ -2277,7 +2527,7 @@ fn send_with_retry(
                         prepared.via.as_ref(),
                     )));
                 }
-                delay
+                delay / 2
             }
             Err(e) => {
                 return Err(LlmError::Transport(crate::net::failure(
@@ -4057,6 +4307,196 @@ mod tests {
         assert!(out.truncated, "`length` still reports as truncated");
     }
 
+    /// What a call used is read from its response, in each dialect and
+    /// either way it came: blocking or streamed. Cached prompt tokens are
+    /// counted in the prompt's, as they are billed as part of it.
+    #[test]
+    fn a_response_says_what_it_used() {
+        let anthropic = parse_response(
+            Dialect::Anthropic,
+            r#"{"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn",
+               "usage":{"input_tokens":120,"cache_read_input_tokens":800,
+                        "cache_creation_input_tokens":80,"output_tokens":42}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            anthropic.usage,
+            Usage {
+                input: 1000,
+                cached: 800,
+                written: 80,
+                output: 42
+            }
+        );
+        let openai = parse_response(
+            Dialect::OpenAi,
+            r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],
+               "usage":{"prompt_tokens":900,"completion_tokens":50,
+                        "prompt_tokens_details":{"cached_tokens":512}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            openai.usage,
+            Usage {
+                input: 900,
+                cached: 512,
+                written: 0,
+                output: 50
+            }
+        );
+        let deepseek = parse_response(
+            Dialect::OpenAi,
+            r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],
+               "usage":{"prompt_tokens":300,"completion_tokens":7,
+                        "prompt_cache_hit_tokens":256,"prompt_cache_miss_tokens":44}}"#,
+        )
+        .unwrap();
+        assert_eq!(deepseek.usage.cached, 256);
+        let silent = parse_response(
+            Dialect::OpenAi,
+            r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}"#,
+        )
+        .unwrap();
+        assert!(silent.usage.is_empty());
+
+        // Streamed: OpenAI's comes on its own last event; Anthropic tells the
+        // prompt's as it starts and the output's, as a running count, as it ends.
+        let sse = concat!(
+            r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#,
+            "\n\n",
+            r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            "\n\n",
+            r#"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3}}"#,
+            "\n\ndata: [DONE]\n\n",
+        );
+        let (_, out) = collect_text(sse, Dialect::OpenAi).expect("a complete stream");
+        assert_eq!((out.usage.input, out.usage.output), (10, 3));
+        let sse = concat!(
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":20,"#,
+            r#""cache_read_input_tokens":100,"cache_creation_input_tokens":30,"#,
+            r#""output_tokens":1}}}"#,
+            "\n\n",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"ok"}}"#,
+            "\n\n",
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}"#,
+            "\n\n",
+            r#"data: {"type":"message_stop"}"#,
+            "\n\n",
+        );
+        let (_, out) = collect_text(sse, Dialect::Anthropic).expect("a complete stream");
+        assert_eq!(
+            out.usage,
+            Usage {
+                input: 150,
+                cached: 100,
+                written: 30,
+                output: 9
+            }
+        );
+    }
+
+    /// The balance is read where the provider keeps it, and its reply read
+    /// in its own shape; a provider that keeps none is not asked.
+    #[test]
+    fn a_balance_is_read_where_its_provider_keeps_it() {
+        let cfg = |provider, base: &str| {
+            Config::from_parts(provider, "k".into(), "m".into(), base.into())
+        };
+        assert_eq!(
+            balance_url(&cfg(Provider::DeepSeek, "https://api.deepseek.com/v1")).as_deref(),
+            Some("https://api.deepseek.com/user/balance")
+        );
+        assert_eq!(
+            balance_url(&cfg(Provider::Custom, "https://openrouter.ai/api/v1")).as_deref(),
+            Some("https://openrouter.ai/api/v1/credits")
+        );
+        assert_eq!(
+            balance_url(&cfg(Provider::Custom, "http://localhost:11434/v1")),
+            None
+        );
+        assert_eq!(balance_url(&cfg(Provider::Anthropic, "")), None);
+        assert_eq!(balance_url(&cfg(Provider::OpenAI, "")), None);
+        // OpenRouter's streams are asked what they used, as OpenAI's are;
+        // another Custom endpoint's are not (it may refuse the field).
+        let asks = |c: &Config| {
+            let mut body = json!({});
+            ask_stream_usage(c, &mut body);
+            body.get("stream_options").is_some()
+        };
+        assert!(asks(&cfg(Provider::Custom, "https://openrouter.ai/api/v1")));
+        assert!(!asks(&cfg(Provider::Custom, "http://localhost:11434/v1")));
+        assert!(asks(&cfg(Provider::DeepSeek, "https://api.deepseek.com")));
+        assert_eq!(
+            parse_balance(
+                r#"{"is_available":true,"balance_infos":[{"currency":"CNY",
+                    "total_balance":"110.00","granted_balance":"10.00","topped_up_balance":"100.00"}]}"#
+            )
+            .unwrap(),
+            vec![("CNY".to_string(), "110.00".to_string())]
+        );
+        assert_eq!(
+            parse_balance(r#"{"data":{"total_credits":10.5,"total_usage":2.25}}"#).unwrap(),
+            vec![("USD".to_string(), "8.25".to_string())]
+        );
+        assert!(parse_balance("{}").is_err());
+
+        // Read from the server, with the key, at no token's cost.
+        let ok = http(
+            "200 OK",
+            "application/json",
+            r#"{"balance_infos":[{"currency":"USD","total_balance":"3.10"}]}"#,
+        );
+        let (addr, handle) = mock(vec![Script::Respond(ok)]);
+        let mut deepseek = custom(addr);
+        deepseek.provider = Provider::DeepSeek;
+        assert_eq!(
+            balance(&deepseek).unwrap(),
+            Some(vec![("USD".to_string(), "3.10".to_string())])
+        );
+        let log = handle.join().unwrap();
+        assert_eq!(log.served, 1);
+    }
+
+    /// A call made under a meter tells it what it used, what for and as part
+    /// of what; one made under none, or after the meter's scope, tells
+    /// nobody. An OpenAI or DeepSeek stream asks for its count; a Custom
+    /// endpoint is not sent a field it may refuse.
+    #[test]
+    fn a_metered_call_reports_what_it_spent() {
+        let ok = http(
+            "200 OK",
+            "application/json",
+            r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":11,"completion_tokens":2}}"#,
+        );
+        let (addr, handle) = mock(vec![Script::Respond(ok.clone()), Script::Respond(ok)]);
+        let heard = Arc::new(Mutex::new(Vec::<Spent>::new()));
+        let meter: Meter = {
+            let heard = heard.clone();
+            Arc::new(move |s| heard.lock().unwrap().push(s))
+        };
+        let cfg = custom(addr);
+        let msgs = [ChatMsg::user("q")];
+        let done = metered(meter, "explain", 7, || {
+            complete_chat_full(&cfg, "s", &msgs, 64, &never()).unwrap()
+        });
+        assert_eq!(done.usage.input, 11);
+        complete_chat_full(&cfg, "s", &msgs, 64, &never()).unwrap();
+        handle.join().unwrap();
+        let heard = heard.lock().unwrap();
+        assert_eq!(heard.len(), 1, "only the metered call: {heard:?}");
+        assert_eq!(heard[0].purpose, "explain");
+        assert_eq!(heard[0].work, 7);
+        assert_eq!(heard[0].model, cfg.model);
+        assert_eq!((heard[0].usage.input, heard[0].usage.output), (11, 2));
+
+        let mut deepseek = cfg.clone();
+        deepseek.provider = Provider::DeepSeek;
+        assert!(chat_body(&deepseek, "s", &msgs, 8, true).contains("include_usage"));
+        assert!(!chat_body(&deepseek, "s", &msgs, 8, false).contains("stream_options"));
+        assert!(!chat_body(&cfg, "s", &msgs, 8, true).contains("stream_options"));
+    }
+
     /// Anthropic's stream: text and tool-use blocks come back in emission
     /// order, and reasoning deltas — which cannot occur, since extended
     /// thinking is never requested — are ignored rather than mistaken for text.
@@ -4265,9 +4705,13 @@ mod tests {
         let mut scripts = vec![Script::Respond(http("200 OK", "application/json", body))];
         scripts.extend((0..CARRY_ONS).map(|n| anthropic_reply(&format!(" more {n}"), true)));
         let (addr, handle) = mock(scripts);
-        let done = complete_chat_full(&anthropic_at(addr), "s", &[ChatMsg::user("q")], 8, &|| {
-            false
-        })
+        let done = complete_chat_full(
+            &anthropic_at(addr),
+            "s",
+            &[ChatMsg::user("q")],
+            CARRY_ON_FROM,
+            &|| false,
+        )
         .expect("a completion");
         assert_eq!(handle.join().unwrap().served, 1 + CARRY_ONS);
         assert_eq!(
@@ -4296,8 +4740,14 @@ mod tests {
             ))
         };
         let (addr, handle) = mock((0..=CARRY_ONS).map(|_| partial()).collect());
-        let done =
-            complete_chat_full(&custom(addr), "s", &[ChatMsg::user("q")], 8, &|| false).unwrap();
+        let done = complete_chat_full(
+            &custom(addr),
+            "s",
+            &[ChatMsg::user("q")],
+            CARRY_ON_FROM,
+            &|| false,
+        )
+        .unwrap();
         handle.join().unwrap();
         assert!(done.truncated);
 
@@ -4313,7 +4763,7 @@ mod tests {
             &custom(addr),
             "s",
             &[ChatMsg::user("q")],
-            8,
+            CARRY_ON_FROM,
             |d| seen.push_str(d),
             &|| false,
         )
@@ -4349,9 +4799,13 @@ mod tests {
             anthropic_reply("- lib.rs — `CacheIss", true),
             anthropic_reply("ue` holds the cache.", false),
         ]);
-        let done = complete_chat_full(&anthropic_at(addr), "s", &[ChatMsg::user("q")], 8, &|| {
-            false
-        })
+        let done = complete_chat_full(
+            &anthropic_at(addr),
+            "s",
+            &[ChatMsg::user("q")],
+            CARRY_ON_FROM,
+            &|| false,
+        )
         .unwrap();
         assert_eq!(done.text, "- lib.rs — `CacheIssue` holds the cache.");
         assert!(!done.truncated);
@@ -4378,7 +4832,7 @@ mod tests {
             &custom(addr),
             "s",
             &[ChatMsg::user("q")],
-            8,
+            CARRY_ON_FROM,
             &mut |d| seen.push_str(d),
             &|| false,
         )

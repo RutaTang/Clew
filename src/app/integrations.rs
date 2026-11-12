@@ -230,6 +230,28 @@ pub struct IntegrationsDraft {
     pub signed_in: HashSet<String>,
     /// What the last action did, or why it did not.
     pub note: Option<String>,
+    /// Why the add-a-server and add-an-agent forms' last Add did not add:
+    /// said beside their button, as the Connect form says what it lacks —
+    /// at the top of the page it was 400 px from what was pressed.
+    pub mcp_add_error: Option<String>,
+    pub acp_add_error: Option<String>,
+    /// The MCP registry search (`mcp::registry`).
+    pub registry: RegistrySearch,
+}
+
+/// A search of the official MCP registry, and what it found.
+#[derive(Debug, Default)]
+pub struct RegistrySearch {
+    pub query: String,
+    /// The search under way: its number.
+    pub searching: Option<u64>,
+    seq: u64,
+    /// What the last search found, or why it found nothing.
+    pub found: Option<Result<Vec<mcp::registry::Entry>, String>>,
+    /// The entry the add form was last filled from, and what it reads that
+    /// the form leaves to the user: its variables or headers, each with
+    /// whether it is required and secret, and what it is for.
+    pub used: Option<mcp::registry::Entry>,
 }
 
 /// The `ask_agent` preference: which ACP agent the Ask panel uses.
@@ -507,7 +529,13 @@ impl App {
                         );
                     }
                 }
-                Err(why) => failed.push(format!("{} ({why})", found.config.name)),
+                // Why, in the reader's language: "(the server is not
+                // running)" stood in English in a Chinese line.
+                Err(why) => failed.push(format!(
+                    "{} ({})",
+                    found.config.name,
+                    crate::i18n::message(&why.to_string())
+                )),
             }
         }
         self.status = if failed.is_empty() {
@@ -569,7 +597,7 @@ impl App {
             });
             return Task::none();
         };
-        let label = format!("{} · {}", target.server.name, target.tool.display_name());
+        let label = format!("{} ({})", target.tool.display_name(), target.server.name);
         let ask = target
             .server
             .needs_approval(&target.tool.name, target.tool.read_only);
@@ -1001,7 +1029,7 @@ impl App {
             ..AskTurn::default()
         });
         // Said aloud, it is answered without the card opening over the code
-        // (see `on_transcribed`).
+        // (see `on_words`).
         if !spoken {
             self.reveal_ask();
         }
@@ -1798,25 +1826,90 @@ impl App {
         let result: Result<Option<String>, String> = match message {
             IntegrationsMsg::McpName(v) => {
                 draft.new_mcp_name = v;
+                draft.mcp_add_error = None;
+                return Task::none();
+            }
+            IntegrationsMsg::RegistryQuery(v) => {
+                draft.registry.query = v;
+                return Task::none();
+            }
+            IntegrationsMsg::RegistrySearch => {
+                let query = draft.registry.query.trim().to_string();
+                if query.is_empty() {
+                    return Task::none();
+                }
+                draft.registry.seq += 1;
+                let seq = draft.registry.seq;
+                draft.registry.searching = Some(seq);
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || mcp::registry::search(&query))
+                            .await
+                            .unwrap_or_else(|_| Err(tr!("an internal task failed").into()))
+                    },
+                    move |result| {
+                        Message::Integrations(IntegrationsMsg::RegistryFound { seq, result })
+                    },
+                );
+            }
+            IntegrationsMsg::RegistryFound { seq, result } => {
+                if draft.registry.searching == Some(seq) {
+                    draft.registry.searching = None;
+                    draft.registry.found = Some(result);
+                }
+                return Task::none();
+            }
+            IntegrationsMsg::RegistryUse(index) => {
+                let Some(entry) = draft
+                    .registry
+                    .found
+                    .as_ref()
+                    .and_then(|f| f.as_ref().ok())
+                    .and_then(|entries| entries.get(index))
+                    .cloned()
+                else {
+                    return Task::none();
+                };
+                let Some((name, target, extra)) = mcp::registry::form_fields(&entry) else {
+                    return Task::none();
+                };
+                draft.new_mcp_name = name;
+                draft.new_mcp_target = target;
+                draft.new_mcp_extra = extra;
+                draft.mcp_add_error = None;
+                draft.note = Some(tr!(
+                    "Filled in from the registry: read the command, fill in what it needs, then Add server"
+                ).to_string());
+                draft.registry.used = Some(entry);
                 return Task::none();
             }
             IntegrationsMsg::McpTarget(v) => {
                 draft.new_mcp_target = v;
+                draft.mcp_add_error = None;
                 return Task::none();
             }
             IntegrationsMsg::McpExtra(v) => {
                 draft.new_mcp_extra = v;
+                draft.mcp_add_error = None;
                 return Task::none();
             }
             IntegrationsMsg::AcpName(v) => {
                 draft.new_acp_name = v;
+                draft.acp_add_error = None;
                 return Task::none();
             }
             IntegrationsMsg::AcpCommand(v) => {
                 draft.new_acp_command = v;
+                draft.acp_add_error = None;
                 return Task::none();
             }
-            IntegrationsMsg::McpAdd => self.add_mcp_from_form(),
+            // Why it did not add is said beside its button, not as the
+            // page's note.
+            IntegrationsMsg::McpAdd => {
+                let added = self.add_mcp_from_form();
+                self.settings.integrations.mcp_add_error = added.as_ref().err().cloned();
+                added.or(Ok(None))
+            }
             IntegrationsMsg::McpRemove(name) => {
                 mcp::hub::Hub::global().forget(&name);
                 mcp::config::remove(&name)
@@ -1968,7 +2061,11 @@ impl App {
                 mcp::hub::Hub::global().forget(&name);
                 result.map(|()| Some(tr!("Signed out of `{name}`", name = name)))
             }
-            IntegrationsMsg::AcpAdd => self.add_acp_from_form(),
+            IntegrationsMsg::AcpAdd => {
+                let added = self.add_acp_from_form();
+                self.settings.integrations.acp_add_error = added.as_ref().err().cloned();
+                added.or(Ok(None))
+            }
             IntegrationsMsg::AcpPreset(index) => match acp::config::PRESETS.get(index) {
                 Some(preset) => acp::config::save(&preset.config()).map(|()| {
                     Some(tr!(
@@ -2084,6 +2181,7 @@ impl App {
         draft.new_mcp_name.clear();
         draft.new_mcp_target.clear();
         draft.new_mcp_extra.clear();
+        draft.registry.used = None;
         let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
         Ok(Some(trn!(
             "Added MCP server {names}",

@@ -4,7 +4,419 @@
 use crate::app::prelude::*;
 use crate::*;
 
+/// The parts of the window F6 moves the keys between, in the order it
+/// moves through them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Region {
+    /// The code: its motions and keys.
+    Code,
+    /// The sidebar's field: the file filter, or the text search.
+    Sidebar,
+    /// The Files view's tree, under its filter (`ui::tree_keys`).
+    Tree,
+    /// The chat with Clew.
+    Chat,
+}
+
+/// An id no field has: focusing it takes the keys from every field.
+pub(crate) fn nowhere() -> iced::widget::Id {
+    iced::widget::Id::new("clew-keys-nowhere")
+}
+
 impl App {
+    /// ⌘J: put a code on every control on screen (`ui::jump`), the keys
+    /// taken from the fields to type one by — or put the codes away, if
+    /// they are up.
+    fn start_jump(&mut self) -> Task<Message> {
+        if self.jump.take().is_some() {
+            self.status.clear();
+            return Task::none();
+        }
+        // The codes put the ring away: a press after them is a code's.
+        let _ = self.end_ring(false);
+        self.jump = Some(String::new());
+        self.pending_g = false;
+        self.pending_z = false;
+        self.status = tr!("Type the code on a control to press it — Esc to stop").into();
+        operation::focus(nowhere())
+    }
+
+    /// A key while jump mode's codes are up: a letter goes on with a code,
+    /// and a whole code presses its control, as a click does; Backspace
+    /// takes a letter back. Any other key — Esc, ⌘J — puts the codes away.
+    fn jump_key(&mut self, key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Task<Message> {
+        use keyboard::Key;
+        use keyboard::key::Named;
+        let mut typed = self.jump.take().unwrap_or_default();
+        let plain = !(modifiers.command() || modifiers.control() || modifiers.alt());
+        match key.as_ref() {
+            Key::Named(Named::Backspace) if plain && !typed.is_empty() => {
+                typed.pop();
+                self.jump = Some(typed);
+                Task::none()
+            }
+            Key::Character(c) if plain => {
+                let Some(letter) = c.chars().next().filter(char::is_ascii_alphabetic) else {
+                    self.status.clear();
+                    return Task::none();
+                };
+                typed.push(letter.to_ascii_lowercase());
+                match ui::jump::pressed(self.main_window, &typed) {
+                    ui::jump::Typed::Press(message) => {
+                        self.status.clear();
+                        self.press(*message)
+                    }
+                    ui::jump::Typed::More => {
+                        self.jump = Some(typed);
+                        Task::none()
+                    }
+                    ui::jump::Typed::Nothing => {
+                        self.status = tr!(
+                            "No control has the code {code}",
+                            code = typed.to_uppercase()
+                        );
+                        Task::none()
+                    }
+                }
+            }
+            _ => {
+                self.status.clear();
+                Task::none()
+            }
+        }
+    }
+
+    /// Tab or Shift-Tab, the ring not up: the window puts it up — on the
+    /// first stop (the last, going back), or, a field holding the keys
+    /// (`field`), on the stop after it. The keys it takes are given back
+    /// when the ring is put away by a key.
+    pub(crate) fn on_tab(&mut self, forward: bool, field: bool) -> Task<Message> {
+        if self.tutorial.is_some() {
+            return Task::none();
+        }
+        if self.ring.is_none() {
+            self.ring_code = self.code_focused;
+            self.ring_menu = ui::active_overlay(self).is_some_and(|o| o.is_menu());
+        }
+        self.ring = Some(match &self.picker {
+            Some(picker) if !field => ui::RingAsk::AfterPicker {
+                forward,
+                key: picker.key,
+            },
+            _ if field => ui::RingAsk::AfterFocused { forward },
+            _ => ui::RingAsk::Start { forward },
+        });
+        self.code_focused = false;
+        self.pending_g = false;
+        self.pending_z = false;
+        Task::none()
+    }
+
+    /// The ring is on another stop: what it is called — as its control
+    /// said when built, else as what it presses is offered — said in the
+    /// status bar (a strip's tool is an icon alone); nothing, on a field.
+    pub(crate) fn on_ring_moved(&mut self, press: Option<Message>, name: Option<String>) {
+        // Said late, of a ring put away since: it stays away.
+        if self.ring.is_none() {
+            return;
+        }
+        self.ring = Some(ui::RingAsk::Kept);
+        self.status = name
+            .or_else(|| press.and_then(|press| ring_name(self, &press)))
+            .unwrap_or_default();
+        self.ring_said = self.status.clone();
+    }
+
+    /// The ring put away: by a key (`give_back`), the keys go back where
+    /// they were when it came up — to the code, unless a dialog or the
+    /// tutorial holds them now; to the field it came up from, which the
+    /// task returned gives them back — and by the pointer or a field taking
+    /// them, they are where those put them. What the ring said in the
+    /// status bar goes with it.
+    pub(crate) fn end_ring(&mut self, give_back: bool) -> Option<Task<Message>> {
+        self.ring.take()?;
+        self.ring_menu = false;
+        if self.status == self.ring_said {
+            self.status.clear();
+        }
+        self.ring_said.clear();
+        if !give_back {
+            return None;
+        }
+        // Ask made large holds them too, as a dialog does. A menu still up
+        // does not: it lets keys through to nothing and goes with Esc, and
+        // counted, the keys were nowhere once it had gone.
+        let held_above = ui::active_overlay(self).is_some_and(|o| o.holds_keys() && !o.is_menu())
+            || self.tutorial.is_some()
+            || self.ask_view == crate::AskView::Expanded;
+        self.code_focused = self.ring_code && !held_above;
+        if self.ring_code {
+            return None;
+        }
+        ui::jump::ring_from(self.main_window).map(operation::focus)
+    }
+
+    /// A menu come up or gone, as the last message left it. Gone: the ring
+    /// that came up on it goes with it, the keys back where they were —
+    /// left up, it went on to a control of the window, whose name took
+    /// the status line from what the menu's row had said there — and the
+    /// tree, which gives up the keys while its menu is up, has them again,
+    /// unless what was picked gave them to the code (a file opened).
+    /// Before, the keys were the tree's when the menu went, and nothing's.
+    pub(crate) fn sync_menu_keys(&mut self) -> Option<Task<Message>> {
+        let up = ui::active_overlay(self).is_some_and(|o| o.is_menu());
+        let was = std::mem::replace(&mut self.menu_up, up);
+        if up && !was {
+            self.menu_tree_keys = self.tree_focused;
+            // Come up under the ring (Enter on the View button): the ring's
+            // menu as one Tab opened on is — Esc closed the ring alone and
+            // left the menu holding the keys, and a pick left the ring on a
+            // control of the window.
+            if self.ring.is_some() {
+                self.ring_menu = true;
+            }
+        }
+        if up || !was {
+            return None;
+        }
+        let held = ui::active_overlay(self).is_some_and(|o| o.holds_keys())
+            || self.tutorial.is_some()
+            || self.ask_view == crate::AskView::Expanded;
+        // A dialog its row opened in its place: the ring goes on there, on
+        // the dialog's first stop.
+        let ring = if self.ring_menu && !held {
+            // What was picked gave the code the keys (Open, from the tree's
+            // menu): theirs once the ring is put away — it gave them back
+            // to the tree the ring came up from.
+            if self.code_focused {
+                self.ring_code = true;
+            }
+            self.end_ring(true)
+        } else {
+            self.ring_menu = false;
+            None
+        };
+        let tree = std::mem::take(&mut self.menu_tree_keys)
+            && !self.code_focused
+            && !held
+            && self.show_left_sidebar
+            && self.sidebar == crate::SidebarTab::Files
+            && ui::tree_has_rows(self);
+        let tree = tree.then(|| operation::focus(ui::files_tree_keys_id()));
+        match (ring, tree) {
+            (None, None) => None,
+            (ring, tree) => Some(Task::batch(ring.into_iter().chain(tree))),
+        }
+    }
+
+    /// What pressing a control sends, sent as its click sends it: through
+    /// the window's shell when that takes it before the App does — closing
+    /// the window (which asks about unsaved edits first), a tour begun in a
+    /// window of its own — else to the App now.
+    pub(crate) fn press(&mut self, message: Message) -> Task<Message> {
+        let shells = matches!(
+            message,
+            Message::Window(WindowMsg::Close) | Message::Tutorial(TutorialMsg::InNewWindow(_))
+        );
+        if shells {
+            Task::done(message)
+        } else {
+            self.update(message)
+        }
+    }
+
+    /// A key while the keyboard's ring is up (the window took Tab and the
+    /// arrows already): Enter and Space press what it is on, as a click
+    /// does, the ring staying; Esc puts it away. Any other key puts it away
+    /// and is left to do what it does (`None`).
+    fn ring_key(
+        &mut self,
+        key: &keyboard::Key,
+        modifiers: keyboard::Modifiers,
+    ) -> Option<Task<Message>> {
+        use keyboard::Key;
+        use keyboard::key::Named;
+        let plain = !(modifiers.command() || modifiers.control() || modifiers.alt());
+        match key.as_ref() {
+            Key::Named(Named::Enter | Named::Space) if plain => {
+                let message = ui::jump::ring_press(self.main_window)?;
+                let task = self.press(message);
+                // The press gave the code the keys (a file opened from a
+                // row): they are its once the ring is put away.
+                if self.ring.is_some() && self.code_focused {
+                    self.ring_code = true;
+                    self.code_focused = false;
+                }
+                Some(task)
+            }
+            // On a menu, the menu goes with it, and the keys go back where
+            // they were: put away alone, it left the menu up, holding them,
+            // and the next Esc closed the menu with the keys nowhere.
+            Key::Named(Named::Escape) if self.ring_menu => {
+                let closed = ui::escape_message(self).map(|close| self.update(close));
+                // Closing it put the ring away (`sync_menu_keys`) unless it
+                // did not close.
+                let ended = self.end_ring(true);
+                Some(Task::batch(closed.into_iter().chain(ended)))
+            }
+            Key::Named(Named::Escape) => Some(self.end_ring(true).unwrap_or_else(Task::none)),
+            // Any other key puts the ring away and does what it does. Given
+            // back to the field the ring came up from, what is typed is the
+            // field's to have, and went to no field; a shortcut (with a
+            // modifier, or a function key) does what it does once the field
+            // has the keys again — it only put the ring away, and had to be
+            // pressed twice.
+            _ => {
+                let give_back = self.end_ring(true)?;
+                let shortcut =
+                    !plain || matches!(key.as_ref(), Key::Named(named) if is_function_key(named));
+                Some(if shortcut {
+                    give_back.chain(Task::done(Message::Editor(EditorMsg::KeyPressed(
+                        key.clone(),
+                        modifiers,
+                    ))))
+                } else {
+                    give_back
+                })
+            }
+        }
+    }
+
+    /// What a function key does for the debugger now, if anything: F9 sets
+    /// or clears a breakpoint on the caret's line; F5 continues a paused
+    /// program, or starts debugging when none runs; ⇧F5 stops it; F10, F11
+    /// and ⇧F11 step over, in and out of a paused one.
+    pub(crate) fn debug_key(
+        &self,
+        key: &iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> Option<Message> {
+        use iced::keyboard::{Key, key::Named};
+        let Key::Named(named) = key.as_ref() else {
+            return None;
+        };
+        // A chord is some other command's: on macOS Ctrl is not Command, and
+        // Ctrl+F10 stepped the program there.
+        if modifiers.command() || modifiers.control() || modifiers.logo() || modifiers.alt() {
+            return None;
+        }
+        let status = self.debug.session.as_ref().map(|s| s.status);
+        let paused = status == Some(crate::DebugStatus::Stopped);
+        let live = status.is_some_and(|s| s != crate::DebugStatus::Terminated);
+        let shift = modifiers.shift();
+        let step = |cmd| Message::Debug(DebugMsg::Control(cmd));
+        Some(match named {
+            Named::F9 if !shift => {
+                let v = self.active_viewer()?;
+                let (line, _) = v.caret?;
+                Message::Debug(DebugMsg::BreakpointToggle {
+                    path: v.abs.clone(),
+                    line: line + 1,
+                })
+            }
+            Named::F5 if shift && live => Message::Debug(DebugMsg::Stop),
+            Named::F5 if !shift && paused => step(crate::DebugCmd::Continue),
+            Named::F5 if !shift && !live => {
+                Message::Editor(EditorMsg::RunAction(keymap::Action::StartDebug))
+            }
+            Named::F10 if !shift && paused => step(crate::DebugCmd::StepOver),
+            Named::F11 if !shift && paused => step(crate::DebugCmd::StepIn),
+            Named::F11 if shift && paused => step(crate::DebugCmd::StepOut),
+            _ => return None,
+        })
+    }
+
+    /// The regions F6 moves through now: the code while a file is open,
+    /// the sidebar while it shows a field, and the chat.
+    fn regions(&self) -> Vec<Region> {
+        let mut regions = Vec::new();
+        if self.active_viewer().is_some() {
+            regions.push(Region::Code);
+        }
+        if self.sidebar_field().is_some() {
+            regions.push(Region::Sidebar);
+        }
+        if self.sidebar_field().is_some()
+            && self.sidebar == SidebarTab::Files
+            && ui::tree_has_rows(self)
+        {
+            regions.push(Region::Tree);
+        }
+        regions.push(Region::Chat);
+        regions
+    }
+
+    /// The sidebar's field, while it is on screen.
+    fn sidebar_field(&self) -> Option<iced::widget::Id> {
+        if !self.show_left_sidebar || self.proj.project.is_none() {
+            return None;
+        }
+        match self.sidebar {
+            SidebarTab::Files => Some(ui::file_filter_id()),
+            SidebarTab::Search => Some(ui::search_input_id()),
+            _ => None,
+        }
+    }
+
+    /// F6 (`forward`) or Shift-F6: the keys to the next region of the
+    /// window, or the one before — from the code, wherever they are.
+    pub(crate) fn cycle_region(&mut self, forward: bool) -> Task<Message> {
+        let regions = self.regions();
+        let now = if self.code_focused {
+            Region::Code
+        } else if self.tree_focused {
+            Region::Tree
+        } else {
+            self.region
+        };
+        let n = regions.len();
+        let next = match regions.iter().position(|&r| r == now) {
+            Some(i) if forward => (i + 1) % n,
+            Some(i) => (i + n - 1) % n,
+            None => 0,
+        };
+        let region = regions[next];
+        self.region = region;
+        // Going on from the chat F6 opened, nothing typed or asked there:
+        // put away again, not left over the code.
+        if now == Region::Chat
+            && region != Region::Chat
+            && let Some(turns) = self.ask_by_f6.take()
+            && self.proj.ask_input.trim().is_empty()
+            && self.proj.ask_turns.len() == turns
+        {
+            // As its × puts it away: its menu of sessions with it.
+            self.put_ask_away();
+        }
+        match region {
+            Region::Code => {
+                self.code_focused = true;
+                operation::focus(nowhere())
+            }
+            Region::Sidebar => {
+                self.code_focused = false;
+                self.sidebar_field()
+                    .map_or_else(Task::none, operation::focus)
+            }
+            Region::Tree => {
+                self.code_focused = false;
+                Task::batch([
+                    operation::focus(ui::files_tree_keys_id()),
+                    self.reveal_tree_cursor(),
+                ])
+            }
+            Region::Chat => {
+                self.ask_by_f6 = (!self.ask_view.is_open()).then_some(self.proj.ask_turns.len());
+                self.reveal_ask();
+                self.code_focused = false;
+                Task::batch([
+                    operation::focus(ui::ask_input_id()),
+                    operation::move_cursor_to_end(ui::ask_input_id()),
+                ])
+            }
+        }
+    }
+
     pub(crate) fn handle_key(
         &mut self,
         key: keyboard::Key,
@@ -20,6 +432,9 @@ impl App {
         if std::mem::take(&mut self.escape_taken)
             && matches!(key.as_ref(), Key::Named(Named::Escape))
         {
+            // It put the ring away too: the field gave the keys where they
+            // go.
+            let _ = self.end_ring(false);
             return Task::none();
         }
 
@@ -50,6 +465,28 @@ impl App {
         ) {
             return Task::none();
         }
+        // Jump mode's codes are up: every key is theirs (`jump_key`).
+        if self.jump.is_some() {
+            return self.jump_key(&key, modifiers);
+        }
+        // A drop-down is open: its rows are walked and picked from, ahead
+        // of the ring it was opened from (`picker_key`).
+        if self.picker.is_some()
+            && let Some(task) = self.picker_key(&key, modifiers)
+        {
+            return task;
+        }
+        // The tutorial holds the keys: no ring over it.
+        if self.tutorial.is_some() {
+            let _ = self.end_ring(false);
+        }
+        // The keyboard's ring is up: Enter, Space and Esc are its
+        // (`ring_key`); any other key puts it away and does what it does.
+        if self.ring.is_some()
+            && let Some(task) = self.ring_key(&key, modifiers)
+        {
+            return task;
+        }
         // The tutorial is modal: → / Enter advance, ← goes back, Esc leaves, and
         // every other key is swallowed so nothing acts behind the overlay.
         if self.tutorial.is_some() {
@@ -71,6 +508,20 @@ impl App {
             self.pending_z = false;
             return self.update(msg);
         }
+        // Enter on a sheet presses its main button — as its "yes" by voice
+        // does — where that is safe and only once it can be pressed and
+        // read (`ActiveOverlay::enter_answers`). Opened from a shortcut,
+        // the cost sheet took no Enter: the ring had nothing on it. A field
+        // holding the keys sends its own Enter before it gets here.
+        if matches!(key.as_ref(), Key::Named(Named::Enter))
+            && !(cmd || modifiers.control() || modifiers.alt() || modifiers.shift())
+            && ui::active_overlay(self).is_some_and(|o| o.enter_answers(self))
+            && let Some(yes) = ui::heard::gather(self).into_iter().find(|t| {
+                t.answer == Some(ui::heard::Answer::Yes) && t.layer >= ui::heard::Layer::Overlay
+            })
+        {
+            return self.update(yes.message);
+        }
         // The large Ask window is over everything but the overlays: Esc
         // makes it a card first, before it reaches what is under it.
         if matches!(key.as_ref(), Key::Named(Named::Escape)) && self.ask_view == AskView::Expanded {
@@ -81,22 +532,51 @@ impl App {
         // every key so nothing acts behind it. (Esc never gets here: Settings
         // is an overlay, so `escape_message` above closed it.)
         if self.shortcuts_shown() {
+            // But ⌘J: its codes go on the page's own controls only.
+            if keymap::Chord::from_event(&key, modifiers)
+                .is_some_and(|chord| chord == self.keymap.chord(keymap::Action::Jump))
+            {
+                return self.start_jump();
+            }
             return Task::none();
         }
-        // Tab / Shift-Tab move keyboard focus between fields (inside the open
-        // modal, if any). Focus leaves the code view, so its motions stop.
-        if matches!(key.as_ref(), Key::Named(Named::Tab))
-            && !(cmd || modifiers.alt() || modifiers.control())
+        // Tab is the window's: it moves the keyboard's ring among the
+        // controls and fields (`ui::ring`) before a key reaches here.
+        // F6 / Shift-F6 move the keys between the window's regions — the
+        // code, the sidebar's field, the chat — but not out of a dialog
+        // holding them.
+        if matches!(key.as_ref(), Key::Named(Named::F6))
+            && !ui::active_overlay(self).is_some_and(|o| o.holds_keys())
         {
-            self.code_focused = false;
-            return ui::cycle_focus(!modifiers.shift());
+            return self.cycle_region(!modifiers.shift());
         }
         // Keys go to whatever is on top first: the overlay drawn over the app
         // takes its own before anything under it — a time-travel session
         // included, whose swallow below used to drop the finder's ↑/↓. (Esc,
         // which every overlay takes, went to the one on top above.)
-        if let Some(task) = self.overlay_key(&key) {
+        if let Some(task) = self.overlay_key(&key, modifiers) {
             return task;
+        }
+        // The debugger's function keys, as editors have them — F9 a
+        // breakpoint, F5 continue (or start), ⇧F5 stop, F10 over, F11 in,
+        // ⇧F11 out — unless a dialog holds the keys.
+        // ⇧F10, or the Menu key: the code's menu at the caret, as a
+        // right-click opens it there (the tree's opens from the tree).
+        if self.code_focused
+            && ui::active_overlay(self).is_none()
+            && !(cmd || modifiers.alt() || modifiers.control())
+            && match key.as_ref() {
+                Key::Named(Named::F10) => modifiers.shift(),
+                Key::Named(Named::ContextMenu) => true,
+                _ => false,
+            }
+        {
+            return self.open_context_menu_at_caret();
+        }
+        if !ui::active_overlay(self).is_some_and(|o| o.holds_keys())
+            && let Some(msg) = self.debug_key(&key, modifiers)
+        {
+            return self.update(msg);
         }
         // Time Travel history navigation uses COMMAND chords — ⌘← steps to an
         // older commit, ⌘→ to a newer one — so plain ←/→/h/l stay free for
@@ -136,7 +616,10 @@ impl App {
         // the single-key reading motions and text input below stay untouched.
         if (cmd || modifiers.alt() || modifiers.control())
             && let Some(chord) = keymap::Chord::from_event(&key, modifiers)
-            && let Some(action) = self.keymap.action_for(&chord)
+            && let Some(action) = self
+                .keymap
+                .action_for(&chord)
+                .or_else(|| keymap::alias_for(&chord))
             && let Some(task) = self.run_command_action(action)
         {
             return task;
@@ -175,7 +658,7 @@ impl App {
             Key::Named(Named::Escape) => {
                 self.pending_g = false;
                 self.pending_z = false;
-                if self.voice.is_busy() {
+                if self.voice.takes_esc() {
                     return self.update(Message::Voice(VoiceMsg::Cancel));
                 }
                 if self.proj.find.open {
@@ -206,6 +689,46 @@ impl App {
                 }
                 self.reader_moved_caret(self.proj.active);
                 Task::none()
+            }
+            // A page, the line's ends and — with ⌘ (Ctrl) — the file's: the
+            // keys every editor reads by, which did nothing here. Only while
+            // the code has the keys, as the motions below.
+            Key::Named(named @ (Named::PageUp | Named::PageDown | Named::Home | Named::End))
+                if self.code_focused
+                    && !self.proj.finder.open
+                    && self.proj.context_menu.is_none()
+                    && self.active_viewer().is_some() =>
+            {
+                self.pending_g = false;
+                self.pending_z = false;
+                match (named, cmd) {
+                    (Named::PageDown, _) => self.scroll_pages(1),
+                    (Named::PageUp, _) => self.scroll_pages(-1),
+                    (Named::Home, true) => self.move_cursor(viewer::Motion::FileStart),
+                    (Named::End, true) => self.move_cursor(viewer::Motion::FileEnd),
+                    (Named::Home, false) => self.move_cursor(viewer::Motion::LineStart),
+                    _ => self.move_cursor(viewer::Motion::LineEnd),
+                }
+            }
+            // F12 and ⇧F12: Go to Definition and Find References, as most
+            // editors have them — F12 did nothing, and said nothing (`gd`
+            // and `gr` do the same). Not under a menu or a dialog holding
+            // the keys: menus let function keys through, and it went to a
+            // definition under the open menu.
+            Key::Named(Named::F12)
+                if self.code_focused
+                    && !(cmd || modifiers.alt() || modifiers.control())
+                    && !ui::active_overlay(self).is_some_and(|o| o.holds_keys())
+                    && ui::pane_cover(self).is_none()
+                    && self.active_viewer().is_some() =>
+            {
+                self.pending_g = false;
+                self.pending_z = false;
+                self.goto_at_cursor(if modifiers.shift() {
+                    GotoKind::References
+                } else {
+                    GotoKind::Definition
+                })
             }
             // -------- Vim-style read-only cursor (only when the code view has
             // focus, so it never steals keys from a text input) --------
@@ -242,9 +765,8 @@ impl App {
                     Key::Character("a") => self.fold_toggle_at_cursor(),
                     Key::Character("R") => self.fold_all(false),
                     Key::Character("M") => self.fold_all(true),
-                    _ => {}
+                    _ => Task::none(),
                 }
-                Task::none()
             }
             Key::Character("z") => {
                 self.pending_z = true;
@@ -266,18 +788,39 @@ impl App {
             Key::Character("b") => self.move_cursor(viewer::Motion::WordBack),
             Key::Character("0") => self.move_cursor(viewer::Motion::LineStart),
             Key::Character("$") => self.move_cursor(viewer::Motion::LineEnd),
-            Key::Character("G") => self.move_cursor(viewer::Motion::FileEnd),
+            Key::Character("G") => self.move_cursor(viewer::Motion::LastLine),
             _ => Task::none(),
         }
     }
 
     /// A key the overlay on top (`ui::active_overlay`) takes for itself,
     /// besides the Esc every overlay takes: the finder's ↑/↓, which move its
-    /// selection. `None` when the key is not the overlay's to take.
-    fn overlay_key(&mut self, key: &keyboard::Key) -> Option<Task<Message>> {
+    /// selection; a menu's, which put the keyboard's ring on its first row
+    /// (↓) or its last (↑), from where the arrows walk its rows and Enter
+    /// presses one — they did nothing, and a menu was the mouse's alone.
+    /// Any other plain key, a menu up, is its to swallow: ←, →, j, k, Enter
+    /// moved and stepped the code under the menu — and once the ring was
+    /// up, ← and → walked the menu instead. A function key or a chord does
+    /// what it does. `None` when the key is not the overlay's to take.
+    fn overlay_key(
+        &mut self,
+        key: &keyboard::Key,
+        modifiers: keyboard::Modifiers,
+    ) -> Option<Task<Message>> {
         use keyboard::Key;
         use keyboard::key::Named;
-        let delta = match (ui::active_overlay(self)?, key.as_ref()) {
+        let overlay = ui::active_overlay(self)?;
+        if overlay.is_menu() && self.ring.is_none() {
+            let chord = modifiers.command() || modifiers.control() || modifiers.alt();
+            return match key.as_ref() {
+                Key::Named(Named::ArrowDown) => Some(self.on_tab(true, false)),
+                Key::Named(Named::ArrowUp) => Some(self.on_tab(false, false)),
+                Key::Named(named) if chord || is_function_key(named) => None,
+                _ if chord => None,
+                _ => Some(Task::none()),
+            };
+        }
+        let delta = match (overlay, key.as_ref()) {
             (ui::ActiveOverlay::Finder, Key::Named(Named::ArrowDown)) => 1,
             (ui::ActiveOverlay::Finder, Key::Named(Named::ArrowUp)) => -1,
             _ => return None,
@@ -297,9 +840,28 @@ impl App {
         Some(match action {
             OpenFile => self.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files))),
             OpenSymbol => self.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Symbols))),
-            ProjectSearch => self.update(Message::Window(WindowMsg::SidebarTabPicked(
-                SidebarTab::Search,
-            ))),
+            // Searching text: a list of references (or definitions) in the
+            // search's place is put away first, as its × does, for the
+            // field to be there — it stayed, with no field, and what was
+            // typed went nowhere.
+            ProjectSearch => {
+                let left = if self.proj.search.listing.is_some() {
+                    self.update(Message::Nav(NavMsg::ListingClosed))
+                } else {
+                    Task::none()
+                };
+                let shown = self.update(Message::Window(WindowMsg::SidebarTabPicked(
+                    SidebarTab::Search,
+                )));
+                Task::batch([left, shown])
+            }
+            // Over a map, Find finds in the map.
+            FindInFile
+                if self.graph_mode
+                    && matches!(ui::active_overlay(self), Some(ui::ActiveOverlay::Graph(_))) =>
+            {
+                operation::focus(ui::graph_search_id())
+            }
             FindInFile => self.update(Message::Editor(EditorMsg::FindOpened)),
             CopySelection => {
                 if self.proj.finder.open {
@@ -316,8 +878,13 @@ impl App {
             GoBack => self.update(Message::Reading(ReadingMsg::GoBack)),
             GoForward => self.update(Message::Reading(ReadingMsg::GoForward)),
             TraceValue => self.update(Message::Flow(crate::FlowMsg::AtCursor)),
+            FakeRun => self.update(Message::Fake(FakeMsg::AtCaret { debug: false })),
+            FakeDebug => self.update(Message::Fake(FakeMsg::AtCaret { debug: true })),
             ToggleAsk => self.update(Message::Ask(AskMsg::Toggle)),
+            Run => self.update(Message::Debug(DebugMsg::Run)),
             StartDebug => self.update(Message::Debug(DebugMsg::Start)),
+            WeakSpots => self.update(Message::Weak(WeakMsg::Show)),
+            Jump => self.start_jump(),
             CallGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectCalls))),
             TypeGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectTypes))),
             ProjectMaps => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps))),
@@ -332,7 +899,7 @@ impl App {
             } else if self.llm_available {
                 Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
             } else {
-                Message::Settings(SettingsMsg::OpenAt(SettingsPage::LanguageModel))
+                Message::Settings(SettingsMsg::NeedKey)
             }),
             ToggleDiff => self.update(Message::Editor(EditorMsg::ToggleDiff)),
             TimeTravel => self.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false })),
@@ -341,6 +908,13 @@ impl App {
             ))),
             LspServers => self.update(Message::Lsp(LspMsg::TogglePanel)),
             Shortcuts => self.update(Message::Window(WindowMsg::OpenShortcuts)),
+            Overview => self.update(Message::Overview(OverviewMsg::Show)),
+            Stats => self.update(Message::Overview(OverviewMsg::ShowStats)),
+            Glossary => self.update(Message::Glossary(GlossaryMsg::Open)),
+            SetUpProject => self.update(Message::Project(ProjectMsg::SetupShow(
+                crate::app::setup::SetupMode::Manage,
+            ))),
+            Tutorial => self.update(Message::Tutorial(TutorialMsg::Start)),
             CommandPalette => self.update(Message::Nav(NavMsg::PaletteOpened)),
             Voice => self.update(Message::Voice(VoiceMsg::Toggle)),
         })
@@ -360,10 +934,18 @@ impl App {
             let chord = self.keymap.chord(action);
             return self.capture_chord(target, chord);
         }
-        if self.tutorial.is_some() || self.shortcuts_shown() {
+        let jump_on_shortcuts = self.shortcuts_shown() && action == keymap::Action::Jump;
+        if self.tutorial.is_some() || (self.shortcuts_shown() && !jump_on_shortcuts) {
             return Task::none();
         }
-        self.run_command_action(action).unwrap_or_else(Task::none)
+        // A menu's command (⌘J and every key the menu bar takes on macOS)
+        // puts the ring away, as any other key does.
+        let back = self.end_ring(true);
+        let run = self.run_command_action(action).unwrap_or_else(Task::none);
+        match back {
+            Some(back) => Task::batch([back, run]),
+            None => run,
+        }
     }
 
     /// Capture a keypress as the new binding for `action`. Esc cancels; keys
@@ -412,4 +994,35 @@ impl App {
         }
         Task::none()
     }
+}
+
+/// What a control pressing `press` is called on screen: the words a voice
+/// would press it by.
+fn ring_name(app: &App, press: &Message) -> Option<String> {
+    let wanted = format!("{press:?}");
+    ui::heard::gather(app)
+        .into_iter()
+        .find(|t| format!("{:?}", t.message) == wanted)
+        .map(|t| t.shown)
+}
+
+/// Whether `named` is a function key (F1–F12): a shortcut of its own, as
+/// a chord is, never typing.
+fn is_function_key(named: keyboard::key::Named) -> bool {
+    use keyboard::key::Named;
+    matches!(
+        named,
+        Named::F1
+            | Named::F2
+            | Named::F3
+            | Named::F4
+            | Named::F5
+            | Named::F6
+            | Named::F7
+            | Named::F8
+            | Named::F9
+            | Named::F10
+            | Named::F11
+            | Named::F12
+    )
 }

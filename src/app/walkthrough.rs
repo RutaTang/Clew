@@ -32,21 +32,45 @@ impl App {
         let context = self.gather_walkthrough_context();
         let overview = self.proj.overview.markdown.clone();
         let scope = scope.trim().to_string();
-        let scope_opt = (!scope.is_empty()).then(|| scope.clone());
-        let prompt = walkthrough::prompt(
-            &project_name,
-            overview.as_deref(),
-            &context,
-            scope_opt.as_deref(),
-        );
+        // The reading guide: a tree of where to start, what to read next and
+        // where reading ends, asked for as its own kind of answer.
+        let guide = scope == walkthrough::GUIDE_SCOPE;
+        let (system, prompt) = if guide {
+            (
+                walkthrough::GUIDE_SYSTEM,
+                walkthrough::guide_prompt(&project_name, overview.as_deref(), &context),
+            )
+        } else {
+            let scope_opt = (!scope.is_empty()).then(|| scope.clone());
+            (
+                walkthrough::SYSTEM,
+                walkthrough::prompt(
+                    &project_name,
+                    overview.as_deref(),
+                    &context,
+                    scope_opt.as_deref(),
+                ),
+            )
+        };
         let seq = self.begin_walkthrough_generation(scope.clone());
-        self.status = tr!("Generating walkthrough…").into();
+        self.status = if guide {
+            tr!("Writing the reading guide…")
+        } else {
+            tr!("Generating walkthrough…")
+        }
+        .into();
         let ai = self.ai_client();
         let stamp = self.stamp();
         Task::perform(
             async move {
-                let resp = ai.complete(cfg, walkthrough::SYSTEM, prompt, 4096).await?;
-                walkthrough::parse(&resp)
+                let resp = ai
+                    .complete(cfg, crate::app::usage::WALKTHROUGH, system, prompt, 4096)
+                    .await?;
+                let mut wt = walkthrough::parse(&resp)?;
+                if guide {
+                    walkthrough::shape_guide(&mut wt);
+                }
+                Ok(wt)
             },
             move |result| {
                 Message::Walk(WalkMsg::Done {
@@ -73,10 +97,11 @@ impl App {
             .trace_program
             .clone()
             .unwrap_or_else(|| "program".to_string());
-        let Some(plain) = walkthrough::from_trace(&root, &program, &self.debug.trace) else {
+        let Some(mut plain) = walkthrough::from_trace(&root, &program, &self.debug.trace) else {
             self.status = tr!("The last run never stopped inside this project").into();
             return Task::none();
         };
+        plain.made = Some(crate::app::ask_sessions::now());
         let scope = format!("@trace {program}");
         let seq = self.begin_walkthrough_generation(scope.clone());
         let Some(cfg) = self.llm_config() else {
@@ -104,10 +129,17 @@ impl App {
         self.status = tr!("Narrating the run…").into();
         let ai = self.ai_client();
         let stamp = self.stamp();
+        let said = stamp.clone();
         Task::perform(
             async move {
                 let narrated = ai
-                    .complete(cfg, walkthrough::TRACE_SYSTEM, prompt, 4096)
+                    .complete(
+                        cfg,
+                        crate::app::usage::WALKTHROUGH,
+                        walkthrough::TRACE_SYSTEM,
+                        prompt,
+                        4096,
+                    )
                     .await
                     .map_err(walkthrough::Failure::from)
                     .and_then(|r| walkthrough::parse(&r));
@@ -115,35 +147,119 @@ impl App {
                 // — a step's file, symbol and line are what happened, not
                 // the model's to change — when it kept every step; else the
                 // plain tour, which is the run as it happened.
+                //
+                // The plain tour is said to be one: opened without a word,
+                // it read as the AI's story of the run, and a thin one.
                 match narrated {
                     Ok(mut wt) if wt.steps.len() == plain.steps.len() => {
+                        wt.made = plain.made;
                         for (step, own) in wt.steps.iter_mut().zip(&plain.steps) {
                             step.file = own.file.clone();
                             step.symbol = own.symbol.clone();
                             step.line = own.line;
                         }
-                        Ok(wt)
+                        (Ok(wt), None)
                     }
-                    _ => Ok(plain),
+                    Ok(_) => (
+                        Ok(plain),
+                        Some(tr!("its narration skipped some of the stops").to_string()),
+                    ),
+                    Err(why) => (Ok(plain), Some(why.to_string())),
                 }
             },
-            move |result| {
-                Message::Walk(WalkMsg::Done {
-                    stamp: stamp.clone(),
-                    seq,
-                    scope: scope.clone(),
-                    result,
-                })
-            },
+            std::convert::identity,
         )
+        .then(move |(result, unnarrated)| {
+            let done = Task::done(Message::Walk(WalkMsg::Done {
+                stamp: stamp.clone(),
+                seq,
+                scope: scope.clone(),
+                result,
+            }));
+            match unnarrated {
+                Some(why) => done.chain(Task::done(Message::Walk(WalkMsg::Unnarrated {
+                    stamp: said.clone(),
+                    seq,
+                    why,
+                }))),
+                None => done,
+            }
+        })
+    }
+
+    /// The run's tour was opened as recorded, its narration having failed
+    /// (`WalkMsg::Unnarrated`): said, standing, with a way to try again —
+    /// unless another generation has started since.
+    fn on_walkthrough_unnarrated(&mut self, seq: u64, why: String) -> Task<Message> {
+        // Said only of this run's tour, shown: its Done may have kept nothing
+        // ("no valid steps"), and that is what the line says then — over
+        // another run's tour open, it said "showing its stops as recorded".
+        let program = self.debug.trace_program.as_deref().unwrap_or("program");
+        let shown = self.proj.walk.open.as_deref() == Some(format!("@trace {program}").as_str());
+        if self.proj.walk.seq != seq || !shown {
+            return Task::none();
+        }
+        let about = crate::app::tasks::setting_to_fix(&why);
+        self.say_failure_again(
+            move || {
+                // Plainly, in two sentences: the reason inside brackets,
+                // its own in brackets, and two dashes read as a puzzle.
+                tr!(
+                    "Couldn't narrate the run: {reason}. Showing its stops as recorded.",
+                    reason = crate::app::tasks::ai_reason(&why)
+                )
+            },
+            Some(Message::Walk(WalkMsg::GenerateTrace)),
+            crate::app::state::FailureOf::Walkthrough,
+        );
+        self.failure_about(about);
+        Task::none()
+    }
+
+    /// The tour open is left for `next` (none, `""`): a failure said of it
+    /// — its narration that could not be written — goes with it. It stood
+    /// on the status line for the rest of the session, over other files,
+    /// Settings and later runs, cut to "Impossible de racon…" at 1100.
+    fn leave_tour_failure(&mut self, next: &str) {
+        if self
+            .proj
+            .walk
+            .open
+            .as_deref()
+            .is_some_and(|open| open != next)
+            && self.proj.walk.generating.is_none()
+        {
+            self.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
+        }
     }
 
     /// Mark a walkthrough generation for `scope` as the one in flight and mint
     /// its request id: only that request's `WalkMsg::Done` may clear the busy
     /// row, retry, or open the tour.
+    /// `task`, stoppable with `WalkMsg::Cancel` when it is a generation that
+    /// began (one more request minted since `before`); as it is otherwise —
+    /// a key asked for, nothing to do.
+    fn stoppable_walk(&mut self, before: u64, task: Task<Message>) -> Task<Message> {
+        if self.proj.walk.seq == before {
+            return task;
+        }
+        let (task, abort) = task.abortable();
+        // The generation it replaces is stopped: left running, it was
+        // billed, could no longer be stopped, and landed as "finished in the
+        // background".
+        if let Some(earlier) = self.proj.walk.abort.replace(abort) {
+            earlier.abort();
+        }
+        task
+    }
+
     fn begin_walkthrough_generation(&mut self, scope: String) -> u64 {
         self.proj.walk.seq += 1;
         self.proj.walk.pending = Some(self.proj.walk.seq);
+        self.proj.walk.failed = None;
+        // Asked for again: the failure's Try again, beside it, would ask a
+        // second time.
+        self.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
         self.proj.walk.generating = Some(scope);
         self.proj.walk.seq
     }
@@ -250,7 +366,7 @@ impl App {
                         &patch,
                     );
                     let resp = ai
-                        .complete(cfg, walkthrough::DIFF_SYSTEM, prompt, 4096)
+                        .complete(cfg, crate::app::usage::WALKTHROUGH, walkthrough::DIFF_SYSTEM, prompt, 4096)
                         .await?;
                     walkthrough::parse(&resp)
                 }
@@ -281,14 +397,23 @@ impl App {
         // running, nor spend its retry, nor pull the reader into its tour; a
         // finished one is still saved (it was paid for), just not opened.
         let awaited = self.proj.walk.pending == Some(seq);
+        // Stopped: what it brings is not kept, whenever it lands.
+        if self.proj.walk.cancelled == Some(seq) {
+            return Task::none();
+        }
         if awaited {
             self.proj.walk.pending = None;
             self.proj.walk.generating = None;
+            self.proj.walk.abort = None;
         } else if result.is_err() {
             return Task::none();
         }
         match result {
             Ok(mut wt) => {
+                // A tour made: a failure of an earlier one is past.
+                if awaited {
+                    self.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
+                }
                 // Drop steps that don't resolve to a real project file.
                 wt.steps
                     .retain(|s| self.resolve_walk_file(&s.file).is_some());
@@ -366,12 +491,7 @@ impl App {
                 }
                 // The tour on screen says it is done; a save failure said
                 // above stays.
-                self.settle_status(&[
-                    tr!("Generating walkthrough…"),
-                    tr!("Narrating the run…"),
-                    tr!("Reviewing changes…"),
-                    tr!("Retrying walkthrough…"),
-                ]);
+                self.settle_walk_status();
                 // By scope: the merge re-reads a library another window may
                 // have appended to, which moves every index.
                 self.proj.walk.open = Some(scope);
@@ -401,7 +521,34 @@ impl App {
                     };
                 }
                 self.proj.walk.retried = false;
-                self.status = tr!("Walkthrough failed: {error}", error = e);
+                // Kept where it was asked for, and on the status line until
+                // it is read, each with a way to try again — as it failed,
+                // said in the language spoken when it is shown.
+                let raw = e.to_string();
+                let about = crate::app::tasks::setting_to_fix(&raw);
+                self.proj.walk.failed = Some((scope.clone(), raw.clone()));
+                // Said there, in the walkthroughs' own row, with its Try
+                // again: on the status line too, it said the same thing
+                // twice, side by side.
+                // What was being said of it goes, as an older failure's notice
+                // does: "Generating walkthrough…" stood for good beside the
+                // row's "Failed: …".
+                if self.show_left_sidebar && self.sidebar == crate::SidebarTab::Walk {
+                    self.settle_walk_status();
+                    self.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
+                    return Task::none();
+                }
+                self.say_failure_again(
+                    move || {
+                        tr!(
+                            "Walkthrough failed: {error}",
+                            error = crate::app::tasks::ai_reason(&raw)
+                        )
+                    },
+                    Some(Message::Walk(WalkMsg::again(&scope))),
+                    crate::app::state::FailureOf::Walkthrough,
+                );
+                self.failure_about(about);
                 Task::none()
             }
         }
@@ -487,6 +634,20 @@ impl App {
         Task::none()
     }
 
+    /// Whether the tour with `scope` can be made again: any tour the AI
+    /// wrote; a debug run's only from the last run of its program, still
+    /// recorded.
+    pub(crate) fn can_regenerate(&self, scope: &str) -> bool {
+        if !scope.starts_with("@trace ") {
+            return true;
+        }
+        self.debug
+            .trace_program
+            .as_ref()
+            .is_some_and(|program| scope == format!("@trace {program}"))
+            && !self.debug.trace.is_empty()
+    }
+
     pub(crate) fn on_walkthrough_regenerate(&mut self, scope: String) -> Task<Message> {
         if !self.proj.walk.library.iter().any(|w| w.scope == scope) {
             return Task::none();
@@ -500,13 +661,7 @@ impl App {
         // anew, it was a paid model call on the literal text "@trace app",
         // whose made-up tour replaced the recording under the run's label.
         if scope.starts_with("@trace ") {
-            let last_run = self
-                .debug
-                .trace_program
-                .as_ref()
-                .is_some_and(|program| scope == format!("@trace {program}"))
-                && !self.debug.trace.is_empty();
-            if last_run {
+            if self.can_regenerate(&scope) {
                 return Task::done(Message::Walk(WalkMsg::GenerateTrace));
             }
             self.status = tr!(
@@ -532,6 +687,38 @@ impl App {
         self.walkthrough_goto(i)
     }
 
+    /// What the status line said while a walkthrough was being made, gone
+    /// once it is done or has failed.
+    fn settle_walk_status(&mut self) {
+        self.settle_status(&[
+            tr!("Generating walkthrough…"),
+            tr!("Writing the reading guide…"),
+            tr!("Narrating the run…"),
+            tr!("Reviewing changes…"),
+            tr!("Retrying walkthrough…"),
+        ]);
+    }
+
+    /// The open tour's step said again in the language spoken now: a run's
+    /// stop is said from its facts (`walkthrough::Step::said`), and what
+    /// was prepared of it to show was in the language before.
+    pub(crate) fn respeak_walk_step(&mut self) -> Task<Message> {
+        let said = match self
+            .proj
+            .walk
+            .open_tour()
+            .and_then(|w| w.steps.get(self.proj.walk.step))
+        {
+            Some(step) if step.stop.is_some() && !self.proj.walk.prepared.is_empty() => {
+                step.said().into_owned()
+            }
+            _ => return Task::none(),
+        };
+        let (prepared, task) = self.prepare_segments(&said);
+        self.proj.walk.prepared = prepared;
+        task
+    }
+
     /// Navigate to walkthrough step `i`: open its file and jump to the step's
     /// symbol, or its own line when the symbol is not there.
     ///
@@ -544,21 +731,28 @@ impl App {
     /// step (`WalkState::anchor_note`, shown in the WALK panel) as well as
     /// said in the status line — which the file load the step starts
     /// overwrites.
+    /// Step `i` of the open tour, as it is to be found in its file. A debug
+    /// run's step is where the run stopped: its line, not its function's
+    /// first one — found by its function's name, "Stop 1 (breakpoint) in
+    /// main" opened on `def main`, four lines above the stop.
+    pub(crate) fn tour_step(&self, i: usize) -> Option<walkthrough::Step> {
+        let tour = self.proj.walk.open_tour()?;
+        let mut step = tour.steps.get(i)?.clone();
+        if tour.scope.starts_with("@trace ") && step.line.is_some_and(|l| l >= 1) {
+            step.symbol = None;
+        }
+        Some(step)
+    }
+
     pub(crate) fn walkthrough_goto(&mut self, i: usize) -> Task<Message> {
-        let Some(step) = self
-            .proj
-            .walk
-            .open_tour()
-            .and_then(|w| w.steps.get(i))
-            .cloned()
-        else {
+        let Some(step) = self.tour_step(i) else {
             return Task::none();
         };
         self.proj.walk.step = i;
         self.proj.walk.anchor_note = None;
         self.proj.walk.pending_anchor = None;
         // Prepare the narration (markdown + any mermaid/math → SVG).
-        let (prepared, render) = self.prepare_segments(&step.narration);
+        let (prepared, render) = self.prepare_segments(&step.said());
         self.proj.walk.prepared = prepared;
         let Some(abs) = self.resolve_walk_file(&step.file) else {
             self.set_walk_anchor_note(Some(tr!(
@@ -643,12 +837,7 @@ impl App {
             load,
             superseded,
         } = self.proj.walk.pending_anchor.clone()?;
-        let step = self
-            .proj
-            .walk
-            .open_tour()
-            .and_then(|w| w.steps.get(i))
-            .cloned();
+        let step = self.tour_step(i);
         let Some(step) = step.filter(|_| self.proj.walk.step == i) else {
             // The reader moved to another step, or closed the tour.
             self.proj.walk.pending_anchor = None;
@@ -784,10 +973,45 @@ impl App {
     /// (after its one ownership check and the menu bookkeeping).
     pub(crate) fn update_walk(&mut self, message: WalkMsg) -> Task<Message> {
         match message {
-            WalkMsg::Generate(scope) => self.on_generate_walkthrough(scope),
-            WalkMsg::GenerateDiff => self.on_generate_diff_walkthrough(),
-            WalkMsg::GenerateTrace => self.on_generate_trace_walkthrough(),
-            WalkMsg::Regenerate(scope) => self.on_walkthrough_regenerate(scope),
+            WalkMsg::Generate(scope) => {
+                // With no tour yet the header shows New whatever the mode
+                // is: made New in fact, so the first tour landing does not
+                // turn the field into "Search walkthroughs…" and take its
+                // Generate away.
+                if self.proj.walk.library.is_empty() {
+                    self.walk_ui.mode = WalkMode::Walk;
+                }
+                let before = self.proj.walk.seq;
+                let task = self.on_generate_walkthrough(scope);
+                self.stoppable_walk(before, task)
+            }
+            WalkMsg::GenerateDiff => {
+                let before = self.proj.walk.seq;
+                let task = self.on_generate_diff_walkthrough();
+                self.stoppable_walk(before, task)
+            }
+            WalkMsg::GenerateTrace => {
+                let before = self.proj.walk.seq;
+                let task = self.on_generate_trace_walkthrough();
+                self.stoppable_walk(before, task)
+            }
+            WalkMsg::Regenerate(scope) => {
+                let before = self.proj.walk.seq;
+                let task = self.on_walkthrough_regenerate(scope);
+                self.stoppable_walk(before, task)
+            }
+            WalkMsg::Cancel => {
+                if let Some(abort) = self.proj.walk.abort.take() {
+                    abort.abort();
+                }
+                if let Some(seq) = self.proj.walk.pending.take() {
+                    self.proj.walk.cancelled = Some(seq);
+                    self.status = tr!("Walkthrough stopped").into();
+                }
+                self.proj.walk.generating = None;
+                self.proj.walk.retried = false;
+                Task::none()
+            }
             WalkMsg::Delete(scope) => self.on_walkthrough_delete(&scope),
             // (A tour generated for another project must not be saved into
             // this one's library — the save also writes to its disk: dropped
@@ -795,15 +1019,25 @@ impl App {
             WalkMsg::Done {
                 seq, scope, result, ..
             } => self.on_walkthrough_done(seq, scope, result),
+            WalkMsg::Unnarrated { seq, why, .. } => self.on_walkthrough_unnarrated(seq, why),
+            // Dismissed where it was asked for, it is dismissed: it stood on
+            // the status line too, a second thing to dismiss.
+            WalkMsg::ForgetFailure => {
+                self.proj.walk.failed = None;
+                self.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
+                Task::none()
+            }
             WalkMsg::Open(scope) => {
                 if !self.proj.walk.library.iter().any(|w| w.scope == scope) {
                     return Task::none();
                 }
+                self.leave_tour_failure(&scope);
                 self.proj.walk.open = Some(scope);
                 self.proj.walk.step = 0;
                 self.walkthrough_goto(0)
             }
             WalkMsg::Back => {
+                self.leave_tour_failure("");
                 self.proj.walk.open = None;
                 self.proj.walk.forget_vanished_tour();
                 Task::none()
@@ -831,7 +1065,7 @@ impl App {
                 // Narration height = distance from the drag point to the window
                 // bottom, clamped so neither block collapses.
                 let max = (self.window_height - 160.0).max(120.0);
-                self.walk_ui.narration_height = (self.window_height - y).clamp(90.0, max);
+                self.walk_ui.narration_height = Some((self.window_height - y).clamp(90.0, max));
                 Task::none()
             }
         }

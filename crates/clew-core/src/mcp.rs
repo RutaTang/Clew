@@ -41,6 +41,7 @@ pub mod config;
 mod http;
 pub mod hub;
 pub mod oauth;
+pub mod registry;
 pub mod serve;
 
 use std::collections::HashSet;

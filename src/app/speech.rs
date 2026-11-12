@@ -8,10 +8,22 @@
 //! output ([`clew_voice::playback`]). Nothing said or heard leaves the
 //! computer.
 //!
+//! Which answers are read is the reader's to say
+//! ([`ReadAloud`](crate::app::voice::ReadAloud)): those to questions said
+//! aloud, every one, or none.
+//!
 //! It stops at Esc, at the voice key — which then listens, so the reader
 //! can speak over Clew as over a person — at a new question, and at Stop,
-//! Clear or closing Ask. With Keep listening on, the microphone opens again
-//! only once Clew has finished speaking: it would hear Clew otherwise.
+//! Clear or closing Ask. With the microphone on, the reader can also just
+//! talk over Clew ([`VoicePrefs::talk_over`]): the microphone stays open
+//! while Clew speaks, Clew's own voice taken out of what it hears
+//! ([`clew_voice::echo`]); Clew pauses at the first words said over it, and
+//! stops once they are heard to be words — not its own, heard back — or
+//! goes on where it paused when they were not. With that off, the
+//! microphone waits while Clew reads an answer aloud, and opens again once
+//! all is said.
+//!
+//! [`VoicePrefs::talk_over`]: crate::app::voice::VoicePrefs::talk_over
 //!
 //! Its messages are [`VoiceMsg`]'s, handled here through
 //! [`App::update_speech`].
@@ -76,6 +88,10 @@ pub(crate) trait Playing: Send {
     fn level(&self) -> f32;
     /// A failure since it opened (the device went away).
     fn error(&self) -> Option<String>;
+    /// Hold what is playing, to go on from there ([`Playing::resume`]).
+    fn pause(&self);
+    /// Go on playing what was held.
+    fn resume(&self);
 }
 
 impl Playing for Player {
@@ -102,6 +118,12 @@ impl Playing for Player {
     }
     fn error(&self) -> Option<String> {
         Player::error(self)
+    }
+    fn pause(&self) {
+        Player::pause(self);
+    }
+    fn resume(&self) {
+        Player::resume(self);
     }
 }
 
@@ -147,7 +169,10 @@ impl std::fmt::Debug for Opened {
 /// Text made speech: `clew-speak`, or a test's.
 pub(crate) trait Synthesizer: Send + Sync {
     /// `text` said in `lang` by `model` (its files in `dir`), in voice
-    /// `voice` at `speed`: samples, one channel, and their rate.
+    /// `voice` at `speed`, given to `part` as it is made — whole, or a part
+    /// at a time from a voice that streams: samples, one channel, and their
+    /// rate.
+    #[allow(clippy::too_many_arguments)]
     fn say(
         &self,
         model: &'static VoiceModel,
@@ -156,7 +181,8 @@ pub(crate) trait Synthesizer: Send + Sync {
         lang: &str,
         voice: i32,
         speed: f32,
-    ) -> Result<(Vec<f32>, u32), SayError>;
+        part: &mut dyn FnMut(Vec<f32>, u32) -> bool,
+    ) -> Result<(), SayError>;
     /// Let `model` go, if it is loaded, and do `work` — remove its files —
     /// with nothing said meanwhile: what would be is said once `work` is
     /// done.
@@ -177,9 +203,10 @@ impl Synthesizer for System {
         lang: &str,
         voice: i32,
         speed: f32,
-    ) -> Result<(Vec<f32>, u32), SayError> {
+        part: &mut dyn FnMut(Vec<f32>, u32) -> bool,
+    ) -> Result<(), SayError> {
         match &self.speakers {
-            Some(speakers) => speakers.say(model, dir, text, lang, voice, speed),
+            Some(speakers) => speakers.say(model, dir, text, lang, voice, speed, part),
             None => Err(SayError::Voice(
                 tr!("clew-speak, which reads answers aloud, is not installed next to Clew").into(),
             )),
@@ -231,8 +258,8 @@ fn speak_bin_path() -> Option<PathBuf> {
     clew_core::lsp::store::find_on_path(NAME)
 }
 
-/// A sentence said: its samples (one channel) and their rate. Shown in a
-/// message's debug form by its length alone.
+/// A sentence said, or a part of it: its samples (one channel) and their
+/// rate. Shown in a message's debug form by its length alone.
 #[derive(Clone)]
 pub struct Audio {
     pub samples: Arc<Vec<f32>>,
@@ -263,12 +290,14 @@ pub(crate) struct Speech {
     /// Bumped by every stop: what was being made before it is dropped when
     /// it comes.
     round: u64,
+    /// [`Self::round`], as the sentence being made off the UI thread reads
+    /// it: a sentence made for a round gone stops at its next part, and the
+    /// voice with it — what was asked next waited for it to be made whole.
+    current: Arc<std::sync::atomic::AtomicU64>,
     /// The output, while Clew speaks.
     output: Option<Box<dyn Playing>>,
     /// Since when nothing has been left to play, nor to make.
     quiet_since: Option<Instant>,
-    /// Keep listening: listen once Clew has finished speaking.
-    pub listen_after: bool,
     /// How loud what is said is, 0 to 1, for the meter.
     pub level: f32,
     /// The output's last count of samples played, and when it last moved.
@@ -280,6 +309,10 @@ pub(crate) struct Speech {
     pub(crate) stall: (Duration, Duration),
     /// The models already said to be missing: said once a window.
     told: HashSet<&'static str>,
+    /// The answer last brought on screen because it would not be heard
+    /// ([`App::show_unheard`]): once an answer, so a card put away stays
+    /// away.
+    shown: Option<u64>,
     /// The models what is being said was made with.
     made_with: HashSet<&'static str>,
     /// Voice models downloading, by id.
@@ -288,7 +321,21 @@ pub(crate) struct Speech {
     pub download_errors: HashMap<&'static str, String>,
     pub(crate) open_output: OpenOutput,
     pub(crate) synthesizer: Arc<dyn Synthesizer>,
+    /// Since when Clew is held while the reader talks over it — until what
+    /// they said is heard, and told from Clew's own voice
+    /// ([`said_over`](crate::app::voice::said_over)).
+    barged: Option<Instant>,
+    /// The last sentences made to be said: what the microphone may still
+    /// hear of Clew's own voice, its echo not all taken out.
+    said_lately: VecDeque<String>,
 }
+
+/// How many of the sentences last made [`Speech::said_lately`] keeps.
+const SAID_LATELY: usize = 6;
+
+/// How long Clew is held for words said over it at most, before it goes
+/// on: what was said is heard by then.
+const HELD_AT_MOST: Duration = Duration::from_secs(12);
 
 impl Speech {
     pub(crate) fn new() -> Self {
@@ -298,20 +345,71 @@ impl Speech {
             queue: VecDeque::new(),
             making: false,
             round: 0,
+            current: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             output: None,
             quiet_since: None,
-            listen_after: false,
             level: 0.0,
             progress: None,
             reopened: false,
             stall: (STALLED_AFTER_ERROR, STALLED),
             told: HashSet::new(),
+            shown: None,
             made_with: HashSet::new(),
             downloads: HashMap::new(),
             download_errors: HashMap::new(),
             open_output: Arc::new(open_system_output),
             synthesizer: SYSTEM.clone(),
+            barged: None,
+            said_lately: VecDeque::new(),
         }
+    }
+
+    /// Whether Clew is held while the reader talks over it.
+    pub(crate) fn held(&self) -> bool {
+        self.barged.is_some()
+    }
+
+    /// The reader talks over Clew: what is being said is held — faded out,
+    /// kept to go on from — while what they say is heard. Nothing playing,
+    /// nothing is held.
+    pub(crate) fn hold(&mut self) {
+        if self.barged.is_none()
+            && let Some(output) = &self.output
+        {
+            output.pause();
+            self.barged = Some(Instant::now());
+        }
+    }
+
+    /// Go on with what was held, where it was.
+    pub(crate) fn go_on(&mut self) {
+        if self.barged.take().is_some()
+            && let Some(output) = &self.output
+        {
+            output.resume();
+            // The pause was the reader's, not the output's: a stall is
+            // counted from now.
+            self.progress = None;
+        }
+    }
+
+    /// Held longer than words said over it take to be heard.
+    pub(crate) fn held_too_long(&self) -> bool {
+        self.barged
+            .is_some_and(|since| since.elapsed() >= HELD_AT_MOST)
+    }
+
+    /// Held as if since `ago`.
+    #[cfg(test)]
+    pub(crate) fn hold_since_for_test(&mut self, ago: Duration) {
+        if self.barged.is_some() {
+            self.barged = Instant::now().checked_sub(ago);
+        }
+    }
+
+    /// The sentences last made to be said.
+    pub(crate) fn said_lately(&self) -> Vec<String> {
+        self.said_lately.iter().cloned().collect()
     }
 
     /// Whether Clew is speaking: something is being said, made, or waits to
@@ -342,31 +440,30 @@ impl Speech {
         self.queue.clear();
         self.making = false;
         self.round += 1;
+        self.current
+            .store(self.round, std::sync::atomic::Ordering::Relaxed);
         if let Some(output) = self.output.take() {
             close_later(output);
         }
         self.quiet_since = None;
-        self.listen_after = false;
         self.level = 0.0;
         self.progress = None;
         self.reopened = false;
         self.made_with.clear();
+        self.barged = None;
     }
 }
 
 /// What Settings' Try says with `model`: a sentence in the interface's
 /// language when the model speaks it, else in one it does.
 fn sample(model: &VoiceModel) -> Sentence {
-    // Its own words in the one language Kokoro speaks here.
-    const CHINESE: &str = "这就是 Clew 朗读回答时的声音。";
+    // Its own words in a language Supertonic speaks here, which none of the
+    // interface's are.
+    const DUTCH: &str = "Zo klinkt Clew wanneer het een antwoord voorleest.";
     let ui = crate::i18n::current().code();
     if model.speaks(ui) {
-        let text = match ui {
-            "zh" => CHINESE.to_string(),
-            _ => tr!("This is how Clew sounds when it reads an answer aloud.").to_string(),
-        };
         Sentence {
-            text,
+            text: tr!("This is how Clew sounds when it reads an answer aloud.").to_string(),
             lang: clew_voice::say::known_language(ui).unwrap_or("en"),
         }
     } else if model.speaks("en") {
@@ -376,8 +473,8 @@ fn sample(model: &VoiceModel) -> Sentence {
         }
     } else {
         Sentence {
-            text: CHINESE.into(),
-            lang: "zh",
+            text: DUTCH.into(),
+            lang: "nl",
         }
     }
 }
@@ -390,7 +487,8 @@ impl App {
                 round,
                 result,
                 opened,
-            } => self.on_spoken(round, result, opened),
+                last,
+            } => self.on_spoken(round, result, opened, last),
             VoiceMsg::SpeakTick => self.on_speak_tick(),
             VoiceMsg::StopSpeaking => {
                 if self.stop_speaking() {
@@ -398,9 +496,16 @@ impl App {
                 }
                 Task::none()
             }
-            VoiceMsg::SetSpeak(on) => {
-                self.voice.prefs.speak = on;
-                if !on {
+            VoiceMsg::SetSpeak(read_aloud) => {
+                self.voice.prefs.read_aloud = read_aloud;
+                // What is being read stops when such answers are read no
+                // more; with Always, what was not read is not begun midway.
+                let reads = self
+                    .proj
+                    .ask_turns
+                    .last()
+                    .is_some_and(|t| read_aloud.reads(t.spoken));
+                if !reads {
                     self.stop_speaking();
                 }
                 self.save_voice_pref(crate::app::voice::Pref::Speak);
@@ -451,6 +556,9 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.voice.speech.download_errors.remove(id);
+                        self.voice
+                            .downloaded_at
+                            .insert(id, std::time::Instant::now());
                         self.voice.speech.told.remove(id);
                         self.status = tr!(
                             "{model} is ready — answers to what you ask by voice are read aloud",
@@ -466,7 +574,7 @@ impl App {
                         self.voice.speech.download_errors.insert(id, e);
                     }
                 }
-                Task::none()
+                crate::app::embedding::redraw_once_just_downloaded()
             }
             VoiceMsg::RemoveSpeech(id) => {
                 let (Some(model), Some(store)) = (speech::find(id), self.voice.store.clone())
@@ -533,20 +641,31 @@ impl App {
     }
 
     /// The answer on stream `stream` grew — or, `done`, is over: what of it
-    /// is ready to be said is said, when it answers a question that was
-    /// said and answers are read aloud.
+    /// is ready to be said is said, when such answers are read aloud
+    /// ([`ReadAloud`](crate::app::voice::ReadAloud)).
     pub(crate) fn read_answer(&mut self, stream: u64, done: bool) -> Task<Message> {
-        if !self.voice.prefs.speak || self.voice.speech.hushed.contains(&stream) {
+        if self.voice.speech.hushed.contains(&stream) {
             return Task::none();
         }
+        let read_aloud = self.voice.prefs.read_aloud;
         // The newest answer only: one an earlier question gets late — its
         // close arriving after the next was asked — is not said over it.
-        let Some(turn) = self
+        let Some(spoken) = self
             .proj
             .ask_turns
             .last()
-            .filter(|t| t.stream == stream && t.spoken)
+            .filter(|t| t.stream == stream)
+            .map(|t| t.spoken)
         else {
+            return Task::none();
+        };
+        if !read_aloud.reads(spoken) {
+            if spoken {
+                self.show_unheard(stream);
+            }
+            return Task::none();
+        }
+        let Some(turn) = self.proj.ask_turns.last() else {
             return Task::none();
         };
         let usual = self
@@ -571,18 +690,63 @@ impl App {
         if done {
             speech.reading = None;
         }
+        // Read aloud: the microphone, on, waits for it.
+        self.hold_mic_for_clew();
+        self.speak_next()
+    }
+
+    /// The answer on `stream`, being read, cut back to its first `from`
+    /// bytes — a step's remark before its tool calls taken back out
+    /// (`AskMsg::DraftEnd`): what was ready of the remark is said through,
+    /// as a person finishes what they were saying, and reading goes on from
+    /// where the answer now ends. A step asked `again` writes the same text
+    /// anew: reading keeps its place, and goes on in the new text from the
+    /// sentence the first try had come to — it was said through, then said
+    /// again from its start.
+    pub(crate) fn answer_cut_back(
+        &mut self,
+        stream: u64,
+        from: usize,
+        again: bool,
+    ) -> Task<Message> {
+        if again {
+            return Task::none();
+        }
+        let Some(turn) = self.proj.ask_turns.iter().find(|t| t.stream == stream) else {
+            return Task::none();
+        };
+        let kept = turn.answer_md.get(..from).unwrap_or_default();
+        let speech = &mut self.voice.speech;
+        let Some((_, reader)) = speech.reading.as_mut().filter(|(s, _)| *s == stream) else {
+            return Task::none();
+        };
+        let rest = reader.next(&turn.answer_md, true);
+        reader.cut_back(kept);
+        speech.queue.extend(rest);
         self.speak_next()
     }
 
     /// Stop speaking — what is said, made, or waits to be — and stop reading
-    /// the answer being read, or about to be: the one still coming. Whether
-    /// anything was being said.
+    /// the answer being read, or about to be: the one still coming. With
+    /// the microphone on, it opens. Whether anything was being said.
+    /// The answer on `stream` will not be heard — not read aloud, or no
+    /// voice here to read it — so it is shown: a question said is sent
+    /// without the card, and its answer would otherwise be nowhere to be
+    /// seen. Once an answer, so the card put away stays away.
+    fn show_unheard(&mut self, stream: u64) {
+        if self.voice.speech.shown != Some(stream) {
+            self.voice.speech.shown = Some(stream);
+            self.reveal_ask();
+        }
+    }
+
     pub(crate) fn stop_speaking(&mut self) -> bool {
+        let read_aloud = self.voice.prefs.read_aloud;
         let coming = self
             .proj
             .ask_turns
             .last()
-            .filter(|t| t.streaming && t.spoken)
+            .filter(|t| t.streaming && read_aloud.reads(t.spoken))
             .map(|t| t.stream);
         let speech = &mut self.voice.speech;
         let was = speech.is_speaking();
@@ -590,7 +754,19 @@ impl App {
         if let Some(stream) = coming {
             speech.hushed.insert(stream);
         }
+        self.resume_listening();
         was
+    }
+
+    /// Whether an answer Clew will read aloud is still coming in: the
+    /// microphone waits for it, as it does while Clew speaks.
+    pub(crate) fn answer_read_aloud_coming(&self) -> bool {
+        let read_aloud = self.voice.prefs.read_aloud;
+        self.proj.ask_turns.last().is_some_and(|t| {
+            t.streaming
+                && read_aloud.reads(t.spoken)
+                && !self.voice.speech.hushed.contains(&t.stream)
+        })
     }
 
     /// The answer on `stream` was stopped: what is said of it — and only of
@@ -604,18 +780,13 @@ impl App {
         speech.hushed.insert(stream);
     }
 
-    /// Clew could not go on speaking, saying `why` on the status line.
-    /// Unlike the reader's stop, this keeps what they asked for: with Keep
-    /// listening on, the microphone opens as it would have once all was said.
+    /// Clew could not go on speaking, saying `why` on the status line: with
+    /// the microphone on, it opens as it would have once all was said.
     fn give_up_speaking(&mut self, why: String) -> Task<Message> {
-        let listen = self.voice.speech.listen_after;
         self.voice.speech.hush();
         self.status = why;
-        if listen {
-            self.resume_listening()
-        } else {
-            Task::none()
-        }
+        self.resume_listening();
+        Task::none()
     }
 
     /// Say `model`'s sample, as Settings' Try does: whatever was being said
@@ -625,6 +796,7 @@ impl App {
         if !self.speech_installed(model) {
             return Task::none();
         }
+        self.hold_mic_for_clew();
         let sentence = sample(model);
         let speech = &mut self.voice.speech;
         speech.queue.push_back(sentence);
@@ -654,16 +826,29 @@ impl App {
             return self
                 .give_up_speaking(tr!("There is no data directory to keep the voice in").into());
         };
+        // An answer's sentence no voice here can say: the answer is shown
+        // instead. Not a sample of a voice in Settings — that is not an
+        // answer.
+        let unheard = |app: &mut Self| {
+            if only.is_none()
+                && let Some(stream) = app.proj.ask_turns.last().map(|t| t.stream)
+            {
+                app.show_unheard(stream);
+            }
+        };
         while let Some(sentence) = self.voice.speech.queue.pop_front() {
             let Some(model) = only.or_else(|| speech::for_language(sentence.lang)) else {
+                unheard(self);
                 continue;
             };
             // Being downloaded or removed, in any window: as good as not here.
             let changing = crate::app::voice::downloading(&speech::dir(&store, model));
             if changing {
+                unheard(self);
                 continue;
             }
             if !speech::installed(&store, model) {
+                unheard(self);
                 // Said once a window — the status line is not a nag — and
                 // not at all while it downloads.
                 let speech = &mut self.voice.speech;
@@ -678,6 +863,11 @@ impl App {
                 continue;
             }
             let dir = speech::dir(&store, model);
+            let lately = &mut self.voice.speech.said_lately;
+            lately.push_back(sentence.text.clone());
+            while lately.len() > SAID_LATELY {
+                lately.pop_front();
+            }
             let voice = self.voice.prefs.voice_for(model);
             let speed = self.voice.prefs.speed;
             let synthesizer = self.voice.speech.synthesizer.clone();
@@ -695,10 +885,29 @@ impl App {
             self.voice.speech.made_with.insert(model.id);
             self.voice.speech.quiet_since = None;
             let round = self.voice.speech.round;
-            return Task::perform(
-                async move {
+            let current = self.voice.speech.current.clone();
+            // Made off the UI thread, each part sent as it comes: a voice
+            // that streams is heard while the rest is still being made.
+            let stream = iced::stream::channel(
+                16,
+                move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                    use iced::futures::SinkExt;
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
                     tokio::task::spawn_blocking(move || {
-                        let opening = open.map(|open| std::thread::spawn(move || open()));
+                        let mut opening = open.map(|open| std::thread::spawn(move || open()));
+                        let mut device_rate = device_rate;
+                        // The output opened, taken with the first part, its rate
+                        // what the parts are made at.
+                        let mut take_opened = |device_rate: &mut Option<u32>| -> Option<Opened> {
+                            let opened: Opening = opening.take()?.join().unwrap_or_else(|_| {
+                                Err(tr!("speaking failed unexpectedly").into())
+                            });
+                            if let Ok(output) = &opened {
+                                device_rate.get_or_insert(output.rate());
+                            }
+                            Some(Opened::new(opened))
+                        };
+                        let mut resampler: Option<(u32, clew_voice::audio::Resampler)> = None;
                         let said = synthesizer.say(
                             model,
                             &dir,
@@ -706,55 +915,72 @@ impl App {
                             sentence.lang,
                             voice,
                             speed,
+                            &mut |samples, rate| {
+                                // Stopped since it began: no more of it.
+                                if current.load(std::sync::atomic::Ordering::Relaxed) != round {
+                                    return false;
+                                }
+                                let opened = take_opened(&mut device_rate);
+                                let to = device_rate.unwrap_or(rate);
+                                // One resampler for all the parts: they join as
+                                // if made whole.
+                                let (_, resampler) = resampler.get_or_insert_with(|| {
+                                    (to, clew_voice::audio::Resampler::new(rate, to))
+                                });
+                                let audio = Audio {
+                                    samples: Arc::new(resampler.push(&samples)),
+                                    rate: to,
+                                };
+                                let _ = tx.send(Message::Voice(VoiceMsg::Spoken {
+                                    round,
+                                    result: Ok(audio),
+                                    opened,
+                                    last: false,
+                                }));
+                                true
+                            },
                         );
-                        let opened: Option<Opening> = opening.map(|opening| {
-                            opening
-                                .join()
-                                .unwrap_or_else(|_| Err(tr!("speaking failed unexpectedly").into()))
-                        });
-                        let device_rate = device_rate.or(match &opened {
-                            Some(Ok(output)) => Some(output.rate()),
-                            _ => None,
-                        });
-                        let result = said.map(|(samples, rate)| match device_rate {
-                            Some(to) if to != rate => Audio {
-                                samples: Arc::new(clew_voice::audio::resample(&samples, rate, to)),
-                                rate: to,
+                        let opened = take_opened(&mut device_rate);
+                        let rest = match resampler.as_mut() {
+                            Some((to, resampler)) => Audio {
+                                samples: Arc::new(resampler.finish()),
+                                rate: *to,
                             },
-                            _ => Audio {
-                                samples: Arc::new(samples),
-                                rate,
+                            None => Audio {
+                                samples: Arc::new(Vec::new()),
+                                rate: device_rate.unwrap_or(1),
                             },
-                        });
-                        (result, opened.map(Opened::new))
-                    })
-                    .await
-                    .unwrap_or_else(|_| {
-                        (
-                            Err(SayError::Voice(tr!("speaking failed unexpectedly").into())),
-                            None,
-                        )
-                    })
-                },
-                move |(result, opened)| {
-                    Message::Voice(VoiceMsg::Spoken {
-                        round,
-                        result,
-                        opened,
-                    })
+                        };
+                        let _ = tx.send(Message::Voice(VoiceMsg::Spoken {
+                            round,
+                            result: said.map(|()| rest),
+                            opened,
+                            last: true,
+                        }));
+                    });
+                    while let Some(message) = rx.recv().await {
+                        let last =
+                            matches!(message, Message::Voice(VoiceMsg::Spoken { last: true, .. }));
+                        if output.send(message).await.is_err() || last {
+                            break;
+                        }
+                    }
                 },
             );
+            return Task::run(stream, |message| message);
         }
         Task::none()
     }
 
-    /// A sentence made: played after what is playing, and the next one
-    /// made meanwhile.
+    /// A sentence made, or a part of it (all but its `last`): played after
+    /// what is playing — and, once all of it is made, the next one made
+    /// meanwhile.
     fn on_spoken(
         &mut self,
         round: u64,
         result: Result<Audio, SayError>,
         opened: Option<Opened>,
+        last: bool,
     ) -> Task<Message> {
         let opened = opened.and_then(|o| o.take());
         if round != self.voice.speech.round {
@@ -763,7 +989,9 @@ impl App {
             }
             return Task::none();
         }
-        self.voice.speech.making = false;
+        if last {
+            self.voice.speech.making = false;
+        }
         match opened {
             Some(Ok(output)) => match self.voice.speech.output {
                 Some(_) => close_later(output),
@@ -780,8 +1008,9 @@ impl App {
         match result {
             Ok(audio) => {
                 // Opened with the first sentence; one closed since (none is
-                // while a sentence is made) is opened again here.
-                if self.voice.speech.output.is_none() {
+                // while a sentence is made) is opened again here — not for
+                // a sentence's end with nothing left in it.
+                if self.voice.speech.output.is_none() && !audio.samples.is_empty() {
                     match (self.voice.speech.open_output)() {
                         Ok(output) => self.voice.speech.output = Some(output),
                         Err(e) => {
@@ -798,13 +1027,19 @@ impl App {
                     // sentence was not the output's. Given it with some
                     // still to play, the count goes on — an output that
                     // stopped is found out however many sentences come.
-                    if output.idle() {
-                        self.voice.speech.progress = None;
+                    if !audio.samples.is_empty() {
+                        if output.idle() {
+                            self.voice.speech.progress = None;
+                        }
+                        output.play(&audio.samples, audio.rate);
                     }
-                    output.play(&audio.samples, audio.rate);
                 }
                 self.voice.speech.quiet_since = None;
-                self.speak_next()
+                if last {
+                    self.speak_next()
+                } else {
+                    Task::none()
+                }
             }
             // This sentence could not be said; the next can.
             Err(SayError::Sentence(_)) => self.speak_next(),
@@ -816,7 +1051,7 @@ impl App {
     }
 
     /// While Clew speaks: the meter; the output closed once all is said;
-    /// then, with Keep listening on, the microphone opened.
+    /// then, with the microphone on, it opens.
     fn on_speak_tick(&mut self) -> Task<Message> {
         let speech = &mut self.voice.speech;
         let Some(output) = speech.output.as_ref() else {
@@ -826,6 +1061,15 @@ impl App {
         // stop only once it plays nothing more — a device's hiccup is played
         // through.
         let played = output.played();
+        // Held while the reader talks over Clew: it plays nothing on
+        // purpose. Held too long — what was said was not heard — it goes on.
+        if speech.barged.is_some() {
+            if speech.held_too_long() {
+                speech.go_on();
+            }
+            speech.level = 0.0;
+            return Task::none();
+        }
         match speech.progress {
             // Nothing played since, though there was something to play.
             Some((before, _)) if before == played && !output.idle() => {}
@@ -868,10 +1112,7 @@ impl App {
         speech.made_with.clear();
         speech.quiet_since = None;
         speech.level = 0.0;
-        if speech.listen_after && speech.reading.is_none() {
-            speech.listen_after = false;
-            return self.resume_listening();
-        }
+        self.resume_listening();
         Task::none()
     }
 

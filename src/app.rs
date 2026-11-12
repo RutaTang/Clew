@@ -64,17 +64,22 @@ mod editor;
 pub(crate) mod embedding;
 mod explain;
 pub(crate) mod export;
+pub(crate) mod fakerun;
 pub(crate) mod flow;
 pub(crate) mod glossary;
 mod graph;
+pub(crate) mod history;
+pub(crate) mod proof;
+pub(crate) mod runs;
 pub(crate) mod setup;
 pub(crate) mod suggest;
+pub(crate) mod weakspots;
 #[cfg(test)]
 pub(crate) use graph::project_map_layout;
 mod hover;
 pub(crate) mod insight;
 pub(crate) mod integrations;
-mod keys;
+pub(crate) mod keys;
 pub(crate) mod languages;
 mod lsp;
 pub(crate) mod navigation;
@@ -83,17 +88,20 @@ mod overview;
 pub(crate) mod palette;
 mod project;
 mod reading;
+pub(crate) mod recent;
 mod remote_state;
 mod runtime;
 pub use runtime::note_window_system;
 pub(crate) mod choices;
 pub(crate) mod onscreen;
+pub(crate) mod pickers;
 mod semantic;
 pub(crate) mod server;
 mod settings;
 pub(crate) mod speech;
 pub(crate) mod spoken;
 mod timetravel;
+pub(crate) mod tour_sample;
 pub(crate) mod tutorial;
 mod update;
 mod updater;
@@ -107,7 +115,8 @@ pub(crate) mod windowtools;
 pub(crate) use remote_state::{UnsavedEdits, close_question, quit_question};
 
 // A summary as the views outside the explanation overlay show it (`crate::ui`).
-pub(crate) use explain::shown_summary;
+pub(crate) use explain::{explanation_text, shown_summary};
+pub(crate) use walkthrough::DIFF_SCOPE_PENDING;
 
 // The mark it carries when it was kept unchecked, for the views' tests.
 #[cfg(test)]
@@ -116,3 +125,5 @@ pub(crate) use explain::UNCHECKED_MARK;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod turn;
+pub(crate) mod usage;
+pub(crate) mod wake;

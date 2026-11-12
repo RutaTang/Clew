@@ -2,7 +2,7 @@
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::operation::Focusable;
-use iced::advanced::widget::{Id, Operation, Tree, Widget};
+use iced::advanced::widget::{Id, Operation, Tree, Widget, tree};
 use iced::advanced::{Clipboard, Shell, mouse, overlay, renderer};
 use iced::keyboard::{self, key};
 use iced::{Element, Event, Length, Rectangle, Size, Vector};
@@ -17,6 +17,12 @@ use iced::{Element, Event, Length, Rectangle, Size, Vector};
 pub(crate) struct EscapeClears<'a, Message> {
     content: Element<'a, Message>,
     on_escape: Message,
+    /// The corner radius of the edge lit while the field has the keyboard,
+    /// when its content is the field's well ([`Self::ringed`]).
+    ring: Option<f32>,
+    /// What ↓ sends while the field has the keyboard, if anything
+    /// ([`Self::on_down`]).
+    on_down: Option<Message>,
 }
 
 impl<'a, Message> EscapeClears<'a, Message> {
@@ -24,8 +30,31 @@ impl<'a, Message> EscapeClears<'a, Message> {
         Self {
             content: content.into(),
             on_escape,
+            ring: None,
+            on_down: None,
         }
     }
+
+    /// ↓ while the field has the keyboard sends `message`, and goes no
+    /// further: the list under the field takes the keyboard from it.
+    pub(crate) fn on_down(mut self, message: Option<Message>) -> Self {
+        self.on_down = message;
+        self
+    }
+
+    /// Its content is the field's whole well, rounded by `radius`: its edge
+    /// lit in the accent while the field has the keyboard, as every other
+    /// field's is — the Files filter, reached by F6, showed only a caret.
+    pub(crate) fn ringed(mut self, radius: f32) -> Self {
+        self.ring = Some(radius);
+        self
+    }
+}
+
+/// Whether its field had the keyboard when last asked.
+#[derive(Default)]
+struct State {
+    focused: bool,
 }
 
 /// Whether any field under the widget it is run on has the keyboard.
@@ -42,6 +71,14 @@ impl Operation for AnyFocused {
 }
 
 impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for EscapeClears<'_, Message> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<State>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(State::default())
+    }
+
     fn size(&self) -> Size<Length> {
         self.content.as_widget().size()
     }
@@ -88,6 +125,23 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for EscapeClea
             cursor,
             viewport,
         );
+        if let Some(radius) = self.ring
+            && tree.state.downcast_ref::<State>().focused
+        {
+            use iced::advanced::Renderer as _;
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: layout.bounds(),
+                    border: iced::Border {
+                        color: crate::theme::with_alpha(crate::theme::accent(), 0.65),
+                        width: 1.0,
+                        radius: radius.into(),
+                    },
+                    ..renderer::Quad::default()
+                },
+                iced::Color::TRANSPARENT,
+            );
+        }
     }
 
     fn operate(
@@ -130,6 +184,29 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for EscapeClea
                 shell.publish(self.on_escape.clone());
             }
         }
+        if let (
+            Some(down),
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(key::Named::ArrowDown),
+                modifiers,
+                ..
+            }),
+        ) = (&self.on_down, event)
+            && !(modifiers.command() || modifiers.control() || modifiers.alt())
+        {
+            let mut focused = AnyFocused(false);
+            self.content.as_widget_mut().operate(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                &mut focused,
+            );
+            if focused.0 {
+                shell.publish(down.clone());
+                shell.capture_event();
+                return;
+            }
+        }
         self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,
@@ -140,6 +217,23 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for EscapeClea
             shell,
             viewport,
         );
+        // Whether the field has the keyboard now, for the edge drawn: the
+        // keyboard can come to it by a key elsewhere (F6), as well as by a
+        // click on it.
+        if self.ring.is_some() {
+            let mut focused = AnyFocused(false);
+            self.content.as_widget_mut().operate(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                &mut focused,
+            );
+            let state = tree.state.downcast_mut::<State>();
+            if state.focused != focused.0 {
+                state.focused = focused.0;
+                shell.request_redraw();
+            }
+        }
     }
 
     fn mouse_interaction(

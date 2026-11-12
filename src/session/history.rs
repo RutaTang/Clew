@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Bound on the tree, in memory and on disk. Reaching it drops the OLDEST
 /// visits (see [`History::push`]) — the trail keeps its recent past instead
 /// of starting over.
-const MAX_NODES: usize = 800;
+pub const MAX_NODES: usize = 800;
 
 /// How many of the oldest visits one eviction drops, so a trail at the cap
 /// is not re-spliced on every single navigation.
@@ -101,6 +101,10 @@ pub struct Visit {
     /// The symbol name recorded at this location, if any (stable across edits).
     pub label: Option<String>,
     pub depth: usize,
+    /// How far the trail indents it: one step under each fork above it, none
+    /// for a hop that simply followed the one before — a trail of seven hops
+    /// stepped seven levels in, its names cut to nothing.
+    pub indent: usize,
     pub is_current: bool,
     /// True at a fork — this node has more than one child branch.
     pub forks: bool,
@@ -203,21 +207,98 @@ impl History {
         self.renumbered = renumbered;
     }
 
-    pub fn back(&mut self) -> Option<Loc> {
-        let cur = self.current?;
-        let parent = self.nodes[cur].parent?;
-        self.nodes[parent].preferred = Some(cur); // forward returns to where we were
-        self.current = Some(parent);
-        Some(self.nodes[parent].loc.clone())
+    /// The reader, at the current visit, has moved to `line` (labelled
+    /// `label`, the symbol named there, if any) — and is about to leave:
+    /// the visit is made where they are, so that Back returns there. Read
+    /// further in the same place (`moves`: a file opened with no line, the
+    /// function it went to), the visit moves with them; gone on to another
+    /// function, that is a visit of its own. A jump from line 20 to a
+    /// definition in the same file, Back went to the file's top — the place
+    /// it was opened at — and the call the reader jumped from was lost.
+    pub fn settle(&mut self, line: usize, label: Option<String>, moves: bool) {
+        let Some(cur) = self.current else {
+            return;
+        };
+        let label = label.map(cap_label);
+        let node = &mut self.nodes[cur];
+        if node.loc.line == Some(line) {
+            return;
+        }
+        if moves {
+            node.loc.line = Some(line);
+            node.label = label;
+        } else {
+            let path = node.loc.path.clone();
+            self.push(
+                Loc {
+                    path,
+                    line: Some(line),
+                },
+                label,
+            );
+        }
     }
 
+    /// Go back to the visit before this one; see [`History::back_showing`].
+    /// With no view measured, only a visit to this very place is passed.
+    pub fn back(&mut self) -> Option<Loc> {
+        self.back_showing(0)
+    }
+
+    /// Go forward to the visit after this one; see
+    /// [`History::forward_showing`].
     pub fn forward(&mut self) -> Option<Loc> {
-        let cur = self.current?;
-        let child = self.nodes[cur]
-            .preferred
-            .or_else(|| self.nodes[cur].children.last().copied())?;
-        self.current = Some(child);
-        Some(self.nodes[child].loc.clone())
+        self.forward_showing(0)
+    }
+
+    /// Whether going from `here` to `loc` would leave the screen as it is:
+    /// the same place, or the top of the same file while `here` is on its
+    /// first screen — a view `first_rows` lines tall, which shows a line at
+    /// its top with three above it (as a jump does). A file opened, then a
+    /// function near its top gone to: Back to the file changed nothing on
+    /// screen, and seemed broken. Down the file, it scrolls to the top.
+    pub fn changes_nothing(loc: &Loc, here: &Loc, first_rows: usize) -> bool {
+        loc.path == here.path
+            && (loc.line == here.line
+                || (loc.line.is_none() && here.line.is_some_and(|l| l + 3 <= first_rows)))
+    }
+
+    /// Go back to the visit before this one — past any that would change
+    /// nothing on screen ([`History::changes_nothing`], for a view
+    /// `first_rows` lines tall). At the trail's start it stops there.
+    pub fn back_showing(&mut self, first_rows: usize) -> Option<Loc> {
+        let mut cur = self.current?;
+        let here = self.nodes[cur].loc.clone();
+        loop {
+            let parent = self.nodes[cur].parent?;
+            self.nodes[parent].preferred = Some(cur); // forward returns to where we were
+            cur = parent;
+            if !Self::changes_nothing(&self.nodes[cur].loc, &here, first_rows)
+                || self.nodes[cur].parent.is_none()
+            {
+                break;
+            }
+        }
+        self.current = Some(cur);
+        Some(self.nodes[cur].loc.clone())
+    }
+
+    /// Go forward to the visit after this one — past those Back passes
+    /// over, so that Back then Forward returns to the same place.
+    pub fn forward_showing(&mut self, first_rows: usize) -> Option<Loc> {
+        let next = |h: &Self, i: usize| {
+            h.nodes[i]
+                .preferred
+                .or_else(|| h.nodes[i].children.last().copied())
+        };
+        let mut cur = next(self, self.current?)?;
+        while let Some(after) = next(self, cur)
+            && Self::changes_nothing(&self.nodes[cur].loc, &self.nodes[after].loc, first_rows)
+        {
+            cur = after;
+        }
+        self.current = Some(cur);
+        Some(self.nodes[cur].loc.clone())
     }
 
     /// The visits that led to the current one, oldest first and the current
@@ -265,6 +346,11 @@ impl History {
         self.nodes.clear();
         self.current = None;
         self.renumbered += 1;
+    }
+
+    /// Where the current visit is, if there is one.
+    pub fn current_loc(&self) -> Option<&Loc> {
+        self.current.map(|c| &self.nodes[c].loc)
     }
 
     /// Where node `id` points, if there is such a node — how a click on a
@@ -361,9 +447,21 @@ impl History {
 
     // Iterative, not recursive: the tree is user-shaped (and its persisted
     // form repo-shaped), so its depth must never translate into stack depth.
+    /// The current visit's id, then its parent's, up to its root: where the
+    /// trail stands, and the branches it stands in.
+    pub fn current_path(&self) -> Vec<usize> {
+        let mut path = Vec::new();
+        let mut at = self.current;
+        while let Some(id) = at {
+            path.push(id);
+            at = self.nodes.get(id).and_then(|n| n.parent);
+        }
+        path
+    }
+
     fn dfs(&self, id: usize, depth: usize, collapsed: &HashSet<usize>, out: &mut Vec<Visit>) {
-        let mut stack = vec![(id, depth)];
-        while let Some((id, depth)) = stack.pop() {
+        let mut stack = vec![(id, depth, 0)];
+        while let Some((id, depth, indent)) = stack.pop() {
             let n = &self.nodes[id];
             let is_collapsed = collapsed.contains(&id);
             out.push(Visit {
@@ -371,6 +469,7 @@ impl History {
                 loc: n.loc.clone(),
                 label: n.label.clone(),
                 depth,
+                indent,
                 is_current: self.current == Some(id),
                 forks: n.children.len() > 1,
                 has_children: !n.children.is_empty(),
@@ -380,8 +479,9 @@ impl History {
                 continue;
             }
             // Reversed so the LIFO stack emits children in their real order.
+            let branch = usize::from(n.children.len() > 1);
             for &c in n.children.iter().rev() {
-                stack.push((c, depth + 1));
+                stack.push((c, depth + 1, indent + branch));
             }
         }
     }
@@ -948,6 +1048,38 @@ mod tests {
         h.push(loc(name, line), None);
     }
 
+    /// A hop that followed the one before stays in line; only a fork's
+    /// branches step in: seven hops in a row stood seven levels deep.
+    #[test]
+    fn the_trail_indents_at_forks_only() {
+        let mut h = History::default();
+        for name in ["a", "b", "c", "d"] {
+            push(&mut h, name, None);
+        }
+        // Back to b, then off another way: b forks into c and e.
+        h.back();
+        h.back();
+        push(&mut h, "e", None);
+        push(&mut h, "f", None);
+        let shape: Vec<(String, usize, usize)> = h
+            .flatten()
+            .iter()
+            .map(|v| (v.loc.path.display().to_string(), v.depth, v.indent))
+            .collect();
+        let row = |name: &str, depth, indent| (name.to_string(), depth, indent);
+        assert_eq!(
+            shape,
+            [
+                row("a", 0, 0),
+                row("b", 1, 0),
+                row("c", 2, 1),
+                row("d", 3, 1),
+                row("e", 2, 1),
+                row("f", 3, 1),
+            ]
+        );
+    }
+
     #[test]
     fn back_and_forward_walk_the_spine() {
         let mut h = History::default();
@@ -961,6 +1093,55 @@ mod tests {
         assert_eq!(h.back(), None);
         assert_eq!(h.forward(), Some(loc("b", Some(10))));
         assert!(h.can_forward());
+    }
+
+    /// Back skips a visit that would leave the screen as it is — the file
+    /// the reader is in, opened with no line, while the place is on its
+    /// first screen — and Forward skips it the same way: Back then Forward
+    /// returns to where the reader was. Down the file, the file's top is a
+    /// stop of its own, both ways.
+    #[test]
+    fn back_skips_a_visit_that_would_change_nothing() {
+        let mut h = History::default();
+        push(&mut h, "cart", Some(3));
+        push(&mut h, "main", None);
+        h.push(loc("main", Some(12)), Some("main".into()));
+        assert_eq!(h.back_showing(40), Some(loc("cart", Some(3))));
+        assert_eq!(h.forward_showing(40), Some(loc("main", Some(12))));
+        assert_eq!(h.back_showing(40), Some(loc("cart", Some(3))));
+        // A view too short to show line 12 from the top: the top is a stop.
+        assert_eq!(h.forward_showing(10), Some(loc("main", None)));
+        assert_eq!(h.forward_showing(10), Some(loc("main", Some(12))));
+        assert_eq!(h.back_showing(10), Some(loc("main", None)));
+        // At the trail's start it stops there.
+        let mut h = History::default();
+        push(&mut h, "main", None);
+        h.push(loc("main", Some(12)), Some("main".into()));
+        assert_eq!(h.back_showing(40), Some(loc("main", None)));
+    }
+
+    /// Where the reader went in a visit is where Back returns: a file
+    /// opened at its top, read down to line 20, then a definition in it
+    /// gone to — Back is to line 20. Read further in the same function, the
+    /// stop moves; gone on to another, that is a stop of its own.
+    #[test]
+    fn a_jump_leaves_from_where_the_reader_was() {
+        let mut h = History::default();
+        push(&mut h, "main", None);
+        push(&mut h, "pricing", None);
+        h.settle(20, None, true);
+        h.push(loc("pricing", Some(5)), Some("cents".into()));
+        assert_eq!(h.back_showing(40), Some(loc("pricing", Some(20))));
+        // In the same function, read further: the stop moves with it.
+        h.settle(24, None, true);
+        h.push(loc("pricing", Some(5)), Some("cents".into()));
+        assert_eq!(h.back_showing(40), Some(loc("pricing", Some(24))));
+        // Gone on to another function: a stop of its own, and the one
+        // before it kept.
+        h.settle(40, None, false);
+        h.push(loc("pricing", Some(5)), Some("cents".into()));
+        assert_eq!(h.back_showing(40), Some(loc("pricing", Some(40))));
+        assert_eq!(h.back_showing(40), Some(loc("pricing", Some(24))));
     }
 
     #[test]

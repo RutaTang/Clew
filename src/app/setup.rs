@@ -40,6 +40,11 @@ pub enum Fetch {
     Download,
     /// An install with a tool of the machine's (`go`, `npm`, `cargo`).
     Install(String),
+    /// Nothing fetched: the server's own program, already on this
+    /// computer, chosen for the project in place of Clew's copy — as a
+    /// first open offers it ([`crate::LspMsg::FoundOnPath`]). The tour said
+    /// "pyright: install with npm" with pyright on the PATH.
+    OnPath(PathBuf),
 }
 
 /// A language server the project needs, as the sheet lists it.
@@ -61,6 +66,12 @@ impl SetupServer {
     }
 }
 
+/// How long the sheet's estimate stands before Enter presses its Explain:
+/// a held or doubled Enter — the first opening the sheet from the command
+/// bar — started a paid pass whose cost was never on screen to be read.
+/// A press of the button itself is not held back.
+pub const SHEET_READ: std::time::Duration = std::time::Duration::from_millis(700);
+
 /// What a look at the project found.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Census {
@@ -78,8 +89,17 @@ pub struct ProjectSetup {
     pub mode: SetupMode,
     pub root: PathBuf,
     pub servers: bool,
+    /// The reader said no to the servers: unticked them, or chose Open
+    /// without setup. Not the same as `servers` off, which a look that
+    /// found nothing to set up also leaves — a later server that needs a
+    /// download is asked about then.
+    pub servers_declined: bool,
     pub explain: bool,
     pub census: Option<Census>,
+    /// The look found no code to explain in the sheet's folder — not
+    /// "all of it explained already", which the count less what is
+    /// explained also makes 0.
+    pub no_code: bool,
 }
 
 /// What a first open's answer asked for, carried out once the project is
@@ -87,9 +107,13 @@ pub struct ProjectSetup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupIntent {
     pub root: PathBuf,
-    /// The languages whose servers to fetch now.
-    pub fetch: Vec<String>,
+    /// The languages whose servers to set up now, and how.
+    pub fetch: Vec<(String, Fetch)>,
     pub explain: bool,
+    /// The sheet's servers were left unticked (or the answer was Open
+    /// without setup): no language server is asked about on this open —
+    /// each is left "not set up", for the status bar's Set up to offer.
+    pub servers_not_now: bool,
 }
 
 /// Most files the estimate reads; past it, the rest are taken to be like
@@ -139,15 +163,41 @@ pub(crate) fn estimate_calls(files: &[fs_scan::FileEntry]) -> usize {
             }
         }
     }
+    // None of the sample could be read (each too large, or not text): a
+    // call a file, as a guess — 0 says there is no code at all, and the
+    // sheet said so of a folder holding a 9 MB `sqlite3.c`.
     if read == 0 {
-        return 0;
+        return code.len();
     }
     let scale = code.len() as f64 / read as f64;
     // Folders are not sampled away: every folder holding a sampled file
     // with content counts once, and those the sample skipped are guessed
     // at the same rate.
     let folders = (folders.len() as f64 * scale.sqrt()).round() as usize;
-    ((functions + with_content) as f64 * scale).round() as usize + folders
+    // At least one where there is code: scripts with no functions in them
+    // are code too.
+    (((functions + with_content) as f64 * scale).round() as usize + folders).max(1)
+}
+
+/// Whether there is code among `files`: any file of a language Clew reads
+/// — what Explain explains and the overview is of. Not only the languages
+/// a server is set up for: a folder of shell scripts or SQL migrations is
+/// code too, and opened on no overview of it.
+pub(crate) fn has_code(files: &[fs_scan::FileEntry]) -> bool {
+    files.iter().any(|f| highlight::detect(&f.abs).is_some())
+}
+
+impl App {
+    /// Whether the folder open has no code in it ([`has_code`]): a
+    /// folder of notes. False with no folder open.
+    pub(crate) fn no_code(&self) -> bool {
+        self.proj.code_languages.is_empty()
+            && self
+                .proj
+                .project
+                .as_ref()
+                .is_some_and(|p| !has_code(&p.files))
+    }
 }
 
 /// What decides the servers a project runs and what each still takes to
@@ -160,6 +210,10 @@ pub(crate) struct ServerLook {
     pub config: lsp::config::ProjectLspConfig,
     pub choices: clew_protocol::LanguageChoices,
     pub trust: clew_core::trust::Trust,
+    /// Where a server's own program is looked for: the PATH children get.
+    /// (Set here for a test, whose PATH is its thread's: the look runs on
+    /// another.)
+    pub path: Option<std::ffi::OsString>,
 }
 
 impl ServerLook {
@@ -172,10 +226,12 @@ impl ServerLook {
             .filter_map(|language| {
                 let server = self.config.resolve_with(language, &self.choices)?;
                 let fetch = match lsp::store::locate(&server) {
-                    lsp::store::Located::NeedsDownload { .. } => Fetch::Download,
-                    lsp::store::Located::NeedsInstall { install, .. } => {
-                        Fetch::Install(install.tool.to_string())
-                    }
+                    lsp::store::Located::NeedsDownload { download, .. } => self
+                        .on_path(&server.server_name, download.binary)
+                        .map_or(Fetch::Download, Fetch::OnPath),
+                    lsp::store::Located::NeedsInstall { install, .. } => self
+                        .on_path(&server.server_name, install.binary)
+                        .map_or_else(|| Fetch::Install(install.tool.to_string()), Fetch::OnPath),
                     lsp::store::Located::Unsupported(_) => return None,
                     lsp::store::Located::Ready(_) | lsp::store::Located::RepoCommand(_) => {
                         Fetch::Nothing
@@ -193,6 +249,24 @@ impl ServerLook {
             })
             .filter(SetupServer::asks)
             .collect()
+    }
+
+    /// The server `server_name`'s own program — `binary` names where it
+    /// lands in Clew's copy, its file name what it goes by on the PATH —
+    /// when this computer has one worth using, as a first open would offer
+    /// it. Not for a server Clew's own install keeps from running the
+    /// project's code ([`lsp::langenv::pins`]).
+    fn on_path(&self, server_name: &str, binary: &str) -> Option<PathBuf> {
+        if lsp::langenv::pins(server_name) {
+            return None;
+        }
+        let name = Path::new(binary).file_name()?.to_str()?;
+        let path = self
+            .path
+            .clone()
+            .unwrap_or_else(clew_core::linerpc::child_path);
+        let program = lsp::store::find_in_unresolved(&path, name)?;
+        crate::app::lsp::worth_offering(&program, &path).then_some(program)
     }
 }
 
@@ -284,6 +358,7 @@ pub(crate) fn servers_line(servers: &[SetupServer]) -> String {
                 Fetch::Nothing => {}
                 Fetch::Download => takes.push(tr!("download").into()),
                 Fetch::Install(tool) => takes.push(tr!("install with {tool}", tool = tool)),
+                Fetch::OnPath(_) => takes.push(tr!("already installed").into()),
             }
             if s.builds {
                 takes.push(tr!("builds the project (runs its code)").into());
@@ -355,13 +430,18 @@ impl App {
             // Servers are ticked: they cost nothing but the download, and
             // without them go-to-definition is a guess. Explaining costs
             // money, so it waits for a tick — except where the sheet is
-            // Explain All asking first.
-            servers: true,
+            // Explain All asking first, which shows no servers and sets
+            // none up: ticked there, its Explain downloaded them and gave
+            // them leave to build, unseen, over a decline.
+            servers: mode != SetupMode::Explain,
+            servers_declined: false,
             explain: mode == SetupMode::Explain,
             // A project on another machine cannot be looked at from here:
             // its servers run there and ask there, as they need.
             census: remote.then(Census::default),
+            no_code: false,
         });
+        self.setup_counted_at = remote.then(std::time::Instant::now);
         if remote {
             return Task::none();
         }
@@ -394,13 +474,16 @@ impl App {
         } else {
             0
         };
+        let no_code = census.calls == Some(0);
         census.calls = census.calls.map(|c| c.saturating_sub(explained));
         if let Some(setup) = self.setup.as_mut().filter(|s| s.root == root) {
+            setup.no_code = no_code;
             // Nothing to set up for the servers: nothing ticked for them.
             if census.servers.is_empty() {
                 setup.servers = false;
             }
             setup.census = Some(census);
+            self.setup_counted_at = Some(std::time::Instant::now());
         }
         Task::none()
     }
@@ -444,17 +527,19 @@ impl App {
         };
         let servers = Self::ticked_servers(&setup);
         self.allow_builds(root, &servers);
-        let fetch: Vec<String> = servers
+        let fetch: Vec<(String, Fetch)> = servers
             .iter()
             .filter(|s| s.fetch != Fetch::Nothing)
-            .map(|s| s.language.clone())
+            .map(|s| (s.language.clone(), s.fetch.clone()))
             .collect();
         let explain = setup.explain && self.llm_available;
-        if !fetch.is_empty() || explain {
+        let servers_not_now = setup.servers_declined;
+        if !fetch.is_empty() || explain || servers_not_now {
             self.pending_setup = Some(SetupIntent {
                 root: root.to_path_buf(),
                 fetch,
                 explain,
+                servers_not_now,
             });
         }
     }
@@ -469,8 +554,13 @@ impl App {
             self.setup = Some(setup);
             return Task::none();
         }
-        let servers = Self::ticked_servers(&setup);
-        let mut tasks = vec![self.set_up_servers(&setup.root, &servers)];
+        // Explain All's sheet sets up only the explaining it asks about: the
+        // servers left for later stay so.
+        let mut tasks = Vec::new();
+        if setup.mode != SetupMode::Explain {
+            let servers = Self::ticked_servers(&setup);
+            tasks.push(self.set_up_servers(&setup.root, &servers));
+        }
         if setup.explain {
             tasks.push(self.on_explain_project(false));
         }
@@ -481,11 +571,15 @@ impl App {
     /// recorded, and each fetched — or, in hand and declined before,
     /// started afresh.
     fn set_up_servers(&mut self, root: &Path, servers: &[SetupServer]) -> Task<Message> {
+        // Asked for now: the servers left for later at the first open are
+        // asked about again as they start.
+        self.proj.servers_not_now = false;
+        self.proj.servers_asked.clear();
         self.allow_builds(root, servers);
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for server in servers {
             if server.fetch != Fetch::Nothing {
-                tasks.push(self.fetch_lsp(&server.language));
+                tasks.push(self.set_up_server(&server.language, &server.fetch));
             } else if matches!(
                 self.proj.link.lsp.get(&server.language),
                 Some(LspSlot::Declined(_))
@@ -505,7 +599,7 @@ impl App {
     /// [`ServerLook`]): the open project's `lsp.toml` and choices when it is
     /// the one open, clew's defaults before it is; the leave to build on
     /// record either way.
-    fn server_look(&self, root: &Path) -> ServerLook {
+    pub(crate) fn server_look(&self, root: &Path) -> ServerLook {
         let open = self.proj.project.as_ref().is_some_and(|p| p.root == root);
         ServerLook {
             config: if open {
@@ -519,6 +613,7 @@ impl App {
                 Default::default()
             },
             trust: self.trust.clone(),
+            path: crate::app::lsp::path_set_here(),
         }
     }
 
@@ -651,11 +746,16 @@ impl App {
         let Some(intent) = self.pending_setup.take() else {
             return Task::none();
         };
-        let mut tasks: Vec<Task<Message>> =
-            intent.fetch.iter().map(|l| self.fetch_lsp(l)).collect();
+        let mut tasks: Vec<Task<Message>> = intent
+            .fetch
+            .iter()
+            .map(|(language, fetch)| self.set_up_server(language, fetch))
+            .collect();
         if intent.explain {
             tasks.push(self.on_explain_project(false));
         }
+        // The tour's sample, open and set up: its tour begins.
+        tasks.push(self.begin_tour_when_open());
         Task::batch(tasks)
     }
 
@@ -665,6 +765,15 @@ impl App {
     /// otherwise ask for. A language whose server is in hand, on its way,
     /// running or asked about is left alone; one whose download was declined
     /// or failed is fetched: "Set Up Project…" is where it is asked for again.
+    /// Set `language`'s server up as a look at the project found it: the
+    /// program on this computer chosen for it, or Clew's copy fetched.
+    fn set_up_server(&mut self, language: &str, fetch: &Fetch) -> Task<Message> {
+        match fetch {
+            Fetch::OnPath(program) => self.use_server_program(language, program),
+            _ => self.fetch_lsp(language),
+        }
+    }
+
     pub(crate) fn fetch_lsp(&mut self, language: &str) -> Task<Message> {
         if self.connection.is_remote() || self.proj.project.is_none() {
             return Task::none();
@@ -716,6 +825,13 @@ impl App {
     ) -> Task<Message> {
         match result {
             Ok(exe) => {
+                // Said done, as a download a file asked for is: the status
+                // bar said "Downloading rust-analyzer…" on, beside the
+                // server's own "ready".
+                self.status = tr!(
+                    "{language} server installed",
+                    language = crate::app::languages::language_name(&language)
+                );
                 // Set up — and looked at afresh, so a look begun before it
                 // was in, landing after, does not offer it again.
                 self.proj.setup_missing.retain(|s| s.language != language);

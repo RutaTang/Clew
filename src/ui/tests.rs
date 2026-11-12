@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{
-    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, GlossaryMsg, GraphMsg,
-    HoverMsg, NavMsg, ProjectMsg, ReadingMsg, ServerMsg, Stamp, TutorialMsg, WalkMsg, WindowMsg,
+    AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg,
+    GlossaryMsg, GraphMsg, HoverMsg, NavMsg, ProjectMsg, ReadingMsg, ServerMsg, Stamp, TutorialMsg,
+    WalkMsg, WindowMsg,
 };
 
 use iced::advanced::clipboard;
@@ -15,7 +16,7 @@ use iced::advanced::widget::Operation;
 use iced::advanced::widget::operation::focusable::find_focused;
 use iced::advanced::widget::operation::scrollable::Scrollable;
 use iced::advanced::widget::operation::{Outcome, black_box};
-use iced::widget::{Id, column, container, scrollable, space, text_input};
+use iced::widget::{Id, container, scrollable, space};
 use iced::{Element, Event, Font, Pixels, Point, Rectangle, Size, Vector, keyboard, mouse, window};
 use iced_test::runtime::user_interface::{Cache, UserInterface};
 
@@ -54,6 +55,11 @@ fn reader_app() -> App {
     });
     app.proj.panes[0] = Some(viewer);
     app.proj.active = 0;
+    // Its code's language, as an open finds it in its files.
+    app.proj.code_languages = vec!["rust".into()];
+    // No repository at a path that is not there: no branch to read.
+    app.proj.head_stale = false;
+    app.proj.repo_tip_stale = false;
     app.show_left_sidebar = false;
     app.show_right_panel = false;
     app.show_bottom = false;
@@ -473,6 +479,7 @@ fn a_time_travel_scrub_keeps_the_place_on_both_axes() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: app.proj.time_gen,
         session: 0,
@@ -615,6 +622,7 @@ fn leaving_a_view_that_replaced_the_code_puts_the_reader_back() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: 0,
         session: 0,
@@ -750,6 +758,7 @@ fn split_with_history() -> App {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: app.proj.time_gen,
         session: 0,
@@ -1278,6 +1287,53 @@ fn settings_shows_one_page_at_a_time() {
     assert!(shows(&mut sim, "Commands"));
 }
 
+/// Each Settings page opens at its top: the pages share one scroll, and
+/// the Integrations page opened where the Voice page was left — at its
+/// foot, mid-form. The page shown again, it stays where it is.
+#[test]
+fn another_settings_page_opens_at_its_top() {
+    use crate::SettingsPage;
+    use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, scroll_to};
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        SettingsPage::Voice,
+    )));
+    let mut renderer = renderer();
+    let offset = |ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>,
+                  renderer: &iced::Renderer| {
+        let mut probe = ScrollProbe {
+            target: super::settings_scroll_id(),
+            found: None,
+        };
+        ui.operate(renderer, &mut black_box(&mut probe));
+        probe.found.expect("the Settings page's scroll").y
+    };
+    let mut ui = UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
+    let end = AbsoluteOffset {
+        x: Some(0.0),
+        y: Some(f32::MAX),
+    };
+    let _ = run_operation::<()>(
+        &mut ui,
+        &renderer,
+        scroll_to(super::settings_scroll_id(), end),
+    );
+    assert!(offset(&mut ui, &renderer) > 0.0, "the Voice page scrolls");
+    let mut cache = ui.into_cache();
+    for (page, top) in [
+        (SettingsPage::Voice, false),
+        (SettingsPage::Integrations, true),
+    ] {
+        let task = app.update(Message::Settings(crate::SettingsMsg::Page(page)));
+        let mut ui = UserInterface::build(super::view(&app), WINDOW, cache, &mut renderer);
+        for op in widget_ops(task) {
+            let _ = run_operation::<()>(&mut ui, &renderer, op);
+        }
+        assert_eq!(offset(&mut ui, &renderer) == 0.0, top, "{page:?}");
+        cache = ui.into_cache();
+    }
+}
+
 /// A16 / E2-6: Enter in a field of the Settings or Connect form submits it,
 /// like the button: Save, and Connect.
 #[test]
@@ -1388,17 +1444,48 @@ fn indexing_and_explain_progress_say_what_is_happening_once() {
         },
     );
     {
-        // Idle, it says what is current: the notes — not "Up to date" a
+        // Idle, it says what is current: the explanations — not "Up to date" a
         // second time beside the scan's own.
         let mut sim = sim_of(&app);
         assert!(
-            shows(&mut sim, "Notes up to date"),
+            shows(&mut sim, "No changes to explain"),
             "the refresh chip, idle"
         );
         assert!(
             text_at(&mut sim, |t| t.contains("Up to date"), 1).is_none(),
             "\"Up to date\" twice"
         );
+        // A click asks first: the Explain sheet, with what it would cost,
+        // not a pass of every function not yet explained.
+        let sent = click(sim_of(&app), "↻ No changes to explain");
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
+            )),
+            "the chip opens the Explain sheet: {sent:?}"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|m| matches!(m, Message::Explain(ExplainMsg::RefreshAll))),
+            "the chip ran a pass with no word of its cost"
+        );
+    }
+    {
+        // Not kept fresh by itself, changed code is said to be out of date.
+        app.keep_explanations_fresh = false;
+        app.proj
+            .explain
+            .changed_sources
+            .insert(PathBuf::from("/nonexistent/clew-ui-test/src/lib.rs"));
+        {
+            let mut sim = sim_of(&app);
+            assert!(shows(&mut sim, "Explanations out of date"));
+            assert!(!shows(&mut sim, "No changes to explain"));
+        }
+        app.keep_explanations_fresh = true;
+        app.proj.explain.changed_sources.clear();
     }
     app.proj.explain.running = true;
     app.proj.explain.progress = Some((3, 9));
@@ -1557,6 +1644,1720 @@ fn the_files_view_marks_what_changed() {
     );
 }
 
+/// The Files view's tree takes the keyboard as a field does: a press on it
+/// gives it the keys, and the keys that walk a tree are its moves, going no
+/// further; a press elsewhere takes the keys away, and so does the code
+/// having them (a file opened from the tree is read with `j`, as before).
+/// ↓ in the filter above goes down to it.
+#[test]
+fn the_files_tree_takes_the_keyboard_as_a_field_does() {
+    use crate::app::message::TreeKey;
+    use iced::event::Status;
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.code_focused = false;
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        files: vec!["notes.txt".into()],
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: vec![],
+                files: vec!["lib.rs".into()],
+            },
+        )],
+    };
+    let down = || Key::Named(Named::ArrowDown);
+    {
+        let mut sim = sim_of(&app);
+        assert_eq!(sim.tap_key(down()), Status::Ignored, "not the tree's yet");
+        let src = text_at(&mut sim, |t| t == "src", 0).expect("the folder's row");
+        sim.point_at(src.center());
+        let _ = sim.simulate(iced_test::simulator::click());
+        assert_eq!(sim.tap_key(down()), Status::Captured, "the tree's now");
+        assert_eq!(sim.tap_key(Key::Character("p".into())), Status::Captured);
+        // Away from the tree, the keys are no longer its.
+        // The code, in the window's middle.
+        sim.point_at(Point::new(WINDOW.width / 2.0, WINDOW.height / 2.0));
+        let _ = sim.simulate(iced_test::simulator::click());
+        assert_eq!(sim.tap_key(down()), Status::Ignored);
+        let sent = sent_by(sim);
+        let tree_keys: Vec<_> = sent
+            .iter()
+            .filter_map(|m| match m {
+                Message::Window(WindowMsg::TreeKey(k)) => Some(*k),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tree_keys, [TreeKey::Down, TreeKey::Type('p')]);
+        assert!(
+            sent.iter()
+                .any(|m| matches!(m, Message::Window(WindowMsg::TreeFocused(true))))
+        );
+        assert!(
+            sent.iter()
+                .any(|m| matches!(m, Message::Window(WindowMsg::TreeFocused(false))))
+        );
+    }
+    // The code has the keys (a file opened from the tree): the tree lets
+    // them go.
+    app.code_focused = true;
+    {
+        let mut sim = sim_of(&app);
+        let src = text_at(&mut sim, |t| t == "src", 0).expect("the folder's row");
+        sim.point_at(src.center());
+        let _ = sim.simulate(iced_test::simulator::click());
+        assert_eq!(sim.tap_key(down()), Status::Ignored, "the code's");
+    }
+    // ↓ in the filter goes down to the tree.
+    let mut sim = sim_of(&app);
+    // The filter, above the tree's first row: a row's half, the gap, the
+    // field's half.
+    let src = text_at(&mut sim, |t| t == "src", 0).expect("the folder's row");
+    sim.point_at(Point::new(
+        src.x + 10.0,
+        src.center_y() - super::TREE_ROW_H / 2.0 - 12.0 - 15.0,
+    ));
+    let _ = sim.simulate(iced_test::simulator::click());
+    assert_eq!(sim.tap_key(down()), Status::Captured);
+    assert!(
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::FileFilterDown)))
+    );
+}
+
+/// `app`'s window with the widget `id` holding the keys, then `events`:
+/// how each event was taken, and what the window sent.
+fn keys_held_by(app: &App, id: Id, events: &[Event]) -> (Vec<iced::event::Status>, Vec<Message>) {
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(super::view(app), WINDOW, Cache::default(), &mut renderer);
+    let _ = run_operation(
+        &mut ui,
+        &renderer,
+        iced::advanced::widget::operation::focusable::focus::<()>(id),
+    );
+    let mut sent = Vec::new();
+    let (_, statuses) = ui.update(
+        events,
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    (statuses, sent)
+}
+
+/// A key pressed, as the window gets it: `key`, typing `typed`.
+fn press(key: keyboard::Key, typed: keyboard::Key, modifiers: keyboard::Modifiers) -> Event {
+    let text = match typed.as_ref() {
+        keyboard::Key::Character(c) => Some(c.into()),
+        _ => None,
+    };
+    Event::Keyboard(keyboard::Event::KeyPressed {
+        key,
+        modified_key: typed,
+        physical_key: keyboard::key::Physical::Unidentified(
+            keyboard::key::NativeCode::Unidentified,
+        ),
+        location: keyboard::Location::Standard,
+        modifiers,
+        text,
+        repeat: false,
+    })
+}
+
+/// A Files view with a folder and a file, for the tree's keys.
+fn tree_app() -> App {
+    let mut app = reader_app();
+    // No repository at a path that is not there: no marks to read.
+    app.proj.git_status_stale = false;
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.code_focused = false;
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        files: vec!["notes.txt".into()],
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: vec![],
+                files: vec!["lib.rs".into()],
+            },
+        )],
+    };
+    app
+}
+
+/// A dialog over the window holds the keys, though the tree had them: its
+/// keys are not the tree's — an Esc closes the dialog, a letter goes
+/// nowhere near the filter under it.
+#[test]
+fn the_tree_lets_the_keys_go_to_a_dialog_over_it() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = tree_app();
+    let none = keyboard::Modifiers::empty();
+    let down = || {
+        press(
+            Key::Named(Named::ArrowDown),
+            Key::Named(Named::ArrowDown),
+            none,
+        )
+    };
+    let (statuses, sent) = keys_held_by(&app, super::files_tree_keys_id(), &[down()]);
+    assert_eq!(
+        statuses,
+        [iced::event::Status::Captured],
+        "the tree's: {sent:?}"
+    );
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let x = press(Key::Character("x".into()), Key::Character("x".into()), none);
+    let (statuses, sent) = keys_held_by(&app, super::files_tree_keys_id(), &[down(), x]);
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::TreeKey(_)))),
+        "{sent:?}"
+    );
+    assert!(statuses.iter().all(|s| *s == iced::event::Status::Ignored));
+    // So Esc reaches the dialog, and closes it.
+    type_key(&mut app, Key::Named(Named::Escape), none);
+    assert!(!app.settings.open, "closed by the first Esc");
+}
+
+/// The tree's keys are the reading keys too — `j` `k` down and up, `h` out,
+/// `l` in — and a character typed goes to the filter as typed, Shift and
+/// all.
+#[test]
+fn the_tree_walks_by_the_reading_keys_and_types_as_typed() {
+    use crate::app::message::TreeKey;
+    use keyboard::Key;
+    let none = keyboard::Modifiers::empty();
+    let ch = |c: &str| Key::Character(c.into());
+    let key = |k: &str, typed: &str, m| super::tree_keys::tree_key(&ch(k), &ch(typed), m);
+    assert_eq!(key("j", "j", none), Some(TreeKey::Down));
+    assert_eq!(key("k", "k", none), Some(TreeKey::Up));
+    assert_eq!(key("h", "h", none), Some(TreeKey::Left));
+    assert_eq!(key("l", "l", none), Some(TreeKey::Right));
+    assert_eq!(
+        key("j", "J", keyboard::Modifiers::SHIFT),
+        Some(TreeKey::Type('J'))
+    );
+    assert_eq!(
+        key("-", "_", keyboard::Modifiers::SHIFT),
+        Some(TreeKey::Type('_')),
+        "Shift and all"
+    );
+    assert_eq!(key("p", "p", none), Some(TreeKey::Type('p')));
+    assert_eq!(
+        key("j", "j", keyboard::Modifiers::COMMAND),
+        None,
+        "a shortcut"
+    );
+}
+
+/// ↓ in a filter that lists nothing has no tree to go down to: the filter
+/// keeps the keys, and F6 passes the tree by.
+#[test]
+fn an_empty_tree_is_not_gone_down_to() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = tree_app();
+    let down = press(
+        Key::Named(Named::ArrowDown),
+        Key::Named(Named::ArrowDown),
+        keyboard::Modifiers::empty(),
+    );
+    let (_, sent) = keys_held_by(&app, super::file_filter_id(), std::slice::from_ref(&down));
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::FileFilterDown))),
+        "a tree to go to: {sent:?}"
+    );
+    app.file_filter = "zzz".into();
+    let (statuses, sent) = keys_held_by(&app, super::file_filter_id(), &[down]);
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::FileFilterDown))),
+        "{sent:?}"
+    );
+    assert_eq!(statuses, [iced::event::Status::Ignored]);
+    // F6 from the filter goes on to the chat.
+    app.region = crate::app::keys::Region::Sidebar;
+    type_key(
+        &mut app,
+        Key::Named(Named::F6),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.region, crate::app::keys::Region::Chat);
+}
+
+/// A window run as the runtime runs it: events through its widgets, what
+/// they send — and the keys none took, as the window's key handler gets
+/// them — through the app, the app's widget operations run on the window
+/// built anew, the widgets' state kept from build to build.
+struct Driven {
+    renderer: iced::Renderer,
+    cache: Option<Cache>,
+    size: Size,
+}
+
+impl Driven {
+    fn new(app: &App) -> Driven {
+        Driven::sized(app, WINDOW)
+    }
+
+    fn sized(app: &App, size: Size) -> Driven {
+        let mut driven = Driven {
+            renderer: renderer(),
+            cache: Some(Cache::default()),
+            size,
+        };
+        driven.build(app);
+        driven
+    }
+
+    /// `message` through the app, and the widget operations it asks for
+    /// run on the window built anew, as the runtime runs them.
+    fn deliver(&mut self, app: &mut App, message: Message) {
+        let ops = ready_ops(app.update(message));
+        let mut ui = UserInterface::build(
+            super::view(app),
+            self.size,
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        for mut op in ops {
+            loop {
+                ui.operate(&self.renderer, &mut black_box(&mut *op));
+                match op.finish() {
+                    Outcome::Chain(next) => op = next,
+                    _ => break,
+                }
+            }
+        }
+        self.cache = Some(ui.into_cache());
+    }
+
+    /// How far the scrollable `id` is scrolled.
+    fn scrolled(&mut self, app: &App, id: Id) -> Option<Vector> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            self.size,
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        let mut probe = ScrollProbe {
+            target: id,
+            found: None,
+        };
+        ui.operate(&self.renderer, &mut probe);
+        self.cache = Some(ui.into_cache());
+        probe.found
+    }
+
+    fn build(&mut self, app: &App) {
+        let ui = UserInterface::build(
+            super::view(app),
+            self.size,
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        self.cache = Some(ui.into_cache());
+    }
+
+    /// `events`, then a redraw; how each of `events` was taken.
+    fn send(&mut self, app: &mut App, events: &[Event]) -> Vec<iced::event::Status> {
+        let mut all = events.to_vec();
+        all.push(Event::Window(window::Event::RedrawRequested(
+            std::time::Instant::now(),
+        )));
+        let mut ui = UserInterface::build(
+            super::view(app),
+            self.size,
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        let mut sent = Vec::new();
+        let (_, statuses) = ui.update(
+            &all,
+            mouse::Cursor::Unavailable,
+            &mut self.renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        let mut cache = ui.into_cache();
+        for (event, status) in all.iter().zip(&statuses) {
+            if let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event {
+                let escape = matches!(
+                    key.as_ref(),
+                    keyboard::Key::Named(keyboard::key::Named::Escape)
+                );
+                if *status == iced::event::Status::Ignored || escape {
+                    sent.push(Message::Editor(EditorMsg::KeyPressed(
+                        key.clone(),
+                        *modifiers,
+                    )));
+                }
+            }
+        }
+        for message in sent {
+            let ops = ready_ops(app.update(message));
+            let mut ui =
+                UserInterface::build(super::view(app), self.size, cache, &mut self.renderer);
+            for mut op in ops {
+                loop {
+                    ui.operate(&self.renderer, &mut black_box(&mut *op));
+                    match op.finish() {
+                        Outcome::Chain(next) => op = next,
+                        _ => break,
+                    }
+                }
+            }
+            cache = ui.into_cache();
+        }
+        self.cache = Some(cache);
+        self.build(app);
+        statuses[..events.len()].to_vec()
+    }
+
+    /// `key` pressed, plainly or with `modifiers`, then a redraw (which
+    /// tells the app where the ring went).
+    fn key(
+        &mut self,
+        app: &mut App,
+        key: keyboard::Key,
+        modifiers: keyboard::Modifiers,
+    ) -> iced::event::Status {
+        let status = self.send(app, &[press(key.clone(), key, modifiers)])[0];
+        let _ = self.send(app, &[]);
+        status
+    }
+
+    fn tab(&mut self, app: &mut App, back: bool) -> iced::event::Status {
+        let modifiers = if back {
+            keyboard::Modifiers::SHIFT
+        } else {
+            keyboard::Modifiers::empty()
+        };
+        self.key(
+            app,
+            keyboard::Key::Named(keyboard::key::Named::Tab),
+            modifiers,
+        )
+    }
+
+    /// The widget holding the keys.
+    fn focused(&mut self, app: &App) -> Option<Id> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            self.size,
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        let found = run_operation(&mut ui, &self.renderer, find_focused());
+        self.cache = Some(ui.into_cache());
+        found
+    }
+
+    /// `id` given the keys, as a click on it gives them.
+    fn focus(&mut self, app: &App, id: Id) {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            self.size,
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        let _ = run_operation(
+            &mut ui,
+            &self.renderer,
+            iced::advanced::widget::operation::focusable::focus::<()>(id),
+        );
+        self.cache = Some(ui.into_cache());
+    }
+}
+
+/// The widget operations `task` asks for at once — what waits (a file
+/// read, an operation's answer) is left, as a turn of the runtime leaves
+/// it for later.
+fn ready_ops(task: iced::Task<Message>) -> Vec<Box<dyn Operation>> {
+    use iced_test::futures::futures::{FutureExt, StreamExt};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let _inside = runtime.enter();
+    let Some(mut stream) = iced_test::runtime::task::into_stream(task) else {
+        return Vec::new();
+    };
+    let mut ops = Vec::new();
+    while let Some(Some(action)) = stream.next().now_or_never() {
+        if let iced_test::runtime::Action::Widget(op) = action {
+            ops.push(op);
+        }
+    }
+    ops
+}
+
+/// Where the window's ring is: its place, how many stops, what it presses.
+fn ring_at(app: &App) -> (Option<usize>, usize, Option<Message>) {
+    crate::ui::jump::ring_placed(app.main_window).expect("the ring placed")
+}
+
+/// A control built as the window is laid out — in a `responsive`, as the
+/// status bar's chips are — is a stop of its own: the ring on it presses
+/// it, not the first control built with the view (whose number it took).
+#[test]
+fn a_control_built_as_laid_out_presses_itself() {
+    use iced::widget::{button, column, responsive, text};
+    let view = |ask: super::RingAsk| -> Element<'static, Message> {
+        super::jump::begin(true);
+        let early = Message::Nav(NavMsg::PaletteOpened);
+        let first = super::jump::mark(button(text("early")).on_press(early.clone()), early);
+        let second = responsive(|_| {
+            let late = Message::Project(ProjectMsg::SetUpMissing);
+            super::jump::mark(button(text("late")).on_press(late.clone()), late)
+        });
+        super::jump::root(
+            column![first, second].into(),
+            Some(super::jump::Up::Ring(ask)),
+            false,
+            None,
+            true,
+            super::jump::OnTop {
+                layer: super::heard::Layer::Ask,
+                scene: None,
+            },
+        )
+    };
+    let mut renderer = renderer();
+    let size = Size::new(400.0, 300.0);
+    super::jump::forget(None);
+    // The first Tab puts the ring on the first control...
+    let ui = UserInterface::build(
+        view(super::RingAsk::Start { forward: true }),
+        size,
+        Cache::default(),
+        &mut renderer,
+    );
+    let (at, count, pressed) = super::jump::ring_placed(None).expect("the ring placed");
+    assert_eq!((at, count), (Some(0), 2), "both controls are stops");
+    assert!(
+        matches!(pressed, Some(Message::Nav(NavMsg::PaletteOpened))),
+        "{pressed:?}"
+    );
+    let first = super::jump::ring_target(None);
+    // ...and the next goes on to the one built as it was laid out.
+    let mut ui = UserInterface::build(
+        view(super::RingAsk::Kept),
+        size,
+        ui.into_cache(),
+        &mut renderer,
+    );
+    let tab = keyboard::Key::Named(keyboard::key::Named::Tab);
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &[press(tab.clone(), tab, keyboard::Modifiers::empty())],
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    let (at, _, pressed) = super::jump::ring_placed(None).expect("the ring placed");
+    assert_eq!(at, Some(1));
+    assert!(
+        matches!(pressed, Some(Message::Project(ProjectMsg::SetUpMissing))),
+        "its own press, not the first control's: {pressed:?}"
+    );
+    // Another stop, by another number: the ring is drawn round it alone.
+    assert_ne!(super::jump::ring_target(None), first);
+    super::jump::forget(None);
+}
+
+/// Tab, no field holding the keys, rings the window's first stop — not its
+/// title bar's, which come last — and goes from stop to stop: buttons and
+/// fields alike, the filter field and the tree each one, Shift-Tab back.
+/// A field reached holds the keys; a control reached is named in the status
+/// bar, and Enter presses it as a click does, the ring staying.
+#[test]
+fn tab_walks_the_controls_and_fields_and_enter_presses() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = tree_app();
+    app.code_focused = true;
+    let mut window = Driven::new(&app);
+    assert_eq!(window.tab(&mut app, false), iced::event::Status::Captured);
+    assert!(app.ring.is_some(), "up");
+    let (at, count, first) = ring_at(&app);
+    assert_eq!(at, Some(0));
+    assert!(count > 10, "{count} stops");
+    assert!(
+        !matches!(first, Some(Message::Window(WindowMsg::ToggleAppMenu))),
+        "the title bar's come last: {first:?}"
+    );
+    // Back from the first: the last, the title bar's.
+    window.tab(&mut app, true);
+    assert_eq!(ring_at(&app).0, Some(count - 1));
+    window.tab(&mut app, false);
+    // On, to the filter: it holds the keys; then the tree, one stop.
+    let mut reached = Vec::new();
+    let mut said = Vec::new();
+    for _ in 0..count {
+        window.tab(&mut app, false);
+        let held = window.focused(&app);
+        if let Some(id) = held.clone() {
+            reached.push(id);
+            said.push(app.status.clone());
+        }
+        if held == Some(super::files_tree_keys_id()) {
+            break;
+        }
+    }
+    assert_eq!(
+        reached,
+        [super::file_filter_id(), super::files_tree_keys_id()],
+        "the filter, then the tree"
+    );
+    // Each named as a control is: a field by what it asks for — the
+    // status bar was left blank on one.
+    assert_eq!(said[0], "Filter files", "the filter named");
+    assert!(!said[1].is_empty(), "the tree named");
+    assert!(
+        ring_at(&app).2.is_none(),
+        "a field is not pressed by the ring"
+    );
+    // Past the tree: not one of its rows (its own keys walk them).
+    window.tab(&mut app, false);
+    let past = format!("{:?}", ring_at(&app).2);
+    assert!(
+        !past.contains("OpenRel") && !past.contains("ToggleDir"),
+        "a row of the tree: {past}"
+    );
+    window.tab(&mut app, true);
+    window.tab(&mut app, true);
+    assert_eq!(window.focused(&app), Some(super::file_filter_id()), "back");
+    // On to the strip's Weak Spots: named, then pressed.
+    for _ in 0..count {
+        if matches!(ring_at(&app).2, Some(Message::Weak(crate::WeakMsg::Show))) {
+            break;
+        }
+        window.tab(&mut app, false);
+    }
+    assert_eq!(window.focused(&app), None, "no field holds the keys");
+    assert!(!app.status.is_empty(), "named: {}", app.status);
+    window.key(
+        &mut app,
+        Key::Named(Named::Enter),
+        keyboard::Modifiers::empty(),
+    );
+    assert!(app.proj.weak.showing, "pressed");
+    assert!(app.ring.is_some(), "the ring stays");
+    assert!(
+        matches!(ring_at(&app).2, Some(Message::Weak(crate::WeakMsg::Show))),
+        "on what it pressed: {:?}",
+        ring_at(&app).2
+    );
+}
+
+/// The ring stays on the control it pressed, wherever the press moved it:
+/// the sidebar's toggle, pressed, takes the sidebar's stops from before it,
+/// and the ring is still on the toggle — not on the stop now where it was
+/// (the window's Close, past the end), whose Enter would close the window.
+#[test]
+fn the_ring_stays_on_what_it_pressed() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let mut app = tree_app();
+    app.show_left_sidebar = true;
+    app.code_focused = true;
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let (_, count, _) = ring_at(&app);
+    let toggle = format!("{:?}", Some(Message::Window(WindowMsg::ToggleLeftSidebar)));
+    for _ in 0..count {
+        if format!("{:?}", ring_at(&app).2) == toggle {
+            break;
+        }
+        window.tab(&mut app, false);
+    }
+    assert_eq!(format!("{:?}", ring_at(&app).2), toggle, "reached");
+    window.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(!app.show_left_sidebar, "hidden");
+    assert_eq!(format!("{:?}", ring_at(&app).2), toggle, "still on it");
+    window.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.show_left_sidebar, "shown again, not the window closed");
+    assert_eq!(format!("{:?}", ring_at(&app).2), toggle, "and still on it");
+}
+
+/// The messages `task` sends, run to its end: for a task that ends by
+/// itself (a message sent on), never one that waits on the world.
+fn task_sends(task: iced::Task<Message>) -> Vec<Message> {
+    use iced_test::futures::futures::StreamExt;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let _inside = runtime.enter();
+    let Some(stream) = iced_test::runtime::task::into_stream(task) else {
+        return Vec::new();
+    };
+    let actions: Vec<_> = runtime.block_on(stream.collect());
+    actions
+        .into_iter()
+        .filter_map(|action| match action {
+            iced_test::runtime::Action::Output(message) => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Enter on the window's Close, the ring on it, closes the window as a
+/// click does: the press goes to the shell, which asks about unsaved edits
+/// and lets the window go — not to the App, which takes no Close.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn enter_on_the_rings_close_closes_the_window() {
+    let none = keyboard::Modifiers::empty();
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, true);
+    let (_, count, _) = ring_at(&app);
+    for _ in 0..count {
+        if matches!(ring_at(&app).2, Some(Message::Window(WindowMsg::Close))) {
+            break;
+        }
+        window.tab(&mut app, true);
+    }
+    assert!(matches!(
+        ring_at(&app).2,
+        Some(Message::Window(WindowMsg::Close))
+    ));
+    let task = app.update(Message::Editor(EditorMsg::KeyPressed(
+        keyboard::Key::Named(keyboard::key::Named::Enter),
+        none,
+    )));
+    let sent = task_sends(task);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::Close))),
+        "sent on, to the shell: {sent:?}"
+    );
+}
+
+/// Esc puts the ring away, and the keys go back where they were — the
+/// code, its reading keys at work again; so does any other key, doing what
+/// it does.
+#[test]
+fn the_ring_put_away_gives_the_keys_back() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let mut app = reader_app();
+    app.code_focused = true;
+    let line = |app: &App| app.active_viewer().unwrap().caret.map_or(0, |(l, _)| l);
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    assert!(!app.code_focused);
+    window.key(&mut app, Key::Named(Named::Escape), none);
+    assert_eq!(app.ring, None);
+    assert!(app.code_focused, "the code's again");
+    let before = line(&app);
+    window.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(line(&app), before + 1, "j reads on");
+    // Another key: the ring goes, and the key does what it does.
+    window.tab(&mut app, false);
+    window.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(app.ring, None);
+    assert_eq!(line(&app), before + 2, "j read on, the ring gone");
+}
+
+/// A field taking the keys — a press that focuses one — puts the ring away:
+/// its arrows are the field's, not the ring's.
+#[test]
+fn a_field_taking_the_keys_puts_the_ring_away() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = tree_app();
+    app.sidebar = crate::SidebarTab::Search;
+    app.code_focused = true;
+    let line = |app: &App| app.active_viewer().unwrap().caret.map_or(0, |(l, _)| l);
+    let before = line(&app);
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    window.focus(&app, super::search_input_id());
+    let status = window.key(
+        &mut app,
+        Key::Named(Named::ArrowDown),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.ring, None, "put away");
+    // The keys are the field's: the arrow went nowhere near the code.
+    assert!(!app.code_focused);
+    assert_eq!(line(&app), before, "the code's caret stayed");
+    assert_ne!(
+        ring_at_or_none(&app),
+        Some(1),
+        "the arrow did not move it: {status:?}"
+    );
+}
+
+fn ring_at_or_none(app: &App) -> Option<usize> {
+    crate::ui::jump::ring_placed(app.main_window).and_then(|(at, _, _)| at)
+}
+
+/// Tab from a field the pointer gave the keys to goes on to the stop after
+/// it — the filter's next is the tree.
+#[test]
+fn tab_from_a_field_goes_on_from_it() {
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.focus(&app, super::file_filter_id());
+    window.tab(&mut app, false);
+    assert_eq!(window.focused(&app), Some(super::files_tree_keys_id()));
+    window.tab(&mut app, true);
+    assert_eq!(
+        window.focused(&app),
+        Some(super::file_filter_id()),
+        "and back"
+    );
+}
+
+/// A dialog come up takes the ring to its own first stop, and only its
+/// own; closed, the ring is back on what opened it.
+#[test]
+fn a_dialog_takes_the_ring_and_gives_it_back() {
+    let mut app = reader_app();
+    let mut window = Driven::new(&app);
+    for _ in 0..4 {
+        window.tab(&mut app, false);
+    }
+    let (under, window_count, press) = ring_at(&app);
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let _ = window.send(&mut app, &[]);
+    let (at, count, _) = ring_at(&app);
+    assert_eq!(at, Some(0), "the dialog's first");
+    assert_ne!(count, window_count, "the dialog's own stops");
+    window.tab(&mut app, false);
+    assert_eq!(ring_at(&app).0, Some(1));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Close));
+    let _ = window.send(&mut app, &[]);
+    let (back, _, back_press) = ring_at(&app);
+    assert_eq!(back, under, "back on what it was on");
+    assert_eq!(format!("{back_press:?}"), format!("{press:?}"));
+}
+
+/// Tab is each window's own: a field holding the keys in another window
+/// does not keep this one from ringing its controls, and its ring going
+/// round leaves the other's where it is.
+#[test]
+fn tab_is_each_windows_own() {
+    let mut first = tree_app();
+    first.main_window = Some(iced::window::Id::unique());
+    let mut second = tree_app();
+    second.main_window = Some(iced::window::Id::unique());
+    let mut one = Driven::new(&first);
+    let mut two = Driven::new(&second);
+    one.focus(&first, super::file_filter_id());
+    two.tab(&mut second, false);
+    assert_eq!(
+        second.ring,
+        Some(crate::ui::RingAsk::Kept),
+        "rung, from its own first stop"
+    );
+    assert_eq!(ring_at(&second).0, Some(0));
+    // Both up: the second's Tab moves the second's alone.
+    one.tab(&mut first, true);
+    one.tab(&mut first, true);
+    let (at, _, press) = ring_at(&first);
+    for _ in 0..3 {
+        two.tab(&mut second, false);
+    }
+    assert_eq!(ring_at(&second).0, Some(3));
+    let (still, _, still_press) = ring_at(&first);
+    assert_eq!(still, at, "the first window's ring stayed");
+    assert_eq!(format!("{still_press:?}"), format!("{press:?}"));
+}
+
+/// A press of the pointer puts the ring away, the keys where it puts them.
+#[test]
+fn a_press_of_the_pointer_puts_the_ring_away() {
+    let mut app = tree_app();
+    app.code_focused = true;
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    assert!(app.ring.is_some());
+    let _ = window.send(
+        &mut app,
+        &[Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Left,
+        ))],
+    );
+    assert_eq!(app.ring, None, "put away");
+}
+
+/// The tutorial's keys are its own: Tab puts up no ring over it.
+#[test]
+fn the_tutorial_keeps_tab() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Tutorial(crate::TutorialMsg::Begin));
+    assert!(app.tutorial.is_some());
+    let mut window = Driven::new(&app);
+    assert_ne!(window.tab(&mut app, false), iced::event::Status::Captured);
+    assert_eq!(app.ring, None);
+}
+
+/// Put away with Esc under a dialog the ring's control opened, the keys
+/// are not the code's — its reading keys would act under the dialog — and
+/// a control that gave the code the keys gives them for good: Esc then
+/// leaves them there.
+#[test]
+fn the_keys_go_back_where_they_are_now() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let line = |app: &App| app.active_viewer().unwrap().caret.map_or(0, |(l, _)| l);
+    // A dialog came up over the code since the ring came up.
+    let mut app = reader_app();
+    app.code_focused = true;
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let _ = window.send(&mut app, &[]);
+    window.key(&mut app, Key::Named(Named::Escape), none);
+    assert_eq!(app.ring, None);
+    assert!(app.settings.open, "the dialog stays");
+    assert!(!app.code_focused, "not the code's, under the dialog");
+    let before = line(&app);
+    window.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(line(&app), before, "j moved nothing under it");
+    // The dialog's ×, pressed by the ring, gave the code the keys back.
+    let mut app = reader_app();
+    app.code_focused = true;
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    assert!(!app.code_focused);
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let (_, count, _) = ring_at(&app);
+    for _ in 0..count {
+        if matches!(
+            ring_at(&app).2,
+            Some(Message::Settings(crate::SettingsMsg::Close))
+        ) {
+            break;
+        }
+        window.tab(&mut app, false);
+    }
+    assert!(
+        matches!(
+            ring_at(&app).2,
+            Some(Message::Settings(crate::SettingsMsg::Close))
+        ),
+        "on its ×: {:?}",
+        ring_at(&app).2
+    );
+    window.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(!app.settings.open, "closed");
+    window.key(&mut app, Key::Named(Named::Escape), none);
+    assert_eq!(app.ring, None);
+    assert!(app.code_focused, "the code's, as the × gave them");
+    let before = line(&app);
+    window.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(line(&app), before + 1, "j reads on");
+}
+
+/// The ring come up from a field and put away by Esc gives the field the
+/// keys back: they are not left nowhere.
+#[test]
+fn the_ring_put_away_gives_a_field_its_keys_back() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.focus(&app, super::file_filter_id());
+    app.code_focused = false;
+    window.tab(&mut app, true);
+    assert_eq!(window.focused(&app), None, "back to a control: no field");
+    window.key(
+        &mut app,
+        Key::Named(Named::Escape),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.ring, None);
+    assert_eq!(
+        window.focused(&app),
+        Some(super::file_filter_id()),
+        "the filter's again"
+    );
+}
+
+/// The ring come up from a field, and a dialog over the field since: Esc
+/// puts the ring away without giving the keys back to the field behind the
+/// dialog — what was typed next went into it, unseen.
+#[test]
+fn esc_on_the_ring_gives_no_field_under_a_dialog_the_keys() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.focus(&app, super::file_filter_id());
+    app.code_focused = false;
+    window.tab(&mut app, true);
+    assert_eq!(window.focused(&app), None, "on a control: no field");
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let _ = window.send(&mut app, &[]);
+    window.key(
+        &mut app,
+        Key::Named(Named::Escape),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.ring, None);
+    assert_ne!(
+        window.focused(&app),
+        Some(super::file_filter_id()),
+        "the filter is under the dialog"
+    );
+}
+
+/// The window changed under a dialog — the sidebar put away, its controls
+/// with it — the ring is given back on the control it was on, found by
+/// what it is, not on whatever came to stand at its old place.
+#[test]
+fn a_dialog_gone_gives_the_ring_back_on_the_same_control() {
+    let mut app = tree_app();
+    app.show_left_sidebar = true;
+    let mut window = Driven::new(&app);
+    // From the end: a control after the sidebar's.
+    window.tab(&mut app, true);
+    window.tab(&mut app, true);
+    let (under, _, press) = ring_at(&app);
+    assert!(press.is_some());
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let _ = window.send(&mut app, &[]);
+    app.show_left_sidebar = false;
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Close));
+    let _ = window.send(&mut app, &[]);
+    let (back, _, back_press) = ring_at(&app);
+    assert_ne!(back, under, "the sidebar's stops are gone: it moved up");
+    assert_eq!(format!("{back_press:?}"), format!("{press:?}"));
+}
+
+/// A shortcut pressed with the ring up from a field puts the ring away and
+/// does what it does, at once: Ctrl-P opened nothing, and had to be pressed
+/// again.
+#[test]
+fn a_shortcut_with_the_ring_up_does_what_it_does() {
+    use keyboard::Key;
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.focus(&app, super::file_filter_id());
+    app.code_focused = false;
+    window.tab(&mut app, true);
+    assert!(app.ring.is_some());
+    let p = Key::Character("p".into());
+    let task = app.update(Message::Editor(EditorMsg::KeyPressed(
+        p,
+        keyboard::Modifiers::COMMAND,
+    )));
+    assert_eq!(app.ring, None);
+    let next = task_sends(task);
+    assert!(
+        next.iter().any(|m| matches!(
+            m,
+            Message::Editor(EditorMsg::KeyPressed(Key::Character(c), mods))
+                if c.as_str() == "p" && mods.command()
+        )),
+        "{next:?}"
+    );
+    for m in next {
+        let _ = app.update(m);
+    }
+    assert!(app.proj.finder.open, "the command bar is up");
+}
+
+/// Page Up and Page Down, Home and End — and with Ctrl (Cmd) the file's
+/// start and end — move in the code, as every editor reads by.
+#[test]
+fn page_home_and_end_keys_move_in_the_code() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = reader_app();
+    app.code_focused = true;
+    app.active_viewer_mut().unwrap().caret = Some((5, 3));
+    let key = |app: &mut App, named: Named, modifiers: keyboard::Modifiers| {
+        let _ = app.update(Message::Editor(EditorMsg::KeyPressed(
+            Key::Named(named),
+            modifiers,
+        )));
+    };
+    let none = keyboard::Modifiers::empty();
+    let caret = |app: &App| app.active_viewer().unwrap().caret.unwrap();
+    let line_len = app.active_viewer().unwrap().line_len(5);
+    key(&mut app, Named::End, none);
+    assert_eq!(caret(&app), (5, line_len));
+    key(&mut app, Named::Home, none);
+    assert_eq!(caret(&app), (5, 0));
+    let top = app.active_viewer().unwrap().scroll_y;
+    key(&mut app, Named::PageDown, none);
+    assert!(app.active_viewer().unwrap().scroll_y > top, "a page down");
+    key(&mut app, Named::PageUp, none);
+    assert_eq!(app.active_viewer().unwrap().scroll_y, top, "and back");
+    key(&mut app, Named::End, keyboard::Modifiers::COMMAND);
+    let last = app.active_viewer().unwrap().lines.len() - 1;
+    assert_eq!(caret(&app).0, last, "the file's end");
+    key(&mut app, Named::Home, keyboard::Modifiers::COMMAND);
+    assert_eq!(caret(&app).0, 0, "the file's start");
+    // Not while a field has the keys: they are its.
+    app.code_focused = false;
+    key(&mut app, Named::End, keyboard::Modifiers::COMMAND);
+    assert_eq!(caret(&app).0, 0);
+}
+
+/// A fold key that folds nothing (`za` off any fold) leaves the view where
+/// it was: it snapped the view to a row.
+#[test]
+fn a_fold_key_that_folds_nothing_leaves_the_view() {
+    use keyboard::Key;
+    let mut app = reader_app();
+    app.code_focused = true;
+    app.active_viewer_mut().unwrap().caret = Some((40, 0));
+    app.active_viewer_mut().unwrap().scroll_y = 333.0;
+    for c in ["z", "a"] {
+        let _ = app.update(Message::Editor(EditorMsg::KeyPressed(
+            Key::Character(c.into()),
+            keyboard::Modifiers::empty(),
+        )));
+    }
+    assert_eq!(app.active_viewer().unwrap().scroll_y, 333.0);
+}
+
+/// Ask made large holds the keys as a dialog does: the ring put away from
+/// over it does not give them to the code under it.
+#[test]
+fn the_ring_put_away_over_a_large_ask_leaves_the_code_without_the_keys() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = reader_app();
+    app.code_focused = true;
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let _ = app.update(Message::Ask(AskMsg::Toggle));
+    app.ask_view = crate::AskView::Expanded;
+    let _ = window.send(&mut app, &[]);
+    window.key(
+        &mut app,
+        Key::Named(Named::Escape),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.ring, None);
+    assert!(!app.code_focused, "Ask, large, has them");
+}
+
+/// F6 opened the chat, then its × put it away: opened again by hand, F6
+/// going on from it leaves it open — it put away the Ask the reader had
+/// opened.
+#[test]
+fn f6_leaves_an_ask_opened_by_hand() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = reader_app();
+    app.code_focused = true;
+    let f6 = |app: &mut App| {
+        let _ = app.update(Message::Editor(EditorMsg::KeyPressed(
+            Key::Named(Named::F6),
+            keyboard::Modifiers::empty(),
+        )));
+    };
+    for _ in 0..6 {
+        if app.ask_view.is_open() {
+            break;
+        }
+        f6(&mut app);
+    }
+    assert!(app.ask_view.is_open(), "F6 came to the chat");
+    let _ = app.update(Message::Ask(AskMsg::Hide));
+    assert!(!app.ask_view.is_open());
+    // Opened by hand, its field clicked into.
+    let _ = app.update(Message::Ask(AskMsg::Toggle));
+    app.code_focused = false;
+    assert!(app.ask_view.is_open());
+    f6(&mut app);
+    assert!(app.ask_view.is_open(), "the reader's Ask stays");
+}
+
+/// A control made an element after another was named keeps its own name:
+/// the ring on it said none (the other's press was the one named last).
+#[test]
+fn a_control_made_an_element_late_keeps_its_own_name() {
+    use iced::widget::{column, text};
+    let view = |ask: super::RingAsk| -> Element<'static, Message> {
+        super::jump::begin(true);
+        let alpha = super::heard::said("Alpha", Message::Nav(NavMsg::PaletteOpened));
+        let early = super::press::button(text("one")).on_press(alpha);
+        let beta = super::heard::said("Beta", Message::Project(ProjectMsg::SetUpMissing));
+        let second: Element<'static, Message> =
+            super::press::button(text("two")).on_press(beta).into();
+        let first: Element<'static, Message> = early.into();
+        super::jump::root(
+            column![first, second].into(),
+            Some(super::jump::Up::Ring(ask)),
+            false,
+            None,
+            true,
+            super::jump::OnTop {
+                layer: super::heard::Layer::Ask,
+                scene: None,
+            },
+        )
+    };
+    let mut renderer = renderer();
+    let size = Size::new(400.0, 300.0);
+    super::jump::forget(None);
+    let ui = UserInterface::build(
+        view(super::RingAsk::Start { forward: false }),
+        size,
+        Cache::default(),
+        &mut renderer,
+    );
+    let mut ui = UserInterface::build(
+        view(super::RingAsk::Kept),
+        size,
+        ui.into_cache(),
+        &mut renderer,
+    );
+    let tab = keyboard::Key::Named(keyboard::key::Named::Tab);
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &[press(tab.clone(), tab, keyboard::Modifiers::empty())],
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    assert_eq!(super::jump::ring_placed(None).unwrap().0, Some(0));
+    let said: Vec<Option<String>> = sent
+        .iter()
+        .filter_map(|m| match m {
+            Message::Window(WindowMsg::RingMoved(_, name)) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, [Some("Alpha".to_string())]);
+    super::jump::forget(None);
+}
+
+/// A dialog with no control of its own — the finder with nothing found —
+/// keeps the ring in it, as one with controls does: Tab does not go on to
+/// the window under it.
+#[test]
+fn a_dialog_with_no_controls_keeps_the_ring() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(
+        crate::session::finder::FinderMode::Files,
+    )));
+    let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged(":".into())));
+    let mut window = Driven::new(&app);
+    window.focus(&app, super::finder_input_id());
+    window.tab(&mut app, false);
+    let (_, count, press) = ring_at(&app);
+    assert_eq!(count, 1, "the finder's field alone");
+    assert!(press.is_none(), "nothing under it: {press:?}");
+    assert_eq!(window.focused(&app), Some(super::finder_input_id()));
+}
+
+/// Another dialog come up in the place of the one the ring was in takes
+/// the ring to its own first stop.
+#[test]
+fn a_dialog_in_anothers_place_starts_the_ring_over() {
+    let mut app = reader_app();
+    app.show_app_menu = true;
+    let mut window = Driven::new(&app);
+    for _ in 0..4 {
+        window.tab(&mut app, false);
+    }
+    assert_eq!(ring_at(&app).0, Some(3));
+    // The menu's item opened a dialog in its place.
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let _ = window.send(&mut app, &[]);
+    assert!(app.settings.open);
+    let (at, _, press) = ring_at(&app);
+    assert_eq!(at, Some(0), "the dialog's first stop: {press:?}");
+}
+
+/// The codes or the tour, begun while the ring is up — by a menu's
+/// command, as the menu bar sends ⌘J on macOS — put the ring away: it does
+/// not come back once they are done.
+#[test]
+fn the_codes_and_the_tour_put_the_ring_away() {
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let _ = app.on_menu_action(crate::keymap::Action::Jump);
+    assert!(app.jump.is_some());
+    assert_eq!(app.ring, None);
+    // Any command of the menu bar's.
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let _ = app.on_menu_action(crate::keymap::Action::ZoomIn);
+    assert_eq!(app.ring, None);
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let _ = app.update(Message::Tutorial(crate::TutorialMsg::Begin));
+    assert_eq!(app.ring, None);
+}
+
+/// What else is said in the status bar while the ring is up stays when
+/// the ring goes: only the name it said goes with it.
+#[test]
+fn the_ring_takes_away_only_what_it_said() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let mut app = tree_app();
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    assert!(!app.status.is_empty(), "named");
+    window.key(&mut app, Key::Named(Named::Escape), none);
+    assert!(app.status.is_empty(), "its name went with it");
+    window.tab(&mut app, false);
+    app.status = "Could not save shortcuts".into();
+    window.key(&mut app, Key::Named(Named::Escape), none);
+    assert_eq!(app.status, "Could not save shortcuts");
+}
+
+/// Esc on a field the ring is on in a dialog puts the ring away, as it does
+/// on a button there: it does not close the dialog as well.
+#[test]
+fn esc_on_a_ringed_field_puts_away_the_ring_alone() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let mut app = reader_app();
+    let _ = app.update(Message::Connect(crate::ConnectMsg::Open));
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let (_, count, _) = ring_at(&app);
+    // A field: a stop the ring presses nothing on.
+    for _ in 0..count {
+        if ring_at(&app).2.is_none() {
+            break;
+        }
+        window.tab(&mut app, false);
+    }
+    assert!(ring_at(&app).2.is_none(), "on a field");
+    window.key(
+        &mut app,
+        Key::Named(Named::Escape),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.ring, None, "put away");
+    assert!(app.connect.is_some(), "the dialog stays");
+}
+
+/// Every control the ring reaches says its own name in the status bar —
+/// a switch its name, not "On" or "Off"; one of two controls pressing the
+/// same thing its own, not the other's.
+#[test]
+fn the_ring_says_each_controls_own_name() {
+    let mut app = tree_app();
+    app.code_focused = true;
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let (_, count, _) = ring_at(&app);
+    let mut unnamed = Vec::new();
+    for _ in 0..count {
+        let (_, _, press) = ring_at(&app);
+        if press.is_some() && app.status.is_empty() {
+            unnamed.push(format!("{press:?}"));
+        }
+        window.tab(&mut app, false);
+    }
+    assert!(unnamed.is_empty(), "said no name: {unnamed:#?}");
+    // A switch, by its name alone.
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Voice,
+    )));
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let (_, count, _) = ring_at(&app);
+    let mut said = Vec::new();
+    for _ in 0..count {
+        said.push(app.status.clone());
+        window.tab(&mut app, false);
+    }
+    assert!(
+        !said
+            .iter()
+            .any(|s| s.ends_with(": On") || s.ends_with(": Off")),
+        "a switch said as one of its states: {said:#?}"
+    );
+    assert!(
+        said.iter().any(|s| s == "Run spoken commands"),
+        "a switch, by its name: {said:#?}"
+    );
+}
+
+/// A drop-down is worked from the keyboard as from the pointer: the ring
+/// names it by its field and the value it shows; Enter opens its list, the
+/// value as it was; the arrows, Home and End and a letter walk the rows; Esc
+/// puts the list away and leaves Settings up; Tab puts it away and moves
+/// on; Enter picks. Pressed from the ring it moved on to the next value at
+/// each Enter — Display language went to French, then Chinese, then
+/// Korean — and the ring named it by the value it would switch to.
+#[test]
+fn a_drop_down_opens_and_is_walked_from_the_keyboard() {
+    use crate::llm::Provider;
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::LanguageModel,
+    )));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::ProviderPicked(
+        Provider::Anthropic,
+    )));
+    let mut driven = Driven::new(&app);
+    let to_provider = |driven: &mut Driven, app: &mut App| {
+        let mut steps = 0;
+        while !app.status.starts_with("Provider") {
+            let _ = driven.tab(app, false);
+            steps += 1;
+            assert!(
+                steps < 80,
+                "the ring never reached Provider: {}",
+                app.status
+            );
+        }
+    };
+    to_provider(&mut driven, &mut app);
+    assert_eq!(
+        app.status, "Provider: Anthropic",
+        "named by field and value"
+    );
+    // Enter opens the list, and changes nothing.
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    let at = |app: &App| app.picker.as_ref().map(|p| p.at);
+    assert_eq!(at(&app), Some(0), "open, on the value shown");
+    // Under its well, as wide as its rows: laid out as wide as the
+    // window, it opened at the window's left edge, over the sidebar.
+    {
+        let mut sim = sim_of(&app);
+        let well = text_at(&mut sim, |t| t == "Anthropic", 0).expect("the well");
+        let row = text_at(&mut sim, |t| t == "DeepSeek", 0).expect("its list");
+        assert!(
+            row.x >= well.x - 40.0 && row.x <= well.x + 40.0,
+            "the list is not under its well: {row:?} {well:?}"
+        );
+        assert!(row.y > well.y, "{row:?} {well:?}");
+    }
+    assert_eq!(
+        app.settings.provider,
+        Provider::Anthropic,
+        "Enter changed it"
+    );
+    // The arrows walk its rows, not the ring.
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert_eq!(at(&app), Some(2));
+    assert_eq!(app.status, "Provider: Anthropic", "the ring moved");
+    let _ = driven.key(&mut app, Key::Named(Named::End), none);
+    assert_eq!(at(&app), Some(3));
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert_eq!(at(&app), Some(3), "past the last row");
+    let _ = driven.key(&mut app, Key::Named(Named::Home), none);
+    assert_eq!(at(&app), Some(0));
+    let _ = driven.key(&mut app, Key::Character("d".into()), none);
+    assert_eq!(at(&app), Some(2), "a letter: the row beginning with it");
+    // Esc puts the list away, nothing picked, Settings still up.
+    let _ = driven.key(&mut app, Key::Named(Named::Escape), none);
+    assert!(app.picker.is_none(), "Esc left the list up");
+    assert!(app.settings.open, "Esc closed Settings with the list");
+    assert_eq!(app.settings.provider, Provider::Anthropic);
+    // Tab puts it away too, and moves on.
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.picker.is_some());
+    let _ = driven.tab(&mut app, false);
+    assert!(app.picker.is_none(), "Tab left the list up");
+    assert!(
+        !app.status.starts_with("Provider"),
+        "Tab stayed: {}",
+        app.status
+    );
+    // Enter picks the row the keys are on.
+    let _ = driven.tab(&mut app, true);
+    to_provider(&mut driven, &mut app);
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.picker.is_none(), "picked, and put away");
+    assert_eq!(app.settings.provider, Provider::DeepSeek);
+    assert!(app.settings.open);
+    assert_eq!(
+        app.status, "Provider: DeepSeek",
+        "the ring on it, named anew"
+    );
+    // Settings closed under an open list: the next key is not the list's.
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.picker.is_some());
+    app.settings.open = false;
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert!(app.picker.is_none(), "a list not drawn held the keys");
+}
+
+/// A drop-down picked other than from its list — by voice, which says each
+/// row — is put away; one whose rows changed under it is no longer the
+/// keys'. Its list gone from the window, it stood open unseen: it took
+/// every key, and Enter picked the row it had when it opened.
+#[test]
+fn a_drop_down_whose_rows_went_is_not_the_keys() {
+    use crate::llm::Provider;
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::LanguageModel,
+    )));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::ProviderPicked(
+        Provider::Anthropic,
+    )));
+    let mut driven = Driven::new(&app);
+    let mut steps = 0;
+    while !app.status.starts_with("Provider") {
+        let _ = driven.tab(&mut app, false);
+        steps += 1;
+        assert!(steps < 80, "the ring never reached Provider");
+    }
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.picker.is_some());
+    // Said by voice: picked, and put away.
+    driven.deliver(
+        &mut app,
+        Message::Settings(crate::SettingsMsg::ProviderPicked(Provider::DeepSeek)),
+    );
+    assert!(app.picker.is_none(), "picked by voice, the list stood open");
+    assert_eq!(app.settings.provider, Provider::DeepSeek);
+    // Open again, the keys on another row; then its rows change under it.
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    let picker = app.picker.as_mut().expect("open again");
+    picker.key ^= 1;
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert_eq!(
+        app.settings.provider,
+        Provider::DeepSeek,
+        "Enter picked from a list no longer drawn"
+    );
+}
+
+/// Tab from a drop-down the pointer opened puts it away and moves on from
+/// it, as from one the ring opened: the ring went back to the window's
+/// first stop.
+#[test]
+fn tab_from_a_drop_down_the_pointer_opened_moves_on_from_it() {
+    use crate::llm::Provider;
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::LanguageModel,
+    )));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::ProviderPicked(
+        Provider::Anthropic,
+    )));
+    let mut driven = Driven::new(&app);
+    let open = click(sim_of(&app), "Anthropic")
+        .into_iter()
+        .find(|m| matches!(m, Message::Picker(crate::app::pickers::PickerMsg::Open(_))))
+        .expect("a click opens it");
+    driven.deliver(&mut app, open);
+    assert!(app.picker.is_some());
+    let _ = driven.tab(&mut app, false);
+    assert!(app.picker.is_none(), "Tab left it open");
+    assert!(
+        !app.status.starts_with("Provider"),
+        "Tab stayed on it: {}",
+        app.status
+    );
+    let _ = driven.tab(&mut app, true);
+    assert_eq!(
+        app.status, "Provider: Anthropic",
+        "Tab did not move on from it"
+    );
+}
+
+/// Ask's agent drop-down opens with Enter from the ring, as every other
+/// one does: reached from its field, Enter did nothing there.
+#[test]
+fn asks_agent_drop_down_opens_with_enter() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let mut app = reader_app();
+    app.acp_agents = vec![clew_core::acp::AgentConfig {
+        name: "fake".into(),
+        launch: clew_core::linerpc::Launch::default(),
+        share_mcp: false,
+    }];
+    app.ask_view = crate::AskView::Compact;
+    let mut driven = Driven::new(&app);
+    driven.focus(&app, super::ask_input_id());
+    let mut steps = 0;
+    while !app.status.starts_with("Agent") {
+        let _ = driven.tab(&mut app, true);
+        steps += 1;
+        assert!(steps < 40, "the ring never reached Agent: {}", app.status);
+    }
+    assert_eq!(app.status, "Agent: Clew");
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.picker.is_some(), "Enter did not open it");
+}
+
+/// A control built as a dialog is laid out (a `responsive`'s) is in the
+/// dialog: the ring there reaches it.
+#[test]
+fn a_control_laid_out_in_a_dialog_is_the_dialogs() {
+    use iced::widget::{button, responsive, text};
+    let view = |ask: super::RingAsk| -> Element<'static, Message> {
+        super::jump::begin(true);
+        let dialog = responsive(|_| {
+            let late = Message::Project(ProjectMsg::SetUpMissing);
+            super::jump::mark(button(text("late")).on_press(late.clone()), late)
+        });
+        super::jump::root(
+            super::jump::scope(
+                dialog,
+                super::ring::ScopeTag::Layer(super::heard::Layer::Overlay),
+            ),
+            Some(super::jump::Up::Ring(ask)),
+            false,
+            None,
+            true,
+            super::jump::OnTop {
+                layer: super::heard::Layer::Overlay,
+                scene: Some("setup".into()),
+            },
+        )
+    };
+    let mut renderer = renderer();
+    super::jump::forget(None);
+    let _ui = UserInterface::build(
+        view(super::RingAsk::Start { forward: true }),
+        Size::new(400.0, 300.0),
+        Cache::default(),
+        &mut renderer,
+    );
+    let (at, count, pressed) = super::jump::ring_placed(None).expect("the ring placed");
+    assert_eq!((at, count), (Some(0), 1), "the dialog's one control");
+    assert!(matches!(
+        pressed,
+        Some(Message::Project(ProjectMsg::SetUpMissing))
+    ));
+    super::jump::forget(None);
+}
+
+/// Skim near a file's end leaves the code in view: the file folded short,
+/// the view was left where it was, past its end — nothing but the last
+/// line on screen. The function at the top stays at the top.
+#[test]
+fn skim_keeps_the_code_in_view() {
+    let mut app = reader_app();
+    let source: String = (0..120)
+        .map(|i| format!("fn f{i}() {{\n    let a = {i};\n    let b = a;\n}}\n"))
+        .collect();
+    let lines = crate::highlight::plain_lines(&source);
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.proj.panes[0] = Some(Viewer::new(
+        abs.clone(),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(source),
+        lines,
+    ));
+    app.proj.symbol_index_by_file.insert(
+        abs.clone(),
+        Arc::new(
+            (0..120)
+                .map(|i| crate::index::SymbolEntry {
+                    name: format!("f{i}"),
+                    kind: "function".into(),
+                    rel: "src/lib.rs".into(),
+                    abs: abs.clone(),
+                    line: i * 4 + 1,
+                    is_test: false,
+                    entry: None,
+                })
+                .collect(),
+        ),
+    );
+    let line_h = app.line_height();
+    // Reading the last functions: f110 at the top.
+    let v = app.active_viewer_mut().unwrap();
+    v.scroll_y = 440.0 * line_h;
+    v.caret = Some((441, 0));
+    let _ = app.update(Message::Editor(EditorMsg::SkimFile));
+    let v = app.active_viewer().unwrap();
+    let rows = v.content_rows();
+    assert!(rows < 300, "skimmed: {rows} rows");
+    assert!(
+        v.scroll_y <= (rows - 1) as f32 * line_h,
+        "past the end: {} with {rows} rows",
+        v.scroll_y
+    );
+    let top = v.line_at_row((v.scroll_y / line_h) as usize);
+    assert_eq!(top, 440, "f110 at the top still");
+}
+
+/// A control scrolled out of sight is scrolled to when the ring reaches
+/// it; a picker and a tick are stops, pressed by Enter as by a click.
+#[test]
+fn the_ring_reaches_what_is_scrolled_away_and_the_pickers() {
+    use crate::SettingsPage;
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        SettingsPage::Appearance,
+    )));
+    let mut window = Driven::new(&app);
+    window.tab(&mut app, false);
+    let (_, count, _) = ring_at(&app);
+    let mut presses = Vec::new();
+    for _ in 0..count {
+        presses.push(format!("{:?}", ring_at(&app).2));
+        window.tab(&mut app, false);
+    }
+    // Its press opens its list (whose rows set the language): pressed from
+    // the ring it moved on to the next language.
+    assert!(
+        presses
+            .iter()
+            .any(|p| p.contains("Picker(Open(") && p.contains("SetLanguage")),
+        "the display language's picker: {presses:#?}"
+    );
+    // A page longer than the window: its last stops are scrolled to.
+    let mut app = reader_app();
+    app.window_height = 520.0;
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        SettingsPage::Voice,
+    )));
+    let mut window = Driven::sized(&app, Size::new(1000.0, 520.0));
+    window.tab(&mut app, false);
+    let top = window
+        .scrolled(&app, super::settings_scroll_id())
+        .expect("the page");
+    assert_eq!(top.y, 0.0);
+    window.tab(&mut app, true);
+    window.tab(&mut app, true);
+    let low = window
+        .scrolled(&app, super::settings_scroll_id())
+        .expect("the page");
+    assert!(low.y > 0.0, "scrolled to the page's last stops: {low:?}");
+}
+
 /// A file's row in the Files view's tree is counted as the tree lays its
 /// rows out: each folder's row, its rows when open, then its files.
 #[test]
@@ -1622,6 +3423,153 @@ fn the_trail_row_does_not_move_the_code_when_the_trail_begins() {
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "line_0"));
     assert!(shows(&mut sim, "line_39"));
+}
+
+/// L16: the margin's tabs fit over the margin in French at 1100 —
+/// "Explications · Appels · Historique" ran past its edge, the last tab's
+/// background cut there — and in English as they were.
+#[test]
+fn the_margin_tabs_fit_over_the_margin_in_french() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    // At 1100 with the sidebar open, the margin is as narrow as it goes.
+    app.window_width = 1100.0;
+    app.show_left_sidebar = true;
+    let room = super::panes::margin_w(&app) - 12.0 - 16.0;
+    assert!(room <= 240.0 - 28.0 + 0.5, "the narrowest margin: {room}");
+    for lang in [crate::i18n::Lang::Fr, crate::i18n::Lang::En] {
+        crate::i18n::with_lang(lang, || {
+            let mut sim = iced_test::Simulator::with_size(
+                Default::default(),
+                Size::new(room + 200.0, 60.0),
+                super::sheet::margin_tabs(&app, room),
+            );
+            for name in [
+                crate::tr!("Explanations"),
+                crate::tr!("Calls"),
+                crate::tr!("History"),
+            ] {
+                let at = text_at(&mut sim, |t| t == name || t.ends_with('…'), 0)
+                    .unwrap_or_else(|| panic!("{name} shown"));
+                assert!(at.x >= 0.0, "{name}: {at:?}");
+            }
+            let last = text_at(&mut sim, |t| t == crate::tr!("History"), 0)
+                .expect("the last tab named whole");
+            assert!(
+                last.x + last.width + 4.0 <= room,
+                "{lang:?}: past the margin's edge: {last:?} of {room}"
+            );
+        });
+    }
+}
+
+/// L19: an empty file says so in its pane — it opened blank, with no line
+/// number, read as one still loading — and the margin offers no Explain or
+/// Ask of a file with nothing in it.
+#[test]
+fn an_empty_file_says_so_and_offers_nothing_to_explain() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.proj.explain.view = Some(crate::explain::Node::File(abs.clone()));
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.symbols.clear();
+    }
+    // How many of `words` are on screen.
+    let count = |app: &App, words: &str| {
+        let mut sim = sim_of(app);
+        let mut n = 0;
+        while text_at(&mut sim, |t| t == words, n).is_some() {
+            n += 1;
+        }
+        n
+    };
+    assert_eq!(count(&app, "This file is empty"), 0);
+    // The file's card, with its Explain beside the header's.
+    assert_eq!(count(&app, "file"), 1, "a file's card");
+    assert_eq!(count(&app, "Explain"), 2);
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.source = std::sync::Arc::new(String::new());
+    }
+    assert_eq!(count(&app, "This file is empty"), 1);
+    assert_eq!(count(&app, "file"), 0, "no card");
+    assert_eq!(count(&app, "Explain"), 1, "the header's alone");
+}
+
+/// L9: a file found no longer there is left out of the reading trail: it
+/// stayed in it, and a press on it said only an error of the system's.
+#[test]
+fn the_trail_leaves_out_a_file_gone() {
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let gone = abs.with_file_name("gone_away.rs");
+    let at = |path: &std::path::Path, line| crate::history::Loc {
+        path: path.to_path_buf(),
+        line: Some(line),
+    };
+    app.proj.history.push(at(&gone, 1), None);
+    app.proj.history.push(at(&abs, 40), Some("line_39".into()));
+    assert!(shows(&mut sim_of(&app), "gone_away.rs"), "in the trail");
+    assert!(shows(
+        &mut sim_elem(super::sidebar::trail_tab(&app)),
+        "gone_away.rs"
+    ));
+    app.proj.gone_files.insert(gone);
+    let mut sim = sim_of(&app);
+    assert!(!shows(&mut sim, "gone_away.rs"), "left out");
+    assert!(shows(&mut sim, "line_39"));
+    // The sidebar's Reading trail leaves it out too.
+    let mut tab = sim_elem(super::sidebar::trail_tab(&app));
+    assert!(!shows(&mut tab, "gone_away.rs"), "left out of the tab");
+}
+
+/// A stop named for what is on its line — a type gone to — keeps its name
+/// while the caret is on that line: it read "lib.rs", where it read
+/// "Point". Left, the crumb says where the caret is: the file.
+#[test]
+fn a_types_stop_keeps_its_name_while_the_caret_is_on_it() {
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let loc = |line| crate::history::Loc {
+        path: abs.clone(),
+        line: Some(line),
+    };
+    app.proj.history.push(loc(1), Some("line_0".into()));
+    app.proj.history.push(loc(40), Some("Point".into()));
+    app.proj.panes[0].as_mut().unwrap().caret = Some((39, 0));
+    assert!(shows(&mut sim_of(&app), "Point"));
+    app.proj.panes[0].as_mut().unwrap().caret = Some((60, 0));
+    let mut sim = sim_of(&app);
+    assert!(!shows(&mut sim, "Point"));
+    assert!(text_at(&mut sim, |t| t == "lib.rs", 1).is_some());
+}
+
+/// A new walkthrough being made — a first tour, a change review — can be
+/// stopped from its row, as one being made again can: its row had no
+/// control at all.
+#[test]
+fn a_new_walkthrough_being_made_has_a_stop() {
+    let mut app = reader_app();
+    for (scope, library) in [("checkout", None), ("@diff changes", Some("@diff main"))] {
+        app.proj.walk.library = library
+            .map(|scope: &str| {
+                vec![crate::walkthrough::Walkthrough {
+                    made: None,
+                    title: "Review".into(),
+                    scope: scope.into(),
+                    steps: Vec::new(),
+                }]
+            })
+            .unwrap_or_default();
+        app.proj.walk.generating = Some(scope.into());
+        app.proj.walk.pending = Some(1);
+        let sent = click_right_of(
+            || sim_elem(super::sidebar::walk_library(&app)),
+            "Generating…",
+            |m| matches!(m, Message::Walk(crate::WalkMsg::Cancel)),
+        );
+        assert!(!sent.is_empty(), "{scope}: no Stop");
+    }
 }
 
 /// A path too long for its row is cut at its start — "…" and its last
@@ -1740,7 +3688,7 @@ fn the_overview_map_has_no_caption() {
     for graph_3d in [false, true] {
         app.graph_3d = graph_3d;
         let mut sim = sim_of(&app);
-        assert!(shows(&mut sim, "Module map"), "3D {graph_3d}: no map");
+        assert!(shows(&mut sim, "Module graph"), "3D {graph_3d}: no map");
         assert!(
             text_at(
                 &mut sim,
@@ -1763,16 +3711,40 @@ fn the_chrome_geometry_matches_what_is_drawn() {
     use super::StripTool;
     /// Whether a message is the one a tool sends.
     type Sends = fn(&Message) -> bool;
-    let app = reader_app();
-    let expected: [(StripTool, Sends); 9] = [
+    let mut app = reader_app();
+    // A function in view, for Fake Run and Fake Debug to work out: with
+    // none they are drawn off and press nothing.
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "line_0".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 1,
+    }];
+    let app = app;
+    let expected: [(StripTool, Sends); 14] = [
         (StripTool::Overview, |m| {
             matches!(m, Message::Overview(crate::OverviewMsg::Show))
         }),
         (StripTool::Stats, |m| {
             matches!(m, Message::Overview(crate::OverviewMsg::ShowStats))
         }),
+        (StripTool::WeakSpots, |m| {
+            matches!(m, Message::Weak(crate::WeakMsg::Show))
+        }),
+        (StripTool::Run, |m| {
+            matches!(m, Message::Debug(DebugMsg::Run))
+        }),
+        (StripTool::FakeRun, |m| {
+            matches!(m, Message::Fake(crate::FakeMsg::AtCaret { debug: false }))
+        }),
         (StripTool::Debug, |m| {
             matches!(m, Message::Debug(DebugMsg::Start))
+        }),
+        (StripTool::FakeDebug, |m| {
+            matches!(m, Message::Fake(crate::FakeMsg::AtCaret { debug: true }))
+        }),
+        (StripTool::RunMenu, |m| {
+            matches!(m, Message::Window(WindowMsg::ToggleRunMenu))
         }),
         (StripTool::CallGraph, |m| {
             matches!(
@@ -1812,9 +3784,13 @@ fn the_chrome_geometry_matches_what_is_drawn() {
         sent_by(sim).into_iter().collect::<Vec<_>>()
     };
     for (tool, is_expected) in expected {
-        // The ⋯ is not on a strip tall enough for the menu's own tools.
+        // The ⋯ is not on a strip tall enough for the menu's own tools,
+        // nor the bug on one tall enough for the four ways to run.
         let Some(at) = super::strip_slot_center(&app, super::StripSlot::Tool(tool)) else {
-            assert_eq!(tool, StripTool::More, "{tool:?} is not on the strip");
+            assert!(
+                matches!(tool, StripTool::More | StripTool::RunMenu),
+                "{tool:?} is not on the strip"
+            );
             continue;
         };
         let sent = click_at(at);
@@ -1829,12 +3805,15 @@ fn the_chrome_geometry_matches_what_is_drawn() {
             let at = super::strip_slot_center(&app, super::StripSlot::Row(row)).unwrap();
             let sent = click_at(at);
             let expected = match row {
-                super::ToolsRow::Shortcuts => {
-                    matches!(sent.as_slice(), [Message::Window(WindowMsg::OpenShortcuts)])
+                super::ToolsRow::Tutorial => {
+                    matches!(
+                        sent.as_slice(),
+                        [Message::Tutorial(crate::TutorialMsg::Start)]
+                    )
                 }
-                super::ToolsRow::OpenFolder => matches!(
+                super::ToolsRow::Glossary => matches!(
                     sent.as_slice(),
-                    [Message::Project(crate::ProjectMsg::OpenFolderPressed)]
+                    [Message::Glossary(crate::GlossaryMsg::Open)]
                 ),
                 // The rest: something, and only one thing, is pressed.
                 _ => sent.len() <= 1,
@@ -1856,7 +3835,7 @@ fn the_chrome_geometry_matches_what_is_drawn() {
     assert!(super::tools_on_strip(&app));
     app.show_tools_menu = true;
     assert!(
-        !shows(&mut sim_of(&app), "Open Remote…"),
+        !shows(&mut sim_of(&app), "Keyboard Shortcuts"),
         "a menu of what the strip shows"
     );
     // The ⋯ menu's rows, in a window too short for them on the strip: each
@@ -1864,8 +3843,8 @@ fn the_chrome_geometry_matches_what_is_drawn() {
     app.window_height = TOOLS_IN_MENU_H;
     assert!(!super::tools_on_strip(&app));
     for (row, label) in [
-        (super::ToolsRow::ExplainAll, "Explain All"),
-        (super::ToolsRow::OpenRemote, "Open Remote…"),
+        (super::ToolsRow::ExplainAll, "Explain All…"),
+        (super::ToolsRow::SetUp, "Set Up Project…"),
         (super::ToolsRow::Tutorial, "Tutorial"),
     ] {
         let rect = super::tools_menu_rows_rect(&app, row.index(), 1);
@@ -2081,6 +4060,7 @@ fn escape_names_the_topmost_overlay() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     assert!(matches!(
         super::escape_message(&app),
@@ -2106,7 +4086,13 @@ fn escape_names_the_topmost_overlay() {
         Some(Message::Settings(crate::SettingsMsg::Close))
     ));
 
+    // Settings opened from the project's sheet is over it, and goes first.
     app.pending_consent = Some(PathBuf::from("/nonexistent/clew-ui-test"));
+    assert!(matches!(
+        super::escape_message(&app),
+        Some(Message::Settings(crate::SettingsMsg::Close))
+    ));
+    app.settings.open = false;
     assert!(matches!(
         super::escape_message(&app),
         Some(Message::Project(ProjectMsg::ConsentDenied(root))) if root == std::path::Path::new("/nonexistent/clew-ui-test")
@@ -2139,6 +4125,7 @@ fn escape_closes_overlays_one_at_a_time() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     open_tools_menu(&mut app);
     let escape = || {
@@ -2155,52 +4142,6 @@ fn escape_closes_overlays_one_at_a_time() {
     );
     let _ = app.update(escape());
     assert!(app.proj.context_menu.is_none());
-}
-
-/// E2-6: Tab cycles focus through the open modal's fields only, wrapping, and
-/// clears any focus left behind it; with no modal it covers every field.
-#[test]
-fn tab_focus_cycles_inside_the_open_modal() {
-    let mut renderer = renderer();
-    let input = |id: &'static str| {
-        text_input::<Message, iced::Theme, iced::Renderer>("", "")
-            .id(Id::new(id))
-            .on_input(|_| Message::Noop)
-    };
-    // The modal is framed by the real `modal()` every dialog is built with
-    // — the scope is whatever that frame marks, not a container this test
-    // labelled itself.
-    let view = |with_modal: bool| -> Element<'static, Message> {
-        let modal: Element<'static, Message> = if with_modal {
-            super::modal(
-                column![input("modal-a"), input("modal-b")],
-                super::Placement::Center,
-                super::Backdrop::Dim(None),
-            )
-        } else {
-            space().into()
-        };
-        iced::widget::stack![column![input("behind-a"), input("behind-b")], modal].into()
-    };
-    let mut focused_after = |with_modal: bool, cache: Cache, forward: bool| {
-        let mut ui = UserInterface::build(view(with_modal), WINDOW, cache, &mut renderer);
-        let _ = run_operation(&mut ui, &renderer, super::focus_cycle(forward));
-        let focused = run_operation(&mut ui, &renderer, find_focused());
-        (focused, ui.into_cache())
-    };
-
-    let (first, cache) = focused_after(true, Cache::default(), true);
-    assert_eq!(first, Some(Id::new("modal-a")));
-    let (second, cache) = focused_after(true, cache, true);
-    assert_eq!(second, Some(Id::new("modal-b")));
-    let (wrapped, cache) = focused_after(true, cache, true);
-    assert_eq!(wrapped, Some(Id::new("modal-a")), "the cycle wraps");
-    let (back, cache) = focused_after(true, cache, false);
-    assert_eq!(back, Some(Id::new("modal-b")), "Shift-Tab goes backwards");
-
-    // No modal: every field takes part (the first after the last).
-    let (open, _) = focused_after(false, cache, true);
-    assert_eq!(open, Some(Id::new("behind-a")));
 }
 
 /// E2-6: moving the finder's selection scrolls its list just enough to keep
@@ -2252,7 +4193,7 @@ type Sim<'a> = iced_test::Simulator<'a, Message, iced::Theme, iced::Renderer>;
 /// The whole window, at the app's test size.
 /// A window short enough that the ⋯ menu's tools are in its menu, not laid
 /// on the strip ([`super::tools_on_strip`]): there is a ⋯ to open it from.
-const TOOLS_IN_MENU_H: f32 = 600.0;
+const TOOLS_IN_MENU_H: f32 = 520.0;
 
 /// `app`'s ⋯ menu open — in a window short enough to have one.
 fn open_tools_menu(app: &mut App) {
@@ -2280,6 +4221,14 @@ fn sim_sized(app: &App, size: Size) -> Sim<'_> {
 fn sim_elem(elem: Element<'_, Message>) -> Sim<'_> {
     crate::app::tests::isolated_data_dir();
     iced_test::simulator(elem)
+}
+
+/// [`sim_elem`] tall enough for a whole Settings section: what a test
+/// clicks is on screen however long the sections above it grow.
+fn sim_tall(elem: Element<'_, Message>) -> Sim<'_> {
+    crate::app::tests::isolated_data_dir();
+    crate::fonts::load();
+    iced_test::Simulator::with_size(Default::default(), Size::new(1024.0, 3000.0), elem)
 }
 
 /// The visible bounds of the `nth` (0-based) text whose content satisfies
@@ -2395,14 +4344,14 @@ fn click(sim: Sim<'_>, label: &str) -> Vec<Message> {
 #[test]
 fn the_tutorial_walks_every_step_end_to_end() {
     let mut app = reader_app();
-    let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+    let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
     let total = crate::app::tutorial::steps(&app).len();
     assert!(total > 10, "the tour lost its steps: {total}");
     for i in 0..total {
         assert_eq!(app.tutorial, Some(i));
         let title = crate::app::tutorial::steps(&app)[i].title.clone();
         let mut sim = sim_of(&app);
-        let counter = format!("Step {} of {total}", i + 1);
+        let counter = format!("{} of {total}", i + 1);
         assert!(sim.find(counter.as_str()).is_ok(), "no {counter:?}");
         assert!(
             sim.find(title.as_str()).is_ok(),
@@ -2421,16 +4370,884 @@ fn the_tutorial_walks_every_step_end_to_end() {
     assert_eq!(app.tutorial, None, "Done ends the tour");
 }
 
-/// Every tool on the strip has its one tutorial step, Settings the last
-/// (the type map's came in before it); and no text field holds the keyboard
-/// while the tour shows its tab — the SEARCH box did, and took the → and
-/// Enter that step the tour.
+/// A Rust file's context menu has its memory layout and its tests; a Lean
+/// file's, Step Through Proof. Each sends its own message.
+#[test]
+fn the_context_menu_has_each_languages_own_rows() {
+    let mut app = reader_app();
+    app.proj.context_menu = Some(crate::ContextMenu {
+        pane: 0,
+        line: 3,
+        col: 4,
+        x: 200.0,
+        y: 120.0,
+        insight: crate::InsightKind::for_lang("rust"),
+        served: true,
+        by_pointer: true,
+        line_top: None,
+    });
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Memory Layout"));
+    assert!(shows(&mut sim, "Related Tests"));
+    assert!(!shows(&mut sim, "Step Through Proof"));
+    drop(sim);
+    let sent = click(sim_of(&app), "Related Tests");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Hover(HoverMsg::InsightOf(crate::InsightKind::RelatedTests))
+        )),
+        "{sent:?}"
+    );
+    // The same file as Lean.
+    let v = app.proj.panes[0].as_mut().unwrap();
+    v.lang_key = Some("lean");
+    app.proj.context_menu.as_mut().unwrap().insight = crate::InsightKind::for_lang("lean");
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Step Through Proof"));
+    assert!(!shows(&mut sim, "Memory Layout"));
+    drop(sim);
+    let sent = click(sim_of(&app), "Step Through Proof");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::FromMenu))),
+        "{sent:?}"
+    );
+}
+
+/// A page over the code has nothing under the Ask pill floating at the
+/// window's foot, scrolled to its end or not: it ends above the pill (the
+/// weak spots here; the statistics, the glossary, the overview and a docs
+/// page alike). With room only after its last row, the rows on their way
+/// there were under it — a file's language in the statistics.
+#[test]
+fn a_pages_last_row_scrolls_clear_of_the_ask_pill() {
+    use clew_core::weakspots::{Reason, Spot};
+    let mut app = reader_app();
+    app.proj.weak.showing = true;
+    app.proj.weak.files = 40;
+    app.proj.weak.spots = Some(std::sync::Arc::new(
+        (0..40)
+            .map(|i| Spot {
+                rel: format!("src/f{i:02}.rs"),
+                name: format!("spot{i:02}"),
+                line: 1,
+                end_line: 90,
+                score: 40 - i,
+                reasons: vec![Reason::Long(87)],
+            })
+            .collect(),
+    ));
+    let pill = super::askfloat::ask_corner_rect(&app);
+    let mut sim = sim_of(&app);
+    // At rest: what is shown of the page ends above the pill.
+    let page = text_at(&mut sim, |t| t.starts_with("spot"), 0).expect("a row");
+    let lowest = (0..40)
+        .filter_map(|i| {
+            let name = format!("spot{i:02}");
+            text_at(&mut sim, move |t| t == name, 0)
+        })
+        .filter(|r| r.height > 1.0)
+        .map(|r| r.y + r.height)
+        .fold(page.y, f32::max);
+    assert!(
+        lowest <= pill.y,
+        "a row at {lowest} under the pill at {pill:?}"
+    );
+    sim.point_at(Point::new(WINDOW.width / 2.0, WINDOW.height / 2.0));
+    let _ = sim.simulate([Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Pixels {
+            x: 0.0,
+            y: -20_000.0,
+        },
+    })]);
+    let last = text_at(&mut sim, |t| t == "spot39", 0).expect("the last row");
+    assert!(
+        last.y + last.height <= pill.y,
+        "{last:?} under the pill at {pill:?}"
+    );
+}
+
+/// The weak spots page says what it is, then each spot: its name, where
+/// it is, why it is listed; the row opens its code, Ask why asks.
+#[test]
+fn the_weak_spots_page_lists_each_spot_with_why() {
+    use clew_core::weakspots::{Reason, Risk, Spot};
+    let mut app = reader_app();
+    app.proj.weak.showing = true;
+    app.proj.weak.files = 12;
+    app.proj.weak.spots = Some(std::sync::Arc::new(vec![
+        Spot {
+            rel: "src/load.rs".into(),
+            name: "load".into(),
+            line: 4,
+            end_line: 90,
+            score: 20,
+            reasons: vec![
+                Reason::Long(87),
+                Reason::Deep(5),
+                Reason::Risky(Risk::Unwrap, 3),
+                Reason::Churn(24),
+            ],
+        },
+        Spot {
+            rel: "src/old.rs".into(),
+            name: String::new(),
+            line: 1,
+            end_line: 1,
+            score: 3,
+            reasons: vec![Reason::Marked(1)],
+        },
+    ]));
+    let mut sim = sim_of(&app);
+    for words in [
+        "Weak Spots",
+        "2 spots, from 12 files measured",
+        "load",
+        "src/load.rs:4",
+        "87 lines",
+        "nested 5 deep",
+        "3 unwraps",
+        "changed in 24 commits",
+        "notes in the file",
+        "1 TODO or FIXME",
+    ] {
+        assert!(shows(&mut sim, words), "{words} is not shown");
+    }
+    assert!(
+        !shows(&mut sim, "A guide to read by"),
+        "no paragraph saying what the page is"
+    );
+    drop(sim);
+    let sent = click(sim_of(&app), "load");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Weak(crate::WeakMsg::Open(0)))),
+        "{sent:?}"
+    );
+    let sent = click_nth(sim_of(&app), "Ask why", 1);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Weak(crate::WeakMsg::AskWhy(1)))),
+        "{sent:?}"
+    );
+}
+
+/// The proof panel shows the step's tactic among the steps, the goals
+/// before and after it, what the tactic brought marked `+`, changed `~`,
+/// and the goals it closed; at the end, that it is proved.
+#[test]
+fn the_proof_panel_marks_what_each_tactic_did() {
+    use clew_core::leanproof::ProofStep;
+    let mut app = reader_app();
+    let step = |first: usize, text: &str| ProofStep {
+        first,
+        last: first,
+        end: 0,
+        text: text.into(),
+    };
+    app.proj.proof = Some(crate::app::proof::ProofWalk {
+        abs: PathBuf::from("/nonexistent/clew-ui-test/Swap.lean"),
+        name: "and_swap".into(),
+        steps: vec![step(0, "by"), step(1, "intro h"), step(2, "exact h.symm")],
+        goals: Some(vec![
+            Some(vec![
+                "n : Nat\nk : Nat\n⊢ n = 1 → 1 = n".into(),
+                "⊢ True".into(),
+            ]),
+            Some(vec!["n : Nat\nk : Int\nh : n = 1\n⊢ 1 = n".into()]),
+            Some(Vec::new()),
+        ]),
+        failed: None,
+        at: 1,
+        token: 1,
+    });
+    app.show_bottom = true;
+    let mut sim = sim_of(&app);
+    for words in [
+        "Proof",
+        "and_swap",
+        "step 2 of 3",
+        "intro h",
+        "GOALS BEFORE",
+        "GOALS AFTER",
+        "+ h : n = 1",
+        "~ k : Int",
+        "  n : Nat",
+        "1 goal closed",
+    ] {
+        assert!(shows(&mut sim, words), "{words} is not shown");
+    }
+    drop(sim);
+    let sent = click(sim_of(&app), "exact h.symm");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::Goto(2)))),
+        "{sent:?}"
+    );
+    app.proj.proof.as_mut().unwrap().at = 2;
+    assert!(shows(&mut sim_of(&app), "No goals left: proved."));
+}
+
+/// The bottom panel has a tab for each run, named by what it runs — the
+/// second of two Debugs of one program numbered — each pressed to show it
+/// and closed by its ×; with none, it offers the four ways to run.
+#[test]
+fn the_panel_has_a_tab_for_each_run() {
+    use crate::app::state::RunTab;
+    let mut app = reader_app();
+    app.show_bottom = true;
+    assert!(shows(&mut sim_of(&app), "Nothing is running"));
+    let sent = click(sim_of(&app), "Start Debugging");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::Start))),
+        "{sent:?}"
+    );
+    let session = |status| crate::DebugSession {
+        client: None,
+        status,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/p/main.py"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/p"),
+        addr: None,
+    };
+    app.debug.session = Some(session(crate::DebugStatus::Running));
+    app.debug.tab = 1;
+    app.park_debug();
+    app.debug.session = Some(session(crate::DebugStatus::Stopped));
+    app.debug.tab = 2;
+    app.run_shown = Some(RunTab::Real(2));
+    let mut sim = sim_of(&app);
+    assert!(
+        shows(&mut sim, "Debug main.py (2)"),
+        "two Debugs of one program, each said with its kind"
+    );
+    drop(sim);
+    let sent = click(sim_of(&app), "Debug main.py");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::ShowTab(RunTab::Real(1))))),
+        "{sent:?}"
+    );
+    let (targets, _) = super::heard::gather_all(&app);
+    for (shown, tab) in [("Close Debug main.py", 1), ("Close Debug main.py (2)", 2)] {
+        assert!(
+            targets.iter().any(|t| t.shown == shown
+                && matches!(t.message, Message::Debug(DebugMsg::CloseTab(RunTab::Real(id))) if id == tab)),
+            "{shown}: {:?}",
+            targets.iter().map(|t| &t.shown).collect::<Vec<_>>()
+        );
+    }
+    // Shown, a tab's run is the one on screen.
+    for m in sent {
+        let _ = app.update(m);
+    }
+    assert_eq!(app.debug.tab, 1);
+    assert_eq!(
+        app.debug.session.as_ref().unwrap().status,
+        crate::DebugStatus::Running
+    );
+}
+
+/// L19: behind the first-open sheet, the Files view says the folder is
+/// being opened — "No folder open / Open a folder to start reading" said
+/// the opposite of the sheet's "Open teashop".
+#[test]
+fn behind_the_first_open_sheet_the_files_view_says_it_is_opening() {
+    let mut app = blank_app();
+    let mut sim = sim_elem(super::sidebar::files_tab(&app));
+    assert!(shows(&mut sim, "No folder open"));
+    drop(sim);
+    app.pending_consent = Some(std::path::PathBuf::from("/somewhere/teashop"));
+    let mut sim = sim_elem(super::sidebar::files_tab(&app));
+    assert!(shows(&mut sim, "Opening teashop…"));
+    assert!(!shows(&mut sim, "No folder open"));
+}
+
+/// L15: a hover peek near the code's foot opens above the point, not over
+/// the panel under the code — "class Decimal(…)" sat over its Continue and
+/// Walk this run.
+#[test]
+fn a_hover_peek_stays_off_the_panel_under_the_code() {
+    let mut app = reader_app();
+    app.show_bottom = true;
+    let panel_top = app.window_height - super::STATUSBAR_H - app.bottom_shown_height();
+    let doc = "class Decimal(value='0', context=None)\n".repeat(6);
+    app.proj.hover = Some(crate::HoverState {
+        text: Some(doc),
+        ..hover_at(300.0, panel_top - 30.0)
+    });
+    let mut sim = sim_of(&app);
+    let peek = text_at(&mut sim, |t| t.starts_with("class Decimal"), 0).expect("the peek");
+    assert!(
+        peek.y + peek.height <= panel_top,
+        "over the panel at {panel_top}: {peek:?}"
+    );
+    assert!(peek.y < panel_top - 30.0, "above the point");
+    drop(sim);
+    // With no panel, it opens below the point as it did.
+    app.show_bottom = false;
+    let mut sim = sim_of(&app);
+    let peek = text_at(&mut sim, |t| t.starts_with("class Decimal"), 0).expect("the peek");
+    assert!(peek.y > panel_top - 30.0, "below the point: {peek:?}");
+}
+
+/// M4/M5: resting on a gutter line says what is there — a breakpoint's
+/// condition, why a hollow one won't stop, a bookmark's note — which the
+/// dot and the bar never said; not before the pointer has rested, not
+/// once the code has scrolled under it, not under a menu.
+#[test]
+fn a_gutter_line_rested_on_says_its_breakpoint_and_bookmark() {
+    let mut app = reader_app();
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    let bps = app.debug.breakpoints.entry(abs).or_default();
+    bps.insert(
+        3,
+        crate::Bp {
+            condition: Some("count > 3".into()),
+            ..Default::default()
+        },
+    );
+    bps.insert(
+        7,
+        crate::Bp {
+            verified: Some(false),
+            ..Default::default()
+        },
+    );
+    app.proj.bookmarks.push(crate::Bookmark {
+        rel: "src/lib.rs".into(),
+        line: 3,
+        preview: String::new(),
+        note: Some("where the total starts".into()),
+    });
+    let rest_on = |app: &mut App, line: usize, shown: bool| {
+        app.proj.gutter_tip = Some(crate::app::state::GutterTip {
+            pane: 0,
+            line,
+            x: 30.0,
+            y: 120.0,
+            scroll: (0.0, 0.0),
+            generation: 1,
+            shown,
+        });
+    };
+    rest_on(&mut app, 2, true);
+    let mut sim = sim_of(&app);
+    let said = text_at(&mut sim, |t| t.contains("count > 3"), 0).expect("the condition");
+    assert!(shows(&mut sim, "where the total starts"), "the note too");
+    assert!(said.y > 120.0, "below the pointer: {said:?}");
+    drop(sim);
+    rest_on(&mut app, 6, true);
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "won't stop here"), "the hollow dot said");
+    drop(sim);
+    // Not yet rested; a line with nothing on it; scrolled since; a menu.
+    rest_on(&mut app, 2, false);
+    assert!(!shows(&mut sim_of(&app), "count > 3"));
+    rest_on(&mut app, 4, true);
+    assert!(!shows(&mut sim_of(&app), "Breakpoint"));
+    rest_on(&mut app, 2, true);
+    app.proj.panes[0].as_mut().unwrap().scroll_y = 40.0;
+    assert!(!shows(&mut sim_of(&app), "count > 3"));
+    app.proj.panes[0].as_mut().unwrap().scroll_y = 0.0;
+    app.show_app_menu = true;
+    assert!(!shows(&mut sim_of(&app), "count > 3"));
+}
+
+/// L5: the code menu shows Toggle Breakpoint's key, F9, on its row, as it
+/// shows Toggle Bookmark's.
+#[test]
+fn the_code_menu_shows_the_breakpoints_key() {
+    let mut app = reader_app();
+    app.proj.context_menu = Some(crate::ContextMenu {
+        pane: 0,
+        line: 1,
+        col: 1,
+        x: 20.0,
+        y: 20.0,
+        insight: None,
+        served: true,
+        by_pointer: true,
+        line_top: None,
+    });
+    let mut sim = sim_of(&app);
+    let row = text_at(&mut sim, |t| t == "Toggle Breakpoint", 0).expect("the row");
+    let key = text_at(&mut sim, |t| t == "F9", 0).expect("its key");
+    assert!((key.center_y() - row.center_y()).abs() < 2.0, "on its row");
+    assert!(key.x > row.x + row.width, "after its words");
+}
+
+/// L11: the walkthrough player's ‹ and › do nothing at the ends — at
+/// "1/1" both stayed lit — and its × puts the tour away.
+#[test]
+fn the_walkthrough_player_stops_at_its_ends_and_closes() {
+    let mut app = reader_app();
+    let step = |n: usize| crate::walkthrough::Step {
+        title: format!("step {n}"),
+        file: "src/lib.rs".into(),
+        symbol: None,
+        line: Some(n),
+        narration: format!("narration {n}"),
+        depth: 0,
+        stop: None,
+    };
+    let tour = |n: usize| crate::walkthrough::Walkthrough {
+        made: None,
+        title: "tour".into(),
+        scope: "t".into(),
+        steps: (1..=n).map(step).collect(),
+    };
+    let sent = |app: &App, n: usize, label: &str| {
+        let tour = tour(n);
+        click(
+            sim_elem(super::sidebar::walk_narration(app, &tour, 240.0)),
+            label,
+        )
+    };
+    let stepped = |m: &Message, by: i32| matches!(m, Message::Walk(WalkMsg::Step(d)) if *d == by);
+    app.proj.walk.step = 0;
+    assert!(!sent(&app, 1, "‹").iter().any(|m| stepped(m, -1)));
+    assert!(!sent(&app, 1, "›").iter().any(|m| stepped(m, 1)));
+    assert!(sent(&app, 2, "›").iter().any(|m| stepped(m, 1)));
+    app.proj.walk.step = 1;
+    assert!(sent(&app, 2, "‹").iter().any(|m| stepped(m, -1)));
+    assert!(!sent(&app, 2, "›").iter().any(|m| stepped(m, 1)));
+    let tour = tour(1);
+    let closed = click_right_of(
+        || sim_elem(super::sidebar::walk_narration(&app, &tour, 240.0)),
+        "›",
+        |m| matches!(m, Message::Walk(WalkMsg::Back)),
+    );
+    assert!(!closed.is_empty(), "the × after › puts the tour away");
+}
+
+/// L12: with no condition typed, the dialog's button says what it does —
+/// "Set" silently made a plain breakpoint.
+#[test]
+fn an_empty_condition_says_it_sets_a_plain_breakpoint() {
+    let app = reader_app();
+    let at = |draft: &str| {
+        let edit = (
+            std::path::PathBuf::from("/p/pricing.py"),
+            27usize,
+            draft.to_string(),
+        );
+        let mut sim = sim_elem(super::dialogs::bp_condition_modal(&app, &edit));
+        (
+            shows(&mut sim, "Set without condition"),
+            text_at(&mut sim, |t| t == "Set", 0).is_some(),
+        )
+    };
+    assert_eq!(at(""), (true, false));
+    assert_eq!(at("  "), (true, false));
+    assert_eq!(at("i == 3"), (false, true));
+}
+
+/// M9: Fake Run and Fake Debug, dimmed with no file open, say why where
+/// the pointer rests — named only, clicked, they did nothing and said
+/// nothing; only the shortcut explained.
+#[test]
+fn a_dimmed_fake_run_says_why_where_the_pointer_rests() {
+    use crate::ui::StripTool;
+    let mut app = reader_app();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "line_3".into(),
+        kind: "function".into(),
+        line: 4,
+        end_line: 4,
+    }];
+    let why = "Open a file and put the cursor in a function, class or struct to fake-run it";
+    let off = "Put the cursor in a function, class or struct to fake-run it";
+    let hovered = |app: &App, why: &str| {
+        let at = super::strip_tool_center(app, StripTool::FakeRun);
+        super::tip::warm_now();
+        let mut sim = sim_of(app);
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        (shows(&mut sim, "Fake Run…"), shows(&mut sim, why))
+    };
+    assert_eq!(
+        hovered(&app, off),
+        (true, false),
+        "a function in view: named only"
+    );
+    assert!(super::strip_tool_able(&app, StripTool::FakeRun));
+    // M18: the cursor off any function — it looked ready, and pressed,
+    // only then said to put the cursor in one.
+    app.proj.panes[0].as_mut().unwrap().caret = Some((9, 0));
+    assert!(!super::strip_tool_able(&app, StripTool::FakeRun));
+    assert!(!super::strip_tool_able(&app, StripTool::FakeDebug));
+    assert_eq!(
+        hovered(&app, off),
+        (true, true),
+        "the cursor off a function: and why"
+    );
+    app.proj.panes[0].as_mut().unwrap().caret = Some((3, 2));
+    assert!(super::strip_tool_able(&app, StripTool::FakeRun), "in one");
+    for pane in app.proj.panes.iter_mut() {
+        *pane = None;
+    }
+    assert!(app.active_viewer().is_none(), "precondition");
+    assert_eq!(hovered(&app, why), (true, true), "no file open: and why");
+}
+
+/// M4: the code menu says "Edit Condition…" on a line whose breakpoint has
+/// a condition — named as a new one, it hid where a condition is read and
+/// changed — and the condition dialog takes the breakpoint away, where it
+/// offered only to set one.
+#[test]
+fn a_breakpoints_condition_dialog_edits_and_removes_it() {
+    let mut app = reader_app();
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    let menu = |app: &mut App| {
+        app.proj.context_menu = Some(crate::ContextMenu {
+            pane: 0,
+            line: 2,
+            col: 0,
+            x: 40.0,
+            y: 40.0,
+            insight: None,
+            served: true,
+            by_pointer: true,
+            line_top: None,
+        });
+    };
+    menu(&mut app);
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Conditional Breakpoint…"));
+        assert!(!shows(&mut sim, "Edit Condition…"));
+    }
+    let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
+    assert!(
+        !shows(&mut sim_of(&app), "Remove breakpoint"),
+        "no breakpoint there to remove"
+    );
+    let _ = app.update(Message::Debug(DebugMsg::BpConditionInput("i == 3".into())));
+    let _ = app.update(Message::Debug(DebugMsg::BpConditionSet));
+    assert!(
+        app.debug
+            .breakpoints
+            .get(&abs)
+            .and_then(|m| m.get(&3))
+            .is_some_and(|bp| bp.condition.as_deref() == Some("i == 3"))
+    );
+    menu(&mut app);
+    assert!(shows(&mut sim_of(&app), "Edit Condition…"));
+    let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
+    let sent = click(sim_of(&app), "Remove breakpoint");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::BpConditionRemove))),
+        "{sent:?}"
+    );
+    for m in sent {
+        let _ = app.update(m);
+    }
+    assert!(app.proj.bp_cond_edit.is_none(), "the dialog stayed");
+    assert!(
+        app.debug
+            .breakpoints
+            .get(&abs)
+            .is_none_or(|m| !m.contains_key(&3)),
+        "the breakpoint stayed"
+    );
+}
+
+/// M8: with no folder open, the ☰ menu's rows that read a project are
+/// drawn off and press nothing, as the strip's tools are — "Start
+/// Debugging" looked ready, and pressed, did nothing; and what works on
+/// the file in view waits for one.
+#[test]
+fn the_app_menu_draws_off_what_needs_a_project_or_a_file() {
+    use crate::keymap::Action;
+    let app = blank_app();
+    assert!(app.proj.project.is_none(), "precondition");
+    for action in [
+        Action::StartDebug,
+        Action::Run,
+        Action::CallGraph,
+        Action::ExplainAll,
+    ] {
+        assert!(!super::menu_action_able(&app, action), "{action:?}");
+    }
+    for action in [Action::FindInFile, Action::FakeRun, Action::ToggleBookmark] {
+        assert!(!super::menu_action_able(&app, action), "{action:?}");
+    }
+    for action in [Action::ZoomIn, Action::CommandPalette, Action::Tutorial] {
+        assert!(super::menu_action_able(&app, action), "{action:?}");
+    }
+    let sent = click(sim_elem(super::app_menu(&app)), "Start Debugging");
+    assert!(sent.is_empty(), "{sent:?}");
+    // M3: the strip's (and the ⋯ menu's) Explain All with it — it stood
+    // lit, and pressed, did nothing.
+    assert!(
+        super::tools_row(&app, super::ToolsRow::ExplainAll)
+            .2
+            .is_none()
+    );
+    // R16-4: Back and Forward as the top bar's arrows: nowhere to go.
+    assert!(!super::menu_action_able(&app, Action::GoBack));
+    assert!(!super::menu_action_able(&app, Action::GoForward));
+    assert_eq!(super::menu_action_why(&app, Action::GoBack), None);
+    // A greyed row says why where the pointer rests, as the strip does.
+    assert_eq!(
+        super::menu_action_why(&app, Action::StartDebug),
+        Some("Open a folder first")
+    );
+    let rested_on = |menu: Element<'_, Message>, row: &str, why: &str| {
+        super::tip::warm_now();
+        let mut sim = sim_elem(menu);
+        let at = text_at(&mut sim, |t| t == row, 0)
+            .expect("the row")
+            .center();
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        shows(&mut sim, why)
+    };
+    assert!(rested_on(
+        super::app_menu(&app),
+        "Start Debugging",
+        "Open a folder first"
+    ));
+    let mut app = reader_app();
+    for action in [
+        Action::StartDebug,
+        Action::FindInFile,
+        Action::ToggleBookmark,
+    ] {
+        assert!(super::menu_action_able(&app, action), "{action:?}");
+        assert_eq!(super::menu_action_why(&app, action), None);
+    }
+    // The cursor off any function: Fake Run greyed in both menus, saying
+    // what it waits for — the strip alone said it.
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "line_3".into(),
+        kind: "function".into(),
+        line: 4,
+        end_line: 4,
+    }];
+    app.proj.panes[0].as_mut().unwrap().caret = Some((9, 0));
+    let why = "Put the cursor in a function, class or struct to fake-run it";
+    assert_eq!(super::menu_action_why(&app, Action::FakeRun), Some(why));
+    assert!(rested_on(super::app_menu(&app), "Fake Run…", why));
+    assert!(rested_on(super::run_menu(&app), "Fake Run…", why));
+    // In a function: no words, in either.
+    app.proj.panes[0].as_mut().unwrap().caret = Some((3, 2));
+    assert!(!rested_on(super::run_menu(&app), "Fake Run…", why));
+}
+
+/// In a window too short for the four ways to run, they fold into the bug,
+/// whose Run menu opens beside the strip, level with it: Run and Debug,
+/// then Fake Run and Fake Debug, each named as the menu bar names it, with
+/// its keys. A row sends its run, and picked, the menu goes; the bug is
+/// lit while it is open.
+#[test]
+fn in_a_short_window_the_bug_opens_a_menu_of_the_four_runs() {
+    use crate::keymap::Action;
+    use crate::ui::StripTool;
+    let short = Size {
+        width: 1280.0,
+        height: 540.0,
+    };
+    let mut app = reader_app();
+    // A function in view, for the fake runs to work out.
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "line_0".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 1,
+    }];
+    app.window_height = short.height;
+    assert!(!super::runs_on_strip(&app));
+    let (.., open) = super::strip_tool(&app, StripTool::RunMenu);
+    assert!(matches!(open, Message::Window(WindowMsg::ToggleRunMenu)));
+    let _ = app.update(open);
+    assert!(app.show_run_menu);
+    let bug = super::strip_tool_center(&app, StripTool::RunMenu);
+    assert_eq!(
+        super::toolbar::run_menu_top(&app),
+        bug.y - super::ICON_BTN / 2.0,
+        "level with the bug"
+    );
+    let mut sim = sim_sized(&app, short);
+    for (label, action) in [
+        ("Run Without Debugging", Action::Run),
+        ("Start Debugging", Action::StartDebug),
+        ("Fake Run…", Action::FakeRun),
+        ("Fake Debug…", Action::FakeDebug),
+    ] {
+        let wanted = label.to_string();
+        let row = text_at(&mut sim, move |t| t == wanted, 0)
+            .unwrap_or_else(|| panic!("{label} is not in the menu"));
+        assert!(row.x < bug.x, "{label} is beside the strip, left of it");
+        let keys = app.keymap.chord(action).caps();
+        let chord = text_at(&mut sim, move |t| t == keys, 0)
+            .unwrap_or_else(|| panic!("{label}'s keys are not shown"));
+        assert!(
+            (chord.center().y - row.center().y).abs() < 2.0,
+            "{label}'s keys are on its row"
+        );
+    }
+    drop(sim);
+    let sent = click(sim_sized(&app, short), "Run Without Debugging");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::Run))),
+        "{sent:?}"
+    );
+    for m in sent {
+        let _ = app.update(m);
+    }
+    assert!(!app.show_run_menu, "picked, it goes");
+    let _ = app.update(Message::Window(WindowMsg::ToggleRunMenu));
+    let sent = click(sim_sized(&app, short), "Fake Debug…");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Fake(crate::FakeMsg::AtCaret { debug: true }))),
+        "{sent:?}"
+    );
+
+    // The window made taller with the menu open: the four are buttons
+    // again, and no menu hangs from a bug that is not there.
+    assert!(app.show_run_menu);
+    app.window_height = WINDOW.height;
+    assert!(super::runs_on_strip(&app));
+    assert!(
+        !matches!(
+            super::active_overlay(&app),
+            Some(super::ActiveOverlay::RunMenu)
+        ),
+        "no menu hangs from a bug that is not there"
+    );
+}
+
+/// In a window of the usual size, Run, Fake Run, Debug and Fake Debug are
+/// buttons of their own on the strip, each beside its twin, and there is no
+/// bug to open their menu from: its message opens nothing. Fake Run and
+/// Fake Debug work out code in view: with no file open they are drawn off
+/// and press nothing, as Run and Debug are with no project.
+#[test]
+fn the_four_ways_to_run_are_buttons_on_the_strip() {
+    use crate::ui::StripTool;
+    let mut app = reader_app();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "line_0".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 1,
+    }];
+    assert!(super::runs_on_strip(&app));
+    assert!(super::strip_slot_center(&app, super::StripSlot::Tool(StripTool::RunMenu)).is_none());
+    let _ = app.update(Message::Window(WindowMsg::ToggleRunMenu));
+    assert!(!app.show_run_menu, "no bug, no menu");
+    for tool in super::RUN_TOOLS {
+        assert!(super::strip_tool_able(&app, tool), "{tool:?}");
+    }
+    let sent = {
+        let mut sim = sim_of(&app);
+        sim.point_at(super::strip_tool_center(&app, StripTool::FakeRun));
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+    };
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Fake(crate::FakeMsg::AtCaret { debug: false }))),
+        "{sent:?}"
+    );
+
+    // No file open: the model has nothing to work out.
+    app.proj.panes = Default::default();
+    assert!(app.active_viewer().is_none());
+    assert!(!super::strip_tool_able(&app, StripTool::FakeRun));
+    assert!(!super::strip_tool_able(&app, StripTool::FakeDebug));
+    assert!(super::strip_tool_able(&app, StripTool::Run));
+    let sent = {
+        let mut sim = sim_of(&app);
+        sim.point_at(super::strip_tool_center(&app, StripTool::FakeDebug));
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+    };
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Fake(crate::FakeMsg::AtCaret { .. }))),
+        "{sent:?}"
+    );
+}
+
+/// Every tool on the strip — and every row of the ⋯ menu, laid on the strip
+/// where there is room, and of the Run menu — has a shortcut, and its tip
+/// says it: Overview, Stats and the menu's Glossary, Set Up Project… and
+/// Tutorial had none. The ⋯ and the bug, menus, are the ones without. No
+/// two share a chord, and none is one the menu bar keeps.
+#[test]
+fn every_tool_on_the_strip_has_a_shortcut() {
+    use crate::ui::StripTool;
+    let app = reader_app();
+    for tool in super::STRIP_TOP
+        .into_iter()
+        .chain([StripTool::Settings])
+        .filter(|t| !matches!(t, StripTool::More | StripTool::RunMenu))
+    {
+        let (_, label, keys, _) = super::strip_tool(&app, tool);
+        assert!(keys.is_some(), "{label} has no shortcut");
+    }
+    for row in super::toolbar::RUN_MENU_ROWS {
+        let action = super::toolbar::run_row_action(row);
+        assert!(
+            !app.keymap.chord(action).caps().is_empty(),
+            "{row:?} has no chord"
+        );
+    }
+    for row in super::TOOLS_MENU_ROWS {
+        let action = super::tools_row_action(row);
+        assert!(
+            !app.keymap.chord(action).caps().is_empty(),
+            "{row:?} has no chord"
+        );
+    }
+    let all = crate::keymap::Action::ALL;
+    for (i, a) in all.iter().enumerate() {
+        let chord = app.keymap.chord(*a);
+        for b in &all[i + 1..] {
+            assert!(
+                app.keymap.chord(*b) != chord,
+                "{a:?} and {b:?} share a chord"
+            );
+        }
+        assert!(
+            !crate::keymap::MENU_RESERVED
+                .iter()
+                .any(|(c, _)| *c == chord),
+            "{a:?} takes a chord the menu bar keeps"
+        );
+    }
+}
+
+/// Every tool on the strip for reading a project has its one tutorial
+/// step, and none has two; and no text field holds the keyboard while the
+/// tour shows its tab — the SEARCH box did, and took the → and Enter that
+/// step the tour.
 #[test]
 fn the_tutorial_points_at_each_tool_and_leaves_no_field_holding_its_keys() {
     use crate::app::tutorial::{Anchor, steps};
     use crate::ui::StripTool;
     let mut app = reader_app();
-    let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+    let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
     let all = steps(&app);
     for tool in super::STRIP_TOP.into_iter().chain([StripTool::Settings]) {
         let on: Vec<&str> = all
@@ -2438,11 +5255,23 @@ fn the_tutorial_points_at_each_tool_and_leaves_no_field_holding_its_keys() {
             .filter(|s| s.anchor == Anchor::Strip(tool))
             .map(|s| s.title.as_str())
             .collect();
-        assert_eq!(on.len(), 1, "{tool:?}: {on:?}");
+        let reads = matches!(
+            tool,
+            StripTool::Overview
+                | StripTool::ProjectMaps
+                | StripTool::CallGraph
+                | StripTool::TypeMap
+                | StripTool::ImportGraph
+        );
+        assert_eq!(on.len(), usize::from(reads), "{tool:?}: {on:?}");
     }
+    // The four ways to run have one step, over the four of them.
+    assert_eq!(
+        all.iter().filter(|s| s.anchor == Anchor::RunTools).count(),
+        1
+    );
     let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
-    assert!(all[at("Settings")].anchor == Anchor::Strip(StripTool::Settings));
-    assert!(all[at("The type map")].anchor == Anchor::Strip(StripTool::TypeMap));
+    assert!(all[at("Types and their kinds")].anchor == Anchor::Strip(StripTool::TypeMap));
     assert!(all.iter().any(|s| s.anchor == Anchor::AskCorner));
     assert!(all.iter().any(|s| s.anchor == Anchor::FileTools));
     assert!(all.iter().any(|s| s.anchor == Anchor::ViewMenu));
@@ -2537,15 +5366,18 @@ fn reading_panels_are_drawn_fresh_for_what_they_show() {
         symbol: None,
         line: Some(n),
         narration: format!("narration {n}"),
+        depth: 0,
+        stop: None,
     };
     let tour = crate::walkthrough::Walkthrough {
+        made: None,
         title: "tour".into(),
         scope: String::new(),
         steps: vec![step(1), step(2)],
     };
     let at = |app: &mut App, n| {
         app.proj.walk.step = n;
-        keys_in(&super::sidebar::walk_narration(app, &tour))
+        keys_in(&super::sidebar::walk_narration(app, &tour, 240.0))
     };
     let first = at(&mut app, 0);
     assert_ne!(first, at(&mut app, 1));
@@ -2684,11 +5516,14 @@ fn the_shortcuts_modal_lists_every_action_with_its_chord() {
     }
     for action in Action::ALL {
         let caps = app.keymap.chord(action).caps();
-        assert!(
-            sim.find(caps.as_str()).is_ok(),
-            "{:?}'s chord {caps:?} is not shown",
-            action.label()
-        );
+        // Each key a cap of its own.
+        for key in super::toolbar::split_caps(&caps) {
+            assert!(
+                sim.find(key.as_str()).is_ok(),
+                "{:?}'s chord {caps:?} is not shown ({key:?})",
+                action.label()
+            );
+        }
     }
 }
 
@@ -2777,12 +5612,18 @@ fn an_unknown_host_is_trusted_only_by_a_click_on_the_key_shown() {
         Some(crate::ConnectStage::TrustHost { key, .. }) if *key == scanned_key()
     ));
 
-    // Cancel: back to the form, saying why.
+    // Cancel: back to the form, saying why. A connect clew made itself
+    // (not asked from the form) has nowhere else to go back to: the window
+    // stays on the host, to trust it from there.
     let _ = app.update(Message::Connect(ConnectMsg::TrustCancel));
     assert!(matches!(
         app.connect.as_ref().map(|u| &u.stage),
         Some(crate::ConnectStage::Error(reason)) if reason == "refused: unknown key"
     ));
+    assert_eq!(app.connection, port_2222_target());
+    // Asked again, the key is shown again.
+    let _ = app.connect_to(port_2222_target());
+    let conn = app.conn_gen;
     let _ = app.update(Message::Server(ServerMsg::HostKeyUnknown {
         conn,
         reason: "refused: unknown key".into(),
@@ -2994,12 +5835,18 @@ fn a_changed_key_clew_recorded_is_forgotten_only_by_a_click_on_the_prompt() {
         "{sent:?}"
     );
 
-    // Cancel: back to the form, saying why.
+    // Cancel: back to the form, saying why. A connect clew made itself
+    // (not asked from the form) has nowhere else to go back to: the window
+    // stays on the host.
     let _ = app.update(Message::Connect(ConnectMsg::TrustCancel));
     assert!(matches!(
         stage(&app),
         Some(crate::ConnectStage::Error(reason)) if reason == "refused: the host key changed"
     ));
+    assert_eq!(app.connection, port_2222_target());
+    // Asked again, the refusal is shown again.
+    let _ = app.connect_to(port_2222_target());
+    let conn = app.conn_gen;
     let _ = app.update(changed(conn));
 
     // A data directory whose path has spaces in it.
@@ -3138,6 +5985,26 @@ fn the_download_question_offers_the_program_already_here() {
         click(sim, "Use that one").as_slice(),
         [Message::Lsp(crate::LspMsg::ConsentUsePath(4))]
     ));
+    // The program already here is the primary answer: a spoken "yes" picks
+    // it, and the download stays one press (or its name) away.
+    let yes: Vec<Message> =
+        crate::ui::heard::gather_of(|| super::lsp_consent_modal(&consent, 4, 0, true))
+            .into_iter()
+            .filter(|t| t.answer == Some(crate::ui::heard::Answer::Yes))
+            .map(|t| t.message)
+            .collect();
+    assert!(
+        matches!(
+            yes.as_slice(),
+            [Message::Lsp(crate::LspMsg::ConsentUsePath(4))]
+        ),
+        "{yes:?}"
+    );
+    let sim = sim_elem(super::lsp_consent_modal(&consent, 4, 0, true));
+    assert!(matches!(
+        click(sim, "Download").as_slice(),
+        [Message::Lsp(crate::LspMsg::ConsentAllowed(4))]
+    ));
     let sim = sim_elem(super::lsp_consent_modal(&consent, 4, 0, false));
     assert!(click(sim, "Use that one").is_empty(), "not yet read");
 }
@@ -3190,6 +6057,33 @@ fn open_sheet(
     super::setup::setup_sheet(app, root, None, asked)
 }
 
+/// A first open's Open, held a moment so the sheet is read before it is
+/// pressed (or while the window is behind another), says why where the
+/// pointer rests: a press then did nothing, with no word why. Once it
+/// counts, nothing is said.
+#[test]
+fn a_held_open_says_why_it_waits() {
+    let root = std::path::Path::new("/nonexistent/clew-held");
+    let why = "Ready in a moment, once the sheet is in front";
+    let says_why = |ready: bool| {
+        let at = {
+            let mut sim = sim_elem(open_sheet(root, ready));
+            text_at(&mut sim, |t| t == "Open", 0)
+                .expect("Open")
+                .center()
+        };
+        super::tip::warm_now();
+        let mut sim = sim_elem(open_sheet(root, ready));
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        shows(&mut sim, why)
+    };
+    assert!(says_why(false), "a held Open says nothing of why");
+    assert!(!says_why(true), "a ready Open says it waits");
+}
+
 /// The setup sheet says, in a line each, where clew keeps its data, what
 /// its servers take and what explaining costs; its ticks and buttons send
 /// what they say.
@@ -3204,7 +6098,9 @@ fn the_setup_sheet_says_what_each_choice_takes() {
         mode: SetupMode::Open,
         root: root.clone(),
         servers: true,
+        servers_declined: false,
         explain: false,
+        no_code: false,
         census: Some(Census {
             servers: vec![SetupServer {
                 language: "rust".into(),
@@ -3225,14 +6121,21 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     for said in [
         "Open iced",
         "/nonexistent/iced/.clew",
+        "Its bookmarks, notes and project settings can be committed with the project; your own reading state stays out of git.",
         "Language servers",
         "rust-analyzer: download, builds the project (runs its code)",
         "Explain the project",
-        "About 3,600 AI calls. Also builds the semantic index.",
-        "Skip setup",
+        "Also builds the semantic index.",
+        "Open without setup",
     ] {
         assert!(shows(&mut sim, said), "{said:?}");
     }
+    // And what those calls are likely to cost, with their count, in one
+    // sentence of one weight.
+    let estimate = app.explain_estimate(3617).expect("an estimate");
+    let said = estimate.said(3617);
+    assert!(said.starts_with("About 3,600 AI calls: "), "{said:?}");
+    assert!(shows(&mut sim, &said), "{said:?}");
     assert!(matches!(
         click(sim_elem(sheet(&app, &root)), "Language servers").as_slice(),
         [Message::Project(ProjectMsg::SetupServers(false))]
@@ -3252,6 +6155,19 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     let mut sim = sim_elem(sheet(&app, &root));
     assert!(shows(&mut sim, "Explain iced?"));
     assert!(!shows(&mut sim, "Language servers"));
+    // Asking first: the calls, their tokens and their money as three
+    // figures of one weight, and where they come from.
+    for said in [
+        "3,600".to_string(),
+        "AI calls".to_string(),
+        crate::app::usage::tokens(estimate.tokens),
+        "Tokens".to_string(),
+        "Estimated cost".to_string(),
+        estimate.basis(),
+        "Also builds the semantic index.".to_string(),
+    ] {
+        assert!(shows(&mut sim, &said), "{said:?}");
+    }
     assert!(matches!(
         click(sim_elem(sheet(&app, &root)), "Explain").as_slice(),
         [Message::Project(ProjectMsg::SetupApply)]
@@ -3262,8 +6178,8 @@ fn the_setup_sheet_says_what_each_choice_takes() {
 /// servers' row is there from the first frame, ticked as it will be, and
 /// keeps its room, so the look landing — with a server to set up or none —
 /// neither ticks anything nor moves Open; Open waits for the look (it sets
-/// up what the look found), Skip setup does not; and its × says that it
-/// does not open the project, beside Skip setup, which does.
+/// up what the look found), Open without setup does not; and its × says that it
+/// does not open the project, beside Open without setup, which does.
 #[test]
 fn the_setup_sheet_holds_still_while_it_looks() {
     use crate::app::setup::{Census, Fetch, ProjectSetup, SetupMode, SetupServer};
@@ -3273,7 +6189,9 @@ fn the_setup_sheet_holds_still_while_it_looks() {
         mode: SetupMode::Open,
         root: root.clone(),
         servers: true,
+        servers_declined: false,
         explain: false,
+        no_code: false,
         census: None,
     });
     fn sheet<'a>(
@@ -3305,7 +6223,7 @@ fn the_setup_sheet_holds_still_while_it_looks() {
         "nothing to choose yet"
     );
     assert!(matches!(
-        click(sim_elem(sheet(&app, &root)), "Skip setup").as_slice(),
+        click(sim_elem(sheet(&app, &root)), "Open without setup").as_slice(),
         [Message::Project(ProjectMsg::OpenWithoutSetup(r))] if *r == root
     ));
     let looking = open_at(&app);
@@ -3444,13 +6362,13 @@ fn an_unread_questions_allow_sends_nothing() {
         click(sim, "Open").as_slice(),
         [Message::Project(ProjectMsg::ConsentAllowed(r))] if *r == root
     ));
-    // A first open's Skip setup opens the project too, with nothing set
+    // A first open's Open without setup opens the project too, with nothing set
     // up: an answer as Open is, pressed only once it can have been read.
     let sim = sim_elem(open_sheet(&root, false));
-    assert!(click(sim, "Skip setup").is_empty());
+    assert!(click(sim, "Open without setup").is_empty());
     let sim = sim_elem(open_sheet(&root, true));
     assert!(matches!(
-        click(sim, "Skip setup").as_slice(),
+        click(sim, "Open without setup").as_slice(),
         [Message::Project(ProjectMsg::OpenWithoutSetup(r))] if *r == root
     ));
     let pending = crate::PendingLspCommand {
@@ -3551,10 +6469,10 @@ fn the_composers_one_button_stops_queues_or_asks() {
             size,
             super::panels::ask_panel(app, size.height),
         );
-        let row = text_at(&mut sim, |t| t == "Keep listening", 0).expect("the composer");
+        // The composer's last button, at its foot.
         sim.point_at(Point::new(
             size.width - super::COMPOSER_PAD.right - super::ROUND_BUTTON / 2.0,
-            row.center_y(),
+            size.height - super::COMPOSER_PAD.bottom - super::ROUND_BUTTON / 2.0,
         ));
         let _ = sim.simulate(iced_test::simulator::click());
         sent_by(sim)
@@ -3943,8 +6861,9 @@ fn a_fitted_cards_approval_stays_put_while_its_turn_grows() {
 
 /// A question's Allow counts once its answers have been in view for the
 /// delay, where they are now (`ui::placed`): the Ask card moved under them
-/// moves them, and a card too low for them hides them — each waits again.
-/// And a hover's peek over the window counts as over the card.
+/// (the window made shorter, its corner up) moves them, and a card too low
+/// for them hides them — each waits again. And a hover's peek over the
+/// window counts as over the card.
 #[test]
 fn a_question_moved_or_out_of_view_waits_again() {
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
@@ -3952,9 +6871,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
     app.ask_view = crate::AskView::Compact;
-    // The debugger's panel under the card, low: its height squeezes it.
-    app.show_bottom = true;
-    app.bottom_height = 100.0;
+    shorter(&mut app, 100.0);
     app.proj.ask_turns.push(AskTurn {
         stream: 9,
         question: "why?".into(),
@@ -3987,7 +6904,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
     let mut frame = |app: &mut App| -> Vec<Option<Rectangle>> {
         let mut ui = UserInterface::build(
             super::view(app),
-            WINDOW,
+            Size::new(app.window_width, app.window_height),
             std::mem::take(&mut cache),
             &mut renderer,
         );
@@ -4026,9 +6943,9 @@ fn a_question_moved_or_out_of_view_waits_again() {
     assert!(frame(&mut app).is_empty(), "where it was: nothing to say");
     assert!(app.may_allow(&card));
 
-    // The debugger's panel taller: the Ask card standing on it moves up,
-    // and with it the approval card in it.
-    app.bottom_height = 140.0;
+    // The window shorter: the Ask card in its corner moves up, and with it
+    // the approval card in it.
+    shorter(&mut app, 140.0);
     let _ = app.update(Message::Noop);
     let moved = frame(&mut app);
     assert!(
@@ -4039,13 +6956,13 @@ fn a_question_moved_or_out_of_view_waits_again() {
     read(&mut app);
     assert!(app.may_allow(&card));
 
-    // An Ask card too low for the approval card (the debugger's panel tall
-    // under it): not all of it in view, however long.
-    app.bottom_height = SQUEEZING;
+    // An Ask card too low for the approval card (the window too short for
+    // it): not all of it in view, however long.
+    shorter(&mut app, SQUEEZING);
     assert_eq!(frame(&mut app), [None]);
     read(&mut app);
     assert!(!app.may_allow(&card), "out of view");
-    app.bottom_height = 340.0;
+    shorter(&mut app, 340.0);
     assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
     assert!(!app.may_allow(&card), "back in view: unread");
     read(&mut app);
@@ -4091,7 +7008,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
         use iced_test::selector::{Candidate, Selector};
         let mut ui = UserInterface::build(
             super::view(app),
-            WINDOW,
+            Size::new(app.window_width, app.window_height),
             std::mem::take(&mut cache),
             &mut renderer,
         );
@@ -4126,7 +7043,8 @@ fn a_question_moved_or_out_of_view_waits_again() {
                     overlay.push(open);
                     let _ = app.update(message);
                 }
-                Message::Placed { .. } => {
+                // A drop-down's own: it opens, and closes, by the App.
+                Message::Placed { .. } | Message::Picker(_) => {
                     let _ = app.update(message);
                 }
                 _ => {}
@@ -4203,7 +7121,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
     let mut unheard = |app: &App| -> Vec<Message> {
         let mut ui = UserInterface::build(
             super::view(app),
-            WINDOW,
+            Size::new(app.window_width, app.window_height),
             std::mem::take(&mut cache),
             &mut renderer,
         );
@@ -4280,8 +7198,8 @@ fn yes_said_to_an_approval_never_allows_always() {
 
 /// An agent's answers, however many, stay within the card's reach: a few
 /// of each kind at a time — a way to decline always among them — the rest
-/// a page on, where the card is read anew. And a card coming up in a
-/// bottom panel too low for it opens the panel to where it fits, once.
+/// a page on, where the card is read anew. And a card coming up in an Ask
+/// card too low for it opens the Ask window large, where it fits, once.
 #[test]
 fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
@@ -4361,15 +7279,15 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_some());
     assert!(text_at(&mut sim, |t| t == "Allow 0", 0).is_none());
 
-    // In an Ask card too low for it — the debugger's panel tall under it —
-    // drawn, and found squeezed, it opens the Ask window large, where it
-    // fits, and is answered there once read.
+    // In an Ask card too low for it — a window short for it — drawn, and
+    // found squeezed, it opens the Ask window large, where it fits (wider,
+    // its answers in fewer rows), and is answered there once read.
+    let squeezing = squeezed_in_the_card_only(&approval);
     let mut app = reader_app();
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
     app.ask_view = crate::AskView::Compact;
-    app.show_bottom = true;
-    app.bottom_height = SQUEEZING;
+    shorter(&mut app, squeezing);
     app.proj.ask_turns.push(AskTurn {
         stream: 9,
         question: "why?".into(),
@@ -4389,7 +7307,7 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     let mut frame = |app: &mut App| -> Vec<Option<Rectangle>> {
         let mut ui = UserInterface::build(
             super::view(app),
-            WINDOW,
+            Size::new(app.window_width, app.window_height),
             std::mem::take(&mut cache),
             &mut renderer,
         );
@@ -4458,14 +7376,14 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     assert_eq!(app.ask_view, crate::AskView::Expanded);
     assert!(text_at(&mut sim_of(&app), |t| t == "Allow 0", 0).is_some());
     // One that fits when first drawn moves nothing — nor does the user's
-    // own drag of the debugger's panel squeezing it after.
+    // own resize of the window squeezing it after.
     let _ = app.update(Message::Ask(AskMsg::Shrink));
-    app.bottom_height = 120.0;
+    shorter(&mut app, 120.0);
     app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 3 };
     let _ = app.update(Message::Noop);
     assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
     assert_eq!(app.ask_view, crate::AskView::Compact);
-    app.bottom_height = SQUEEZING;
+    shorter(&mut app, squeezing);
     assert_eq!(frame(&mut app), [None], "squeezed by the user");
     assert_eq!(app.ask_view, crate::AskView::Compact, "and left so");
     // Reported again from nothing (the window moved): still left so.
@@ -4476,9 +7394,56 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     let _ = card;
 }
 
-/// A debugger's panel tall enough that the Ask card above it is too low
-/// for an approval card's answers.
-const SQUEEZING: f32 = 660.0;
+/// How much shorter than [`WINDOW`] a window is whose Ask card, in its
+/// corner, is too low for an approval card's answers.
+const SQUEEZING: f32 = 620.0;
+
+/// The window `by` shorter than [`WINDOW`]: the Ask card in its corner
+/// with that much less room.
+fn shorter(app: &mut App, by: f32) {
+    app.window_height = WINDOW.height - by;
+}
+
+/// How much shorter than [`WINDOW`] the window is when the Ask card in it
+/// is too low for `approval`'s first page of answers and the large Ask
+/// window — wider, its answers in fewer rows — is not.
+fn squeezed_in_the_card_only(approval: &crate::app::model::Approval) -> f32 {
+    use crate::app::model::{AskTurn, TurnExtras};
+    let fits = |by: f32, view| {
+        let mut app = reader_app();
+        shorter(&mut app, by);
+        app.ask_view = view;
+        app.proj.ask_turns.push(AskTurn {
+            stream: 9,
+            question: "why?".into(),
+            streaming: true,
+            extras: TurnExtras {
+                approvals: vec![approval.clone()],
+                ..TurnExtras::default()
+            },
+            ..AskTurn::default()
+        });
+        let _ = app.update(Message::Noop);
+        let mut renderer = renderer();
+        let size = Size::new(app.window_width, app.window_height);
+        let mut ui = UserInterface::build(super::view(&app), size, Cache::default(), &mut renderer);
+        let mut sent = Vec::new();
+        let _ = ui.update(
+            &redraw(),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        sent.iter()
+            .any(|m| matches!(m, Message::Placed { place: Some(_), .. }))
+    };
+    (300..700)
+        .step_by(4)
+        .map(|by| by as f32)
+        .find(|&by| !fits(by, crate::AskView::Compact) && fits(by, crate::AskView::Expanded))
+        .expect("precondition: a window the card is too low in and the large window is not")
+}
 
 /// A page of answers taller than the first — its labels running over more
 /// rows — in an Ask card the first page fitted: drawn, and found squeezed,
@@ -4500,14 +7465,13 @@ fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
         option(format!("yes{i}"), label, true)
     }));
     options.push(option("no".into(), "Deny".into(), false));
-    // With the debugger's panel `height` tall under the Ask card: where the
-    // card was placed on its first page, then on its second, and the Ask
-    // window's size after.
+    // In a window `height` shorter than the test's: where the card was
+    // placed on its first page, then on its second, and the Ask window's
+    // size after.
     let at = |height: f32| -> (Option<Rectangle>, Option<Rectangle>, crate::AskView) {
         let mut app = reader_app();
         app.ask_view = crate::AskView::Compact;
-        app.show_bottom = true;
-        app.bottom_height = height;
+        shorter(&mut app, height);
         app.proj.ask_turns.push(AskTurn {
             stream: 9,
             question: "why?".into(),
@@ -4530,7 +7494,7 @@ fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
         let mut frame = |app: &mut App| -> Option<Option<Rectangle>> {
             let mut ui = UserInterface::build(
                 super::view(app),
-                WINDOW,
+                Size::new(app.window_width, app.window_height),
                 std::mem::take(&mut cache),
                 &mut renderer,
             );
@@ -5237,7 +8201,7 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
     );
     check(
         |ready| open_sheet(&root, ready),
-        ("Skip setup", |m| {
+        ("Open without setup", |m| {
             matches!(m, Message::Project(ProjectMsg::OpenWithoutSetup(_)))
         }),
         None,
@@ -5551,6 +8515,7 @@ fn the_connect_modal_can_revoke_the_live_hosts_ai_keys() {
     let mut app = reader_app();
     app.connection = port_2222_target();
     app.remote_ai_opt_in = true;
+    app.settings.key = "sk-test".into();
     app.connect = Some(crate::ConnectUi::default());
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "holds your API keys"));
@@ -5567,6 +8532,14 @@ fn the_connect_modal_can_revoke_the_live_hosts_ai_keys() {
     }
     assert_eq!(app.live_ai_opt_in(), Some(false));
     assert!(shows(&mut sim_of(&app), "does not hold your API keys"));
+    // With no key here, there is nothing for it to hold, or not.
+    app.settings.key.clear();
+    app.llm_available = false;
+    assert!(!shows(&mut sim_of(&app), "does not hold your API keys"));
+    // A key configured — in config.toml or the environment — with Settings
+    // never opened (its draft empty) is one it does not hold.
+    app.llm_available = true;
+    assert!(shows(&mut sim_of(&app), "does not hold your API keys"));
     // Locally there is nothing to grant, so nothing is shown.
     app.connection = crate::connect::ConnTarget::Local;
     let mut local = sim_of(&app);
@@ -5577,6 +8550,7 @@ fn paused_debug_session() -> crate::DebugSession {
     crate::DebugSession {
         client: None,
         status: crate::DebugStatus::Stopped,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -5588,6 +8562,45 @@ fn paused_debug_session() -> crate::DebugSession {
         cwd: PathBuf::from("/p"),
         addr: None,
     }
+}
+
+/// A variable's value cut to its column is whole where the pointer rests,
+/// however short: counted by letters, a value of under 24 cut in a narrow
+/// column had no tip, and could be read nowhere.
+#[test]
+fn a_cut_variable_is_whole_in_its_tip() {
+    let mut app = reader_app();
+    let mut session = paused_debug_session();
+    let value = "Decimal('12.50')";
+    session.scopes = vec![crate::app::model::DebugScope {
+        name: "Locals".into(),
+        vars: vec![crate::dap::Variable {
+            name: "subtotal".into(),
+            value: value.into(),
+            type_name: None,
+            variables_reference: 0,
+        }],
+    }];
+    session.output = vec![("stdout".into(), "x\n".into())];
+    app.debug.session = Some(session);
+    let size = Size::new(520.0, 400.0);
+    app.window_width = size.width;
+    app.show_left_sidebar = false;
+    super::tip::warm_now();
+    let mut sim =
+        iced_test::Simulator::with_size(Default::default(), size, super::debug_panel(&app));
+    let at = text_at(&mut sim, |t| t.starts_with('D') && t.ends_with('…'), 0)
+        .expect("the value, cut")
+        .center();
+    assert!(!shows(&mut sim, value), "not cut: the test shows nothing");
+    sim.point_at(at);
+    let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: at,
+    })]);
+    assert!(
+        shows(&mut sim, &format!("subtotal = {value}")),
+        "cut, and whole nowhere"
+    );
 }
 
 /// I1: the Debug panel's watch rows remove by identity, and hover evaluation
@@ -5623,6 +8636,48 @@ fn the_debug_panel_removes_watches_by_identity_and_offers_hover_evaluation() {
     );
 }
 
+/// M3: a watch too long for its column says its whole value where the
+/// pointer rests on it, as a variable does: "off * 2 = ⚠ Na" could be read
+/// nowhere. A short one has no tip to wait for.
+#[test]
+fn a_long_watch_is_whole_in_its_tip() {
+    let mut app = reader_app();
+    let mut session = paused_debug_session();
+    let expr = "order.customer.email_address_that_is_long";
+    let value = "'someone.with.a.long.name@example.com'";
+    session.watches = vec![(expr.into(), value.into()), ("a".into(), "1".into())];
+    app.debug.session = Some(session);
+    app.debug.watches = vec![expr.into(), "a".into()];
+    let rested = |on: &'static str, tip: String| {
+        super::tip::warm_now();
+        let mut sim = sim_elem(super::debug_panel(&app));
+        let at = text_at(&mut sim, move |t| t.starts_with(on), 0)
+            .expect("the watch")
+            .center();
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        shows(&mut sim, &tip)
+    };
+    assert!(
+        rested("order.customer", format!("{expr} = {value}")),
+        "no whole value"
+    );
+    assert!(!rested("a", "a = 1".into()), "a tip for a short one");
+    // M2 (round 19): a long expression is cut, its value still shown: it
+    // pushed " = " and its value out of the column.
+    let mut sim = sim_elem(super::debug_panel(&app));
+    assert!(
+        text_at(&mut sim, |t| t.starts_with("order.") && t.ends_with('…'), 0).is_some(),
+        "the expression not cut"
+    );
+    assert!(
+        text_at(&mut sim, |t| t.starts_with("'some"), 0).is_some(),
+        "its value pushed out of view"
+    );
+}
+
 fn call_item(name: &str) -> crate::lsp::client::CallItem {
     crate::lsp::client::CallItem {
         name: name.into(),
@@ -5643,6 +8698,10 @@ fn the_empty_call_hierarchy_says_how_to_fill_it() {
     assert!(app.proj.call_graph.is_none());
     let mut sim = sim_elem(super::calls_tab(&app));
     assert!(shows(&mut sim, "choose Call Hierarchy"));
+    // Value flow says how to fill it too.
+    assert!(app.proj.flow.is_none());
+    let mut sim = sim_elem(super::panels::flow_tab(&app));
+    assert!(shows(&mut sim, "choose Trace Value"));
 }
 
 /// A language server's list in the Search sidebar is a list of its own:
@@ -5679,6 +8738,16 @@ fn a_reference_list_is_named_in_the_search_sidebar() {
     }
     assert!(app.proj.search.listing.is_none());
     assert!(app.proj.search.hits.is_empty());
+    // M4: Search Text (⌘⇧F) over a reference list puts it away, for the
+    // field to be there: the list stayed, with no field, and what was
+    // typed went nowhere.
+    app.proj.search.listing = Some("References to “origin”".into());
+    app.sidebar = crate::SidebarTab::Files;
+    let _ = app.run_command_action(crate::keymap::Action::ProjectSearch);
+    assert_eq!(app.sidebar, crate::SidebarTab::Search);
+    assert!(app.proj.search.listing.is_none(), "the list stayed");
+    let mut sim = sim_elem(super::sidebar::search_tab(&app));
+    assert!(!shows(&mut sim, "References to"), "the list is still up");
 }
 
 /// One letter in the search field is searched only on Enter, and the
@@ -5705,7 +8774,7 @@ fn a_call_tree_with_nothing_under_its_root_says_so() {
     let mut app = reader_app();
     for (direction, said) in [
         (crate::callgraph::Direction::Incoming, "No callers found"),
-        (crate::callgraph::Direction::Outgoing, "No callees found"),
+        (crate::callgraph::Direction::Outgoing, "No calls found"),
     ] {
         let mut tree =
             crate::callgraph::CallTree::new(7, direction, "python", vec![call_item("root")]);
@@ -5850,7 +8919,6 @@ fn the_files_import_cycle_opens_to_its_files_and_opens_each() {
     assert_eq!(app.proj.import_notes_open, [ImportNote::Cycles]);
 
     let mut tab = sim_elem(super::imports_tab(&app));
-    assert!(shows(&mut tab, "Files that import one another"));
     assert!(shows(&mut tab, "c.rs") && shows(&mut tab, "d.rs"));
     assert!(!shows(&mut tab, "a.rs"), "only lib.rs's cycle is listed");
     let _ = tab.click("d.rs");
@@ -6138,7 +9206,7 @@ fn an_unchecked_summary_is_marked_where_it_is_shown() {
     assert!(shows(&mut sim, &marked), "the search results");
 }
 
-/// A click on the file banner shows the file's note in the margin, from
+/// A click on the file banner shows the file's explanation in the margin, from
 /// whichever of its pages the margin was on. Open on Calls (or History),
 /// the margin stayed there: the note was chosen to be shown on Notes, the
 /// banner stayed above the code, and the click seemed to do nothing.
@@ -6255,7 +9323,6 @@ fn an_unchecked_summary_is_marked_in_the_outline_and_the_call_flow() {
 /// call hierarchy are not called what the margin's tabs are.
 #[test]
 fn a_feature_is_called_the_same_wherever_it_is_named() {
-    use super::toolbar::{ToolsRow, tools_row_label};
     use crate::SidebarTab as T;
     use crate::keymap::Action;
     let same = |a: &str, b: &str| {
@@ -6300,12 +9367,7 @@ fn a_feature_is_called_the_same_wherever_it_is_named() {
     let tab = super::sidebar::tab_name;
     assert!(same(Action::ProjectSearch.label(), tab(T::Search)));
     assert!(same(Action::Walkthrough.label(), tab(T::Walk)));
-    assert!(same(tools_row_label(ToolsRow::Walkthrough), tab(T::Walk)));
-    assert!(same(
-        tools_row_label(ToolsRow::LspServers),
-        crate::SettingsPage::Languages.title()
-    ));
-    for margin in ["Notes", "Calls"] {
+    for margin in ["Explanations", "Calls"] {
         for t in [T::Notes, T::Calls] {
             assert!(
                 !same(tab(t), margin),
@@ -6337,6 +9399,10 @@ fn an_icon_stands_for_one_thing() {
         let (glyph, name, _) = tools_row(&app, row);
         named.push((name, glyph));
     }
+    for row in super::toolbar::RUN_MENU_ROWS {
+        let (glyph, name, _) = super::toolbar::run_row(&app, row);
+        named.push((name.to_string(), glyph));
+    }
     for (glyph, name, ..) in app_menu_head(&app) {
         named.push((name.to_string(), glyph));
     }
@@ -6362,6 +9428,8 @@ fn an_icon_stands_for_one_thing() {
     let one_thing = [
         ("imports", "import graph"),
         ("call hierarchy", "call graph"),
+        // The bug opens the Run menu, whose Debug is the bug's own.
+        ("run and debug", "debug"),
     ];
     for (i, (a, glyph_a)) in named.iter().enumerate() {
         for (b, glyph_b) in &named[i + 1..] {
@@ -6395,12 +9463,13 @@ fn the_maps_header_says_its_views_in_words() {
             false,
             None,
             None,
+            None,
             WINDOW,
             iced::widget::space().into(),
         )
     };
     let mut sim = sim_elem(header(&app));
-    for said in ["2D", "3D", "Map", "List"] {
+    for said in ["2D", "3D", "Graph", "List"] {
         assert!(shows(&mut sim, said), "{said}");
     }
     drop(sim);
@@ -6410,7 +9479,10 @@ fn the_maps_header_says_its_views_in_words() {
         click(sim_elem(header(&app)), "3D").as_slice(),
         [Message::Graph(crate::GraphMsg::Toggle3D)]
     ));
-    assert!(click(sim_elem(header(&app)), "Map").is_empty(), "in effect");
+    assert!(
+        click(sim_elem(header(&app)), "Graph").is_empty(),
+        "in effect"
+    );
     assert!(matches!(
         click(sim_elem(header(&app)), "List").as_slice(),
         [Message::Graph(crate::GraphMsg::OverlayViewToggle)]
@@ -6429,7 +9501,7 @@ fn the_margin_history_lists_the_files_commits() {
     app.margin_tab = crate::MarginTab::History;
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Reading the file's history"));
-    assert!(shows(&mut sim, "Why is this line here?"));
+    assert!(shows(&mut sim, "Why is this here?"));
     assert!(!shows(&mut sim, "Changes since the last commit"));
     assert!(!shows(&mut sim, "This file through time"));
     drop(sim);
@@ -6456,9 +9528,11 @@ fn the_margin_history_lists_the_files_commits() {
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Read lines lazily"));
     assert!(
-        shows(&mut sim, "aaaaaaa  ·  Ada"),
+        shows(&mut sim, "aaaaaaa by Ada"),
         "its short sha and author"
     );
+    // Headed as the Calls tab's lists are, in the margin's one style.
+    assert!(shows(&mut sim, "COMMITS TO THIS FILE"));
     drop(sim);
     let sent = click(sim_of(&app), "First reader");
     assert!(
@@ -6498,6 +9572,73 @@ fn the_margin_history_lists_the_files_commits() {
     let mut sim = sim_of(&app);
     assert!(!shows(&mut sim, "Elsewhere"));
     assert!(shows(&mut sim, "Reading the file's history"));
+}
+
+/// A function no commit has yet — every line of it added since HEAD — has
+/// no history of its own: the margin says so over the file's commits, which
+/// are not its, and offers no "This function through time", which only
+/// answered that git had none.
+#[test]
+fn the_margin_history_says_a_new_function_is_not_committed() {
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.show_right_panel = true;
+    app.margin_tab = crate::MarginTab::History;
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.symbols = vec![crate::outline::Symbol {
+            name: "helper".into(),
+            kind: "function".into(),
+            line: 3,
+            end_line: 5,
+        }];
+        v.caret = Some((3, 0));
+    }
+    app.proj.explain.view = Some(crate::explain::Node::Function {
+        file: abs.clone(),
+        name: "helper".into(),
+        ordinal: 0,
+    });
+    app.proj.margin_history = Some((abs.clone(), Some(Ok(vec![]))));
+    let git = |kind: clew_protocol::ChangeKind| {
+        let mut status = vec![None; 400];
+        for line in status.iter_mut().take(5).skip(2) {
+            *line = Some(kind);
+        }
+        Some(Arc::new(clew_protocol::GitInfo {
+            blame: Vec::new(),
+            status,
+            deleted_at: Default::default(),
+        }))
+    };
+
+    // Committed and since changed: its history is there to read.
+    app.proj.panes[0].as_mut().unwrap().git = git(clew_protocol::ChangeKind::Modified);
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "This function through time"));
+    assert!(!shows(&mut sim, "is not in any commit yet"));
+    drop(sim);
+
+    // All of it new.
+    app.proj.panes[0].as_mut().unwrap().git = git(clew_protocol::ChangeKind::Added);
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "“helper” is not in any commit yet."));
+    drop(sim);
+    // Its own history is not offered — but its link keeps its place,
+    // inert, so the paid one never comes under a click aimed at it.
+    assert!(click(sim_of(&app), "This function through time").is_empty());
+    assert!(shows(&mut sim_of(&app), "Why is this here?"));
+    // On a blank line there is nothing to ask why of: nothing to pay for.
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        Arc::make_mut(&mut v.lines)[3] = crate::highlight::plain_lines("    \n")[0].clone();
+    }
+    assert!(click(sim_of(&app), "Why is this here?").is_empty());
+    app.proj.panes[0].as_mut().unwrap().caret = Some((4, 0));
+    assert!(matches!(
+        click(sim_of(&app), "Why is this here?").as_slice(),
+        [Message::TimeTravel(crate::TimeTravelMsg::WhyIsThisHere)]
+    ));
 }
 
 /// A call row in a narrow margin puts its place under the name instead of
@@ -6548,6 +9689,236 @@ fn a_call_row_wraps_its_place_in_a_narrow_margin() {
         "inside the margin: {place:?}"
     );
     assert!(place.y > name.y, "under the name: {name:?} {place:?}");
+}
+
+/// M10: a name longer than the margin is cut with an ellipsis beside its
+/// arrow, whole where the pointer rests: it wrapped under its arrow, left
+/// alone on the line above, and ran past the margin's edge unmarked.
+#[test]
+fn a_long_name_in_the_call_flow_is_cut_beside_its_arrow() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let long = "test_tax_is_on_the_discounted_amount_for_members";
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 12,
+            callers,
+            callees,
+        };
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![call("work", vec![1], vec![]), call(long, vec![], vec![0])],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    let node = crate::explain::Node::Function {
+        file: lib,
+        name: "work".into(),
+        ordinal: 0,
+    };
+    app.right_width = 220.0;
+    let rows = || -> Element<'_, Message> {
+        container(iced::widget::Column::with_children(super::call_flow_rows(
+            &app, &node,
+        )))
+        .width(app.right_width)
+        .into()
+    };
+    let mut sim = sim_elem(rows());
+    assert!(!shows(&mut sim, long), "whole, past the margin's edge");
+    let name = text_at(
+        &mut sim,
+        |t| t.starts_with("test_tax_is") && t.ends_with('…'),
+        0,
+    )
+    .expect("the name, cut");
+    let arrow = text_at(&mut sim, |t| t == "←", 0).expect("its arrow");
+    assert!(
+        (name.center_y() - arrow.center_y()).abs() < 3.0 && name.x > arrow.x,
+        "beside its arrow: {arrow:?} {name:?}"
+    );
+    assert!(
+        name.x + name.width <= app.right_width,
+        "inside the margin: {name:?}"
+    );
+    drop(sim);
+    // Whole where the pointer rests.
+    super::tip::warm_now();
+    let mut sim = sim_elem(rows());
+    sim.point_at(name.center());
+    let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: name.center(),
+    })]);
+    assert!(shows(&mut sim, long), "its whole name on hover");
+}
+
+/// A chain whose entry takes most of the margin's line has its steps on
+/// the line under it, set in: beside it, a step wider than the room left
+/// was cut at the margin's edge ("total(").
+#[test]
+fn a_long_entry_puts_its_chain_under_it() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    // As the reviewer saw it: "test_member_pays_less() [test] › total(".
+    let long_entry = "test_member_pays_less";
+    let step = "total";
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            callers,
+            callees,
+        };
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call(long_entry, vec![], vec![1]),
+                    call(step, vec![0], vec![2]),
+                    call("work", vec![1], vec![]),
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    let symbol = |name: &str, line: usize, entry: Option<crate::index::EntryKind>| {
+        crate::index::SymbolEntry {
+            name: name.into(),
+            kind: "function".into(),
+            rel: "src/lib.rs".into(),
+            abs: lib.clone(),
+            line,
+            is_test: false,
+            entry,
+        }
+    };
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(vec![
+            symbol(long_entry, 1, Some(crate::index::EntryKind::Main)),
+            symbol(step, 2, None),
+            symbol("work", 3, None),
+        ]),
+    );
+    app.proj.symbol_index_rev += 1;
+    crate::fonts::load();
+    let width = super::panes::margin_w(&app) - 24.0;
+    let node = crate::explain::Node::Function {
+        file: lib.clone(),
+        name: "work".into(),
+        ordinal: 0,
+    };
+    let mut sim = iced_test::Simulator::with_size(
+        Default::default(),
+        Size::new(width, 600.0),
+        Element::from(iced::widget::Column::with_children(super::call_flow_rows(
+            &app, &node,
+        ))),
+    );
+    let entry = text_at(&mut sim, move |t| t.starts_with(long_entry), 0).expect("the entry");
+    let next = text_at(&mut sim, move |t| t.starts_with(step), 0).expect("the step after it");
+    assert!(
+        next.y > entry.y + entry.height / 2.0,
+        "under the entry: {entry:?} {next:?}"
+    );
+    // Set in under the entry, not run on past it: beside it, the room
+    // left was too little for the step, which was cut.
+    assert!(
+        next.x > entry.x && next.x < entry.x + 40.0,
+        "set in: {entry:?} {next:?}"
+    );
+    let whole = super::steady::width_of(&format!("{step}()"), super::ts::SMALL, crate::fonts::UI);
+    assert!(
+        next.width >= whole * 0.9,
+        "whole, not cut: {next:?} of {whole}"
+    );
+}
+
+/// L5: an entry's tag stays on one line in Chinese — "测试" was set a
+/// character to a line beside a long test's name, the row as tall as two.
+#[test]
+fn an_entrys_tag_stays_on_one_line_in_chinese() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let long_entry = "test_tax_is_on_the_discounted_amount";
+    let step = "total";
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            callers,
+            callees,
+        };
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call(long_entry, vec![], vec![1]),
+                    call(step, vec![0], vec![2]),
+                    call("work", vec![1], vec![]),
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    let symbol = |name: &str, line: usize, entry: Option<crate::index::EntryKind>| {
+        crate::index::SymbolEntry {
+            name: name.into(),
+            kind: "function".into(),
+            rel: "src/lib.rs".into(),
+            abs: lib.clone(),
+            line,
+            is_test: name == long_entry,
+            entry,
+        }
+    };
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(vec![
+            symbol(long_entry, 1, None),
+            symbol(step, 2, None),
+            symbol("work", 3, None),
+        ]),
+    );
+    app.proj.symbol_index_rev += 1;
+    crate::fonts::load();
+    let width = super::panes::margin_w(&app) - 24.0;
+    let node = crate::explain::Node::Function {
+        file: lib.clone(),
+        name: "work".into(),
+        ordinal: 0,
+    };
+    let tag = crate::i18n::with_lang(crate::i18n::Lang::Zh, || {
+        let mut sim = iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(width, 600.0),
+            Element::from(iced::widget::Column::with_children(super::call_flow_rows(
+                &app, &node,
+            ))),
+        );
+        text_at(&mut sim, |t| t == "测试", 0)
+    });
+    let tag = tag.expect("the test's tag");
+    let line = super::steady::width_of("测", super::ts::CAPTION, crate::fonts::UI);
+    assert!(
+        tag.width >= 1.5 * line && tag.height < 1.6 * super::ts::CAPTION * 1.3,
+        "on one line: {tag:?}"
+    );
 }
 
 /// The REACHED FROM section: the chain from an entry point down to the
@@ -6638,6 +10009,27 @@ fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
          as a one-step chain"
     );
     drop(sim);
+    // Where the margin is narrow, the chain runs on under its second
+    // step, not flush left under its entry: "work()" alone at a line's
+    // start read as a chain of its own.
+    crate::app::tests::isolated_data_dir();
+    crate::fonts::load();
+    let mut sim = iced_test::Simulator::with_size(
+        Default::default(),
+        Size::new(150.0, 400.0),
+        Element::from(iced::widget::Column::with_children(super::call_flow_rows(
+            &app,
+            &node("work"),
+        ))),
+    );
+    let entry = text_at(&mut sim, |t| t == "main()", 0).expect("the entry");
+    let last = text_at(&mut sim, |t| t == "work()", 0).expect("the last step");
+    assert!(last.y > entry.y + 4.0, "wrapped: {entry:?} {last:?}");
+    assert!(
+        last.x > entry.x + 20.0,
+        "under its second step: {entry:?} {last:?}"
+    );
+    drop(sim);
     // Reached by a test alone: TESTS says so, and there is no chain to
     // show — nor a claim that nothing reaches it.
     let mut sim = sim_elem(
@@ -6664,6 +10056,49 @@ fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
         !shows(&mut sim, "REACHED FROM"),
         "a test is an entry of its own kind"
     );
+    drop(sim);
+    // A test whose name is longer than the margin's line: cut with an
+    // ellipsis, its tag inside the margin — its tag ran past the edge.
+    let long = "test_tax_is_on_the_discounted_amount_after_every_rule";
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call(long, vec![], vec![1]),
+                    call("total", vec![0], vec![2]),
+                    call("discounts", vec![1], vec![]),
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(vec![
+            symbol(long, 1, None, true),
+            symbol("total", 2, None, false),
+            symbol("discounts", 3, None, false),
+        ]),
+    );
+    app.proj.symbol_index_rev += 1;
+    app.proj.project_calls.graph_rev += 1;
+    let width = super::panes::margin_w(&app);
+    let mut sim = iced_test::Simulator::with_size(
+        Default::default(),
+        Size::new(width, 400.0),
+        Element::from(iced::widget::Column::with_children(super::call_flow_rows(
+            &app,
+            &node("discounts"),
+        ))),
+    );
+    let name = text_at(&mut sim, |t| t.starts_with("test_tax"), 0).expect("the test");
+    let tag = text_at(&mut sim, |t| t == "test", 0).expect("its tag");
+    assert!(
+        tag.x + tag.width <= width,
+        "past the edge: {tag:?} in {width}"
+    );
+    assert!(name.x + name.width <= tag.x, "{name:?} {tag:?}");
 }
 
 /// The graph overlays' MOST CHANGED section lists the hottest files with
@@ -6764,6 +10199,123 @@ fn the_overlays_list_the_most_changed_files_and_the_entry_points() {
     );
 }
 
+/// What the language reaches without a call naming it is not "uncalled":
+/// a property, a special method, the `__init__` of a class that is called,
+/// a subclass's override of a called method — as a language server's graph
+/// leaves them, with edges to none. A class called nowhere keeps its
+/// `__init__` listed, and a function called nowhere is listed.
+#[test]
+fn the_uncalled_list_leaves_out_what_python_reaches_by_itself() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let shop = root.join("shop.py");
+    let src = "\
+class Discount:
+    def amount_off(self, order):
+        return 0
+
+class Bulk(Discount):
+    def amount_off(self, order):
+        return 1
+
+class Inventory:
+    def __init__(self):
+        self.tins = {}
+
+    @property
+    def count(self):
+        return len(self.tins)
+
+    def __repr__(self):
+        return 'Inventory'
+
+class Ghost:
+    def __init__(self):
+        pass
+
+def unused():
+    return 1
+
+def main(rule):
+    inventory = Inventory()
+    rule.amount_off(None)
+";
+    app.proj.calls_by_file.insert(
+        shop.clone(),
+        std::sync::Arc::new(crate::projectcalls::FileCalls::read(&shop, src).unwrap()),
+    );
+    let node = |name: &str, line: usize, callers: Vec<usize>| clew_protocol::CallGraphNode {
+        name: name.into(),
+        kind: "method".into(),
+        file: "shop.py".into(),
+        line,
+        callers,
+        callees: Vec::new(),
+    };
+    let g = crate::projectcalls::ProjectCallGraph::from_wire(
+        clew_protocol::CallGraph {
+            nodes: vec![
+                node("amount_off", 2, vec![7]),
+                node("amount_off", 6, vec![]),
+                node("__init__", 10, vec![]),
+                node("count", 14, vec![]),
+                node("__repr__", 17, vec![]),
+                node("__init__", 21, vec![]),
+                node("unused", 24, vec![]),
+                node("main", 27, vec![]),
+            ],
+        },
+        |rel| root.join(rel),
+    )
+    .expect("a call graph");
+    let summary = super::calls_summary(&app, &g);
+    let uncalled: Vec<String> = summary
+        .uncalled
+        .iter()
+        .map(|&(id, _)| format!("{}@{}", g.node(id).name, g.node(id).line))
+        .collect();
+    assert_eq!(uncalled, ["__init__@21", "main@27", "unused@24"]);
+}
+
+/// A project graph's English is said in the reader's language — its
+/// words, and the shapes that hold a name — while code stays code; and a
+/// section's heading is in capitals only in a language that has them.
+#[test]
+fn a_project_graphs_words_are_translated() {
+    use crate::i18n::{Lang, with_lang};
+    with_lang(Lang::Zh, || {
+        assert_eq!(super::map_text("inherits"), "继承");
+        assert_eq!(super::map_text("handled by"), "处理函数");
+        assert_eq!(super::map_text("base 2"), "基类 2");
+        assert_eq!(
+            super::map_text("MRO: D → B → object"),
+            "方法解析顺序：D → B → object"
+        );
+        assert_eq!(
+            super::map_text("id serial (primary key) → users"),
+            "id serial (主键) → users"
+        );
+        assert_eq!(super::map_text("1 lemmas"), "1 条引理");
+        assert_eq!(super::map_text("pub use"), "pub use");
+        assert_eq!(super::map_text("gen_server:call"), "gen_server:call");
+        assert_eq!(
+            crate::i18n::caps("入口点（main、路由）"),
+            "入口点（main、路由）"
+        );
+    });
+    with_lang(Lang::En, || {
+        assert_eq!(super::map_text("inherits"), "inherits");
+        assert_eq!(super::map_text("base 2"), "base 2");
+        assert_eq!(
+            crate::i18n::caps("Entry points (main)"),
+            "ENTRY POINTS (MAIN)"
+        );
+    });
+    with_lang(Lang::Fr, || {
+        assert_eq!(super::map_text("delegate to profile"), "délègue à profile");
+    });
+}
+
 /// The Maps overlay's list: the map's counts and its line on how to read
 /// it, its nodes by kind with their detail and their arrows, each opening
 /// where it is defined; nothing yet says so, a failed read says why; the
@@ -6774,13 +10326,13 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
     let mut app = reader_app();
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let mut sim = sim_elem(super::project_maps_body(&app));
-    assert!(shows(&mut sim, "No maps for this project."));
+    assert!(shows(&mut sim, "No graphs for this project."));
     drop(sim);
     app.proj.maps_error = Some("the host refused".into());
     let mut sim = sim_elem(super::project_maps_body(&app));
     assert!(shows(
         &mut sim,
-        "Couldn't read the project's maps: the host refused"
+        "Couldn't read the project's graphs: the host refused"
     ));
     drop(sim);
     app.proj.maps_error = None;
@@ -6822,25 +10374,39 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
         },
     ]);
     let mut sim = sim_elem(super::project_maps_body(&app));
-    assert!(shows(&mut sim, "Database schema · 2 nodes · 1 arrow"));
-    assert!(shows(&mut sim, "an arrow is a foreign key"));
+    assert!(shows(&mut sim, "Database schema, 2 nodes, 1 arrow"));
+    // Said as a sentence, its first letter a capital (L15): the
+    // extractors write it lower case.
+    assert!(shows(&mut sim, "An arrow is a foreign key"));
     assert!(shows(&mut sim, "TABLE"));
     assert!(shows(&mut sim, "db/schema.sql:7"));
     assert!(shows(&mut sim, "user_id int → users"));
-    assert!(shows(&mut sim, "→ users (user_id)"));
+    // What the arrow says, then where it goes (L4).
+    assert!(shows(&mut sim, "user_id → users"));
     drop(sim);
     app.proj.maps_selected = Some("routes".into());
     let mut sim = sim_elem(super::project_maps_body(&app));
-    assert!(shows(&mut sim, "Routes · 1 node · 0 arrows"));
+    assert!(shows(&mut sim, "Routes, 1 node, 0 arrows"));
     assert!(shows(&mut sim, "GET /users"));
     drop(sim);
     assert!(super::map_picker(&app).is_some());
-    let choice = super::MapChoice {
-        id: "routes".into(),
-        title: "Routes".into(),
-        nodes: 1,
-    };
-    assert_eq!(choice.to_string(), "Routes (1)");
+    // Each map by its name alone: a count beside one (where its nodes were
+    // all of one kind) read as if the others had nothing in them (L18),
+    // and a route and its handler are not two routes (L4).
+    assert_eq!(
+        super::MapChoice::of(&app.proj.maps[0]).to_string(),
+        "Database schema"
+    );
+    let mut routes = app.proj.maps[1].clone();
+    routes
+        .nodes
+        .push(node("list_users", "handler", "app.py", 3, ""));
+    routes.edges.push(clew_protocol::MapEdge {
+        from: 0,
+        to: 1,
+        label: "handled by".into(),
+    });
+    assert_eq!(super::MapChoice::of(&routes).to_string(), "Routes");
     // From the graph: a node opens where it is defined; one defined nowhere,
     // nothing.
     let layout = crate::app::project_map_layout(&app.proj.maps[0], &root);
@@ -6912,10 +10478,7 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
         &root, &files, &structure,
     ));
     let mut sim = sim_elem(super::project_types_body(&app));
-    assert!(shows(
-        &mut sim,
-        "4 types · 4 relations · 1 inheritance link"
-    ));
+    assert!(shows(&mut sim, "4 types, 4 relations, 1 inheritance link"));
     assert!(shows(&mut sim, "MOST REFERENCED (USED BY THE MOST TYPES)"));
     assert!(shows(&mut sim, "Customer"));
     assert!(shows(&mut sim, "2 ←"), "Customer is named twice");
@@ -6935,11 +10498,11 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
         )),
     );
     let mut sim = sim_elem(super::project_types_body(&app));
-    assert!(shows(&mut sim, "· 0 inheritance links"));
+    assert!(shows(&mut sim, ", 0 inheritance links"));
     drop(sim);
     crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
         let mut sim = sim_elem(super::project_types_body(&app));
-        assert!(shows(&mut sim, "· 0 lien d’héritage"));
+        assert!(shows(&mut sim, ", 0 lien d’héritage"));
     });
     app.proj.type_graph = structured;
     // A node of the type map opens its definition at its line.
@@ -6965,6 +10528,479 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
 /// offers the walkthrough, the WALK tab offers it too, a `@trace` scope has a
 /// label, and the calls overlay lists the functions the run stopped in with
 /// their counts.
+/// A plain run's panel is its output and how it ended: titled Run, its exit
+/// code said, no stack, variables or watches, nothing to step, and Stop
+/// gone quiet once the program is. A debug run keeps its columns, and its
+/// Stop goes quiet too when it ends.
+#[test]
+fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let session = |status, exit_code| crate::DebugSession {
+        client: None,
+        status,
+        exit_code,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: vec![("stdout".into(), "Sencha    37.50\n".into())],
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    };
+    let stops = |app: &App| {
+        let mut sim = sim_elem(super::debug_panel(app));
+        let _ = sim.click("■ Stop");
+        sent_by(sim)
+            .into_iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::Stop)))
+    };
+    app.debug.no_debug = true;
+    app.debug.session = Some(session(crate::DebugStatus::Running, None));
+    {
+        let mut sim = sim_elem(super::debug_panel(&app));
+        assert!(shows(&mut sim, "Run"));
+        assert!(shows(&mut sim, "Sencha    37.50"));
+        assert!(!shows(&mut sim, "CALL STACK"));
+        assert!(!shows(&mut sim, "▶ Continue"));
+    }
+    assert!(stops(&app), "a running program can be stopped");
+    app.debug.session = Some(session(crate::DebugStatus::Terminated, Some(0)));
+    {
+        let mut sim = sim_elem(super::debug_panel(&app));
+        assert!(shows(&mut sim, "exited with code 0"));
+        assert!(!shows(&mut sim, "terminated"));
+    }
+    assert!(!stops(&app), "nothing is left to stop");
+    // Ended with nothing printed: said so — and, stopped by the reader,
+    // that it was stopped, not that it ran to its end.
+    let mut quiet = session(crate::DebugStatus::Terminated, None);
+    quiet.output.clear();
+    app.debug.session = Some(quiet);
+    assert!(shows(
+        &mut sim_elem(super::debug_panel(&app)),
+        "The program printed nothing."
+    ));
+    app.debug.stopped_by_reader = true;
+    assert!(shows(
+        &mut sim_elem(super::debug_panel(&app)),
+        "Stopped before the program printed anything."
+    ));
+    app.debug.stopped_by_reader = false;
+    app.debug.no_debug = false;
+    app.debug.session = Some(session(crate::DebugStatus::Terminated, None));
+    {
+        // A debug run that ended without ever stopping: still a debug run,
+        // but its output has the panel — its stack and variables were empty.
+        let mut sim = sim_elem(super::debug_panel(&app));
+        assert!(shows(&mut sim, "Debug"));
+        assert!(shows(&mut sim, "terminated"));
+        assert!(shows(&mut sim, "↻ Debug Again"));
+        assert!(!shows(&mut sim, "CALL STACK"));
+    }
+    assert!(!stops(&app));
+    // L12: one that stopped on its way, ended with nothing left of a stop
+    // to show: its output has the panel too — its empty stack and
+    // variables kept two thirds of it, "3" wrapped under "Darjeeling
+    // left:" — and Walk this run stays.
+    app.debug.trace = vec![crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: Vec::new(),
+    }];
+    app.debug.trace_rev += 1;
+    {
+        let mut sim = sim_elem(super::debug_panel(&app));
+        assert!(!shows(&mut sim, "CALL STACK"));
+        assert!(shows(&mut sim, "Walk this run"));
+    }
+    // One that stopped and still shows where keeps its columns.
+    let mut stopped = session(crate::DebugStatus::Terminated, None);
+    stopped.frames = vec![crate::dap::StackFrame {
+        id: 1,
+        name: "main".into(),
+        path: Some(root.join("main.py")),
+        line: 3,
+        column: 1,
+    }];
+    app.debug.session = Some(stopped);
+    let mut sim = sim_elem(super::debug_panel(&app));
+    assert!(shows(&mut sim, "CALL STACK"));
+    drop(sim);
+    // Narrow, a long path is cut from its start, so its file and line
+    // stay: cut at its end, "teashop/checkout.py:" lost the line, the one
+    // thing it is read for.
+    let mut deep = session(crate::DebugStatus::Terminated, None);
+    deep.frames = vec![crate::dap::StackFrame {
+        id: 1,
+        name: "total".into(),
+        path: Some(root.join("teashop/pricing/rules/discounts/checkout.py")),
+        line: 18,
+        column: 1,
+    }];
+    app.window_width = 1100.0;
+    app.debug.session = Some(deep);
+    let mut sim = sim_elem(super::debug_panel(&app));
+    let loc = text_at(&mut sim, |t| t.ends_with("checkout.py:18"), 0);
+    assert!(
+        loc.is_some() && !shows(&mut sim, "teashop/pricing/rules/discounts/checkout.py:18"),
+        "the line lost, or nothing cut"
+    );
+}
+
+/// M5: a frame's place in the call stack fits its column whole — its last
+/// digit was cut off at the column's edge ("pricing.py:2" for ":20"),
+/// the column's own padding uncounted when the room was worked out.
+#[test]
+fn a_call_stack_frames_line_number_fits_its_column() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    crate::fonts::load();
+    // Paths of every length about the column's: one a pixel or two short
+    // of its room is shown whole, and must fit.
+    let mut cases: Vec<(f32, String, usize)> = vec![
+        (1100.0, "teashop/pricing.py".into(), 20),
+        (
+            1440.0,
+            "teashop/pricing/rules/discounts/runpy.py".into(),
+            203,
+        ),
+    ];
+    for k in 0..36 {
+        cases.push((1100.0, format!("{}/pricing.py", "d".repeat(k)), 20));
+    }
+    for (width, rel, line) in cases {
+        let rel = rel.as_str();
+        app.debug.session = Some(crate::DebugSession {
+            client: None,
+            status: crate::DebugStatus::Stopped,
+            exit_code: None,
+            thread_id: Some(1),
+            frames: vec![crate::dap::StackFrame {
+                id: 1,
+                name: "total".into(),
+                path: Some(root.join(rel)),
+                line,
+                column: 1,
+            }],
+            scopes: Vec::new(),
+            watches: Vec::new(),
+            output: vec![("stdout".into(), "Darjeeling left: 3".into())],
+            current: None,
+            program: root.join("main.py"),
+            args: Vec::new(),
+            cwd: root.clone(),
+            addr: None,
+        });
+        app.show_bottom = true;
+        let size = Size::new(width, 900.0);
+        app.window_width = size.width;
+        app.window_height = size.height;
+        let mut sim = sim_sized(&app, size);
+        let tail = format!("{}:{line}", rel.rsplit('/').next().unwrap());
+        // Its whole extent as laid out, not what its column lets show: cut
+        // at the column's edge, what shows ends inside the column whatever
+        // the text runs on to.
+        let (mut loc, shown) = sim
+            .find(|c: iced_test::selector::Candidate<'_>| match c {
+                iced_test::selector::Candidate::Text {
+                    content, bounds, ..
+                } if content.ends_with(&tail) => Some((bounds, content.to_string())),
+                _ => None,
+            })
+            .expect("the frame's place");
+        loc.width = super::steady::width_of(&shown, super::ts::CAPTION, crate::fonts::UI);
+        let vars = text_at(&mut sim, |t| t == "VARIABLES", 0).expect("the next column");
+        // The variables' heading is its column's padding (6) in; the gap
+        // (6), the stack column's padding (6) and its row's (6) before it.
+        assert!(
+            loc.x + loc.width <= vars.x - 24.0 + 0.5,
+            "{width}: {loc:?} runs past its column (next at {})",
+            vars.x
+        );
+    }
+}
+
+/// A tour is named as the action that made it, in the language spoken
+/// now: "Review changes" makes a change review of the branch, or of the
+/// last commit; "Where to start reading" makes one named so; a run's plain
+/// tour, made in English, is said in French once French is spoken. They
+/// said "Review branch changes" over "Change review (last commit)" (and
+/// "Change review" under the button "Review changes"),
+/// "Reading guide", and "Run: main.py" among French words.
+#[test]
+fn walkthroughs_are_named_as_their_actions_in_the_language_spoken_now() {
+    use crate::i18n::{Lang, with_lang};
+    use crate::walkthrough::{GUIDE_SCOPE, Walkthrough};
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    let mut sim = sim_elem(super::walk_tab(&app));
+    assert!(shows(&mut sim, "Review changes"));
+    assert!(!shows(&mut sim, "Review branch changes"));
+    assert_eq!(super::scope_label(GUIDE_SCOPE), "Where to start reading");
+    assert_eq!(
+        super::scope_label("@diff last commit"),
+        "Review changes (last commit)"
+    );
+    assert_eq!(
+        super::scope_label("@diff vs main"),
+        "Review changes (vs main)"
+    );
+    let run = Walkthrough {
+        made: None,
+        title: crate::walkthrough::plain_run_title("main.py"),
+        scope: "@trace main.py".into(),
+        steps: Vec::new(),
+    };
+    assert_eq!(super::walk_title(&run), "Debug run of main.py");
+    with_lang(Lang::Fr, || {
+        assert_eq!(super::walk_title(&run), "Exécution de débogage de main.py");
+        assert_eq!(
+            super::scope_label("@diff last commit"),
+            "Relire les modifications (dernier commit)"
+        );
+        assert_eq!(
+            super::scope_label("@diff vs main"),
+            "Relire les modifications (par rapport à main)"
+        );
+    });
+    // A title the model wrote is its own.
+    let narrated = Walkthrough {
+        made: None,
+        title: "Checkout totals the cart".into(),
+        ..run
+    };
+    with_lang(Lang::Fr, || {
+        assert_eq!(super::walk_title(&narrated), "Checkout totals the cart");
+    });
+}
+
+/// A cited path is held on one line in prose: a run's tour said
+/// "(teashop/" on one line and "pricing.py:32)" on the next. Held only in
+/// what is shown — the link goes where it went — and only a citation's:
+/// other code wraps as it did.
+#[test]
+fn a_cited_path_is_held_on_one_line() {
+    use iced::widget::markdown::{Item, parse};
+    let md = crate::richmd::linkify_citations(
+        "Called from `teashop/pricing.py:32`, see `a/b` too.",
+        |p| (p == "teashop/pricing.py").then(|| p.to_string()),
+    );
+    let items: Vec<Item> = parse(&md).collect();
+    let Some(Item::Paragraph(text)) = items.first() else {
+        panic!("a paragraph: {md}");
+    };
+    let style = crate::theme::markdown_settings().style;
+    let spans: Vec<_> = text
+        .spans(style)
+        .iter()
+        .cloned()
+        .map(|span| super::explain_view::held_together(span, style.inline_code_font))
+        .collect();
+    let cited = spans
+        .iter()
+        .find(|s| s.link.is_some())
+        .expect("the citation, a link");
+    assert_eq!(cited.text, "teashop/\u{2060}pricing.py:\u{2060}32");
+    let link = format!("{:?}", cited.link);
+    assert!(
+        link.contains("teashop/pricing.py") && !link.contains('\u{2060}'),
+        "the link as it was: {link}"
+    );
+    let plain = spans
+        .iter()
+        .find(|s| s.link.is_none() && s.text == "a/b")
+        .map(|s| s.text.to_string());
+    assert_eq!(plain.as_deref(), Some("a/b"), "other code as it was");
+}
+
+/// A run's tour with fewer steps than the run had stops says why, above
+/// its steps: "Stop 1" then "Stop 4" said nothing of 2 and 3. Not said
+/// where every stop is a step, nor for a tour that is not a run's.
+#[test]
+fn a_run_tour_says_why_it_has_fewer_steps_than_stops() {
+    use crate::walkthrough::{Step, StopFacts, Walkthrough};
+    let step = |ordinal: usize| Step {
+        title: "discounts".into(),
+        file: "teashop/pricing.py".into(),
+        symbol: Some("discounts".into()),
+        line: Some(30),
+        narration: String::new(),
+        depth: 0,
+        stop: Some(StopFacts {
+            ordinal,
+            reason: "step".into(),
+            caller: None,
+            of: 0,
+        }),
+    };
+    let mut run = Walkthrough {
+        made: None,
+        title: crate::walkthrough::plain_run_title("main.py"),
+        scope: "@trace main.py".into(),
+        steps: vec![step(1), step(4)],
+    };
+    let said = "2 steps from 4 stops: a function stepped through is one step, and stops outside the project are left out.";
+    assert_eq!(super::folded_stops(&run).as_deref(), Some(said));
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    app.proj.walk.library.push(run.clone());
+    app.proj.walk.open = Some(run.scope.clone());
+    let mut sim = sim_elem(super::walk_library(&app));
+    assert!(shows(&mut sim, said), "said above its steps");
+    run.steps = vec![step(1), step(2)];
+    assert_eq!(super::folded_stops(&run), None, "every stop a step");
+    // Stops left out at the end (outside the project) are counted as the
+    // run made them: the last kept stop is not the last stop.
+    run.steps = vec![step(1), step(2), step(3)];
+    for s in &mut run.steps {
+        s.stop.as_mut().unwrap().of = 4;
+    }
+    assert_eq!(
+        super::folded_stops(&run).as_deref(),
+        Some(
+            "3 steps from 4 stops: a function stepped through is one step, and stops outside the project are left out."
+        )
+    );
+    run.steps.iter_mut().for_each(|s| s.stop = None);
+    assert_eq!(super::folded_stops(&run), None, "not a run's");
+}
+
+/// L5: in a short window the open tour's narration leaves the list its
+/// steps. 240 tall wherever it stood, it left a French run's tour at
+/// 1100×700 its title over two lines, why it has fewer steps than stops
+/// over four, and half a step — over three lines of narration and blank.
+/// A height the reader set by the divider is kept, short of the list's
+/// room.
+#[test]
+fn a_short_windows_tour_keeps_room_for_its_steps() {
+    use crate::walkthrough::{Step, StopFacts, Walkthrough};
+    let step = |ordinal: usize, name: &str| Step {
+        title: name.into(),
+        file: format!("teashop/{name}.py"),
+        symbol: Some(name.into()),
+        line: Some(30),
+        narration: "Stepped in.".into(),
+        depth: 0,
+        stop: Some(StopFacts {
+            ordinal,
+            reason: "step".into(),
+            caller: None,
+            of: 10,
+        }),
+    };
+    let run = Walkthrough {
+        made: None,
+        title: crate::walkthrough::plain_run_title("main.py"),
+        scope: "@trace main.py".into(),
+        steps: vec![
+            step(1, "alpha"),
+            step(4, "beta"),
+            step(7, "gamma"),
+            step(10, "delta"),
+        ],
+    };
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    app.proj.walk.library.push(run.clone());
+    app.proj.walk.open = Some(run.scope.clone());
+    app.proj.walk.step = 3;
+    let size = Size::new(1100.0, 700.0);
+    app.window_height = size.height;
+    crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
+        let mut sim = sim_sized(&app, size);
+        let nav = text_at(&mut sim, |t| t == "teashop/delta.py", 0).expect("the narration's head");
+        for name in ["alpha", "beta"] {
+            let row = text_at(&mut sim, |t| t.ends_with(name), 0)
+                .unwrap_or_else(|| panic!("no step {name}"));
+            assert!(
+                row.y + row.height <= nav.y,
+                "step {name} under the narration: {row:?} {nav:?}"
+            );
+        }
+    });
+    // Laid out for the room it has, it is still offered to a voice: the
+    // window gathered without a layout built none of it.
+    let heard: Vec<String> = super::heard::gather(&app)
+        .into_iter()
+        .map(|t| t.title)
+        .collect();
+    for word in ["Previous step", "Close"] {
+        assert!(
+            heard.iter().any(|t| t == word),
+            "{word} not heard: {heard:?}"
+        );
+    }
+    assert!(
+        heard.iter().any(|t| t.contains("Debug run of main.py")),
+        "the tour's row not heard: {heard:?}"
+    );
+    // Tall windows keep the narration as tall as it was; a height set by
+    // the divider is kept, short of the list's room.
+    assert_eq!(super::sidebar::narration_room(None, 900.0), 240.0);
+    assert_eq!(super::sidebar::narration_room(None, 380.0), 152.0);
+    assert_eq!(super::sidebar::narration_room(Some(300.0), 600.0), 300.0);
+    assert_eq!(super::sidebar::narration_room(Some(300.0), 380.0), 230.0);
+    assert_eq!(super::sidebar::narration_room(None, 100.0), 90.0);
+}
+
+/// The room beside the call graph's title is one width whatever stands in
+/// it — the button, refining's count, the result — so its header keeps its
+/// lines: as wide as its words, the header changed lines as refining ended,
+/// and the search field moved with it, losing its caret mid-word.
+#[test]
+fn the_call_graphs_title_keeps_one_room_beside_it() {
+    let mut app = reader_app();
+    let calls = crate::Overlay::ProjectCalls;
+    let idle = super::graph::graph_extra_w(&app, calls);
+    app.proj.project_calls.refine_progress = Some((3, 40));
+    assert_eq!(super::graph::graph_extra_w(&app, calls), idle, "refining");
+    app.proj.project_calls.refine_progress = None;
+    app.proj.project_calls.precise = true;
+    assert!(app.precise_label().is_some());
+    assert_eq!(super::graph::graph_extra_w(&app, calls), idle, "refined");
+}
+
+/// A tour's row, and its Regenerate and Delete, are heard by the title its
+/// row shows — the Tab ring and the voice said "Debug run (main.py)" and
+/// "Delete: Debug run (main.py)" beside a row that read "Debug run of
+/// main.py".
+#[test]
+fn a_tours_row_is_heard_by_the_title_it_shows() {
+    use crate::walkthrough::Walkthrough;
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    app.proj.walk.library.push(Walkthrough {
+        made: None,
+        title: crate::walkthrough::plain_run_title("main.py"),
+        scope: "@trace main.py".into(),
+        steps: Vec::new(),
+    });
+    let heard: Vec<String> = super::heard::gather(&app)
+        .into_iter()
+        .filter(|t| matches!(t.message, Message::Walk(_)))
+        .map(|t| t.shown)
+        .collect();
+    assert!(
+        heard.iter().any(|s| s == "Debug run of main.py"),
+        "the row: {heard:?}"
+    );
+    assert!(
+        heard.iter().any(|s| s == "Delete: Debug run of main.py"),
+        "its Delete: {heard:?}"
+    );
+    assert!(
+        !heard.iter().any(|s| s.contains("Debug run (main.py)")),
+        "another name than the one shown: {heard:?}"
+    );
+}
+
 #[test]
 fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph() {
     let mut app = reader_app();
@@ -6978,6 +11014,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     app.debug.session = Some(crate::DebugSession {
         client: None,
         status: crate::DebugStatus::Terminated,
+        exit_code: None,
         thread_id: None,
         frames: Vec::new(),
         scopes: Vec::new(),
@@ -7051,9 +11088,12 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     let visits = super::trace_visits(&app, &g);
     let named: Vec<(&str, usize)> = visits
         .iter()
-        .map(|&(id, n)| (g.node(id).name.as_str(), n))
+        .map(|&(id, n, _)| (g.node(id).name.as_str(), n))
         .collect();
     assert_eq!(named, [("line_1", 2), ("line_0", 1)]);
+    // Each opens where the run first stopped in it, not on its first line.
+    let lines: Vec<usize> = visits.iter().map(|&(_, _, line)| line).collect();
+    assert_eq!(lines, [2, 1]);
     assert_eq!(super::trace_files(&app).len(), 1);
     app.proj.project_calls.graph = std::sync::Arc::new(g);
     let mut sim = sim_elem(super::project_calls_body(&app));
@@ -7102,11 +11142,26 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
     ));
     tree.push_root(node(Role::Passed, "render", 3, "render(total)"));
     tree.push_root(node(Role::Read, "", 9, ""));
+    // L14: a line longer than the sidebar is cut with an ellipsis, whole
+    // where the pointer rests: it ended at the sidebar's edge mid-word.
+    let long = "off = cents(rule.amount_off(order, base, members_only_discount_table))";
+    tree.push_root(node(Role::Read, "", 12, long));
     app.proj.flow = Some(tree);
     app.sidebar = crate::SidebarTab::Flow;
+    app.sidebar_width = 260.0;
+    let mut sim = sim_elem(super::flow_tab(&app));
+    assert!(!shows(&mut sim, long), "whole, past the sidebar's edge");
+    let cut = text_at(
+        &mut sim,
+        |t| t.starts_with("off = cents(") && t.ends_with('…'),
+        0,
+    )
+    .expect("cut, and said so");
+    assert!(cut.x + cut.width <= app.sidebar_width, "{cut:?}");
+    drop(sim);
     let mut sim = sim_elem(super::flow_tab(&app));
     assert!(shows(&mut sim, "total"));
-    assert!(shows(&mut sim, "3 places"));
+    assert!(shows(&mut sim, "4 places"));
     assert!(shows(&mut sim, "ASSIGNED"));
     assert!(shows(&mut sim, "= compute()"));
     assert!(shows(&mut sim, "PASSED TO"));
@@ -7140,6 +11195,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
         insight: None,
         served: true,
         by_pointer: true,
+        line_top: None,
     });
     assert!(shows(&mut sim_of(&app), "Trace Value"));
     app.proj.context_menu = None;
@@ -7172,6 +11228,44 @@ fn doc_file(rel: &str, items: &[(&str, bool)]) -> clew_protocol::DocFile {
         })).collect::<Vec<_>>(),
     }))
     .expect("a DocFile")
+}
+
+/// The API docs' grouping and visibility are pairs with the chosen half
+/// raised: pressing the other half switches, pressing the chosen one does
+/// nothing — a chip that named what was on and flipped read as two tabs
+/// with neither picked.
+#[test]
+fn the_docs_toggles_show_which_is_chosen() {
+    let mut app = reader_app();
+    app.proj.docs.files = vec![doc_file("src/lib.rs", &[("open", true)])];
+    let sent = |app: &App, label: &str| {
+        click(sim_elem(super::docs_stats::docs_tab(app)), label)
+            .into_iter()
+            .filter(|m| matches!(m, Message::Docs(_)))
+            .collect::<Vec<_>>()
+    };
+    for both in ["Files", "Modules", "Public", "All"] {
+        assert!(
+            shows(&mut sim_elem(super::docs_stats::docs_tab(&app)), both),
+            "{both}"
+        );
+    }
+    assert!(sent(&app, "Files").is_empty(), "Files is chosen");
+    assert!(matches!(
+        sent(&app, "Modules").as_slice(),
+        [Message::Docs(DocsMsg::ToggleGrouping)]
+    ));
+    assert!(sent(&app, "Public").is_empty(), "Public is chosen");
+    assert!(matches!(
+        sent(&app, "All").as_slice(),
+        [Message::Docs(DocsMsg::ToggleShowAll)]
+    ));
+    app.docs_view.by_module = true;
+    assert!(sent(&app, "Modules").is_empty(), "now Modules is");
+    assert!(matches!(
+        sent(&app, "Files").as_slice(),
+        [Message::Docs(DocsMsg::ToggleGrouping)]
+    ));
 }
 
 /// I5: the DOCS grouping is computed per installed index and view options,
@@ -7236,6 +11330,28 @@ fn the_docs_grouping_follows_the_installed_index() {
     );
 }
 
+/// L8: a bookmark on a blank line says so — its row showed its number
+/// and nothing else.
+#[test]
+fn a_bookmark_on_a_blank_line_says_so() {
+    let mut app = reader_app();
+    app.proj.bookmarks = vec![crate::Bookmark {
+        rel: "a.rs".into(),
+        line: 13,
+        preview: "    ".into(),
+        note: None,
+    }];
+    app.sidebar = crate::SidebarTab::Marks;
+    app.show_left_sidebar = true;
+    let mut sim = sim_of(&app);
+    let number = text_at(&mut sim, |t| t == "13", 0).expect("its line");
+    let said = text_at(&mut sim, |t| t == "(blank line)", 0).expect("said blank");
+    assert!(
+        (said.center_y() - number.center_y()).abs() < 2.0,
+        "on its row"
+    );
+}
+
 /// I8: the rows send what they show — identities, not positions.
 #[test]
 fn rows_send_the_identity_of_what_they_show() {
@@ -7281,7 +11397,7 @@ fn rows_send_the_identity_of_what_they_show() {
     };
     app.proj.ask_pins = vec![pin.clone()];
     app.ask_view = crate::AskView::Compact;
-    let sent = click(sim_of(&app), "📎 src/lib.rs · L4");
+    let sent = click(sim_of(&app), "📎 src/lib.rs:4");
     assert!(
         matches!(sent.as_slice(), [Message::Ask(AskMsg::PinGoto(k))] if *k == pin.key()),
         "{sent:?}"
@@ -7345,6 +11461,7 @@ fn rows_send_the_identity_of_what_they_show() {
 
 fn tour(scope: &str) -> crate::walkthrough::Walkthrough {
     crate::walkthrough::Walkthrough {
+        made: None,
         title: format!("Tour of {scope}"),
         scope: scope.into(),
         steps: vec![
@@ -7354,6 +11471,8 @@ fn tour(scope: &str) -> crate::walkthrough::Walkthrough {
                 symbol: None,
                 line: Some(1),
                 narration: "n".into(),
+                depth: 0,
+                stop: None,
             },
             crate::walkthrough::Step {
                 title: format!("{scope} two"),
@@ -7361,6 +11480,8 @@ fn tour(scope: &str) -> crate::walkthrough::Walkthrough {
                 symbol: None,
                 line: Some(2),
                 narration: "n".into(),
+                depth: 0,
+                stop: None,
             },
         ],
     }
@@ -7649,7 +11770,7 @@ fn a_notebook_shows_its_cells_and_folds_its_outputs() {
     assert!(app.proj.panes[0].as_ref().unwrap().notebook.is_some());
     {
         let mut sim = sim_of(&app);
-        assert!(shows(&mut sim, "2 cells · 1 with output · python"));
+        assert!(shows(&mut sim, "2 cells, 1 with output, python"));
         assert!(shows(&mut sim, "In [3]"), "the code cell's execution badge");
         assert!(shows(&mut sim, "▸ output (1)"), "outputs start folded");
         assert!(shows(&mut sim, "Expand all outputs"));
@@ -7702,6 +11823,7 @@ fn time_travel_shows_the_commit_being_read() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: true,
         generation: 0,
         session: 0,
@@ -7713,16 +11835,19 @@ fn time_travel_shows_the_commit_being_read() {
         story_loading: false,
     });
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "01234567"), "the short sha");
+    assert!(
+        shows(&mut sim, "0123456"),
+        "the short sha, as git shortens it"
+    );
     assert!(shows(&mut sim, "Ada"));
     assert!(shows(&mut sim, "Teach the parser about raw strings"));
-    assert!(shows(&mut sim, "Exit"));
+    assert!(!shows(&mut sim, "Exit"), "the Time Travel button ends it");
     assert!(shows(&mut sim, "Scope: whole file"));
     assert!(
         !shows(&mut sim, "Loading revision…"),
         "the live file stays on screen until the revision loads"
     );
-    let exit = click(sim_of(&app), "Exit");
+    let exit = click(sim_of(&app), "Time Travel");
     assert!(
         exit.iter()
             .any(|m| matches!(m, Message::TimeTravel(crate::TimeTravelMsg::Exit))),
@@ -7887,7 +12012,7 @@ fn the_glossary_page_lists_terms_by_kind() {
     app.proj.docs.generation += 1;
     app.explain_cache_mut().clear();
     let _ = app.update(Message::Glossary(GlossaryMsg::Open));
-    assert!(on_page(&app, "No terms yet"));
+    assert!(on_page(&app, "No terms found"));
     assert!(!on_page(&app, "Rebuild"));
     let sent = click(sim_of(&app), "Look again");
     assert!(
@@ -7945,6 +12070,22 @@ fn a_long_glossary_section_does_not_hide_the_next() {
         "the modules after a capped section"
     );
     assert!(shows(&mut sim, "Talks to the server"));
+    drop(sim);
+    // L20: on a page wider than its column, the column is in the middle:
+    // held to the left, the page's right was a band of nothing.
+    let wide = 1600.0;
+    let mut sim = iced_test::Simulator::with_size(
+        Default::default(),
+        Size::new(wide, 900.0),
+        super::glossary_home(&app),
+    );
+    let title = text_at(&mut sim, |t| t == "Glossary", 0).expect("its title");
+    let left = title.x;
+    let right = wide - (left + super::docs_stats::GLOSSARY_W);
+    assert!(
+        (left - right).abs() < 4.0,
+        "in the middle: {left} left, {right} right"
+    );
 }
 
 /// The settings' build choices, language by language: what each group
@@ -8011,7 +12152,7 @@ fn the_languages_section_offers_each_languages_build_choices() {
         .into(),
         python: None,
     }));
-    let mut sim = sim_elem(super::connect::languages_section(&app));
+    let mut sim = sim_tall(super::connect::languages_section(&app));
     for shown in [
         "What rust-analyzer checks the project with. \
          Also set in .clew/lsp.toml: cargo.features. Settings here take precedence.",
@@ -8028,7 +12169,7 @@ fn the_languages_section_offers_each_languages_build_choices() {
         "The toolchain the language server runs from.",
         "The lake found on the PATH",
         "elan (set by the project)",
-        "Server programs",
+        "Add a server program",
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
     }
@@ -8079,7 +12220,7 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
                 "zig".to_string(),
                 vec![ToolchainCandidate {
                     command: "/h/.zvm/0.13.0/zig".into(),
-                    name: "zvm · Zig 0.13.0".into(),
+                    name: "Zig 0.13.0 (zvm)".into(),
                     project: true,
                 }],
             ),
@@ -8088,13 +12229,13 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
         ..Default::default()
     }));
     let warning = "Runs the project's own code. Only for projects you trust.";
-    let mut sim = sim_elem(super::connect::languages_section(&app));
+    let mut sim = sim_tall(super::connect::languages_section(&app));
     for shown in [
         "TypeScript and JavaScript",
         "Clew's built-in TypeScript 5",
         "The project's TypeScript 5.4.5 — runs the project's own code",
         "Zig",
-        "zvm · Zig 0.13.0",
+        "Zig 0.13.0 (zvm)",
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
     }
@@ -8112,7 +12253,7 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
     assert_eq!(chosen[0].typescript.as_deref(), Some(projects.as_str()));
 
     app.proj.lang_choices = chosen[0].clone();
-    let mut sim = sim_elem(super::connect::languages_section(&app));
+    let mut sim = sim_tall(super::connect::languages_section(&app));
     assert!(sim.find(warning).is_ok(), "said once it is the one chosen");
 }
 
@@ -8147,7 +12288,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
                 "ruby".to_string(),
                 one(
                     "/h/.rbenv/versions/3.3.0/bin/ruby-lsp",
-                    "rbenv · Ruby 3.3.0",
+                    "Ruby 3.3.0 (rbenv)",
                 ),
             ),
             (
@@ -8162,7 +12303,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
         .into(),
         ..Default::default()
     }));
-    let mut sim = sim_elem(super::connect::languages_section(&app));
+    let mut sim = sim_tall(super::connect::languages_section(&app));
     for shown in [
         "Java",
         "JDK 21",
@@ -8171,7 +12312,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
         "C#",
         "src/App.sln",
         "The Ruby that runs Ruby LSP.",
-        "rbenv · Ruby 3.3.0",
+        "Ruby 3.3.0 (rbenv)",
         "The ruby-lsp found on the PATH",
         "The Erlang Language Platform build to run.",
         "The elp found on the PATH",
@@ -8180,7 +12321,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
     }
-    let _ = sim.click("rbenv · Ruby 3.3.0");
+    let _ = sim.click("Ruby 3.3.0 (rbenv)");
     let chosen: Vec<LanguageChoices> = sim
         .into_messages()
         .filter_map(|m| match m {
@@ -8234,7 +12375,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
         app.proj.project_languages = vec![language.to_string()];
         // The project's code is in them, as a scan finds it.
         app.proj.code_languages = app.proj.project_languages.clone();
-        let mut sim = sim_elem(super::connect::languages_section(&app));
+        let mut sim = sim_tall(super::connect::languages_section(&app));
         let _ = sim.click(row_label);
         let chosen: Vec<LanguageChoices> = sim
             .into_messages()
@@ -8268,7 +12409,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
     };
     // The ELP chosen is one of those found, not a program of the user's
     // own: no row of its own for it.
-    let mut sim = sim_elem(super::connect::languages_section(&app));
+    let mut sim = sim_tall(super::connect::languages_section(&app));
     assert!(sim.find("elp in /opt/elp/bin").is_ok());
     assert!(
         sim.find("Your own program").is_err(),
@@ -8333,14 +12474,10 @@ fn explain_all_without_a_key_opens_settings_where_the_key_goes() {
     let mut app = reader_app();
     app.llm_available = false;
     open_tools_menu(&mut app);
-    let sent = click(sim_of(&app), "Explain All");
+    let sent = click(sim_of(&app), "Explain All…");
     assert!(
-        sent.iter().any(|m| matches!(
-            m,
-            Message::Settings(crate::SettingsMsg::OpenAt(
-                crate::SettingsPage::LanguageModel
-            ))
-        )),
+        sent.iter()
+            .any(|m| matches!(m, Message::Settings(crate::SettingsMsg::NeedKey))),
         "{sent:?}"
     );
     let mut app = reader_app();
@@ -8351,6 +12488,33 @@ fn explain_all_without_a_key_opens_settings_where_the_key_goes() {
     assert_eq!(app.settings.page, crate::SettingsPage::LanguageModel);
 }
 
+/// Settings' shortcuts are drawn as the command bar draws them, a cap per
+/// key: here, where they are learned, a command's keys were one pill of
+/// words ("Ctrl+L"), its other keys plain text ("or Ctrl+G"), and the
+/// reading motions a line of code ("h j k l   ← ↓ ↑ →").
+#[test]
+fn settings_draws_every_shortcut_as_key_caps() {
+    let app = reader_app();
+    let mut sim = sim_elem(super::connect::shortcuts_body(&app));
+    // The motions, a cap a key.
+    for key in ["h", "j", "k", "l", "gd", "za", "Esc", "F9"] {
+        assert!(sim.find(key).is_ok(), "{key} is a cap of its own");
+    }
+    assert!(sim.find("h j k l   ← ↓ ↑ →").is_err());
+    // A command's other keys after "or", as caps: where it has some — on
+    // macOS, ⌘G is Find Next, no second key for Go to Line.
+    assert_eq!(sim.find("or").is_ok(), !crate::keymap::MAC_KEYS);
+    // No text holds a chord whole, or "or" and its keys together.
+    let whole = |t: &str| t.contains("Ctrl+") || t.contains("Shift+") || t.starts_with("or ");
+    assert!(
+        sim.find(move |c: iced_test::selector::Candidate<'_>| match c {
+            iced_test::selector::Candidate::Text { content, .. } if whole(content) => Some(()),
+            _ => None,
+        })
+        .is_err()
+    );
+}
+
 /// The status bar's target picker is there for a file whose dimming the
 /// platform decides — Rust's, Go's, Haskell's — and not for one whose does
 /// not (C#'s, Erlang's: their files' own symbols decide).
@@ -8358,7 +12522,7 @@ fn explain_all_without_a_key_opens_settings_where_the_key_goes() {
 fn the_target_picker_shows_for_languages_the_platform_dims() {
     let mut app = reader_app();
     let label = format!(
-        "Reading for {}",
+        "Built for {}",
         super::statusbar::target_name(&app.proj.reading_target)
     );
     for (lang, shown) in [
@@ -8390,6 +12554,7 @@ fn the_context_menu_offers_the_languages_own_action() {
         insight,
         served: true,
         by_pointer: true,
+        line_top: None,
     };
     app.proj.context_menu = Some(menu(Some(crate::InsightKind::ExpandMacro)));
     assert!(shows(&mut sim_of(&app), "Expand Macro"));
@@ -8427,7 +12592,7 @@ fn the_insight_popup_shows_the_answer_and_where_it_points() {
         assert!(shows(&mut sim, "Expansion of MAX"));
         assert!(shows(&mut sim, "Asking…"));
     }
-    assert!(!shows(&mut sim_of(&app), "Open Definition"));
+    assert!(!shows(&mut sim_of(&app), "Open definition"));
     assert!(matches!(
         super::escape_message(&app),
         Some(Message::Hover(HoverMsg::InsightClose))
@@ -8474,7 +12639,7 @@ fn the_insight_popup_shows_the_answer_and_where_it_points() {
         let mut sim = sim_of(&app);
         assert!(!shows(&mut sim, "Asking…"));
     }
-    let sent = click(sim_of(&app), "Open Definition");
+    let sent = click(sim_of(&app), "Open definition");
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Hover(HoverMsg::InsightOpenDefinition))),
@@ -8589,6 +12754,325 @@ fn the_raised_note_keeps_clear_of_the_ask_pill() {
     assert!(seen_low, "the note was never brought low in the view");
 }
 
+/// The Ask pill floats over the bottom panel's foot at its right, where a
+/// run's output is: the output's column ends above it, so no line of it
+/// runs under the pill, scrolled to its end or not.
+#[test]
+fn no_line_of_a_runs_output_is_under_the_ask_pill() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    // Lines as wide as the column, as a log's are.
+    let output: String = (1..=120)
+        .map(|n| format!("printed line {n} {}\n", "x".repeat(200)))
+        .collect();
+    app.debug.no_debug = true;
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Running,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: vec![("stdout".into(), output)],
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.show_bottom = true;
+    app.ask_view = crate::AskView::Hidden;
+    let mut sim = sim_of(&app);
+    let pill = text_at(&mut sim, |t| t == "Ask", 0).expect("the pill");
+    let pill_h = crate::ui::askfloat::PILL_H;
+    let pill_top = pill.center_y() - pill_h / 2.0;
+    // The output, as much of it as is on screen (clipped to where its
+    // column shows it).
+    let shown = text_at(&mut sim, |t| t.contains("printed line 1 "), 0).expect("the output");
+    assert!(shown.height > 3.0 * 14.0, "{shown:?}");
+    assert!(
+        shown.x + shown.width > pill.x,
+        "the output reaches across under the pill's side: {shown:?} {pill:?}"
+    );
+    assert!(
+        shown.y + shown.height <= pill_top,
+        "{shown:?} runs under the pill from {pill_top}"
+    );
+}
+
+/// M1: a run's output is shown at its end — its last line, most often the
+/// result or the error — not at its first, with the rest below the panel's
+/// foot and nothing to say there was more.
+#[test]
+fn a_runs_output_is_shown_at_its_end() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let output = (1..=120)
+        .map(|n| ("stdout".to_string(), format!("printed line {n}\n")))
+        .collect();
+    app.debug.no_debug = true;
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Running,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output,
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.show_bottom = true;
+    app.ask_view = crate::AskView::Hidden;
+    let mut sim = sim_of(&app);
+    assert!(
+        text_at(&mut sim, |t| t == "printed line 120", 0).is_some(),
+        "its last line is below the panel's foot"
+    );
+    assert!(
+        text_at(&mut sim, |t| t == "printed line 1", 0).is_none(),
+        "all of it fits: the test shows nothing"
+    );
+    // Its heading stays over it, as the other columns' do: among the
+    // lines, it went out of sight with the first of them.
+    assert!(
+        text_at(&mut sim, |t| t == "OUTPUT", 0).is_some(),
+        "the heading scrolled away"
+    );
+}
+
+/// While the diff or Time Travel stands in the code's place, the note the
+/// caret is in heads the margin — where it is with its function at the top
+/// of the code — and no other note is laid beside lines that are not on
+/// screen. Each was placed by the hidden code's scroll: the raised note a
+/// banner lower than without the diff, the rest beside whatever of the
+/// diff was there.
+#[test]
+fn a_diff_in_the_codes_place_leaves_the_margin_its_raised_note_alone() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    let function = |name: &str, line: usize| crate::outline::Symbol {
+        name: name.into(),
+        kind: "function".into(),
+        line,
+        end_line: line + 2,
+    };
+    // `origin` heads the file and has the caret; `other`, further down,
+    // is explained.
+    app.proj.panes[0].as_mut().unwrap().symbols =
+        vec![function("origin", 1), function("other", 10)];
+    let node = |name: &str| crate::explain::Node::Function {
+        file: abs.clone(),
+        name: name.into(),
+        ordinal: 0,
+    };
+    app.proj.explain.view = Some(node("origin"));
+    app.proj.explain.cache.insert(
+        node("other"),
+        crate::explain::Cached {
+            summary: "Does the other thing.".into(),
+            prompt_hash: crate::incremental::content_hash(b"t"),
+            detail: None,
+            basis: None,
+        },
+    );
+    let margin = |app: &App| {
+        let mut sim = sim_of(app);
+        let raised = text_at(&mut sim, |t| t == "origin", 0).map(|r| r.y);
+        (raised, shows(&mut sim, "Does the other thing."))
+    };
+    let (beside_code, other_shown) = margin(&app);
+    let beside_code = beside_code.expect("the raised note beside the code");
+    assert!(other_shown, "beside the code, the other note shows");
+
+    app.proj.diff = Some(crate::DiffState::new(
+        abs.clone(),
+        "src/lib.rs".into(),
+        Vec::new(),
+    ));
+    let (beside_diff, other_shown) = margin(&app);
+    let beside_diff = beside_diff.expect("the raised note beside the diff");
+    assert!(
+        (beside_diff - beside_code).abs() < 1.0,
+        "beside the diff at {beside_diff}, beside the code at {beside_code}"
+    );
+    assert!(!other_shown, "a note beside the diff's lines");
+    app.proj.diff = None;
+
+    let hv = app.proj.panes[0].clone().unwrap();
+    app.proj.time_travel = Some(crate::TimeTravel {
+        abs: abs.clone(),
+        rel: "src/lib.rs".into(),
+        lang: Some("rust"),
+        scope: crate::TimeScope::File,
+        commits: Vec::new(),
+        idx: 0,
+        viewer: Some(hv),
+        scroll_y: 0.0,
+        scroll_x: 0.0,
+        caret: None,
+        focus_line: None,
+        reveal_change: false,
+        loading: false,
+        generation: 0,
+        session: 0,
+        scoped: 0,
+        why: std::collections::HashMap::new(),
+        why_loading: false,
+        why_pending: std::collections::HashSet::new(),
+        story: None,
+        story_loading: false,
+    });
+    let (in_time_travel, other_shown) = margin(&app);
+    let in_time_travel = in_time_travel.expect("the raised note in Time Travel");
+    assert!(
+        (in_time_travel - beside_code).abs() < 1.0,
+        "in Time Travel at {in_time_travel}, beside the code at {beside_code}"
+    );
+    assert!(!other_shown, "a note beside Time Travel's lines");
+}
+
+/// The status bar and the tool strip paint no fill of their own: drawn
+/// after the sheet, theirs cut the sheet's shadow off in a hard line —
+/// under the sheet's rounded bottom corners, and down its right edge. The
+/// window's fill, under everything, is their background.
+#[test]
+fn the_chrome_drawn_after_the_sheet_leaves_its_shadow_whole() {
+    let theme = crate::theme::app_theme();
+    assert!(crate::theme::sheet(&theme).shadow.blur_radius > 0.0);
+    assert!(crate::theme::statusbar(&theme).background.is_none());
+    assert!(crate::theme::strip(&theme).background.is_none());
+    assert!(crate::theme::chrome(&theme).background.is_some());
+}
+
+/// The explanation in blocks has the margin to be read in: the raised card
+/// reaches down it. In the summary's 193 pixels it showed three lines of the
+/// first block, the last cut through, the rest only by scrolling a window
+/// that size.
+#[test]
+fn the_explanation_in_blocks_has_the_margin_to_be_read_in() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 3,
+    }];
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    app.proj.explain.cache.insert(
+        node.clone(),
+        crate::explain::Cached {
+            summary: "Makes the point at zero.".into(),
+            prompt_hash: crate::incremental::content_hash(b"t"),
+            detail: Some(
+                "Names the point it makes.\n\n\
+                 Sets its x to zero.\n\n\
+                 Sets its y to zero.\n\n\
+                 Checks the two agree.\n\n\
+                 Hands the point back."
+                    .into(),
+            ),
+            basis: None,
+        },
+    );
+    // Where the card ends: its actions' row, the lowest "Calls" (the
+    // other is the margin's tab).
+    let card_foot = |app: &App| {
+        let mut sim = sim_of(app);
+        (0..)
+            .map_while(|nth| text_at(&mut sim, |t| t == "Calls", nth))
+            .map(|r| r.y)
+            .fold(f32::MIN, f32::max)
+    };
+    let _ = app.show_explanation(node.clone());
+    assert!(!app.proj.explain.showing_detail);
+    let summary_foot = card_foot(&app);
+    let _ = app.update(Message::Explain(crate::ExplainMsg::ToggleBlocks));
+    assert!(app.proj.explain.showing_detail);
+    let said = format!("{:?}", app.proj.explain.prepared);
+    assert!(said.contains("Hands the point back."), "{said}");
+    let blocks_foot = card_foot(&app);
+    assert!(
+        blocks_foot - summary_foot > 200.0,
+        "the card in blocks ends at {blocks_foot}, in summary at {summary_foot}"
+    );
+    assert!(
+        blocks_foot < app.window_height,
+        "its actions off the window at {blocks_foot}"
+    );
+}
+
+/// The raised card holds the whole of a function's explanation, where it
+/// runs past four lines: those were shown, and the rest scrolled out of a
+/// window that size, cut through a line. A short one keeps the card's own
+/// height.
+#[test]
+fn the_raised_card_holds_a_long_explanation_whole() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 3,
+    }];
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    let card_foot = |app: &mut App, summary: &str| {
+        app.proj.explain.cache.insert(
+            node.clone(),
+            crate::explain::Cached {
+                summary: summary.into(),
+                prompt_hash: crate::incremental::content_hash(b"t"),
+                detail: None,
+                basis: None,
+            },
+        );
+        let _ = app.show_explanation(node.clone());
+        let mut sim = sim_of(app);
+        (0..)
+            .map_while(|nth| text_at(&mut sim, |t| t == "Calls", nth))
+            .map(|r| r.y)
+            .fold(f32::MIN, f32::max)
+    };
+    let short = card_foot(&mut app, "Makes the point at zero.");
+    let shorter = card_foot(&mut app, "Zero.");
+    assert!((short - shorter).abs() < 1.0, "{short} and {shorter}");
+    let long = card_foot(
+        &mut app,
+        "Makes the point at zero, the origin every other point is measured \
+         from. It builds the point from two zero coordinates rather than \
+         asking for them, so a caller never passes the wrong ones. The \
+         layout code calls it once per frame to anchor the grid, and the \
+         tests call it to check that distances from it are the lengths \
+         they expect. Nothing in it can fail, and it allocates nothing.",
+    );
+    assert!(
+        long - short > 60.0,
+        "the long card ends at {long}, the short one at {short}"
+    );
+    assert!(
+        long < app.window_height,
+        "its actions off the window at {long}"
+    );
+}
+
 /// Escape in the Files view's filter empties it, as its × does: it stayed
 /// filled however often Escape was pressed. Only while the filter has the
 /// keyboard: Escape elsewhere leaves it be.
@@ -8655,6 +13139,72 @@ fn escape_in_the_file_filter_clears_it() {
     assert!(sent.iter().any(cleared), "{sent:?}");
 }
 
+/// The Files filter's well lights its edge while the filter has the
+/// keyboard, as every field's does: reached by F6, it showed only a caret.
+#[test]
+fn the_files_filter_lights_its_edge_while_it_has_the_keyboard() {
+    use iced::advanced::renderer::Headless as _;
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    let size = Size::new(300.0, 600.0);
+    let field = sim_elem(super::sidebar::sidebar(&app))
+        .find(super::file_filter_id())
+        .expect("the filter is on screen")
+        .bounds();
+    let accent = crate::theme::accent();
+    // How near the well's top edge, over the field's middle, comes to the
+    // accent: the least distance of any of its pixels.
+    let nearest = |focus: bool| {
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(
+            super::sidebar::sidebar(&app),
+            size,
+            Cache::default(),
+            &mut renderer,
+        );
+        if focus {
+            let _ = run_operation::<()>(
+                &mut ui,
+                &renderer,
+                iced::advanced::widget::operation::focusable::focus(super::file_filter_id()),
+            );
+        }
+        let _ = ui.update(
+            &[Event::Window(window::Event::RedrawRequested(
+                std::time::Instant::now(),
+            ))],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut Vec::new(),
+        );
+        ui.draw(
+            &mut renderer,
+            &crate::theme::app_theme(),
+            &iced::advanced::renderer::Style {
+                text_color: iced::Color::BLACK,
+            },
+            mouse::Cursor::Unavailable,
+        );
+        let rgba = renderer.screenshot(
+            iced::Size::new(size.width as u32, size.height as u32),
+            1.0,
+            iced::Color::TRANSPARENT,
+        );
+        let x = field.center_x() as usize;
+        (field.y as usize - 10..field.y as usize)
+            .map(|y| {
+                let i = (y * size.width as usize + x) * 4;
+                let d = |c: u8, a: f32| (f32::from(c) / 255.0 - a).abs();
+                d(rgba[i], accent.r) + d(rgba[i + 1], accent.g) + d(rgba[i + 2], accent.b)
+            })
+            .fold(f32::MAX, f32::min)
+    };
+    let (rest, lit) = (nearest(false), nearest(true));
+    assert!(lit + 0.2 < rest, "lit {lit:.2}, at rest {rest:.2}");
+}
+
 /// A commit's day reads as a reader says it: the month and day, and the
 /// year when it is not this one.
 #[test]
@@ -8714,7 +13264,8 @@ fn the_raised_note_says_when_its_function_changed() {
         ],
     );
     assert!(shows(&mut sim_of(&app), "Feb 29, 2024"));
-    // A line of it not committed: said so.
+    // A line of it edited since: its commits still date it — "Uncommitted"
+    // read as if it were new.
     set(
         &mut app,
         vec![
@@ -8723,6 +13274,18 @@ fn the_raised_note_says_when_its_function_changed() {
             blame(946_598_400, true),
             blame(1_709_251_199, false),
             blame(946_598_400, false),
+        ],
+    );
+    assert!(shows(&mut sim_of(&app), "Feb 29, 2024"));
+    // None of it committed yet: said so.
+    set(
+        &mut app,
+        vec![
+            blame(1_793_793_600, false),
+            blame(1, false),
+            blame(946_598_400, true),
+            blame(1_709_251_199, true),
+            blame(946_598_400, true),
         ],
     );
     assert!(shows(&mut sim_of(&app), "Uncommitted"));
@@ -8779,7 +13342,9 @@ fn the_raised_note_says_when_its_function_changed() {
             Default::default(),
         )),
     );
-    assert!(shows(&mut sim_of(&app), "3 references"));
+    // Callers, as the Calls tab lists them, and the calls when one caller
+    // makes more than one: `a` calls it twice.
+    assert!(shows(&mut sim_of(&app), "2 callers, 3 calls"));
     // A call at the top of its file, in no function (Python's `if __name__
     // == "__main__": main()`), is a reference too: such a `main` read "0
     // references". A method call of that name is not one.
@@ -8807,7 +13372,38 @@ fn the_raised_note_says_when_its_function_changed() {
             Default::default(),
         )),
     );
-    assert!(shows(&mut sim_of(&app), "4 references"));
+    assert!(shows(&mut sim_of(&app), "2 callers, 4 calls"));
+    // Two callers of one name in one file — `save` in two classes — are two
+    // callers, as the Calls tab lists them: they read as one.
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call("origin", vec![1, 2], vec![]),
+                    call("save", vec![], vec![0]),
+                    clew_protocol::CallGraphNode {
+                        line: 30,
+                        ..call("save", vec![], vec![0])
+                    },
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    let lib = root.join("src/lib.rs");
+    app.proj.calls_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(crate::projectcalls::FileCalls::new(
+            lib,
+            crate::highlight::Lang::Rust,
+            vec![site("save", "origin", 7), site("save", "origin", 31)],
+            &[],
+            Default::default(),
+        )),
+    );
+    assert!(shows(&mut sim_of(&app), "2 callers"));
+    assert!(!shows(&mut sim_of(&app), "1 caller, 2 calls"));
 }
 
 /// The margin, with no note to show, says why, centered under a muted icon
@@ -8857,6 +13453,54 @@ fn an_empty_ask_shows_questions_not_instructions() {
     app.proj.project = None;
     let mut sim = sim_elem(super::ask_panel(&app, 560.0));
     assert!(!shows(&mut sim, "Answers draw on the open file"));
+    drop(sim);
+
+    // H2: asked with no folder open — said so, with the way to one; it
+    // said to configure embeddings, as plain words, under questions about
+    // "this codebase" there was none of.
+    let mut app = blank_app();
+    // L14: said as the card opens, before anything is asked — it stood
+    // blank until a question was sent.
+    let mut sim = sim_elem(super::ask_panel(&app, 560.0));
+    assert!(shows(&mut sim, "Open a folder to ask about its code"));
+    drop(sim);
+    app.proj.ask_input = "what is this?".into();
+    // L10: the send button is not lit for a question with nowhere to go.
+    let words = super::heard::gather_of(|| super::ask_panel(&app, 560.0));
+    assert!(
+        !words.iter().any(|w| w.title == "Send"),
+        "Send offered with no folder open"
+    );
+    let _ = app.update(Message::Ask(AskMsg::Submit));
+    assert_eq!(
+        app.proj.ask_notice.as_deref(),
+        Some("Open a folder to ask about its code")
+    );
+    let sent = click(sim_elem(super::ask_panel(&app, 560.0)), "Open Folder…");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Project(crate::ProjectMsg::OpenFolderPressed))),
+        "{sent:?}"
+    );
+    assert!(!shows(
+        &mut sim_elem(super::ask_panel(&app, 560.0)),
+        "Try asking"
+    ));
+    // The embeddings it is about, where they are what is missing: their
+    // page of Settings, a click away.
+    let mut app = reader_app();
+    app.proj.ask_notice = Some(crate::app::embedding::why_no_embeddings());
+    app.proj.ask_notice_embeddings = true;
+    let sent = click(sim_elem(super::ask_panel(&app, 560.0)), "Settings");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::OpenAt(
+                crate::app::state::SettingsPage::Embeddings
+            ))
+        )),
+        "{sent:?}"
+    );
 }
 
 /// The palette's rows show each command and its keys, a cap per key; a
@@ -8902,6 +13546,48 @@ fn ask_corner_edges() -> (f32, f32) {
 /// conversation in it, the code above and beside it taking its own clicks;
 /// Esc hides it to the pill, and put away the pill goes too; the large
 /// window's dimmed rest makes it a card again when clicked.
+/// A question to try names code as code (`total()` in the code font, not
+/// "How does total handle…" run into the prose), and a click still asks
+/// it, backticks and all, as the model wrote it.
+#[test]
+fn a_question_to_try_sets_its_names_as_code() {
+    let mut app = reader_app();
+    app.llm_available = false;
+    let q = "What does `total()` return?".to_string();
+    app.proj
+        .suggestions
+        .insert(app.suggest_key(), vec![q.clone()]);
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    let mut sim = sim_of(&app);
+    let caption = text_at(&mut sim, |t| t == "Try asking", 0).expect("Try asking");
+    assert!(!shows(&mut sim, "`"), "a backtick is shown to the reader");
+    // Its name in the code font, its backticks not drawn (rich text is not
+    // seen by the simulator, so the pieces are checked as they are made); a
+    // lone backtick sets nothing apart.
+    assert_eq!(
+        super::panels::question_pieces(&q),
+        vec![
+            ("What does ".to_string(), false),
+            ("total()".to_string(), true),
+            (" return?".to_string(), false),
+        ]
+    );
+    assert_eq!(
+        super::panels::question_pieces("Why `x?"),
+        vec![("Why x?".to_string(), false)]
+    );
+    let at = Point::new(caption.x + 24.0, caption.y + caption.height + 14.0);
+    let mut sim = sim_of(&app);
+    sim.point_at(at);
+    let _ = sim.simulate(iced_test::simulator::click());
+    let sent = sent_by(sim);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Suggested(s)) if *s == q)),
+        "the question is not asked: {sent:?}"
+    );
+}
+
 #[test]
 fn the_floating_ask_is_driven_from_the_screen() {
     let mut app = reader_app();
@@ -9051,6 +13737,8 @@ fn the_card_names_its_session_and_lists_the_others() {
         },
     ];
     app.proj.ask_session = Some(1);
+    let name_at = |app: &App| text_at(&mut sim_of(app), |t| t == "Where is the origin?", 0);
+    let shut = name_at(&app);
     {
         let mut sim = sim_of(&app);
         assert!(shows(&mut sim, "Where is the origin?"), "the card's name");
@@ -9066,14 +13754,19 @@ fn the_card_names_its_session_and_lists_the_others() {
         "{sent:?}"
     );
     app.ask_sessions_menu = true;
+    // The menu drops over the window: the card, and its name, stay where
+    // they were — the card grew to its full height to hold the menu, and
+    // its header jumped up the window from under the pointer.
+    assert!(shut.is_some());
+    assert_eq!(name_at(&app), shut, "the card's header stays put");
     {
         let mut sim = sim_of(&app);
         // A new session is the header's +, beside the menu: not a second
         // time in it.
         assert!(!shows(&mut sim, "New session"));
         assert!(shows(&mut sim, "How is a host connected?"));
-        assert!(shows(&mut sim, "2 min ago · 1 question"));
-        assert!(shows(&mut sim, "2 h ago · 2 questions"));
+        assert!(shows(&mut sim, "2 min ago, 1 question"));
+        assert!(shows(&mut sim, "2 h ago, 2 questions"));
     }
     let sent = click(sim_of(&app), "How is a host connected?");
     assert!(
@@ -9090,7 +13783,7 @@ fn the_card_names_its_session_and_lists_the_others() {
         assert!(shows(&mut sim, "How is a host connected?"));
         assert!(shows(&mut sim, "Over SSH, with the user's own keys."));
         assert!(
-            !shows(&mut sim, "2 min ago · 1 question"),
+            !shows(&mut sim, "2 min ago, 1 question"),
             "the other is not found"
         );
     }
@@ -9265,6 +13958,345 @@ fn smart_turn_is_offered_in_voice_settings() {
     let _ = std::fs::remove_dir_all(store.dir());
 }
 
+/// Waiting for "Hey, Clew" in Voice settings: its switch, and the keyword
+/// spotter it needs — its download saying its size, once here Remove, what
+/// went wrong under it, and that it cannot run without `clew-speak`. The
+/// microphone, while it waits, is drawn in the accent, and says the phrase
+/// starts it too.
+#[test]
+fn the_wake_phrase_is_offered_in_voice_settings() {
+    use crate::VoiceMsg;
+    let _turn = crate::app::wake::TEST_TURN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut app = reader_app();
+    let dir = crate::app::tests::test_dir("ui-wake-phrase");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = clew_voice::models::Store::new(dir);
+    app.voice.store = Some(store.clone());
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(&mut sim, "Start listening when you say “Hey, Clew”"));
+    assert!(shows(
+        &mut sim,
+        "goes only to a small model on this computer"
+    ));
+    assert!(shows(&mut sim, "Keyword Spotter"));
+    assert!(matches!(
+        click(sim, "Download (33 MB)").as_slice(),
+        [Message::Voice(VoiceMsg::DownloadWake)]
+    ));
+    let wake = clew_voice::wake::dir(&store);
+    std::fs::create_dir_all(&wake).unwrap();
+    for file in clew_voice::wake::MODEL.files {
+        std::fs::File::create(wake.join(file.name))
+            .unwrap()
+            .set_len(file.bytes)
+            .unwrap();
+    }
+    app.voice.wake.error = Some("the microphone was unplugged".into());
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(&mut sim, "the microphone was unplugged"));
+    assert!(!shows(&mut sim, "Download (33 MB)"));
+    assert!(matches!(
+        click(sim, "Remove").as_slice(),
+        [Message::Voice(VoiceMsg::RemoveWake)]
+    ));
+    app.voice.wake.spotters = None;
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(
+        &mut sim,
+        "clew-speak, which runs it, is not installed beside Clew"
+    ));
+    drop(sim);
+    // Waiting: the microphone at rest says so.
+    let rest = crate::theme::fg_muted();
+    assert_eq!(super::askfloat::talk_tip(&app), "Talk");
+    assert_eq!(super::askfloat::talk_tint(&app, rest), rest);
+    crate::app::wake::testing::ready(&mut app, store.clone());
+    assert!(app.resume_waiting());
+    assert_eq!(super::askfloat::talk_tip(&app), "Talk — or say “Hey, Clew”");
+    assert_eq!(
+        super::askfloat::talk_tint(&app, rest),
+        crate::theme::accent()
+    );
+    app.stop_waiting();
+    let _ = std::fs::remove_dir_all(store.dir());
+}
+
+/// The tour's sheet says a language model is "All set" only once it has
+/// answered: a key alone is checked first, with one tiny call; a provider
+/// that could not be reached is said as such. With a key and nothing
+/// reachable it said "All set", and the tour then set up 45 calls that
+/// failed.
+#[test]
+fn the_tour_sheet_says_all_set_only_of_a_model_that_answered() {
+    use crate::app::state::ConnectionTest;
+    let mut app = reader_app();
+    app.llm_available = true;
+    let prep = crate::app::tutorial::TourPrep::default();
+    let says = |app: &App, words: &str| {
+        shows(
+            &mut sim_elem(super::tutorial::tour_prep_sheet(app, &prep)),
+            words,
+        )
+    };
+    app.model_check.result = ConnectionTest::Untried;
+    assert!(says(&app, "Key added."));
+    assert!(says(&app, "Test connection"));
+    assert!(!says(&app, "All set."));
+    // Not ticked, so the step to do — and Start waits for it.
+    assert_eq!(prep.current(&app), Some(crate::app::tutorial::Need::Model));
+    assert!(!prep.ready(&app));
+    app.model_check.result =
+        ConnectionTest::Failed(crate::app::state::TestFailure::Said("Couldn't reach 127.0.0.1:9 (nothing answered at that address). Check the base URL and your network.".into()));
+    assert!(says(&app, "Couldn't reach 127.0.0.1:9"));
+    assert!(!says(&app, "All set."));
+    assert_eq!(prep.current(&app), Some(crate::app::tutorial::Need::Model));
+    // Said as a failure, in its colour: it stood in the grey of the help.
+    assert!(super::tutorial::step_failed(
+        &app,
+        &prep,
+        crate::app::tutorial::Need::Model
+    ));
+    app.model_check.result = ConnectionTest::Answered("m".into());
+    assert!(says(&app, "All set."));
+    assert!(!says(&app, "Test connection"));
+    assert!(!super::tutorial::step_failed(
+        &app,
+        &prep,
+        crate::app::tutorial::Need::Model
+    ));
+    assert_ne!(prep.current(&app), Some(crate::app::tutorial::Need::Model));
+    // Settings, opened from the sheet's next step, tests its own form: the
+    // sheet's check stands. It went back to "Check that it answers".
+    let _ = app.update(Message::Tutorial(crate::TutorialMsg::SetUp(
+        crate::SettingsPage::Embeddings,
+    )));
+    assert!(says(&app, "All set."));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::TestConnection));
+    assert!(says(&app, "All set."));
+}
+
+/// Why the tour cannot start yet is said beside its Start button, whatever
+/// is missing: in a tip alone (which a held button may not show), a press
+/// on the tour's main button did nothing, with no word why.
+#[test]
+fn the_tour_sheet_says_why_it_cannot_start_yet() {
+    use crate::app::state::ConnectionTest;
+    let mut app = reader_app();
+    let prep = crate::app::tutorial::TourPrep::default();
+    let says = |app: &App, words: &str| {
+        shows(
+            &mut sim_elem(super::tutorial::tour_prep_sheet(app, &prep)),
+            words,
+        )
+    };
+    app.llm_available = false;
+    assert!(says(
+        &app,
+        "The tour needs a language model first (step 1)."
+    ));
+    app.llm_available = true;
+    app.model_check.result = ConnectionTest::Untried;
+    assert!(says(
+        &app,
+        "The tour starts once the model answers a test (step 1)."
+    ));
+    assert!(!says(&app, "needs a language model"));
+    app.model_check.result = ConnectionTest::Answered("m".into());
+    assert!(!prep.ready(&app), "Tea Shop is not ready in a reader's app");
+    assert!(says(
+        &app,
+        "The tour starts once Tea Shop is ready (step 3)."
+    ));
+    assert!(!says(&app, "answers a test"));
+    // Tea Shop could not be written: said so, not as a start to come — it
+    // never would — and its step has Try again, which writes it anew.
+    let prep = crate::app::tutorial::TourPrep {
+        sample: Some(Err("disk full".into())),
+        ..Default::default()
+    };
+    let mut sim = sim_elem(super::tutorial::tour_prep_sheet(&app, &prep));
+    assert!(shows(&mut sim, "Tea Shop could not be set up (step 3)."));
+    assert!(!shows(&mut sim, "The tour starts once Tea Shop is ready"));
+    assert!(shows(&mut sim, "disk full"));
+    drop(sim);
+    assert!(matches!(
+        click(
+            sim_elem(super::tutorial::tour_prep_sheet(&app, &prep)),
+            "Try again"
+        )
+        .as_slice(),
+        [Message::Tutorial(crate::TutorialMsg::RetrySample)]
+    ));
+    app.tour_prep = Some(prep);
+    let _ = app.update(Message::Tutorial(crate::TutorialMsg::RetrySample));
+    assert!(
+        app.tour_prep.as_ref().is_some_and(|p| p.sample.is_none()),
+        "written anew: getting ready again"
+    );
+}
+
+/// While jump mode's codes are up, what to do with them is said whole on
+/// the status line, a failure standing there or not — after the failure's
+/// words it was cut to "Type the code on a…" — and the failure's controls
+/// stay, to be pressed by their codes, after what failed: without it,
+/// "Try again  Settings ×" stood with nothing said of what they were
+/// about.
+#[test]
+fn the_jump_hint_is_said_whole_beside_a_failure() {
+    let mut app = reader_app();
+    app.say_failure(
+        "Couldn't explain lib.rs: couldn't reach the AI provider (nothing answered at that address) — check the base URL in Settings".into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    let hint = "Type the code on a control to press it — Esc to stop";
+    app.jump = Some(String::new());
+    app.status = hint.into();
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(
+        text_at(&mut sim, |t| t == hint, 0).is_some(),
+        "the hint, whole"
+    );
+    let again = text_at(&mut sim, |t| t == "Try again", 0).expect("Try again");
+    let failed = text_at(&mut sim, |t| t == "Couldn't explain lib.rs", 0)
+        .expect("what failed, before its controls");
+    assert!(failed.x < again.x);
+    assert!(!shows(&mut sim, "couldn't reach the AI provider"));
+    drop(sim);
+    // Out of jump mode, the failure is said again.
+    app.jump = None;
+    app.status = String::new();
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(shows(&mut sim, "Couldn't explain"));
+}
+
+/// A failure on the status line keeps its Try again, Settings and × where
+/// they are whatever else is said or stops being said: shortened to make
+/// room for the next message, they moved under the pointer and a click
+/// meant for Settings landed on words.
+#[test]
+fn a_failures_controls_stay_put_on_the_status_line() {
+    let mut app = reader_app();
+    app.say_failure(
+        "Couldn't explain lib.rs: couldn't reach the AI provider (nothing answered at that address) — check the base URL in Settings".into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    let at = |app: &App, words: &str| {
+        let mut sim = sim_elem(super::statusbar::statusbar(app));
+        text_at(&mut sim, |t| t == words, 0).map(|r| r.x)
+    };
+    let before = (at(&app, "Try again"), at(&app, "Settings"));
+    assert!(before.0.is_some() && before.1.is_some(), "{before:?}");
+    for said in ["Copied 2 lines", "Code statistics ready", ""] {
+        app.status = said.into();
+        assert_eq!(
+            (at(&app, "Try again"), at(&app, "Settings")),
+            before,
+            "moved for {said:?}"
+        );
+    }
+}
+
+/// What is under way now is said whole beside an older failure, at the
+/// widths a window is used at: the failure gave it about 120 px, and
+/// "Working out what discounts does…" was "Working out wh…". The failure
+/// keeps what failed, its reason whole where the pointer rests.
+#[test]
+fn what_is_under_way_is_said_whole_beside_an_older_failure() {
+    let mut app = reader_app();
+    app.say_failure(
+        "Couldn't explain lib.rs: couldn't reach the AI provider (nothing answered at that address) — check the base URL in Settings".into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    let now = "Working out what discounts does…";
+    app.status = now.into();
+    for width in [1100.0, 1440.0] {
+        let mut sim = sim_sized(&app, Size::new(width, 800.0));
+        assert!(
+            text_at(&mut sim, |t| t == now, 0).is_some(),
+            "cut at {width}"
+        );
+        assert!(
+            text_at(&mut sim, |t| t.starts_with("Couldn't explain lib.rs"), 0).is_some(),
+            "what failed is gone at {width}"
+        );
+        assert!(text_at(&mut sim, |t| t == "Try again", 0).is_some());
+    }
+    // Said in Chinese, with the full-width colon: what failed is told from
+    // its reason by that, and the room kept for what is said now is kept
+    // (the whole failure counted as what failed, and took it again).
+    let mut app = reader_app();
+    app.say_failure(
+        "无法解释 lib.rs：无法连接到 AI 服务商（该地址无人应答）— 请在设置中检查基础 URL，或者检查网络连接是否正常".into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    let now = "正在弄清 discounts 的作用…";
+    app.status = now.into();
+    let mut sim = sim_sized(&app, Size::new(1100.0, 800.0));
+    assert!(
+        text_at(&mut sim, |t| t == now, 0).is_some(),
+        "cut in Chinese"
+    );
+    assert!(text_at(&mut sim, |t| t.starts_with("无法解释 lib.rs"), 0).is_some());
+}
+
+/// An Ask answer's failure, raised with Ask put away, is said in the
+/// conversation once Ask is open — and not on the status bar in grey as
+/// well, for as long as the status line kept its words.
+#[test]
+fn an_ask_failure_is_not_said_in_grey_once_ask_is_open() {
+    let mut app = reader_app();
+    app.say_failure(
+        "Couldn't answer: boom".into(),
+        Some(Message::Ask(AskMsg::AskAgain(0))),
+        crate::app::state::FailureOf::Ask,
+    );
+    let shown = |app: &App| {
+        let mut sim = sim_elem(super::statusbar::statusbar(app));
+        text_at(&mut sim, |t| t.starts_with("Couldn't answer"), 0).is_some()
+    };
+    assert!(shown(&app), "not said with Ask put away");
+    app.ask_view = crate::AskView::Compact;
+    assert!(!shown(&app), "said again on the status bar");
+}
+
+/// A failure standing on the status line is said in the language spoken
+/// now: after Display language changed it stood on in English beside
+/// "Réessayer" and "Réglages".
+#[test]
+fn a_standing_failure_is_said_in_the_language_now_spoken() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = reader_app();
+    app.say_failure_again(
+        || {
+            crate::tr!(
+                "Walkthrough failed: {error}",
+                error = crate::app::tasks::ai_reason("Connection refused (os error 111)")
+            )
+        },
+        None,
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    let said = |app: &App| {
+        let mut sim = sim_elem(super::statusbar::statusbar(app));
+        text_at(&mut sim, |t| t.starts_with("Walkthrough failed"), 0).is_some()
+    };
+    assert!(said(&app));
+    with_lang(Lang::Fr, || {
+        assert!(!said(&app), "still in English");
+        let mut sim = sim_elem(super::statusbar::statusbar(&app));
+        assert!(
+            text_at(&mut sim, |t| t.starts_with("Échec de la visite"), 0).is_some(),
+            "not said in French"
+        );
+    });
+}
+
 /// What voice could not do is said in the reader's language: on the card,
 /// on the pill, and under a model in Settings.
 #[test]
@@ -9335,6 +14367,8 @@ fn speaking_shows_with_a_stop() {
         fn error(&self) -> Option<String> {
             None
         }
+        fn pause(&self) {}
+        fn resume(&self) {}
     }
     let mut app = reader_app();
     app.ask_view = crate::AskView::Hidden;
@@ -9349,6 +14383,14 @@ fn speaking_shows_with_a_stop() {
             "in the corner: {speaking:?}"
         );
     }
+    // The pill opens the conversation, as it does at rest: the answer being
+    // read is in it.
+    assert!(
+        click(sim_of(&app), "Speaking")
+            .iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Open))),
+        "the conversation is out of reach while Clew speaks"
+    );
     // Its button, lit, stops it — and no key is named beside it, which
     // said the same thing twice.
     assert!(!shows(&mut sim_of(&app), "Esc"));
@@ -9362,20 +14404,21 @@ fn speaking_shows_with_a_stop() {
             .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking))),
         "{sent:?}"
     );
-    // On the card, in the composer: the same, Esc left to the pill.
+    // On the card, in the composer: the button lit to stop it, the field
+    // left to type in, Esc left to the pill.
     app.ask_view = crate::AskView::Compact;
-    let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "Speaking"), "on the card too");
-    assert!(!shows(&mut sim, "Esc"));
-    let sent = click_right_of(
-        || sim_of(&app),
-        "Speaking",
-        |m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking)),
-    );
+    assert!(!shows(&mut sim_of(&app), "Esc"));
+    let lit = super::askfloat::voice_lit(&app, super::ROUND_BUTTON, 15.0).expect("lit");
+    let mut sim = sim_elem(lit);
+    sim.point_at(Point::new(
+        super::ROUND_BUTTON / 2.0,
+        super::ROUND_BUTTON / 2.0,
+    ));
+    let _ = sim.simulate(iced_test::simulator::click());
     assert!(
-        sent.iter()
-            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking))),
-        "{sent:?}"
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking)))
     );
 }
 
@@ -9394,6 +14437,12 @@ fn voice_shows_what_it_is_doing() {
         level: 0.5,
     };
     {
+        assert!(
+            click(sim_of(&app), "Listening")
+                .iter()
+                .any(|m| matches!(m, Message::Ask(AskMsg::Open))),
+            "the pill opens the conversation while it listens"
+        );
         let mut sim = sim_of(&app);
         let listening = text_at(&mut sim, |t| t == "Listening", 0)
             .expect("the pill says it listens, even put away");
@@ -9420,37 +14469,38 @@ fn voice_shows_what_it_is_doing() {
         voice.as_slice(),
         [Message::Voice(crate::VoiceMsg::Toggle)]
     ));
+    // On the card, the field says it listens — and can still be typed in;
+    // the microphone, lit, turns it off. What is said is worked out out of
+    // sight: nothing says so, and there is no switch to keep it listening.
+    app.voice.mic_on = true;
     app.ask_view = crate::AskView::Compact;
-    assert!(shows(&mut sim_of(&app), "Listening"), "on the card too");
-    app.voice.phase = VoicePhase::Transcribing { token: 1 };
-    assert!(shows(&mut sim_of(&app), "Transcribing"));
-    // On the card, the microphone's place holds the way to cancel; on the
-    // pill, as while listening, Esc.
-    let sent = click_right_of(
-        || sim_of(&app),
-        "Transcribing",
-        |m| matches!(m, Message::Voice(crate::VoiceMsg::Cancel)),
-    );
-    assert!(
-        sent.iter()
-            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::Cancel))),
-        "{sent:?}"
-    );
-    app.ask_view = crate::AskView::Hidden;
     {
         let mut sim = sim_of(&app);
-        assert!(shows(&mut sim, "Transcribing"));
-        assert!(!shows(&mut sim, "Esc"));
+        assert!(!shows(&mut sim, "Keep listening"));
+        assert!(!shows(&mut sim, "Transcribing"));
     }
-    app.ask_view = crate::AskView::Compact;
-    app.voice.phase = VoicePhase::Idle;
+    let lit = super::askfloat::voice_lit(&app, super::ROUND_BUTTON, 15.0).expect("lit while on");
+    let mut sim = sim_elem(lit);
+    sim.point_at(Point::new(
+        super::ROUND_BUTTON / 2.0,
+        super::ROUND_BUTTON / 2.0,
+    ));
+    let _ = sim.simulate(iced_test::simulator::click());
+    assert!(
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::Toggle))),
+        "it turns the microphone off"
+    );
+    // A command that asks first, while it listens on for the yes.
     app.voice.confirm = Some(crate::app::voice::Waiting::Command("Explain All".into()));
     assert!(shows(&mut sim_of(&app), "Run “Explain All”?"));
     assert!(matches!(
         click(sim_of(&app), "Run").as_slice(),
         [Message::Voice(crate::VoiceMsg::Confirm)]
     ));
-    // On the card: what was last heard, and what came of it.
+    // On the card: what was last heard, and what came of it — as it
+    // listens on.
     app.voice.confirm = None;
     app.voice.hear(Heard {
         text: "open the call graph".into(),
@@ -9469,9 +14519,14 @@ fn voice_shows_what_it_is_doing() {
         assert!(shows(&mut sim, "Call Graph"));
     }
     app.voice.heard_at = Some(std::time::Instant::now() - crate::app::voice::HEARD_SHOWN);
-    let mut sim = sim_of(&app);
-    assert!(!shows(&mut sim, "“open the call graph”"));
-    assert!(shows(&mut sim, "Ask"));
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, "“open the call graph”"));
+        assert!(shows(&mut sim, "Listening"), "listening, as before");
+    }
+    app.voice.mic_on = false;
+    app.voice.phase = VoicePhase::Idle;
+    assert!(shows(&mut sim_of(&app), "Ask"));
 }
 
 /// The settings' Voice section: every model with its size, downloaded
@@ -9545,6 +14600,15 @@ fn the_voice_settings_offer_each_model_and_its_size() {
         click(sim_elem(super::voice_section(&app)), "Remove").as_slice(),
         [Message::Voice(crate::VoiceMsg::RemoveModel("base.en"))]
     ));
+    // Just downloaded, its Remove is not yet where its Cancel was: a click
+    // meant for Cancel removed what had just arrived.
+    app.voice
+        .downloaded_at
+        .insert("small-q5_1", std::time::Instant::now());
+    app.voice
+        .downloaded_at
+        .insert("base.en", std::time::Instant::now());
+    assert!(!shows(&mut sim_elem(super::voice_section(&app)), "Remove"));
     let _ = std::fs::remove_dir_all(store.dir());
 }
 
@@ -9588,8 +14652,8 @@ fn the_window_resizes_from_its_edges_and_corners() {
 }
 
 /// The sidebar's strip holds its six everyday views and nothing else; a
-/// view opened by what shows it (a value traced, the import graph, a
-/// walkthrough, a symbol's docs) is named over it, with the way back to
+/// view opened by what shows it (a function's calls, a value traced, the
+/// import graph, a symbol's docs) is named over it, with the way back to
 /// the files.
 #[test]
 fn a_view_off_the_strip_is_named_over_it() {
@@ -9600,7 +14664,7 @@ fn a_view_off_the_strip_is_named_over_it() {
     for (tab, name) in [
         (crate::SidebarTab::Flow, "Value flow"),
         (crate::SidebarTab::Imports, "Imports"),
-        (crate::SidebarTab::Walk, "Walkthroughs"),
+        (crate::SidebarTab::Calls, "Call hierarchy"),
         (crate::SidebarTab::Docs, "API docs"),
         (crate::SidebarTab::Notes, "Your notes"),
     ] {
@@ -9701,6 +14765,71 @@ fn the_view_menu_shows_and_hides_the_margin() {
     assert!(!shows(&mut sim, "Toggle panel"), "no toggle in the bars");
 }
 
+/// M9: the margin, asked for, is hidden while the code is split — and its
+/// View menu row says so beside its tick, where it went with no word.
+/// Once the split closes, its card is of the caret in the pane left: it
+/// went on telling of the closed pane's ("subtotal, line 11" over line 1).
+#[test]
+fn the_margin_says_why_it_is_hidden_and_follows_the_pane_left() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let sym = |name: &str, line: usize| crate::outline::Symbol {
+        name: name.into(),
+        kind: "function".into(),
+        line,
+        end_line: line,
+    };
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![sym("line_0", 1), sym("line_10", 11)];
+    app.proj.panes[0].as_mut().unwrap().caret = Some((0, 0));
+    app.show_view_menu = true;
+    assert!(!shows(&mut sim_of(&app), "hidden while split"));
+    let _ = app.update(Message::Editor(crate::EditorMsg::ToggleSplit));
+    assert!(app.proj.split);
+    let mut sim = sim_of(&app);
+    assert!(
+        shows(&mut sim, "hidden while split"),
+        "the row says nothing"
+    );
+    let margin = text_at(&mut sim, |t| t == "Margin", 0).expect("its row");
+    let why = text_at(&mut sim, |t| t == "hidden while split", 0).unwrap();
+    assert!(
+        (why.center_y() - margin.center_y()).abs() < 2.0,
+        "on its row"
+    );
+    drop(sim);
+    app.show_view_menu = false;
+    // The right half read, its caret on line 11, and its card with it.
+    app.proj.panes[1].as_mut().unwrap().caret = Some((10, 0));
+    let _ = app.follow_caret(iced::Task::none());
+    let named = |app: &App| match &app.proj.explain.view {
+        Some(crate::explain::Node::Function { name, .. }) => name.clone(),
+        other => format!("{other:?}"),
+    };
+    assert_eq!(named(&app), "line_10");
+    // Closed from the right half, the pane read is the one kept, its card
+    // with it.
+    app.proj.active = 1;
+    let _ = app.update(Message::Editor(crate::EditorMsg::ToggleSplit));
+    assert!(!app.proj.split);
+    assert_eq!(named(&app), "line_10", "the card of the pane kept");
+    // Closed from the left half, the left pane is kept: the card is of
+    // its caret, not of the pane closed.
+    let _ = app.update(Message::Editor(crate::EditorMsg::ToggleSplit));
+    app.proj.panes[1].as_mut().unwrap().caret = Some((10, 0));
+    app.proj.panes[0].as_mut().unwrap().caret = Some((0, 0));
+    app.proj.active = 1;
+    let _ = app.follow_caret(iced::Task::none());
+    assert_eq!(named(&app), "line_10");
+    app.proj.active = 0;
+    let _ = app.update(Message::Editor(crate::EditorMsg::ToggleSplit));
+    assert!(!app.proj.split);
+    assert_eq!(named(&app), "line_0", "the card of the pane closed");
+    // A narrow window says why too.
+    app.show_view_menu = true;
+    app.window_width = 900.0;
+    assert!(shows(&mut sim_of(&app), "hidden: window too narrow"));
+}
+
 /// On Linux and Windows the window is borderless and Clew draws the design's
 /// 1 px border round it, the room inside it what everything is laid out in;
 /// maximized, there is no frame, and restored, it is back. macOS keeps the
@@ -9771,7 +14900,7 @@ fn a_diff_tints_its_rows_across_the_pane() {
         PathBuf::from("/p/src/main.py"),
         "src/main.py".into(),
         vec![
-            line(DiffKind::Hunk, "@@ -1,1 +1,2 @@"),
+            line(DiffKind::Hunk, "@@ -4,1 +4,2 @@"),
             line(DiffKind::Context, " main()"),
             line(DiffKind::Add, "+# local change"),
         ],
@@ -10014,8 +15143,10 @@ fn the_stats_page_reads_cleanly() {
     assert_eq!(super::lang_color(n + 1), super::lang_color(n));
 
     let size = Size::new(WINDOW.width, 600.0);
-    let view =
-        || iced_test::Simulator::with_size(Default::default(), size, super::stats_home(&app));
+    // As the page is shown over the panes, with its foot.
+    app.proj.stats.showing = true;
+    app.ask_view = crate::AskView::Hidden;
+    let view = || iced_test::Simulator::with_size(Default::default(), size, super::pane_area(&app));
     let mut sim = view();
     assert!(shows(&mut sim, "120"), "the project's files");
     assert!(shows(&mut sim, "87"), "its code files");
@@ -10040,6 +15171,22 @@ fn the_stats_page_reads_cleanly() {
     assert!(
         last.y + last.height <= pill_top,
         "{last:?} under the pill from {pill_top}"
+    );
+    drop(sim);
+    // At rest too: a row on its way to the end was under it.
+    let mut sim = view();
+    let lowest = (0..30)
+        .filter_map(|i| {
+            let name = format!("src/file{i:02}.rs");
+            text_at(&mut sim, move |t| t == name, 0)
+        })
+        .filter(|r| r.height > 1.0)
+        .map(|r| r.y + r.height)
+        .fold(0.0, f32::max);
+    assert!(lowest > 0.0, "rows shown");
+    assert!(
+        lowest <= pill_top,
+        "a row at {lowest} under the pill from {pill_top}"
     );
 }
 
@@ -10104,8 +15251,9 @@ fn repeated_actions_are_icons_that_do_what_they_did() {
             .any(|m| matches!(m, Message::Semantic(SemanticMsg::BuildIndex)))
     });
     assert!(rebuilt, "the index is rebuilt from its icon");
-    // The first build is asked for in words.
+    // The first build is asked for in words (with a model to build with).
     app.proj.embed_index = crate::embed::Index::default();
+    app.embed_available = true;
     assert!(shows(
         &mut sim_elem(super::semantic_tab(&app)),
         "Build index"
@@ -10136,7 +15284,7 @@ fn repeated_actions_are_icons_that_do_what_they_did() {
 
     let abs = root.join("src/lib.rs");
     app.proj.diff = Some(crate::DiffState::new(abs, "src/lib.rs".into(), Vec::new()));
-    let head = "src/lib.rs  ·  vs HEAD";
+    let head = "src/lib.rs: changes since the last commit";
     words_gone(&mut sim_of(&app), &["✕ Close"]);
     let sent = click_right_of(
         || sim_of(&app),
@@ -10248,9 +15396,44 @@ fn the_status_bar_is_one_line_at_any_width() {
     });
 }
 
+/// In a window too narrow for the status bar's chip, the chip is left
+/// out — not laid out clipped to nothing, an invisible control the ring
+/// stopped on (its ring two brackets of a pixel).
+#[test]
+fn a_chip_with_no_room_is_no_stop() {
+    let presses_setup = |width: f32| {
+        let mut app = reader_app();
+        app.window_width = width;
+        app.window_height = 520.0;
+        app.proj.setup_missing = vec![crate::app::setup::SetupServer {
+            language: "rust".into(),
+            name: "rust-analyzer".into(),
+            fetch: crate::app::setup::Fetch::Download,
+            builds: false,
+        }];
+        let mut window = Driven::sized(&app, Size::new(width, 520.0));
+        window.tab(&mut app, false);
+        let (_, count, _) = ring_at(&app);
+        (0..count).any(|_| {
+            let on = matches!(
+                ring_at(&app).2,
+                Some(Message::Project(ProjectMsg::SetupShow(_)))
+            );
+            window.tab(&mut app, false);
+            on
+        })
+    };
+    assert!(presses_setup(1280.0), "a stop where there is room");
+    // Its right side's words — the language, the server, the caret — took
+    // the room a window shows them in; here, the window's own narrowness.
+    assert!(!presses_setup(330.0), "none where there is not");
+}
+
 /// What the status bar lays out for its room — the chip that sets up
 /// missing language servers — is built only when laid out, and is pressed
-/// by voice all the same: gathered as it is drawn.
+/// by voice all the same: gathered as it is drawn. Pressed, it asks first —
+/// the setup sheet, saying what each server takes — and fetches nothing,
+/// runs no build, until that is agreed to.
 #[test]
 fn the_status_bars_chips_are_pressed_by_voice() {
     let mut app = reader_app();
@@ -10267,8 +15450,16 @@ fn the_status_bars_chips_are_pressed_by_voice() {
         .expect("the chip is gathered");
     assert!(matches!(
         chip.message,
-        Message::Project(ProjectMsg::SetUpMissing)
+        Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Manage))
     ));
+    let _ = app.update(chip.message.clone());
+    assert!(
+        app.setup
+            .as_ref()
+            .is_some_and(|s| s.mode == crate::app::setup::SetupMode::Manage),
+        "the setup sheet, asking"
+    );
+    assert!(app.proj.setting_up.is_empty(), "nothing set up yet");
 }
 
 /// The ⋯ menu fits the window: in one short enough for the strip to fall
@@ -10277,7 +15468,7 @@ fn the_status_bars_chips_are_pressed_by_voice() {
 /// Hung from its button, its last rows ran past the foot, out of reach.
 #[test]
 fn the_tools_menu_fits_a_short_window() {
-    for height in [520.0, 600.0] {
+    for height in [460.0, 520.0] {
         let size = Size::new(1280.0, height);
         let mut app = reader_app();
         app.window_width = size.width;
@@ -10287,14 +15478,13 @@ fn the_tools_menu_fits_a_short_window() {
         let top = super::tools_menu_top(&app);
         assert!(top >= super::TOOLBAR_H, "over the top bar: {top}");
         let mut sim = sim_sized(&app, size);
-        let last =
-            text_at(&mut sim, |t| t == "Keyboard Shortcuts", 0).expect("the last row is drawn");
+        let last = text_at(&mut sim, |t| t == "Tutorial", 0).expect("the last row is drawn");
         assert!(
             last.y + last.height <= height,
             "the last row runs past the foot at {height}: {last:?}"
         );
         assert!(
-            text_at(&mut sim, |t| t == "Explain All", 0).is_some(),
+            text_at(&mut sim, |t| t == "Explain All…", 0).is_some(),
             "and the first is there too"
         );
         sim.point_at(last.center());
@@ -10302,13 +15492,13 @@ fn the_tools_menu_fits_a_short_window() {
         assert!(
             sent_by(sim)
                 .iter()
-                .any(|m| matches!(m, Message::Window(WindowMsg::OpenShortcuts))),
+                .any(|m| matches!(m, Message::Tutorial(crate::TutorialMsg::Start))),
             "its last row clicked at {height}"
         );
     }
     // Shorter than the menu: its rows scroll in what there is.
     let mut app = reader_app();
-    app.window_height = 360.0;
+    app.window_height = 240.0;
     assert!(super::tools_menu_h() > super::tools_menu_room(&app));
 }
 
@@ -10348,7 +15538,8 @@ fn the_files_name_keeps_its_room_in_the_header() {
 
 /// A note not explained yet offers what explains it, there in the note: it
 /// named "the ⋯ menu", which was no menu on screen once its tools were laid
-/// on the strip.
+/// on the strip — and it explains this note's file or function, in one
+/// call, not the whole project.
 #[test]
 fn an_unexplained_note_offers_explain_all() {
     let mut app = reader_app();
@@ -10361,13 +15552,27 @@ fn an_unexplained_note_offers_explain_all() {
     let said = format!("{:?}", app.proj.explain.prepared);
     assert!(said.contains("Not explained yet."), "{said}");
     assert!(!said.contains('⋯'), "{said}");
-    let sent = click(sim_of(&app), "Explain All");
+    // Every "Explain" on screen (the file's header has one too): the
+    // note's is the rightmost, in the margin.
+    let explains = |app: &App| -> Vec<Rectangle> {
+        let mut sim = sim_of(app);
+        (0..6)
+            .map_while(|n| text_at(&mut sim, |t| t == "Explain", n))
+            .collect()
+    };
+    let before = explains(&app);
+    let note_explain = *before
+        .iter()
+        .max_by(|a, b| a.center_x().total_cmp(&b.center_x()))
+        .expect("an Explain on the note");
+    let mut sim = sim_of(&app);
+    sim.point_at(note_explain.center());
+    let _ = sim.simulate(iced_test::simulator::click());
+    let sent: Vec<Message> = sent_by(sim);
     assert!(
         sent.iter().any(|m| matches!(
             m,
-            Message::Settings(crate::SettingsMsg::OpenAt(
-                crate::SettingsPage::LanguageModel
-            )) | Message::Project(crate::ProjectMsg::SetupShow(_))
+            Message::Explain(crate::ExplainMsg::Explain(crate::explain::Node::File(_)))
         )),
         "{sent:?}"
     );
@@ -10383,7 +15588,11 @@ fn an_unexplained_note_offers_explain_all() {
         },
     );
     let _ = app.show_explanation(node);
-    assert!(!shows(&mut sim_of(&app), "Explain All"));
+    assert_eq!(
+        explains(&app).len(),
+        before.len() - 1,
+        "not offered once explained"
+    );
 }
 
 /// The Overview not generated yet says what it is written from and offers
@@ -10422,14 +15631,27 @@ fn the_overview_offers_its_next_step() {
             basis: None,
         },
     );
-    let sent = click(sim_elem(super::overview_home(&app)), "Generate overview");
+    // Ready: written by the icon beside the close button, not by a button
+    // floated alone under the map.
+    let mut sim = sim_elem(super::overview_home(&app));
+    assert!(!shows(&mut sim, "Generate overview"), "a word, not an icon");
+    drop(sim);
+    let sent = click_right_of(
+        || sim_elem(super::overview_home(&app)),
+        "Architecture Overview",
+        |m| matches!(m, Message::Overview(crate::OverviewMsg::Generate)),
+    );
     assert!(
-        matches!(
-            sent.as_slice(),
-            [Message::Overview(crate::OverviewMsg::Generate)]
-        ),
+        sent.iter()
+            .any(|m| matches!(m, Message::Overview(crate::OverviewMsg::Generate))),
         "{sent:?}"
     );
+    // Writing it keeps the page and turns the icon: the page was swapped
+    // for a line of words.
+    app.proj.overview.generating = true;
+    let mut sim = sim_elem(super::overview_home(&app));
+    assert!(shows(&mut sim, "Architecture Overview"));
+    assert!(shows(&mut sim, "Generating architecture overview…"));
 }
 
 /// An empty type map says why: an API index never built — and, without
@@ -10488,35 +15710,64 @@ fn the_ask_header_has_one_way_away_and_names_esc_once() {
 
 /// The Ask card keeps its height while an answer comes in: fitted to it,
 /// the card grew up the window a line at a time, its header moving with
-/// every line said.
+/// every line said. Nor does it move as an answer fails, as Try again is
+/// pressed ("Thinking…" is shorter than a failure), or as an answer ends:
+/// fitted to each, it jumped, its × moved from under the pointer.
 #[test]
 fn the_ask_card_holds_still_while_an_answer_comes_in() {
+    use clew_protocol::StreamOutcome;
     let mut app = reader_app();
     app.ask_view = crate::AskView::Compact;
-    app.proj.ask_turns.push(crate::app::model::AskTurn {
-        stream: 4,
-        question: "What does it do?".into(),
-        streaming: true,
-        ..Default::default()
-    });
-    app.proj.link.agent_stream = Some(4);
-    let _ = app.on_ask_delta(4, "It reads the file.\n\n".into());
+    // A tall window, where the card fitted to a failure is well short of
+    // as tall as it may be.
+    let size = Size::new(1440.0, 900.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
     // Where the card's header is drawn: its session's name.
     let header_y = |app: &App| {
         let name = app.ask_session_title();
-        text_at(&mut sim_of(app), move |t| t == name, 0)
+        text_at(&mut sim_sized(app, size), move |t| t == name, 0)
             .expect("the card's header")
             .y
     };
-    let before = header_y(&app);
+    let ask = |app: &mut App, stream: u64| {
+        app.proj.ask_turns.push(crate::app::model::AskTurn {
+            stream,
+            question: "What does it do?".into(),
+            streaming: true,
+            ..Default::default()
+        });
+        app.proj.link.agent_stream = Some(stream);
+    };
+    let empty = header_y(&app);
+    ask(&mut app, 3);
+    let asked = header_y(&app);
+    assert!(asked < empty, "as tall as it may be once asked");
+    // Failed before a word came, and asked again.
+    let _ = app.on_ask_stream_ended(3, StreamOutcome::Failed("server disconnected".into()));
+    app.proj.link.agent_stream = None;
+    assert!(!app.ask_stream_active());
+    assert!(app.proj.ask_turns[0].extras.failed);
+    assert_eq!(header_y(&app), asked, "the header moved as it failed");
+    app.proj.ask_turns.clear();
+    ask(&mut app, 4);
+    assert_eq!(header_y(&app), asked, "the header moved for Thinking…");
+    let _ = app.on_ask_delta(4, "It reads the file.\n\n".into());
     for n in 0..12 {
         let _ = app.on_ask_delta(4, format!("- line {n} of what it does\n"));
     }
     assert_eq!(
         header_y(&app),
-        before,
+        asked,
         "the header moved as the answer came in"
     );
+    // Ended, short: it stays where it was.
+    let _ = app.on_ask_stream_ended(4, StreamOutcome::Done);
+    app.proj.link.agent_stream = None;
+    app.proj.ask_turns[0].answer_md = "It reads the file.".into();
+    app.proj.ask_turns[0].answer.clear();
+    app.proj.ask_turns[0].settled = 0;
+    assert_eq!(header_y(&app), asked, "the header moved as it ended");
 }
 
 /// The strip's tools that read a project do nothing with none open, and are
@@ -10563,6 +15814,7 @@ fn the_heat_toggle_keeps_its_width() {
             on,
             None,
             None,
+            None,
             WINDOW,
             space().into(),
         );
@@ -10570,6 +15822,283 @@ fn the_heat_toggle_keeps_its_width() {
         text_at(&mut sim, |t| t.starts_with("Heat"), 0).expect("the toggle")
     };
     assert_eq!(heat_at(false), heat_at(true));
+}
+
+/// Settings, opened from a project's sheet — the first open's, or one
+/// asked from the menu — comes up over it, and closes back to it: under
+/// the sheet, "Add an API Key…" seemed to do nothing.
+#[test]
+fn settings_opened_from_the_projects_sheet_is_over_it() {
+    use crate::app::setup::{ProjectSetup, SetupMode};
+    let mut app = reader_app();
+    let root = PathBuf::from("/nonexistent/clew-sheet");
+    app.pending_consent = Some(root.clone());
+    assert!(matches!(
+        super::active_overlay(&app),
+        Some(super::ActiveOverlay::Consent(_))
+    ));
+    app.settings.open = true;
+    assert!(matches!(
+        super::active_overlay(&app),
+        Some(super::ActiveOverlay::Settings)
+    ));
+    app.settings.open = false;
+    assert!(matches!(
+        super::active_overlay(&app),
+        Some(super::ActiveOverlay::Consent(_))
+    ));
+    app.pending_consent = None;
+    app.setup = Some(ProjectSetup {
+        root,
+        mode: SetupMode::Manage,
+        servers: true,
+        servers_declined: false,
+        explain: false,
+        no_code: false,
+        census: None,
+    });
+    assert!(matches!(
+        super::active_overlay(&app),
+        Some(super::ActiveOverlay::Setup(_))
+    ));
+    app.settings.open = true;
+    assert!(matches!(
+        super::active_overlay(&app),
+        Some(super::ActiveOverlay::Settings)
+    ));
+}
+
+/// "Set up" says why its Apply waits beside it: greyed with nothing said
+/// when nothing ticked would do anything, it read as broken.
+#[test]
+fn the_set_up_sheet_says_why_apply_waits() {
+    use crate::app::setup::{Census, ProjectSetup, SetupMode, SetupServer};
+    let mut app = reader_app();
+    let root = PathBuf::from("/nonexistent/teashop");
+    let says = |app: &App, words: &str| {
+        shows(
+            &mut sim_elem(super::setup::setup_sheet(
+                app,
+                &root,
+                app.setup.as_ref(),
+                true,
+            )),
+            words,
+        )
+    };
+    let census = |servers: Vec<SetupServer>| Census {
+        servers,
+        calls: Some(12),
+    };
+    let setup = |servers: bool, explain: bool, census: Census| ProjectSetup {
+        mode: SetupMode::Manage,
+        root: root.clone(),
+        servers,
+        servers_declined: false,
+        explain,
+        no_code: false,
+        census: Some(census),
+    };
+    // Every server set up, Explain not ticked: nothing to apply, and why.
+    app.setup = Some(setup(true, false, census(Vec::new())));
+    assert!(says(
+        &app,
+        "Nothing to apply: the language servers are already set up."
+    ));
+    // A server to set up, but unticked: tick it.
+    let pyright = SetupServer {
+        language: "python".into(),
+        name: "pyright".into(),
+        fetch: crate::app::setup::Fetch::Download,
+        builds: false,
+    };
+    app.setup = Some(setup(false, false, census(vec![pyright.clone()])));
+    assert!(says(&app, "Nothing to apply: tick what to set up."));
+    // Something to do: nothing said.
+    app.setup = Some(setup(true, false, census(vec![pyright])));
+    assert!(!says(&app, "Nothing to apply"));
+}
+
+/// L10: Explain on a folder with nothing left to explain says it once —
+/// "Nothing left to explain." stood a line above "Nothing is left to
+/// explain." — and on a folder with no code at all, that there is none:
+/// "nothing left" read as if all of it had been explained. Its tree says
+/// so too, where it stood blank.
+#[test]
+fn explain_with_nothing_to_explain_says_so_once() {
+    use crate::app::setup::{Census, ProjectSetup, SetupMode};
+    let mut app = reader_app();
+    app.llm_available = true;
+    let root = PathBuf::from("/nonexistent/teashop");
+    let count = |app: &App, words: &str| {
+        let mut sim = sim_elem(super::setup::setup_sheet(
+            app,
+            &root,
+            app.setup.as_ref(),
+            true,
+        ));
+        let mut n = 0;
+        while text_at(&mut sim, |t| t.contains(words), n).is_some() {
+            n += 1;
+        }
+        n
+    };
+    app.setup = Some(ProjectSetup {
+        mode: SetupMode::Explain,
+        root: root.clone(),
+        servers: false,
+        servers_declined: false,
+        explain: true,
+        no_code: false,
+        census: Some(Census {
+            servers: Vec::new(),
+            calls: Some(0),
+        }),
+    });
+    // A project with code, all of it explained.
+    app.proj.project.as_mut().unwrap().files = Arc::new(vec![crate::fs_scan::FileEntry {
+        abs: PathBuf::from("/nonexistent/teashop/pricing.py"),
+        rel: "pricing.py".into(),
+    }]);
+    assert_eq!(count(&app, "left to explain"), 1, "said once");
+    // No code at all, as the look at the sheet's folder found.
+    app.setup.as_mut().unwrap().no_code = true;
+    if let Some(project) = app.proj.project.as_mut() {
+        project.files = std::sync::Arc::new(Vec::new());
+        project.tree = Default::default();
+    }
+    assert_eq!(count(&app, "left to explain"), 0);
+    assert_eq!(count(&app, "There is no code here to explain."), 1);
+    let mut sim = sim_elem(super::sidebar::files_tab(&app));
+    assert!(shows(&mut sim, "Nothing here to read"));
+    assert!(
+        !shows(&mut sim, "This folder has no files Clew can read."),
+        "said twice, beside the pane that says it"
+    );
+    drop(sim);
+    // M3: nor does the overview offer an Explain All with nothing for it,
+    // nor the pane send the reader to a tree with nothing in it.
+    app.proj.code_languages.clear();
+    let mut sim = sim_elem(super::docs_stats::overview_home(&app));
+    assert!(shows(&mut sim, "There is no code here for an overview."));
+    assert!(!shows(&mut sim, "Explain All…"), "a dead end offered");
+    drop(sim);
+    // The pane, with the setup sheet put aside: it stands over the window.
+    let sheet = app.setup.take();
+    app.proj.panes[0] = None;
+    let mut sim = sim_of(&app);
+    assert!(!shows(&mut sim, "Pick a file from the tree."));
+    assert!(shows(&mut sim, "Nothing here to read"));
+    drop(sim);
+    let sent = click(sim_of(&app), "Open Folder…");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Project(ProjectMsg::OpenFolderPressed))),
+        "the way to a folder with something in it: {sent:?}"
+    );
+    app.setup = sheet;
+    // A first open's sheet is about its own folder, whatever is open (or
+    // nothing): it said "Nothing left to explain." of a folder with no
+    // code opened from the welcome screen — and "Ready." of its servers.
+    app.proj.project = None;
+    let setup = app.setup.as_mut().unwrap();
+    setup.mode = SetupMode::Open;
+    setup.explain = true;
+    assert_eq!(count(&app, "There is no code here to explain."), 1);
+    assert_eq!(count(&app, "left to explain"), 0);
+    assert_eq!(count(&app, "No code here for them to read."), 1);
+    assert_eq!(count(&app, "Ready."), 0, "servers said ready for no code");
+    // Nothing to set up: Open alone — beside it, Open without setup did
+    // the same.
+    assert_eq!(
+        count(&app, "Open without setup"),
+        0,
+        "two buttons that did the same"
+    );
+}
+
+/// L2: Explain on an empty file says the file is empty — the pass found
+/// nothing in it, and said it was "no longer part of the project" — and
+/// spends nothing.
+#[test]
+fn explain_on_an_empty_file_says_it_is_empty() {
+    let mut app = reader_app();
+    app.llm_available = true;
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.proj.panes[0] = Some(Viewer::new(
+        abs.clone(),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(String::new()),
+        crate::highlight::plain_lines(""),
+    ));
+    let _ = app.update(Message::Explain(ExplainMsg::Explain(
+        crate::explain::Node::File(abs),
+    )));
+    assert_eq!(
+        app.status,
+        "This file is empty: there is nothing in it to explain."
+    );
+    assert!(!app.proj.explain.running, "a pass began");
+    // Nor one in no language Clew reads: it was "no longer part of the
+    // project".
+    let notes = PathBuf::from("/nonexistent/notes.txt");
+    let _ = app.update(Message::Explain(ExplainMsg::Explain(
+        crate::explain::Node::File(notes),
+    )));
+    assert!(
+        app.status.ends_with("has no code in it to explain."),
+        "{}",
+        app.status
+    );
+    assert!(!app.proj.explain.running, "a pass began");
+}
+
+/// M4: a note written on a bookmark is among the reader's notes: it was in
+/// Bookmarks alone, and "Your notes" said there were none. Its row opens
+/// its line; with neither kind, the empty view says where notes come from.
+#[test]
+fn a_bookmarks_note_is_among_your_notes() {
+    let mut app = reader_app();
+    app.proj.panes[0] = None;
+    let mut sim = sim_elem(super::sidebar::notes_tab(&app));
+    assert!(shows(&mut sim, "No notes of your own yet"));
+    assert!(shows(
+        &mut sim,
+        "A note you write on a symbol or a bookmark is listed here."
+    ));
+    drop(sim);
+    app.proj.bookmarks = vec![
+        crate::bookmarks::Bookmark {
+            rel: "src/lib.rs".into(),
+            line: 3,
+            preview: "fn line_2() {}".into(),
+            note: Some("Sum of all lines before any discount".into()),
+        },
+        crate::bookmarks::Bookmark {
+            rel: "src/lib.rs".into(),
+            line: 9,
+            preview: "fn line_8() {}".into(),
+            note: None,
+        },
+    ];
+    let mut sim = sim_elem(super::sidebar::notes_tab(&app));
+    assert!(!shows(&mut sim, "No notes of your own yet"));
+    assert!(shows(&mut sim, "On bookmarks"));
+    assert!(shows(&mut sim, "Sum of all lines before any discount"));
+    assert!(!shows(&mut sim, "src/lib.rs:9"), "a bookmark with no note");
+    drop(sim);
+    let sent = click(
+        sim_elem(super::sidebar::notes_tab(&app)),
+        "Sum of all lines before any discount",
+    );
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Editor(EditorMsg::OpenRel { rel, line: Some(3) }) if rel == "src/lib.rs"
+        )),
+        "{sent:?}"
+    );
 }
 
 /// The setup sheet with no AI key offers where one is added, a click away:
@@ -10662,6 +16191,65 @@ fn every_page_over_the_code_has_its_close() {
     assert!(app.proj.docs.page.is_none());
 }
 
+/// Each tool is where what it opens is: nothing on the strip down the
+/// right edge opens one of the left sidebar's views — walkthroughs are one
+/// of its everyday views — opening another project is the app menu's, the
+/// language servers are the status bar's and Settings', and the reader's
+/// notes are exported from where they are listed.
+#[test]
+fn each_tool_is_on_the_side_it_opens() {
+    use super::toolbar::{
+        STRIP_TOP, StripTool, TOOLS_MENU_ROWS, app_menu_head, strip_tool, tools_row,
+    };
+    let app = reader_app();
+    let elsewhere = |m: &Message| {
+        matches!(
+            m,
+            Message::Window(WindowMsg::SidebarTabPicked(_))
+                | Message::Lsp(_)
+                | Message::Project(crate::ProjectMsg::OpenFolderPressed)
+                | Message::Connect(_)
+                | Message::Export(_)
+        )
+    };
+    for tool in STRIP_TOP.into_iter().chain([StripTool::Settings]) {
+        let (.., message) = strip_tool(&app, tool);
+        assert!(!elsewhere(&message), "{tool:?}");
+    }
+    for row in TOOLS_MENU_ROWS {
+        let (_, label, message) = tools_row(&app, row);
+        assert!(!message.as_ref().is_some_and(elsewhere), "{label}");
+    }
+    assert!(
+        super::SIDEBAR_TABS[..super::sidebar::STRIP_VIEWS]
+            .iter()
+            .any(|(_, tab)| *tab == crate::SidebarTab::Walk),
+        "walkthroughs hidden in the sidebar's overflow"
+    );
+    assert!(
+        app_menu_head(&app)
+            .iter()
+            .any(|(.., m)| matches!(m, Message::Project(crate::ProjectMsg::OpenFolderPressed)))
+    );
+    // Exported from the list of them, once there are any.
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Notes;
+    assert!(!shows(
+        &mut sim_elem(super::sidebar::notes_tab(&app)),
+        "Export…"
+    ));
+    app.proj.notes.push(crate::notes::Note {
+        rel: "src/lib.rs".into(),
+        symbol: "origin".into(),
+        understood: true,
+        text: "Where it all starts.".into(),
+    });
+    assert!(matches!(
+        click(sim_elem(super::sidebar::notes_tab(&app)), "Export…").as_slice(),
+        [Message::Export(crate::ExportMsg::Start)]
+    ));
+}
+
 /// The ⋯ menu's rows name the keys that do what they do, on the row and,
 /// where the rows are laid on the strip, in their tips — as every other tool
 /// does: they named none, as though they had none.
@@ -10670,9 +16258,7 @@ fn the_tools_menu_rows_name_their_keys() {
     use super::ToolsRow;
     let keyed = [
         (ToolsRow::ExplainAll, crate::keymap::Action::ExplainAll),
-        (ToolsRow::Walkthrough, crate::keymap::Action::Walkthrough),
-        (ToolsRow::LspServers, crate::keymap::Action::LspServers),
-        (ToolsRow::Shortcuts, crate::keymap::Action::Shortcuts),
+        (ToolsRow::Tutorial, crate::keymap::Action::Tutorial),
     ];
     let mut app = reader_app();
     open_tools_menu(&mut app);
@@ -10721,6 +16307,7 @@ fn the_context_menu_waits_for_the_language_server() {
         insight: None,
         served,
         by_pointer: true,
+        line_top: None,
     };
     app.proj.context_menu = Some(menu(false));
     for waits in ["Go to Definition", "Find References", "Call Hierarchy"] {
@@ -10747,7 +16334,7 @@ fn the_context_menu_waits_for_the_language_server() {
     );
     // Each row names the keys that do it in the code, on its own line.
     let trace = app.keymap.chord(crate::keymap::Action::TraceValue).caps();
-    for (row, keys) in [("Go to Definition", "g d"), ("Trace Value", trace.as_str())] {
+    for (row, keys) in [("Go to Definition", "F12"), ("Trace Value", trace.as_str())] {
         let mut sim = sim_of(&app);
         let at = |sim: &mut Sim<'_>, t: &str| {
             let t = t.to_string();
@@ -10761,6 +16348,55 @@ fn the_context_menu_waits_for_the_language_server() {
         );
         assert!(keys_at.x > row_at.x + row_at.width, "{row}");
     }
+}
+
+/// The Set up sheet has its ×, as the first open's does: the same dialog
+/// had one shown one way and none the other.
+#[test]
+fn the_set_up_sheet_has_its_close() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Project(ProjectMsg::SetupShow(
+        crate::app::setup::SetupMode::Manage,
+    )));
+    assert!(app.setup.is_some());
+    let close = crate::ui::heard::gather(&app)
+        .into_iter()
+        .find(|t| t.title == "Close")
+        .expect("its ×");
+    assert!(matches!(
+        close.message,
+        Message::Project(ProjectMsg::SetupClose)
+    ));
+}
+
+/// With no embedding model, Find by meaning says why it stays empty and
+/// where one is set up: a search showed nothing, its reason flashed in the
+/// status bar, and the link beside Build index was Explain All.
+#[test]
+fn find_by_meaning_with_no_model_says_where_to_set_one_up() {
+    let mut app = reader_app();
+    app.embed_available = false;
+    app.embed_missing = "Configure an embedding endpoint in Settings".into();
+    let mut sim = sim_elem(super::semantic_tab(&app));
+    assert!(
+        shows(
+            &mut sim,
+            "Find by meaning needs an embedding model, on this computer or from a service."
+        ),
+        "why, in the panel, in one sentence"
+    );
+    assert!(!shows(&mut sim, "Build index"), "nothing greyed to press");
+    let sent = click(
+        sim_elem(super::semantic_tab(&app)),
+        "Set Up Find by Meaning…",
+    );
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::OpenAt(crate::SettingsPage::Embeddings))
+        )),
+        "{sent:?}"
+    );
 }
 
 /// Build index does nothing without notes to build from, and is drawn so,
@@ -10793,10 +16429,80 @@ fn build_index_waits_for_notes_and_offers_explain_all() {
     );
     let sent = click(sim_elem(super::semantic_tab(&app)), "Build index");
     assert!(sent.iter().any(builds), "{sent:?}");
-    // No model to embed with: it waits again.
+    // No model to embed with: nothing to build with, and the way to one
+    // offered in its place.
     app.embed_available = false;
-    let sent = click(sim_elem(super::semantic_tab(&app)), "Build index");
-    assert!(!sent.iter().any(builds), "{sent:?}");
+    let mut sim = sim_elem(super::semantic_tab(&app));
+    assert!(!shows(&mut sim, "Build index"));
+    assert!(shows(&mut sim, "Set Up Find by Meaning…"));
+}
+
+/// H1: a graph dialog keeps its List toggle and its Close in reach in any
+/// language: in French at 1100 px the header ran past the dialog's edge,
+/// and List and Close were not drawn. Where its line has no room, the
+/// map's own controls go on a line under it; where it has, they stay on
+/// it.
+#[test]
+fn a_graph_dialog_keeps_list_and_close_in_french_at_1100() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = reader_app();
+    app.graph_mode = true;
+    let calls = crate::Overlay::ProjectCalls;
+    // A text's place as laid out, and what of it shows.
+    let placed = |sim: &mut Sim<'_>, want: &'static str| {
+        use iced_test::selector::Candidate;
+        sim.find(move |c: Candidate<'_>| match c {
+            Candidate::Text {
+                content,
+                bounds,
+                visible_bounds,
+                ..
+            } if content == want => Some((bounds, visible_bounds.unwrap_or_default())),
+            _ => None,
+        })
+        .expect(want)
+    };
+    let header_at = |app: &App, size: Size, list: &'static str, heat: &'static str| {
+        let mut sim = iced_test::Simulator::with_size(
+            Default::default(),
+            size,
+            super::project_graph_modal(app, calls),
+        );
+        (placed(&mut sim, list), placed(&mut sim, heat).1)
+    };
+    for (lang, list, heat) in [(Lang::Fr, "Liste", "Activité"), (Lang::En, "List", "Heat")] {
+        let size = Size::new(1100.0, 700.0);
+        app.window_width = size.width;
+        app.window_height = size.height;
+        let ((list_laid, list_at), heat_at) = with_lang(lang, || header_at(&app, size, list, heat));
+        // The dialog's inner right edge: the window less its edge and pad.
+        let right = size.width - super::GRAPH_MODAL_EDGE - super::MODAL_PAD;
+        // List whole, and Close (its padding, the gap, the icon) after it.
+        assert!(
+            list_at.width >= list_laid.width - 0.5,
+            "{lang:?}: List cut: {list_at:?} of {list_laid:?}"
+        );
+        assert!(
+            list_at.x + list_at.width + 8.0 + 4.0 + 32.0 <= right + 0.5,
+            "{lang:?}: Close past the edge: {list_at:?}"
+        );
+        assert!(heat_at.width > 0.0, "{lang:?}: the map's controls dropped");
+        if lang == Lang::Fr {
+            assert!(
+                heat_at.y > list_at.y + 10.0,
+                "on its own line: {heat_at:?} {list_at:?}"
+            );
+        }
+    }
+    // With room, the map's controls stay on the title's line.
+    let size = Size::new(1600.0, 900.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    let ((_, list_at), heat_at) = header_at(&app, size, "List", "Heat");
+    assert!(
+        (heat_at.y - list_at.y).abs() < 4.0,
+        "{heat_at:?} {list_at:?}"
+    );
 }
 
 /// A map opened with no project says why it is empty, not "Nothing to
@@ -10810,11 +16516,11 @@ fn a_map_with_no_project_says_why() {
     let calls = crate::Overlay::ProjectCalls;
     assert!(shows(
         &mut sim_elem(super::project_graph_modal(&app, calls)),
-        "Open a project to see its map"
+        "Open a project to see its graph"
     ));
     let sent = click(
         sim_elem(super::project_graph_modal(&app, calls)),
-        "Refine with LSP",
+        "Check calls with the language server",
     );
     assert!(
         !sent
@@ -10894,7 +16600,7 @@ fn the_diff_view_shows_places_and_numbers_not_git_headers() {
     ));
     let d = app.proj.diff.as_ref().unwrap();
     let mut sim = sim_elem(super::panes::diff_view(&app, 0, d));
-    assert!(shows(&mut sim, "⋯  fn line_2() {"));
+    assert!(shows(&mut sim, "⋯ 2 unchanged lines   fn line_2() {"));
     assert!(shows(&mut sim, "3 3"));
     assert!(!shows(&mut sim, "diff --git"));
     assert!(!shows(&mut sim, "@@"));
@@ -10940,6 +16646,7 @@ fn time_travel_says_each_thing_once_and_counts_as_its_slider_runs() {
         scroll_x: 0.0,
         caret: None,
         focus_line: None,
+        reveal_change: false,
         loading: false,
         generation: app.proj.time_gen,
         session: 0,
@@ -10956,7 +16663,7 @@ fn time_travel_says_each_thing_once_and_counts_as_its_slider_runs() {
         assert!(shows(&mut sim, "3 / 3"));
         let hashes = {
             let mut n = 0;
-            while text_at(&mut sim, |t| t.contains("cccccccc"), n).is_some() {
+            while text_at(&mut sim, |t| t.contains("ccccccc"), n).is_some() {
                 n += 1;
             }
             n
@@ -11059,6 +16766,7 @@ fn a_picked_node_is_said_over_the_map_which_fills_the_window() {
     app.proj.overlay = Some(crate::Overlay::ProjectImports);
     let file = PathBuf::from("/nonexistent/clew-ui-test/src/app/mod.rs");
     app.proj.graph_pick = Some(crate::app::model::GraphPick {
+        node: 0,
         label: "app/mod.rs".into(),
         file: file.clone(),
         open: Box::new(Message::Graph(GraphMsg::OverlayOpenImports(file.clone()))),
@@ -11322,14 +17030,46 @@ fn the_search_fields_words_end_in_an_ellipsis_when_cut() {
 fn an_empty_docs_view_offers_to_look_again() {
     let mut app = reader_app();
     app.proj.docs.files.clear();
+    app.proj.docs.generation = 0;
     assert!(!app.docs_loading(), "precondition");
-    let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
-    assert!(shows(&mut sim, "No documentation"));
-    assert!(!shows(&mut sim, "Rebuild"));
+    {
+        let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
+        assert!(shows(&mut sim, "No documentation"));
+        assert!(!shows(&mut sim, "Rebuild"));
+    }
     assert!(matches!(
         click(sim_elem(super::docs_stats::docs_tab(&app)), "Look again").as_slice(),
         [Message::Docs(DocsMsg::Refresh)]
     ));
+    // A build that came back empty says so, not "No documentation" again.
+    app.proj.docs.generation = 1;
+    let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
+    assert!(shows(&mut sim, "Nothing documented"));
+    assert!(shows(&mut sim, "Look again"));
+}
+
+/// M10 (round 6): working without clew-server, the Docs view and the
+/// Glossary said "No documentation" / "No terms yet" on a documented project
+/// and offered a Look again that did nothing. They say what they need and
+/// why it is missing.
+#[test]
+fn docs_without_their_server_say_what_they_need() {
+    let mut app = reader_app();
+    app.proj.docs.files.clear();
+    app.explain_cache_mut().clear();
+    let why = "No clew-server binary was found beside Clew or on PATH; working without it.";
+    app.handshake_failure = Some(why.into());
+    {
+        let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
+        assert!(shows(&mut sim, "API docs need clew-server"));
+        assert!(shows(&mut sim, why));
+        assert!(!shows(&mut sim, "Look again"));
+    }
+    let _ = app.update(Message::Glossary(GlossaryMsg::Open));
+    let on_page = |app: &App, shown: &str| sim_of(app).find(shown).is_ok();
+    assert!(on_page(&app, "The glossary needs clew-server"));
+    assert!(on_page(&app, why));
+    assert!(!on_page(&app, "Look again"));
 }
 
 /// L21: the View menu's row that is inert — blocks, with no function
@@ -11360,6 +17100,490 @@ fn the_view_menus_inert_row_says_why() {
     assert!(!shows(&mut sim, why));
 }
 
+/// The header's folder tag is cut short with "…" where the tools leave
+/// it too little room — never clipped under them mid-word ("test" for
+/// "tests", in French, whose tools are longer) — and the tools give up
+/// their words before the folder is cut to nothing ("…op").
+#[test]
+fn the_headers_folder_is_cut_with_an_ellipsis_not_clipped() {
+    use crate::i18n::{Lang, with_lang};
+    with_lang(Lang::Fr, || {
+        let mut app = reader_app();
+        app.show_left_sidebar = true;
+        app.show_right_panel = true;
+        app.proj.panes[0].as_mut().unwrap().rel = "tests/integration/test_pricing.py".into();
+        let mut words_given_up = false;
+        for width in (760..=1280).rev().step_by(20) {
+            app.window_width = width as f32;
+            let mut sim = sim_of(&app);
+            // Skim's name goes before Explain's (L15).
+            if text_at(&mut sim, |t| t == "Survol", 0).is_none() {
+                words_given_up = true;
+            }
+            let Some(tools) = text_at(&mut sim, |t| t == "Expliquer", 0) else {
+                continue;
+            };
+            let full = text_at(&mut sim, |t| t == "tests/integration", 0);
+            let elided = text_at(
+                &mut sim,
+                |t| {
+                    t.strip_prefix('…')
+                        .is_some_and(|rest| "tests/integration".ends_with(rest))
+                },
+                0,
+            );
+            if let Some(cut) = elided {
+                assert!(
+                    cut.width >= 60.0,
+                    "{width}: the folder cut to {cut:?} while the tools keep their words"
+                );
+            }
+            let Some(folder) = full.or(elided) else {
+                continue;
+            };
+            assert!(
+                folder.x + folder.width <= tools.x,
+                "{width}: the folder {folder:?} runs under the tools at {}",
+                tools.x
+            );
+        }
+        assert!(
+            words_given_up,
+            "a narrow window's tools give up their words"
+        );
+    });
+}
+
+/// The welcome screen offers the folders opened here before, newest
+/// first, each opened again in a click: every return to a project went
+/// through the folder dialog. A remote host's welcome has none of them.
+#[test]
+fn the_welcome_screen_offers_recent_folders() {
+    let mut app = blank_app();
+    assert!(
+        !shows(&mut sim_of(&app), "Recent"),
+        "none yet: nothing said"
+    );
+    let dir = crate::app::tests::test_dir("ui-recent-folder");
+    let shop = dir.join("teashop");
+    std::fs::create_dir_all(&shop).unwrap();
+    app.recent_folders = vec![shop.clone()];
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Recent"));
+    assert!(shows(&mut sim, "teashop"));
+    drop(sim);
+    let sent = click(sim_of(&app), "teashop");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Project(ProjectMsg::FolderPicked(Some(p))) if *p == shop
+        )),
+        "{sent:?}"
+    );
+
+    // L1: a place longer than the row is cut from its middle, its end —
+    // what tells two folders apart — kept; cut at its end, that was lost.
+    let deep = dir
+        .join("a_rather_long_folder_name_for_the_place")
+        .join("and_another_one_below_it")
+        .join("scratchpad")
+        .join("r17");
+    let shop2 = deep.join("teashop");
+    std::fs::create_dir_all(&shop2).unwrap();
+    app.recent_folders = vec![shop2.clone()];
+    let (_, place) = crate::app::recent::said(&shop2);
+    let mut sim = sim_of(&app);
+    assert!(!shows(&mut sim, &place), "whole, past the row's end");
+    let cut = text_at(
+        &mut sim,
+        |t| t.contains('…') && t.ends_with("scratchpad/r17"),
+        0,
+    );
+    assert!(cut.is_some(), "cut from its middle, its end kept");
+    drop(sim);
+    // And taken off the list by its ×.
+    let sent = click_right_of(
+        || sim_of(&app),
+        "teashop",
+        |m| matches!(m, Message::Project(ProjectMsg::ForgetRecent(_))),
+    );
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Project(ProjectMsg::ForgetRecent(p)) if *p == shop2
+        )),
+        "{sent:?}"
+    );
+    let _ = app.update(Message::Project(ProjectMsg::ForgetRecent(shop2)));
+    assert!(app.recent_folders.is_empty());
+    assert!(!shows(&mut sim_of(&app), "Recent"));
+}
+
+/// M1: with a folder open, the folders opened before are still a click
+/// away — under Open Folder… in the app menu, and in the command bar —
+/// and the folder open can be closed, back to the welcome screen. The
+/// welcome screen alone offered them, and only before a folder was open.
+/// The app menu in a window tall enough for all of it.
+fn tall_menu(app: &App) -> Sim<'_> {
+    iced_test::Simulator::with_size(
+        Default::default(),
+        Size::new(1440.0, 4000.0),
+        super::app_menu(app),
+    )
+}
+
+#[test]
+fn recent_folders_and_close_folder_are_in_the_app_menu() {
+    let mut app = reader_app();
+    // Tall enough for the whole menu: Close Folder is at its end.
+    app.window_height = 4000.0;
+    let dir = crate::app::tests::test_dir("ui-recent-menu");
+    let shop = dir.join("teashop");
+    std::fs::create_dir_all(&shop).unwrap();
+    let open = app.proj.project.as_ref().unwrap().root.clone();
+    app.recent_folders = vec![open.clone(), shop.clone()];
+    let mut sim = tall_menu(&app);
+    assert!(shows(&mut sim, "Open Recent"));
+    assert!(shows(&mut sim, "Close Folder"));
+    drop(sim);
+    // The folder open is not offered again.
+    let rows = super::app_menu_recent(&app);
+    assert_eq!(
+        rows.len(),
+        1,
+        "{:?}",
+        rows.iter().map(|r| &r.0).collect::<Vec<_>>()
+    );
+    let sent = click(tall_menu(&app), "teashop");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Project(ProjectMsg::FolderPicked(Some(p))) if *p == shop
+        )),
+        "{sent:?}"
+    );
+    assert!(super::closes_app_menu(&sent[0]));
+    // In the command bar too.
+    app.proj.finder.open = true;
+    app.proj.finder.query = ">recent".into();
+    app.refresh_palette();
+    assert!(shows(&mut sim_of(&app), "Open Recent: teashop"));
+    app.proj.finder.query = ">close folder".into();
+    app.refresh_palette();
+    assert!(shows(&mut sim_of(&app), "Close Folder"));
+    app.proj.finder.open = false;
+    // Closed: back to the welcome screen, its recent folders offered.
+    let _ = app.update(Message::Project(ProjectMsg::CloseFolder));
+    assert!(app.proj.project.is_none());
+    assert_eq!(app.status, "Folder closed");
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Recent"));
+    assert!(shows(&mut sim, "teashop"));
+    drop(sim);
+    // With no folder open, there is none to close.
+    assert!(!shows(&mut tall_menu(&app), "Close Folder"));
+}
+
+/// L15: where the header has room for Explain's name and not every
+/// tool's, Explain keeps it — the one that spends an AI call, and what a
+/// reader new to Clew looks for. At 1100 px "test_pricing.py" showed
+/// ✦ ⤫ ⟲ ◷ alone, where "pricing.py" showed their names.
+#[test]
+fn explain_keeps_its_name_the_longest() {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.show_right_panel = true;
+    let mut kept_alone = false;
+    for width in (760..=1440).rev().step_by(10) {
+        app.window_width = width as f32;
+        app.proj.panes[0].as_mut().unwrap().rel = "tests/test_pricing.py".into();
+        let mut sim = sim_of(&app);
+        let explain = text_at(&mut sim, |t| t == "Explain", 0).is_some();
+        let skim = text_at(&mut sim, |t| t == "Skim", 0).is_some();
+        assert!(explain || !skim, "{width}: Skim named, Explain not");
+        kept_alone |= explain && !skim;
+        // The file's name is never what gave way for it.
+        assert!(
+            text_at(&mut sim, |t| t == "test_pricing.py", 0).is_some(),
+            "{width}: the name cut for the tools' words"
+        );
+    }
+    assert!(kept_alone, "Explain never kept its name alone");
+}
+
+/// A file's card has no way to a function's calls: the margin's Calls tab
+/// follows the function the caret is in, and from a file's card — a
+/// README's, a schema's — it said only to move the cursor into one.
+#[test]
+fn a_files_card_offers_no_calls() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.explain.cache.insert(
+        crate::explain::Node::File(abs.clone()),
+        crate::explain::Cached {
+            summary: "What the whole file is for.".into(),
+            prompt_hash: crate::incremental::content_hash(b"test"),
+            detail: None,
+            basis: None,
+        },
+    );
+    app.proj.explain.view = Some(crate::explain::Node::File(abs));
+    let mut sim = sim_of(&app);
+    // The card is up: its History beside the margin's own tab of the name.
+    assert!(
+        text_at(&mut sim, |t| t == "History", 1).is_some(),
+        "the card's History, after the tab's"
+    );
+    assert!(
+        text_at(&mut sim, |t| t == "Calls", 0).is_some(),
+        "the margin's own tab"
+    );
+    assert!(
+        text_at(&mut sim, |t| t == "Calls", 1).is_none(),
+        "and no second Calls, on the card"
+    );
+}
+
+/// M7: an outline row's understood circle and note pencil say what they do
+/// where the pointer rests, as All notes' do — here, where they are first
+/// seen, they said nothing.
+#[test]
+fn an_outline_rows_circle_and_pencil_say_what_they_do() {
+    let mut app = reader_app();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![clew_protocol::Symbol {
+        name: "OutOfStock".into(),
+        kind: "class".into(),
+        line: 1,
+        end_line: 4,
+    }];
+    let rests_on = |from_name: f32, said: &str| {
+        super::tip::warm_now();
+        let mut sim = sim_elem(super::outline_content(&app));
+        let name = text_at(&mut sim, |t| t == "OutOfStock", 0).expect("the row");
+        let at = Point::new(name.x + from_name, name.center_y());
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        shows(&mut sim, said)
+    };
+    // The circle, somewhere left of the name; the pencil at the row's end.
+    assert!(
+        (8..120)
+            .step_by(4)
+            .any(|dx| rests_on(-(dx as f32), "Mark understood")),
+        "the circle says nothing"
+    );
+    // The pencil at the row's end, by the panel's right edge (1024 wide).
+    let name_x = {
+        let mut sim = sim_elem(super::outline_content(&app));
+        text_at(&mut sim, |t| t == "OutOfStock", 0)
+            .expect("the row")
+            .x
+    };
+    assert!(
+        (980..1022)
+            .step_by(3)
+            .any(|x| rests_on(x as f32 - name_x, "Add a note")),
+        "the pencil says nothing"
+    );
+}
+
+/// Two classes' `__init__` are two rows with notes of their own: each
+/// row's understood mark is kept under its class, not shared — marking one
+/// marked both.
+#[test]
+fn each_init_in_the_outline_has_a_note_of_its_own() {
+    let mut app = reader_app();
+    let symbol = |name: &str, kind: &str, line: usize, end_line: usize| clew_protocol::Symbol {
+        name: name.into(),
+        kind: kind.into(),
+        line,
+        end_line,
+    };
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![
+        symbol("OutOfStock", "class", 1, 4),
+        symbol("__init__", "method", 2, 4),
+        symbol("Inventory", "class", 6, 12),
+        symbol("__init__", "method", 7, 9),
+    ];
+    let toggled = |nth: usize| {
+        click_left_of(
+            || sim_elem(super::outline_content(&app)),
+            "__init__",
+            nth,
+            |m| matches!(m, Message::Reading(ReadingMsg::NoteToggleUnderstood { .. })),
+        )
+        .into_iter()
+        .find_map(|m| match m {
+            Message::Reading(ReadingMsg::NoteToggleUnderstood { symbol, .. }) => Some(symbol),
+            _ => None,
+        })
+    };
+    assert_eq!(toggled(0).as_deref(), Some("OutOfStock.__init__"));
+    assert_eq!(toggled(1).as_deref(), Some("Inventory.__init__"));
+}
+
+/// A setting whose value is words — the interpreter in use — has them on
+/// its label's line, not 7 above it.
+#[test]
+fn a_fields_words_sit_on_its_labels_line() {
+    let mut sim = sim_elem(super::form::field_text(
+        "In use",
+        None,
+        iced::widget::text("Chosen by the language server").size(super::ts::BASE),
+    ));
+    let label = text_at(&mut sim, |t| t == "In use", 0).expect("the label");
+    let value = text_at(&mut sim, |t| t == "Chosen by the language server", 0).expect("the value");
+    assert!(
+        (label.center_y() - value.center_y()).abs() <= 1.5,
+        "label {label:?}, value {value:?}"
+    );
+}
+
+/// A field whose control starts with a checkbox or a line of chips has
+/// their words on its label's line: "Features" sat 7 below "All features
+/// of all packages", "Build tags" 4 below its first tag.
+#[test]
+fn a_fields_checkbox_and_chips_sit_on_its_labels_line() {
+    let app = reader_app();
+    let level = |sim: &mut Sim<'_>, label: &str, value: &str| {
+        let l = text_at(sim, |t| t == label, 0).expect("the label");
+        let v = text_at(sim, |t| t == value, 0).expect("the value");
+        assert!(
+            (l.center_y() - v.center_y()).abs() <= 1.5,
+            "{label} {l:?}, {value} {v:?}"
+        );
+    };
+    let rust = clew_protocol::RustOptions {
+        packages: vec![clew_protocol::CargoPackage {
+            name: "salvo".into(),
+            root: true,
+            features: vec!["acme".into()],
+            default: Vec::new(),
+        }],
+        targets: Vec::new(),
+        project_sets: Vec::new(),
+    };
+    let mut sim = sim_elem(super::connect::rust_block(&app, Some(&rust)));
+    level(&mut sim, "Features", "All features of all packages");
+    let go = clew_protocol::GoOptions {
+        tags: vec!["integration".into()],
+        ..Default::default()
+    };
+    let mut sim = sim_elem(super::connect::go_block(&app, Some(&go)));
+    level(&mut sim, "Build tags", "integration");
+    let mut sim = sim_elem(super::connect::go_block(&app, None));
+    level(&mut sim, "Build tags", "No build tags in this project.");
+}
+
+/// A file's card keeps its actions where they are while its history is
+/// read: "History" turned into the date once it came, and the longer date
+/// sent "Ask" on to a second line, and back on the next file: a flash at
+/// every file opened.
+#[test]
+fn a_file_cards_actions_stay_put_when_its_date_comes() {
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.show_right_panel = true;
+    app.margin_tab = crate::MarginTab::Notes;
+    app.active_viewer_mut().unwrap().caret = Some((0, 0));
+    app.proj.explain.view = Some(crate::explain::Node::File(abs));
+    let ask_at = |app: &App| {
+        let mut sim = sim_of(app);
+        text_at(&mut sim, |t| t == "Ask", 0).expect("the card's Ask")
+    };
+    let before = ask_at(&app);
+    let line = |time: i64| clew_protocol::BlameLine {
+        commit: "a".repeat(40),
+        author: "Ada".into(),
+        time,
+        summary: "Read lines lazily".into(),
+        uncommitted: false,
+    };
+    // A date of the widest kind: another year, a two-figure day.
+    app.proj.panes[0].as_mut().unwrap().git = Some(Arc::new(clew_protocol::GitInfo {
+        blame: vec![line(1_701_302_400); 400],
+        status: Vec::new(),
+        deleted_at: Default::default(),
+    }));
+    let after = ask_at(&app);
+    assert_eq!((before.x, before.y), (after.x, after.y));
+}
+
+/// The find bar's ‹ and › go to the matches while there are some, and do
+/// nothing while there are none — in grey then, as they were always drawn,
+/// so that with 16 matches they looked switched off.
+#[test]
+fn the_find_bars_arrows_step_only_through_matches() {
+    let mut app = reader_app();
+    app.proj.find.open = true;
+    app.proj.find.query = "value".into();
+    let click_prev = |app: &App| {
+        let mut sim = sim_elem(super::panes::find_bar(app));
+        let count = text_at(&mut sim, |t| t.contains('/'), 0).expect("the count");
+        // Past the count's 46 and the row's 6: the first arrow.
+        let at = Point::new(count.x + 46.0 + 6.0 + 13.0, count.center_y());
+        sim.point_at(at);
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+            .into_iter()
+            .filter(|m| matches!(m, Message::Editor(EditorMsg::FindStep(_))))
+            .count()
+    };
+    assert_eq!(click_prev(&app), 0, "no match to go to");
+    app.proj.find.matches = vec![(0, 18, 23), (1, 18, 23)];
+    assert_eq!(click_prev(&app), 1, "a match to go to");
+}
+
+/// An import list's row names the file's folder; a file at the project's
+/// root has none to name, and shows none — not a stray ".".
+#[test]
+fn a_root_files_import_row_names_no_folder() {
+    let app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let row = |rel: &str| super::memo::RankedFile {
+        path: root.join(rel),
+        fan_in: 1,
+        fan_out: 2,
+    };
+    let mut sim = sim_elem(super::graph::import_file_row(&app, &row("main.py")));
+    assert!(shows(&mut sim, "main.py"));
+    assert!(
+        text_at(&mut sim, |t| t.trim() == ".", 0).is_none(),
+        "no folder for a root file"
+    );
+    let mut sim = sim_elem(super::graph::import_file_row(&app, &row("shop/cart.py")));
+    assert!(shows(&mut sim, "shop"), "a nested file's folder is named");
+}
+
+/// The header's file tools say what they do where the pointer rests:
+/// Explain that it asks the AI, Skim what it folds, Diff what it compares
+/// with — the names the menu gives them.
+#[test]
+fn the_file_tools_say_what_they_do() {
+    let app = reader_app();
+    for (label, says) in [
+        (
+            "Explain",
+            "Explain this file with AI (an AI call for each part not yet explained)",
+        ),
+        ("Skim", "Skim: fold every body to its signature"),
+        ("Diff", "Changes since the last commit"),
+    ] {
+        let at = text_at(&mut sim_of(&app), |t| t == label, 0).expect(label);
+        assert!(!shows(&mut sim_of(&app), says), "{label}: said at rest");
+        super::tip::warm_now();
+        let mut sim = sim_of(&app);
+        sim.point_at(at.center());
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at.center(),
+        })]);
+        assert!(shows(&mut sim, says), "{label}");
+    }
+}
+
 /// L16: the ☰ menu keeps its tools under a Tools heading of their own,
 /// between View and Go — under View they were mixed in with zoom and
 /// split — and, when it runs past a short window, its scroller shows at
@@ -11382,8 +17606,8 @@ fn the_app_menu_keeps_its_tools_apart_and_shows_it_scrolls() {
     // Time Travel).
     for tool in [
         "Call Graph",
-        "Project Maps",
-        "Explain All",
+        "Project Graphs",
+        "Explain All…",
         "Start Debugging",
     ] {
         let at = y(&mut sim, tool);
@@ -11409,32 +17633,77 @@ fn the_app_menu_keeps_its_tools_apart_and_shows_it_scrolls() {
     assert!(!drawn(crate::theme::overlay_scrollbar(&theme, rest)));
 }
 
-/// L23: the status bar's place — "Local · Up to date" — opens Connect, and
-/// says so before the pointer rests on it: a chevron after it, as the
-/// target picker has, a click on which opens Connect too.
+/// L23: the status bar's place — "Local" — opens Connect, and says so
+/// before the pointer rests on it: a chevron after it, as the target picker
+/// has, a click on which opens Connect too. The scan's state stands apart,
+/// after the button: "Local · Up to date ⌄" read as a branch's sync, and a
+/// click on it opened Connect.
 #[test]
 fn the_status_bars_place_shows_it_opens_something() {
     let app = reader_app();
     let mut sim = sim_of(&app);
-    let place = text_at(&mut sim, |t| t.starts_with("Local · "), 0).expect("the place");
-    // Past the room its words have — as wide as the widest of its states
-    // — where only the chevron is.
-    let states = [
-        "Local · Scanning…",
-        "Local · Indexing…",
-        "Local · Up to date",
-    ];
-    let room = super::steady::widest(&states, super::ts::SMALL, crate::fonts::UI);
-    let at = Point::new(place.x + room + 12.0, place.center_y());
-    let mut sim = sim_of(&app);
-    sim.point_at(at);
-    let _ = sim.simulate(iced_test::simulator::click());
-    let sent = sent_by(sim);
+    let place = text_at(&mut sim, |t| t == "Local", 0).expect("the place");
+    let state = text_at(&mut sim, |t| t == "Indexed", 0).expect("the scan's state");
+    let opens = |at: Point| {
+        let mut sim = sim_of(&app);
+        sim.point_at(at);
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Connect(ConnectMsg::Open)))
+    };
+    // Past the place's words, where only the chevron is.
+    let room = super::steady::widest(&["Local"], super::ts::SMALL, crate::fonts::UI);
     assert!(
-        sent.iter()
-            .any(|m| matches!(m, Message::Connect(ConnectMsg::Open))),
-        "nothing past its words: {sent:?}"
+        opens(Point::new(place.x + room + 12.0, place.center_y())),
+        "nothing past its words"
     );
+    assert!(
+        state.x > place.x + room + 12.0,
+        "the state is after the chevron"
+    );
+    assert!(!opens(state.center()), "the scan's state is no connection");
+}
+
+/// The status bar names the branch checked out, after the scan's state —
+/// a long one cut short, a detached HEAD by its commit's short name — and
+/// nothing outside a repository.
+#[test]
+fn the_status_bar_names_the_branch_checked_out() {
+    use clew_protocol::HeadName;
+    let mut app = reader_app();
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, "main"), "no repository, no branch");
+    }
+    app.proj.head = Some(HeadName::Branch("main".into()));
+    {
+        let mut sim = sim_of(&app);
+        let state = text_at(&mut sim, |t| t == "Indexed", 0).expect("the scan's state");
+        let branch = text_at(&mut sim, |t| t == "main", 0).expect("the branch");
+        assert!(branch.x > state.x, "after the scan's state");
+        assert!(
+            (branch.center_y() - state.center_y()).abs() < 2.0,
+            "on its line"
+        );
+    }
+    let long = "feature/reading-guide-with-every-file-in-order";
+    app.proj.head = Some(HeadName::Branch(long.into()));
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, long), "cut short");
+        let start: String = long.chars().take(27).collect();
+        assert!(
+            text_at(&mut sim, |t| t == format!("{start}…"), 0).is_some(),
+            "its start, and a mark that it goes on"
+        );
+    }
+    app.proj.head = Some(HeadName::Detached(
+        "0123456789abcdef0123456789abcdef01234567".into(),
+    ));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "0123456"), "the commit, as git shortens it");
+    assert!(!shows(&mut sim, "01234567"));
 }
 
 /// What Clew says with a name in it — "Connecting to `prod`…", the MCP
@@ -11509,6 +17778,9 @@ fn the_why_popup_opens_at_the_line_it_is_about() {
         loading: true,
         prepared: Vec::new(),
         anchor,
+        fix: None,
+        asked: None,
+        failed: false,
     };
     let lh = app.line_height();
     app.proj.blame_why = Some(why(Some(400.0)));
@@ -11529,6 +17801,68 @@ fn the_why_popup_opens_at_the_line_it_is_about() {
     // Asked from no point (the palette): near the top, as before.
     app.proj.blame_why = Some(why(None));
     assert!(at(&app, "Why line 8 exists").y < 200.0);
+    // Failed for what Settings puts right: the way there, beside Close.
+    assert!(!shows(&mut sim_of(&app), "Settings"));
+    app.proj.blame_why = Some(crate::app::model::BlameWhy {
+        loading: false,
+        fix: Some(crate::app::state::LlmField::BaseUrl),
+        ..why(None)
+    });
+    assert!(
+        click(sim_of(&app), "Settings").iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::Fix(
+                crate::app::state::LlmField::BaseUrl
+            ))
+        )),
+        "the popup's Settings"
+    );
+    // M1: failed, it is asked again from the popup — it offered only
+    // Settings and Close — of the lines it was asked about.
+    assert!(!shows(&mut sim_of(&app), "Try again"), "not failed: none");
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.blame_why = Some(crate::app::model::BlameWhy {
+        loading: false,
+        failed: true,
+        asked: Some((abs, 2, 2)),
+        ..why(None)
+    });
+    let again = click(sim_of(&app), "Try again");
+    assert!(
+        again
+            .iter()
+            .any(|m| matches!(m, Message::TimeTravel(crate::TimeTravelMsg::BlameWhyAgain))),
+        "{again:?}"
+    );
+    app.status.clear();
+    let _ = app.update(Message::TimeTravel(crate::TimeTravelMsg::BlameWhyAgain));
+    // Asked again of line 3, which holds code: as far as the key, which
+    // this window has none of.
+    assert_eq!(app.status, "Add an API key in Settings", "not asked again");
+    // R16-6: the file it asked about no longer shown — another in its
+    // pane: not asked of that one; said, and the popup put away.
+    let other = app.proj.panes[0]
+        .as_ref()
+        .unwrap()
+        .abs
+        .with_file_name("other.rs");
+    app.proj.blame_why = Some(crate::app::model::BlameWhy {
+        loading: false,
+        failed: true,
+        asked: Some((other, 2, 2)),
+        ..why(None)
+    });
+    app.status.clear();
+    let _ = app.update(Message::TimeTravel(crate::TimeTravelMsg::BlameWhyAgain));
+    assert!(
+        app.status.contains("other.rs is no longer open"),
+        "{}",
+        app.status
+    );
+    assert!(
+        app.proj.blame_why.is_none(),
+        "left with a Try again that does nothing"
+    );
     app.proj.blame_why = None;
     app.proj.insight = Some(crate::Insight {
         anchor: Some(400.0),
@@ -11541,4 +17875,3700 @@ fn the_why_popup_opens_at_the_line_it_is_about() {
     });
     let insight = at(&app, "Expansion of MAX");
     assert!(insight.y > 400.0 + lh, "{insight:?} is not under the line");
+}
+
+/// A fake run or a commit's summary that could not reach the provider says
+/// so in plain words, with the way to the field to fix beside it: they said
+/// the client's own words, or "check the base URL in Settings" with only
+/// Try again and Close there. Any other failure has no Settings.
+#[test]
+fn a_failed_fake_run_or_summary_shows_the_way_to_settings_when_unreached() {
+    use crate::app::state::LlmField;
+    let refused = "error sending request for url (http://127.0.0.1:9/chat/completions): \
+                   client error (Connect): tcp connect error: Connection refused (os error 111)";
+    let fixes = |sent: &[Message]| {
+        sent.iter().any(|m| {
+            matches!(
+                m,
+                Message::Settings(crate::SettingsMsg::Fix(LlmField::BaseUrl))
+            )
+        })
+    };
+    let mut app = reader_app();
+    app.proj.fake.failed = Some(refused.into());
+    let mut sim = sim_elem(super::fakerun::fake_panel(&app));
+    assert!(
+        !shows(&mut sim, "tcp connect error"),
+        "the client's own words"
+    );
+    assert!(shows(&mut sim, "The fake run failed: "));
+    drop(sim);
+    let sent = click_nth(sim_elem(super::fakerun::fake_panel(&app)), "Settings", 0);
+    assert!(fixes(&sent), "{sent:?}");
+    app.proj.fake.failed = Some("rate limited".into());
+    let mut sim = sim_elem(super::fakerun::fake_panel(&app));
+    assert!(shows(&mut sim, "rate limited"));
+    assert!(!shows(&mut sim, "Settings"));
+    // Its Try again opens the inputs first: said with "…".
+    assert!(shows(&mut sim, "Try again…"));
+
+    let commit = clew_protocol::HistCommit {
+        sha: "aaaa1111".into(),
+        author: "a".into(),
+        time: 0,
+        subject: "subject".into(),
+        path: "src/lib.rs".into(),
+    };
+    let mut tt = crate::TimeTravel {
+        abs: "/p/src/lib.rs".into(),
+        rel: "src/lib.rs".into(),
+        lang: Some("rust"),
+        scope: crate::TimeScope::File,
+        commits: vec![commit.clone()],
+        idx: 0,
+        viewer: None,
+        scroll_y: 0.0,
+        scroll_x: 0.0,
+        caret: None,
+        focus_line: None,
+        reveal_change: false,
+        loading: false,
+        generation: 0,
+        session: 0,
+        scoped: 0,
+        why: std::collections::HashMap::new(),
+        why_loading: false,
+        why_pending: std::collections::HashSet::new(),
+        story: None,
+        story_loading: false,
+    };
+    tt.why.insert("aaaa1111".into(), Err(refused.into()));
+    let mut sim = sim_elem(super::panes::time_travel_banner(&tt, Some(&commit)));
+    assert!(
+        !shows(&mut sim, "tcp connect error"),
+        "the client's own words"
+    );
+    assert!(shows(&mut sim, "Couldn't summarize: "));
+    drop(sim);
+    let sent = click_nth(
+        sim_elem(super::panes::time_travel_banner(&tt, Some(&commit))),
+        "Settings",
+        0,
+    );
+    assert!(fixes(&sent), "{sent:?}");
+    tt.why.insert("aaaa1111".into(), Err("rate limited".into()));
+    let mut sim = sim_elem(super::panes::time_travel_banner(&tt, Some(&commit)));
+    assert!(shows(&mut sim, "rate limited"));
+    assert!(!shows(&mut sim, "Settings"));
+}
+
+/// A fake debug session in the bottom panel: said to be simulated, where
+/// it is in the trace, the line's values with what it changed, what the
+/// run returns — and its controls step it.
+#[test]
+fn the_fake_debug_panel_shows_the_trace_and_steps_it() {
+    use crate::fakerun::{Step, Target, Trace};
+    let mut app = reader_app();
+    let step = |line: usize, vars: &[(&str, &str)], note: &str| Step {
+        file: "src/lib.rs".into(),
+        line,
+        function: "line_0".into(),
+        depth: 0,
+        note: note.into(),
+        vars: vars
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect(),
+    };
+    app.proj.fake.sim = Some(crate::app::fakerun::Sim {
+        target: Target {
+            name: "line_0".into(),
+            kind: "function".into(),
+            rel: "src/lib.rs".into(),
+            line: 1,
+            end_line: 1,
+            lang: "rust".into(),
+            source: "fn line_0() { let value = 0; }".into(),
+        },
+        given: Vec::new(),
+        trace: Trace {
+            returns: "()".into(),
+            assumptions: vec!["nothing is called".into()],
+            steps: vec![
+                step(1, &[("value", "0")], "the call begins"),
+                step(1, &[("value", "7")], "value is set"),
+            ],
+            ..Trace::default()
+        },
+        at: 1,
+        ended: false,
+        debug: true,
+    });
+    app.show_bottom = true;
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Fake debug"));
+    assert!(
+        !shows(&mut sim, "simulated"),
+        "no caption saying what Fake debug is"
+    );
+    assert!(shows(&mut sim, "step 2 of 2"));
+    assert!(shows(&mut sim, "value is set"));
+    assert!(shows(&mut sim, "7"));
+    assert!(shows(&mut sim, "nothing is called"));
+    let over = click(sim_of(&app), "↪ Over");
+    assert!(
+        over.iter()
+            .any(|m| matches!(m, Message::Fake(crate::FakeMsg::Step(crate::SimCmd::Over)))),
+        "{over:?}"
+    );
+    let back = click(sim_of(&app), "◀ Back");
+    assert!(
+        back.iter()
+            .any(|m| matches!(m, Message::Fake(crate::FakeMsg::Step(crate::SimCmd::Back)))),
+        "{back:?}"
+    );
+    // Its line lit in the code as the debugger's is.
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    assert_eq!(app.fake_line(&abs), Some(1));
+}
+
+/// The inputs sheet names the target and each parameter, and Run runs it.
+#[test]
+fn the_fake_run_sheet_asks_for_each_parameter() {
+    use crate::fakerun::{Field, Target};
+    let mut app = reader_app();
+    let target = Target {
+        name: "total".into(),
+        kind: "function".into(),
+        rel: "src/lib.rs".into(),
+        line: 1,
+        end_line: 1,
+        lang: "python".into(),
+        source: "def total(cart: Cart, rules: list[Discount] = ALL, note=None):".into(),
+    };
+    let fields = crate::fakerun::fields(&target);
+    assert_eq!(fields.len(), 4);
+    assert!(matches!(&fields[0], Field::Param { name, .. } if name == "cart"));
+    app.proj.fake.sheet = Some(crate::app::fakerun::Sheet {
+        values: vec![String::new(); fields.len()],
+        fields,
+        target,
+        suggesting: None,
+        suggest_failed: None,
+        debug: false,
+    });
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Fake run"));
+    assert!(shows(&mut sim, "total"));
+    assert!(shows(&mut sim, "cart"));
+    assert!(shows(&mut sim, "rules"));
+    // Its type, and its default as what an empty field leaves it: "ALL —
+    // a value, or say it in words" read the default as the type (L1).
+    let fields = &app.proj.fake.sheet.as_ref().unwrap().fields;
+    let hint = |i: usize| super::fakerun::field_words(&fields[i]).1;
+    assert_eq!(hint(0), "Cart — a value, or say it in words");
+    assert_eq!(
+        hint(1),
+        "list[Discount] — leave empty for ALL, or give a value"
+    );
+    assert_eq!(hint(2), "leave empty for None, or give a value");
+    // Neither a type nor a default: what may be given, said alone.
+    let bare = Field::Param {
+        name: "x".into(),
+        hint: String::new(),
+        default: String::new(),
+    };
+    assert_eq!(
+        super::fakerun::field_words(&bare).1,
+        "a value, or say it in words"
+    );
+    assert!(shows(&mut sim, "Anything else it depends on"));
+    assert!(shows(&mut sim, "Suggest inputs"));
+    // L7: an empty parameter with no default says it is made up — the run
+    // started with nothing said of it; one with a default, or given, not.
+    assert!(shows(
+        &mut sim,
+        "Left empty, a typical cart is assumed, and said in the run."
+    ));
+    assert!(!shows(&mut sim, "a typical rules is assumed"));
+    drop(sim);
+    app.proj.fake.sheet.as_mut().unwrap().values[0] = "Cart(items=[])".into();
+    let mut sim = sim_of(&app);
+    assert!(!shows(&mut sim, "a typical cart is assumed"));
+    drop(sim);
+    let sim = sim_of(&app);
+    let run = click(sim_of(&app), "Run");
+    assert!(
+        run.iter()
+            .any(|m| matches!(m, Message::Fake(crate::FakeMsg::Run))),
+        "{run:?}"
+    );
+    // No inputs came: said in the sheet, with the way to the setting it
+    // points at — not on the status bar, under the sheet.
+    drop(sim);
+    app.proj.fake.sheet.as_mut().unwrap().suggest_failed =
+        Some("request failed: Connection refused (os error 111)".into());
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "No inputs suggested: couldn't reach"));
+    let settings = click(sim_of(&app), "Settings");
+    assert!(
+        settings
+            .iter()
+            .any(|m| matches!(m, Message::Settings(crate::SettingsMsg::Fix(_)))),
+        "{settings:?}"
+    );
+}
+
+/// The keyboard shortcuts are no tool of the strip's, nor of its ⋯ menu:
+/// they are in the app menu, with the window's other pages, and on ⌘/.
+#[test]
+fn the_shortcuts_are_in_the_app_menu_not_on_the_strip() {
+    let mut app = reader_app();
+    open_tools_menu(&mut app);
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Tutorial"), "the ⋯ menu is open");
+        assert!(!shows(&mut sim, "Keyboard Shortcuts"));
+    }
+    app.show_tools_menu = false;
+    app.show_app_menu = true;
+    let picked = click(sim_of(&app), "Keyboard Shortcuts…");
+    assert!(
+        picked.iter().any(|m| matches!(
+            m,
+            Message::Editor(EditorMsg::RunAction(crate::keymap::Action::Shortcuts))
+        )),
+        "{picked:?}"
+    );
+}
+
+/// The reading guide is offered first in the Walkthroughs view — written
+/// when there is none, opened when there is — and, open, its steps are a
+/// tree: each under the one it is read from.
+#[test]
+fn the_reading_guide_is_a_tree_in_the_walkthroughs_view() {
+    use crate::walkthrough::{GUIDE_SCOPE, Step, Walkthrough};
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    let label = "Where to start reading";
+    let write = click(sim_elem(super::walk_tab(&app)), label);
+    assert!(
+        write
+            .iter()
+            .any(|m| matches!(m, Message::Walk(WalkMsg::Generate(s)) if s == GUIDE_SCOPE)),
+        "{write:?}"
+    );
+    let step = |title: &str, depth: usize| Step {
+        title: title.into(),
+        file: "src/lib.rs".into(),
+        symbol: None,
+        line: Some(1),
+        narration: "n".into(),
+        depth,
+        stop: None,
+    };
+    app.proj.walk.library = vec![Walkthrough {
+        made: None,
+        title: "Where to start".into(),
+        scope: GUIDE_SCOPE.into(),
+        steps: vec![
+            step("The entry point", 0),
+            step("The router", 1),
+            step("One handler", 2),
+            step("The store", 1),
+        ],
+    }];
+    let open = click(sim_elem(super::walk_tab(&app)), label);
+    assert!(
+        open.iter()
+            .any(|m| matches!(m, Message::Walk(WalkMsg::Open(s)) if s == GUIDE_SCOPE)),
+        "{open:?}"
+    );
+    app.proj.walk.open = Some(GUIDE_SCOPE.into());
+    let mut sim = sim_elem(super::walk_tab(&app));
+    // Its row named as the action that made it.
+    assert!(text_at(&mut sim, |t| t == label, 1).is_some());
+    assert!(!shows(&mut sim, "Reading guide"));
+    let x = |sim: &mut Sim<'_>, title: &str| {
+        text_at(sim, |t| t == title, 0)
+            .unwrap_or_else(|| panic!("{title} is drawn"))
+            .x
+    };
+    let root = x(&mut sim, "The entry point");
+    let child = x(&mut sim, "The router");
+    let grandchild = x(&mut sim, "One handler");
+    let sibling = x(&mut sim, "The store");
+    assert!(
+        root < child && child < grandchild,
+        "{root} {child} {grandchild}"
+    );
+    assert_eq!(child, sibling, "siblings line up");
+}
+
+/// The MCP registry in Settings: what the servers are for (Clew's own
+/// agent, not an ACP agent's), each found server with how it runs and Use,
+/// and — once used — what it reads that the form leaves to fill in.
+#[test]
+fn the_mcp_registry_is_searched_and_used_from_settings() {
+    use crate::IntegrationsMsg as M;
+    let mut app = reader_app();
+    app.settings.open = true;
+    app.settings.page = crate::SettingsPage::Integrations;
+    let entries = clew_core::mcp::registry::parse(
+        r#"{"servers": [
+          {"server": {"name": "io.github.acme/notes-mcp", "description": "Your notes.",
+            "version": "1.2.0", "packages": [{"registryType": "npm",
+              "identifier": "@acme/notes", "version": "1.2.0",
+              "environmentVariables": [{"name": "NOTES_TOKEN", "description": "An API token",
+                "isRequired": true, "isSecret": true}]}]}},
+          {"server": {"name": "com.example/bundle", "version": "1",
+            "packages": [{"registryType": "mcpb", "identifier": "x"}]}}]}"#,
+    )
+    .unwrap();
+    app.settings.integrations.registry.query = "notes".into();
+    app.settings.integrations.registry.found = Some(Ok(entries));
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Find in the MCP registry"));
+        assert!(
+            !shows(&mut sim, "tools for Clew's own agent"),
+            "no paragraph saying what the servers are for"
+        );
+        assert!(shows(&mut sim, "io.github.acme/notes-mcp"));
+        assert!(shows(&mut sim, "npm 1.2.0"));
+        assert!(shows(&mut sim, "Clew can't run it"));
+    }
+    let used = click(sim_of(&app), "Use");
+    assert!(
+        used.iter()
+            .any(|m| matches!(m, Message::Integrations(M::RegistryUse(0)))),
+        "{used:?}"
+    );
+    let _ = app.update(Message::Integrations(M::RegistryUse(0)));
+    let draft = &app.settings.integrations;
+    assert_eq!(draft.new_mcp_name, "notes");
+    assert_eq!(draft.new_mcp_target, "npx -y @acme/notes@1.2.0");
+    assert_eq!(draft.new_mcp_extra, "NOTES_TOKEN=");
+    {
+        // The results put away, the add form is in view.
+        let found = app.settings.integrations.registry.found.take();
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "NOTES_TOKEN (required, secret)"));
+        assert!(shows(&mut sim, "An API token"));
+        drop(sim);
+        app.settings.integrations.registry.found = found;
+    }
+    // An entry Clew cannot run fills nothing.
+    let _ = app.update(Message::Integrations(M::RegistryUse(1)));
+    assert_eq!(app.settings.integrations.new_mcp_name, "notes");
+
+    // Add server asks for something to add, and says beside itself why an
+    // Add did not add — not at the top of the page, 400 px away.
+    app.settings.integrations.registry.found = None;
+    app.settings.integrations.new_mcp_target.clear();
+    assert!(click(sim_tall(super::view(&app)), "Add server").is_empty());
+    app.settings.integrations.new_mcp_target = "npx -y x".into();
+    assert!(matches!(
+        click(sim_tall(super::view(&app)), "Add server").as_slice(),
+        [Message::Integrations(M::McpAdd)]
+    ));
+    app.settings.integrations.mcp_add_error = Some("give the server a name".into());
+    assert!(shows(
+        &mut sim_tall(super::view(&app)),
+        "Not added: give the server a name."
+    ));
+}
+
+/// A search runs off the window's thread and only the newest answer is
+/// taken; an empty query searches nothing.
+#[test]
+fn only_the_newest_registry_search_is_taken() {
+    use crate::IntegrationsMsg as M;
+    let mut app = reader_app();
+    let _ = app.update(Message::Integrations(M::RegistrySearch));
+    assert_eq!(app.settings.integrations.registry.searching, None);
+    let _ = app.update(Message::Integrations(M::RegistryQuery("git".into())));
+    let _ = app.update(Message::Integrations(M::RegistrySearch));
+    let first = app
+        .settings
+        .integrations
+        .registry
+        .searching
+        .expect("searching");
+    let _ = app.update(Message::Integrations(M::RegistrySearch));
+    let second = app.settings.integrations.registry.searching.unwrap();
+    assert_ne!(first, second);
+    let _ = app.update(Message::Integrations(M::RegistryFound {
+        seq: first,
+        result: Err("late".into()),
+    }));
+    assert!(
+        app.settings.integrations.registry.found.is_none(),
+        "the older one"
+    );
+    let _ = app.update(Message::Integrations(M::RegistryFound {
+        seq: second,
+        result: Ok(Vec::new()),
+    }));
+    assert_eq!(app.settings.integrations.registry.searching, None);
+    assert!(matches!(
+        app.settings.integrations.registry.found,
+        Some(Ok(ref v)) if v.is_empty()
+    ));
+}
+
+/// Every state of the window the audit below reads: the code with each of
+/// the sidebar's views, the margin's tabs and the bottom panel, Ask open
+/// and large, the menus, each page of Settings, and the pages over the
+/// code.
+fn audited_states() -> Vec<(String, App)> {
+    let mut states = Vec::new();
+    let base = reader_app();
+    states.push(("the code".to_string(), base_clone(&base)));
+    for (_, tab) in crate::ui::SIDEBAR_TABS {
+        let mut app = base_clone(&base);
+        app.show_left_sidebar = true;
+        app.sidebar = tab;
+        states.push((format!("the sidebar's {tab:?}"), app));
+    }
+    for tab in [
+        crate::MarginTab::Notes,
+        crate::MarginTab::Calls,
+        crate::MarginTab::History,
+    ] {
+        let mut app = base_clone(&base);
+        app.show_right_panel = true;
+        app.margin_tab = tab;
+        states.push((format!("the margin's {tab:?}"), app));
+    }
+    let mut app = base_clone(&base);
+    app.show_bottom = true;
+    states.push(("the bottom panel".into(), app));
+    for (name, message) in [
+        ("Ask", Message::Ask(AskMsg::Toggle)),
+        (
+            "the tools menu",
+            Message::Window(WindowMsg::ToggleToolsMenu),
+        ),
+        ("the overview", Message::Overview(crate::OverviewMsg::Show)),
+        (
+            "the stats",
+            Message::Overview(crate::OverviewMsg::ShowStats),
+        ),
+        ("the weak spots", Message::Weak(crate::WeakMsg::Show)),
+        ("the command bar", Message::Nav(NavMsg::PaletteOpened)),
+    ] {
+        let mut app = base_clone(&base);
+        let _ = app.update(message);
+        states.push((name.to_string(), app));
+    }
+    // The bug's Run menu is there only where the strip is too short for
+    // the four ways to run.
+    let mut app = base_clone(&base);
+    app.window_height = 540.0;
+    let _ = app.update(Message::Window(WindowMsg::ToggleRunMenu));
+    assert!(app.show_run_menu);
+    states.push(("the run menu, the window short".into(), app));
+    let mut app = base_clone(&base);
+    let _ = app.update(Message::Ask(AskMsg::Toggle));
+    app.ask_view = crate::AskView::Expanded;
+    states.push(("Ask, large".into(), app));
+    for page in crate::SettingsPage::ALL {
+        let mut app = base_clone(&base);
+        let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(page)));
+        states.push((format!("Settings, {page:?}"), app));
+    }
+    // What each command opens — but those that start a program, the
+    // microphone or a paid pass, or put codes on the window.
+    use crate::keymap::Action;
+    for action in Action::ALL {
+        if matches!(
+            action,
+            Action::Run
+                | Action::StartDebug
+                | Action::ExplainAll
+                | Action::Voice
+                | Action::FakeRun
+                | Action::FakeDebug
+                | Action::Jump
+        ) {
+            continue;
+        }
+        let mut app = base_clone(&base);
+        let _ = app.update(Message::Editor(EditorMsg::RunAction(action)));
+        states.push((format!("{action:?}"), app));
+    }
+    // The sidebar's More views menu.
+    let mut app = base_clone(&base);
+    app.show_left_sidebar = true;
+    let _ = app.update(Message::Window(WindowMsg::ToggleViewsMenu));
+    states.push(("the views menu".into(), app));
+    // The context menu over the code, and a tree with rows.
+    let mut app = base_clone(&base);
+    app.proj.context_menu = Some(crate::ContextMenu {
+        pane: 0,
+        line: 1,
+        col: 1,
+        x: 20.0,
+        y: 20.0,
+        insight: None,
+        served: true,
+        by_pointer: true,
+        line_top: None,
+    });
+    states.push(("the context menu".into(), app));
+    let mut app = base_clone(&base);
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        files: vec!["README.md".into()],
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: vec![],
+                files: vec!["lib.rs".into(), "main.rs".into()],
+            },
+        )],
+    };
+    app.proj.expanded.insert("src".into());
+    states.push(("a tree".into(), app));
+    states
+}
+
+/// [`reader_app`] again: an `App` is not `Clone`.
+fn base_clone(_base: &App) -> App {
+    reader_app()
+}
+
+/// Every button a click presses offers itself to voice and to the
+/// command bar too (`heard`): in every state audited, each press a button
+/// marks for jump mode is one voice can make by a word. A button built
+/// without a word for it fails here.
+#[test]
+fn every_button_a_click_presses_a_word_presses_too() {
+    let mut unsaid = Vec::new();
+    for (name, app) in audited_states() {
+        let (targets, marks) = crate::ui::heard::gather_all(&app);
+        assert!(!marks.is_empty(), "{name}: nothing marked");
+        let offered: std::collections::HashSet<String> =
+            targets.iter().map(|t| format!("{:?}", t.message)).collect();
+        for (mark, _) in marks {
+            if !offered.contains(&mark) {
+                unsaid.push(format!("{name}: {mark}"));
+            }
+        }
+    }
+    unsaid.dedup();
+    assert!(
+        unsaid.is_empty(),
+        "pressed by a click, by no word:\n{}",
+        unsaid.join("\n")
+    );
+}
+
+/// macOS's window buttons — drawn only there, so the states above, built on
+/// any system, show them only on a Mac — are pressed by a word too: "close",
+/// "minimize", "full screen", or "exit full screen" once it is.
+#[test]
+fn the_window_buttons_of_macos_are_pressed_by_a_word_too() {
+    let mut app = reader_app();
+    for fullscreen in [false, true] {
+        app.fullscreen = fullscreen;
+        let (targets, marks) =
+            crate::ui::heard::gather_all_of(|| crate::ui::toolbar::traffic_lights(&app));
+        assert_eq!(marks.len(), 3, "{marks:?}");
+        for (mark, _) in &marks {
+            assert!(
+                targets.iter().any(|t| &format!("{:?}", t.message) == mark),
+                "{mark}: pressed by a click, by no word"
+            );
+        }
+        let shown: Vec<&str> = targets.iter().map(|t| t.shown.as_str()).collect();
+        let full = if fullscreen {
+            "Exit Full Screen"
+        } else {
+            "Full Screen"
+        };
+        assert_eq!(shown, ["Close", "Minimize", full]);
+    }
+}
+
+/// The window drawn once, as the runtime draws it: the codes jump mode
+/// deals go out as it is.
+fn draw_window(app: &App) {
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(super::view(app), WINDOW, Cache::default(), &mut renderer);
+    let _ = ui.update(
+        &redraw(),
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut Vec::new(),
+    );
+    ui.draw(
+        &mut renderer,
+        &crate::theme::app_theme(),
+        &iced::advanced::renderer::Style {
+            text_color: iced::Color::BLACK,
+        },
+        mouse::Cursor::Unavailable,
+    );
+}
+
+/// A key typed as the window gets it.
+fn type_key(app: &mut App, key: keyboard::Key, modifiers: keyboard::Modifiers) {
+    let _ = app.handle_key(key, modifiers);
+}
+
+fn type_letters(app: &mut App, letters: &str) {
+    for c in letters.chars() {
+        type_key(
+            app,
+            keyboard::Key::Character(c.to_string().into()),
+            keyboard::Modifiers::empty(),
+        );
+    }
+}
+
+/// ⌘J puts a code on every control on screen — the sidebar's rows, the
+/// strip's tools, the bar's buttons — one each, all as long; typing a
+/// tool's code presses it as a click does, and the codes go.
+#[test]
+fn jump_codes_go_on_every_control_and_a_code_presses_it() {
+    let (_, mut app) = audited_states()
+        .into_iter()
+        .find(|(name, _)| name == "a tree")
+        .expect("the tree state");
+    let cmd_j = keyboard::Modifiers::COMMAND;
+    type_key(&mut app, keyboard::Key::Character("j".into()), cmd_j);
+    assert_eq!(app.jump.as_deref(), Some(""), "{}", app.status);
+    draw_window(&app);
+    let dealt = crate::ui::jump::dealt(app.main_window);
+    assert!(dealt.len() > 26, "{} codes", dealt.len());
+    let codes: std::collections::HashSet<&str> = dealt.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(codes.len(), dealt.len(), "each code is another");
+    assert!(dealt.iter().all(|(c, _)| c.len() == 2), "all two letters");
+    // A file's row in the tree has one.
+    assert!(
+        dealt
+            .iter()
+            .any(|(_, m)| format!("{m:?}").contains("main.rs")),
+        "the tree's rows"
+    );
+    let (code, _) = dealt
+        .iter()
+        .find(|(_, m)| matches!(m, Message::Weak(crate::WeakMsg::Show)))
+        .expect("the strip's Weak Spots");
+    let code = code.clone();
+    type_letters(&mut app, &code[..1]);
+    assert_eq!(app.jump.as_deref(), Some(&code[..1]), "waits for the rest");
+    type_letters(&mut app, &code[1..]);
+    assert!(app.proj.weak.showing, "pressed");
+    assert!(app.jump.is_none(), "the codes go");
+    // Drawn without them, none is dealt.
+    draw_window(&app);
+    assert!(crate::ui::jump::dealt(app.main_window).is_empty());
+}
+
+/// Each window keeps its own codes: another window drawn after it, without
+/// codes or with its own, neither puts them away nor gives this one its.
+#[test]
+fn jump_codes_are_each_windows_own() {
+    let mut first = reader_app();
+    first.main_window = Some(iced::window::Id::unique());
+    let mut second = reader_app();
+    second.main_window = Some(iced::window::Id::unique());
+    let cmd_j = keyboard::Modifiers::COMMAND;
+    type_key(&mut first, keyboard::Key::Character("j".into()), cmd_j);
+    draw_window(&first);
+    // The codes and what each presses, as words to compare.
+    let codes = |app: &App| -> Vec<String> {
+        crate::ui::jump::dealt(app.main_window)
+            .iter()
+            .map(|(code, m)| format!("{code} {m:?}"))
+            .collect()
+    };
+    let dealt = codes(&first);
+    let (code, _) = crate::ui::jump::dealt(first.main_window)
+        .into_iter()
+        .find(|(_, m)| matches!(m, Message::Weak(crate::WeakMsg::Show)))
+        .expect("the strip's Weak Spots");
+    // The other window, drawn since without codes, leaves the first's.
+    draw_window(&second);
+    assert_eq!(codes(&first), dealt);
+    // With codes of its own, it keeps them to itself.
+    second.show_left_sidebar = true;
+    type_key(&mut second, keyboard::Key::Character("j".into()), cmd_j);
+    draw_window(&second);
+    assert_ne!(codes(&second), dealt);
+    assert_eq!(codes(&first), dealt);
+    type_letters(&mut first, &code);
+    assert!(first.proj.weak.showing, "pressed in the first window");
+    assert!(!second.proj.weak.showing);
+    assert!(first.jump.is_none(), "the codes go");
+    draw_window(&first);
+    assert!(crate::ui::jump::dealt(first.main_window).is_empty());
+    assert!(!crate::ui::jump::dealt(second.main_window).is_empty());
+}
+
+/// Backspace takes a letter back; a letter no code goes on with, or Esc,
+/// puts the codes away and presses nothing.
+#[test]
+fn jump_mode_takes_letters_back_and_ends_on_a_wrong_one() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::Jump,
+    )));
+    draw_window(&app);
+    let dealt = crate::ui::jump::dealt(app.main_window);
+    let first = dealt[0].0.clone();
+    type_letters(&mut app, &first[..1]);
+    type_key(
+        &mut app,
+        keyboard::Key::Named(keyboard::key::Named::Backspace),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.jump.as_deref(), Some(""));
+    // A letter no code begins with.
+    let unused = ('a'..='z')
+        .find(|c| !dealt.iter().any(|(code, _)| code.starts_with(*c)))
+        .expect("a letter no code begins with");
+    type_letters(&mut app, &unused.to_string());
+    assert!(app.jump.is_none());
+    assert!(
+        app.status
+            .contains(&unused.to_ascii_uppercase().to_string()),
+        "{}",
+        app.status
+    );
+    // Esc puts them away too; ⌘J again as well.
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::Jump,
+    )));
+    type_key(
+        &mut app,
+        keyboard::Key::Named(keyboard::key::Named::Escape),
+        keyboard::Modifiers::empty(),
+    );
+    assert!(app.jump.is_none());
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::Jump,
+    )));
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::Jump,
+    )));
+    assert!(app.jump.is_none());
+}
+
+/// A dialog over the window takes the codes as it takes the pointer:
+/// only its own controls have one.
+#[test]
+fn a_dialog_takes_the_codes_from_what_is_under_it() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Shortcuts,
+    )));
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::Jump,
+    )));
+    draw_window(&app);
+    let dealt = crate::ui::jump::dealt(app.main_window);
+    assert!(
+        dealt
+            .iter()
+            .any(|(_, m)| matches!(m, Message::Window(WindowMsg::RebindStart(_)))),
+        "the dialog's own"
+    );
+    assert!(
+        !dealt
+            .iter()
+            .any(|(_, m)| matches!(m, Message::Weak(crate::WeakMsg::Show))),
+        "nothing under it"
+    );
+    // ⌘J typed on that page, which keeps every other key from what is
+    // under it, puts the codes up as well.
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Shortcuts,
+    )));
+    type_key(
+        &mut app,
+        keyboard::Key::Character("j".into()),
+        keyboard::Modifiers::COMMAND,
+    );
+    assert!(app.jump.is_some());
+}
+
+/// The chat F6 opened on its way round is put away again as F6 goes on,
+/// nothing typed in it — not left over the code — and kept, a question
+/// begun in it. One open before F6 came is left open.
+#[test]
+fn f6_puts_away_the_chat_it_opened() {
+    let mut app = reader_app();
+    app.code_focused = true;
+    let f6 = || keyboard::Key::Named(keyboard::key::Named::F6);
+    let to_chat = |app: &mut App| {
+        for _ in 0..6 {
+            if app.region == crate::app::keys::Region::Chat {
+                return;
+            }
+            type_key(app, f6(), keyboard::Modifiers::empty());
+        }
+        panic!("F6 never reached the chat");
+    };
+    to_chat(&mut app);
+    assert!(app.ask_view.is_open(), "shown to type in");
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert!(!app.ask_view.is_open(), "put away, nothing typed");
+    // A question begun: kept.
+    to_chat(&mut app);
+    app.proj.ask_input = "why".into();
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert!(app.ask_view.is_open(), "kept, a question begun in it");
+    // Open before F6 came: left open.
+    app.proj.ask_input.clear();
+    to_chat(&mut app);
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert!(app.ask_view.is_open(), "it was open before");
+}
+
+/// F6 moves the keys from the code to the sidebar's field, to the chat
+/// and back to the code; Shift-F6 the other way.
+#[test]
+fn f6_moves_the_keys_between_the_regions() {
+    let mut app = reader_app();
+    // A tree with a row to rest on: an empty one is passed over.
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: vec![],
+        files: vec!["main.py".into()],
+    };
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.code_focused = true;
+    let f6 = || keyboard::Key::Named(keyboard::key::Named::F6);
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert_eq!(app.region, crate::app::keys::Region::Sidebar);
+    assert!(!app.code_focused);
+    // The Files view's tree, under its filter.
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert_eq!(app.region, crate::app::keys::Region::Tree);
+    assert!(!app.code_focused);
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert_eq!(app.region, crate::app::keys::Region::Chat);
+    assert!(app.ask_view.is_open(), "the chat shown to type in");
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert_eq!(app.region, crate::app::keys::Region::Code);
+    assert!(app.code_focused);
+    type_key(&mut app, f6(), keyboard::Modifiers::SHIFT);
+    assert_eq!(app.region, crate::app::keys::Region::Chat);
+    // A sidebar view with no field is passed over.
+    app.sidebar = crate::SidebarTab::Marks;
+    app.code_focused = true;
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert_eq!(app.region, crate::app::keys::Region::Chat);
+}
+
+/// The command bar lists what is on screen under it by name — a control
+/// no command names — and runs it for the reader; the agent, running
+/// commands by title, never reaches it.
+#[test]
+fn the_command_bar_lists_what_is_on_screen_for_the_reader_only() {
+    let mut app = reader_app();
+    app.show_bottom = true;
+    let _ = app.update(Message::Nav(NavMsg::PaletteOpened));
+    app.refresh_bar();
+    let hide = app
+        .palette
+        .iter()
+        .find(|c| c.title == "Hide panel")
+        .expect("the panel's Hide is listed")
+        .title
+        .clone();
+    assert!(
+        !app.palette_commands().iter().any(|c| c.title == hide),
+        "no command of the agent's"
+    );
+    let _ = app.run_palette(&hide);
+    assert!(app.show_bottom, "the agent's way runs nothing");
+    let _ = app.update(Message::Nav(NavMsg::PaletteOpened));
+    let _ = app.update(Message::Nav(NavMsg::PaletteRun(hide)));
+    assert!(!app.show_bottom, "the reader's does");
+    assert!(!app.proj.finder.open);
+}
+
+/// A file the tree shows is listed once in the command bar — as the file —
+/// not a second time above it as a control on screen.
+#[test]
+fn a_file_on_screen_is_listed_once_in_the_command_bar() {
+    let mut app = reader_app();
+    let project = app.proj.project.as_mut().unwrap();
+    let root = project.root.clone();
+    project.tree = crate::fs_scan::DirNode {
+        dirs: vec![],
+        files: vec!["main.py".into()],
+    };
+    project.files = Arc::new(vec![crate::fs_scan::FileEntry {
+        abs: root.join("main.py"),
+        rel: "main.py".into(),
+    }]);
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    assert!(
+        crate::ui::heard::gather(&app)
+            .iter()
+            .any(|t| t.title == "main.py"),
+        "the tree's row is on screen"
+    );
+    let _ = app.update(Message::Nav(NavMsg::PaletteOpened));
+    app.proj.finder.query = "main".into();
+    app.refresh_bar();
+    let n = app.palette.len();
+    assert!(
+        !app.palette.iter().any(|c| c.title == "main.py"),
+        "not as a command"
+    );
+    let files: Vec<usize> = app
+        .proj
+        .finder
+        .results
+        .iter()
+        .filter(|&&i| i >= n)
+        .copied()
+        .collect();
+    assert_eq!(files, [n], "once, as the file");
+}
+
+/// Only what is on screen has a code: a long tree's rows scrolled away
+/// below the window have none, and the codes stay two letters long.
+#[test]
+fn rows_scrolled_away_have_no_code() {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        files: vec![],
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: vec![],
+                files: (0..800).map(|i| format!("f{i}.rs")).collect(),
+            },
+        )],
+    };
+    app.proj.expanded.insert("src".into());
+    app.jump = Some(String::new());
+    draw_window(&app);
+    let dealt = crate::ui::jump::dealt(app.main_window);
+    let rows = |name: &str| {
+        dealt
+            .iter()
+            .any(|(_, m)| format!("{m:?}").contains(&format!("src/{name}\"")))
+    };
+    assert!(rows("f0.rs"), "the first row, on screen");
+    assert!(!rows("f799.rs"), "the last, far below, has none");
+    assert!(dealt.len() < 200, "{} codes", dealt.len());
+    assert!(dealt.iter().all(|(c, _)| c.len() == 2));
+}
+
+/// The sidebar's ⋯ lists the views not on its strip — a function's calls
+/// among them — and picking one shows it, the menu put away, the ⋯ raised
+/// while it shows; Esc puts the menu away too.
+#[test]
+fn the_more_views_menu_lists_the_views_off_the_strip() {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    let more = crate::ui::heard::gather(&app)
+        .into_iter()
+        .find(|t| t.title == "More views")
+        .expect("the ⋯ is offered");
+    let _ = app.update(more.message);
+    assert!(app.show_views_menu);
+    let mut sim = sim_of(&app);
+    for name in [
+        "Call hierarchy",
+        "Value flow",
+        "Imports",
+        "Your notes",
+        "API docs",
+    ] {
+        assert!(shows(&mut sim, name), "{name} listed");
+    }
+    assert!(!shows(&mut sim, "Bookmarks"), "a view on the strip is not");
+    drop(sim);
+    assert!(matches!(
+        super::escape_message(&app),
+        Some(Message::Window(WindowMsg::ToggleViewsMenu))
+    ));
+    let sent = click(sim_of(&app), "Call hierarchy");
+    for message in sent {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.sidebar, crate::SidebarTab::Calls);
+    assert!(!app.show_views_menu, "put away");
+    // Its menu hangs under the ⋯, within the sidebar.
+    let _ = app.update(Message::Window(WindowMsg::ToggleViewsMenu));
+    let mut sim = sim_of(&app);
+    let row = text_at(&mut sim, |t| t == "API docs", 0).expect("listed");
+    assert!(row.x + row.width <= app.sidebar_width, "{row:?}");
+    assert!(row.y > super::toolbar::TOOLBAR_H + 30.0, "{row:?}");
+}
+
+/// The window drawn at `size` with the pointer at `at` (moved there first),
+/// as RGBA, and the messages the move gave.
+fn window_with_pointer(
+    app: &App,
+    size: iced::Size,
+    at: Option<iced::Point>,
+    then: &[Event],
+) -> (Vec<u8>, Vec<Message>) {
+    use iced::advanced::renderer::Headless as _;
+    let cursor = at.map_or(mouse::Cursor::Unavailable, mouse::Cursor::Available);
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(crate::ui::view(app), size, Cache::default(), &mut renderer);
+    let mut events = vec![Event::Window(window::Event::RedrawRequested(
+        std::time::Instant::now(),
+    ))];
+    if let Some(p) = at {
+        events.push(Event::Mouse(mouse::Event::CursorMoved { position: p }));
+    }
+    events.extend_from_slice(then);
+    let mut messages = Vec::new();
+    let _ = ui.update(
+        &events,
+        cursor,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut messages,
+    );
+    ui.draw(
+        &mut renderer,
+        &crate::theme::app_theme(),
+        &iced::advanced::renderer::Style {
+            text_color: iced::Color::BLACK,
+        },
+        cursor,
+    );
+    let rgba = renderer.screenshot(
+        iced::Size::new(size.width as u32, size.height as u32),
+        1.0,
+        iced::Color::TRANSPARENT,
+    );
+    (rgba, messages)
+}
+
+/// A reader with the sidebar open beside the sheet, in a window of `size`.
+fn sidebar_app(size: iced::Size) -> App {
+    let mut app = reader_app();
+    let _ = app.on_window_resized(size);
+    app.show_left_sidebar = true;
+    app
+}
+
+/// The sheet's shadow fades out into the sidebar as it does along its other
+/// edges, getting no darker away from the sheet: the sidebar's divider,
+/// painted in the sidebar's colour at rest, stopped it short a few pixels
+/// out, leaving a dark line down the sidebar's edge.
+#[test]
+fn the_sheets_shadow_fades_into_the_sidebar_without_a_line() {
+    let size = iced::Size::new(1000.0, 640.0);
+    let app = sidebar_app(size);
+    let (rgba, _) = window_with_pointer(&app, size, None, &[]);
+    let w = size.width as usize;
+    let light = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        u32::from(rgba[i]) + u32::from(rgba[i + 1]) + u32::from(rgba[i + 2])
+    };
+    // The sheet's border: the first pixel past the sidebar's that is not
+    // the chrome's.
+    let edge = (app.sidebar_width + app.window_frame) as usize;
+    for y in [250, 400, 550] {
+        // Walking out from the sheet into the empty sidebar, each pixel is
+        // as light as the one before it or lighter.
+        let row: Vec<u32> = (edge - 30..edge).rev().map(|x| light(x, y)).collect();
+        assert!(
+            row.windows(2).all(|p| p[1] >= p[0]),
+            "y = {y}: going out from the sheet: {row:?}"
+        );
+    }
+}
+
+/// The sidebar's lists keep their scrollbar: with the pointer over a long
+/// file tree its scroller shows down the sidebar's edge, where the divider
+/// lay over it and hid it.
+#[test]
+fn the_file_trees_scrollbar_shows_beside_the_sidebars_divider() {
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: Vec::new(),
+        files: (0..80).map(|i| format!("file_{i:02}.rs")).collect(),
+    };
+    let w = size.width as usize;
+    let edge = (app.sidebar_width + app.window_frame) as usize;
+    let lightest = |rgba: &[u8]| {
+        (edge - crate::ui::SCROLLBAR_W as usize..edge)
+            .flat_map(|x| (150..600).map(move |y| (x, y)))
+            .map(|(x, y)| u32::from(rgba[(y * w + x) * 4]))
+            .max()
+            .unwrap()
+    };
+    let (away, _) = window_with_pointer(&app, size, None, &[]);
+    let over = iced::Point::new(app.window_frame + 120.0, 300.0);
+    let (hovered, _) = window_with_pointer(&app, size, Some(over), &[]);
+    // Unseen at rest; seen, well over the chrome, under the pointer.
+    assert!(lightest(&away) < 30, "{}", lightest(&away));
+    assert!(
+        lightest(&hovered) > lightest(&away) + 15,
+        "{}",
+        lightest(&hovered)
+    );
+}
+
+/// The sidebar's divider lies over the sheet's edge, but ends before the
+/// code's gutter marks: a click anywhere on a breakpoint's dot clears it,
+/// and doesn't grab the divider.
+#[test]
+fn a_click_on_a_breakpoints_dot_is_not_taken_by_the_sidebars_divider() {
+    let size = iced::Size::new(1000.0, 640.0);
+    let app = sidebar_app(size);
+    let edge = app.window_frame + app.sidebar_width;
+    // A dot starts past the sheet's 1px border and the bookmark ribbon's
+    // room, 4.5px in at the least; its left side is the first place a
+    // click aims.
+    for x in [edge + 5.0, edge + 8.0] {
+        let at = iced::Point::new(x, 300.0);
+        let mut renderer = renderer();
+        let mut ui =
+            UserInterface::build(crate::ui::view(&app), size, Cache::default(), &mut renderer);
+        let mut messages = Vec::new();
+        for event in [
+            mouse::Event::CursorMoved { position: at },
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        ] {
+            let _ = ui.update(
+                &[Event::Mouse(event)],
+                mouse::Cursor::Available(at),
+                &mut renderer,
+                &mut clipboard::Null,
+                &mut messages,
+            );
+        }
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::Debug(DebugMsg::BreakpointToggle { .. }))),
+            "x = {x}: {messages:?}"
+        );
+    }
+}
+
+/// Dragging the divider beside the sidebar makes the sidebar reach the
+/// pointer, less half the divider: grabbed by its middle, it stays put.
+#[test]
+fn dragging_the_sidebars_divider_moves_its_edge_with_the_pointer() {
+    let size = iced::Size::new(1000.0, 640.0);
+    let app = sidebar_app(size);
+    let half = crate::resize::EDGE_GRIP / 2.0;
+    let grab = iced::Point::new(app.window_frame + app.sidebar_width + half, 300.0);
+    let to = iced::Point::new(grab.x + 40.0, 300.0);
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(crate::ui::view(&app), size, Cache::default(), &mut renderer);
+    let mut messages = Vec::new();
+    for (at, event) in [
+        (grab, mouse::Event::CursorMoved { position: grab }),
+        (grab, mouse::Event::ButtonPressed(mouse::Button::Left)),
+        (to, mouse::Event::CursorMoved { position: to }),
+    ] {
+        let _ = ui.update(
+            &[Event::Mouse(event)],
+            mouse::Cursor::Available(at),
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+    }
+    let widths: Vec<f32> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::Window(WindowMsg::ResizeSidebar(x)) => Some(*x),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(widths, [app.sidebar_width + 40.0]);
+}
+
+/// A History view of two commits, the newer opened to its files: what the
+/// History tests read.
+fn history_app() -> (App, String, String) {
+    use clew_protocol::{CommitDetail, CommitFile, LogCommit, LogRef, RefKind};
+    let mut app = reader_app();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let (new, old) = ("b".repeat(40), "a".repeat(40));
+    let commit = |sha: &str, parents: &[&str], subject: &str| LogCommit {
+        sha: sha.to_string(),
+        parents: parents.iter().map(|p| p.to_string()).collect(),
+        author: "Mira Chen".into(),
+        time: now - 3 * 86_400,
+        subject: subject.into(),
+        refs: Vec::new(),
+    };
+    let mut commits = vec![
+        commit(&new, &[&old], "Tax the total"),
+        commit(&old, &[], "Start the shop"),
+    ];
+    commits[0].refs.push(LogRef {
+        kind: RefKind::Head,
+        name: "main".into(),
+    });
+    let h = &mut app.proj.git_log;
+    h.asked = true;
+    h.graph = crate::app::history::graph_rows(&commits);
+    h.commits = commits;
+    h.open = Some(new.clone());
+    h.details.insert(
+        new.clone(),
+        Ok(Some(CommitDetail {
+            sha: new.clone(),
+            parents: vec![old.clone()],
+            author: "Mira Chen".into(),
+            time: now - 3 * 86_400,
+            message: "Tax the total\n\nNot each line.".into(),
+            files: vec![
+                CommitFile {
+                    rel: "teashop/pricing.py".into(),
+                    old: None,
+                    status: 'M',
+                    added: Some(4),
+                    removed: Some(2),
+                },
+                CommitFile {
+                    rel: "teashop/legacy.py".into(),
+                    old: None,
+                    status: 'D',
+                    added: Some(0),
+                    removed: Some(9),
+                },
+            ],
+            more_files: 0,
+        })),
+    );
+    (app, new, old)
+}
+
+/// The History view lists the project's commits, newest first: the name
+/// that points at one, its subject, its short id, who and when. Pressed, a
+/// commit opens to its message and files, each file read as the commit
+/// left it — not a deleted one, which it did not leave — and its whole id
+/// is there to copy.
+#[test]
+fn the_history_view_lists_commits_and_opens_one_to_its_files() {
+    use crate::HistoryMsg;
+    let (app, new, old) = history_app();
+    let view = || sim_elem(super::history::history_tab(&app));
+    assert!(shows(&mut view(), "Tax the total"));
+    // Whole in its row, the opened commit's subject is not said again
+    // under it.
+    assert!(
+        text_at(&mut view(), |t| t == "Tax the total", 1).is_none(),
+        "the subject said twice"
+    );
+    assert!(shows(&mut view(), "main"));
+    assert!(shows(&mut view(), "bbbbbbb by Mira Chen, 3 days ago"));
+    assert!(
+        shows(&mut view(), "Not each line."),
+        "the body of the opened one"
+    );
+    assert!(shows(&mut view(), "2 files changed"));
+
+    let sent = click(view(), "Start the shop");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::History(HistoryMsg::Toggle(s)) if *s == old)),
+        "{sent:?}"
+    );
+    let sent = click(view(), "pricing.py");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::History(HistoryMsg::OpenAt { sha, rel })
+                if *sha == new && rel == "teashop/pricing.py"
+        )),
+        "{sent:?}"
+    );
+    let sent = click(view(), "legacy.py");
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::History(HistoryMsg::OpenAt { .. }))),
+        "a file the commit deleted is not there to read: {sent:?}"
+    );
+    let sent = click(view(), "Copy id");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::History(HistoryMsg::CopyId(s)) if *s == new)),
+        "{sent:?}"
+    );
+}
+
+/// This branch / All branches spans the row, two equal halves, each label
+/// centred in its own: one hugging its labels at the row's start, with
+/// nothing after it, looked unfinished. The half not chosen switches; the
+/// chosen one has nothing to do.
+#[test]
+fn the_branch_switch_spans_the_row() {
+    use crate::HistoryMsg;
+    let (app, ..) = history_app();
+    let view = || sim_elem(super::history::history_tab(&app));
+    let mut sim = view();
+    let this = text_at(&mut sim, |t| t == "This branch", 0).expect("This branch");
+    let all = text_at(&mut sim, |t| t == "All branches", 0).expect("All branches");
+    // The simulator's 1024 wide, less the header's 10 a side: halves
+    // centred near a quarter and three quarters across.
+    let quarter = (1024.0 - 20.0) / 4.0 + 10.0;
+    assert!(
+        (this.center_x() - quarter).abs() < 8.0,
+        "This branch centred in the left half: {this:?}"
+    );
+    assert!(
+        (all.center_x() - 3.0 * quarter + 10.0).abs() < 16.0,
+        "All branches centred in the right half: {all:?}"
+    );
+    let sent = click(view(), "All branches");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::History(HistoryMsg::AllBranches(true)))),
+        "{sent:?}"
+    );
+    let sent = click(view(), "This branch");
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::History(HistoryMsg::AllBranches(_)))),
+        "the chosen half: {sent:?}"
+    );
+}
+
+/// A page read for a filter of words or an author is drawn as one dashed
+/// lane: its commits are not each other's parents, and a second lane drawn
+/// for one read as a branch that is not there. The whole history keeps its
+/// branches.
+#[test]
+fn a_filtered_history_draws_no_branches() {
+    use crate::HistoryMsg;
+    use clew_protocol::{LogCommit, LogPage};
+    let (mut app, new, old) = history_app();
+    // Two matches with a commit between them the filter left out.
+    let page = |app: &App| LogPage {
+        commits: vec![
+            LogCommit {
+                parents: vec!["c".repeat(40)],
+                ..app.proj.git_log.commits[0].clone()
+            },
+            app.proj.git_log.commits[1].clone(),
+        ],
+        more: false,
+    };
+    app.proj.git_log.query = "tax".into();
+    let loaded = HistoryMsg::Loaded {
+        stamp: app.stamp(),
+        generation: app.proj.git_log.generation,
+        skip: 0,
+        result: Ok(page(&app)),
+    };
+    let _ = app.update(Message::History(loaded));
+    let g = &app.proj.git_log.graph;
+    assert_eq!(app.proj.git_log.commits[0].sha, new);
+    assert!(g.iter().all(|r| r.dashed && r.col == 0), "{g:?}");
+
+    app.proj.git_log.query.clear();
+    let loaded = HistoryMsg::Loaded {
+        stamp: app.stamp(),
+        generation: app.proj.git_log.generation,
+        skip: 0,
+        result: Ok(page(&app)),
+    };
+    let _ = app.update(Message::History(loaded));
+    let g = &app.proj.git_log.graph;
+    assert_eq!(app.proj.git_log.commits[1].sha, old);
+    assert!(g.iter().all(|r| !r.dashed), "{g:?}");
+}
+
+/// Updates is the last of Settings' pages: what a reader sets up first
+/// comes first, Clew's own updates after.
+#[test]
+fn updates_is_the_last_settings_page() {
+    assert_eq!(
+        crate::SettingsPage::ALL.last(),
+        Some(&crate::SettingsPage::Updates)
+    );
+    assert_eq!(crate::SettingsPage::ALL[0], crate::SettingsPage::Appearance);
+}
+
+/// Settings → Usage and cost: what the key spent today and this month, by
+/// feature and by call, at the model's price — read from the ledger as the
+/// page opens.
+#[test]
+fn the_usage_page_says_what_the_key_spent() {
+    use crate::app::usage::{ASK, EXPLAIN, Entry};
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Usage,
+    )));
+    assert!(shows(&mut sim_of(&app), "Loading…"));
+    // Nothing called yet: the chart says so, not a row of empty stubs.
+    let _ = app.update(Message::Usage(crate::UsageMsg::Read(Vec::new())));
+    let mut page = sim_tall(super::usage::usage_page(&app));
+    assert!(shows(&mut page, "No AI calls in these 30 days yet."));
+    drop(page);
+    let now = crate::app::usage::now_secs();
+    let call = |purpose: &str, input: u64, output: u64| Entry {
+        at: now,
+        purpose: purpose.into(),
+        model: "gpt-4o-mini".into(),
+        input,
+        cached: 0,
+        written: 0,
+        output,
+    };
+    let _ = app.update(Message::Usage(crate::UsageMsg::Read(vec![
+        call(EXPLAIN, 1_000_000, 0),
+        call(ASK, 0, 1_000_000),
+    ])));
+    let mut sim = sim_of(&app);
+    for said in [
+        "Today",
+        "This month",
+        "2 calls, 2M tokens",
+        "$0.75",
+        "This month by feature",
+        "Explanations",
+        "Latest calls",
+    ] {
+        assert!(shows(&mut sim, said), "{said:?}");
+    }
+    drop(sim);
+    // Down the page, the prices the money is worked out at.
+    let mut page = sim_tall(super::usage::usage_page(&app));
+    assert!(shows(&mut page, "Prices"));
+    // The chart says what a bar measures and when it runs; each call says
+    // when, to the minute.
+    for said in ["Cost per day", "Today, "] {
+        assert!(shows(&mut page, said), "{said:?}");
+    }
+    assert!(!shows(&mut page, "No AI calls in these 30 days yet."));
+    drop(page);
+    // Prices Clew knows are said in a line, not three boxes to fill in;
+    // Edit shows the boxes.
+    app.usage.model = "gpt-4o-mini".into();
+    let mut page = sim_tall(super::usage::usage_page(&app));
+    assert!(shows(&mut page, "$0.15 in, $0.60 out, per million tokens"));
+    assert!(!shows(&mut page, "per 1M tokens"), "boxes for known prices");
+    drop(page);
+    assert!(matches!(
+        click(sim_tall(super::usage::usage_page(&app)), "Edit").as_slice(),
+        [Message::Usage(crate::UsageMsg::EditPrices(true))]
+    ));
+    let _ = app.update(Message::Usage(crate::UsageMsg::EditPrices(true)));
+    let mut page = sim_tall(super::usage::usage_page(&app));
+    assert!(shows(&mut page, "per 1M tokens"));
+    assert!(shows(&mut page, "Done"));
+    assert!(!shows(&mut page, "Enter a number"));
+    drop(page);
+    // A price that is no number is said to be one, not taken silently.
+    let _ = app.update(Message::Usage(crate::UsageMsg::Price(
+        crate::app::usage::PriceField::Input,
+        "abc".into(),
+    )));
+    let mut page = sim_tall(super::usage::usage_page(&app));
+    assert!(shows(&mut page, "Enter a number."));
+    drop(page);
+    // And Done keeps the editor until it is one: pressed, it closed and
+    // dropped the edit without a word. Cancel is the way out meanwhile,
+    // back to the prices last kept.
+    assert!(click(sim_tall(super::usage::usage_page(&app)), "Done").is_empty());
+    assert!(matches!(
+        click(sim_tall(super::usage::usage_page(&app)), "Cancel").as_slice(),
+        [Message::Usage(crate::UsageMsg::EditPrices(false))]
+    ));
+    let _ = app.update(Message::Usage(crate::UsageMsg::Price(
+        crate::app::usage::PriceField::Input,
+        "0.2".into(),
+    )));
+    assert!(matches!(
+        click(sim_tall(super::usage::usage_page(&app)), "Done").as_slice(),
+        [Message::Usage(crate::UsageMsg::EditPrices(false))]
+    ));
+    assert!(
+        !shows(&mut sim_tall(super::usage::usage_page(&app)), "Cancel"),
+        "prices it can keep: Done alone"
+    );
+}
+
+/// An empty call hierarchy, with the caret in a function, offers that
+/// function's: it only said to right-click one (round-6 L17).
+#[test]
+fn an_empty_call_hierarchy_offers_the_carets_function() {
+    let mut app = reader_app();
+    app.proj.call_graph = None;
+    app.proj.explain.view = None;
+    assert!(!shows(
+        &mut sim_elem(super::panels::calls_tab(&app)),
+        "Show for total()"
+    ));
+    app.proj.explain.view = Some(crate::explain::Node::Function {
+        file: "src/lib.rs".into(),
+        name: "total".into(),
+        ordinal: 0,
+    });
+    assert!(matches!(
+        click(sim_elem(super::panels::calls_tab(&app)), "Show for total()").as_slice(),
+        [Message::Calls(CallsMsg::OfFunction)]
+    ));
+}
+
+/// A balance that could not be checked for what Settings puts right has
+/// the way there on the page, not "check the base URL in Settings" said
+/// in Settings, with nothing to press.
+#[test]
+fn a_balance_check_that_failed_leads_to_its_setting() {
+    let mut app = reader_app();
+    app.llm_available = true;
+    app.usage.tells_balance = true;
+    app.usage.balance = crate::app::usage::Balance::Failed(
+        "request failed: Connection refused (os error 111)".into(),
+    );
+    let mut page = sim_tall(super::usage::usage_page(&app));
+    assert!(shows(&mut page, "nothing answered at that address"));
+    assert!(!shows(&mut page, "in Settings"));
+    // Named by what to check there: a button called "Settings", in
+    // Settings, said nothing of where it went (L3).
+    assert!(!shows(&mut page, "Settings"));
+    drop(page);
+    assert!(
+        click(
+            sim_tall(super::usage::usage_page(&app)),
+            "Check the base URL"
+        )
+        .iter()
+        .any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::Fix(
+                crate::app::state::LlmField::BaseUrl
+            ))
+        )),
+        "its Settings"
+    );
+}
+
+/// The balance says what is left: an empty currency beside one with money
+/// is left out; with none, the empty one is said.
+#[test]
+fn a_balance_leaves_out_an_empty_currency() {
+    let said = |a: &[(&str, &str)]| {
+        super::usage::balance_said(
+            &a.iter()
+                .map(|(c, v)| (c.to_string(), v.to_string()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(said(&[("USD", "0.00"), ("CNY", "72.01")]), "CN¥72.01");
+    assert_eq!(
+        said(&[("USD", "3.10"), ("CNY", "72.01")]),
+        "$3.10, CN¥72.01"
+    );
+    assert_eq!(said(&[("USD", "0.00")]), "$0.00");
+}
+
+/// A model call the server made says what it used: kept, and counted to
+/// the Ask answer it was for, whose cost is then said under it.
+#[test]
+fn a_reported_call_is_kept_and_counted_to_its_answer() {
+    let mut app = reader_app();
+    app.usage.entries = Some(Vec::new());
+    for _ in 0..2 {
+        let _ = app.handle_server_event(clew_protocol::Event::Usage {
+            work: 42,
+            purpose: crate::app::usage::ASK.into(),
+            model: "gpt-4o-mini".into(),
+            input: 1_000,
+            cached: 0,
+            written: 0,
+            output: 500,
+        });
+    }
+    assert_eq!(app.usage.entries.as_ref().map(Vec::len), Some(2));
+    assert_eq!(app.answer_cost(42).as_deref(), Some("3k tokens, $0.0009"));
+    assert!(app.answer_cost(7).is_none(), "another answer spent nothing");
+    // A call that said nothing of what it used is no entry.
+    let _ = app.handle_server_event(clew_protocol::Event::Usage {
+        work: 43,
+        purpose: crate::app::usage::EXPLAIN.into(),
+        model: "gpt-4o-mini".into(),
+        input: 0,
+        cached: 0,
+        written: 0,
+        output: 0,
+    });
+    assert_eq!(app.usage.entries.as_ref().map(Vec::len), Some(2));
+}
+
+/// Explaining says what it is likely to cost before it is asked for: the
+/// count of calls, and under it their tokens and money.
+#[test]
+fn explaining_says_what_it_will_likely_cost() {
+    let mut app = reader_app();
+    app.llm_available = true;
+    let estimate = app.explain_estimate(45).expect("an estimate");
+    let said = estimate.said(45);
+    assert!(
+        said.starts_with("About 45 AI calls: ") && said.contains("tokens"),
+        "{said:?}"
+    );
+    assert!(!estimate.from_history, "no explanations in the ledger yet");
+    assert_eq!(
+        app.explain_estimate(0),
+        None,
+        "nothing to explain, nothing to say"
+    );
+    app.llm_available = false;
+    assert_eq!(app.explain_estimate(45), None, "no key, no estimate");
+}
+
+/// "Check now" says what it is doing, on the page it was pressed on: its
+/// answer went only to the status bar the Settings window covers, so it
+/// seemed to do nothing. While a check runs the button says "Checking…"
+/// and cannot be pressed again; after, the page says what it found.
+#[test]
+fn check_now_says_what_it_found_on_its_page() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Updates,
+    )));
+    assert!(
+        !shows(&mut sim_of(&app), "Clew is up to date"),
+        "before any check"
+    );
+    app.update.checking = true;
+    assert!(shows(&mut sim_of(&app), "Checking…"));
+    let sent = click(sim_of(&app), "Checking…");
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Updater(crate::UpdaterMsg::Check))),
+        "a second check while one runs: {sent:?}"
+    );
+    let release = clew_core::update::Release {
+        version: crate::updater::current_version(),
+        notes: String::new(),
+        dmg_url: None,
+    };
+    let _ = app.update(Message::Updater(crate::UpdaterMsg::Checked {
+        manual: true,
+        result: Ok(release),
+    }));
+    assert!(!app.update.checking);
+    assert!(shows(&mut sim_of(&app), "Clew is up to date"));
+    assert!(shows(&mut sim_of(&app), "Check now"));
+
+    let _ = app.update(Message::Updater(crate::UpdaterMsg::Checked {
+        manual: true,
+        result: Err("no network".into()),
+    }));
+    assert!(shows(&mut sim_of(&app), "Update check failed: no network"));
+}
+
+/// A form's segmented control is as wide as the pickers above and below it,
+/// in equal parts: Mode's System / Light / Dark hugged their words and sat
+/// short of the theme pickers.
+#[test]
+fn a_forms_switch_is_as_wide_as_its_pickers() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Appearance,
+    )));
+    let mut sim = sim_of(&app);
+    let centre =
+        |sim: &mut Sim<'_>, t: &'static str| text_at(sim, move |c| c == t, 0).expect(t).center_x();
+    let (system, light, dark) = (
+        centre(&mut sim, "System"),
+        centre(&mut sim, "Light"),
+        centre(&mut sim, "Dark"),
+    );
+    // Equal parts of exactly the picker's width (less the trough's 2 a
+    // side and the 2 between parts): their centres a part and a gap apart.
+    // At 8 more it started 8 px left of the pickers.
+    let step = (super::form::PICK_W - 4.0 - 2.0 * 2.0) / 3.0 + 2.0;
+    assert!(
+        ((light - system) - step).abs() < 1.0,
+        "{system} {light} {dark}"
+    );
+    assert!(
+        ((dark - light) - step).abs() < 1.0,
+        "{system} {light} {dark}"
+    );
+}
+
+/// A page put away from over the code (Statistics here) brings the code
+/// back where the reader left it: the code view, drawn afresh under it,
+/// started at the top. Nothing is scrolled for a view at the top already,
+/// nor while the page is still up.
+#[test]
+fn a_page_put_away_leaves_the_code_where_it_was() {
+    let mut app = reader_app();
+    app.proj.panes[0].as_mut().unwrap().scroll_y = 480.0;
+    app.panes_covered = false;
+    assert!(app.sync_panes_uncovered().is_none(), "nothing covered it");
+    app.proj.stats.showing = true;
+    assert!(app.sync_panes_uncovered().is_none(), "still covered");
+    assert!(app.panes_covered);
+    app.proj.stats.showing = false;
+    assert!(app.sync_panes_uncovered().is_some(), "scrolled back");
+    assert!(app.sync_panes_uncovered().is_none(), "once");
+    app.proj.panes[0].as_mut().unwrap().scroll_y = 0.0;
+    app.proj.stats.showing = true;
+    let _ = app.sync_panes_uncovered();
+    app.proj.stats.showing = false;
+    assert!(app.sync_panes_uncovered().is_none(), "at the top already");
+}
+
+/// An AI action asked with no key opens the Language model page saying why,
+/// the keyboard in its key field: it opened on the form with no word of it.
+/// The word goes as Settings closes.
+#[test]
+fn an_ai_action_without_a_key_says_why_settings_opened() {
+    let mut app = reader_app();
+    app.settings.key.clear();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::NeedKey));
+    assert!(app.settings.open);
+    assert_eq!(app.settings.page, crate::SettingsPage::LanguageModel);
+    assert!(shows(&mut sim_of(&app), "That needs an AI model"));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Close));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::LanguageModel,
+    )));
+    assert!(
+        !shows(&mut sim_of(&app), "That needs an AI model"),
+        "opened by hand: nothing asked for it"
+    );
+}
+
+/// Go to File (Ctrl+P, the key the field over the window shows) with no file
+/// by the name typed offers the commands that have it: "settings" said only
+/// "No matches", though that field says it searches commands too. A name
+/// that is a file's lists the files as before.
+#[test]
+fn go_to_file_offers_the_commands_no_file_is_named_after() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(
+        crate::session::finder::FinderMode::Files,
+    )));
+    let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged("settings".into())));
+    assert!(
+        app.proj.finder.bar_fallback,
+        "nothing of the project by that name"
+    );
+    assert!(!app.proj.finder.results.is_empty());
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, "No matches"));
+        assert!(shows(&mut sim, "Settings"), "a Settings command offered");
+    }
+    let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged(":".into())));
+    assert!(
+        !app.proj.finder.bar_fallback,
+        "a line asked for is not searched"
+    );
+}
+
+/// The History view with the sidebar on it, nothing asked yet.
+fn history_shown(mut app: App) -> App {
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::History;
+    app
+}
+
+/// A History page read for the view as it stands.
+fn history_page(app: &App, result: Result<clew_protocol::LogPage, String>) -> Message {
+    Message::History(crate::HistoryMsg::Loaded {
+        stamp: app.stamp(),
+        generation: app.proj.git_log.generation,
+        skip: 0,
+        result,
+    })
+}
+
+/// The History view reads what it shows whenever it shows and has not
+/// asked — after a new project, or a tutorial's sample put away, it stayed
+/// on "Reading the history…": nothing read it again.
+#[test]
+fn the_history_view_reads_again_once_it_has_not_asked() {
+    let mut app = history_shown(reader_app());
+    app.proj.git_log.asked = false;
+    let _ = app.update(Message::Noop);
+    assert!(app.proj.git_log.asked, "read on the next update");
+    // Not shown: nothing read.
+    app.sidebar = crate::SidebarTab::Files;
+    app.proj.git_log.asked = false;
+    let _ = app.update(Message::Noop);
+    assert!(!app.proj.git_log.asked);
+}
+
+/// A filter is read once its typing settles, not for each key: each key
+/// walked the whole history.
+#[test]
+fn the_history_filter_is_read_once_it_settles() {
+    use crate::HistoryMsg;
+    let mut app = history_shown(reader_app());
+    app.proj.git_log.asked = true;
+    let _ = app.update(Message::History(HistoryMsg::Query("ta".into())));
+    let first = app.proj.git_log.typed;
+    let _ = app.update(Message::History(HistoryMsg::Query("tax".into())));
+    assert!(app.proj.git_log.asked, "not read for a key");
+    let _ = app.update(Message::History(HistoryMsg::QuerySettled(first)));
+    assert!(
+        !app.proj.git_log.loading,
+        "an earlier key's settling reads nothing"
+    );
+    let last = app.proj.git_log.typed;
+    let _ = app.update(Message::History(HistoryMsg::QuerySettled(last)));
+    assert!(app.proj.git_log.loading, "the last key's settling reads it");
+}
+
+/// A first page that failed clears what the last filter showed — it
+/// stayed under the new chip as if it matched; one file's commits, followed
+/// across renames, are drawn apart.
+#[test]
+fn a_failed_or_followed_history_page_is_shown_for_what_it_is() {
+    let (mut app, ..) = history_app();
+    app.proj.git_log.path = Some("teashop/legacy.py".into());
+    let failed = history_page(&app, Err("refused".into()));
+    let _ = app.update(failed);
+    assert!(app.proj.git_log.commits.is_empty() && app.proj.git_log.graph.is_empty());
+    assert_eq!(app.proj.git_log.error.as_deref(), Some("refused"));
+
+    let (mut app, new, old) = history_app();
+    let page = clew_protocol::LogPage {
+        commits: app.proj.git_log.commits.clone(),
+        more: false,
+    };
+    let project = app.proj.project.as_mut().unwrap();
+    project.files = std::sync::Arc::new(vec![crate::fs_scan::FileEntry {
+        abs: project.root.join("teashop/pricing.py"),
+        rel: "teashop/pricing.py".into(),
+    }]);
+    app.proj.git_log.path = Some("teashop/pricing.py".into());
+    let loaded = history_page(&app, Ok(page));
+    let _ = app.update(loaded);
+    assert_eq!(app.proj.git_log.commits.len(), 2, "{new} {old}");
+    assert!(app.proj.git_log.graph.iter().all(|r| r.dashed));
+}
+
+/// A changed file pressed while it is the one being read shows its Diff at
+/// once — no load was coming to show it after, and the Diff came on at the
+/// file's next opening, long after. What waits for a file is dropped when
+/// another opens first, or it fails to.
+#[test]
+fn history_opens_answer_the_next_file_only() {
+    use crate::HistoryMsg;
+    let mut app = reader_app();
+    let sent = crate::app::tests::run_task(app.update(Message::History(HistoryMsg::OpenChanged(
+        "src/lib.rs".into(),
+    ))));
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Editor(crate::EditorMsg::ToggleDiff))),
+        "{sent:?}"
+    );
+    assert!(app.proj.diff_after_open.is_none(), "nothing left waiting");
+
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.diff_after_open = Some(root.join("a.py"));
+    app.proj.time_travel_after_open = Some((root.join("a.py"), "a".repeat(40)));
+    let _ = app.after_history_open(&root.join("b.py"));
+    assert!(app.proj.diff_after_open.is_none() && app.proj.time_travel_after_open.is_none());
+
+    app.proj.diff_after_open = Some(root.join("a.py"));
+    app.forget_history_open(&root.join("a.py"));
+    assert!(app.proj.diff_after_open.is_none());
+}
+
+/// M4 (round 6): a compiled file among the uncommitted changes was pressed
+/// like the rest — it closed what was open for "binary file" and became a
+/// stop on the trail. It is listed, quiet and inert; a text file still
+/// opens.
+#[test]
+fn a_binary_uncommitted_file_is_listed_but_not_opened() {
+    use crate::HistoryMsg;
+    assert!(super::history::binary_name(
+        "teashop/__pycache__/a.cpython-313.pyc"
+    ));
+    assert!(super::history::binary_name("logo.PNG"));
+    assert!(!super::history::binary_name("teashop/pricing.py"));
+    assert!(!super::history::binary_name("Makefile"));
+    let mut app = history_shown(reader_app());
+    app.proj.git_status = [
+        ("src/widget.rs".to_string(), 'M'),
+        ("src/__pycache__/widget.cpython-313.pyc".to_string(), 'U'),
+    ]
+    .into_iter()
+    .collect();
+    app.proj.git_log.changes_open = true;
+    assert!(click(sim_of(&app), "widget.cpython-313.pyc").is_empty());
+    let sent = click(sim_of(&app), "widget.rs");
+    assert!(
+        sent.iter().any(
+            |m| matches!(m, Message::History(HistoryMsg::OpenChanged(r)) if r == "src/widget.rs")
+        ),
+        "{sent:?}"
+    );
+}
+
+/// A commit whose read failed is read again when opened again; it was
+/// cached, failed, for good.
+#[test]
+fn a_commit_read_that_failed_is_read_again() {
+    use crate::HistoryMsg;
+    let (mut app, new, _) = history_app();
+    app.proj
+        .git_log
+        .details
+        .insert(new.clone(), Err("timed out".into()));
+    app.proj.git_log.open = None;
+    let _ = app.update(Message::History(HistoryMsg::Toggle(new.clone())));
+    assert_eq!(app.proj.git_log.open.as_deref(), Some(new.as_str()));
+    assert!(!app.proj.git_log.details.contains_key(&new), "asked again");
+}
+
+/// The check pressed in Settings ends its own "Checking…": the one at
+/// startup answering meanwhile left it pressable again — and a startup
+/// check that failed is no red line in Settings.
+#[test]
+fn only_the_pressed_check_ends_checking() {
+    let mut app = reader_app();
+    app.update.checking = true;
+    let _ = app.update(Message::Updater(crate::UpdaterMsg::Checked {
+        manual: false,
+        result: Err("offline".into()),
+    }));
+    assert!(app.update.checking);
+    assert!(app.update.last_check.is_none());
+}
+
+/// The Diff of a file git does not track is the file, every line added —
+/// it said only "No diff … not tracked by git".
+#[test]
+fn an_untracked_files_diff_is_every_line_added() {
+    let mut app = reader_app();
+    let (abs, rel, total) = {
+        let v = app.active_viewer().unwrap();
+        (v.abs.clone(), v.rel.clone(), v.source.lines().count())
+    };
+    // One git ignores — or a project that is no repository — is answered
+    // as an untracked file is: it was shown against a HEAD there is not.
+    app.proj.diff_pending = Some((6, abs.clone()));
+    let _ = app.on_diff_loaded(6, abs.clone(), rel.clone(), Ok(None));
+    assert!(app.proj.diff.is_none(), "not shown as about to be added");
+    assert!(app.status.contains("not tracked"), "{}", app.status);
+    app.proj.git_status.insert(rel.clone(), 'U');
+    app.proj.diff_pending = Some((7, abs.clone()));
+    let _ = app.on_diff_loaded(7, abs.clone(), rel.clone(), Ok(None));
+    let diff = app.proj.diff.as_ref().expect("a diff shown");
+    assert_eq!(diff.abs, abs);
+    let added = diff
+        .lines
+        .iter()
+        .filter(|l| l.kind == crate::git::DiffKind::Add)
+        .count();
+    assert_eq!(added, total);
+    // Drawn as the file reads: indented lines keep their indent.
+    let source = app.active_viewer().unwrap().source.clone();
+    let drawn: Vec<&str> = diff
+        .runs
+        .iter()
+        .filter(|r| r.kind == crate::git::DiffKind::Add)
+        .flat_map(|r| r.text.lines())
+        .collect();
+    let want: Vec<String> = source
+        .lines()
+        .map(super::panes::diff_display_text)
+        .collect();
+    assert_eq!(drawn, want);
+    // Nothing is hidden before its first line, nor after its last.
+    assert!(
+        diff.runs
+            .iter()
+            .all(|r| r.kind != crate::git::DiffKind::Hunk)
+    );
+    assert!(!diff.hides_tail());
+    // Read again after a save made elsewhere, it is still every line added:
+    // it said "No uncommitted changes".
+    app.proj.diff_refresh = Some(8);
+    let _ = app.on_diff_loaded(8, abs.clone(), rel, Ok(None));
+    let again = app.proj.diff.as_ref().expect("still shown");
+    assert_eq!(
+        again
+            .lines
+            .iter()
+            .filter(|l| l.kind == crate::git::DiffKind::Add)
+            .count(),
+        total
+    );
+}
+
+/// A search result longer than its row is cut with an ellipsis, each piece
+/// keeping its colour and mark: it was clipped mid-letter at the panel's
+/// edge ("Discounts an order can earn. Each or").
+#[test]
+fn a_long_search_result_ends_in_an_ellipsis() {
+    crate::fonts::load();
+    let shown = "Discounts an order can earn. Each one is checked in turn";
+    let pieces = vec![
+        ("Discounts".to_string(), Some(1), true),
+        (
+            " an order can earn. Each one is checked in turn".to_string(),
+            None,
+            false,
+        ),
+    ];
+    let room = super::steady::width_of("Discounts an order", super::ts::BODY, crate::fonts::UI);
+    let fit = super::sidebar::fit_pieces(pieces.clone(), shown, room);
+    let joined: String = fit.iter().map(|(p, ..)| p.as_str()).collect();
+    assert!(joined.ends_with('…'), "{joined}");
+    assert!(joined.starts_with("Discounts an"), "{joined}");
+    assert!(
+        super::steady::width_of(&joined, super::ts::BODY, crate::fonts::UI) <= room + 0.5,
+        "{joined}"
+    );
+    assert_eq!(
+        fit[0],
+        ("Discounts".to_string(), Some(1), true),
+        "mark kept"
+    );
+    // What fits is left whole, with no ellipsis.
+    assert_eq!(
+        super::sidebar::fit_pieces(pieces.clone(), shown, 10_000.0),
+        pieces
+    );
+}
+
+/// The Overview's module map takes over half the window's height, within
+/// bounds: at a fixed 320 it was a knot some 200 high across a page 900
+/// wide, its labels running into one another.
+#[test]
+fn the_overview_map_takes_room_from_the_window() {
+    use super::docs_stats::overview_map_h;
+    assert!(overview_map_h(860.0) > 450.0, "{}", overview_map_h(860.0));
+    assert_eq!(overview_map_h(400.0), super::chrome::OVERVIEW_MAP_H);
+    assert_eq!(overview_map_h(4000.0), 640.0);
+}
+
+/// A server program of the reader's own is added from a form of its own,
+/// headed as such, its Add on a row of its own — it sat in the chosen
+/// list's card with no heading, its Use on the Arguments row.
+#[test]
+fn a_server_program_is_added_from_a_form_of_its_own() {
+    let mut app = reader_app();
+    app.proj.lang_drafts.server_language = Some("python".into());
+    app.proj.lang_drafts.server_command = "pyright-langserver".into();
+    let mut sim = sim_tall(super::connect::languages_section(&app));
+    assert!(sim.find("Add a server program").is_ok());
+    assert!(
+        sim.find("Server programs").is_err(),
+        "no list while none is chosen"
+    );
+    let _ = sim.click("Add");
+    assert!(
+        sim.into_messages().any(|m| matches!(
+            m,
+            Message::Languages(crate::LanguagesMsg::UseDraft(
+                crate::LangField::ServerCommand
+            ))
+        )),
+        "Add uses the draft"
+    );
+}
+
+/// A call this window makes itself is counted where the window shows it —
+/// the ledger as read, and the Ask answer it was for — not only kept in
+/// the file: the Usage page and a local answer's cost knew nothing of it.
+#[test]
+fn a_local_call_is_counted_where_it_is_shown() {
+    let mut app = reader_app();
+    app.usage.entries = Some(Vec::new());
+    let meter = crate::App::local_meter();
+    meter(clew_core::llm::Spent {
+        provider: clew_core::llm::Provider::OpenAI,
+        model: "gpt-4o-mini".into(),
+        usage: clew_core::llm::Usage {
+            input: 1_000,
+            cached: 0,
+            written: 0,
+            output: 500,
+        },
+        purpose: crate::app::usage::ASK.into(),
+        work: 77,
+    });
+    app.take_local_spent();
+    assert_eq!(app.usage.entries.as_ref().map(Vec::len), Some(1));
+    assert!(
+        app.answer_cost(77).is_some(),
+        "the answer shows what it cost"
+    );
+}
+
+/// A folder's change dot counts only what the tree shows inside it: a
+/// dot for `__pycache__/*.pyc`, hidden by the tree, or for a deleted file,
+/// led nowhere; a tracked file in a folder the tree otherwise leaves out is
+/// listed, and counts.
+#[test]
+fn a_folder_marks_only_the_changes_the_tree_shows() {
+    use super::sidebar::tree_holds;
+    use crate::fs_scan::DirNode;
+    let dir = |dirs: Vec<(&str, DirNode)>, files: &[&str]| DirNode {
+        dirs: dirs.into_iter().map(|(n, d)| (n.to_string(), d)).collect(),
+        files: files.iter().map(|f| f.to_string()).collect(),
+    };
+    let shop = dir(
+        vec![(
+            "node_modules",
+            dir(vec![("pkg", dir(vec![], &["index.js"]))], &[]),
+        )],
+        &["cart.py"],
+    );
+    assert!(tree_holds(&shop, "cart.py"));
+    assert!(!tree_holds(&shop, "__pycache__/cart.cpython-313.pyc"));
+    assert!(!tree_holds(&shop, "gone.py"), "deleted: not in the tree");
+    assert!(tree_holds(&shop, "node_modules/pkg/index.js"), "tracked");
+    assert!(!tree_holds(&shop, "node_modules/pkg/other.js"));
+}
+
+/// A walkthrough that failed keeps its row, saying why, with Try again; a
+/// function's own Explain that failed says why on its note, and the
+/// explaining chip names the function a single Explain is for, not the
+/// project's count ("Explaining 0/45" beside "one AI call").
+#[test]
+fn ai_failures_are_said_where_the_action_was_taken() {
+    let mut app = reader_app();
+    app.proj.walk.failed = Some((
+        "checkout".into(),
+        "request failed: Connection refused".into(),
+    ));
+    {
+        // Kept as it failed, said plainly — the one sentence every AI
+        // failure says — in the language spoken.
+        let mut sim = sim_elem(super::sidebar::walk_library(&app));
+        assert!(
+            shows(&mut sim, "couldn't reach the AI provider"),
+            "the failed row is gone"
+        );
+        assert!(shows(&mut sim, "Try again"));
+    }
+    {
+        // In a sidebar's width, its title and why it failed each run
+        // across the row, and its Try again comes under them: beside the
+        // controls the reason was a column a word or two wide, five lines
+        // tall, and the title a word a line. And where it says to check
+        // the base URL, the way there is beside Try again.
+        crate::app::tests::isolated_data_dir();
+        crate::fonts::load();
+        let width = 260.0;
+        let mut sim = iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(width, 400.0),
+            super::sidebar::walk_library(&app),
+        );
+        let again = text_at(&mut sim, |t| t == "Try again", 0).expect("Try again");
+        let why = text_at(&mut sim, |t| t.starts_with("Failed: "), 0).expect("why");
+        let title = text_at(&mut sim, |t| t.contains("checkout"), 0).expect("its title");
+        assert!(
+            again.y >= why.y + why.height,
+            "the ways forward under why: {why:?} {again:?}"
+        );
+        assert!(why.y >= title.y + title.height, "{title:?} {why:?}");
+        assert!(why.width > width * 0.6, "across the row: {why:?}");
+        let settings = text_at(&mut sim, |t| t == "Settings", 0).expect("Settings");
+        assert!(
+            (settings.y - again.y).abs() < 2.0 && settings.x > again.x,
+            "beside Try again: {settings:?} {again:?}"
+        );
+        drop(sim);
+        let sent = click_nth(
+            iced_test::Simulator::with_size(
+                Default::default(),
+                Size::new(width, 400.0),
+                super::sidebar::walk_library(&app),
+            ),
+            "Settings",
+            0,
+        );
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                Message::Settings(crate::SettingsMsg::Fix(
+                    crate::app::state::LlmField::BaseUrl
+                ))
+            )),
+            "{sent:?}"
+        );
+    }
+    {
+        // Refused for its key: the way to the key, as every other AI
+        // failure has — only an unreached base URL had a Settings here.
+        let mut app = reader_app();
+        app.proj.walk.failed = Some(("checkout".into(), "HTTP 401: invalid api key".into()));
+        let sent = click(sim_elem(super::sidebar::walk_library(&app)), "Settings");
+        assert!(
+            sent.iter().any(|m| matches!(
+                m,
+                Message::Settings(crate::SettingsMsg::Fix(crate::app::state::LlmField::Key))
+            )),
+            "{sent:?}"
+        );
+    }
+
+    let node = crate::explain::Node::Function {
+        file: std::path::PathBuf::from("/p/src/lib.rs"),
+        name: "helper".into(),
+        ordinal: 0,
+    };
+    app.proj.explain.running = true;
+    app.proj.explain.progress = Some((0, 45));
+    app.proj.explain.pass_target = Some(node);
+    let (said, _) = super::statusbar::explain_label_for_tests(&app).unwrap();
+    assert_eq!(said, "Explaining helper()…");
+    // M17: beside an older failure, what is under way keeps its words, and
+    // the failure's give way: its progress was squeezed to "✦ … ×".
+    app.say_failure(
+        "Couldn't narrate the run with AI: couldn't reach the AI provider (nothing answered at that address) — showing its stops as recorded".into(),
+        None,
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    let size = Size::new(1100.0, 700.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    let mut sim = sim_sized(&app, size);
+    assert!(
+        shows(&mut sim, "Explaining helper()…"),
+        "the work under way, cut short beside an older failure"
+    );
+    assert!(
+        text_at(&mut sim, |t| t.starts_with("Couldn't narrate"), 0).is_some(),
+        "the failure stands, its words cut"
+    );
+}
+
+/// A right-click on a row of the file tree opens its menu where the
+/// pointer is — the row named first, then where — and the menu's rows say
+/// what they do.
+#[test]
+fn a_right_click_on_a_tree_row_opens_its_menu_at_the_pointer() {
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: Vec::new(),
+                files: vec!["main.rs".into()],
+            },
+        )],
+        files: vec!["README.md".into()],
+    };
+    let row = {
+        let mut sim = sim_sized(&app, size);
+        text_at(&mut sim, |t| t == "README.md", 0).expect("the file's row is on screen")
+    };
+    let at = row.center();
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(crate::ui::view(&app), size, Cache::default(), &mut renderer);
+    let mut messages = Vec::new();
+    for event in [
+        mouse::Event::CursorMoved { position: at },
+        mouse::Event::ButtonPressed(mouse::Button::Right),
+        mouse::Event::ButtonReleased(mouse::Button::Right),
+    ] {
+        let _ = ui.update(
+            &[Event::Mouse(event)],
+            mouse::Cursor::Available(at),
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+    }
+    drop(ui);
+    let menu: Vec<&Message> = messages
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                Message::Project(ProjectMsg::TreeMenuFor { .. } | ProjectMsg::TreeMenuAt { .. })
+            )
+        })
+        .collect();
+    assert!(
+        matches!(
+            menu.as_slice(),
+            [
+                Message::Project(ProjectMsg::TreeMenuFor { rel, dir: false }),
+                Message::Project(ProjectMsg::TreeMenuAt { x, y }),
+            ] if rel == "README.md" && (x - at.x).abs() < 0.5 && (y - at.y).abs() < 0.5
+        ),
+        "{messages:?}"
+    );
+    for message in messages {
+        let _ = app.update(message);
+    }
+    let tree_menu = app.proj.tree_menu.as_ref().expect("the menu is up");
+    assert_eq!(
+        (tree_menu.rel.as_str(), tree_menu.dir),
+        ("README.md", false)
+    );
+    let mut sim = sim_sized(&app, size);
+    for label in [
+        "Open",
+        "Open to the Side",
+        "Copy Path",
+        "Copy Relative Path",
+    ] {
+        assert!(shows(&mut sim, label), "{label} is in the menu");
+    }
+    // It opens where the pointer was: its first row just below and right
+    // of it.
+    let open = text_at(&mut sim, |t| t == "Open", 0).unwrap();
+    assert!(
+        open.x > at.x && open.x < at.x + 40.0 && open.y > at.y && open.y < at.y + 40.0,
+        "{open:?} vs {at:?}"
+    );
+    let sent = click_nth(sim_sized(&app, size), "Copy Relative Path", 0);
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Project(ProjectMsg::TreeMenuAct(
+                crate::app::state::TreeAct::CopyRelativePath
+            ))
+        )),
+        "{sent:?}"
+    );
+    drop(sim);
+
+    // A folder's menu expands or collapses it in place of opening it.
+    app.proj.expanded.remove("src");
+    app.proj.tree_menu = Some(crate::app::state::TreeMenu {
+        rel: "src".into(),
+        dir: true,
+        x: at.x,
+        y: at.y,
+    });
+    let mut sim = sim_sized(&app, size);
+    assert!(shows(&mut sim, "Expand Folder"));
+    assert!(!shows(&mut sim, "Open to the Side"));
+}
+
+/// The file tree menu's last row: showing the file where this platform's
+/// own file manager is named.
+fn reveal_row() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Show in Finder"
+    } else if cfg!(target_os = "windows") {
+        "Show in Explorer"
+    } else {
+        "Show in File Manager"
+    }
+}
+
+/// A menu is the keyboard's too: ↓ puts the ring on its first row (↑ on
+/// its last), the arrows walk its rows, saying each, and Enter presses the
+/// one it is on. They did nothing: a menu was the mouse's alone.
+#[test]
+fn the_arrows_walk_a_menu_and_enter_presses_its_row() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: Vec::new(),
+        files: vec!["README.md".into()],
+    };
+    app.proj.tree_menu = Some(crate::app::state::TreeMenu {
+        rel: "README.md".into(),
+        dir: false,
+        x: 120.0,
+        y: 120.0,
+    });
+    let none = keyboard::Modifiers::empty();
+    let mut driven = Driven::sized(&app, size);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert!(app.ring.is_some(), "the ring is up on the menu");
+    assert_eq!(app.status, "Open", "on its first row");
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert_eq!(app.status, "Open to the Side");
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
+    assert_eq!(app.status, "Open");
+    assert!(app.proj.tree_menu.is_some(), "walked, not pressed");
+    // ↑ first: its last row.
+    app.ring = None;
+    let mut driven = Driven::sized(&app, size);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
+    assert_eq!(app.status, reveal_row(), "on its last row");
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
+    let row = app.status.clone();
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.proj.tree_menu.is_none(), "{row:?} was not pressed");
+}
+
+/// A menu's ring goes with the menu, and the keys go back where they
+/// were. Walked with ↓ and put away with Esc, the code's menu left the keys
+/// nowhere: j moved nothing until the code was clicked. A row pressed with
+/// Enter left the ring up, on a control of the window whose name took the
+/// status line from what the row had said. The tree, which gives up the
+/// keys while its menu is up, has them again as it goes. And with a menu
+/// up, the reading keys are the menu's: under the Tools menu they moved
+/// the code.
+#[test]
+fn a_menus_ring_goes_with_it_and_the_keys_go_back() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: Vec::new(),
+        files: vec!["README.md".into(), "main.py".into()],
+    };
+    let caret = |app: &App| app.proj.panes[0].as_ref().and_then(|v| v.caret);
+    app.code_focused = true;
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.caret = Some((2, 0));
+    }
+    let mut driven = Driven::sized(&app, size);
+    // Under the Tools menu, j and → are the menu's, not the code's.
+    app.show_tools_menu = true;
+    let _ = driven.send(&mut app, &[]);
+    let _ = driven.key(&mut app, Key::Character("j".into()), none);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowRight), none);
+    assert_eq!(
+        caret(&app),
+        Some((2, 0)),
+        "the code under the menu kept still"
+    );
+    assert!(app.show_tools_menu);
+    let _ = driven.key(&mut app, Key::Named(Named::Escape), none);
+    assert!(!app.show_tools_menu);
+    // The code's menu, from the keyboard in the code.
+    let _ = driven.key(&mut app, Key::Named(Named::ContextMenu), none);
+    assert!(app.proj.context_menu.is_some(), "the code's menu");
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert!(app.ring.is_some(), "walked");
+    let _ = driven.key(&mut app, Key::Named(Named::Escape), none);
+    assert!(
+        app.proj.context_menu.is_none(),
+        "the menu went with the ring"
+    );
+    assert!(app.ring.is_none());
+    assert!(app.code_focused, "the keys are the code's again");
+    let _ = driven.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(caret(&app), Some((3, 0)), "j moves the caret");
+
+    // The tree's menu, the tree holding the keys.
+    app.code_focused = false;
+    app.proj.tree_cursor = Some("main.py".into());
+    driven.focus(&app, super::files_tree_keys_id());
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.tree_focused, "the tree has the keys");
+    let _ = driven.key(&mut app, Key::Named(Named::F10), keyboard::Modifiers::SHIFT);
+    assert!(app.proj.tree_menu.is_some(), "the tree's menu");
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
+    assert_eq!(app.status, reveal_row(), "on its last row");
+    // Up to Copy Relative Path, and pressed.
+    while app.status != "Copy Relative Path" {
+        let said = app.status.clone();
+        let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
+        assert_ne!(app.status, said, "stuck on {said:?}");
+    }
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.proj.tree_menu.is_none(), "pressed");
+    assert!(app.ring.is_none(), "the ring went with the menu");
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.status.starts_with("Copied"), "{:?}", app.status);
+    assert!(app.tree_focused, "the keys are the tree's again");
+}
+
+/// M10: a menu opened from the keys — ⇧F10, the Menu key — opens on its
+/// first row: Enter runs it. With nothing chosen, Enter did nothing until
+/// ↓ was pressed.
+#[test]
+fn a_menu_opened_from_the_keys_opens_on_its_first_row() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: Vec::new(),
+        files: vec!["README.md".into(), "main.py".into()],
+    };
+    let mut driven = Driven::sized(&app, size);
+    app.code_focused = false;
+    app.proj.tree_cursor = Some("main.py".into());
+    driven.focus(&app, super::files_tree_keys_id());
+    let _ = driven.send(&mut app, &[]);
+    let _ = driven.key(&mut app, Key::Named(Named::F10), keyboard::Modifiers::SHIFT);
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.proj.tree_menu.is_some(), "the tree's menu");
+    assert!(app.ring.is_some(), "nothing chosen");
+    assert_eq!(app.status, "Open", "not on its first row");
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.proj.tree_menu.is_none(), "Enter ran nothing");
+
+    // The code's, from the Menu key: on its first row too.
+    app.code_focused = true;
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.caret = Some((2, 0));
+    }
+    let _ = driven.send(&mut app, &[]);
+    let _ = driven.key(&mut app, Key::Named(Named::ContextMenu), none);
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.proj.context_menu.is_some(), "the code's menu");
+    assert!(app.ring.is_some(), "nothing chosen in the code's menu");
+    // A right-click's menu opens as it did, nothing chosen.
+    let _ = driven.key(&mut app, Key::Named(Named::Escape), none);
+    let _ = driven.send(&mut app, &[]);
+    let _ = app.update(Message::Project(crate::ProjectMsg::TreeMenuFor {
+        rel: "main.py".into(),
+        dir: false,
+    }));
+    let _ = app.update(Message::Project(crate::ProjectMsg::TreeMenuAt {
+        x: 40.0,
+        y: 80.0,
+    }));
+    assert!(app.proj.tree_menu.is_some());
+    assert!(app.ring.is_none(), "a right-click's menu chose a row");
+}
+
+/// Where the keys are once a menu worked from the keyboard has gone: the
+/// opened file's after Open on the tree's menu (they went back to the tree
+/// the ring came up from, and j walked the tree); the code's after a menu
+/// the ring opened (Enter on View) is put away with Esc, and after the
+/// ring on a menu is put away by another key and the menu then with Esc —
+/// both left the keys nowhere.
+#[test]
+fn the_keys_land_where_a_keyboard_menu_leaves_them() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: Vec::new(),
+        files: vec!["README.md".into(), "main.py".into()],
+    };
+    let caret = |app: &App| app.proj.panes[0].as_ref().and_then(|v| v.caret);
+    let mut driven = Driven::sized(&app, size);
+
+    // Open, from the tree's menu.
+    app.code_focused = false;
+    app.proj.tree_cursor = Some("main.py".into());
+    driven.focus(&app, super::files_tree_keys_id());
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.tree_focused, "the tree has the keys");
+    let _ = driven.key(&mut app, Key::Named(Named::F10), keyboard::Modifiers::SHIFT);
+    assert!(app.proj.tree_menu.is_some(), "the tree's menu");
+    let mut steps = 0;
+    while app.status != "Open" {
+        let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+        steps += 1;
+        assert!(steps < 10, "no Open row: {:?}", app.status);
+    }
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    let _ = driven.send(&mut app, &[]);
+    assert!(app.proj.tree_menu.is_none() && app.ring.is_none());
+    assert!(
+        app.code_focused,
+        "the opened file has the keys: {:?}",
+        app.status
+    );
+    assert!(!app.tree_focused, "not the tree the menu was opened from");
+
+    // A menu the ring opened: Enter on View, then Esc.
+    app.code_focused = true;
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.caret = Some((2, 0));
+    }
+    let _ = driven.send(&mut app, &[]);
+    let _ = driven.key(&mut app, Key::Named(Named::Tab), none);
+    let mut steps = 0;
+    while app.status != "View" {
+        let _ = driven.key(&mut app, Key::Named(Named::Tab), none);
+        steps += 1;
+        assert!(steps < 80, "the ring never reached View");
+    }
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.show_view_menu, "the View menu, from the ring");
+    let _ = driven.key(&mut app, Key::Named(Named::Escape), none);
+    assert!(!app.show_view_menu, "Esc put the menu away");
+    assert!(app.ring.is_none());
+    assert!(app.code_focused, "the keys are the code's again");
+    let _ = driven.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(caret(&app), Some((3, 0)), "j moves the caret");
+
+    // The ring on the code's menu put away by another key, then the menu.
+    let _ = driven.key(&mut app, Key::Named(Named::ContextMenu), none);
+    assert!(app.proj.context_menu.is_some(), "the code's menu");
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    assert!(app.ring.is_some(), "walked");
+    let _ = driven.key(&mut app, Key::Character("j".into()), none);
+    assert!(app.ring.is_none(), "put away by the key");
+    let _ = driven.key(&mut app, Key::Named(Named::Escape), none);
+    assert!(app.proj.context_menu.is_none());
+    assert!(app.code_focused, "the keys are the code's again");
+    let _ = driven.key(&mut app, Key::Character("j".into()), none);
+    assert_eq!(caret(&app), Some((4, 0)), "j moves the caret");
+}
+
+/// ⇧F10 (or the Menu key) opens a menu from the keyboard, as a right-click
+/// opens it: the file tree's for the row the keyboard rests on, by that
+/// row; the code's at the caret, for where the caret is. Both were the
+/// pointer's alone.
+#[test]
+fn shift_f10_opens_the_menu_of_what_the_keyboard_is_on() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: Vec::new(),
+        files: vec!["README.md".into(), "main.py".into(), "zeta.txt".into()],
+    };
+    app.code_focused = false;
+    app.proj.tree_cursor = Some("main.py".into());
+    let row = {
+        let mut sim = sim_sized(&app, size);
+        text_at(&mut sim, |t| t == "main.py", 0).expect("its row")
+    };
+    let mut driven = Driven::sized(&app, size);
+    driven.focus(&app, super::files_tree_keys_id());
+    let _ = driven.key(&mut app, Key::Named(Named::F10), keyboard::Modifiers::SHIFT);
+    let menu = app.proj.tree_menu.as_ref().expect("the tree's menu");
+    assert_eq!((menu.rel.as_str(), menu.dir), ("main.py", false));
+    assert!(
+        menu.y > row.y && menu.y < row.y + 2.0 * row.height + 16.0,
+        "by its row: {menu:?} {row:?}"
+    );
+    assert!(menu.x < 300.0, "in the sidebar: {menu:?}");
+    // Put away as a reader does, with Esc: opened from the keys, the ring
+    // is on its first row, and goes with it.
+    let _ = driven.key(
+        &mut app,
+        Key::Named(Named::Escape),
+        keyboard::Modifiers::empty(),
+    );
+    assert!(app.proj.tree_menu.is_none() && app.ring.is_none());
+
+    // The code's, at its caret.
+    app.code_focused = true;
+    let line = 3;
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.caret = Some((line, 4));
+    }
+    let _ = app.update(Message::Editor(crate::EditorMsg::KeyPressed(
+        Key::Named(Named::ContextMenu),
+        keyboard::Modifiers::empty(),
+    )));
+    let menu = app.proj.context_menu.as_ref().expect("the code's menu");
+    assert_eq!((menu.line, menu.col), (line, 4));
+    // It knows its line, to open above it where there is no room below.
+    let line_h = app.line_height();
+    assert!(
+        menu.line_top
+            .is_some_and(|top| (menu.y - top - line_h).abs() < 0.5),
+        "{menu:?}"
+    );
+    let panes = super::panes_rect(&app).expect("the panes");
+    assert!(
+        panes.contains(iced::Point::new(menu.x, menu.y)),
+        "{menu:?} {panes:?}"
+    );
+    assert!(app.proj.tree_menu.is_none());
+
+    // Not with a page over the code (the statistics, Weak Spots): the menu
+    // opened over the page, for a line no one could see.
+    app.proj.context_menu = None;
+    let _ = app.update(Message::Overview(crate::OverviewMsg::ShowStats));
+    assert!(super::pane_cover(&app).is_some_and(|c| c.is_page()));
+    app.code_focused = true;
+    let _ = app.update(Message::Editor(crate::EditorMsg::KeyPressed(
+        Key::Named(Named::F10),
+        keyboard::Modifiers::SHIFT,
+    )));
+    assert!(app.proj.context_menu.is_none(), "over the statistics");
+    let _ = app.update(Message::Overview(crate::OverviewMsg::Close));
+    // Nor under the large Ask window.
+    app.ask_view = crate::AskView::Expanded;
+    app.code_focused = true;
+    let _ = app.update(Message::Editor(crate::EditorMsg::KeyPressed(
+        Key::Named(Named::ContextMenu),
+        keyboard::Modifiers::empty(),
+    )));
+    assert!(app.proj.context_menu.is_none(), "under Ask");
+}
+
+/// With a menu up, a right-click on another row puts it away and opens
+/// that row's menu there, in the one click, as a desktop's menus do: it
+/// only put the menu away, and a second right-click was needed. A left
+/// click outside only puts it away; a right-click on the menu itself does
+/// neither.
+#[test]
+fn a_right_click_outside_a_menu_opens_the_menu_of_what_it_is_on() {
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: Vec::new(),
+                files: vec!["main.rs".into()],
+            },
+        )],
+        files: vec!["README.md".into()],
+    };
+    let (readme, src) = {
+        let mut sim = sim_sized(&app, size);
+        (
+            text_at(&mut sim, |t| t == "README.md", 0).expect("README.md's row"),
+            text_at(&mut sim, |t| t == "src", 0).expect("src's row"),
+        )
+    };
+    // The pointer moved to `at` and the `button` clicked there; what the
+    // window was sent, applied.
+    let click = |app: &mut App, at: iced::Point, button: mouse::Button| {
+        let mut renderer = renderer();
+        let mut ui =
+            UserInterface::build(crate::ui::view(app), size, Cache::default(), &mut renderer);
+        let mut messages = Vec::new();
+        for event in [
+            mouse::Event::CursorMoved { position: at },
+            mouse::Event::ButtonPressed(button),
+            mouse::Event::ButtonReleased(button),
+        ] {
+            let _ = ui.update(
+                &[Event::Mouse(event)],
+                mouse::Cursor::Available(at),
+                &mut renderer,
+                &mut clipboard::Null,
+                &mut messages,
+            );
+        }
+        drop(ui);
+        for message in messages.clone() {
+            let _ = app.update(message);
+        }
+        messages
+    };
+    let open_on = |app: &App| app.proj.tree_menu.as_ref().map(|m| m.rel.clone());
+    let _ = click(&mut app, readme.center(), mouse::Button::Right);
+    assert_eq!(open_on(&app).as_deref(), Some("README.md"));
+    let sent = click(&mut app, src.center(), mouse::Button::Right);
+    assert_eq!(open_on(&app).as_deref(), Some("src"), "{sent:?}");
+    let menu = app.proj.tree_menu.as_ref().unwrap();
+    assert!(
+        (menu.x - src.center().x).abs() < 0.5 && (menu.y - src.center().y).abs() < 0.5,
+        "where the second click was: {menu:?}"
+    );
+    // A right-click on the menu itself is the menu's.
+    let row = text_at(&mut sim_sized(&app, size), |t| t == "Copy Path", 0).expect("its row");
+    let sent = click(&mut app, row.center(), mouse::Button::Right);
+    assert_eq!(open_on(&app).as_deref(), Some("src"), "{sent:?}");
+    // A left click outside only puts it away: README.md is not opened.
+    let sent = click(&mut app, readme.center(), mouse::Button::Left);
+    assert_eq!(open_on(&app), None, "{sent:?}");
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Editor(crate::EditorMsg::OpenRel { .. }))),
+        "the click outside went on to the row: {sent:?}"
+    );
+}
+
+/// A function's card and a file's lay out their actions alike: what is
+/// known (the date, and a function's callers) on one row, what to do
+/// (Explain, Ask) on the row under it — and right under what the card
+/// says, with no room held for words it does not have.
+#[test]
+fn every_note_card_has_one_layout_under_its_words() {
+    use crate::git::{BlameLine, GitInfo};
+    let size = iced::Size::new(1100.0, 700.0);
+    let mut app = reader_app();
+    let _ = app.on_window_resized(size);
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.symbols = vec![crate::outline::Symbol {
+            name: "origin".into(),
+            kind: "function".into(),
+            line: 3,
+            end_line: 5,
+        }];
+        v.git = Some(std::sync::Arc::new(GitInfo {
+            blame: vec![
+                BlameLine {
+                    commit: "c".into(),
+                    author: "a".into(),
+                    time: 1_741_600_000,
+                    summary: "s".into(),
+                    uncommitted: false,
+                };
+                400
+            ],
+            status: Vec::new(),
+            deleted_at: Default::default(),
+        }));
+    }
+    let function = crate::explain::Node::Function {
+        file: abs.clone(),
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    let file = crate::explain::Node::File(abs);
+    for (node, calls, kind) in [(function, true, "function, line 3"), (file, false, "file")] {
+        let _ = app.show_explanation(node);
+        assert!(format!("{:?}", app.proj.explain.prepared).contains("Not explained yet"));
+        let mut sim = sim_sized(&app, size);
+        let head = text_at(&mut sim, |t| t == kind, 0).expect("its head");
+        let date = text_at(&mut sim, |t| t.contains("2025"), 0).expect("its date");
+        let explain = text_at(&mut sim, |t| t == "Explain", 1).expect("its Explain");
+        let ask = text_at(&mut sim, |t| t == "Ask", 0).expect("its Ask");
+        // Facts over actions, each pair on one line.
+        assert!((explain.y - ask.y).abs() < 1.0, "{explain:?} {ask:?}");
+        assert!(explain.y > date.y + 20.0, "{explain:?} under {date:?}");
+        if calls {
+            let count = text_at(&mut sim, |t| t == "Calls", 1).expect("its callers");
+            assert!((count.y - date.y).abs() < 1.0, "{count:?} {date:?}");
+            assert!(count.x > date.x, "the date first");
+        }
+        // Under its one line of words (20 pixels, and the 6 and 10 round
+        // it), not four lines' room down.
+        let under = date.y - (head.y + head.height);
+        assert!(under < 50.0, "{under} under {head:?}: {date:?}");
+    }
+}
+
+/// A command with two shortcuts shows each as its keys, the way the
+/// search field shows its own: "Ctrl+L / Ctrl+G" was one cap of words.
+#[test]
+fn a_rows_two_shortcuts_are_each_drawn_as_keys() {
+    let mut sim = sim_elem(super::toolbar::row_keycap("Ctrl+L / Ctrl+G".into()));
+    for key in ["Ctrl", "L", "G", "/"] {
+        assert!(
+            text_at(&mut sim, |t| t == key, 0).is_some(),
+            "{key} on its own"
+        );
+    }
+    assert!(text_at(&mut sim, |t| t.contains("Ctrl+"), 0).is_none());
+    let ctrl = |sim: &mut Sim<'_>, nth| text_at(sim, |t| t == "Ctrl", nth).unwrap();
+    assert!(
+        ctrl(&mut sim, 1).x > ctrl(&mut sim, 0).x,
+        "both Ctrls, side by side"
+    );
+}
+
+/// Time Travel in the left half of a split keeps no room for the Ask card
+/// in the right corner: measured from the window's edge, the card took
+/// the left half's slider to nothing. In the right half, or unsplit, the
+/// bar still keeps clear of it.
+#[test]
+fn time_travel_in_a_splits_left_half_keeps_no_room_for_a_card_far_off() {
+    let mut app = reader_app();
+    let _ = app.on_window_resized(iced::Size::new(1400.0, 800.0));
+    app.show_left_sidebar = true;
+    app.ask_view = crate::AskView::Compact;
+    let unsplit = super::panes::time_travel_bar_clear(&app);
+    assert!(
+        unsplit > 0.0,
+        "the card is over the bar's right end: {unsplit}"
+    );
+    app.proj.panes[1] = app.proj.panes[0].clone();
+    app.proj.split = true;
+    app.proj.active = 0;
+    assert_eq!(super::panes::time_travel_bar_clear(&app), 0.0);
+    app.proj.active = 1;
+    assert!(super::panes::time_travel_bar_clear(&app) > 0.0);
+}
+
+/// The raised card counts the lines its rows of actions run on to: where
+/// the margin is too narrow for the date and the callers on one line, or
+/// for Explain and Ask, each line more is added to the card, not taken
+/// from what it says — "Not explained yet." and a failure's reason were
+/// drawn no lines high.
+#[test]
+fn a_raised_cards_wrapped_rows_add_to_its_height() {
+    let mut app = reader_app();
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 3,
+    }];
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    // Not explained: one line of words at any width, so the difference is
+    // the rows' alone. Wide, each row is one line; at 150 the callers go
+    // under the date and Ask under Explain — two lines more.
+    let h = |width| super::panes::raised_card_h(&app, &node, width, 2000.0);
+    assert!(
+        (h(150.0) - h(600.0) - 2.0 * (26.0 + 2.0)).abs() < 0.01,
+        "{} vs {}",
+        h(150.0),
+        h(600.0)
+    );
+    // Explained, there is no Explain: Ask has a line of its own no more.
+    app.proj.explain.cache.insert(
+        node.clone(),
+        crate::explain::Cached {
+            summary: "Zero.".into(),
+            prompt_hash: crate::incremental::content_hash(b"t"),
+            detail: None,
+            basis: None,
+        },
+    );
+    let h = |width| super::panes::raised_card_h(&app, &node, width, 2000.0);
+    assert!((h(150.0) - h(600.0) - (26.0 + 2.0)).abs() < 0.01);
+}
+
+/// An answer that failed for what Settings puts right — nothing answered
+/// at the address — has Settings beside Try again: its words said "check
+/// the base URL in Settings", and nothing led there. Another failure has
+/// Try again alone.
+#[test]
+fn a_failed_answer_settings_can_fix_has_its_settings() {
+    use crate::app::model::AskTurn;
+    use crate::app::state::LlmField;
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Compact;
+    let mut turn = AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: false,
+        answer_md: "*Couldn't answer: it failed*".into(),
+        ..AskTurn::default()
+    };
+    turn.extras.failed = true;
+    app.proj.ask_turns.push(turn);
+    fn panel(app: &App) -> Sim<'_> {
+        iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(800.0, 400.0),
+            super::panels::ask_panel(app, 400.0),
+        )
+    }
+    assert!(shows(&mut panel(&app), "Try again"));
+    assert!(!shows(&mut panel(&app), "Settings"), "no setting to fix");
+    app.proj.ask_turns[0].extras.fix = Some(LlmField::BaseUrl);
+    assert!(
+        click(panel(&app), "Settings").iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::Fix(LlmField::BaseUrl))
+        )),
+        "Settings opens at the base URL"
+    );
+}
+
+/// A note whose Explain failed for what Settings puts right — nothing
+/// answered at the address — has Settings beside Try again, and the card
+/// counts it in its rows; any other failure has no Settings. On a narrow
+/// card the reason's "check the base URL in Settings" was cut short, and
+/// nothing led there.
+#[test]
+fn a_notes_failure_settings_can_fix_has_its_settings() {
+    use crate::app::state::{LlmField, SayAgain};
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 3,
+    }];
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    app.proj.explain.view = Some(node.clone());
+    let said = || {
+        SayAgain(std::sync::Arc::new(|| {
+            "couldn't reach the AI provider".into()
+        }))
+    };
+    app.proj.explain.node_failed = Some((node.clone(), said(), None));
+    assert!(shows(&mut sim_of(&app), "Try again"));
+    assert!(!shows(&mut sim_of(&app), "Settings"), "no setting to fix");
+    let widths: Vec<f32> = (150..=420).step_by(2).map(|w| w as f32).collect();
+    let plain: Vec<f32> = widths
+        .iter()
+        .map(|&w| super::panes::raised_card_h(&app, &node, w, 2000.0))
+        .collect();
+    app.proj.explain.node_failed = Some((node.clone(), said(), Some(LlmField::BaseUrl)));
+    assert!(shows(&mut sim_of(&app), "Try again"));
+    // In a margin with room for it, named.
+    let usual = app.right_width;
+    app.right_width = 480.0;
+    assert!(
+        click(sim_of(&app), "Settings").iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::Fix(LlmField::BaseUrl))
+        )),
+        "Settings opens at the base URL"
+    );
+    app.right_width = usual;
+    // Where it pushes Ask onto a line more, the card counts the line; it
+    // is never counted shorter.
+    let fixed: Vec<f32> = widths
+        .iter()
+        .map(|&w| super::panes::raised_card_h(&app, &node, w, 2000.0))
+        .collect();
+    assert!(plain.iter().zip(&fixed).all(|(p, f)| f >= p));
+    assert!(
+        plain.iter().zip(&fixed).any(|(p, f)| f > p),
+        "never counted"
+    );
+    // L6: at the margin's width nothing falls onto a line of its own —
+    // Ask fell under the two — and Settings says its name beside Try again
+    // (a bare gear read as nothing the status bar and the Ask card call
+    // "Settings"): Ask, which has its pill, is its icon alone first.
+    let mut sim = sim_of(&app);
+    let again = text_at(&mut sim, |t| t == "Try again", 0).expect("Try again");
+    let settings = text_at(&mut sim, |t| t == "Settings", 0).expect("Settings, by name");
+    assert!(
+        (again.center_y() - settings.center_y()).abs() < 2.0,
+        "Settings on a line of its own: {again:?} {settings:?}"
+    );
+    for nth in 0..4 {
+        let Some(ask) = text_at(&mut sim, |t| t == "Ask", nth) else {
+            break;
+        };
+        let under = ask.y > again.y + 4.0 && ask.y < again.y + 40.0;
+        assert!(!under, "Ask on a line of its own: {again:?} {ask:?}");
+    }
+    drop(sim);
+    // M2: in French at 1100 px, where even Settings' icon and Ask's name
+    // do not fit beside Try again, Ask is its icon too: "Questions" fell
+    // onto a line of its own, right over Ask's pill saying the same.
+    use crate::i18n::{Lang, with_lang};
+    let size = Size::new(1100.0, 700.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    with_lang(Lang::Fr, || {
+        let mut sim = sim_sized(&app, size);
+        let again = text_at(&mut sim, |t| t == "Réessayer", 0).expect("Réessayer");
+        for nth in 0..4 {
+            let Some(ask) = text_at(&mut sim, |t| t == "Questions", nth) else {
+                break;
+            };
+            let under = ask.y > again.y + 4.0 && ask.y < again.y + 40.0;
+            assert!(!under, "Ask on a line of its own: {again:?} {ask:?}");
+        }
+    });
+}
+
+/// L2: a failure whose Try again asks first — Explain All's cost sheet —
+/// says so with an ellipsis, as a row that opens a dialog does: it read as
+/// done at once, and opened the sheet.
+#[test]
+fn a_retry_that_asks_first_says_so() {
+    let mut app = reader_app();
+    app.say_failure(
+        "Explain couldn't continue: couldn't reach the AI provider".into(),
+        Some(Message::Project(crate::ProjectMsg::SetupShow(
+            crate::app::setup::SetupMode::Explain,
+        ))),
+        crate::app::state::FailureOf::Explain,
+    );
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(text_at(&mut sim, |t| t == "Try again…", 0).is_some());
+    drop(sim);
+    // L2: pressed, it opens the cost sheet and the failure stands until
+    // Explain All starts again: put away there, it was gone with nothing
+    // tried.
+    let _ = app.update(Message::Window(crate::WindowMsg::RetryFailure));
+    assert!(app.failure_notice.is_some(), "gone as the sheet opened");
+    let _ = app.update(Message::Project(crate::ProjectMsg::SetupClose));
+    assert!(app.setup.is_none());
+    assert!(
+        app.failure_notice.is_some(),
+        "the failure, with nothing tried"
+    );
+    app.say_failure(
+        "Explain couldn't continue: couldn't reach the AI provider".into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(text_at(&mut sim, |t| t == "Try again", 0).is_some());
+    drop(sim);
+    // A fake run's opens its inputs first.
+    app.say_failure(
+        "Fake run failed: no".into(),
+        Some(Message::Fake(crate::FakeMsg::EditInputs)),
+        crate::app::state::FailureOf::FakeRun,
+    );
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(text_at(&mut sim, |t| t == "Try again…", 0).is_some());
+}
+
+/// A function's own Explain that fails says why on its card, with Try
+/// again and Settings: the status bar said it as well, the one failure
+/// twice. It says it there only while the card is not to be seen.
+#[test]
+fn a_failed_explain_is_said_on_its_card_or_else_on_the_status_bar() {
+    use crate::app::tasks::{ExplainFailure, PassFailures};
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 3,
+    }];
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    app.proj.explain.view = Some(node.clone());
+    let fail = |app: &mut App| {
+        app.proj.explain.running = true;
+        app.proj.explain.pass_target = Some(node.clone());
+        app.proj.explain.pass_target_new = true;
+        let _ = app.update(Message::Explain(ExplainMsg::Done {
+            stamp: app.stamp(),
+            generation: app.proj.explain.generation,
+            cache: crate::explain::Cache::new(),
+            failures: PassFailures {
+                failed: 1,
+                stopped: Some(ExplainFailure::Unreached(
+                    "request failed: Connection refused (os error 111)".into(),
+                )),
+                ..PassFailures::default()
+            },
+            tally: Default::default(),
+            written: Default::default(),
+        }));
+    };
+    fail(&mut app);
+    assert!(app.failure_shown().is_none(), "said twice");
+    assert!(shows(&mut sim_of(&app), "Try again"), "its card says it");
+    // The margin put away: only the status bar is left to say it.
+    app.show_right_panel = false;
+    fail(&mut app);
+    let notice = app.failure_shown().expect("said on the status bar");
+    assert_eq!(notice.of, crate::app::state::FailureOf::Explain);
+    assert!(notice.said.contains("couldn't reach"), "{}", notice.said);
+    // On its card again, failed again: the card says it, and only the card.
+    app.show_right_panel = true;
+    fail(&mut app);
+    assert!(app.failure_shown().is_none(), "said twice");
+}
+
+/// A failure's Settings link opens Settings with the keys in the field to
+/// fix: the key for a rejected key, the model for an unknown model, the
+/// base URL for an address nothing answered at.
+#[test]
+fn a_failures_settings_link_puts_the_keys_in_the_field_to_fix() {
+    use crate::app::state::LlmField;
+    let mut app = reader_app();
+    let mut window = Driven::new(&app);
+    for (field, id) in [
+        (LlmField::Key, super::settings_key_id()),
+        (LlmField::Model, super::settings_model_id()),
+        (LlmField::BaseUrl, super::settings_base_url_id()),
+    ] {
+        window.deliver(&mut app, Message::Settings(crate::SettingsMsg::Fix(field)));
+        assert_eq!(window.focused(&app), Some(id), "{field:?}");
+    }
+}
+
+/// At every width with the Ask card open, a paused run's header shows Walk
+/// this run whole: counted two gaps, the panel's padding and the "Evaluate
+/// on hover" switch short, it stayed on one row in a band of widths where
+/// the row cut Walk this run.
+#[test]
+fn walk_this_run_is_never_cut_whatever_the_width() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.hover_safe = false;
+    app.debug.trace = vec![crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: Vec::new(),
+    }];
+    app.debug.trace_rev += 1;
+    app.show_bottom = true;
+    app.ask_view = crate::AskView::Compact;
+    crate::fonts::load();
+    // Its width where there is room for all of it.
+    let whole = {
+        let size = Size::new(2400.0, 700.0);
+        app.window_width = size.width;
+        app.window_height = size.height;
+        let mut sim = sim_sized(&app, size);
+        text_at(&mut sim, |t| t == "Walk this run", 0)
+            .expect("Walk this run")
+            .width
+    };
+    let mut width = 1000.0;
+    while width <= 1700.0 {
+        let size = Size::new(width, 700.0);
+        app.window_width = size.width;
+        app.window_height = size.height;
+        let mut sim = sim_sized(&app, size);
+        assert!(shows(&mut sim, "Evaluate on hover"), "{width}: the switch");
+        let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
+        assert!(
+            walk.width >= whole - 1.0,
+            "{width}: cut to {walk:?} of {whole}"
+        );
+        width += 10.0;
+    }
+}
+
+/// With the Ask card open at a laptop's width, the debug header keeps what
+/// it says — the trace and Walk this run — and puts its stepping controls
+/// on a row under it: clipped to fit the room left of the card, all it
+/// said went, and only the controls were left.
+#[test]
+fn the_debug_header_keeps_walk_this_run_beside_the_ask_card() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Terminated,
+        exit_code: Some(0),
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.trace = vec![crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: Vec::new(),
+    }];
+    app.debug.trace_rev += 1;
+    app.show_bottom = true;
+    crate::fonts::load();
+    let size = Size::new(1100.0, 700.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    app.ask_view = crate::AskView::Compact;
+    assert!(
+        super::askfloat::card_reach(
+            &app,
+            size.width - super::toolbar::STRIP_W,
+            size.height - 120.0
+        ) > 0.0,
+        "the card is beside the panel"
+    );
+    let mut sim = sim_sized(&app, size);
+    let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
+    assert!(walk.width > 20.0, "drawn whole: {walk:?}");
+    assert!(
+        text_at(&mut sim, |t| t == "Trace: 1 stop", 0).is_some(),
+        "the trace"
+    );
+    assert!(
+        text_at(&mut sim, |t| t.contains("Debug Again"), 0).is_some(),
+        "the controls"
+    );
+}
+
+/// The Ask card in the corner sits beside the debugger's columns, not
+/// over them: open, it hid the watches and the output whole, as it once
+/// hid the header's controls.
+#[test]
+fn the_debug_columns_keep_clear_of_the_ask_card() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: None,
+        frames: vec![crate::dap::StackFrame {
+            id: 1,
+            name: "main".into(),
+            path: Some(root.join("main.py")),
+            line: 3,
+            column: 1,
+        }],
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        // Nothing printed yet: the watches and the output at the right,
+        // where the card is.
+        output: Vec::new(),
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.show_bottom = true;
+    crate::fonts::load();
+    let size = Size::new(1440.0, 900.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    app.ask_view = crate::AskView::Compact;
+    let card = super::askfloat::ask_corner_rect(&app);
+    let mut sim = sim_sized(&app, size);
+    assert!(
+        card.y < size.height - 200.0,
+        "the card over the panel: {card:?}"
+    );
+    for heading in ["WATCH", "OUTPUT"] {
+        let at = text_at(&mut sim, move |t| t == heading, 0).expect(heading);
+        assert!(
+            at.x + at.width <= card.x,
+            "{heading} under the card: {at:?} {card:?}"
+        );
+    }
+    drop(sim);
+    // And the note on what ran, on its own line for want of room in the
+    // header: it wrapped at the panel's full width, under the card.
+    // Long enough that, wrapped at the panel's full width, it runs under
+    // the card.
+    let file = "the_rules_for_prices_discounts_taxes_and_rounding_in_every_country_and_every_currency_and_every_season_of_the_year_kept_apart_from_refunds.py";
+    app.debug.ran_for = Some(file.into());
+    app.debug.trace = vec![crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: Vec::new(),
+    }];
+    app.debug.trace_rev += 1;
+    let mut sim = sim_sized(&app, size);
+    let note = text_at(&mut sim, move |t| t.contains(file), 0).expect("the note");
+    // Whole, it is longer than the room left of the card: it is kept clear
+    // by wrapping, not by being short.
+    let said = sim
+        .find(|c: iced_test::selector::Candidate<'_>| match c {
+            iced_test::selector::Candidate::Text { content, .. } if content.contains(file) => {
+                Some(content.to_string())
+            }
+            _ => None,
+        })
+        .expect("the note's words");
+    assert!(
+        note.x + super::steady::width_of(&said, super::ts::SMALL, crate::fonts::UI) > card.x,
+        "the note does not reach the card: {said}"
+    );
+    assert!(
+        note.x + note.width <= card.x,
+        "the note under the card: {note:?} {card:?}"
+    );
+}
+
+/// M6: a run's steps made without a model are told apart by their stop —
+/// a breakpoint hit again and again in one function listed "discounts",
+/// "discounts", "discounts"; a narrated step keeps the title it was given.
+#[test]
+fn a_runs_plain_steps_are_named_by_their_stop() {
+    let app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let hit = |line: usize| crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: vec![crate::TraceFrame {
+            name: "discounts".into(),
+            path: Some(root.join("src/lib.rs")),
+            line,
+        }],
+    };
+    let tour = crate::walkthrough::from_trace(&root, "main.py", &[hit(20), hit(20), hit(21)])
+        .expect("a tour");
+    let titles: Vec<String> = tour.steps.iter().map(super::step_title).collect();
+    assert_eq!(
+        titles,
+        [
+            "Stop 1: discounts",
+            "Stop 2: discounts",
+            "Stop 3: discounts"
+        ]
+    );
+    let mut narrated = tour.steps[0].clone();
+    narrated.title = "Where the discounts are worked out".into();
+    assert_eq!(
+        super::step_title(&narrated),
+        "Where the discounts are worked out"
+    );
+}
+
+/// M10: an open run's tour made without a model, its step shown, is said
+/// again in the language chosen: "Stop 1 (breakpoint) in discounts…"
+/// stayed English in a French window.
+#[test]
+fn an_open_runs_step_is_said_again_in_the_language_chosen() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let stop = |name: &str, line: usize| crate::TraceFrame {
+        name: name.into(),
+        path: Some(root.join("src/lib.rs")),
+        line,
+    };
+    let tour = crate::walkthrough::from_trace(
+        &root,
+        "main.py",
+        &[crate::TraceStop {
+            reason: "breakpoint".into(),
+            frames: vec![stop("discounts", 9), stop("total", 32)],
+        }],
+    )
+    .expect("a tour");
+    app.proj.walk.library = vec![crate::walkthrough::Walkthrough {
+        made: None,
+        scope: "@trace main.py".into(),
+        ..tour
+    }];
+    app.proj.walk.open = Some("@trace main.py".into());
+    let said = app.proj.walk.library[0].steps[0].said().into_owned();
+    let (prepared, _) = app.prepare_segments(&said);
+    app.proj.walk.prepared = prepared;
+    let narration = |app: &App| {
+        let said = format!("{:?}", app.proj.walk.prepared);
+        (said.contains("Stop 1"), said.contains("Arrêt 1"))
+    };
+    assert_eq!(narration(&app), (true, false));
+    with_lang(Lang::Fr, || {
+        let _ = app.respeak_walk_step();
+        assert_eq!(narration(&app), (false, true));
+    });
+}
+
+/// L2: the debug header's note on what ran, cut short, says the whole of
+/// it where the pointer rests; with too little room to say anything it is
+/// not shown — "pricin…" (or "…" alone, in Chinese) said nothing.
+#[test]
+fn the_debug_notes_cut_sentence_is_whole_in_its_tip_and_gone_when_it_says_nothing() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.ran_for = Some("pricing.py".into());
+    crate::app::tests::isolated_data_dir();
+    crate::fonts::load();
+    let whole = "pricing.py does not run on its own, so main.py ran";
+    let panel = |width: f32| {
+        iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(width, 260.0),
+            super::debug_panel(&app),
+        )
+    };
+    let (mut cut, mut gone) = (None, false);
+    let mut width = 1400.0;
+    while width >= 500.0 {
+        let mut sim = panel(width);
+        match text_at(&mut sim, |t| t.starts_with("pric") || t == "…", 0) {
+            Some(_) if text_at(&mut sim, |t| t == whole, 0).is_some() => {}
+            Some(_) => {
+                let shown = text_at(&mut sim, |t| t.ends_with('…'), 0).expect("cut short");
+                assert!(
+                    text_at(
+                        &mut sim,
+                        |t| t.starts_with("pricing.py d") && t.ends_with('…'),
+                        0
+                    )
+                    .is_some(),
+                    "{width}: cut to a stub that says nothing"
+                );
+                cut.get_or_insert((width, shown));
+            }
+            None => gone = true,
+        }
+        width -= 10.0;
+    }
+    assert!(gone, "where there is no room, the note gives way");
+    let (width, shown) = cut.expect("cut short at some width");
+    assert!(
+        !shows(&mut panel(width), whole),
+        "said whole before the pointer rests"
+    );
+    super::tip::warm_now();
+    let mut sim = panel(width);
+    sim.point_at(shown.center());
+    let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: shown.center(),
+    })]);
+    assert!(
+        shows(&mut sim, whole),
+        "{width}: the whole of it where the pointer rests"
+    );
+}
+
+/// L13: in French, at a desktop's width, the note on what ran is said
+/// whole where there is room for it: "pricing.py ne s’exécute p…" was cut
+/// with room to spare beside it.
+#[test]
+fn the_debug_note_is_whole_in_french_where_there_is_room() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.ran_for = Some("pricing.py".into());
+    app.debug.trace = vec![crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: Vec::new(),
+    }];
+    app.debug.trace_rev += 1;
+    app.show_bottom = true;
+    app.show_left_sidebar = true;
+    let size = Size::new(1440.0, 900.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    crate::app::tests::isolated_data_dir();
+    crate::fonts::load();
+    // The panel's width beside the sidebar and the strip.
+    let panel_w = size.width - app.sidebar_width - super::toolbar::STRIP_W;
+    with_lang(Lang::Fr, || {
+        let mut sim = iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(panel_w, 260.0),
+            super::debug_panel(&app),
+        );
+        let whole = crate::tr!(
+            "{file} does not run on its own, so {program} ran",
+            file = "pricing.py",
+            program = "main.py"
+        );
+        let note = text_at(&mut sim, move |t| t == whole, 0).expect("the note, whole");
+        // Under the header, where its row had no room: not over the
+        // columns' headings.
+        let stack = text_at(&mut sim, |t| t.starts_with("PILE"), 0).expect("the stack");
+        assert!(note.y + note.height <= stack.y, "{note:?} {stack:?}");
+        assert!(text_at(&mut sim, |t| t.starts_with("Parcourir"), 0).is_some());
+    });
+}
+
+/// At a laptop's width, the debug panel's header keeps its trace whole —
+/// "Trace: 1 stop" on one line and "Walk this run" there — and the note
+/// on what ran is said whole at every width, on the header's row where it
+/// fits, else on a line of its own: the count was squeezed to a word a line
+/// ("Tra / 1 / sto") and Walk this run pushed out of the panel. The window
+/// is as wide as the panel drawn, as it is in the app: the step controls'
+/// arrows are the interface font's own, so no machine's fallback font
+/// widens them and moves the header's breaks.
+#[test]
+fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.ran_for = Some("pricing.py".into());
+    app.debug.trace = vec![crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: vec![crate::TraceFrame {
+            name: "subtotal".into(),
+            path: Some(root.join("pricing.py")),
+            line: 12,
+        }],
+    }];
+    app.debug.trace_rev += 1;
+    crate::app::tests::isolated_data_dir();
+    crate::fonts::load();
+    for width in [1400.0, 900.0, 640.0] {
+        app.window_width = width;
+        let mut sim = iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(width, 260.0),
+            super::debug_panel(&app),
+        );
+        let count = text_at(&mut sim, |t| t == "Trace: 1 stop", 0).expect("the trace's count");
+        assert!(count.height < 20.0, "{width}: on one line: {count:?}");
+        let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
+        assert!(
+            walk.x + walk.width <= width,
+            "{width}: in the panel: {walk:?}"
+        );
+        // What ran is said whole: on the header's row where it fits, on a
+        // line of its own where it does not.
+        let note = text_at(
+            &mut sim,
+            |t| t == "pricing.py does not run on its own, so main.py ran",
+            0,
+        )
+        .unwrap_or_else(|| panic!("{width}: the note whole"));
+        assert!(note.height < 20.0, "{width}: on one line: {note:?}");
+        assert!(
+            note.x + note.width <= width,
+            "{width}: in the panel: {note:?}"
+        );
+    }
 }

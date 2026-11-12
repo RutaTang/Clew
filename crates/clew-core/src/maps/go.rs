@@ -531,7 +531,7 @@ fn packages(corpus: &Corpus) -> Option<ProjectMap> {
             map.place(at, rel, 1);
             let c = component_of[i];
             let l = layer_of(c, &components, &edges, &component_of, &mut layer);
-            let mut detail = format!("{count} files · layer {l}");
+            let mut detail = format!("{count} files, layer {l}");
             if components[c].len() > 1 {
                 let others: Vec<&str> = components[c]
                     .iter()

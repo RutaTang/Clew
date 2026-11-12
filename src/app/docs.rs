@@ -161,6 +161,7 @@ impl App {
         self.proj.docs.page = Some(page);
         self.proj.overview.showing = false;
         self.proj.stats.showing = false;
+        self.proj.weak.showing = false;
         self.proj.glossary.showing = false;
     }
 

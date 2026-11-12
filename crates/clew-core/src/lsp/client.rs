@@ -957,6 +957,60 @@ impl LspClient {
         Ok(parse_expanded_macro(&result))
     }
 
+    /// rust-analyzer's `rust-analyzer/viewRecursiveMemoryLayout`: how the
+    /// type at a 0-based (line, character) is laid out in memory — its size
+    /// and alignment, and each field's offset — or `None` where there is no
+    /// type whose layout it knows.
+    pub async fn memory_layout(
+        &self,
+        path: &Path,
+        line: usize,
+        character: usize,
+    ) -> Result<Option<MemoryLayout>, String> {
+        let params = json!({
+            "textDocument": { "uri": path_to_uri(path) },
+            "position": { "line": line, "character": character }
+        });
+        let result = self
+            .call("rust-analyzer/viewRecursiveMemoryLayout", params)
+            .await?;
+        Ok(parse_memory_layout(&result))
+    }
+
+    /// rust-analyzer's `rust-analyzer/relatedTests`: the tests that exercise
+    /// the item at a 0-based (line, character), each by its name and where
+    /// it is.
+    pub async fn related_tests(
+        &self,
+        path: &Path,
+        line: usize,
+        character: usize,
+    ) -> Result<Vec<RelatedTest>, String> {
+        let params = json!({
+            "textDocument": { "uri": path_to_uri(path) },
+            "position": { "line": line, "character": character }
+        });
+        let result = self.call("rust-analyzer/relatedTests", params).await?;
+        Ok(parse_related_tests(&result))
+    }
+
+    /// The Lean server's tactic goals at a 0-based (line, character)
+    /// (`$/lean/plainGoal`), each with its hypotheses — none once the proof
+    /// is done there — or `None` where no tactic is.
+    pub async fn lean_tactic_goals(
+        &self,
+        path: &Path,
+        line: usize,
+        character: usize,
+    ) -> Result<Option<Vec<String>>, String> {
+        let params = json!({
+            "textDocument": { "uri": path_to_uri(path) },
+            "position": { "line": line, "character": character }
+        });
+        let result = self.call("$/lean/plainGoal", params).await?;
+        Ok(parse_plain_goal(&result))
+    }
+
     /// The Lean server's state at a 0-based (line, character): the tactic
     /// goals there (`$/lean/plainGoal`), or, outside a tactic block, the
     /// type the term there is expected to have (`$/lean/plainTermGoal`).
@@ -1824,6 +1878,122 @@ pub struct ExpandedMacro {
     pub name: String,
     /// The expansion, formatted.
     pub expansion: String,
+}
+
+/// One item of a type's memory layout, as rust-analyzer lays it out: the
+/// type itself first, then its fields, in the order rustc placed them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutNode {
+    /// The field's name (`[ROOT]` for the type itself).
+    pub name: String,
+    /// Its type, as rust-analyzer writes it.
+    pub typename: String,
+    pub size: u64,
+    /// Its offset in the item it is part of.
+    pub offset: u64,
+    pub alignment: u64,
+    /// The node it is a field of; `None` for the type itself.
+    pub parent: Option<usize>,
+}
+
+/// rust-analyzer's memory layout of a type, its nodes in its order (the
+/// type first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryLayout {
+    pub nodes: Vec<LayoutNode>,
+}
+
+impl MemoryLayout {
+    /// The type's own fields, by offset: what is placed where in it.
+    pub fn fields(&self) -> Vec<&LayoutNode> {
+        let mut fields: Vec<&LayoutNode> =
+            self.nodes.iter().filter(|n| n.parent == Some(0)).collect();
+        fields.sort_by_key(|n| n.offset);
+        fields
+    }
+
+    /// Bytes of the type no field holds: the gaps alignment leaves between
+    /// its fields and after the last.
+    pub fn padding(&self) -> u64 {
+        let Some(root) = self.nodes.first() else {
+            return 0;
+        };
+        let mut end = 0;
+        let mut gaps = 0;
+        for field in self.fields() {
+            gaps += field.offset.saturating_sub(end);
+            end = end.max(field.offset + field.size);
+        }
+        if self.fields().is_empty() {
+            return 0;
+        }
+        gaps + root.size.saturating_sub(end)
+    }
+}
+
+fn parse_memory_layout(result: &Value) -> Option<MemoryLayout> {
+    let nodes = result.get("nodes")?.as_array()?;
+    let number = |n: &Value, camel: &str, snake: &str| {
+        n.get(camel)
+            .or_else(|| n.get(snake))
+            .and_then(Value::as_i64)
+    };
+    let text = |n: &Value, camel: &str, snake: &str| {
+        n.get(camel)
+            .or_else(|| n.get(snake))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let nodes: Vec<LayoutNode> = nodes
+        .iter()
+        .map(|n| {
+            Some(LayoutNode {
+                name: text(n, "itemName", "item_name")?,
+                typename: text(n, "typename", "typename").unwrap_or_default(),
+                size: number(n, "size", "size")?.max(0) as u64,
+                offset: number(n, "offset", "offset").unwrap_or(0).max(0) as u64,
+                alignment: number(n, "alignment", "alignment").unwrap_or(1).max(0) as u64,
+                parent: number(n, "parentIdx", "parent_idx").and_then(|p| usize::try_from(p).ok()),
+            })
+        })
+        .collect::<Option<_>>()?;
+    (!nodes.is_empty()).then_some(MemoryLayout { nodes })
+}
+
+/// A test rust-analyzer finds exercising an item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedTest {
+    /// Its name as rust-analyzer labels it (`test tests::doubles`, less
+    /// the `test `).
+    pub name: String,
+    /// Where it is defined.
+    pub path: PathBuf,
+    /// 0-based line of its name.
+    pub line: usize,
+}
+
+fn parse_related_tests(result: &Value) -> Vec<RelatedTest> {
+    let Some(tests) = result.as_array() else {
+        return Vec::new();
+    };
+    tests
+        .iter()
+        .filter_map(|t| {
+            let runnable = t.get("runnable")?;
+            let label = runnable.get("label")?.as_str()?;
+            let location = runnable.get("location")?;
+            let path = uri_to_path(location.get("targetUri")?.as_str()?)?;
+            let range = location
+                .get("targetSelectionRange")
+                .or_else(|| location.get("targetRange"))?;
+            let line = range.get("start")?.get("line")?.as_u64()? as usize;
+            Some(RelatedTest {
+                name: label.strip_prefix("test ").unwrap_or(label).to_string(),
+                path,
+                line,
+            })
+        })
+        .collect()
 }
 
 /// The Lean server's answer at a position.
@@ -3478,6 +3648,118 @@ mod session_tests {
         peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": null}))
             .await;
         assert_eq!(asked.await.unwrap(), Ok(None));
+    }
+
+    /// What rust-analyzer 1.95 answered for `struct Packet { flag: u8,
+    /// id: u64, tag: u16 }`: rustc moved the fields, and five bytes are
+    /// padding.
+    const PACKET_LAYOUT: &str = r#"{"nodes": [{"itemName": "[ROOT]", "typename": "Packet", "size": 16, "offset": 0, "alignment": 8, "parentIdx": -1, "childrenStart": 1, "childrenLen": 3}, {"itemName": "id", "typename": "u64", "size": 8, "offset": 0, "alignment": 8, "parentIdx": 0, "childrenStart": -1, "childrenLen": 0}, {"itemName": "tag", "typename": "u16", "size": 2, "offset": 8, "alignment": 2, "parentIdx": 0, "childrenStart": -1, "childrenLen": 0}, {"itemName": "flag", "typename": "u8", "size": 1, "offset": 10, "alignment": 1, "parentIdx": 0, "childrenStart": -1, "childrenLen": 0}]}"#;
+
+    #[tokio::test]
+    async fn memory_layout_and_related_tests_ask_rust_analyzer() {
+        let (client, mut peer, _) = connected().await;
+        let asked = tokio::spawn({
+            let client = client.clone();
+            async move { client.memory_layout(Path::new("/proj/a.rs"), 0, 12).await }
+        });
+        let request = peer.next().await;
+        assert_eq!(request["method"], "rust-analyzer/viewRecursiveMemoryLayout");
+        assert_eq!(
+            request["params"]["position"],
+            json!({"line": 0, "character": 12})
+        );
+        let result: Value = serde_json::from_str(PACKET_LAYOUT).unwrap();
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": result}))
+            .await;
+        let layout = asked.await.unwrap().unwrap().expect("a layout");
+        assert_eq!(layout.nodes[0].typename, "Packet");
+        assert_eq!(layout.nodes[0].parent, None);
+        let fields: Vec<(&str, u64)> = layout
+            .fields()
+            .iter()
+            .map(|f| (f.name.as_str(), f.offset))
+            .collect();
+        assert_eq!(fields, [("id", 0), ("tag", 8), ("flag", 10)]);
+        assert_eq!(layout.padding(), 5, "16 bytes, 11 of them fields");
+
+        let asked = tokio::spawn({
+            let client = client.clone();
+            async move { client.related_tests(Path::new("/proj/a.rs"), 6, 8).await }
+        });
+        let request = peer.next().await;
+        assert_eq!(request["method"], "rust-analyzer/relatedTests");
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": [{"runnable": {
+            "label": "test tests::doubles",
+            "location": {"targetUri": "file:///proj/a.rs",
+                "targetRange": {"start": {"line": 13, "character": 4}, "end": {"line": 16, "character": 5}},
+                "targetSelectionRange": {"start": {"line": 14, "character": 7}, "end": {"line": 14, "character": 14}}},
+            "kind": "cargo", "args": {"cargoArgs": ["test"], "executableArgs": ["tests::doubles", "--exact"]}}}]}))
+            .await;
+        assert_eq!(
+            asked.await.unwrap(),
+            Ok(vec![RelatedTest {
+                name: "tests::doubles".into(),
+                path: PathBuf::from("/proj/a.rs"),
+                line: 14,
+            }])
+        );
+        // Nothing to lay out, no tests: answers too.
+        assert_eq!(parse_memory_layout(&Value::Null), None);
+        assert_eq!(parse_memory_layout(&json!({"nodes": []})), None);
+        assert!(parse_related_tests(&json!([])).is_empty());
+        assert!(parse_related_tests(&Value::Null).is_empty());
+    }
+
+    /// A struct with no fields has no padding to speak of, and a type with
+    /// no gaps none either.
+    #[test]
+    fn padding_is_the_bytes_no_field_holds() {
+        let node = |name: &str, size, offset, parent| LayoutNode {
+            name: name.into(),
+            typename: String::new(),
+            size,
+            offset,
+            alignment: 1,
+            parent,
+        };
+        let unit = MemoryLayout {
+            nodes: vec![node("[ROOT]", 0, 0, None)],
+        };
+        assert_eq!(unit.padding(), 0);
+        let packed = MemoryLayout {
+            nodes: vec![
+                node("[ROOT]", 4, 0, None),
+                node("a", 2, 0, Some(0)),
+                node("b", 2, 2, Some(0)),
+            ],
+        };
+        assert_eq!(packed.padding(), 0);
+        let gap = MemoryLayout {
+            nodes: vec![
+                node("[ROOT]", 8, 0, None),
+                node("a", 1, 0, Some(0)),
+                node("b", 4, 4, Some(0)),
+            ],
+        };
+        assert_eq!(gap.padding(), 3);
+    }
+
+    #[tokio::test]
+    async fn lean_tactic_goals_ask_only_the_tactic_state() {
+        let (client, mut peer, _) = connected().await;
+        let asked = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .lean_tactic_goals(Path::new("/proj/A.lean"), 3, 10)
+                    .await
+            }
+        });
+        let request = peer.next().await;
+        assert_eq!(request["method"], "$/lean/plainGoal");
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"goals": []}}))
+            .await;
+        assert_eq!(asked.await.unwrap(), Ok(Some(Vec::new())));
     }
 
     #[tokio::test]

@@ -66,8 +66,8 @@ impl Embedder {
         let read = |file: &str| std::fs::read(dir.join(file)).map_err(|e| unreadable(file, e));
         let tokenizer = tokenizer(&read(TOKENIZER_FILE)?)?;
         let model = read(MODEL_FILE)?;
-        let weights =
-            read_shared(&dir.join(WEIGHTS_FILE)).map_err(|e| unreadable(WEIGHTS_FILE, e))?;
+        let weights = crate::runtime::read_shared(&dir.join(WEIGHTS_FILE))
+            .map_err(|e| unreadable(WEIGHTS_FILE, e))?;
         let session = crate::runtime::session_from_memory(&model, vec![(WEIGHTS_NAME, weights)])?;
         let mut embedder = Embedder {
             session,
@@ -133,24 +133,6 @@ impl Embedder {
         }
         Ok(data.chunks_exact(dims).map(unit).collect())
     }
-}
-
-/// The bytes of the file at `path`, read straight into the buffer the
-/// model keeps: a file of weights is a fifth of a gigabyte, and read first
-/// and then copied it was in memory twice over while the model loaded.
-fn read_shared(path: &Path) -> std::io::Result<std::sync::Arc<[u8]>> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let len =
-        usize::try_from(file.metadata()?.len()).map_err(|_| std::io::Error::other("too large"))?;
-    let mut bytes: std::sync::Arc<[u8]> = std::iter::repeat_n(0u8, len).collect();
-    let buffer = std::sync::Arc::get_mut(&mut bytes).expect("not shared yet");
-    file.read_exact(buffer)?;
-    // Grown since it was measured: not the file it was.
-    if file.read(&mut [0u8; 1])? != 0 {
-        return Err(std::io::Error::other("changed while it was read"));
-    }
-    Ok(bytes)
 }
 
 /// `v` scaled to length 1 (as it is, if it has none).

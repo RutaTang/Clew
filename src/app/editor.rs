@@ -26,6 +26,26 @@ pub(crate) fn open_status(rel: &str, lang_key: Option<&str>) -> String {
 }
 
 impl App {
+    /// Open a search result, line `line` of `abs`: at the place a language
+    /// server named (`at`), else on what the search matched in it.
+    pub(crate) fn open_search_hit(
+        &mut self,
+        abs: PathBuf,
+        line: usize,
+        at: Option<(usize, crate::viewer::PositionEncoding)>,
+    ) -> Task<Message> {
+        use crate::app::state::LandingAt;
+        let landing = match (at, self.proj.search.matcher.clone()) {
+            (Some((character, encoding)), _) => Some(LandingAt::Char(character, encoding)),
+            (None, Some(matcher)) => Some(LandingAt::Match(matcher)),
+            (None, None) => None,
+        };
+        if let Some(landing) = landing {
+            self.proj.landing_next = Some((abs.clone(), line.saturating_sub(1), landing));
+        }
+        self.open_file(abs, Some(line), true)
+    }
+
     /// Open a file into the active pane, optionally jumping to a 1-based line,
     /// and (with `push`) record the jump on the reading trail.
     pub(crate) fn open_file(
@@ -34,6 +54,21 @@ impl App {
         line: Option<usize>,
         push: bool,
     ) -> Task<Message> {
+        // A package (a Go or Java import names its directory, a C# `using`
+        // its namespace: the Imports tab's row, the map's) opens at its first
+        // file: neither is a file. Looked up whatever the name: a namespace's
+        // node (`namespace Acme.Core`) reads as though it had an extension.
+        let abs = self.proj.import_graph.package_file(&abs).unwrap_or(abs);
+        // A jump to a file of this machine's deleted since it was listed (a
+        // tree row, a result, a citation) is said so before anything is left
+        // for it: the trail took it as the place read, and the page over the
+        // code, the Ask window, Time Travel went for a pane that then showed
+        // what it showed before, with the system's error under it.
+        if push && self.is_gone(&abs) {
+            self.proj.landing_next = None;
+            self.say_gone(&abs);
+            return Task::none();
+        }
         // A jump supersedes a walkthrough step still waiting for its file's
         // symbols (`PendingAnchor`): settled afterwards, the step moved the
         // cursor off where the reader went — even within the step's own
@@ -47,16 +82,14 @@ impl App {
         // Where this jump lands on its line: on a name only when the jump
         // to it asked so (`landing_next`), else at the line's start.
         self.proj.landing = self.proj.landing_next.take();
-        // A package (a Go or Java import names its directory, a C# `using`
-        // its namespace: the Imports tab's row, the map's) opens at its first
-        // file: neither is a file. Looked up whatever the name: a namespace's
-        // node (`namespace Acme.Core`) reads as though it had an extension.
-        let abs = self.proj.import_graph.package_file(&abs).unwrap_or(abs);
+        // The Files view's keyboard rests on the file being read.
+        self.proj.tree_cursor = None;
         // Opening a file leaves the overview / stats / docs page for the code, and
         // ends any time-travel session (which would otherwise stay active-but-hidden
         // and keep capturing Esc/←/→ for a file that's no longer shown).
         self.proj.overview.showing = false;
         self.proj.stats.showing = false;
+        self.proj.weak.showing = false;
         // The large Ask window steps aside to a card for the code it opens
         // (a citation clicked, a file the agent opened): the code is what
         // the reader goes there to see.
@@ -65,7 +98,10 @@ impl App {
         }
         self.proj.glossary.showing = false;
         self.proj.docs.page = None;
-        self.proj.time_travel = None;
+        if self.proj.time_travel.take().is_some() {
+            self.forget_failure_of(crate::app::state::FailureOf::Summary);
+            self.forget_failure_of(crate::app::state::FailureOf::Story);
+        }
         // (A revision still loading goes with the session: its load answers
         // to the session's own request.) A history still loading is given up
         // only if landing, it would undo this jump: in its own pane, to its
@@ -91,9 +127,16 @@ impl App {
             Task::none()
         };
         let saved = if push {
+            // The visit being left is made where the reader is in it: Back
+            // returns to the line jumped from, not to where the file opened.
+            self.settle_visit();
             // Remember the symbol at the target so the trail can re-anchor to it
             // after edits shift its line (see `reanchor` in FilesRehashed).
             let label = line.and_then(|l| self.symbol_name_at(&abs, l));
+            if let Some(l) = line {
+                let around = self.function_around(&abs, l);
+                self.note_trail_fn(&abs, l, around);
+            }
             self.proj.history.push(
                 Loc {
                     path: abs.clone(),
@@ -217,6 +260,67 @@ impl App {
     /// [`Self::open_file`] once the trail is recorded: show `abs` at `line`
     /// in the active pane — moving the cursor when it is already there, else
     /// loading it.
+    /// Make the current visit where the reader is: the caret's line in the
+    /// file it is of ([`crate::history::History::settle`]).
+    fn settle_visit(&mut self) {
+        let Some(v) = self.active_viewer() else {
+            return;
+        };
+        let Some((l0, _)) = v.caret else {
+            return;
+        };
+        let line = l0 + 1;
+        let Some(here) = self.proj.history.current_loc() else {
+            return;
+        };
+        if here.path != v.abs {
+            return;
+        }
+        // The function a line is in: the same one, the visit moves with the
+        // reader; another, the place left is a stop of its own. (Not the
+        // symbol named on that very line: a body line has none.)
+        let enclosing = |line1: usize| {
+            v.symbols
+                .iter()
+                .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+                .filter(|s| s.line <= line1 && line1 <= s.end_line)
+                .min_by_key(|s| s.end_line.saturating_sub(s.line))
+                .map(|s| (s.line, s.name.clone()))
+        };
+        // A caret still where the visit put it has not moved: a file opened
+        // at its top has it on line 1, and made a visit to line 1 Back
+        // stopped at, the screen as it was. The stop's function is noted
+        // all the same: a jump to a body line lands before the file has
+        // loaded, so this is the first time it is known, and the trail would
+        // say "lib.rs:4" once the file is closed.
+        if here.line.unwrap_or(1) == line {
+            // (An outline not in yet says nothing either way.)
+            if let Some(at) = here.line.filter(|_| !v.symbols.is_empty()) {
+                let around = enclosing(at).map(|(_, name)| name);
+                let abs = v.abs.clone();
+                self.note_trail_fn(&abs, at, around);
+            }
+            return;
+        }
+        let moves = here.line.is_none_or(|at| enclosing(at) == enclosing(line));
+        let abs = v.abs.clone();
+        // The function the stop is in, kept with it while it is known.
+        let around = enclosing(line).map(|(_, name)| name);
+        let label = self.symbol_name_at(&abs, line);
+        self.note_trail_fn(&abs, line, around);
+        self.proj.history.settle(line, label, moves);
+    }
+
+    /// How many lines the code view shows from a file's top — what Back,
+    /// Forward and the trail take to be a file's first screen. Not measured
+    /// yet: none.
+    pub(crate) fn first_rows(&self) -> usize {
+        let lh = self.line_height();
+        self.active_viewer()
+            .filter(|v| v.viewport_measured && lh > 0.0)
+            .map_or(0, |v| (v.viewport_h / lh) as usize)
+    }
+
     fn open_file_at(&mut self, abs: PathBuf, line: Option<usize>) -> Task<Message> {
         // A jump lands the reader in the code view.
         self.code_focused = true;
@@ -349,6 +453,65 @@ impl App {
         )
     }
 
+    /// Whether `abs` is a file of this machine's project that is no longer
+    /// there ([`crate::app::model::gone`]).
+    pub(crate) fn is_gone(&self, abs: &Path) -> bool {
+        !self.connection.is_remote()
+            && self
+                .proj
+                .project
+                .as_ref()
+                .is_some_and(|p| crate::app::model::gone(&p.root, abs))
+    }
+
+    /// `abs`, a file of this machine's, found no longer there: said so, and
+    /// marked for the reading trail to leave out.
+    pub(crate) fn say_gone(&mut self, abs: &Path) {
+        self.status = tr!("{file} is no longer there", file = self.rel_of(abs));
+        self.proj.gone_files.insert(abs.to_path_buf());
+    }
+
+    /// The open of `abs` into `pane` failed, the file gone: said so, and
+    /// the trail put back on the visit the pane still shows — whichever way
+    /// it had stepped (a jump or Forward onto it, Back or a click in the
+    /// trail), not on as though the file had been read, nor a visit further
+    /// back than the one on screen.
+    pub(crate) fn gone_on_load(&mut self, pane: usize, abs: &Path) -> Task<Message> {
+        self.say_gone(abs);
+        if self
+            .proj
+            .history
+            .current_loc()
+            .is_none_or(|l| l.path != abs)
+        {
+            return Task::none();
+        }
+        let shown = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(|v| v.as_ref())
+            .map(|v| v.abs.clone());
+        let mut back = self.proj.history.clone();
+        let mut forward = self.proj.history.clone();
+        let to = match shown {
+            Some(shown) if back.back().is_some_and(|l| l.path == shown) => Some(back),
+            Some(shown) if forward.forward().is_some_and(|l| l.path == shown) => Some(forward),
+            // Nothing on screen to go back to: the visit before it.
+            _ => {
+                let mut before = self.proj.history.clone();
+                before.back().map(|_| before)
+            }
+        };
+        match to {
+            Some(history) => {
+                self.proj.history = history;
+                self.save_history()
+            }
+            None => Task::none(),
+        }
+    }
+
     pub(crate) fn on_file_loaded(
         &mut self,
         req: u64,
@@ -362,7 +525,12 @@ impl App {
         // issued before a project switch must not resurrect into it.
         if self.proj.link.pane_pending.get(pane).copied().flatten() != Some(req) {
             if let Err(e) = &result {
-                let said = format!("{}: {e}", self.rel_of(&abs));
+                let said = if self.is_gone(&abs) {
+                    self.proj.gone_files.insert(abs.clone());
+                    tr!("{file} is no longer there", file = self.rel_of(&abs))
+                } else {
+                    format!("{}: {e}", self.rel_of(&abs))
+                };
                 self.fail_superseded_open(req, said);
             }
             return Task::none();
@@ -371,11 +539,22 @@ impl App {
         let rel = self.rel_of(&abs);
         let content = match result {
             Err(e) => {
-                self.status = format!("{rel}: {e}");
-                return Task::none();
+                // A file of this machine's no longer there is said so, and
+                // left out of the trail: "empty.py: cannot resolve path: No
+                // such file or directory (os error 2)" stood for it.
+                let saved = if self.is_gone(&abs) {
+                    self.gone_on_load(pane, &abs)
+                } else {
+                    self.status = format!("{rel}: {e}");
+                    Task::none()
+                };
+                self.forget_history_open(&abs);
+                return saved;
             }
             Ok(content) => content,
         };
+        // Back again (restored, or made anew): in the trail again.
+        self.proj.gone_files.remove(&abs);
 
         let lang_key = highlight::detect(&abs);
         let source = Arc::new(content);
@@ -383,11 +562,15 @@ impl App {
         let line_height = self.line_height();
         let old_viewport = self.proj.panes[pane]
             .as_ref()
-            .map(|v| (v.viewport_h, v.viewport_measured));
+            .map(|v| (v.viewport_h, v.viewport_measured, v.bounds_h));
         let mut v = Viewer::new(abs.clone(), rel, lang_key, source.clone(), lines);
-        if let Some((h, measured)) = old_viewport {
+        // The view's measured height too: without it, a jump that opened
+        // a file fell back to "the last line at the top", and a short
+        // file's start was scrolled away again.
+        if let Some((h, measured, bounds)) = old_viewport {
             v.viewport_h = h;
             v.viewport_measured = measured;
+            v.bounds_h = bounds;
         }
         v.target_line = target;
         // Put the block cursor on the jump target (or the top of the file).
@@ -404,6 +587,7 @@ impl App {
         // (and an answer still on its way for it is too), as on every other
         // way a pane is replaced.
         self.invalidate_hover();
+        self.forget_gutter_tip(Some(pane));
         // Seed the content hash so the watcher can tell real edits from noise
         // — for a file of the project: one outside it (a dependency, the
         // standard library, gone to by a definition) is in no index, and
@@ -430,10 +614,14 @@ impl App {
             Some(lang) => self.ensure_lsp(lang),
             None => Task::none(),
         };
+        // What the tour's step waits to show of this file, if it does.
+        let tour = self.tour_file_loaded(&abs);
+        // What the History view waits for this file to open for.
+        let after = self.after_history_open(&abs);
         let content = self.content_tasks(abs, source, lang_key);
         // Symbols arrive later via `Highlighted`; follow_caret there resolves the
         // enclosing function. Here it shows the file until then.
-        self.follow_caret(Task::batch([scroll, lsp_task, content]))
+        self.follow_caret(Task::batch([scroll, lsp_task, content, tour, after]))
     }
 
     /// Off-thread re-highlight + git-info tasks for a file's current source,
@@ -505,7 +693,14 @@ impl App {
         // (a dependency gone to by a definition), git refuses — "outside
         // repository" — and that refusal took the status line at every such
         // jump.
-        let git_task = match self
+        let git_task = self.local_git_info(abs, stamp);
+        Task::batch([highlight_task, git_task])
+    }
+
+    /// The blame and change status of `abs`, a file of the project, read
+    /// here (the local path's `GitInfo`); none for a file outside it.
+    fn local_git_info(&mut self, abs: PathBuf, stamp: Stamp) -> Task<Message> {
+        match self
             .proj
             .project
             .as_ref()
@@ -542,8 +737,33 @@ impl App {
                 )
             }
             None => Task::none(),
-        };
-        Task::batch([highlight_task, git_task])
+        }
+    }
+
+    /// The blame and change status of every file open, read again: the
+    /// project's history moved (`App::repo_moved`), and what the gutter
+    /// showed was of the commit before. Through the server when it is up,
+    /// as a file's content came; here otherwise.
+    pub(crate) fn refresh_git_of_open_files(&mut self) -> Task<Message> {
+        let mut open: Vec<(PathBuf, String)> = self
+            .proj
+            .panes
+            .iter()
+            .flatten()
+            .map(|v| (v.abs.clone(), v.rel.clone()))
+            .collect();
+        open.sort();
+        open.dedup();
+        let mut tasks = Vec::new();
+        for (abs, rel) in open {
+            if self.server.is_up() {
+                self.request_git_info(rel, abs);
+            } else {
+                let stamp = self.stamp();
+                tasks.push(self.local_git_info(abs, stamp));
+            }
+        }
+        Task::batch(tasks)
     }
 
     pub(crate) fn on_open_rel(&mut self, rel: String, line: Option<usize>) -> Task<Message> {
@@ -641,6 +861,8 @@ impl App {
         // Opening a file leaves the doc page (and the overview/stats homes).
         self.proj.docs.page = None;
         let abs = root.join(&rel);
+        // Back again (restored, or made anew): in the trail again.
+        self.proj.gone_files.remove(&abs);
         let git_rel = rel.clone();
         let lang_key = highlight::detect(&abs);
         let source = Arc::new(source);
@@ -650,7 +872,7 @@ impl App {
             .panes
             .get(pane)
             .and_then(|s| s.as_ref())
-            .map(|v| (v.viewport_h, v.viewport_measured));
+            .map(|v| (v.viewport_h, v.viewport_measured, v.bounds_h));
 
         let mut v = Viewer::new(abs.clone(), rel, lang_key, source.clone(), lines);
         v.symbols = symbols;
@@ -664,9 +886,13 @@ impl App {
         };
         v.set_inactive_lines(dimmed);
         v.highlighted = true;
-        if let Some((h, measured)) = old_viewport {
+        // The view's measured height too: without it, a jump that opened
+        // a file fell back to "the last line at the top", and a short
+        // file's start was scrolled away again.
+        if let Some((h, measured, bounds)) = old_viewport {
             v.viewport_h = h;
             v.viewport_measured = measured;
+            v.bounds_h = bounds;
         }
         v.target_line = target;
         let l0 = target.map(|t| t.saturating_sub(1)).unwrap_or(0);
@@ -677,6 +903,7 @@ impl App {
         // The pane's document is being replaced: any hover in flight is
         // about the file that was there.
         self.invalidate_hover();
+        self.forget_gutter_tip(Some(pane));
         self.proj.panes[pane] = Some(v);
         // Seed the content hash so the watcher can tell real edits from noise.
         // Local projects only: a remote project's versions come from the index
@@ -699,8 +926,10 @@ impl App {
             Some(lang) => self.ensure_lsp(lang),
             None => Task::none(),
         };
-        self.request_git_info(git_rel, abs);
-        self.follow_caret(Task::batch([scroll, lsp_task]))
+        self.request_git_info(git_rel, abs.clone());
+        // What the History view waits for this file to open for.
+        let after = self.after_history_open(&abs);
+        self.follow_caret(Task::batch([scroll, lsp_task, after]))
     }
 
     /// Rough pixel height of one rendered notebook cell, for scroll estimation.
@@ -790,6 +1019,8 @@ impl App {
             self.proj.docs.page = None;
         }
         let abs = root.join(&rel);
+        // Back again (restored, or made anew): in the trail again.
+        self.proj.gone_files.remove(&abs);
         // Prepare markdown cells first (this may spawn math/mermaid renders).
         let mut tasks: Vec<Task<Message>> = Vec::new();
         let mut prepared: Vec<NbCell> = Vec::new();
@@ -846,6 +1077,9 @@ impl App {
         // The pane's document is being replaced: any hover in flight is
         // about the file that was there.
         self.invalidate_hover();
+        for &pane in panes {
+            self.forget_gutter_tip(Some(pane));
+        }
         let mut active_mounted = false;
         for &pane in panes {
             // Each pane keeps ITS own scroll and expanded outputs across a
@@ -1148,10 +1382,38 @@ impl App {
         let Some(git) = self.git_source() else {
             return Task::none();
         };
+        let others = self.one_file_view(FileView::Diff);
         let req = self.mint_request_id();
         self.proj.diff_pending = Some((req, abs.clone()));
         self.status = tr!("Computing the diff of {file}…", file = self.rel_of(&abs));
-        self.load_diff(git, req, abs)
+        Task::batch([others, self.load_diff(git, req, abs)])
+    }
+
+    /// The file's other views put away for `keep`. Skim, Diff and Time
+    /// Travel each show the file another way, and only one shows at a time:
+    /// a diff asked for while Time Travel was on never showed, its button
+    /// lit all the same, and Skim folded a view no one could see.
+    pub(crate) fn one_file_view(&mut self, keep: FileView) -> Task<Message> {
+        let mut tasks = Vec::new();
+        if keep != FileView::TimeTravel && ui::time_travel_pane(self) == Some(self.proj.active) {
+            tasks.push(self.update(Message::TimeTravel(TimeTravelMsg::Exit)));
+        }
+        if keep != FileView::Diff {
+            self.proj.diff_pending = None;
+            if self.proj.diff.take().is_some() {
+                self.proj.diff_refresh = None;
+                tasks.push(self.restore_code_scroll(self.proj.active));
+            }
+        }
+        if keep != FileView::Skim
+            && let Some(abs) = self.active_viewer().map(|v| v.abs.clone())
+        {
+            let sig_lines = self.skim_lines(&abs);
+            if self.active_viewer().is_some_and(|v| v.skimmed(&sig_lines)) {
+                tasks.push(self.fold_in(self.proj.active, |v| v.skim_bodies(&sig_lines)));
+            }
+        }
+        Task::batch(tasks)
     }
 
     /// The diff on screen again, when `path` — just changed or deleted on
@@ -1212,7 +1474,13 @@ impl App {
             if let Ok(lines) = result
                 && self.proj.diff.as_ref().is_some_and(|d| d.abs == abs)
             {
-                self.proj.diff = Some(DiffState::new(abs, rel, lines.unwrap_or_default()));
+                // Untracked still: every line added, as the first load showed
+                // it — it turned into "No uncommitted changes" at the first
+                // save made elsewhere.
+                self.proj.diff = match lines {
+                    Some(lines) => Some(self.with_file_length(DiffState::new(abs, rel, lines))),
+                    None => self.all_added(abs, rel),
+                };
             }
             return Task::none();
         }
@@ -1228,9 +1496,17 @@ impl App {
                     error = e
                 )
             }
-            Ok(None) => {
-                self.status = tr!("No diff for {file} — it is not tracked by git", file = rel);
-            }
+            // Not tracked: every line of it is new — the diff of a file
+            // added, which it will be. It said only that there was none.
+            Ok(None) => match self.all_added(abs, rel.clone()) {
+                Some(d) => {
+                    self.status.clear();
+                    self.proj.diff = Some(d);
+                }
+                None => {
+                    self.status = tr!("No diff for {file} — it is not tracked by git", file = rel);
+                }
+            },
             Ok(Some(lines)) => {
                 // Show the diff only if the active pane still shows that file —
                 // a slow diff must not display against another file.
@@ -1238,40 +1514,113 @@ impl App {
                     // No changes is said by the diff's own pane; the status
                     // line said it again under it.
                     self.status.clear();
-                    self.proj.diff = Some(DiffState::new(abs, rel, lines));
+                    let d = DiffState::new(abs, rel, lines);
+                    self.proj.diff = Some(self.with_file_length(d));
                 }
             }
         }
         Task::none()
     }
 
+    /// The diff of a file git will add — untracked, or in a repository with
+    /// no commit yet — as every line added, where the active pane shows it.
+    /// `None` for one git ignores or a project that is no repository: git
+    /// answers those as it does an untracked file, and they were shown
+    /// "compared with HEAD", every line added, against a HEAD there is not.
+    fn all_added(&self, abs: PathBuf, rel: String) -> Option<DiffState> {
+        let v = self.active_viewer().filter(|v| v.abs == abs)?;
+        if !matches!(self.proj.git_status.get(&rel), Some('U' | 'A')) {
+            return None;
+        }
+        let source = std::sync::Arc::clone(&v.source);
+        Some(DiffState::new(abs, rel, untracked_diff(&source)).of_file(&source))
+    }
+
+    /// `d`, knowing how long its file is where the active pane shows it: a
+    /// `⋯` then follows a last change the file goes on after.
+    fn with_file_length(&self, d: DiffState) -> DiffState {
+        // Not a notebook's: its pane holds the cells as a script, while the
+        // diff numbers the lines of its JSON — a count of one from the
+        // other's length meant nothing.
+        match self
+            .active_viewer()
+            .filter(|v| v.abs == d.abs && v.notebook.is_none())
+        {
+            Some(v) => {
+                let source = std::sync::Arc::clone(&v.source);
+                d.of_file(&source)
+            }
+            None => d,
+        }
+    }
+
     pub(crate) fn on_toggle_split(&mut self) -> Task<Message> {
         // Panes are about to move or close under the cursor.
         self.invalidate_hover();
+        // And a gutter's tip with them: the pane closed could not put it
+        // away, and the one opened, at the same scroll, drew it again.
+        self.forget_gutter_tip(None);
         if self.proj.split {
+            // The pane kept is the one being read: closing the split while
+            // reading the second pane, opened to the side, closed that one,
+            // and the file being read went.
+            let kept = usize::from(self.proj.active == 1 && self.proj.panes[1].is_some());
+            let closed = 1 - kept;
             self.proj.split = false;
-            self.proj.panes[1] = None;
+            self.proj.panes[closed] = None;
             // A load still in flight for the closed pane must not resurrect
             // it as an invisible viewer — nor one a time-travel start there
             // superseded, carried out once its history came to nothing: into
             // a new second pane, should the split be open again by then.
-            self.cancel_pane_load(1);
-            self.proj.link.superseded_open.take_if(|s| s.pane == 1);
+            self.cancel_pane_load(closed);
+            self.proj.link.superseded_open.take_if(|s| s.pane == closed);
             // A time-travel start made there goes on in the pane left, should
             // that show its file — its history shows there, and a jump there
             // gives it up (`jump_gives_up_time_start`) — and is given up
             // otherwise: its history would bring a session no pane shows,
             // replacing the one there is, which opening its file ends.
-            let shown = self.proj.panes[0].as_ref().map(|v| v.abs.clone());
-            if let Some(start) = self.proj.time_start.as_mut().filter(|s| s.pane == 1) {
+            let shown = self.proj.panes[kept].as_ref().map(|v| v.abs.clone());
+            if let Some(start) = self.proj.time_start.as_mut().filter(|s| s.pane == closed) {
                 if shown.as_ref() == Some(&start.abs) {
-                    start.pane = 0;
+                    start.pane = kept;
                 } else {
                     // What it held back went with the pane, above.
                     let _ = self.give_up_time_travel_start();
                 }
             }
+            self.proj.context_menu = None;
+            // The second pane kept becomes the first, where it is: what
+            // waits on it waits there. A load still on its way to it would
+            // land in no pane, and is let go.
+            let mut moved = Task::none();
+            if kept == 1 {
+                self.proj.panes.swap(0, 1);
+                self.cancel_pane_load(1);
+                if let Some(s) = self.proj.link.superseded_open.as_mut() {
+                    s.pane = 0;
+                }
+                if let Some(start) = self.proj.time_start.as_mut() {
+                    start.pane = 0;
+                }
+                if let Some(anchor) = self.proj.walk.pending_anchor.as_mut() {
+                    anchor.pane = 0;
+                }
+                if let Some(v) = self.proj.panes[0].as_ref() {
+                    moved = operation::scroll_to(
+                        ui::code_scroll_id(0),
+                        AbsoluteOffset {
+                            x: v.scroll_x,
+                            y: v.scroll_y,
+                        },
+                    );
+                }
+            }
             self.proj.active = 0;
+            // The margin is back, beside the pane left: its card is of
+            // that pane's caret — it went on telling of the closed one's
+            // ("subtotal, line 11" over line 1) until a click in the code.
+            let follow = self.follow_caret(Task::none());
+            return Task::batch([moved, follow, self.sync_reading_context()]);
         } else {
             self.proj.split = true;
             // Duplicate the current file for side-by-side reading.
@@ -1357,6 +1706,33 @@ impl App {
         Task::none()
     }
 
+    /// The code panes back from under a page that covered them (Statistics,
+    /// the Overview, Weak spots, the Glossary, a docs page): drawn afresh,
+    /// their code views start at the top, so each is scrolled back to where
+    /// the reader left it — the caret's line still on screen. `None` while
+    /// nothing was put away.
+    pub(crate) fn sync_panes_uncovered(&mut self) -> Option<Task<Message>> {
+        let covered = ui::pane_cover(self).is_some();
+        let was = std::mem::replace(&mut self.panes_covered, covered);
+        if !was || covered {
+            return None;
+        }
+        let scrolls: Vec<Task<Message>> = self
+            .proj
+            .panes
+            .iter()
+            .enumerate()
+            .filter_map(|(pane, v)| {
+                let v = v.as_ref()?;
+                let (x, y) = (v.scroll_x, v.scroll_y);
+                (x > 0.0 || y > 0.0).then(|| {
+                    operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x, y })
+                })
+            })
+            .collect();
+        (!scrolls.is_empty()).then(|| Task::batch(scrolls))
+    }
+
     pub(crate) fn on_outline_jump(&mut self, line: usize) -> Task<Message> {
         let Some(abs) = self.active_viewer().map(|v| v.abs.clone()) else {
             return Task::none();
@@ -1405,23 +1781,40 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// How much of `pane`'s code view is seen: its height, less the foot of
+    /// it the Ask pill floats over ([`ui::pill_over_code`]). The caret kept
+    /// in view is kept in this — moved down a line at a time in a narrow
+    /// window, it went on under the pill — and a page is as many lines.
+    pub(crate) fn code_seen_h(&self, pane: usize) -> f32 {
+        let line_height = self.line_height();
+        self.proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .map_or(0.0, |v| {
+                (v.viewport_h - ui::pill_over_code(self, pane)).max(line_height)
+            })
+    }
+
     /// Move the active pane's block cursor and scroll it into view.
     pub(crate) fn move_cursor(&mut self, motion: viewer::Motion) -> Task<Message> {
         let pane = self.proj.active;
         let line_height = self.line_height();
+        let seen_h = self.code_seen_h(pane);
         let Some(v) = self.active_viewer_mut() else {
             return Task::none();
         };
         v.move_caret(motion);
         let (line, _) = v.caret.unwrap_or((0, 0));
         // Keep the cursor line within the viewport (in display rows, so folds
-        // above it are accounted for).
+        // above it are accounted for) — above the Ask pill, where it floats
+        // over the code's foot.
         let top = v.row_of(line) as f32 * line_height;
         let bottom = top + line_height;
         if top < v.scroll_y {
             v.scroll_y = top;
-        } else if bottom > v.scroll_y + v.viewport_h {
-            v.scroll_y = bottom - v.viewport_h;
+        } else if bottom > v.scroll_y + seen_h {
+            v.scroll_y = bottom - seen_h;
         }
         let y = v.scroll_y;
         self.reader_moved_caret(pane);
@@ -1435,10 +1828,11 @@ impl App {
     /// end it goes to the last line (the first, scrolling up).
     pub(crate) fn scroll_pages(&mut self, pages: i32) -> Task<Message> {
         let line_height = self.line_height();
-        let Some(v) = self.active_viewer() else {
+        if self.active_viewer().is_none() {
             return Task::none();
-        };
-        let page = ((v.viewport_h / line_height).floor() as i64 - 1).max(1);
+        }
+        let seen_h = self.code_seen_h(self.proj.active);
+        let page = ((seen_h / line_height).floor() as i64 - 1).max(1);
         self.scroll_rows(page * i64::from(pages))
     }
 
@@ -1479,60 +1873,123 @@ impl App {
 
     /// Change `pane`'s folds with `fold`. A fold that hides the caret pulls
     /// it onto its header, which is the reader moving it as much as a click
-    /// is (`reader_moved_caret`).
-    fn fold_in(&mut self, pane: usize, fold: impl FnOnce(&mut Viewer)) {
+    /// is (`reader_moved_caret`). The line at the top of the view stays at
+    /// the top — its fold's header, folded away — and the view no further
+    /// down than the code now runs: left where it was, a file folded short
+    /// (Skim near its end) showed nothing but its last line.
+    fn fold_in(&mut self, pane: usize, fold: impl FnOnce(&mut Viewer)) -> Task<Message> {
+        let line_height = self.line_height();
+        // Time Travel shows its own view in this pane's place, by this
+        // pane's scroll id: the live file's rows are not its.
+        let in_time_travel = ui::time_travel_pane(self) == Some(pane);
         let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) else {
-            return;
+            return Task::none();
         };
         let caret = v.caret;
+        let rows = v.content_rows();
+        let top = v.line_at_row((v.scroll_y / line_height.max(1.0)) as usize);
         fold(v);
+        // Scrolled by the code's rows only where the view is them, and only
+        // when the fold changed them: a notebook's cells and a rendered
+        // document scroll by their own measure, and a fold that changed
+        // nothing (`za` off a fold, `zR` with none closed) snapped the view
+        // to a row.
+        let by_rows = !in_time_travel
+            && v.notebook.is_none()
+            && (v.md.is_none() || v.show_source)
+            && v.content_rows() != rows;
+        if !by_rows {
+            if v.caret != caret {
+                self.reader_moved_caret(pane);
+            }
+            return Task::none();
+        }
+        let row = v.row_of(top);
+        // Folded away: its fold's header, the visible line before it.
+        let row = if v.line_at_row(row) == top {
+            row
+        } else {
+            row.saturating_sub(1)
+        };
+        // No further than puts the last line at the view's foot: Skim on a
+        // file scrolled to line 8 kept line 8 at the top of what now fitted
+        // whole, lines 1-7 above the view and its lower half empty.
+        let most = v.most_scroll(line_height);
+        let y = (row as f32 * line_height).min(most);
+        let scroll = if (y - v.scroll_y).abs() >= 0.5 {
+            v.scroll_y = y;
+            operation::scroll_to(
+                ui::code_scroll_id(pane),
+                AbsoluteOffset { x: v.scroll_x, y },
+            )
+        } else {
+            Task::none()
+        };
         if v.caret != caret {
             self.reader_moved_caret(pane);
         }
+        scroll
     }
 
     /// Toggle the fold enclosing the caret (`za`).
-    pub(crate) fn fold_toggle_at_cursor(&mut self) {
+    pub(crate) fn fold_toggle_at_cursor(&mut self) -> Task<Message> {
         self.fold_in(self.proj.active, |v| {
             let line = v.caret.map(|(l, _)| l).unwrap_or(0);
             if let Some(header) = v.fold_header_for(line) {
                 v.toggle_fold(header);
             }
-        });
+        })
     }
 
     /// Collapse (`zM`) or expand (`zR`) every fold in the active pane.
-    pub(crate) fn fold_all(&mut self, collapse: bool) {
+    pub(crate) fn fold_all(&mut self, collapse: bool) -> Task<Message> {
         self.fold_in(self.proj.active, |v| {
             if collapse {
                 v.collapse_all();
             } else {
                 v.expand_all();
             }
-        });
+        })
     }
 
     /// Toggle "skim" for the active file: fold every function/method body down
     /// to its signature (which still shows its inline summary), so the file
     /// reads as an annotated table of contents. Uses the symbol index to fold
     /// only bodies, leaving impl/mod blocks open so every signature stays shown.
-    pub(crate) fn skim_active_file(&mut self) {
+    pub(crate) fn skim_active_file(&mut self) -> Task<Message> {
         let Some(v) = self.active_viewer() else {
-            return;
+            return Task::none();
         };
-        let sig_lines = self.skim_lines(&v.abs);
-        self.fold_in(self.proj.active, |v| v.skim_bodies(&sig_lines));
+        let functions = self.skim_lines(&v.abs);
+        self.fold_in(self.proj.active, |v| v.skim_bodies(&functions))
     }
 
-    /// Where `abs`'s functions and methods start (0-based): what Skim folds.
-    pub(crate) fn skim_lines(&self, abs: &Path) -> Vec<usize> {
+    /// Where `abs`'s functions and methods start and end (0-based; the end
+    /// `usize::MAX` when not known): what Skim folds. From the file's own
+    /// outline when it is open — which knows where each ends — else from
+    /// the project's index, which knows where each starts.
+    pub(crate) fn skim_lines(&self, abs: &Path) -> Vec<(usize, usize)> {
+        let open = self
+            .proj
+            .panes
+            .iter()
+            .flatten()
+            .find(|v| v.abs == abs && !v.symbols.is_empty());
+        if let Some(v) = open {
+            return v
+                .symbols
+                .iter()
+                .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+                .map(|s| (s.line.saturating_sub(1), s.end_line.saturating_sub(1)))
+                .collect();
+        }
         self.proj
             .symbol_index_by_file
             .get(abs)
             .map(|syms| {
                 syms.iter()
                     .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
-                    .map(|s| s.line.saturating_sub(1)) // 1-based symbol line → 0-based
+                    .map(|s| (s.line.saturating_sub(1), usize::MAX)) // 1-based → 0-based
                     .collect()
             })
             .unwrap_or_default()
@@ -1610,6 +2067,7 @@ impl App {
         };
         let pane = self.proj.active;
         let line_height = self.line_height();
+        let seen_h = self.code_seen_h(pane);
         let Some(v) = self.active_viewer_mut() else {
             return Task::none();
         };
@@ -1621,9 +2079,10 @@ impl App {
             v.scroll_y =
                 Self::estimate_notebook_offset(&doc, &v.nb_expanded, line + 1, line_height);
         } else {
-            // Center-ish the match line (display rows account for folds).
+            // Center-ish the match line (display rows account for folds),
+            // unless it is in view already — clear of the Ask pill.
             let top = v.row_of(line) as f32 * line_height;
-            if top < v.scroll_y || top + line_height > v.scroll_y + v.viewport_h {
+            if top < v.scroll_y || top + line_height > v.scroll_y + seen_h {
                 v.scroll_y = (top - v.viewport_h / 3.0).max(0.0);
             }
         }
@@ -1679,8 +2138,9 @@ impl App {
             return out;
         };
 
-        // Occurrences of the identifier under the cursor (2+ to be useful).
-        if let Some(word) = analyze::word_at(&v.lines, line, col) {
+        // Occurrences of the identifier under the cursor (2+ to be useful) —
+        // one of the code's, not a word in a string or a comment.
+        if let Some(word) = analyze::code_word_at(&v.lines, line, col) {
             let occ = v.occurrences(&word, 500);
             if occ.len() > 1 {
                 for (l, c0, c1) in occ {
@@ -1721,7 +2181,7 @@ impl App {
             return None;
         }
         let text = if b.uncommitted {
-            format!("· {}", tr!("Uncommitted change"))
+            tr!("Uncommitted change").to_string()
         } else {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1731,11 +2191,11 @@ impl App {
             if summary.chars().count() > 60 {
                 summary = summary.chars().take(59).collect::<String>() + "…";
             }
+            // What the commit said, then who and when.
             format!(
-                "{}, {} · {}",
+                "{summary} ({}, {})",
                 b.author,
-                crate::i18n::ago(b.time, now),
-                summary
+                crate::i18n::ago(b.time, now)
             )
         };
         Some((line, text))
@@ -1775,6 +2235,7 @@ impl App {
         match message {
             EditorMsg::OpenRel { rel, line } => self.on_open_rel(rel, line),
             EditorMsg::OpenAbs { abs, line, push } => self.open_file(abs, line, push),
+            EditorMsg::OpenHit { abs, line, at } => self.open_search_hit(abs, line, at),
             EditorMsg::FileLoaded {
                 req,
                 pane,
@@ -1802,11 +2263,46 @@ impl App {
                 self.on_git_info_loaded(abs, req, info)
             }
             EditorMsg::Scrolled(pane, viewport) => {
+                let line_height = self.line_height();
                 if let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) {
+                    // The height last measured, not `viewport_h`: a resize
+                    // raises that to the window's height, a guess, and the
+                    // real one after it read as the view shrinking.
+                    let was = v.bounds_h;
                     v.scroll_y = viewport.absolute_offset().y;
                     v.scroll_x = viewport.absolute_offset().x;
                     v.viewport_h = viewport.bounds().height;
                     v.viewport_measured = true;
+                    if let Some(y) = v
+                        .measured(viewport.bounds().height, line_height)
+                        .or_else(|| kept_in_sight(v, was, line_height))
+                    {
+                        v.scroll_y = y;
+                        return operation::scroll_to(
+                            ui::code_scroll_id(pane),
+                            AbsoluteOffset { x: v.scroll_x, y },
+                        );
+                    }
+                }
+                Task::none()
+            }
+            EditorMsg::ViewMeasured { pane, height } => {
+                let line_height = self.line_height();
+                if let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) {
+                    // As for a scroll: the height last measured.
+                    let was = v.bounds_h;
+                    v.viewport_h = height;
+                    v.viewport_measured = true;
+                    if let Some(y) = v
+                        .measured(height, line_height)
+                        .or_else(|| kept_in_sight(v, was, line_height))
+                    {
+                        v.scroll_y = y;
+                        return operation::scroll_to(
+                            ui::code_scroll_id(pane),
+                            AbsoluteOffset { x: v.scroll_x, y },
+                        );
+                    }
                 }
                 Task::none()
             }
@@ -1825,10 +2321,7 @@ impl App {
                 self.selecting = false;
                 Task::none()
             }
-            EditorMsg::FoldToggle { pane, line } => {
-                self.fold_in(pane, |v| v.toggle_fold(line));
-                Task::none()
-            }
+            EditorMsg::FoldToggle { pane, line } => self.fold_in(pane, |v| v.toggle_fold(line)),
             EditorMsg::MinimapScrolled { pane, fraction } => {
                 self.on_minimap_scrolled(pane, fraction)
             }
@@ -1895,20 +2388,24 @@ impl App {
                 Task::none()
             }
             EditorMsg::SkimFile => {
-                self.skim_active_file();
-                Task::none()
+                // Skimming puts the file's other views away; unskimming
+                // leaves them be.
+                let skimmed = self
+                    .active_viewer()
+                    .is_some_and(|v| v.skimmed(&self.skim_lines(&v.abs)));
+                let others = if skimmed {
+                    Task::none()
+                } else {
+                    self.one_file_view(FileView::Skim)
+                };
+                let fold = self.skim_active_file();
+                Task::batch([others, fold])
             }
             EditorMsg::ScrollPages(pages) => self.scroll_pages(pages),
             EditorMsg::ScrollLines(lines) => self.scroll_rows(i64::from(lines)),
             EditorMsg::MoveCaret(motion) => self.move_cursor(motion),
-            EditorMsg::FoldAll(collapse) => {
-                self.fold_all(collapse);
-                Task::none()
-            }
-            EditorMsg::FoldHere => {
-                self.fold_toggle_at_cursor();
-                Task::none()
-            }
+            EditorMsg::FoldAll(collapse) => self.fold_all(collapse),
+            EditorMsg::FoldHere => self.fold_toggle_at_cursor(),
             EditorMsg::GotoLineNumber(line) => {
                 let Some(v) = self.active_viewer() else {
                     return Task::none();
@@ -1983,6 +2480,9 @@ fn landing_col(
         LandingAt::Name(name) => {
             word_at(raw, name).map_or(0, |at| Col::from_offset(raw, at, PositionEncoding::Utf8).0)
         }
+        LandingAt::Match(matcher) => matcher.ranges(raw).first().map_or(0, |&(at, _)| {
+            Col::from_offset(raw, at, PositionEncoding::Utf8).0
+        }),
     }
 }
 
@@ -1992,4 +2492,51 @@ fn word_at(raw: &str, name: &str) -> Option<usize> {
     raw.match_indices(name).map(|(at, _)| at).find(|&at| {
         !word(raw[..at].chars().next_back()) && !word(raw[at + name.len()..].chars().next())
     })
+}
+
+/// One way of showing the file on the sheet, of the ones that exclude each
+/// other (see [`App::one_file_view`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileView {
+    Skim,
+    Diff,
+    TimeTravel,
+}
+
+/// The diff of a file git does not track yet: its every line added, under
+/// the one hunk a new file's diff has.
+fn untracked_diff(source: &str) -> Vec<git::DiffLine> {
+    let n = source.lines().count();
+    let mut lines = vec![git::DiffLine {
+        kind: git::DiffKind::Hunk,
+        text: format!("@@ -0,0 +1,{n} @@"),
+    }];
+    // Each with git's own `+`, which the view takes off: a line of its own
+    // beginning with a space, `-` or `+` lost that character.
+    lines.extend(source.lines().map(|line| git::DiffLine {
+        kind: git::DiffKind::Add,
+        text: format!("+{line}"),
+    }));
+    lines
+}
+
+/// The code seen shrunk from `was` to the viewer's height now — a panel
+/// opened under it, the window made shorter: where to scroll to keep the
+/// cursor's line, seen before, in sight, with a couple of lines under it.
+/// The bottom panel opening for a fake run hid the very function it was
+/// run on, and the margin's card with it.
+///
+/// `was` is the height measured before (`Viewer::bounds_h`), none before
+/// the first measure: nothing was seen in a view never measured.
+fn kept_in_sight(v: &Viewer, was: f32, line_height: f32) -> Option<f32> {
+    let now = v.viewport_h;
+    if was <= 0.0 || now >= was {
+        return None;
+    }
+    let (line, _) = v.caret?;
+    let top = v.row_of(line) as f32 * line_height;
+    let bottom = top + line_height;
+    let seen_before = top >= v.scroll_y && bottom <= v.scroll_y + was;
+    (seen_before && bottom > v.scroll_y + now)
+        .then(|| (bottom + 2.0 * line_height - now).min(top).max(0.0))
 }

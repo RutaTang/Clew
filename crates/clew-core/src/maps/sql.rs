@@ -295,7 +295,7 @@ fn schema_map(schema: &Schema) -> Option<ProjectMap> {
                 .map(|c| {
                     let mut line = format!("{} {}", c.name, c.ty).trim().to_string();
                     if c.pk {
-                        line.push_str(" · primary key");
+                        line.push_str(" (primary key)");
                     }
                     if let Some(fk) = table.fks.iter().find(|fk| {
                         fk.columns.len() == 1 && fk.columns[0].eq_ignore_ascii_case(&c.name)
@@ -1661,13 +1661,13 @@ mod tests {
         assert_eq!(users.file, "db/migrations/001_users.up.sql");
         assert_eq!(users.line, 2);
         assert_eq!(
-            users.detail, "id serial · primary key\nfull_name varchar(80)\nemail text",
+            users.detail, "id serial (primary key)\nfull_name varchar(80)\nemail text",
             "renamed, added, the dropped column gone"
         );
         let (_, orders) = node(schema, "public.orders");
         assert_eq!(
             orders.detail,
-            "id bigint · primary key\nuser_id int → users\ntotal numeric(10, 2)"
+            "id bigint (primary key)\nuser_id int → users\ntotal numeric(10, 2)"
         );
         assert!(
             schema
@@ -1826,7 +1826,7 @@ mod tests {
         let (_, users) = node(schema, "users");
         assert_eq!(
             users.detail,
-            "id bigint · primary key\nname string\ncreated_at datetime\nupdated_at datetime\nemail string"
+            "id bigint (primary key)\nname string\ncreated_at datetime\nupdated_at datetime\nemail string"
         );
         let e = edges(schema);
         assert!(

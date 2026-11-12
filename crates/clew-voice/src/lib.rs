@@ -6,13 +6,16 @@
 //! when it plainly is one ([`intent`]) — and answers said aloud: an
 //! on-device voice model, fetched as verified ([`speech`]), run by the
 //! `clew-speak` program beside Clew ([`speaker`]), the answer made ready to
-//! be said ([`say`]) and played on the speaker ([`playback`]).
+//! be said ([`say`]) and played on the speaker ([`playback`]) — and taken
+//! back out of what the microphone hears, so the reader can talk over it
+//! ([`echo`]).
 //!
 //! Nothing here is tied to a platform or to the rest of Clew: it builds and
 //! is tested on Linux, macOS and Windows alike.
 
 pub mod audio;
 pub mod capture;
+pub mod echo;
 pub mod intent;
 pub mod models;
 pub mod playback;
@@ -20,6 +23,7 @@ pub mod say;
 pub mod speaker;
 pub mod speech;
 pub mod turn;
+pub mod wake;
 #[cfg(test)]
 mod wav;
 pub mod whisper;

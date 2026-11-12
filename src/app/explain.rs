@@ -77,10 +77,19 @@ impl App {
         self.proj.explain.pass_sources = reported.clone();
         self.proj.explain.pass_automatic = matches!(kind, PassKind::Automatic);
         self.proj.explain.pass_target = None;
+        // Asked for again: what the last attempt said is not the news — nor
+        // its Try again, which beside the pass now running would start it
+        // twice.
+        if !matches!(kind, PassKind::Automatic) {
+            self.proj.explain.node_failed = None;
+            self.forget_failure_of(crate::app::state::FailureOf::Explain);
+        }
+        let one_node = matches!(kind, PassKind::Node(_));
         let reuse = match kind {
             PassKind::Explicit => explain::Reuse::SamePrompt,
             PassKind::Automatic => explain::Reuse::ChangedSources(reported),
             PassKind::Node(node) => {
+                self.proj.explain.pass_target_new = !self.proj.explain.cache.contains_key(&node);
                 self.proj.explain.pass_target = Some(node.clone());
                 explain::Reuse::Node(node)
             }
@@ -94,7 +103,17 @@ impl App {
         self.proj.explain.running = true;
         self.proj.explain.progress = Some((0, 0));
         self.proj.explain.failed = 0;
-        self.status = tr!("Explaining project…").into();
+        // What it does, said: a refresh of what changed is not the whole
+        // project explained again ("Explaining project… 20/45"). One
+        // function or file is said by the chip, by name: "Explaining
+        // project…" beside "Explaining subtotal()…" read as a whole paid
+        // pass begun. The whole project's pass is said by the chip too
+        // ("Explaining 0/45"): "Explaining project…" beside it said it twice.
+        self.status = if self.proj.explain.pass_automatic && !one_node {
+            tr!("Updating explanations…").into()
+        } else {
+            String::new()
+        };
         let stream = iced::stream::channel(256, move |output| {
             let gather_root = root.clone();
             let fetch_ai = ai.clone();
@@ -352,7 +371,7 @@ impl App {
             self.status = if self.status.is_empty() {
                 note
             } else {
-                format!("{} · {note}", self.status)
+                format!("{}; {note}", self.status)
             };
         }
         // What the store lacks of the window's copy is in it already
@@ -385,6 +404,12 @@ impl App {
         self.proj.explain.failed = failures.failed;
         let automatic = std::mem::take(&mut self.proj.explain.pass_automatic);
         let reexplained = self.proj.explain.pass_target.take();
+        // Whether the node asked for was written: only what builds on it may
+        // have failed — said of the pass then, not of the node, which "Couldn't
+        // explain helper()" said in red beside helper's new note.
+        let target_written = reexplained
+            .as_ref()
+            .is_some_and(|t| written.contains_key(t));
         // What the pass changed is this window's to save, and nothing else
         // (`explain::merge_unsaved`): every other stored entry is at least as
         // fresh as this window's copy — another window's Refresh All
@@ -459,105 +484,132 @@ impl App {
         // that kept or left summaries says which, and names the files it
         // could not read or can no longer explain.
         let n = self.proj.explain.cache.len();
-        let mut status = if let Some(stopped) = &failures.stopped {
-            tr!("Explain stopped: {reason}", reason = stopped.describe())
-        } else if let Some(target) = reexplained.as_ref().filter(|_| failures.failed == 0) {
-            let file = target.path();
-            let not_read = tally.unread.iter().any(|p| p == file)
-                || tally.dropped.iter().any(|(p, _)| p == file);
-            match tally.regenerated {
-                // Its file could not be read, or can no longer be explained:
-                // the note below says so.
-                0 if not_read => tr!("Nothing re-explained").to_string(),
-                0 => tr!("Nothing to re-explain: it is no longer part of the project").to_string(),
-                1 => tr!("Re-explained").to_string(),
-                paid => trn!(
-                    "Re-explained, along with 1 summary built on it",
-                    "Re-explained, along with {n} summaries built on it",
-                    paid - 1
-                ),
+        // A node asked for on its own and still without a note: why, on
+        // its card, until it is asked for again.
+        if let Some(target) = reexplained
+            .as_ref()
+            .filter(|t| !self.proj.explain.cache.contains_key(*t))
+        {
+            // Kept as what failed, not as its words: said in the language
+            // spoken when the card is drawn — switched to French, the card
+            // kept the English reason beside "Réessayer".
+            let why: Option<crate::app::state::SayAgain> = match &failures.stopped {
+                Some(stopped) => {
+                    let stopped = stopped.clone();
+                    Some(crate::app::state::SayAgain(std::sync::Arc::new(
+                        move || stopped.describe(),
+                    )))
+                }
+                None if failures.failed > 0 => {
+                    let calls = failures.calls.clone();
+                    Some(crate::app::state::SayAgain(std::sync::Arc::new(
+                        move || {
+                            calls
+                                .iter()
+                                .map(|f| f.describe())
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        },
+                    )))
+                }
+                None => None,
+            };
+            // The setting to look at, where the failure names one: an
+            // address nothing answered at, a key or model refused.
+            let fix = failures
+                .stopped
+                .iter()
+                .chain(&failures.calls)
+                .find_map(|f| f.field());
+            self.proj.explain.node_failed = why.map(|why| (target.clone(), why, fix));
+        }
+        let said = PassSaid {
+            failures: failures.clone(),
+            target: reexplained.clone(),
+            target_written,
+            target_new: self.proj.explain.pass_target_new,
+            not_read: reexplained.as_ref().is_some_and(|target| {
+                let file = target.path();
+                tally.unread.iter().any(|p| p == file)
+                    || tally.dropped.iter().any(|(p, _)| p == file)
+            }),
+            regenerated: tally.regenerated,
+            n,
+            unquoted: tally.unquoted,
+            waiting: tally.waiting.len(),
+            outdated: tally.outdated,
+            unverified: tally.unverified,
+            unexplained: tally.unexplained,
+            held: tally.held.iter().map(|p| self.shown_path(p)).collect(),
+            dropped: if completed {
+                tally
+                    .dropped
+                    .iter()
+                    .map(|(p, why)| (self.shown_path(p), *why))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        };
+        let status = pass_said(&said);
+        // A pass that fell short stands on the status line until it is
+        // read, with a way to try it again: the same pass, asked for again.
+        if failures.stopped.is_some() || failures.failed > 0 {
+            // A re-explain is asked for again from its note, which may no
+            // longer be the one shown: no way back to it from here.
+            //
+            // A node explained, only what builds on it failed: nothing of it
+            // to ask for again (Explain would only show its note). Explain
+            // All goes by its cost sheet, as every way to it does: stopped
+            // after three calls, a retry pays for the whole project.
+            let retry = match &reexplained {
+                Some(node)
+                    if self.proj.explain.pass_target_new
+                        && !self.proj.explain.cache.contains_key(node) =>
+                {
+                    Some(Message::Explain(ExplainMsg::Explain(node.clone())))
+                }
+                Some(_) => None,
+                None if automatic => Some(Message::Explain(ExplainMsg::Refresh)),
+                None => Some(crate::ui::explain_all_message(self)),
+            };
+            let about = failures
+                .stopped
+                .iter()
+                .chain(&failures.calls)
+                .find_map(ExplainFailure::field);
+            // A node asked for on its own says why on its card, with Try
+            // again and Settings: on the status bar too only where that card
+            // is not to be seen — both at once said the one failure twice.
+            let on_card = reexplained.as_ref().is_some_and(|node| {
+                self.proj
+                    .explain
+                    .node_failed
+                    .as_ref()
+                    .is_some_and(|(of, ..)| of == node)
+                    && self.proj.explain.view.as_ref() == Some(node)
+                    && self.margin_tab == crate::MarginTab::Notes
+                    && crate::ui::right_panel_shown(self)
+            });
+            if on_card {
+                self.forget_failure_of(crate::app::state::FailureOf::Explain);
+            } else {
+                self.say_failure_again(
+                    move || pass_said(&said),
+                    retry,
+                    crate::app::state::FailureOf::Explain,
+                );
+                self.failure_about(about);
             }
         } else {
-            let mut status = trn!(
-                "Explained 1 function, file or folder",
-                "Explained {n} functions, files and folders",
-                n
-            );
-            // Each clause after a " · " says one thing whole.
-            if failures.failed > 0 {
-                let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
-                status.push_str(" · ");
-                status.push_str(&trn!(
-                    "1 failed: {reasons}",
-                    "{n} failed: {reasons}",
-                    failures.failed,
-                    reasons = why.join("; ")
-                ));
+            // Done again, and done: the failure it stood for is past — once
+            // the model answered. A pass that asked it nothing (every note
+            // up to date) proves nothing of a key it rejected.
+            if tally.regenerated > 0 {
+                self.forget_failure_of(crate::app::state::FailureOf::Explain);
             }
-            if tally.unquoted > 0 {
-                status.push_str(" · ");
-                status.push_str(&trn!(
-                    "1 explained without the failed summaries it builds on",
-                    "{n} explained without the failed summaries they build on",
-                    tally.unquoted
-                ));
-            }
-            if !tally.waiting.is_empty() {
-                status.push_str(" · ");
-                status.push_str(&trn!(
-                    "1 left for the next refresh",
-                    "{n} left for the next refresh",
-                    tally.waiting.len()
-                ));
-            }
-            let mut left = Vec::new();
-            if tally.outdated > 0 {
-                left.push(trn!(
-                    "1 out of date, kept",
-                    "{n} out of date, kept",
-                    tally.outdated
-                ));
-            }
-            if tally.unverified > 0 {
-                left.push(trn!(
-                    "1 from an earlier version of Clew, kept but not rechecked",
-                    "{n} from an earlier version of Clew, kept but not rechecked",
-                    tally.unverified
-                ));
-            }
-            if tally.unexplained > 0 {
-                left.push(trn!(
-                    "1 not explained yet",
-                    "{n} not explained yet",
-                    tally.unexplained
-                ));
-            }
-            if !left.is_empty() {
-                status.push_str(" · ");
-                status.push_str(&tr!(
-                    "{list} — Explain All brings them up to date",
-                    list = left.join(" · ")
-                ));
-            }
-            status
-        };
-        // Named where they hold something: a file that could not be read and
-        // holds no summary loses nothing by it.
-        let held: Vec<String> = tally.held.iter().map(|p| self.shown_path(p)).collect();
-        if !held.is_empty() {
-            status.push_str(" · ");
-            status.push_str(&trn!(
-                "1 file could not be read ({files}) — its summaries are kept until it can be",
-                "{n} files could not be read ({files}) — their summaries are kept until they can be",
-                held.len(),
-                files = some_of(&held)
-            ));
+            self.status = status;
         }
-        // Dropped only by a pass that ran to its end.
-        if completed && let Some(note) = self.dropped_note(&tally.dropped) {
-            status.push_str(&format!(" · {note}"));
-        }
-        self.status = status;
 
         // Propagate the refreshed summaries to the downstream artifacts already in
         // use, each guarded so an unchanged input stays cheap. These run in the
@@ -566,7 +618,17 @@ impl App {
         // rendered, not to what they describe — nothing downstream changed
         // either: the overview is not re-billed for a new prompt wording.
         let mut tasks = vec![persist];
-        let downstream = !automatic || tally.regenerated > 0;
+        // Not after a pass that fell short: built on what it could not
+        // explain, and paid for with the AI that just failed, the index and
+        // the overview would say "Building semantic index…" over the failure
+        // the reader is to see, and likely fail the same way. The next pass
+        // that completes brings them up to date. Only a pass that stopped,
+        // or whose calls failed for a while (the provider down, out of reach)
+        // fell short so: one that will fail the same way every time — a
+        // function too long for the model — held the index back for good.
+        let fell_short = failures.stopped.is_some()
+            || (failures.failed > 0 && failures.calls.iter().any(ExplainFailure::may_pass_later));
+        let downstream = (!automatic || tally.regenerated > 0) && !fell_short;
         // The search index follows what was asked for: built after a pass
         // someone started (the cost they agreed to says so), kept fresh
         // after an automatic one — never built the first time by one.
@@ -580,7 +642,11 @@ impl App {
         if downstream && self.proj.overview.markdown.is_some() && self.overview_inputs_changed() {
             tasks.push(Task::done(Message::Overview(OverviewMsg::Generate)));
         }
-        if self.proj.refresh_pending {
+        // A refresh waiting is not run over a failure either: what it would
+        // explain waits in `changed_sources` for the next change or pass.
+        if fell_short {
+            self.proj.refresh_pending = false;
+        } else if self.proj.refresh_pending {
             tasks.push(self.request_auto_refresh());
         }
         if let Some(node) = self.proj.explain.view.clone() {
@@ -604,46 +670,6 @@ impl App {
         Task::batch(tasks)
     }
 
-    /// What the status line says of the files whose summaries a pass drops
-    /// because they can no longer be explained (`explain::Tally::dropped`):
-    /// each by name — a few of several — with why.
-    fn dropped_note(&self, dropped: &[(PathBuf, explain::Unexplainable)]) -> Option<String> {
-        use explain::Unexplainable::{Refused, TooLarge};
-        let size = |bytes: u64| crate::ui::human_size(bytes);
-        match dropped {
-            [] => None,
-            [(path, TooLarge(bytes))] => Some(tr!(
-                "{file} is too large to explain ({size}) — its summaries are dropped",
-                file = self.shown_path(path),
-                size = size(*bytes)
-            )),
-            [(path, Refused(why))] => Some(refused_note(*why, &self.shown_path(path))),
-            several => {
-                let named: Vec<String> = several
-                    .iter()
-                    .map(|(path, why)| match why {
-                        TooLarge(bytes) => {
-                            tr!(
-                                "{file} (too large, {size})",
-                                file = self.shown_path(path),
-                                size = size(*bytes)
-                            )
-                        }
-                        Refused(why) => {
-                            format!("{} ({})", self.shown_path(path), refusal_words(*why))
-                        }
-                    })
-                    .collect();
-                Some(trn!(
-                    "1 file can no longer be explained ({files}) — its summaries are dropped",
-                    "{n} files can no longer be explained ({files}) — their summaries are dropped",
-                    several.len(),
-                    files = some_of(&named)
-                ))
-            }
-        }
-    }
-
     /// `path` as the status line names a file: relative to the project.
     fn shown_path(&self, path: &Path) -> String {
         let root = self.proj.project.as_ref().map(|p| p.root.as_path());
@@ -654,7 +680,15 @@ impl App {
     }
 
     pub(crate) fn request_auto_refresh(&mut self) -> Task<Message> {
-        if !self.llm_available || self.proj.explain.cache.is_empty() {
+        // Switched off, a change spends nothing by itself: the status bar
+        // says the explanations are out of date, and the changed code
+        // waits for a pass the reader asks for (and is told the cost of).
+        if !self.llm_available
+            || self.proj.explain.cache.is_empty()
+            || !self.keep_explanations_fresh
+        {
+            // Nothing is left queued to fire on a later tick.
+            self.proj.refresh_pending = false;
             return Task::none();
         }
         // Let any running pass finish, then re-check on completion / next tick.
@@ -710,6 +744,25 @@ impl App {
         self.begin_refresh(false)
     }
 
+    /// The name of the function the caret is in when no commit has it yet:
+    /// every line of it added since HEAD. Its History has nothing of its own
+    /// — the file's commits are not its — and "This function through time"
+    /// only answered that git had no history for it.
+    pub(crate) fn caret_function_uncommitted(&self) -> Option<String> {
+        let v = self.active_viewer()?;
+        let git = v.git.as_ref()?;
+        let line1 = v.caret.map(|(l, _)| l + 1)?;
+        let sym = v
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+            .filter(|s| s.line <= line1 && line1 <= s.end_line)
+            .min_by_key(|s| s.end_line.saturating_sub(s.line))?;
+        let added = (sym.line.saturating_sub(1)..sym.end_line)
+            .all(|l| git.status_for(l) == Some(crate::git::ChangeKind::Added));
+        added.then(|| sym.name.clone())
+    }
+
     /// The explanation target for the active pane's caret: the innermost
     /// function/method it sits in, or the file itself when it's between
     /// functions. Drives the always-on explanation panel.
@@ -759,13 +812,13 @@ impl App {
                     name,
                     ordinal,
                 };
-                // Reveal the panel now (a cached summary, or the placeholder),
-                // then generate the block walkthrough. Without the second step a
-                // menu / Cmd+click "Explain" just parked the panel on "Not
-                // explained yet" and looked dead; ExplainMsg::Blocks shows a cached
-                // walkthrough if present, else streams a fresh one.
-                let show = self.show_explanation(node.clone());
-                Task::batch([show, Task::done(Message::Explain(ExplainMsg::Blocks(node)))])
+                // Its explanation, as the file's Explain gives the file's:
+                // shown, and written — this function alone, one call — when
+                // it has none. It used to write the block walkthrough, which
+                // the card showed under the function's name as if it were
+                // the function's explanation, a few lines of it, cut off; the
+                // walkthrough is View → Explanation in blocks.
+                self.on_explain_node(node)
             }
             None => {
                 self.status = tr!("No function here to explain").into();
@@ -846,6 +899,58 @@ impl App {
             Some(file) => self.explain_symbol_at(file, menu.line + 1),
             None => Task::none(),
         }
+    }
+
+    /// The file's Explain, and a function's (its context menu, ⌘-click):
+    /// show the node's explanation, and when it has none, write it — this
+    /// node alone, one call: what it quotes keeps what it has
+    /// (`explain::Reuse::Node`). Explain All is the way to explain all of
+    /// it, bottom up.
+    pub(crate) fn on_explain_node(&mut self, node: explain::Node) -> Task<Message> {
+        // An empty file has nothing to explain: said so — the pass found
+        // nothing in it to write about, and said it was no longer part of
+        // the project.
+        if let explain::Node::File(abs) = &node
+            && self
+                .proj
+                .panes
+                .iter()
+                .flatten()
+                .any(|v| &v.abs == abs && v.source.is_empty())
+        {
+            self.status = tr!("This file is empty: there is nothing in it to explain.").into();
+            return Task::none();
+        }
+        // Nor one in no language Clew reads (notes, a licence): the pass
+        // found nothing in it, and said it was no longer part of the
+        // project.
+        if let explain::Node::File(abs) = &node
+            && highlight::detect(abs).is_none()
+        {
+            self.status = tr!(
+                "{file} has no code in it to explain.",
+                file = self.rel_of(abs)
+            );
+            return Task::none();
+        }
+        let shown = self.update_explain(ExplainMsg::Show(node.clone()));
+        if self.proj.explain.cache.contains_key(&node) {
+            return shown;
+        }
+        // Asked for, with no model to write it: Settings, where one is
+        // added, as every other AI action opens it.
+        if let Err(ask_for_key) = self.require_llm() {
+            return Task::batch([shown, ask_for_key]);
+        }
+        // One pass at a time: the one running writes it, if it is due.
+        if self.proj.explain.running {
+            self.status = tr!("Explain All is running — this is explained as it goes").into();
+            return shown;
+        }
+        // Its chip says "Explaining pricing.py…" while it runs: the status
+        // line said "Explaining…" beside it, the same thing twice.
+        let pass = self.start_explain_pass(PassKind::Node(node));
+        Task::batch([shown, pass])
     }
 
     /// Re-explain the node in the open panel: a pass that pays for this node
@@ -971,7 +1076,13 @@ impl App {
                     // A failed call says what failed and what to do, as a
                     // pass does (`ExplainFailure`).
                     Ok(p) => ai
-                        .complete_typed(cfg, EXPLAIN_BLOCKS_SYSTEM, p, 1024)
+                        .complete_typed(
+                            cfg,
+                            crate::app::usage::EXPLAIN,
+                            EXPLAIN_BLOCKS_SYSTEM,
+                            p,
+                            1024,
+                        )
                         .await
                         .map_err(|e| ExplainFailure::of_call(&e, &model).describe()),
                     Err(e) => Err(e),
@@ -1172,6 +1283,18 @@ fn refused_note(why: explain::Refusal, file: &str) -> String {
     }
 }
 
+/// A node as the status line names it: a function with its brackets, a
+/// file or folder by its own name.
+fn node_said(node: &explain::Node) -> String {
+    match node {
+        explain::Node::Function { name, .. } => format!("{name}()"),
+        explain::Node::File(path) | explain::Node::Folder(path) => path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        ),
+    }
+}
+
 /// Most files the status line names in one note; the rest are counted.
 const NAMED_FILES: usize = 3;
 
@@ -1277,8 +1400,17 @@ impl App {
                 // (the file banner's click, the file's Explain) did not show.
                 self.show_right_panel = true;
                 self.margin_tab = MarginTab::Notes;
-                self.show_explanation(node)
+                let unexplained = !self.proj.explain.cache.contains_key(&node);
+                let shown = self.show_explanation(node);
+                // Nothing written of it, and nothing to write it with: where
+                // a key is added, as every other way to explain goes — the
+                // margin said "Not explained yet." and no more.
+                if unexplained && let Err(settings) = self.require_llm() {
+                    return Task::batch([shown, settings]);
+                }
+                shown
             }
+            ExplainMsg::Explain(node) => self.on_explain_node(node),
             ExplainMsg::ReexplainNode => self.on_reexplain_node(),
             ExplainMsg::Blocks(node) => self.on_explain_blocks(node),
             ExplainMsg::ToggleBlocks => match self.proj.explain.view.clone() {
@@ -1333,6 +1465,211 @@ pub(crate) mod gather_faults {
             .any(|r| r == root);
         if armed {
             panic!("injected fault reading {}", root.display());
+        }
+    }
+}
+
+/// What a pass said when it ended, kept: said again in the language spoken
+/// whenever it is shown while it stands as a failure
+/// (`FailureNotice::again`) — after Display language changed, it stood on
+/// in the language it was said in, beside buttons in the new one.
+#[derive(Debug, Clone)]
+struct PassSaid {
+    failures: PassFailures,
+    /// The node asked for on its own, if it was.
+    target: Option<explain::Node>,
+    target_written: bool,
+    target_new: bool,
+    /// Its file could not be read, or can no longer be explained.
+    not_read: bool,
+    regenerated: usize,
+    /// Notes the project has.
+    n: usize,
+    unquoted: usize,
+    waiting: usize,
+    outdated: usize,
+    unverified: usize,
+    unexplained: usize,
+    /// Files that could not be read and hold summaries, as named.
+    held: Vec<String>,
+    /// Files whose summaries the pass dropped, as named (only a pass that
+    /// ran to its end drops any).
+    dropped: Vec<(String, explain::Unexplainable)>,
+}
+
+/// What a pass that ended says on the status line ([`PassSaid`]).
+fn pass_said(said: &PassSaid) -> String {
+    let failures = &said.failures;
+    let reexplained = &said.target;
+    let mut status = if let Some(stopped) = &failures.stopped {
+        // Not "stopped": it read as the reader having stopped it.
+        tr!(
+            "Explain couldn't continue: {reason}",
+            reason = stopped.describe()
+        )
+    } else if let Some(target) = reexplained
+        .as_ref()
+        .filter(|_| failures.failed > 0 && !said.target_written)
+    {
+        // One function or file asked for: said of it, not of the whole
+        // project ("Explained 345 functions, files and folders; 1
+        // failed" for an Explain that explained nothing).
+        let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
+        tr!(
+            "Couldn't explain {name}: {reasons}",
+            name = node_said(target),
+            reasons = why.join("; ")
+        )
+    } else if let Some(target) = reexplained.as_ref().filter(|_| failures.failed > 0) {
+        // It was explained; what builds on it was not. Said of it — not
+        // "Couldn't explain helper()" beside helper's new note, nor
+        // "Explained 345 functions…" of the whole project.
+        let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
+        trn!(
+            "Explained {name}; 1 summary built on it failed: {reasons}",
+            "Explained {name}; {n} summaries built on it failed: {reasons}",
+            failures.failed,
+            name = node_said(target),
+            reasons = why.join("; ")
+        )
+    } else if reexplained.is_some() && failures.failed == 0 {
+        match said.regenerated {
+            // Its file could not be read, or can no longer be explained:
+            // the note below says so.
+            0 if said.not_read => tr!("Nothing re-explained").to_string(),
+            0 => tr!("Nothing to re-explain: it is no longer part of the project").to_string(),
+            1 if said.target_new => tr!("Explained").to_string(),
+            1 => tr!("Re-explained").to_string(),
+            paid => trn!(
+                "Re-explained, along with 1 summary built on it",
+                "Re-explained, along with {n} summaries built on it",
+                paid - 1
+            ),
+        }
+    } else {
+        // Nothing to name as explained: not "Explained 0 functions".
+        let mut status = if said.n == 0 {
+            tr!("Nothing explained").to_string()
+        } else {
+            trn!(
+                "Explained 1 function, file or folder",
+                "Explained {n} functions, files and folders",
+                said.n
+            )
+        };
+        // Each clause after a "; " says one thing whole.
+        if failures.failed > 0 {
+            let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
+            status.push_str("; ");
+            status.push_str(&trn!(
+                "1 failed: {reasons}",
+                "{n} failed: {reasons}",
+                failures.failed,
+                reasons = why.join("; ")
+            ));
+        }
+        if said.unquoted > 0 {
+            status.push_str("; ");
+            status.push_str(&trn!(
+                "1 explained without the failed summaries it builds on",
+                "{n} explained without the failed summaries they build on",
+                said.unquoted
+            ));
+        }
+        if said.waiting > 0 {
+            status.push_str("; ");
+            status.push_str(&trn!(
+                "1 left for the next refresh",
+                "{n} left for the next refresh",
+                said.waiting
+            ));
+        }
+        let mut left = Vec::new();
+        if said.outdated > 0 {
+            left.push(trn!(
+                "1 out of date, kept",
+                "{n} out of date, kept",
+                said.outdated
+            ));
+        }
+        if said.unverified > 0 {
+            left.push(trn!(
+                "1 from an earlier version of Clew, kept but not rechecked",
+                "{n} from an earlier version of Clew, kept but not rechecked",
+                said.unverified
+            ));
+        }
+        if said.unexplained > 0 {
+            left.push(trn!(
+                "1 not explained yet",
+                "{n} not explained yet",
+                said.unexplained
+            ));
+        }
+        if !left.is_empty() {
+            status.push_str("; ");
+            status.push_str(&tr!(
+                "{list} — Explain All brings them up to date",
+                list = left.join(", ")
+            ));
+        }
+        status
+    };
+    // Named where they hold something: a file that could not be read and
+    // holds no summary loses nothing by it.
+    let held = &said.held;
+    if !held.is_empty() {
+        status.push_str("; ");
+        status.push_str(&trn!(
+            "1 file could not be read ({files}) — its summaries are kept until it can be",
+            "{n} files could not be read ({files}) — their summaries are kept until they can be",
+            held.len(),
+            files = some_of(held)
+        ));
+    }
+    // Dropped only by a pass that ran to its end.
+    if let Some(note) = dropped_note(&said.dropped) {
+        status.push_str(&format!("; {note}"));
+    }
+    status
+}
+
+/// What the status line says of the files whose summaries a pass drops
+/// because they can no longer be explained (`explain::Tally::dropped`):
+/// each by name — a few of several — with why.
+fn dropped_note(dropped: &[(String, explain::Unexplainable)]) -> Option<String> {
+    use explain::Unexplainable::{Refused, TooLarge};
+    let size = |bytes: u64| crate::ui::human_size(bytes);
+    match dropped {
+        [] => None,
+        [(path, TooLarge(bytes))] => Some(tr!(
+            "{file} is too large to explain ({size}) — its summaries are dropped",
+            file = path.clone(),
+            size = size(*bytes)
+        )),
+        [(path, Refused(why))] => Some(refused_note(*why, path)),
+        several => {
+            let named: Vec<String> = several
+                .iter()
+                .map(|(path, why)| match why {
+                    TooLarge(bytes) => {
+                        tr!(
+                            "{file} (too large, {size})",
+                            file = path.clone(),
+                            size = size(*bytes)
+                        )
+                    }
+                    Refused(why) => {
+                        format!("{} ({})", path.clone(), refusal_words(*why))
+                    }
+                })
+                .collect();
+            Some(trn!(
+                "1 file can no longer be explained ({files}) — its summaries are dropped",
+                "{n} files can no longer be explained ({files}) — their summaries are dropped",
+                several.len(),
+                files = some_of(&named)
+            ))
         }
     }
 }

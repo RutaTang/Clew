@@ -61,7 +61,8 @@ pub(crate) const TIP_MAX_W: f32 = 320.0;
 pub(crate) const NOTES_MAX_W: f32 = 520.0;
 /// Height of the remote folder picker's listing.
 pub(crate) const REMOTE_LIST_H: f32 = 300.0;
-/// Height of the overview home's embedded module map.
+/// Least height of the overview home's embedded module map (see
+/// `docs_stats::overview_map_h`).
 pub(crate) const OVERVIEW_MAP_H: f32 = 320.0;
 
 /// Where a modal's panel sits in the window.
@@ -174,6 +175,9 @@ pub(crate) struct Prompt<'a> {
     pub(crate) submit: Message,
     pub(crate) submit_label: &'a str,
     pub(crate) cancel: Message,
+    /// A way to take away what the dialog edits, at its left: a
+    /// breakpoint's Remove.
+    pub(crate) remove: Option<(&'a str, Message)>,
 }
 
 /// Build a [`Prompt`] dialog. Enter submits, Esc / a backdrop click cancels.
@@ -190,25 +194,38 @@ pub(crate) fn prompt_modal(p: Prompt<'_>) -> Element<'_, Message> {
     let panel = container(
         column![
             text(p.title).size(ts::EMPHASIS).color(theme::fg()),
-            text_input(p.placeholder, p.value)
-                .style(theme::input)
-                .id(p.input_id)
-                .on_input(p.on_input)
-                .on_submit(p.submit.clone())
-                .size(ts::BASE)
-                .padding(8),
-            row![
-                space().width(Fill),
-                button(text(tr!("Cancel")).size(ts::BODY))
-                    .style(theme::toolbar_button)
-                    .padding([4, 12])
-                    .on_press(p.cancel.clone()),
-                button(text(p.submit_label).size(ts::BODY))
-                    .style(theme::primary_button)
-                    .padding([4, 12])
-                    .on_press(p.submit),
-            ]
-            .spacing(8),
+            super::jump::field_named(
+                text_input(p.placeholder, p.value)
+                    .style(theme::input)
+                    .id(p.input_id)
+                    .on_input(p.on_input)
+                    .on_submit(p.submit.clone())
+                    .size(ts::BASE)
+                    .padding(8),
+                p.placeholder,
+            ),
+            row![]
+                .extend(p.remove.map(|(label, msg)| {
+                    button(text(label).size(ts::BODY).color(theme::danger()))
+                        .style(theme::toolbar_button)
+                        .padding([4, 12])
+                        .on_press(super::heard::said(label, msg))
+                        .into()
+                }))
+                .push(space().width(Fill))
+                .push(
+                    button(text(tr!("Cancel")).size(ts::BODY))
+                        .style(theme::toolbar_button)
+                        .padding([4, 12])
+                        .on_press(p.cancel.clone()),
+                )
+                .push(
+                    button(text(p.submit_label).size(ts::BODY))
+                        .style(theme::primary_button)
+                        .padding([4, 12])
+                        .on_press(p.submit),
+                )
+                .spacing(8),
         ]
         .spacing(10),
     )

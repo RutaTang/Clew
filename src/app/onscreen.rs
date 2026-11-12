@@ -281,6 +281,36 @@ pub(crate) fn dismisses(said: &str) -> bool {
         })
 }
 
+/// Whether `said` puts away what is on top by its `name` (an English key,
+/// [`crate::ui::ActiveOverlay::name`]), said in English or any language's
+/// words for it: "close the call graph", "hide Settings", "关闭调用图".
+/// What is left with the name taken out must put away on its own
+/// ([`dismisses`]), the small words between them aside — "explain the call
+/// graph" is a question, and Ask's.
+pub(crate) fn dismisses_named(said: &str, name: &str) -> bool {
+    use crate::app::choices::units;
+    let said = units(said);
+    crate::i18n::Lang::ALL.into_iter().any(|lang| {
+        let name = units(crate::i18n::lookup_in(lang, name));
+        if name.is_empty() || said.len() <= name.len() {
+            return false;
+        }
+        (0..=said.len() - name.len())
+            .filter(|&at| said[at..at + name.len()] == name[..])
+            .any(|at| {
+                // Matched as units again, a word a character where words
+                // are written unspaced: joined by spaces either way.
+                let rest: Vec<&str> = said[..at]
+                    .iter()
+                    .chain(&said[at + name.len()..])
+                    .map(String::as_str)
+                    .filter(|w| !matches!(*w, "the" | "this" | "that" | "my"))
+                    .collect();
+                dismisses(&rest.join(" "))
+            })
+    })
+}
+
 /// The one target `said` names: its name said as it is shown or in
 /// English ("Download", "Download Whisper Small"), "click" or "the
 /// button" around it or not. `None` when nothing is named — or two
@@ -420,6 +450,15 @@ impl App {
             if dismisses(said) {
                 return self.dismiss_heard(said);
             }
+            // What is on top put away by its name: "close the call graph"
+            // went to Ask as a question about the call graph.
+            if let Some(message) = ui::active_overlay(self)
+                .filter(|o| o.name().is_some_and(|name| dismisses_named(said, name)))
+                .map(|o| o.dismiss_message())
+            {
+                let task = self.update(message);
+                return Some(self.closed_as_said(said, task));
+            }
             // A field on top — a note, a condition, the command bar's
             // query — takes what else is said, as its words.
             if let Some((value, on_input)) = targets
@@ -478,7 +517,7 @@ impl App {
             text,
             outcome: HeardOutcome::Ran(target.shown),
         });
-        self.update(target.message)
+        self.press(target.message)
     }
 
     /// Put away what is on top, as Esc does, for `said`: the tutorial, a
@@ -502,6 +541,12 @@ impl App {
         } else {
             return None;
         };
+        Some(self.closed_as_said(said, task))
+    }
+
+    /// `said` put something away, by `task`: said so on the status line and
+    /// the pill.
+    fn closed_as_said(&mut self, said: &str, task: Task<Message>) -> Task<Message> {
         let text = said.to_string();
         let done = tr!("Closed").to_string();
         self.status = tr!("“{text}” → {command}", text = text, command = done);
@@ -509,13 +554,39 @@ impl App {
             text,
             outcome: HeardOutcome::Ran(done),
         });
-        Some(task)
+        task
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What is on top is put away by its name, however the putting away
+    /// is said, in English or in the reader's language — and only by its
+    /// own name: a question about it is no command.
+    #[test]
+    fn what_is_on_top_is_put_away_by_its_name() {
+        for said in [
+            "close the call graph",
+            "Close the Call Graph.",
+            "call graph, close it",
+            "dismiss the call graph",
+            "关闭调用图",
+        ] {
+            assert!(dismisses_named(said, "Call Graph"), "{said}");
+        }
+        for said in [
+            "explain the call graph",
+            "close the type graph",
+            "call graph",
+            "close",
+            "what does the call graph show",
+        ] {
+            assert!(!dismisses_named(said, "Call Graph"), "{said}");
+        }
+        assert!(dismisses_named("close settings", "Settings"));
+    }
 
     /// A list's place, however it is said, in each language.
     #[test]

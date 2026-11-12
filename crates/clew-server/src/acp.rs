@@ -638,6 +638,9 @@ async fn prompt(
         })
     };
     let mut answer = String::new();
+    // What the step being asked is writing: the answer, or a remark before
+    // its tool calls — sent as one or the other once that is known.
+    let mut draft = String::new();
     let mut tool_calls = tokio::task::JoinSet::new();
     let mut outcome = StreamOutcome::Failed("the turn ended without a word".into());
     while let Some(msg) = rx.recv().await {
@@ -678,6 +681,23 @@ async fn prompt(
                     &id,
                     json!({
                         "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": text },
+                    }),
+                );
+            }
+            Event::AgentDraft { text, .. } => draft.push_str(&text),
+            Event::AgentDraftEnd { kept, .. } => {
+                let text = std::mem::take(&mut draft);
+                if text.is_empty() {
+                    continue;
+                }
+                if kept {
+                    answer.push_str(&text);
+                }
+                conn.update(
+                    &id,
+                    json!({
+                        "sessionUpdate": if kept { "agent_message_chunk" } else { "agent_thought_chunk" },
                         "content": { "type": "text", "text": text },
                     }),
                 );
@@ -752,7 +772,7 @@ async fn run_editor_tool(
         return (format!("`{name}` is not a tool of this session"), true);
     };
     let call_id = session.call_id("mcp");
-    let title = format!("{} · {}", tool.server, tool.info.display_name());
+    let title = format!("{} ({})", tool.info.display_name(), tool.server);
     conn.update(
         id,
         json!({

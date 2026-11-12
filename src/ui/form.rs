@@ -96,6 +96,12 @@ fn rule<'a>() -> Element<'a, Message> {
 
 /// What a row sets, and under it `about`.
 fn label<'a>(label: String, about: Option<String>) -> Element<'a, Message> {
+    label_saying(label, about, false)
+}
+
+/// [`label`], its line under the name what is wrong (in the danger colour)
+/// when `wrong`.
+fn label_saying<'a>(label: String, about: Option<String>, wrong: bool) -> Element<'a, Message> {
     let mut col = column![text(label).size(ts::BASE).color(theme::fg())].spacing(2);
     if let Some(about) = about {
         // Its names in the reader's quotation marks, not backticks.
@@ -103,11 +109,20 @@ fn label<'a>(label: String, about: Option<String>) -> Element<'a, Message> {
         col = col.push(
             text(about)
                 .size(ts::SMALL)
-                .color(theme::dim())
+                .color(if wrong { theme::danger() } else { theme::dim() })
                 .wrapping(Wrapping::WordOrGlyph),
         );
     }
     col.into()
+}
+
+/// Something said in a group under the row it is about, padded as the
+/// group's rows are.
+pub(crate) fn row_of<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
+        .width(Fill)
+        .padding([ROW_PAD_Y, ROW_PAD_X])
+        .into()
 }
 
 /// A row: `label` and under it `about` at the left, `control` at the right.
@@ -116,9 +131,25 @@ pub(crate) fn item<'a>(
     about: Option<String>,
     control: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
+    item_saying(name, about, false, control)
+}
+
+/// [`item`] whose `about` says what went wrong (`wrong`): in the danger
+/// colour, as [`field_wrong`] says it — a failure said in the grey of a
+/// hint read as one.
+pub(crate) fn item_saying<'a>(
+    name: impl Into<String>,
+    about: Option<String>,
+    wrong: bool,
+    control: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    // A field in the row is named by it, for the ring: its placeholder is
+    // an example, not what it is.
+    let name = name.into();
+    let control = super::jump::field_named(control, &name);
     row![
-        container(label(name.into(), about)).width(Fill),
-        control.into(),
+        container(label_saying(name, about, wrong)).width(Fill),
+        control,
     ]
     .spacing(16)
     .align_y(iced::Center)
@@ -134,18 +165,87 @@ pub(crate) fn field<'a>(
     about: Option<String>,
     control: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
+    let name = name.into();
+    let control = super::jump::field_named(control, &name);
     row![
-        container(label(name.into(), about))
+        container(label(name, about))
             .width(LABEL_W)
             .padding(Padding {
-                top: 7.0,
+                top: VALUE_TOP,
                 ..Padding::ZERO
             }),
-        container(control.into()).width(Fill),
+        container(control).width(Fill),
     ]
     .spacing(12)
     .padding([ROW_PAD_Y - 2.0, ROW_PAD_X])
     .into()
+}
+
+/// [`field`] whose typed value is wrong: `problem` said under its name in
+/// the danger colour, as the Connect form says a field it needs — the field
+/// itself marked by its caller ([`theme::input_marked`]).
+pub(crate) fn field_wrong<'a>(
+    name: impl Into<String>,
+    problem: String,
+    control: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let name = name.into();
+    let control = super::jump::field_named(control, &name);
+    row![
+        container(label_saying(name, Some(problem), true))
+            .width(LABEL_W)
+            .padding(Padding {
+                top: VALUE_TOP,
+                ..Padding::ZERO
+            }),
+        container(control).width(Fill),
+    ]
+    .spacing(12)
+    .padding([ROW_PAD_Y - 2.0, ROW_PAD_X])
+    .into()
+}
+
+/// [`field`] whose value is words, not a control: set down to the line its
+/// label is on (the label is set down to a control's text; words beside it
+/// sat 7 above).
+pub(crate) fn field_text<'a>(
+    name: impl Into<String>,
+    about: Option<String>,
+    words: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    field(
+        name,
+        about,
+        container(words.into()).padding(Padding {
+            top: VALUE_TOP,
+            ..Padding::ZERO
+        }),
+    )
+}
+
+/// How far a field's label sits below the top of its row: a control's
+/// text's place in the control.
+pub(crate) const VALUE_TOP: f32 = 7.0;
+
+/// The space above and below a chip's words (a feature, a build tag).
+pub(crate) const CHIP_PAD_Y: f32 = 3.0;
+
+/// [`field`] whose control starts with a line of chips: set down so the
+/// chips' words are on the label's line. Beside a typed field's label they
+/// sat 4 above it.
+pub(crate) fn field_chips<'a>(
+    name: impl Into<String>,
+    about: Option<String>,
+    chips: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    field(
+        name,
+        about,
+        container(chips.into()).padding(Padding {
+            top: VALUE_TOP - CHIP_PAD_Y,
+            ..Padding::ZERO
+        }),
+    )
 }
 
 /// A row of its own content, padded as the others are.
@@ -241,7 +341,7 @@ pub(crate) fn radio<'a>(on: bool) -> Element<'a, Message> {
 
 /// A switch: its track, the knob in from the end it is at; pressing it
 /// sends `msg`.
-pub(crate) fn switch<'a>(on: bool, msg: Message) -> iced::widget::Button<'a, Message> {
+pub(crate) fn switch<'a>(on: bool, msg: Message) -> Press<'a> {
     let knob = container(space().width(SWITCH_KNOB).height(SWITCH_KNOB)).style(theme::switch_knob);
     button(
         container(knob)
@@ -274,7 +374,7 @@ pub(crate) fn toggle<'a>(
 }
 
 /// A button of a row: the fields' rounded well, a shade deeper.
-pub(crate) fn action<'a>(label: &str, msg: Option<Message>) -> iced::widget::Button<'a, Message> {
+pub(crate) fn action<'a>(label: &str, msg: Option<Message>) -> Press<'a> {
     let msg = msg.map(|m| super::heard::said(label, m));
     button(text(label.to_string()).size(ts::BODY))
         .style(theme::secondary_button)
@@ -282,8 +382,25 @@ pub(crate) fn action<'a>(label: &str, msg: Option<Message>) -> iced::widget::But
         .on_press_maybe(msg)
 }
 
+/// [`action`] that spends an AI call: marked with the sparkle, as every
+/// such control is.
+pub(crate) fn ai_action<'a>(label: &str, msg: Option<Message>) -> Press<'a> {
+    // Faded, words and mark, while it can do nothing (a test on its way):
+    // the mark stayed lit and the control looked live.
+    let color = if msg.is_some() {
+        theme::fg()
+    } else {
+        theme::dim()
+    };
+    let msg = msg.map(|m| super::heard::said(label, m));
+    button(super::toolbar::ai_words(label, ts::BODY, color))
+        .style(theme::secondary_button)
+        .padding([5, 12])
+        .on_press_maybe(msg)
+}
+
 /// A row's main button (Add, Download): filled with the accent.
-pub(crate) fn primary<'a>(label: &str, msg: Option<Message>) -> iced::widget::Button<'a, Message> {
+pub(crate) fn primary<'a>(label: &str, msg: Option<Message>) -> Press<'a> {
     let msg = msg.map(|m| super::heard::said(label, m));
     button(text(label.to_string()).size(ts::BODY))
         .style(theme::primary_button)
@@ -300,29 +417,47 @@ pub(crate) fn input<'a>(placeholder: &str, value: &str) -> iced::widget::TextInp
         .width(Fill)
 }
 
-/// A picker of a row, [`PICK_W`] wide.
+/// A picker of a row, [`PICK_W`] wide, named `label` — its row's — to
+/// the keyboard's ring and to voice.
 pub(crate) fn pick<'a, T, L, V>(
+    label: &str,
     options: L,
     selected: Option<V>,
     on_select: impl Fn(T) -> Message + 'a,
-) -> iced::widget::PickList<'a, T, L, V, Message>
+) -> super::picker::Pick<'a>
 where
     T: ToString + PartialEq + Clone + 'a,
     L: std::borrow::Borrow<[T]> + 'a,
     V: std::borrow::Borrow<T> + 'a,
 {
-    // Each choice said by what the list shows for it.
-    if super::heard::gathering() {
-        for option in std::borrow::Borrow::<[T]>::borrow(&options) {
-            super::heard::said(&option.to_string(), on_select(option.clone()));
-        }
-    }
-    pick_list(options, selected, on_select)
-        .style(theme::pick)
-        .menu_style(theme::pick_menu)
+    pick_with(label, options, selected, on_select, None)
+}
+
+/// [`pick`], saying `placeholder` while nothing is picked.
+pub(crate) fn pick_with<'a, T, L, V>(
+    label: &str,
+    options: L,
+    selected: Option<V>,
+    on_select: impl Fn(T) -> Message + 'a,
+    placeholder: Option<String>,
+) -> super::picker::Pick<'a>
+where
+    T: ToString + PartialEq + Clone + 'a,
+    L: std::borrow::Borrow<[T]> + 'a,
+    V: std::borrow::Borrow<T> + 'a,
+{
+    // The keyboard opens it and walks its rows as the pointer does
+    // (`ui::picker`): pressed from the ring, iced's own moved on to the next
+    // value, and was named by it.
+    let mut list = super::picker::picker(options, selected, on_select)
+        .label(label)
         .text_size(ts::BASE)
         .padding([6, 10])
-        .width(PICK_W)
+        .width(PICK_W);
+    if let Some(placeholder) = placeholder {
+        list = list.placeholder(placeholder);
+    }
+    list
 }
 
 /// A line said under a group, or between them: small and dim.
@@ -343,23 +478,85 @@ pub(crate) fn path<'a>(s: impl Into<String>) -> iced::widget::Text<'a> {
         .wrapping(Wrapping::Glyph)
 }
 
-/// A segmented control: one segment per `(label, chosen, msg)`, the
-/// chosen one raised in the trough.
-pub(crate) fn segmented<'a>(
-    segments: impl IntoIterator<Item = (String, bool, Message)>,
+/// Height of one side of a [`segmented_across`].
+const ACROSS_SIDE_H: f32 = 24.0;
+
+/// A choice of views or ways a list reads (callers or callees, this branch
+/// or every branch): a segmented control across its row, as the sidebar's
+/// views are — equal parts, each label centred in its own, the chosen one
+/// raised; pressing another switches. Not one hugging its labels at the
+/// row's start with nothing after it.
+pub(crate) fn segmented_across<'a>(
+    sides: impl IntoIterator<Item = (String, bool, Message)>,
 ) -> Element<'a, Message> {
     container(
-        Row::with_children(segments.into_iter().map(|(label, chosen, msg)| {
-            let msg = super::heard::said(&label, msg);
-            button(text(label).size(ts::BODY))
-                .style(theme::segment(chosen))
-                .padding([4, 14])
-                .on_press(msg)
-                .into()
+        Row::with_children(sides.into_iter().map(|(label, chosen, msg)| {
+            let press = (!chosen).then(|| super::heard::said(&label, msg));
+            button(
+                container(
+                    text(label)
+                        .size(ts::SMALL)
+                        .font(if chosen {
+                            crate::fonts::UI_MEDIUM
+                        } else {
+                            crate::fonts::UI
+                        })
+                        .wrapping(Wrapping::None),
+                )
+                .center_x(Fill)
+                .center_y(Fill),
+            )
+            .style(theme::segment(chosen))
+            // A little room either side: in a narrow sidebar the words
+            // touched the segment's edges.
+            .padding([0, 4])
+            .width(Fill)
+            .height(Length::Fixed(ACROSS_SIDE_H))
+            .on_press_maybe(press)
+            .into()
         }))
         .spacing(2),
     )
     .padding(2)
+    .width(Fill)
+    .style(theme::trough)
+    .into()
+}
+
+/// A segmented control of a form's row: one segment per `(label, chosen,
+/// msg)`, the chosen one raised in the trough. As wide as the row's other
+/// controls ([`PICK_W`]) — wider only when its labels need it — in equal
+/// parts, each label centred: one hugging its labels sat short of the
+/// pickers above and below it.
+pub(crate) fn segmented<'a>(
+    segments: impl IntoIterator<Item = (String, bool, Message)>,
+) -> Element<'a, Message> {
+    // The least room each label keeps a side: at [`PICK_W`] the parts are
+    // wider and the labels sit centred with more.
+    const PAD_X: f32 = 8.0;
+    const GAP: f32 = 2.0;
+    let segments: Vec<(String, bool, Message)> = segments.into_iter().collect();
+    let n = segments.len().max(1) as f32;
+    let widest = segments
+        .iter()
+        .map(|(label, ..)| super::steady::width_of(label, ts::BODY, crate::fonts::UI_MEDIUM))
+        .fold(0.0, f32::max);
+    // The trough's own padding (2 a side) and the gaps between parts.
+    let width = PICK_W.max(n * (widest + 2.0 * PAD_X) + (n - 1.0) * GAP + 4.0);
+    container(
+        Row::with_children(segments.into_iter().map(|(label, chosen, msg)| {
+            let msg = super::heard::said(&label, msg);
+            button(container(text(label).size(ts::BODY).wrapping(Wrapping::None)).center_x(Fill))
+                .style(theme::segment(chosen))
+                .padding([4, 0])
+                .width(Fill)
+                .on_press(msg)
+                .into()
+        }))
+        .spacing(GAP),
+    )
+    .padding(2)
+    .width(width)
     .style(theme::trough)
     .into()
 }

@@ -732,7 +732,7 @@ fn dart_sdks(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
             let project = pinned.as_deref() == Some(version.as_str());
             out.extend(candidate(
                 dir.join("bin/dart"),
-                format!("fvm · Flutter {version}"),
+                format!("Flutter {version} (fvm)"),
                 project,
             ));
         }
@@ -785,7 +785,7 @@ fn zig_compilers(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
             let project = names_wanted(&version);
             out.extend(candidate(
                 dir.join("zig"),
-                format!("zvm · Zig {version}"),
+                format!("Zig {version} (zvm)"),
                 project,
             ));
         }
@@ -798,7 +798,7 @@ fn zig_compilers(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
             let project = names_wanted(&version);
             out.extend(candidate(
                 dir.join("files/zig"),
-                format!("zigup · Zig {version}"),
+                format!("Zig {version} (zigup)"),
                 project,
             ));
         }
@@ -1113,7 +1113,7 @@ fn ruby_lsps(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
                 let project = wanted.as_deref() == Some(plain);
                 out.extend(candidate(
                     install.join(bin).join("ruby-lsp"),
-                    format!("{manager} · Ruby {plain}"),
+                    format!("Ruby {plain} ({manager})"),
                     project,
                 ));
             }
@@ -1127,7 +1127,7 @@ fn ruby_lsps(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
             .into_owned();
         out.extend(candidate(
             dir.join("bin/ruby-lsp"),
-            format!("Homebrew · Ruby {version}"),
+            format!("Ruby {version} (Homebrew)"),
             false,
         ));
     }
@@ -1409,9 +1409,9 @@ exclude = ["crates/skip"]
         assert_eq!(
             names,
             [
-                "fvm · Flutter 3.22.0",
+                "Flutter 3.22.0 (fvm)",
                 "Flutter (~/flutter)",
-                "fvm · Flutter 3.19.0"
+                "Flutter 3.19.0 (fvm)"
             ]
         );
     }
@@ -1497,10 +1497,10 @@ exclude = ["crates/skip"]
         assert_eq!(
             names,
             [
-                ("zvm · Zig 0.13.0".to_string(), true),
+                ("Zig 0.13.0 (zvm)".to_string(), true),
                 ("zvm (its current one)".to_string(), false),
-                ("zvm · Zig 0.12.0".to_string(), false),
-                ("zigup · Zig 0.11.0".to_string(), false),
+                ("Zig 0.12.0 (zvm)".to_string(), false),
+                ("Zig 0.11.0 (zigup)".to_string(), false),
             ]
         );
     }
@@ -1612,9 +1612,9 @@ exclude = ["crates/skip"]
         assert_eq!(
             rubies,
             [
-                ("rbenv · Ruby 3.3.0".to_string(), true),
-                ("chruby · Ruby 3.3.0".to_string(), true),
-                ("rbenv · Ruby 3.2.2".to_string(), false)
+                ("Ruby 3.3.0 (rbenv)".to_string(), true),
+                ("Ruby 3.3.0 (chruby)".to_string(), true),
+                ("Ruby 3.2.2 (rbenv)".to_string(), false)
             ]
         );
         let hls: Vec<String> = toolchain_candidates("haskell", &root, &host)

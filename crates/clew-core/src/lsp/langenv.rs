@@ -1046,7 +1046,20 @@ pub fn python_candidates(root: &Path, host: &PythonHost) -> Vec<PythonCandidate>
     ] {
         system.push(PathBuf::from(well_known));
     }
+    // One program by two of the search path's names — /bin/python3 and
+    // /usr/bin/python3, where /bin is a link to /usr/bin — is listed once,
+    // by the first. Its folder is what is followed, not the file: a
+    // virtualenv's python links to the system's and is still its own.
+    let mut places = std::collections::HashSet::new();
     for interpreter in system.into_iter().filter(|p| p.is_file()) {
+        let place = interpreter
+            .parent()
+            .and_then(|dir| std::fs::canonicalize(dir).ok())
+            .zip(interpreter.file_name())
+            .map(|(dir, file)| dir.join(file));
+        if place.is_some_and(|place| !places.insert(place)) {
+            continue;
+        }
         let name = interpreter.to_string_lossy().into_owned();
         add(&mut out, interpreter, PythonEnvKind::System, name, None);
     }
@@ -2384,6 +2397,38 @@ mod tests {
                     None
                 ),
             ]
+        );
+    }
+
+    /// The same python3 by two folders of the search path, one a link to
+    /// the other (/bin and /usr/bin on a merged-/usr system), is one system
+    /// interpreter, not two.
+    #[cfg(unix)]
+    #[test]
+    fn one_system_python_by_two_folders_is_listed_once() {
+        let home = scratch("merged-usr-home");
+        let usr_bin = home.join("usr/bin");
+        std::fs::create_dir_all(&usr_bin).unwrap();
+        std::fs::write(usr_bin.join("python3"), "").unwrap();
+        let bin = home.join("bin");
+        std::os::unix::fs::symlink(&usr_bin, &bin).unwrap();
+        let host = PythonHost {
+            home: Some(home.clone()),
+            path: Some(std::env::join_paths([&bin, &usr_bin]).unwrap()),
+            vars: Vec::new(),
+            macos: false,
+        };
+        let system: Vec<String> = python_candidates(&home, &host)
+            .into_iter()
+            .filter(|c| {
+                c.kind == PythonEnvKind::System && c.interpreter.starts_with(home.to_str().unwrap())
+            })
+            .map(|c| c.interpreter)
+            .collect();
+        assert_eq!(
+            system,
+            [bin.join("python3").to_string_lossy().into_owned()],
+            "listed once, by the search path's first name for it"
         );
     }
 

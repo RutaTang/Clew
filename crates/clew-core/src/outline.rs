@@ -201,6 +201,10 @@ pub struct Located {
     pub container: Option<Container>,
     /// Who the definition belongs to (see [`Owner`]).
     pub owner: Owner,
+    /// A method read and written as an attribute, never called: a Python
+    /// `@property` (a `@cached_property`, a property's `@x.setter`). A
+    /// call graph sees no call of it, and that says nothing of its use.
+    pub accessed: bool,
 }
 
 /// Where a definition is declared, to tell same-name definitions of
@@ -246,6 +250,7 @@ impl PartialEq for Located {
             && self.body == other.body
             && self.container == other.container
             && self.owner == other.owner
+            && self.accessed == other.accessed
     }
 }
 
@@ -448,6 +453,7 @@ fn lean_head_located(command: &str, head: &crate::lean::Head, line: usize) -> Lo
             scope: (0, command.len()),
             member_of: None,
         },
+        accessed: false,
     }
 }
 
@@ -519,6 +525,7 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             body,
             container: container_of(def, lang),
             owner: owner_of(def, source, lang),
+            accessed: lang == Lang::Python && python_property(def, source),
         });
     }
     // Stable, so of two patterns naming the same symbol the first match wins
@@ -780,6 +787,30 @@ fn refine_kind<'a>(def: Node, kind: &'a str, lang: Lang) -> &'a str {
         }
         _ => kind,
     }
+}
+
+/// Whether the Python definition `def` is a property's: decorated
+/// `@property`, `@cached_property` (`functools.`'s too), or as a property's
+/// `@name.setter`, `.getter` or `.deleter` (see [`Located::accessed`]).
+fn python_property(def: Node, source: &str) -> bool {
+    let Some(decorated) = def.parent().filter(|p| p.kind() == "decorated_definition") else {
+        return false;
+    };
+    let mut cursor = decorated.walk();
+    decorated
+        .children(&mut cursor)
+        .filter(|c| c.kind() == "decorator")
+        .filter_map(|c| source.get(c.byte_range()))
+        .any(|text| {
+            let name = text.trim_start_matches('@').trim();
+            let name = name.split('(').next().unwrap_or(name).trim();
+            matches!(
+                name.rsplit('.').next().unwrap_or(name),
+                "property" | "cached_property" | "abstractproperty"
+            ) || [".setter", ".getter", ".deleter"]
+                .iter()
+                .any(|end| name.ends_with(end))
+        })
 }
 
 /// A Lean declaration's whole name: `Group.toMonoid` is several `name` nodes

@@ -4,8 +4,8 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Row, button, center, column, container, mouse_area, opaque, pick_list, row, scrollable,
-    slider, space, stack, text, text_input, tooltip,
+    Column, Row, center, column, container, mouse_area, opaque, row, scrollable, slider, space,
+    stack, text, text_input, tooltip,
 };
 use iced::{Element, Fill, Length, Padding, Task};
 
@@ -18,22 +18,40 @@ use crate::viewer::Viewer;
 use crate::{App, Message, SidebarTab, TimeScope, TimeTravel, theme};
 use crate::{
     AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
-    GlossaryMsg, GraphMsg, HoverMsg, LspMsg, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg,
-    SemanticMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WindowMsg,
+    GlossaryMsg, GraphMsg, HistoryMsg, HoverMsg, LspMsg, NavMsg, OverviewMsg, ProjectMsg,
+    ReadingMsg, SemanticMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg,
+    WindowMsg,
 };
 use crate::{tr, tr_noop, trn};
 mod anchored;
 // A line of text on the design's baseline wherever it lands (`ts::set_in`).
 mod baseline;
+mod clipped;
 mod corner_safe;
+mod dropdown;
 mod escape_clears;
+pub(crate) mod picker;
+mod right_press;
+pub(crate) use right_press::{MenuBackdrop, RightPress};
+mod ring;
+mod tree_keys;
 pub(crate) use anchored::*;
 mod chrome;
 pub(crate) use chrome::*;
 mod ops;
 pub(crate) use ops::*;
+pub(crate) use ring::RingAsk;
 mod dialogs;
 pub(crate) use dialogs::*;
+mod fakerun;
+pub(crate) mod jump;
+mod press;
+pub(crate) use press::{Press, button};
+mod proof;
+mod weakspots;
+pub(crate) use fakerun::*;
+pub(crate) use weakspots::reason_words;
+mod slide;
 mod tutorial;
 pub(crate) use tutorial::*;
 mod statusbar;
@@ -68,6 +86,7 @@ pub(crate) use connect::*;
 mod graph;
 pub(crate) use graph::*;
 mod graph_labels;
+mod history;
 mod memo;
 pub use memo::ViewMemo;
 pub(crate) use memo::{CallsSummary, DocsGroup, DocsKey, ImportRanks, RankedFile};
@@ -76,6 +95,7 @@ pub(crate) use notebook::*;
 mod overlays;
 pub(crate) use overlays::*;
 mod updater;
+mod usage;
 pub(crate) use updater::*;
 mod askfloat;
 mod form;
@@ -263,6 +283,11 @@ pub fn finder_list_id() -> iced::widget::Id {
     iced::widget::Id::new("finder-list")
 }
 
+/// The map's search field (see `graph::graph_search_field`).
+pub fn graph_search_id() -> iced::widget::Id {
+    iced::widget::Id::new("graph-search")
+}
+
 pub fn search_input_id() -> iced::widget::Id {
     iced::widget::Id::new("search-input")
 }
@@ -271,11 +296,32 @@ pub fn find_input_id() -> iced::widget::Id {
     iced::widget::Id::new("find-input")
 }
 
+/// The Language model page's API key field: where `SettingsMsg::NeedKey`
+/// puts the keyboard.
+pub fn settings_key_id() -> iced::widget::Id {
+    iced::widget::Id::new("settings-key")
+}
+
+/// The Language model page's model and base URL fields: where a failure
+/// about them puts the keyboard (`SettingsMsg::Fix`).
+pub fn settings_model_id() -> iced::widget::Id {
+    iced::widget::Id::new("settings-model")
+}
+
+pub fn settings_base_url_id() -> iced::widget::Id {
+    iced::widget::Id::new("settings-base-url")
+}
+
 pub fn ask_input_id() -> iced::widget::Id {
     iced::widget::Id::new("ask-input")
 }
 
 /// The Files view's filter field.
+/// The Files view's tree as one stop for the keyboard (`tree_keys`).
+pub fn files_tree_keys_id() -> iced::widget::Id {
+    iced::widget::Id::new("files-tree-keys")
+}
+
 pub fn file_filter_id() -> iced::widget::Id {
     iced::widget::Id::new("file-filter")
 }
@@ -290,9 +336,19 @@ pub fn ask_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("ask-conversation")
 }
 
+/// The Reading trail's list, so it opens on the place being read.
+pub fn trail_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("trail-list")
+}
+
 /// The outline scrollable, so it can follow the caret's current symbol.
 pub fn outline_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("outline-list")
+}
+
+/// The Settings page's scroll: each page opens at its top.
+pub fn settings_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("settings-page")
 }
 
 pub fn bp_condition_input_id() -> iced::widget::Id {
@@ -325,25 +381,44 @@ pub(crate) enum ActiveOverlay<'a> {
     UpdateNotes,
     Settings,
     Connect,
+    /// The sheet before the tour (under Settings, which its steps open).
+    TourPrep(&'a crate::app::tutorial::TourPrep),
     BpCondition(&'a (std::path::PathBuf, usize, String)),
+    /// Fake run's inputs sheet.
+    FakeRun(&'a crate::app::fakerun::Sheet),
     BookmarkNote(&'a (String, usize, String)),
     ReadingNote(&'a (String, String, String)),
     Why(&'a crate::BlameWhy),
     Insight(&'a crate::Insight),
     ToolsMenu,
+    /// The strip's Run menu (Run, Debug, Fake Run, Fake Debug).
+    RunMenu,
     TargetMenu,
     AppMenu,
     ViewMenu,
+    /// The sidebar's More views menu.
+    ViewsMenu,
     Graph(crate::Overlay),
     Finder,
     ContextMenu(&'a crate::ContextMenu),
+    TreeMenu(&'a crate::app::state::TreeMenu),
     Hover(&'a crate::HoverState),
+}
+
+/// Where the panes are in the window: between the sidebar and the margin,
+/// under the sheet's header, over the bottom panel.
+pub(crate) fn panes_rect(app: &App) -> Option<iced::Rectangle> {
+    tutorial::region_rect(app, crate::app::tutorial::Anchor::Main)
 }
 
 /// The overlay on top right now, if any (see [`ActiveOverlay`]).
 pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
     use ActiveOverlay as O;
-    let overlay = if let Some(root) = &app.pending_consent {
+    // Settings opened from the project's sheet — its "Add an API Key…" —
+    // comes up over it, and closes back to it: under the sheet, the click
+    // seemed to do nothing.
+    let sheet_up = !app.settings.open;
+    let overlay = if let Some(root) = app.pending_consent.as_ref().filter(|_| sheet_up) {
         O::Consent(root)
     } else if let Some((number, pending)) = app.proj.pending_lsp_command.on_screen() {
         O::LspCommand(
@@ -356,7 +431,7 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
     } else if let Some(setup) = app
         .setup
         .as_ref()
-        .filter(|s| s.mode != crate::app::setup::SetupMode::Open)
+        .filter(|s| sheet_up && s.mode != crate::app::setup::SetupMode::Open)
     {
         O::Setup(setup)
     } else if app.update.show_notes {
@@ -365,8 +440,12 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::Settings
     } else if app.connect.is_some() {
         O::Connect
+    } else if let Some(prep) = &app.tour_prep {
+        O::TourPrep(prep)
     } else if let Some(edit) = &app.proj.bp_cond_edit {
         O::BpCondition(edit)
+    } else if let Some(sheet) = &app.proj.fake.sheet {
+        O::FakeRun(sheet)
     } else if let Some(edit) = &app.proj.note_edit {
         O::BookmarkNote(edit)
     } else if let Some(edit) = &app.proj.reading_note_edit {
@@ -377,18 +456,24 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::Insight(insight)
     } else if app.show_tools_menu && !tools_on_strip(app) {
         O::ToolsMenu
+    } else if app.show_run_menu && !runs_on_strip(app) {
+        O::RunMenu
     } else if app.show_target_menu {
         O::TargetMenu
     } else if app.show_app_menu {
         O::AppMenu
     } else if app.show_view_menu {
         O::ViewMenu
+    } else if app.show_views_menu {
+        O::ViewsMenu
     } else if let Some(overlay) = app.proj.overlay {
         O::Graph(overlay)
     } else if app.proj.finder.open {
         O::Finder
     } else if let Some(menu) = &app.proj.context_menu {
         O::ContextMenu(menu)
+    } else if let Some(menu) = &app.proj.tree_menu {
+        O::TreeMenu(menu)
     } else if let Some(hover) = app
         .proj
         .hover
@@ -418,20 +503,43 @@ impl<'a> ActiveOverlay<'a> {
             Self::UpdateNotes => "update-notes",
             Self::Settings => "settings",
             Self::Connect => "connect",
+            Self::TourPrep(_) => "tour-prep",
             Self::Why(_) => "why",
             Self::Insight(_) => "insight",
             Self::ToolsMenu => "tools-menu",
+            Self::RunMenu => "run-menu",
             Self::TargetMenu => "target-menu",
             Self::AppMenu => "app-menu",
             Self::ViewMenu => "view-menu",
+            Self::ViewsMenu => "views-menu",
             Self::Graph(_) => "graph",
             Self::ContextMenu(_) => "context-menu",
+            Self::TreeMenu(_) => "tree-menu",
             Self::BpCondition(_)
+            | Self::FakeRun(_)
             | Self::BookmarkNote(_)
             | Self::ReadingNote(_)
             | Self::Finder
             | Self::Hover(_) => return None,
         })
+    }
+
+    /// Which dialog it is, told apart from another in its place — the next
+    /// of several questions asked in turn too: the keyboard's ring goes to
+    /// the first stop of one come up in another's place.
+    pub(crate) fn scene(&self) -> String {
+        match self {
+            Self::LspCommand(_, number, _) => format!("lsp-command#{number}"),
+            Self::LspConsent(_, number, _) => format!("lsp-consent#{number}"),
+            Self::Graph(overlay) => format!("graph:{overlay:?}"),
+            Self::BpCondition(_) => "bp-condition".into(),
+            Self::FakeRun(_) => "fake-run".into(),
+            Self::BookmarkNote(_) => "bookmark-note".into(),
+            Self::ReadingNote(_) => "reading-note".into(),
+            Self::Finder => "finder".into(),
+            Self::Hover(_) => "hover".into(),
+            other => other.leaves_focus().unwrap_or("overlay").into(),
+        }
     }
 
     /// Whether this overlay holds the keys of what is under it: every one
@@ -440,6 +548,44 @@ impl<'a> ActiveOverlay<'a> {
     /// of its chords (`App::handle_key`).
     pub(crate) fn holds_keys(&self) -> bool {
         !matches!(self, Self::Hover(_))
+    }
+
+    /// Whether Enter presses its main button, as its "yes" by voice does:
+    /// a sheet opened from a shortcut — Explain All's cost sheet — took no
+    /// Enter, the ring having nothing on it yet. Explain All's sheet once
+    /// its estimate has stood to be read ([`crate::app::setup::SHEET_READ`]),
+    /// and a fake run's inputs (whose fields send Run on Enter too). Not a
+    /// first open's sheet or Set Up's, whose Open and Apply download
+    /// language servers and give them leave to build the project; not a
+    /// question of trust (a language server's command, a host's key);
+    /// nothing else that installs or starts something.
+    pub(crate) fn enter_answers(&self, app: &App) -> bool {
+        match self {
+            Self::Setup(setup) => {
+                setup.mode == crate::app::setup::SetupMode::Explain
+                    && app
+                        .setup_counted_at
+                        .is_some_and(|at| at.elapsed() >= crate::app::setup::SHEET_READ)
+            }
+            Self::FakeRun(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether it is a menu: a list of rows, one pressed and it goes —
+    /// the arrows walk it.
+    pub(crate) fn is_menu(&self) -> bool {
+        matches!(
+            self,
+            Self::ToolsMenu
+                | Self::RunMenu
+                | Self::TargetMenu
+                | Self::AppMenu
+                | Self::ViewMenu
+                | Self::ViewsMenu
+                | Self::ContextMenu(_)
+                | Self::TreeMenu(_)
+        )
     }
 
     fn view(self, app: &'a App) -> Element<'a, Message> {
@@ -470,19 +616,40 @@ impl<'a> ActiveOverlay<'a> {
             Self::UpdateNotes => update_notes_modal(app),
             Self::Settings => settings_modal(app),
             Self::Connect => connect_modal(app),
+            Self::TourPrep(prep) => tutorial::tour_prep_sheet(app, prep),
             Self::BpCondition(edit) => bp_condition_modal(app, edit),
+            Self::FakeRun(sheet) => fake_sheet(sheet),
             Self::BookmarkNote(edit) => bookmark_note_modal(edit),
             Self::ReadingNote(edit) => reading_note_modal(edit),
             Self::Why(bw) => why_modal(app, bw),
             Self::Insight(insight) => insight_modal(app, insight),
             Self::ToolsMenu => tools_menu(app),
+            Self::RunMenu => toolbar::run_menu(app),
             Self::TargetMenu => target_menu(app),
             Self::AppMenu => app_menu(app),
             Self::ViewMenu => view_menu(app),
+            Self::ViewsMenu => toolbar::views_menu(app),
             Self::Graph(overlay) => project_graph_modal(app, overlay),
             Self::Finder => finder_modal(app),
             Self::ContextMenu(menu) => context_menu(app, menu),
-            Self::Hover(hover) => hover_tooltip(hover),
+            Self::TreeMenu(menu) => overlays::tree_menu(app, menu),
+            Self::Hover(hover) => hover_tooltip(hover, code_floor(app)),
+        }
+    }
+
+    /// What the overlay is called where it is opened, in English — as it is
+    /// put away by voice: "close the call graph", "hide Settings". `None`
+    /// for what goes by no name of its own (a menu, a prompt).
+    pub(crate) fn name(&self) -> Option<&'static str> {
+        match self {
+            Self::Graph(overlay) => Some(graph::graph_title(*overlay)),
+            Self::Settings => Some(tr_noop!("Settings")),
+            Self::FakeRun(sheet) => Some(if sheet.debug {
+                tr_noop!("Fake debug")
+            } else {
+                tr_noop!("Fake run")
+            }),
+            _ => None,
         }
     }
 
@@ -500,18 +667,23 @@ impl<'a> ActiveOverlay<'a> {
             Self::UpdateNotes => Message::Updater(UpdaterMsg::CloseNotes),
             Self::Settings => Message::Settings(SettingsMsg::Close),
             Self::Connect => Message::Connect(ConnectMsg::Close),
+            Self::TourPrep(_) => Message::Tutorial(TutorialMsg::PrepClose),
             Self::BpCondition(_) => Message::Debug(DebugMsg::BpConditionCancel),
+            Self::FakeRun(_) => Message::Fake(crate::FakeMsg::CloseSheet),
             Self::BookmarkNote(_) => Message::Reading(ReadingMsg::BookmarkNoteCancel),
             Self::ReadingNote(_) => Message::Reading(ReadingMsg::NoteEditCancel),
             Self::Why(_) => Message::TimeTravel(TimeTravelMsg::BlameWhyClose),
             Self::Insight(_) => Message::Hover(HoverMsg::InsightClose),
             Self::ToolsMenu => Message::Window(WindowMsg::ToggleToolsMenu),
+            Self::RunMenu => Message::Window(WindowMsg::ToggleRunMenu),
             Self::TargetMenu => Message::Window(WindowMsg::ToggleTargetMenu),
             Self::AppMenu => Message::Window(WindowMsg::ToggleAppMenu),
             Self::ViewMenu => Message::Window(WindowMsg::ToggleViewMenu),
+            Self::ViewsMenu => Message::Window(WindowMsg::ToggleViewsMenu),
             Self::Graph(_) => Message::Graph(GraphMsg::CloseOverlay),
             Self::Finder => Message::Nav(NavMsg::FinderClosed),
             Self::ContextMenu(_) => Message::Hover(HoverMsg::ContextMenuClosed),
+            Self::TreeMenu(_) => Message::Project(ProjectMsg::TreeMenuClosed),
             // Not `HoverMsg::Cleared`: that one keeps a peek the pointer rests in.
             // Unpinning drops the peek wherever the pointer is.
             Self::Hover(_) => Message::Hover(HoverMsg::Pin(false)),
@@ -519,11 +691,29 @@ impl<'a> ActiveOverlay<'a> {
     }
 }
 
+/// The lowest a peek or tip over the code reaches: over the code, not the
+/// panel under it nor the status bar.
+fn code_floor(app: &App) -> f32 {
+    app.window_height
+        - STATUSBAR_H
+        - if app.show_bottom {
+            app.bottom_shown_height()
+        } else {
+            0.0
+        }
+}
+
 /// What Escape does while an overlay is up: dismiss the topmost one. `None`
 /// when nothing is layered over the app (Escape then falls through to the
 /// find bar / selection handling).
 pub(crate) fn escape_message(app: &App) -> Option<Message> {
-    active_overlay(app).map(|o| o.dismiss_message())
+    match active_overlay(app) {
+        // A map's search is cleared before the map is closed.
+        Some(ActiveOverlay::Graph(_)) if !app.graph_search.is_empty() => {
+            Some(Message::Graph(GraphMsg::Search(String::new())))
+        }
+        overlay => overlay.map(|o| o.dismiss_message()),
+    }
 }
 
 /// The window's view.
@@ -536,41 +726,52 @@ pub(crate) fn escape_message(app: &App) -> Option<Message> {
 /// deeper), its scrollable was rebuilt at offset 0 and reported that offset,
 /// throwing the reader back to the top of the file.
 pub fn view(app: &App) -> Element<'_, Message> {
+    // Jump mode's codes, when they are up, go on what is built now.
+    jump::begin(app.jump.is_some() || app.ring.is_some());
+    picker::set_open(app.picker.as_ref());
     heard::layer(heard::Layer::Window);
     // The divider says where the pointer is in the window; the sidebar is
     // inside its frame.
     let frame = app.window_frame;
-    // Its divider lies over the sidebar's right padding, where nothing is
-    // drawn, as the design's sidebar runs on to the sheet; the sidebar's
-    // edge follows the divider's middle.
     let left: Element<'_, Message> = if app.show_left_sidebar {
-        let half = crate::resize::THICKNESS / 2.0;
-        stack![
-            sidebar(app),
-            container(
-                crate::resize::Divider::vertical(move |v| {
-                    Message::Window(WindowMsg::ResizeSidebar(v - frame + half))
-                })
-                .panel(crate::resize::Panel::Before),
-            )
-            .width(Length::Fixed(app.sidebar_width))
-            .height(Fill)
-            .align_x(iced::alignment::Horizontal::Right),
+        sidebar(app)
+    } else {
+        slot()
+    };
+    // The sidebar's divider lies just past its edge, over the sheet's own,
+    // in a layer of its own: not over the sidebar's padding, where its lists'
+    // scrollbars run, nor drawn over the sheet's shadow at rest, and thin
+    // enough to end before the gutter's breakpoint dots. The sidebar's edge
+    // follows the divider's middle less half its width: the edge is the
+    // divider's near side.
+    let grip: Element<'_, Message> = if app.show_left_sidebar {
+        let half = crate::resize::EDGE_GRIP / 2.0;
+        row![
+            space().width(Length::Fixed(app.sidebar_width)),
+            crate::resize::Divider::vertical(move |v| {
+                Message::Window(WindowMsg::ResizeSidebar(v - frame - half))
+            })
+            .panel(crate::resize::Panel::Before)
+            .thickness(crate::resize::EDGE_GRIP),
         ]
+        .height(Fill)
         .into()
     } else {
         slot()
     };
     // The sidebar on the chrome, the code's sheet raised beside it, and the
-    // tool strip down the right edge.
-    let main = row![left, sheet(app), tool_strip(app)].height(Fill);
+    // tool strip down the right edge; over them, the sidebar's divider.
+    let main = stack![row![left, sheet(app), tool_strip(app)].height(Fill), grip,].height(Fill);
     // A slim "update available" / download-progress banner sits between the
     // toolbar and the content, reading as an extension of the toolbar chrome.
     let banner = update_banner(app).unwrap_or_else(slot);
-    let base = container(column![toolbar(app), banner, main, statusbar(app)])
+    // The title bar's controls are the keyboard ring's last stops.
+    let bar = jump::scope(toolbar(app), ring::ScopeTag::Chrome);
+    let base = container(column![bar, banner, main, statusbar(app)])
         .width(Fill)
         .height(Fill)
         .style(theme::chrome);
+    let base = jump::scope(base, ring::ScopeTag::Layer(heard::Layer::Window));
 
     // The floating Ask window (or its launcher) over the window; over it,
     // the overlay layer (at most one overlay), so the palette or a menu
@@ -579,38 +780,85 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // Each layer said as it is built, for what voice may press
     // (`heard::gather`): a dialog holding the keys leaves nothing under it.
     heard::layer(heard::Layer::Ask);
-    let ask = ask_layer(app);
+    let ask = jump::scope(ask_layer(app), ring::ScopeTag::Layer(heard::Layer::Ask));
     let overlay = active_overlay(app).map_or_else(slot, |o| {
-        heard::layer(if o.holds_keys() {
+        let layer = if o.holds_keys() {
             heard::Layer::Overlay
         } else {
             heard::Layer::Window
-        });
-        o.view(app)
+        };
+        heard::layer(layer);
+        jump::scope(o.view(app), ring::ScopeTag::Layer(layer))
     });
     heard::layer(heard::Layer::Tutorial);
     let tutorial = if app.tutorial.is_some() {
-        tutorial_overlay(app)
+        jump::scope(
+            tutorial_overlay(app),
+            ring::ScopeTag::Layer(heard::Layer::Tutorial),
+        )
     } else {
         slot()
     };
     // Inside the frame Clew draws round its borderless window (none on macOS
     // or maximized: padding 0, the same tree), every layer, so all of them
     // share one origin; the resize grips at the window's very edge.
-    let framed = container(stack![base, ask, overlay, tutorial])
+    // A gutter line's tip, over the code and under all else: none while
+    // anything is layered over the window.
+    let gutter = if active_overlay(app).is_none() {
+        overlays::gutter_tip(app, code_floor(app))
+    } else {
+        None
+    }
+    .unwrap_or_else(slot);
+    let framed = container(stack![base, gutter, ask, overlay, tutorial])
         .padding(app.window_frame)
         .style(theme::window_frame(app.window_radius));
     // Whether a widget's own overlay is drawn over it all, and which
     // renderer draws the window (`watch_overlays`); inside the frame, every
     // layer reaching the window's corners rounds its own as they are.
     let inner = (app.window_radius - app.window_frame).max(0.0);
-    placed::watch_overlays(
+    let window = placed::watch_overlays(
         placed::Known {
             overlay_open: app.overlay_open,
             software_renderer: app.software_renderer,
             corners: inner,
         },
         stack![framed, resize_grips()],
+    );
+    let up = match (&app.jump, app.ring) {
+        (Some(typed), _) => Some(jump::Up::Codes(typed)),
+        (None, Some(ask)) => Some(jump::Up::Ring(ask)),
+        (None, None) => None,
+    };
+    // The tutorial, a shortcut being typed, jump mode's codes: their keys
+    // are their own, Tab too.
+    let tab = app.tutorial.is_none() && app.rebinding.is_none() && app.jump.is_none();
+    // What is on top, whether or not it has a control of its own: a dialog
+    // with none (the finder with no match) still has the window under it.
+    let dialog = active_overlay(app).filter(ActiveOverlay::holds_keys);
+    let top = if app.tutorial.is_some() {
+        jump::OnTop {
+            layer: heard::Layer::Tutorial,
+            scene: None,
+        }
+    } else if let Some(dialog) = dialog {
+        jump::OnTop {
+            layer: heard::Layer::Overlay,
+            scene: Some(dialog.scene()),
+        }
+    } else {
+        jump::OnTop {
+            layer: heard::Layer::Ask,
+            scene: None,
+        }
+    };
+    jump::root(
+        window,
+        up,
+        app.ask_view == crate::AskView::Expanded,
+        app.main_window,
+        tab,
+        top,
     )
 }
 

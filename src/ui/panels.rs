@@ -20,44 +20,274 @@ pub(crate) fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message>
     .into()
 }
 
-/// The collapsible bottom panel: the debugger's, under a title strip with a
-/// collapse control. (Ask floats over the code instead: `ui::askfloat`.)
-pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
-    let title = container(
-        row![
-            glyph::icon(Glyph::Debug, theme::fg_bright(), 16.0),
-            text(tr!("Debug")).size(ts::SMALL).color(theme::fg_bright()),
-        ]
-        .spacing(6)
-        .align_y(iced::Center),
+/// A program's output: [`debug_col`], kept at its end as lines come and
+/// as the run ends — its last line, most often the result or the error,
+/// was below the pane's foot with nothing to say more was there — and its
+/// scrollbar showing, faintly, while there is more than the pane holds.
+fn output_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
+    container(
+        scrollable(Column::with_children(rows).spacing(1).width(Fill))
+            .direction(thin_scroll())
+            .anchor_bottom()
+            .style(theme::cue_scrollbar)
+            .height(Fill),
     )
-    .padding([5, 12]);
+    .width(Fill)
+    .height(Fill)
+    .padding([4, 6])
+    .into()
+}
+
+/// The collapsible bottom panel: a tab for every run — of the program (Run,
+/// Debug) and worked out by the model (Fake Run, Fake Debug) — open at
+/// once, in the order they were opened, the one on screen drawn below its
+/// tab. (Ask floats over the code instead: `ui::askfloat`.)
+pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
+    use crate::app::state::RunTab;
+    let faces = app.run_tab_faces();
+    let shown = app.shown_run_tab();
+    // A proof being stepped through shows while no run has a tab.
+    let proof = faces.is_empty() && app.proj.proof.is_some();
+    let head: Element<'_, Message> = if faces.is_empty() {
+        container(
+            row![
+                glyph::icon(Glyph::Debug, theme::fg_bright(), 16.0),
+                text(if proof {
+                    tr!("Proof")
+                } else {
+                    tr!("Run and Debug")
+                })
+                .size(ts::SMALL)
+                .color(theme::fg_bright()),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        )
+        .padding([5, 12])
+        .into()
+    } else {
+        let labels = run_tab_labels(&faces);
+        let tabs = faces
+            .iter()
+            .zip(labels)
+            .map(|(face, label)| run_tab(face, label, shown == Some(face.tab)))
+            .collect::<Vec<_>>();
+        scrollable(row(tabs).spacing(4).align_y(iced::Center))
+            .direction(iced::widget::scrollable::Direction::Horizontal(
+                iced::widget::scrollable::Scrollbar::new()
+                    .width(3)
+                    .scroller_width(3),
+            ))
+            .style(theme::overlay_scrollbar)
+            .width(Fill)
+            .into()
+    };
     // A borderless "hide" affordance — no button box, just a chevron that
     // brightens on hover.
-    let collapse = button(glyph::icon(Glyph::ChevronDown, theme::fg_muted(), 12.0))
-        .style(theme::list_row(false))
-        .padding([3, 10])
-        .on_press(Message::Window(WindowMsg::CollapseBottom));
-    let tabs = row![title, space().width(Fill), collapse,]
-        .spacing(2)
-        .align_y(iced::Center)
-        .padding(Padding {
-            top: 2.0,
-            right: 6.0,
-            bottom: 2.0,
-            left: 6.0,
-        });
-
-    let content: Element<'_, Message> = if app.debug.session.is_some() {
-        debug_panel(app)
+    // Named where the pointer rests, with the way back: hidden, the panel
+    // left nothing on screen to bring it back by.
+    let collapse = super::toolbar::tip_at(
+        button(glyph::icon(Glyph::ChevronDown, theme::fg_muted(), 12.0))
+            .style(theme::list_row(false))
+            .padding([3, 10])
+            .on_press(super::heard::said(
+                tr!("Hide panel"),
+                Message::Window(WindowMsg::CollapseBottom),
+            )),
+        tr!("Hide the panel. Run or Debug shows it again."),
+        None,
+        tooltip::Position::Left,
+    );
+    let mut top = row![].spacing(2).align_y(iced::Center);
+    top = if faces.is_empty() {
+        top.push(head).push(space().width(Fill))
     } else {
-        empty_state(Glyph::Debug, tr!("No debug session"), "", None)
+        top.push(head)
+    };
+    let tabs = top.push(collapse).padding(Padding {
+        top: 2.0,
+        right: 6.0,
+        bottom: 2.0,
+        left: 6.0,
+    });
+
+    let content: Element<'_, Message> = match shown {
+        Some(RunTab::Real(_)) => debug_panel(app),
+        Some(RunTab::Fake(_)) => fake_panel(app),
+        None if proof => super::proof::proof_panel(app),
+        None => nothing_running(),
     };
 
     container(column![tabs, hairline(), content].height(Fill))
         .height(Fill)
         .style(theme::on_sheet)
         .into()
+}
+
+/// The four ways to run, as the strip has them: what the empty panel offers.
+fn nothing_running<'a>() -> Element<'a, Message> {
+    let start = |g: Glyph, label: &'static str, msg: Message| {
+        button(
+            row![
+                glyph::icon(g, theme::fg_muted(), 13.0),
+                text(label).size(ts::BODY).wrapping(Wrapping::None),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        )
+        .style(theme::toolbar_button)
+        .padding([4, 10])
+        .on_press(super::heard::said(label, msg))
+    };
+    container(
+        column![
+            text(tr!("Nothing is running"))
+                .size(ts::EMPHASIS)
+                .color(theme::fg()),
+            space().height(6),
+            row![
+                start(
+                    Glyph::Play,
+                    tr!("Run Without Debugging"),
+                    Message::Debug(DebugMsg::Run)
+                ),
+                start(
+                    Glyph::FakeRun,
+                    tr!("Fake Run…"),
+                    Message::Fake(crate::FakeMsg::AtCaret { debug: false })
+                ),
+                start(
+                    Glyph::Debug,
+                    tr!("Start Debugging"),
+                    Message::Debug(DebugMsg::Start)
+                ),
+                start(
+                    Glyph::FakeDebug,
+                    tr!("Fake Debug…"),
+                    Message::Fake(crate::FakeMsg::AtCaret { debug: true })
+                ),
+            ]
+            .spacing(6)
+            .wrap(),
+        ]
+        .spacing(4)
+        .align_x(iced::Center)
+        .max_width(560),
+    )
+    .center(Fill)
+    .padding(12)
+    .into()
+}
+
+/// Each tab's name: what it runs, numbered where two runs of the same kind
+/// run the same thing ("main.py", "main.py (2)").
+pub(crate) fn run_tab_labels(faces: &[crate::app::runs::TabFace]) -> Vec<String> {
+    use crate::app::state::RunTab;
+    let kind = |f: &crate::app::runs::TabFace| (matches!(f.tab, RunTab::Fake(_)), f.plain);
+    faces
+        .iter()
+        .enumerate()
+        .map(|(i, face)| {
+            let before = faces[..i]
+                .iter()
+                .filter(|f| kind(f) == kind(face) && f.name == face.name)
+                .count();
+            match before {
+                0 => face.name.clone(),
+                n => format!("{} ({})", face.name, n + 1),
+            }
+        })
+        .collect()
+}
+
+/// What a tab's run is, said: its kind and its name ("Debug main.py").
+pub(crate) fn run_tab_said(face: &crate::app::runs::TabFace, label: &str) -> String {
+    use crate::app::state::RunTab;
+    match (face.tab, face.plain) {
+        (RunTab::Real(_), true) => tr!("Run {name}", name = label),
+        (RunTab::Real(_), false) => tr!("Debug {name}", name = label),
+        (RunTab::Fake(_), true) => tr!("Fake run {name}", name = label),
+        (RunTab::Fake(_), false) => tr!("Fake debug {name}", name = label),
+    }
+}
+
+/// One tab: the kind of run by its icon (the strip's own), what it runs, a
+/// mark of how it is doing, and a × that ends and closes it.
+fn run_tab<'a>(
+    face: &crate::app::runs::TabFace,
+    label: String,
+    shown: bool,
+) -> Element<'a, Message> {
+    use crate::app::runs::TabState;
+    use crate::app::state::RunTab;
+    let g = match (face.tab, face.plain) {
+        (RunTab::Real(_), true) => Glyph::Play,
+        (RunTab::Real(_), false) => Glyph::Debug,
+        (RunTab::Fake(_), true) => Glyph::FakeRun,
+        (RunTab::Fake(_), false) => Glyph::FakeDebug,
+    };
+    let color = if shown {
+        theme::fg()
+    } else {
+        theme::fg_muted()
+    };
+    let (mark, state): (Option<iced::Color>, &str) = match face.state {
+        TabState::Starting => (Some(theme::dim()), tr!("starting")),
+        TabState::Running => (Some(theme::success()), tr!("running")),
+        TabState::Paused => (Some(theme::warning()), tr!("paused")),
+        TabState::Done => (None, tr!("ended")),
+        TabState::Failed => (Some(theme::danger()), tr!("failed")),
+    };
+    let dot: Element<'a, Message> = match mark {
+        Some(c) => container(space().width(6).height(6))
+            .style(move |_: &iced::Theme| container::Style {
+                background: Some(c.into()),
+                border: iced::Border {
+                    radius: 3.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into(),
+        None => space().width(6).into(),
+    };
+    // Said with its kind — "Run main.py", "Debug main.py": a run and a debug
+    // of one program read the same, "main.py", told apart only by an icon.
+    let said = run_tab_said(face, &label);
+    let pick = button(
+        row![
+            glyph::icon(g, color, 13.0),
+            text(said.clone())
+                .size(ts::SMALL)
+                .color(color)
+                .wrapping(Wrapping::None),
+            dot,
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .style(theme::segment(shown))
+    .padding([3, 8])
+    .on_press(super::heard::said(
+        &said,
+        Message::Debug(DebugMsg::ShowTab(face.tab)),
+    ));
+    let close_said = tr!("Close {name}", name = said.clone());
+    let close = button(glyph::icon(Glyph::Close, theme::fg_muted(), 10.0))
+        .style(theme::list_row(false))
+        .padding([5, 5])
+        .on_press(super::heard::said(
+            &close_said,
+            Message::Debug(DebugMsg::CloseTab(face.tab)),
+        ));
+    let tip = format!("{said} — {state}");
+    row![
+        super::toolbar::tip_at(pick, tip, None, tooltip::Position::Top),
+        super::toolbar::tip_at(close, close_said, None, tooltip::Position::Top),
+    ]
+    .spacing(0)
+    .align_y(iced::Center)
+    .into()
 }
 
 /// The bottom debugger panel: status + step controls, and four columns —
@@ -67,13 +297,43 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     let Some(session) = app.debug.session.as_ref() else {
         return space().into();
     };
-    let (status_txt, status_color) = match session.status {
-        DebugStatus::Launching => (tr!("launching…"), theme::dim()),
-        DebugStatus::Running => (tr!("running"), theme::success()),
-        DebugStatus::Stopped => (tr!("stopped"), theme::warning()),
-        DebugStatus::Terminated => (tr!("terminated"), theme::dim()),
+    // A plain run (Run, not Debug) never stops: no stack, no variables, no
+    // watches, nothing to step — its output, and how it ended.
+    let plain = app.debug.no_debug;
+    // A debug run that ended with nothing left to show of a stop is laid
+    // out the same — its empty stack and variables took half the panel,
+    // or two thirds of it once it had stopped, its output wrapped a word a
+    // line beside them — though it is still a debug run, to run again as
+    // one, its stops still there to walk.
+    let output_only = plain
+        || (session.status == DebugStatus::Terminated
+            && session.frames.is_empty()
+            && session.scopes.is_empty());
+    let (status_txt, status_color) = match (session.status, session.exit_code) {
+        (DebugStatus::Launching, _) => (tr!("launching…").to_string(), theme::dim()),
+        (DebugStatus::Running, _) => (tr!("running").to_string(), theme::success()),
+        // Paused, as its tab says: "stopped" is what Stop leaves.
+        (DebugStatus::Stopped, _) => (tr!("paused").to_string(), theme::warning()),
+        (DebugStatus::Terminated, Some(code)) => (
+            tr!("exited with code {code}", code = code).to_string(),
+            if code == 0 {
+                theme::dim()
+            } else {
+                theme::danger()
+            },
+        ),
+        // Stopped with Stop: said so, Run and Debug alike — "finished" said
+        // the program ran to its end beside "Stopped before the program
+        // printed anything", and Debug said "terminated" of the same act.
+        (DebugStatus::Terminated, None) if app.debug.stopped_by_reader => {
+            (tr!("stopped by you").to_string(), theme::dim())
+        }
+        (DebugStatus::Terminated, None) if plain => (tr!("finished").to_string(), theme::dim()),
+        (DebugStatus::Terminated, None) => (tr!("terminated").to_string(), theme::dim()),
     };
     let stopped = session.status == DebugStatus::Stopped;
+    let ended = session.status == DebugStatus::Terminated;
+    let status_w = super::steady::width_of(&status_txt, ts::SMALL, crate::fonts::UI);
 
     let ctrl = |label: &'static str, msg: Message, enabled: bool| {
         let mut b = button(text(label).size(ts::BODY).wrapping(Wrapping::None))
@@ -84,35 +344,187 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         }
         b
     };
-    let controls = row![
+    // Ended, Stop gives way to running it again, as it was, in its tab.
+    let stop = if ended {
         ctrl(
-            tr!("▶ Continue"),
-            Message::Debug(DebugMsg::Control(DebugCmd::Continue)),
-            stopped
-        ),
-        ctrl(
-            tr!("⤼ Over"),
-            Message::Debug(DebugMsg::Control(DebugCmd::StepOver)),
-            stopped
-        ),
-        ctrl(
-            tr!("⤓ In"),
-            Message::Debug(DebugMsg::Control(DebugCmd::StepIn)),
-            stopped
-        ),
-        ctrl(
-            tr!("⤒ Out"),
-            Message::Debug(DebugMsg::Control(DebugCmd::StepOut)),
-            stopped
-        ),
-        ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), true),
-    ]
+            if plain {
+                tr!("↻ Run Again")
+            } else {
+                tr!("↻ Debug Again")
+            },
+            Message::Debug(DebugMsg::Again),
+            true,
+        )
+    } else {
+        ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), true)
+    };
+    // Each says what it does and its function key where the pointer rests
+    // (`App::debug_key`): the keys were there, and nothing said so. Not
+    // while it can do nothing: a tip over a greyed control offered a key
+    // that did nothing either.
+    let keyed = |control: Element<'static, Message>, name: &'static str, key: &str| {
+        if !stopped {
+            return control;
+        }
+        super::toolbar::tip_at(
+            control,
+            name,
+            Some(crate::keymap::local_keys(key)),
+            iced::widget::tooltip::Position::Top,
+        )
+    };
+    let stop: Element<'_, Message> = if ended {
+        stop.into()
+    } else {
+        super::toolbar::tip_at(
+            stop,
+            tr!("Stop"),
+            Some(crate::keymap::local_keys("⇧F5")),
+            iced::widget::tooltip::Position::Top,
+        )
+    };
+    // In a slot as wide as the widest it becomes: Stop turning into Debug
+    // Again moved Continue, Over, In and Out some 50 px under the pointer.
+    let again = if plain {
+        tr!("↻ Run Again")
+    } else {
+        tr!("↻ Debug Again")
+    };
+    let stop_w = super::steady::widest(&[tr!("■ Stop"), again], ts::BODY, crate::fonts::UI) + 16.0;
+    let stop: Element<'_, Message> = container(stop)
+        .width(Length::Fixed(stop_w.ceil() + 2.0))
+        .align_x(iced::alignment::Horizontal::Right)
+        .into();
+    let controls = if output_only {
+        row![stop]
+    } else {
+        row![
+            keyed(
+                ctrl(
+                    tr!("▶ Continue"),
+                    Message::Debug(DebugMsg::Control(DebugCmd::Continue)),
+                    stopped
+                )
+                .into(),
+                tr!("Continue"),
+                "F5"
+            ),
+            keyed(
+                ctrl(
+                    tr!("↪ Over"),
+                    Message::Debug(DebugMsg::Control(DebugCmd::StepOver)),
+                    stopped
+                )
+                .into(),
+                tr!("Step over"),
+                "F10"
+            ),
+            keyed(
+                ctrl(
+                    tr!("↓ In"),
+                    Message::Debug(DebugMsg::Control(DebugCmd::StepIn)),
+                    stopped
+                )
+                .into(),
+                tr!("Step into"),
+                "F11"
+            ),
+            keyed(
+                ctrl(
+                    tr!("↑ Out"),
+                    Message::Debug(DebugMsg::Control(DebugCmd::StepOut)),
+                    stopped
+                )
+                .into(),
+                tr!("Step out"),
+                "⇧F11"
+            ),
+            stop,
+        ]
+    }
     .spacing(4);
+    // Clear of the Ask card in the corner: it sat over Continue, Step and
+    // Stop (the panel's foot is the status bar's top; its header, some 40
+    // px under the panel's top).
+    let panel_top = app.window_height - super::STATUSBAR_H - app.bottom_shown_height();
+    let reach = super::askfloat::card_reach(
+        app,
+        app.window_width - super::toolbar::STRIP_W,
+        panel_top + 44.0,
+    );
+    // What the controls take, and what is said before them at the least
+    // (the run, its state, the trace and Walk this run): where the panel
+    // left of the card holds less, the controls go under it, on a row of
+    // their own. Clipped to fit, everything said before them went — "Walk
+    // this run" with it — whenever the Ask card was open at a laptop's
+    // width.
+    let w = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
+    let controls_w = if output_only {
+        stop_w + 2.0
+    } else {
+        [tr!("▶ Continue"), tr!("↪ Over"), tr!("↓ In"), tr!("↑ Out")]
+            .iter()
+            .map(|label| w(label, ts::BODY) + 16.0)
+            .sum::<f32>()
+            + stop_w
+            + 2.0
+            + 4.0 * 4.0
+    };
+    // Every gap of its row counted (the note's slot, empty, keeps its two),
+    // and the hover switch where it is shown: two gaps short and without
+    // it, the header stayed on one row where it cut Walk this run.
+    let said_w = w(if plain { tr!("Run") } else { tr!("Debug") }, ts::BASE)
+        + 4.0 * 8.0
+        + status_w
+        + if plain { 0.0 } else { trace_control_w(app) }
+        + hover_eval_w(app);
+    let sidebar = if app.show_left_sidebar {
+        app.sidebar_width
+    } else {
+        0.0
+    };
+    // Less the panel's own padding, either side.
+    let panel_w = app.window_width
+        - super::toolbar::STRIP_W
+        - super::sheet::SHEET_GAP
+        - sidebar
+        - 2.0 * DEBUG_PANEL_PAD_X;
+    let stacked = panel_w - reach < said_w + 21.0 + controls_w;
+    // What ran instead, named, where the file read does not run itself.
+    let ran_note: Option<String> = app.debug.ran_for.as_deref().map(|file| {
+        let program = app
+            .debug
+            .session
+            .as_ref()
+            .filter(|_| !app.connection.is_remote())
+            .and_then(|s| s.program.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        match program {
+            Some(program) => tr!(
+                "{file} does not run on its own, so {program} ran",
+                file = file,
+                program = program
+            ),
+            None => tr!("{file} does not run on its own", file = file),
+        }
+    });
+    // Said on the header's row where it fits there whole; else on a line
+    // of its own under the header, whole: in French, beside the longer
+    // step controls, it was cut to "pricing.py ne s’exécute p…", or not
+    // shown at all, at a desktop's width.
+    let note_room = if stacked {
+        panel_w - reach - said_w
+    } else {
+        panel_w - reach - said_w - 21.0 - controls_w
+    };
+    let note_inline = ran_note
+        .as_deref()
+        .is_none_or(|n| w(n, ts::SMALL) + 8.0 <= note_room);
     // The controls whole at the right; what is said before them takes the
     // room left, cut short where a language's words need more.
     let said = container(
         row![
-            text(tr!("Debug"))
+            text(if plain { tr!("Run") } else { tr!("Debug") })
                 .size(ts::BASE)
                 .color(theme::fg())
                 .wrapping(Wrapping::None),
@@ -120,8 +532,56 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 .size(ts::SMALL)
                 .color(status_color)
                 .wrapping(Wrapping::None),
-            space().width(Fill),
-            trace_control(app),
+            // Picked for the file being read, which does not run itself:
+            // said here, with the run, for as long as it is shown.
+            // What ran instead, named: the reader had to work it out from
+            // the tab's name.
+            match ran_note.clone().filter(|_| note_inline) {
+                Some(said) => {
+                    // Cut short with an ellipsis where it still meets less
+                    // room than measured (a font's rounding): whole where
+                    // the pointer rests; with too little room to say
+                    // anything ("pricin…", or "…" alone in Chinese), it is
+                    // not shown at all.
+                    Element::from(
+                        container(iced::widget::responsive(move |room| {
+                            let cut = super::steady::elide_end(
+                                &said,
+                                ts::SMALL,
+                                crate::fonts::UI,
+                                room.width,
+                            );
+                            if cut == said {
+                                return text(cut)
+                                    .size(ts::SMALL)
+                                    .color(theme::dim())
+                                    .wrapping(Wrapping::None)
+                                    .into();
+                            }
+                            if room.width < RAN_NOTE_MIN_W {
+                                return space().into();
+                            }
+                            super::toolbar::tip_wrapped(
+                                text(cut)
+                                    .size(ts::SMALL)
+                                    .color(theme::dim())
+                                    .wrapping(Wrapping::None),
+                                said.clone(),
+                                iced::widget::tooltip::Position::Top,
+                            )
+                        }))
+                        .width(Fill)
+                        .height(Length::Fixed((ts::SMALL * 1.3).ceil())),
+                    )
+                }
+                None => Element::from(space().width(Fill)),
+            },
+            // A plain run never stops: no trace to count, nor to walk.
+            if plain {
+                Element::from(space().width(0))
+            } else {
+                trace_control(app)
+            },
             hover_eval_control(app),
         ]
         .spacing(8)
@@ -129,7 +589,35 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     )
     .width(Fill)
     .clip(true);
-    let header = row![said, controls].spacing(8).align_y(iced::Center);
+    // A rule between what is said and the stepping controls: "Walk this
+    // run", an AI call, sat against Continue, where steps are clicked fast.
+    let rule = container(space().width(1).height(16)).style(|_: &iced::Theme| {
+        iced::widget::container::Style {
+            background: Some(theme::hairline().into()),
+            ..Default::default()
+        }
+    });
+    let header: Element<'_, Message> = if stacked {
+        container(
+            column![
+                said,
+                row![space().width(Fill), controls].align_y(iced::Center),
+            ]
+            .spacing(4),
+        )
+        .padding(Padding {
+            right: reach,
+            ..Padding::ZERO
+        })
+        .into()
+    } else {
+        container(row![said, rule, controls].spacing(10).align_y(iced::Center))
+            .padding(Padding {
+                right: reach,
+                ..Padding::ZERO
+            })
+            .into()
+    };
 
     // Call stack — click a frame to jump to its source.
     let mut stack_rows: Vec<Element<'_, Message>> = vec![
@@ -138,19 +626,65 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .color(theme::dim())
             .into(),
     ];
+    // The stack's column: two parts of the panel's, less the gaps between
+    // the columns, the column's own padding (`debug_col`'s 6 a side), its
+    // rows' padding (6 a side) and a pixel's rounding — the column's
+    // padding uncounted, "pricing.py:20" lost its last digit uncut.
+    let portions = if session.output.is_empty() {
+        12.0
+    } else {
+        14.0
+    };
+    // The columns keep clear of the Ask card in the corner, as the header's
+    // controls do: over them, it hid the watches and the output whole.
+    let cols_reach = super::askfloat::card_reach(
+        app,
+        app.window_width - super::toolbar::STRIP_W,
+        app.window_height - super::STATUSBAR_H,
+    );
+    let cols_w = panel_w - cols_reach;
+    let stack_room = ((cols_w - 3.0 * 6.0) * 2.0 / portions - 2.0 * 6.0 - 12.0 - 2.0).max(0.0);
+    // The output takes the room a run's lines need: half the panel beside
+    // the debugger's three columns, all of it for a plain run.
+    // The variables, what a reader opens the debugger for, take twice a
+    // column's room — and the output's, while the program has printed
+    // nothing: values were cut at 180 px beside an empty column.
+    let quiet = session.output.is_empty();
+    // And the watches, a share of that room when there are any: their
+    // values were cut to a few letters beside the empty output. The
+    // columns' shares add up the same either way, the call stack's too.
+    let (vars_portion, watch_portion) = match (quiet, app.debug.watches.is_empty()) {
+        (true, false) => (5, 3),
+        (true, true) => (6, 2),
+        (false, _) => (4, 2),
+    };
+    // Each column's room for its words, as the stack's: what does not fit
+    // is cut with an ellipsis — cut at the column's edge, "0x7ffb69015i"
+    // and "_run_module_as_ma" read as whole.
+    let column_room = |portion: u16| {
+        ((cols_w - 3.0 * 6.0) * f32::from(portion) / portions - 2.0 * 6.0 - 12.0 - 2.0).max(0.0)
+    };
+    let vars_room = column_room(vars_portion);
+    let watch_room = column_room(watch_portion);
     for f in &session.frames {
         let loc = f
             .path
             .as_ref()
             .map(|p| format!("{}:{}", rel_of(app, p), f.line))
             .unwrap_or_default();
+        // Cut from its start where it does not fit, so its file and line
+        // stay: cut at its end, "teashop/checkout.py:" lost the line, the
+        // one thing a reader looks at it for. Whole on hover.
+        let shown = super::steady::elide_start(&loc, ts::CAPTION, crate::fonts::UI, stack_room);
+        let name = super::steady::cut(&f.name, stack_room, ts::SMALL, crate::fonts::UI);
+        let cut = shown != loc || name != f.name;
         let mut b = button(
             column![
-                text(f.name.clone())
+                text(name)
                     .size(ts::SMALL)
                     .color(theme::accent())
                     .wrapping(Wrapping::None),
-                text(loc)
+                text(shown)
                     .size(ts::CAPTION)
                     .color(theme::dim())
                     .wrapping(Wrapping::None),
@@ -169,7 +703,16 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 }),
             ));
         }
-        stack_rows.push(b.into());
+        stack_rows.push(if cut {
+            super::toolbar::tip_at(
+                b,
+                format!("{}  {loc}", f.name),
+                None,
+                tooltip::Position::Bottom,
+            )
+        } else {
+            b.into()
+        });
     }
 
     // Variables — each scope with its name = value rows.
@@ -181,33 +724,46 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     ];
     for sc in &session.scopes {
         var_rows.push(
-            text(sc.name.clone())
+            text(adapter_name(&sc.name))
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .into(),
         );
-        push_var_rows(app, &sc.vars, 0, &mut var_rows);
+        push_var_rows(app, &sc.vars, 0, vars_room, &mut var_rows);
     }
 
     // Program output.
-    let mut out_rows: Vec<Element<'_, Message>> = vec![
-        text(tr!("OUTPUT"))
-            .size(ts::CAPTION)
-            .color(theme::dim())
-            .into(),
-    ];
+    let mut out_rows: Vec<Element<'_, Message>> = Vec::new();
     for (cat, txt) in &session.output {
         let color = if cat == "stderr" {
             theme::danger()
         } else {
             theme::fg()
         };
+        // In the code's font, so a program's columns line up, and wrapped:
+        // a long line was cut at the column's edge.
         out_rows.push(
             text(txt.trim_end_matches('\n').to_string())
                 .size(ts::SMALL)
+                .font(crate::fonts::CODE)
                 .color(color)
-                .wrapping(Wrapping::None)
+                .wrapping(Wrapping::WordOrGlyph)
                 .into(),
+        );
+    }
+    // Ended without a word: said, where an empty pane read as Clew's
+    // failure as much as the program's.
+    if session.output.is_empty() && session.status == DebugStatus::Terminated {
+        // Stopped by the reader: said so, not as if it ran to its end.
+        out_rows.push(
+            text(if app.debug.stopped_by_reader {
+                tr!("Stopped before the program printed anything.")
+            } else {
+                tr!("The program printed nothing.")
+            })
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .into(),
         );
     }
 
@@ -218,15 +774,15 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .color(theme::dim())
             .into(),
     ];
-    watch_rows.push(
+    watch_rows.push(super::jump::field_named(
         text_input(tr!("Add watch…"), &app.debug.watch_input)
             .style(theme::input)
             .on_input(|v| Message::Debug(DebugMsg::WatchInput(v)))
             .on_submit(Message::Debug(DebugMsg::WatchAdd))
             .size(ts::SMALL)
-            .padding(3)
-            .into(),
-    );
+            .padding(3),
+        tr!("Add watch…"),
+    ));
     for expr in &app.debug.watches {
         let val = session
             .watches
@@ -234,45 +790,169 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .find(|(e, _)| e == expr)
             .map(|(_, v)| v.clone())
             .unwrap_or_else(|| "…".into());
-        watch_rows.push(
-            row![
-                // By identity (the expression): an index into the list drawn
-                // here can name another watch once the list changes.
-                button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
-                    .style(theme::list_row(false))
-                    .padding([0, 4])
-                    .on_press(super::heard::said_to(
-                        tr!("Remove"),
-                        expr,
-                        Message::Debug(DebugMsg::WatchRemoveExpr(expr.clone())),
-                    )),
-                text(expr.clone()).size(ts::SMALL).color(theme::accent()),
-                text(" = ").size(ts::SMALL).color(theme::dim()),
-                text(val)
-                    .size(ts::SMALL)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
-            ]
-            .spacing(2)
-            .align_y(iced::Center)
-            .into(),
+        // The expression takes at most a little over half the room, cut
+        // with an ellipsis past it, so " = " and the value always show: a
+        // long one pushed its value out of the column, and was itself cut
+        // mid-letter.
+        let w = |s: &str| super::steady::width_of(s, ts::SMALL, crate::fonts::UI);
+        let room = (watch_room - 22.0 - w(" = ")).max(0.0);
+        let shown_expr =
+            super::steady::cut(expr, room.mul_add(0.55, 0.0), ts::SMALL, crate::fonts::UI);
+        let shown_val = super::steady::cut(
+            &val,
+            (room - w(&shown_expr)).max(0.0),
+            ts::SMALL,
+            crate::fonts::UI,
         );
+        // Cut, it is whole where the pointer rests — whatever its length:
+        // counted by letters, a short value cut to "Dec…" had no tip.
+        let whole = (shown_expr != *expr || shown_val != val).then(|| {
+            let val: String = val.chars().take(600).collect();
+            format!("{expr} = {val}")
+        });
+        let val = shown_val;
+        let line: Element<'_, Message> = row![
+            // By identity (the expression): an index into the list drawn
+            // here can name another watch once the list changes.
+            button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
+                .style(theme::list_row(false))
+                .padding([0, 4])
+                .on_press(super::heard::said_to(
+                    tr!("Remove"),
+                    expr,
+                    Message::Debug(DebugMsg::WatchRemoveExpr(expr.clone())),
+                )),
+            text(shown_expr)
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .wrapping(Wrapping::None),
+            text(" = ").size(ts::SMALL).color(theme::dim()),
+            text(val)
+                .size(ts::SMALL)
+                .color(theme::fg())
+                .wrapping(Wrapping::None),
+        ]
+        .spacing(2)
+        .align_y(iced::Center)
+        .into();
+        watch_rows.push(match whole {
+            Some(whole) => {
+                super::toolbar::tip_wrapped(line, whole, iced::widget::tooltip::Position::Top)
+            }
+            None => line,
+        });
     }
 
-    let panels = row![
-        debug_col(stack_rows),
-        debug_col(var_rows),
-        debug_col(watch_rows),
-        debug_col(out_rows)
-    ]
+    // The pill floats over the panel's foot at its right, where the output
+    // is: the output's column ends above it, so no line runs under it —
+    // scrolled to its end alone, the lines on their way there did.
+    // The same column either way, its foot empty while Ask is open: as
+    // one thing or the other, the output's scroll was a new widget's when
+    // Ask closed, back at its top.
+    let foot: Element<'_, Message> = if app.ask_view == crate::AskView::Hidden {
+        super::askfloat::pill_foot()
+    } else {
+        space().height(0).into()
+    };
+    // Its heading over the lines, not among them: kept at their end, the
+    // lines took it out of sight as soon as they overflowed, while the
+    // other columns kept theirs.
+    let heading =
+        container(text(tr!("OUTPUT")).size(ts::CAPTION).color(theme::dim())).padding(Padding {
+            top: 4.0,
+            right: 6.0,
+            bottom: 0.0,
+            left: 6.0,
+        });
+    let output: Element<'_, Message> = column![heading, output_col(out_rows), foot]
+        .height(Fill)
+        .into();
+    let panels = if output_only {
+        row![output]
+    } else {
+        row![
+            container(debug_col(stack_rows)).width(Length::FillPortion(2)),
+            container(debug_col(var_rows)).width(Length::FillPortion(vars_portion)),
+            container(debug_col(watch_rows)).width(Length::FillPortion(watch_portion)),
+            container(output).width(Length::FillPortion(if quiet { 2 } else { 6 })),
+        ]
+    }
     .spacing(6)
+    .padding(Padding {
+        right: cols_reach,
+        ..Padding::ZERO
+    })
     .height(Fill);
 
-    container(column![header, panels].spacing(6).padding([8, 12]))
-        .width(Fill)
-        .height(Fill)
-        .style(theme::on_sheet)
+    // The note on what ran, on a line of its own where the header's row
+    // had no room for it whole.
+    // Kept clear of the Ask card as the header is: it comes here when the
+    // header is short of room, the card open as often as not.
+    let note_line: Option<Element<'_, Message>> = ran_note.filter(|_| !note_inline).map(|said| {
+        container(
+            text(said)
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+        .padding(Padding {
+            right: reach,
+            ..Padding::ZERO
+        })
         .into()
+    });
+    container(
+        column![header]
+            .push(note_line)
+            .push(panels)
+            .spacing(6)
+            .padding([8.0, DEBUG_PANEL_PAD_X]),
+    )
+    .width(Fill)
+    .height(Fill)
+    .style(theme::on_sheet)
+    .into()
+}
+
+/// The debug panel's padding at its sides.
+const DEBUG_PANEL_PAD_X: f32 = 12.0;
+
+/// How wide [`hover_eval_control`] is where it is shown: its box, the gap
+/// and its words; nothing where it is not.
+fn hover_eval_w(app: &App) -> f32 {
+    let ended = app
+        .debug
+        .session
+        .as_ref()
+        .is_none_or(|s| s.status == crate::DebugStatus::Terminated);
+    if app.debug.hover_safe || ended || app.debug.no_debug {
+        return 0.0;
+    }
+    14.0 + 6.0 + super::steady::width_of(tr!("Evaluate on hover"), ts::SMALL, crate::fonts::UI)
+}
+
+/// The least room the debug header's note on what ran is cut to: with
+/// less, what is left of it says nothing ("pricin…") and it is not shown.
+const RAN_NOTE_MIN_W: f32 = 120.0;
+
+/// How wide [`trace_control`] is: its count, and Walk this run with its
+/// spark.
+fn trace_control_w(app: &App) -> f32 {
+    let w = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
+    let n = app.debug.trace.len();
+    if n == 0 {
+        return w(tr!("Trace: no stops yet"), ts::CAPTION);
+    }
+    let count = if app.debug.trace_cut {
+        trn!(
+            "Trace: 1 stop (cut short)",
+            "Trace: {n} stops (cut short)",
+            n
+        )
+    } else {
+        trn!("Trace: 1 stop", "Trace: {n} stops", n)
+    };
+    w(&count, ts::CAPTION) + 6.0 + w(tr!("Walk this run"), ts::SMALL) + 16.0 + 18.0
 }
 
 /// The run's trace so far — how many stops it holds — and the button that
@@ -306,14 +986,26 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
         trn!("Trace: 1 stop", "Trace: {n} stops", n)
     };
     row![
-        text(count).size(ts::CAPTION).color(theme::dim()),
-        button(text(tr!("Walk this run")).size(ts::SMALL))
+        text(count)
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .wrapping(Wrapping::None),
+        super::toolbar::tip_at(
+            button(super::toolbar::ai_words_one_line(
+                tr!("Walk this run"),
+                ts::SMALL,
+                theme::accent()
+            ))
             .style(theme::toolbar_button)
             .padding([2, 8])
             .on_press(super::heard::said(
                 tr!("Walk this run"),
                 Message::Walk(WalkMsg::GenerateTrace),
             )),
+            tr!("Tell the story of this run, stop by stop, with AI (one AI call)"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        ),
     ]
     .spacing(6)
     .align_y(iced::Center)
@@ -326,17 +1018,27 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
 /// evaluation may run the program's own code, so it is a checkbox the
 /// reader has to tick, with the risk named beside it.
 pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
-    if app.debug.hover_safe {
+    // Promised safe, or over: nothing to choose.
+    let ended = app
+        .debug
+        .session
+        .as_ref()
+        .is_none_or(|s| s.status == crate::DebugStatus::Terminated);
+    // A plain run has no debugger to ask: nothing is evaluated.
+    if app.debug.hover_safe || ended || app.debug.no_debug {
         return space().into();
     }
     super::tip::tip(
-        iced::widget::checkbox(app.debug_hover_eval)
-            .style(theme::check)
-            .label(tr!("Evaluate on hover"))
-            .on_toggle(|_| Message::Debug(DebugMsg::ToggleHoverEval))
-            .size(14)
-            .text_size(ts::SMALL)
-            .spacing(6),
+        super::jump::mark(
+            iced::widget::checkbox(app.debug_hover_eval)
+                .style(theme::check)
+                .label(tr!("Evaluate on hover"))
+                .on_toggle(|_| Message::Debug(DebugMsg::ToggleHoverEval))
+                .size(14)
+                .text_size(ts::SMALL)
+                .spacing(6),
+            Message::Debug(DebugMsg::ToggleHoverEval),
+        ),
         container(
             text(tr!("May run the program's own code."))
                 .size(ts::SMALL)
@@ -542,31 +1244,50 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         }
         // Context-aware starter questions — click one to ask it.
         let suggestions = app.suggested_questions();
-        if !suggestions.is_empty() && !app.voice.is_listening() {
-            convo.push(
-                text(tr!("Try asking"))
-                    .size(ts::CAPTION)
-                    .color(theme::dim())
-                    .into(),
-            );
+        let coming = app.suggestions_coming();
+        // Questions about a codebase, with none open: not offered.
+        if app.proj.project.is_some()
+            && (!suggestions.is_empty() || coming)
+            && !app.voice.is_listening()
+        {
+            // A question asked at a click is an answer paid for: marked so,
+            // as every control that spends is, and said where the pointer
+            // rests — they looked like plain links.
+            convo.push(super::toolbar::ai_words(
+                tr!("Try asking"),
+                ts::CAPTION,
+                theme::dim(),
+            ));
             let chips: Vec<Element<'_, Message>> = suggestions
                 .into_iter()
                 .map(|q| {
-                    button(
-                        text(strip_backticks(&q))
-                            .size(ts::SMALL)
-                            .color(theme::accent()),
+                    super::toolbar::tip_at(
+                        button(question_text(&q))
+                            .style(theme::list_row(false))
+                            .padding([3, 8])
+                            .on_press(super::heard::said_with(
+                                || strip_backticks(&q),
+                                Message::Ask(AskMsg::Suggested(q.clone())),
+                            )),
+                        // Above it: under it, the tip covered the chips
+                        // that wrapped beneath, the other choices.
+                        tr!("Ask this with AI (one answer)"),
+                        None,
+                        iced::widget::tooltip::Position::Top,
                     )
-                    .style(theme::list_row(false))
-                    .padding([3, 8])
-                    .on_press(super::heard::said_with(
-                        || strip_backticks(&q),
-                        Message::Ask(AskMsg::Suggested(q.clone())),
-                    ))
-                    .into()
                 })
                 .collect();
-            convo.push(Row::with_children(chips).spacing(4).wrap().into());
+            if !chips.is_empty() {
+                convo.push(Row::with_children(chips).spacing(4).wrap().into());
+            }
+            if coming {
+                convo.push(
+                    text(tr!("Writing questions about this code…"))
+                        .size(ts::SMALL)
+                        .color(theme::dim())
+                        .into(),
+                );
+            }
         }
     }
     // The question's bubble grows to the design's 82% of the column it is
@@ -574,8 +1295,34 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     let bubble_max = BUBBLE_SHARE * conversation_width(app);
     // Why the last question could not be asked, where it was — the status
     // line said it alone, and the card seemed to ignore the question.
-    let notice: Option<Element<'_, Message>> = app.proj.ask_notice.as_ref().map(|why| {
-        row![
+    // With no folder open, said from the first: the card opened blank, and
+    // said so only once a question was sent.
+    let why_now: Option<String> = app.proj.ask_notice.clone().or_else(|| {
+        app.proj
+            .project
+            .is_none()
+            .then(|| tr_noop!("Open a folder to ask about its code").to_string())
+    });
+    let notice: Option<Element<'_, Message>> = why_now.as_ref().map(|why| {
+        // With the way to what it asks for: a folder to open, the
+        // embedding endpoint to set — said as plain words, they led
+        // nowhere.
+        let way = if app.proj.project.is_none() {
+            Some((
+                tr!("Open Folder…"),
+                Message::Project(ProjectMsg::OpenFolderPressed),
+            ))
+        } else if app.proj.ask_notice_embeddings {
+            Some((
+                tr!("Settings"),
+                Message::Settings(SettingsMsg::OpenAt(
+                    crate::app::state::SettingsPage::Embeddings,
+                )),
+            ))
+        } else {
+            None
+        };
+        let mut said = row![
             glyph::icon(Glyph::Info, theme::warning(), 14.0),
             text(crate::i18n::message(why))
                 .size(ts::SMALL)
@@ -584,10 +1331,18 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 .wrapping(Wrapping::WordOrGlyph),
         ]
         .spacing(8)
-        .align_y(iced::Center)
-        .into()
+        .align_y(iced::Center);
+        if let Some((label, msg)) = way {
+            said = said.push(
+                button(text(label).size(ts::SMALL).color(theme::accent()))
+                    .style(theme::toolbar_button)
+                    .padding([2, 8])
+                    .on_press(super::heard::said(label, msg)),
+            );
+        }
+        said.into()
     });
-    for turn in &app.proj.ask_turns {
+    for (n, turn) in app.proj.ask_turns.iter().enumerate() {
         // A question said rather than typed is marked so, over it (with
         // the design's 4 between them; a typed one has neither).
         let mut asked = Column::new()
@@ -611,8 +1366,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         convo.push(
             container(
                 asked.push(
+                    // Its code marks as the reader's quotation marks: a
+                    // suggested question showed "What calls `cents`?".
                     container(
-                        text(turn.question.as_str())
+                        text(crate::i18n::quoted(&turn.question).into_owned())
                             .size(ts::BASE)
                             .line_height(1.5)
                             .color(theme::fg()),
@@ -732,9 +1489,44 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         } else {
             convo.extend(super::explain_view::render_answer(app, &turn.answer));
         }
+        // Failed: a way to ask the same again, where it failed — the reason
+        // stood alone, and the question had to be typed again.
+        if turn.extras.failed && !turn.streaming {
+            let again = super::toolbar::tip_at(
+                button(super::toolbar::ai_words(
+                    tr!("Try again"),
+                    ts::SMALL,
+                    theme::accent(),
+                ))
+                .style(theme::toolbar_button)
+                .padding([2, 8])
+                .on_press(super::heard::said(
+                    tr!("Try again"),
+                    Message::Ask(AskMsg::AskAgain(n)),
+                )),
+                tr!("Ask the same question again"),
+                None,
+                iced::widget::tooltip::Position::Top,
+            );
+            // And the way to the setting it is about, where it is about
+            // one: its words said "check the base URL in Settings".
+            convo.push(match turn.extras.fix {
+                Some(field) => row![again, super::panes::settings_fix_button(field)]
+                    .spacing(6)
+                    .align_y(iced::Center)
+                    .into(),
+                None => again,
+            });
+        }
         // What grounded the answer, under it once it is whole: they stood
-        // under half an answer, the reader's eye drawn from the words.
-        if !turn.sources.is_empty() && !turn.streaming {
+        // under half an answer, the reader's eye drawn from the words. None
+        // for an answer that never came; under one that failed part-way,
+        // what grounded the part that came.
+        let never_came = matches!(
+            turn.extras.ended,
+            Some((crate::app::model::TurnEnd::Failed { .. }, _))
+        );
+        if !turn.sources.is_empty() && !turn.streaming && !never_came {
             convo.push(
                 text(tr!("Sources"))
                     .size(ts::CAPTION)
@@ -744,6 +1536,13 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             let chips: Vec<Element<'_, Message>> =
                 turn.sources.iter().map(|(n, _)| source_chip(n)).collect();
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
+        }
+        // What the answer used, and cost, under it once it is whole: the
+        // spend seen where it was spent.
+        if !turn.streaming
+            && let Some(cost) = app.answer_cost(turn.stream)
+        {
+            convo.push(text(cost).size(ts::CAPTION).color(theme::dim()).into());
         }
     }
     if let Some(notice) = notice {
@@ -864,7 +1663,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 container(
                     row![
                         button(
-                            text(format!("📎 {} · L{}", pin.rel, pin.line))
+                            text(format!("📎 {}:{}", pin.rel, pin.line))
                                 .size(ts::SMALL)
                                 .color(theme::accent())
                         )
@@ -908,7 +1707,14 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         ),
         // Once there is a conversation, what is typed is a reply. (How to
         // talk instead is the microphone's own tooltip's to say.)
+        // Clew reading aloud, or the microphone open: what it says, and
+        // what is said, go where this would be typed — and it can still be
+        // typed.
+        None if app.voice.speech.is_speaking() => tr!("Speaking…").to_string(),
+        None if app.voice.is_listening() => tr!("Listening…").to_string(),
         None if !app.proj.ask_turns.is_empty() => tr!("Reply…").to_string(),
+        // No codebase open to say "this" of.
+        None if app.proj.project.is_none() => tr!("Ask about a codebase…").to_string(),
         None => tr!("Ask about this codebase…").to_string(),
     };
     // The question, in lines that wrap and grow — to a few, then it
@@ -919,12 +1725,19 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     let pad_y = ((ROUND_BUTTON - line_h) / 2.0).max(0.0);
     let input: Element<'_, Message> = iced::widget::text_editor(&app.proj.ask_editor)
         .id(ask_input_id())
-        .placeholder(placeholder)
+        .placeholder(placeholder.clone())
         .on_action(|a| Message::Ask(AskMsg::Edit(a)))
         .key_binding(|press| {
             use iced::keyboard::{Key, key::Named};
-            use iced::widget::text_editor::Binding;
-            if matches!(press.key.as_ref(), Key::Named(Named::Enter)) && !press.modifiers.shift() {
+            use iced::widget::text_editor::{Binding, Status};
+            // Only while the field holds the keys: the editor is asked of
+            // every key the window gets, and took every Enter as a
+            // question asked — the ring's on a control by it too, which
+            // then did nothing.
+            if matches!(press.key.as_ref(), Key::Named(Named::Enter))
+                && !press.modifiers.shift()
+                && matches!(press.status, Status::Focused { .. })
+            {
                 return Some(Binding::Custom(Message::Ask(AskMsg::Submit)));
             }
             Binding::from_key_press(press)
@@ -943,6 +1756,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .max_height(line_h * COMPOSER_LINES + 2.0 * pad_y)
         .style(theme::bare_editor)
         .into();
+    let input = super::jump::field_named(input, &placeholder);
     // The send button is the composer's primary action, a round button in
     // the accent — and the one way to stop an answer coming in: while one
     // is, with nothing typed, it stops it (any answer — an agent turn, a
@@ -975,35 +1789,40 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .width(Length::Fixed(ROUND_BUTTON))
         .height(Length::Fixed(ROUND_BUTTON))
     };
+    // Nothing typed and nothing to stop: nothing to send, and the button
+    // says so (it stood lit and pressable over an empty field).
+    // With no folder open there is nothing to ask of: not lit for a
+    // question that only repeats the notice to open one.
+    let typed = typed && app.proj.project.is_some();
+    let send_tip = if app.proj.project.is_none() {
+        tr!("Open a folder to ask about its code")
+    } else {
+        send_tip
+    };
     let ask_btn = round(send_glyph, send_tint)
         .style(theme::round_button(true))
-        .on_press(super::heard::said(
-            if streaming && !typed {
-                send_tip
-            } else {
-                tr!("Send")
-            },
-            send_msg,
-        ));
+        .on_press_maybe((streaming || typed).then(|| {
+            super::heard::said(
+                if streaming && !typed {
+                    send_tip
+                } else {
+                    tr!("Send")
+                },
+                send_msg,
+            )
+        }));
     let ask_btn = super::toolbar::tip_at(ask_btn, send_tip, None, tooltip::Position::Top);
-    // Or say it: the microphone, in the composer beside what is typed.
-    let listening = app.voice.is_listening();
+    // Or say it: the microphone, in the composer beside what is typed —
+    // lit while it is on ([`super::askfloat::voice_lit`]), in the accent
+    // while it waits for "Hey, Clew".
     let talk = super::toolbar::tip_at(
-        round(
-            Glyph::Mic,
-            if listening {
-                theme::danger()
-            } else {
-                theme::fg()
-            },
-        )
-        .style(theme::round_button(false))
-        .on_press(Message::Voice(crate::VoiceMsg::Toggle)),
-        if listening {
-            tr!("Stop listening")
-        } else {
-            tr!("Talk")
-        },
+        round(Glyph::Mic, super::askfloat::talk_tint(app, theme::fg()))
+            .style(theme::round_button(false))
+            .on_press(super::heard::said(
+                tr!("Talk"),
+                Message::Voice(crate::VoiceMsg::Toggle),
+            )),
+        super::askfloat::talk_tip(app),
         Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
         tooltip::Position::Top,
     );
@@ -1034,14 +1853,13 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                         .color(theme::dim()),
                     ask_picker(
                         app,
-                        pick_list(choices, selected, move |c: OptionChoice| {
+                        super::picker::picker(choices, selected, move |c: OptionChoice| {
                             Message::Ask(AskMsg::AcpOption {
                                 option: id.clone(),
                                 value: c.value,
                             })
                         })
-                        .style(theme::pick)
-                        .menu_style(theme::pick_menu)
+                        .label(option.name.clone())
                         .text_size(ts::CAPTION)
                         .padding([2, 6]),
                     ),
@@ -1077,52 +1895,28 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             .or_else(|| choices.first().cloned());
         agent = container(ask_picker(
             app,
-            pick_list(choices, selected, |c: AgentChoice| {
+            super::picker::picker(choices, selected, |c: AgentChoice| {
                 Message::Ask(AskMsg::PickAgent(c.name))
             })
-            .style(theme::pick)
-            .menu_style(theme::pick_menu)
+            .label(tr!("Agent"))
             .text_size(ts::SMALL)
             .padding([6, 8]),
         ))
         .padding(iced::Padding::default().right(6))
         .into();
     }
-    // A conversation by voice: once Clew has answered, listen again. The
-    // design's switch — a track, its knob in from the end it is at — and
-    // beside it what it does, which turns it as well.
-    let on = app.voice.keep_listening;
-    let turn = Message::Voice(crate::VoiceMsg::SetKeepListening(!on));
-    let track = super::form::switch(on, turn.clone());
-    let keep_listening = row![
-        track,
-        iced::widget::mouse_area(ts::set_in(
-            text(tr!("Keep listening")).color(theme::fg_muted()),
-            super::form::SWITCH_H,
-            ts::INTER,
-            KEEP_LISTENING_SIZE,
-        ))
-        .on_press(turn)
-        .interaction(iced::mouse::Interaction::Pointer),
-    ]
-    .spacing(KEEP_LISTENING_GAP)
-    .align_y(iced::Center);
-    // While voice listens, works out the words, waits for a yes or Clew
-    // speaks, what it is doing is where the question is typed.
-    // As the pill says it, and the button lit as on the pill.
-    let input: Element<'_, Message> = match super::askfloat::voice_bar(app) {
-        Some(bar) => container(bar)
-            .width(Fill)
+    let talk = super::askfloat::voice_lit(app, ROUND_BUTTON, 15.0).unwrap_or(talk);
+    // How loud what the microphone hears is, or what Clew says, beside the
+    // button that stops it: the field stays to type in.
+    let meter: Element<'_, Message> = match super::askfloat::voice_meter(app) {
+        Some(meter) => container(meter)
             .height(Length::Fixed(ROUND_BUTTON))
-            .padding(Padding {
-                left: 4.0,
-                ..Padding::ZERO
-            })
             .align_y(iced::Center)
             .into(),
-        None => input,
+        None => space().into(),
     };
-    let talk = super::askfloat::voice_lit(app, ROUND_BUTTON, 15.0).unwrap_or(talk);
+    // A command heard that waits for a yes, over the field.
+    compose.push(compose_slot(super::askfloat::voice_confirm(app)));
     // What is queued, over the field, in a place of its own (`compose_slot`):
     // each question to be asked once the answer coming in is done, with a
     // way to ask it now — the answer stopped for it — and to take it back.
@@ -1179,9 +1973,9 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .into()
     })));
     // The composer, under a rule across the card: the question as it is
-    // typed, Keep listening, the microphone and send — or stop.
+    // typed, the microphone and send — or stop.
     // The buttons at the foot of a question of several lines, by its last.
-    let compose_row = row![input, keep_listening, talk, ask_btn]
+    let compose_row = row![input, meter, talk, ask_btn]
         .spacing(8)
         .align_y(iced::Bottom);
     compose.push(row![agent, compose_row].align_y(iced::Bottom).into());
@@ -1207,10 +2001,6 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
 pub(crate) const ROUND_BUTTON: f32 = 30.0;
 /// The most lines the question's field grows to before it scrolls.
 const COMPOSER_LINES: f32 = 6.0;
-/// Size of the composer's "Keep listening", as the design sets it.
-const KEEP_LISTENING_SIZE: f32 = 12.0;
-/// The design's gap between the switch and what it says.
-const KEEP_LISTENING_GAP: f32 = 7.0;
 /// Padding around the composer's row: a little more room at its start,
 /// where the question begins.
 pub(crate) const COMPOSER_PAD: Padding = Padding {
@@ -1745,45 +2535,6 @@ fn expand_all<'a>(msg: Message) -> Element<'a, Message> {
     super::toolbar::icon_action(crate::glyph::Glyph::ExpandAll, tr!("Expand all"), Some(msg))
 }
 
-/// Height of one side of a [`direction_switch`].
-const SWITCH_SIDE_H: f32 = 24.0;
-
-/// Which way a tree reads (callers or callees, imports or importers): a
-/// segmented control across the panel, as the sidebar's views are — two
-/// equal halves, each label centred in its own, the way it reads raised;
-/// the other switches.
-fn direction_switch<'a>(sides: [(&'static str, bool, Message); 2]) -> Element<'a, Message> {
-    container(
-        Row::with_children(sides.into_iter().map(|(label, chosen, msg)| {
-            button(
-                container(
-                    text(label)
-                        .size(ts::SMALL)
-                        .font(if chosen {
-                            crate::fonts::UI_MEDIUM
-                        } else {
-                            crate::fonts::UI
-                        })
-                        .wrapping(Wrapping::None),
-                )
-                .center_x(Fill)
-                .center_y(Fill),
-            )
-            .style(theme::segment(chosen))
-            .padding(0)
-            .width(Fill)
-            .height(Length::Fixed(SWITCH_SIDE_H))
-            .on_press_maybe((!chosen).then(|| super::heard::said(label, msg)))
-            .into()
-        }))
-        .spacing(2),
-    )
-    .padding(2)
-    .width(Fill)
-    .style(theme::trough)
-    .into()
-}
-
 /// A note under a tree's header: what the tree cannot show by itself, as a
 /// quiet row — its glyph, what it says, and, when there is more to it, a
 /// chevron that shows that under it (`about`, while `open`).
@@ -1913,20 +2664,12 @@ fn import_cycles_note<'a>(app: &'a App, focus: &'a std::path::Path) -> Element<'
             ImportNote::Cycles,
         ))),
         move || {
-            let caption = note_line(
-                text(tr!(
-                    "Files that import one another, directly or through others."
-                ))
-                .size(ts::CAPTION)
-                .color(theme::dim())
-                .wrapping(Wrapping::Word),
-            );
-            // The cycle's files, set apart by dots: they import one another
-            // in no order a line of arrows could honestly draw.
+            // The cycle's files, a list set apart by commas: they import one
+            // another in no order a line of arrows could honestly draw.
             let mut files: Vec<Element<'a, Message>> = Vec::new();
             for (i, f) in cycle.iter().enumerate() {
                 if i > 0 {
-                    files.push(text("·").size(ts::SMALL).color(theme::dim()).into());
+                    files.push(text(",").size(ts::SMALL).color(theme::dim()).into());
                 }
                 files.push(cycle_file(app, f, f == focus));
             }
@@ -1936,7 +2679,7 @@ fn import_cycles_note<'a>(app: &'a App, focus: &'a std::path::Path) -> Element<'
                 .wrap()
                 .vertical_spacing(1)
                 .into();
-            note_list(vec![caption, files], 180.0)
+            note_list(vec![files], 180.0)
         },
     )
 }
@@ -2030,7 +2773,14 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
     // Its rows counted from 1, as voice picks them.
     super::heard::list();
     let Some(tree) = &app.proj.flow else {
-        return empty_state(Glyph::Search, tr!("No value trace yet"), "", None);
+        // How to fill it, as the call hierarchy's says: the tab alone gave
+        // no way in.
+        return empty_state(
+            Glyph::Flow,
+            tr!("No value trace yet"),
+            tr!("Right-click a variable and choose Trace Value."),
+            None,
+        );
     };
     let pending = app.proj.flow_pending == Some(tree.token);
     let header = tree_head(
@@ -2102,7 +2852,7 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
         );
         for root in ids {
             for id in tree.visible_under(root) {
-                rows.push(flow_row(tree, id, token));
+                rows.push(flow_row(app, tree, id, token));
             }
         }
     }
@@ -2115,9 +2865,24 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
 
 /// One occurrence: its role tag, file and line, the line's text; a
 /// `Passed` row's unfold button follows the value into the callee.
-fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element<'_, Message> {
+fn flow_row<'a>(
+    app: &App,
+    tree: &'a crate::app::flow::FlowTree,
+    id: usize,
+    token: u64,
+) -> Element<'a, Message> {
     let node = tree.node(id);
     let indent = 10.0 + 14.0 * node.depth as f32;
+    // The room its line has: the sidebar's, less the indent, the chevron
+    // and the gap after it, the row's padding and the scrollbar.
+    let room = (app.sidebar_width
+        - indent
+        - super::sidebar::CHEVRON_W
+        - 2.0
+        - 6.0
+        - 2.0 * 6.0
+        - crate::ui::SCROLLBAR_W)
+        .max(0.0);
     let unfold: Element<'_, Message> = if node.loading {
         text("…")
             .size(ts::SMALL)
@@ -2153,6 +2918,25 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
     } else {
         space().width(0).into()
     };
+    let code_line: Element<'a, Message> = if node.classified {
+        let shown = super::steady::cut(&node.text, room, ts::SMALL, crate::fonts::CODE);
+        let line = text(shown.clone())
+            .size(ts::SMALL)
+            .font(crate::fonts::CODE)
+            .color(theme::fg())
+            .wrapping(Wrapping::None);
+        if shown == node.text {
+            line.into()
+        } else {
+            super::toolbar::tip_at(line, node.text.clone(), None, tooltip::Position::Bottom)
+        }
+    } else {
+        text(tr!("(line not read)"))
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .wrapping(Wrapping::None)
+            .into()
+    };
     let body = column![
         row![
             text(label).size(ts::CAPTION).color(theme::accent()),
@@ -2160,19 +2944,9 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
             changed,
         ]
         .spacing(6),
-        text(if node.classified {
-            node.text.clone()
-        } else {
-            tr!("(line not read)").to_string()
-        })
-        .size(ts::SMALL)
-        .font(crate::fonts::CODE)
-        .color(if node.classified {
-            theme::fg()
-        } else {
-            theme::dim()
-        })
-        .wrapping(Wrapping::None),
+        // Cut with an ellipsis where it is longer than the room, whole where
+        // the pointer rests: it ended at the sidebar's edge mid-word.
+        code_line,
     ]
     .spacing(1);
     let open = button(body)
@@ -2204,13 +2978,29 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     // Its rows counted from 1, as voice picks them.
     super::heard::list();
     let Some(tree) = &app.proj.call_graph else {
-        // How to fill it: the tab alone gave no way in.
-        return empty_state(
-            Glyph::CallGraph,
-            tr!("No call hierarchy yet"),
-            tr!("Right-click a function and choose Call Hierarchy."),
-            None,
-        );
+        // How to fill it: the tab alone gave no way in. With the caret in a
+        // function, its hierarchy a click away.
+        let here = match &app.proj.explain.view {
+            Some(crate::explain::Node::Function { name, .. }) => Some(name.as_str()),
+            _ => None,
+        };
+        return match here {
+            Some(name) => super::sidebar::empty_state_saying(
+                Glyph::CallGraph,
+                tr!("No call hierarchy yet"),
+                tr!("Right-click a function and choose Call Hierarchy."),
+                Some((
+                    tr!("Show for {name}()", name = name),
+                    Message::Calls(CallsMsg::OfFunction),
+                )),
+            ),
+            None => empty_state(
+                Glyph::CallGraph,
+                tr!("No call hierarchy yet"),
+                tr!("Right-click a function and choose Call Hierarchy."),
+                None,
+            ),
+        };
     };
 
     use crate::graph::callgraph::Direction;
@@ -2218,10 +3008,10 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         &tree.root_name,
         None,
         vec![expand_all(Message::Calls(CallsMsg::ExpandAll))],
-        Some(direction_switch(
+        Some(super::form::segmented_across(
             [Direction::Incoming, Direction::Outgoing].map(|d| {
                 (
-                    crate::i18n::lookup(d.label()),
+                    crate::i18n::lookup(d.label()).to_string(),
                     tree.direction == d,
                     Message::Calls(CallsMsg::Direction),
                 )
@@ -2320,7 +3110,7 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         if node.depth == 0 && node.children.as_ref().is_some_and(|c| c.is_empty()) {
             let none = match tree.direction {
                 Direction::Incoming => tr!("No callers found"),
-                Direction::Outgoing => tr!("No callees found"),
+                Direction::Outgoing => tr!("No calls found"),
             };
             rows.push(tree_empty_row(1, none.to_string()));
         }
@@ -2377,13 +3167,15 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
         &tree.root_name,
         None,
         vec![expand_all(Message::Graph(GraphMsg::ImportExpandAll))],
-        Some(direction_switch([Dir::Imports, Dir::Importers].map(|d| {
-            (
-                crate::i18n::lookup(d.label()),
-                tree.direction == d,
-                Message::Graph(GraphMsg::ImportDirection),
-            )
-        }))),
+        Some(super::form::segmented_across(
+            [Dir::Imports, Dir::Importers].map(|d| {
+                (
+                    crate::i18n::lookup(d.label()).to_string(),
+                    tree.direction == d,
+                    Message::Graph(GraphMsg::ImportDirection),
+                )
+            }),
+        )),
     );
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
@@ -2500,6 +3292,31 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
 /// How deep the variables panel opens values into values.
 const MAX_VAR_DEPTH: usize = 12;
 
+/// The names debug adapters give their scopes and groups ("Locals",
+/// debugpy's "special variables"), in the reader's language: in Chinese
+/// and French the Variables column still said "Locals", "Globals" and
+/// "class variables". What no adapter commonly says stays as it came.
+const ADAPTER_NAMES: &[&str] = &[
+    tr_noop!("Locals"),
+    tr_noop!("Globals"),
+    tr_noop!("Arguments"),
+    tr_noop!("Registers"),
+    tr_noop!("Statics"),
+    tr_noop!("Closure"),
+    tr_noop!("Return value"),
+    tr_noop!("special variables"),
+    tr_noop!("function variables"),
+    tr_noop!("class variables"),
+    tr_noop!("protected variables"),
+];
+
+fn adapter_name(name: &str) -> String {
+    match ADAPTER_NAMES.iter().find(|&&known| known == name) {
+        Some(&known) => crate::i18n::lookup(known).to_string(),
+        None => name.to_string(),
+    }
+}
+
 /// `vars` as the panel's rows, `depth` levels in: `name = value`, a value
 /// with children opening and closing on a click, its children under it
 /// once read. A group with no value of its own (debugpy's "class
@@ -2508,6 +3325,7 @@ fn push_var_rows<'a>(
     app: &'a App,
     vars: &'a [crate::dap::Variable],
     depth: usize,
+    room: f32,
     out: &mut Vec<Element<'a, Message>>,
 ) {
     for v in vars {
@@ -2530,21 +3348,34 @@ fn push_var_rows<'a>(
         let mut line = row![
             space().width(depth as f32 * 12.0),
             marker,
-            text(v.name.clone()).size(ts::SMALL).color(theme::warning()),
+            text(if v.value.is_empty() && opens {
+                adapter_name(&v.name)
+            } else {
+                v.name.clone()
+            })
+            .size(ts::SMALL)
+            .color(theme::warning()),
         ]
         .spacing(3)
         .align_y(iced::Center);
+        let mut cut = false;
         if !v.value.is_empty() {
+            // What is left of the column for the value, cut to it with an
+            // ellipsis; whole where the pointer rests (below).
+            let w = |s: &str| super::steady::width_of(s, ts::SMALL, crate::fonts::UI);
+            let left = room - depth as f32 * 12.0 - 10.0 - w(&v.name) - w("=") - 3.0 * 3.0;
+            let shown = super::steady::cut(&v.value, left.max(0.0), ts::SMALL, crate::fonts::UI);
+            cut = shown != v.value;
             line = line
                 .push(text("=").size(ts::SMALL).color(theme::dim()))
                 .push(
-                    text(v.value.clone())
+                    text(shown)
                         .size(ts::SMALL)
                         .color(theme::fg())
                         .wrapping(Wrapping::None),
                 );
         }
-        out.push(if opens {
+        let row: Element<'a, Message> = if opens {
             button(line)
                 .style(theme::list_row(false))
                 .padding(0)
@@ -2555,10 +3386,24 @@ fn push_var_rows<'a>(
                 .into()
         } else {
             line.into()
+        };
+        // A value too long for its column, whole where the pointer rests:
+        // "order = Order(customer" was all a reader could see. Whenever it
+        // is cut, whatever its length: counted by letters, a short value
+        // cut in a narrow column had no tip.
+        out.push(if cut {
+            let whole: String = v.value.chars().take(600).collect();
+            super::toolbar::tip_wrapped(
+                row,
+                format!("{} = {}", v.name, whole),
+                iced::widget::tooltip::Position::Top,
+            )
+        } else {
+            row
         });
         if open {
             match app.debug.var_children.get(&reference) {
-                Some(children) => push_var_rows(app, children, depth + 1, out),
+                Some(children) => push_var_rows(app, children, depth + 1, room, out),
                 None => out.push(
                     row![
                         space().width((depth + 1) as f32 * 12.0 + 13.0),
@@ -2569,4 +3414,36 @@ fn push_var_rows<'a>(
             }
         }
     }
+}
+
+/// A question to try in pieces: each with whether it is a name from the
+/// code (written in backticks), to be set in the code font. A backtick with
+/// no pair sets nothing apart: the question is one plain piece, without it.
+pub(crate) fn question_pieces(q: &str) -> Vec<(String, bool)> {
+    if q.matches('`').count() % 2 == 1 {
+        return vec![(strip_backticks(q), false)];
+    }
+    q.split('`')
+        .enumerate()
+        .filter(|(_, piece)| !piece.is_empty())
+        // Odd pieces sat between a pair of backticks.
+        .map(|(i, piece)| (piece.to_string(), i % 2 == 1))
+        .collect()
+}
+
+/// A question to try, as the reader reads it: names from the code set in
+/// the code font, the rest as prose ([`question_pieces`]).
+fn question_text<'a>(q: &str) -> Element<'a, Message> {
+    let spans: Vec<iced::widget::text::Span<'a, Message>> = question_pieces(q)
+        .into_iter()
+        .map(|(piece, code)| {
+            let span = iced::widget::span(piece).color(theme::accent());
+            if code {
+                span.font(crate::fonts::CODE)
+            } else {
+                span
+            }
+        })
+        .collect();
+    iced::widget::rich_text(spans).size(ts::SMALL).into()
 }

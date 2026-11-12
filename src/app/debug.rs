@@ -63,6 +63,18 @@ fn take_notice(mut launch: serde_json::Value) -> (serde_json::Value, Option<Stri
     (launch, notice)
 }
 
+/// A `launch` body for a run without the debugger: DAP's `noDebug`, which
+/// every adapter that knows it takes as "run it, stop at nothing" — and no
+/// stop at the entry either, for one that does not. The breakpoints are
+/// kept from it by never being sent
+/// ([`crate::app::state::DebugState::no_debug`]).
+fn without_debugger(launch: &mut serde_json::Value) {
+    if let Some(body) = launch.as_object_mut() {
+        body.insert("noDebug".into(), serde_json::Value::Bool(true));
+        body.insert("stopOnEntry".into(), serde_json::Value::Bool(false));
+    }
+}
+
 /// The most children one variable shows: a list of a million is read a
 /// screenful at a time by no one.
 pub(crate) const MAX_VAR_CHILDREN: usize = 300;
@@ -73,35 +85,157 @@ impl App {
     /// launch.json.
     fn debuggable_script(&self) -> Option<PathBuf> {
         let abs = &self.active_viewer()?.abs;
-        match dap::Lang::detect(None, abs)? {
-            dap::Lang::Native | dap::Lang::CSharp => None,
-            _ => Some(abs.clone()),
+        let lang = dap::Lang::detect(None, abs)?;
+        if matches!(lang, dap::Lang::Native | dap::Lang::CSharp) {
+            return None;
         }
+        // A test file runs its tests (under pytest): Run on
+        // tests/test_pricing.py ran main.py, and said the test "does not
+        // run on its own".
+        if lang == dap::Lang::Python && clew_core::debugadapter::is_python_test(abs) {
+            return Some(abs.clone());
+        }
+        // A module that only defines things does nothing run on its own:
+        // the project's one program start in its language runs instead —
+        // what the reader meant. Run on a library module of a project with
+        // a `main.py` printed nothing and exited 0, and nothing said why.
+        if !self.runs_on_its_own(abs)
+            && let Some(start) = self.only_program_start(lang)
+        {
+            return Some(start);
+        }
+        Some(abs.clone())
+    }
+
+    /// Whether running `file` does something: it has a program start (a
+    /// `main`) or code at its top level, in no function. Not read yet: taken
+    /// to, as before.
+    pub(crate) fn runs_on_its_own(&self, file: &Path) -> bool {
+        let Some(symbols) = self.proj.symbol_index_by_file.get(file) else {
+            return true;
+        };
+        if symbols
+            .iter()
+            .any(|s| s.entry == Some(crate::graph::index::EntryKind::Main))
+        {
+            return true;
+        }
+        // Only files with calls are kept: one read without is all defs.
+        let Some(calls) = self.proj.calls_by_file.get(file) else {
+            return false;
+        };
+        // A call at the top level that is a statement of its own — `main()`,
+        // `app.run()`, an `if __name__ == "__main__":` block's — not one in
+        // a constant's value or a decorator: `TAX_RATE = Decimal("0.08")`
+        // made a module of definitions run itself, and print nothing.
+        let text = self
+            .active_viewer()
+            .filter(|v| v.abs == file)
+            .map(|v| v.source.clone());
+        let lines: Option<Vec<&str>> = text.as_deref().map(|t| t.lines().collect());
+        // Judged by the statement's first line: a call on the second line of
+        // `TAX = Decimal(\n    str(0.08)\n)` is the constant's value.
+        let starts = lines.as_deref().map(statement_starts);
+        calls.calls.iter().any(|s| {
+            s.caller.is_none()
+                && lines
+                    .as_ref()
+                    .zip(starts.as_ref())
+                    .is_none_or(|(lines, starts)| {
+                        let at = s.line.saturating_sub(1);
+                        starts
+                            .get(at)
+                            .and_then(|&first| lines.get(first))
+                            .is_none_or(|l| is_call_statement(l))
+                    })
+        })
+    }
+
+    /// The project's evident program start in `lang`, when there is exactly
+    /// one: a `main` function — not a method of that name — in a file named
+    /// `main` or `__main__`, outside the folders whose code is not the
+    /// program (tests, fixtures, examples, scripts, tools, docs, benches,
+    /// others' code). Any file with a `main` did not do: a project's
+    /// `scripts/seed_db.py` ran, and rewrote its database, for Run on
+    /// `utils.py`.
+    fn only_program_start(&self, lang: dap::Lang) -> Option<PathBuf> {
+        let mut starts = self
+            .proj
+            .symbol_index_by_file
+            .iter()
+            .filter(|(file, symbols)| {
+                symbols.iter().any(|s| {
+                    s.entry == Some(crate::graph::index::EntryKind::Main)
+                        && s.kind == "function"
+                        && !s.is_test
+                        && is_program_start_file(&s.rel)
+                }) && dap::Lang::detect(None, file) == Some(lang)
+            })
+            .map(|(file, _)| file.clone());
+        let start = starts.next()?;
+        starts.next().is_none().then_some(start)
     }
 
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
     /// adapter off-thread and streams its events back as `DapEvent` messages.
     pub(crate) fn start_debug(&mut self) -> Task<Message> {
-        // A program that has ended leaves its session on screen — its output,
-        // its last frames — but nothing runs in it: starting again ends it
-        // (and lets its adapter go) rather than calling it "already running"
-        // until the reader thinks to press Stop.
-        if self
+        self.start_session(false)
+    }
+
+    /// Run the program as Debug would, without the debugger: the same
+    /// launch, the adapter told `noDebug`, no breakpoint set in it. Its
+    /// output and its end show in the bottom panel as a debug run's do.
+    pub(crate) fn start_run(&mut self) -> Task<Message> {
+        self.start_session(true)
+    }
+
+    /// Whether a run or debug session is still going — running, paused or
+    /// starting — while the bottom panel is hidden: what the status bar's
+    /// session chip says, and what Run and Debug show again first.
+    pub(crate) fn hidden_session_live(&self) -> bool {
+        !self.show_bottom
+            && self
+                .debug
+                .session
+                .as_ref()
+                .is_some_and(|s| s.status != DebugStatus::Terminated)
+    }
+
+    /// What the status line says while the session runs: a run is no
+    /// debugger's.
+    fn running_said(&self) -> String {
+        // What runs, named: which file Run picked was said nowhere. A
+        // remote run's program is the project's folder there, not a file —
+        // "Running Clew…" named no program.
+        let name = self
             .debug
             .session
             .as_ref()
-            .is_some_and(|s| s.status == DebugStatus::Terminated)
-        {
-            let ended = self.stop_debug_session();
-            return Task::batch([ended, self.start_debug()]);
+            .filter(|_| !self.connection.is_remote())
+            .and_then(|s| s.program.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        match (self.debug.no_debug, name) {
+            (true, Some(name)) => tr!("Running {file}…", file = name),
+            (true, None) => tr!("Running…").into(),
+            (false, Some(name)) => tr!("Debugging {file}…", file = name),
+            (false, None) => tr!("Debugger running…").into(),
         }
-        if self.debug.session.is_some() {
-            self.status = tr!("A debug session is already running").into();
-            return Task::none();
-        }
+    }
+
+    /// Begin a session from the launch config: a debug one, or with
+    /// `no_debug` a plain run ([`Self::start_run`]).
+    fn start_session(&mut self, no_debug: bool) -> Task<Message> {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
+        // The panel hidden over a session still live: Run or Debug shows it
+        // again, as its tooltip says — it started a second copy of the
+        // program beside the one paused out of sight. Asked again, with the
+        // panel shown, it starts another.
+        if !self.show_bottom && self.hidden_session_live() {
+            self.show_bottom = true;
+            return Task::none();
+        }
         // A remote project's launch.json lives in the REMOTE .clew (fetched
         // over the protocol inside the stream, along with the adapter — the
         // program, config, and adapter binary all live on that host, so
@@ -127,9 +261,27 @@ impl App {
                         type_hint: None,
                     }
                 }
-                // None at all: one for this project, in its language.
+                // None at all: one for this project, in its language —
+                // or, a library crate, that it has nothing to run: a
+                // program named after the folder sent the reader to build
+                // one that would never be.
                 Err(_) if !root.join(".clew").join("launch.json").exists() => {
+                    // A folder with no code has nothing to run: it was told
+                    // to write a launch file for a program it has not got.
+                    if self.no_code() {
+                        self.status = tr!("There is nothing to run in this folder.").into();
+                        return Task::none();
+                    }
                     let lang = self.active_viewer().and_then(|v| v.lang_key);
+                    if matches!(lang, None | Some("rust"))
+                        && crate::app::tasks::cargo_binary(&root) == Some(None)
+                    {
+                        self.status = tr!(
+                            "Nothing to run: this crate is a library. To run a program, name it in {path}",
+                            path = Path::new(".clew").join("launch.json").display()
+                        );
+                        return Task::none();
+                    }
                     self.status = tr!(
                         "Create {path} with {example}",
                         path = Path::new(".clew").join("launch.json").display(),
@@ -159,9 +311,17 @@ impl App {
             };
             (cfg.program, cfg.args, cfg.cwd, Some(lang))
         };
+        // A run of its own, in a tab of its own: the run on screen goes on in
+        // its tab. An ended run of the same program, run the same way, gives
+        // this one its tab — run again, not run beside it.
+        let (tab, ended) = self.tab_for_new_run(&program, no_debug);
+        self.debug.tab = tab;
+        self.run_shown = Some(crate::app::state::RunTab::Real(tab));
+        self.debug.stopped_by_reader = false;
         self.debug.session = Some(DebugSession {
             client: None,
             status: DebugStatus::Launching,
+            exit_code: None,
             thread_id: None,
             frames: Vec::new(),
             scopes: Vec::new(),
@@ -174,20 +334,52 @@ impl App {
             addr: None,
         });
         self.show_bottom = true;
-        self.debug.last_fn = None;
-        // A new run: its trace starts empty.
+        self.debug.no_debug = no_debug;
+        self.debug.trail_fns.clear();
+        // A new run: its trace starts empty — and what was said of the last
+        // one's tour (its narration failed) is of a run no longer the one
+        // traced.
         self.debug.trace.clear();
+        self.forget_failure_of(crate::app::state::FailureOf::Walkthrough);
         self.debug.trace_cut = false;
         self.debug.trace_rev += 1;
         self.debug.trace_program = program
             .file_name()
             .map(|n| n.to_string_lossy().into_owned());
         self.debug.pending_reason.clear();
+        // What runs, named — and, when it is not the file being read, that
+        // it was picked for it: Run on pricing.py ran main.py, and said
+        // only "Starting the program — Python (debugpy)…", naming a
+        // debugger for a run without one.
+        let program_name = program
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // Only where Run picked the program for the file being read: a
+        // program named in launch.json runs whatever is open, and the file
+        // read may well run on its own.
+        let picked =
+            !self.connection.is_remote() && !root.join(".clew").join("launch.json").exists();
+        let reading = self
+            .active_viewer()
+            .filter(|v| picked && v.abs != program)
+            .and_then(|v| v.abs.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        self.debug.ran_for = reading.clone();
         self.status = match lang {
+            Some(_) if no_debug => match reading {
+                Some(reading) => tr!(
+                    "Running {program} ({file} does not run on its own)…",
+                    program = program_name,
+                    file = reading
+                ),
+                None => tr!("Running {file}…", file = program_name),
+            },
             Some(lang) => tr!(
                 "Starting debugger — {adapter}…",
                 adapter = crate::i18n::lookup(lang.label())
             ),
+            None if no_debug => tr!("Starting the program on the remote host…").into(),
             None => tr!("Starting debugger on the remote host…").into(),
         };
         // This run's identity: every message the adapter stream produces carries
@@ -603,7 +795,10 @@ impl App {
                 // What the adapter's resolution has to say (a Zig binary
                 // whose variables lldb cannot read): to the debug console,
                 // and out of the body the adapter gets.
-                let (launch, notice) = take_notice(launch);
+                let (mut launch, notice) = take_notice(launch);
+                if no_debug {
+                    without_debugger(&mut launch);
+                }
                 if let Some(text) = notice {
                     let _ = output
                         .send(Message::Debug(DebugMsg::DapEvent {
@@ -684,7 +879,7 @@ impl App {
                     .await;
             },
         );
-        Task::run(stream, |m| m)
+        Task::batch([ended, Task::run(stream, |m| m)])
     }
 
     /// The debug adapter a run needs is not installed. Nothing is installed
@@ -777,7 +972,7 @@ impl App {
             }
             // The install is global and reported whatever the project; only
             // starting the session belongs to the project it was asked in.
-            Ok(()) if self.owns(&stamp) => self.start_debug(),
+            Ok(()) if self.owns(&stamp) => self.start_session(self.debug.no_debug),
             Ok(()) => {
                 self.status = tr!("Debug adapter installed").into();
                 Task::none()
@@ -786,10 +981,48 @@ impl App {
     }
 
     pub(crate) fn on_debug_stop(&mut self) -> Task<Message> {
-        self.status = tr!("Debugger stopped").into();
+        self.status = if self.debug.no_debug {
+            tr!("Program stopped").into()
+        } else {
+            tr!("Debugger stopped").into()
+        };
+        // Its tab stays, with what the program printed, as a run that ended
+        // by itself leaves it: the tab's × closes it.
+        let kept = self.debug.session.as_ref().map(|s| DebugSession {
+            client: None,
+            status: DebugStatus::Terminated,
+            exit_code: s.exit_code,
+            thread_id: None,
+            frames: Vec::new(),
+            scopes: Vec::new(),
+            watches: Vec::new(),
+            output: s.output.clone(),
+            current: None,
+            program: s.program.clone(),
+            args: s.args.clone(),
+            cwd: s.cwd.clone(),
+            addr: None,
+        });
         // The teardown itself is shared with the project switch, which used to
         // carry its own copy of it (see `stop_debug_session`).
-        self.stop_debug_session()
+        let ended = self.stop_debug_session();
+        self.debug.stopped_by_reader = kept.is_some();
+        self.debug.session = kept;
+        self.debug.said = None;
+        ended
+    }
+
+    /// The ended run on screen, run again as it was: in its own tab.
+    fn on_debug_again(&mut self) -> Task<Message> {
+        if self
+            .debug
+            .session
+            .as_ref()
+            .is_none_or(|s| s.status != DebugStatus::Terminated)
+        {
+            return Task::none();
+        }
+        self.start_session(self.debug.no_debug)
     }
 
     /// Tear down the work this window owns, just before the shell drops its
@@ -1037,6 +1270,13 @@ impl App {
         true
     }
 
+    /// Draw the answers of the session on screen about the breakpoints in
+    /// the gutter: a run come on screen from its tab.
+    pub(crate) fn show_own_debug_verdicts(&mut self) {
+        let id = self.active_debug_session();
+        self.show_debug_verdicts(id);
+    }
+
     /// Draw session `id`'s answers about the breakpoints in the gutter: what
     /// it has not answered for is unknown.
     fn show_debug_verdicts(&mut self, id: crate::app::state::DebugSessionId) {
@@ -1123,7 +1363,10 @@ impl App {
     /// Put `text` on the status line as what the run is doing now.
     pub(crate) fn say_debug_state(&mut self, text: String) {
         self.debug.said = Some(text.clone());
-        self.status = text;
+        // Off screen, it is said when its tab is shown.
+        if !self.debug_off_screen {
+            self.status = text;
+        }
     }
 
     /// Take down what [`say_debug_state`](Self::say_debug_state) said, if
@@ -1173,7 +1416,7 @@ impl App {
         };
         let tid = s.thread_id.unwrap_or(0);
         self.say_debug_state(tr!(
-            "Stopped: {reason}",
+            "Paused: {reason}",
             reason = stop_reason_label(&s.reason)
         ));
         let run = self.debug_run;
@@ -1253,7 +1496,7 @@ impl App {
     /// from the previous run are dropped, and an in-flight startup stream
     /// cancels itself at its next checkpoint.
     pub(crate) fn bump_debug_run(&mut self) {
-        self.debug_run += 1;
+        self.debug_run = self.next_debug_run();
         self.debug_run_live
             .store(self.debug_run, std::sync::atomic::Ordering::SeqCst);
         self.bump_debug_stop();
@@ -1410,10 +1653,12 @@ impl App {
                 let Some(client) = configure else {
                     return Task::none();
                 };
+                // A run sets none: it stops at nothing.
                 let bps: Vec<(PathBuf, BpList)> = self
                     .debug
                     .breakpoints
                     .iter()
+                    .filter(|_| !self.debug.no_debug)
                     .map(|(p, m)| {
                         (
                             p.clone(),
@@ -1456,9 +1701,9 @@ impl App {
                 // behind, an inspection still in flight for it would arrive and
                 // fill the panel back in while the program is running.
                 self.bump_debug_stop();
-                // Running again: "Stopped: breakpoint" is no longer so.
+                // Running again: "Paused: breakpoint" is no longer so.
                 if self.debug.said.as_deref().is_some_and(|s| s == self.status) {
-                    self.say_debug_state(tr!("Debugger running…").into());
+                    self.say_debug_state(self.running_said());
                 }
                 self.show_paused_debug_session()
             }
@@ -1469,13 +1714,11 @@ impl App {
                 push_debug_output(session, o.category, o.text);
                 Task::none()
             }
+            // Its code said once, beside the run's name — the output said
+            // it again under it.
             dap::DapEvent::Exited { code } => {
-                push_debug_output(
-                    session,
-                    "console".into(),
-                    format!("{}\n", tr!("Process exited with code {code}", code = code)),
-                );
                 session.status = DebugStatus::Terminated;
+                session.exit_code = Some(code);
                 session.current = None;
                 // The program is gone: an inspection still loading for the last
                 // stop must not resurrect a location in a dead process.
@@ -1498,6 +1741,11 @@ impl App {
                 let Some(addr) = session.addr else {
                     return Task::none();
                 };
+                // A run's children run without the debugger too.
+                let mut config = config;
+                if self.debug.no_debug {
+                    without_debugger(&mut config);
+                }
                 let run = self.debug_run;
                 // The run's stop, which the child heeds as the run's own
                 // stream does: it went on forwarding a stopped run's events
@@ -1824,14 +2072,19 @@ impl App {
             let fname = session.frames.first().map(|f| short_frame_name(&f.name));
             (t, fname)
         };
-        // Fuse into the reading trail: when execution enters a NEW
-        // function, record one entry (labelled with the function name) so
-        // the debug run becomes a navigable path in the TRAIL tab.
+        // A run in a tab not on screen: its stop is read, not shown — the
+        // code and the reading trail are the reader's.
+        if self.debug_off_screen {
+            return self.eval_watches();
+        }
+        // Fuse into the reading trail: when execution enters a function
+        // for the first time in this run, record one entry (labelled with
+        // the function name) so the debug run becomes a navigable path in
+        // the TRAIL tab.
         let mut saved = Task::none();
         if let (true, Some(fname), Some((path, line))) = (record, &fname, &target)
-            && self.debug.last_fn.as_ref() != Some(fname)
+            && self.debug.trail_fns.insert((path.clone(), fname.clone()))
         {
-            self.debug.last_fn = Some(fname.clone());
             self.proj.history.push(
                 Loc {
                     path: path.clone(),
@@ -1915,6 +2168,22 @@ impl App {
     /// Push one file's breakpoints (line + condition) to a live adapter. No-op
     /// when no session is running.
     pub(crate) fn push_breakpoints(&mut self, path: &Path) -> Task<Message> {
+        // A run without the debugger stops at nothing: the breakpoint is
+        // kept for the next debug run, and not sent to this one.
+        if self.debug.no_debug && self.debug.session.is_some() {
+            return Task::none();
+        }
+        // Nor to a run that has ended: it is kept for the next one. Sent,
+        // the adapter that had gone answered "Server[pid=…] disconnected
+        // unexpectedly", said as a breakpoint that failed.
+        if self
+            .debug
+            .session
+            .as_ref()
+            .is_some_and(|s| s.status == crate::DebugStatus::Terminated)
+        {
+            return Task::none();
+        }
         // A configuration being sent now is a snapshot of before this change
         // (see `DebugState::bp_rev`).
         self.debug.bp_rev += 1;
@@ -2032,12 +2301,22 @@ impl App {
                 Err(e) => {
                     // The request failed or timed out. `let _ =` used to hide
                     // this too: every breakpoint in the file stays "unknown",
-                    // so say so instead of leaving a silently dead gutter.
-                    self.status = tr!(
-                        "Could not set breakpoints in {file}: {error}",
-                        file = self.rel_of(&path),
-                        error = e
-                    );
+                    // so say so instead of leaving a silently dead gutter —
+                    // and that they are kept, for the next run. A run that
+                    // ended while it was asked has nothing to say: they are
+                    // for the next run all the same.
+                    let ended = self
+                        .debug
+                        .session
+                        .as_ref()
+                        .is_none_or(|s| s.status == crate::DebugStatus::Terminated);
+                    if !ended {
+                        self.status = tr!(
+                            "The debugger didn't take the breakpoints in {file} ({why}); they are kept for the next run",
+                            file = self.rel_of(&path),
+                            why = super::tasks::plain_detail(&e)
+                        );
+                    }
                     continue;
                 }
             };
@@ -2323,8 +2602,27 @@ impl App {
     /// Handle a [`DebugMsg`]: this feature's share of what `dispatch` routes
     /// (after its one ownership check and the menu bookkeeping).
     pub(crate) fn update_debug(&mut self, message: DebugMsg) -> Task<Message> {
+        // A message of a run in a tab not on screen is that run's.
+        if let Some(i) = self.parked_owner(&message) {
+            return self.with_parked_debug(i, message);
+        }
+        let stop = message.is_stop() && message.run() == Some(self.debug_run);
+        let task = self.update_debug_here(message);
+        // The run on screen stopped: its tab comes up, if another was.
+        if stop && self.debug.tab != 0 {
+            self.run_shown = Some(crate::app::state::RunTab::Real(self.debug.tab));
+        }
+        task
+    }
+
+    /// [`Self::update_debug`], for the run on screen.
+    pub(crate) fn update_debug_here(&mut self, message: DebugMsg) -> Task<Message> {
         match message {
             DebugMsg::Start => self.start_debug(),
+            DebugMsg::Run => self.start_run(),
+            DebugMsg::ShowTab(tab) => self.show_run_tab(tab),
+            DebugMsg::CloseTab(tab) => self.close_run_tab(tab),
+            DebugMsg::Again => self.on_debug_again(),
             DebugMsg::DapStarted {
                 run,
                 client,
@@ -2344,7 +2642,7 @@ impl App {
                     let children = self.debug_children();
                     children.own = Some((client, hover_safe));
                     children.active = crate::app::state::OWN_SESSION;
-                    self.say_debug_state(tr!("Debugger running…").into());
+                    self.say_debug_state(self.running_said());
                     self.bump_debug_stop();
                 }
                 Task::none()
@@ -2386,7 +2684,7 @@ impl App {
                         // "terminated", the next Start tore it down.
                         if status == Some(DebugStatus::Terminated) {
                             self.show_debug_running();
-                            self.say_debug_state(tr!("Debugger running…").into());
+                            self.say_debug_state(self.running_said());
                         }
                     }
                 }
@@ -2492,6 +2790,23 @@ impl App {
                 self.proj.bp_cond_edit = None;
                 Task::none()
             }
+            // From its own dialog: there was no way to take a breakpoint
+            // away but its dot or the menu's toggle.
+            DebugMsg::BpConditionRemove => {
+                let Some((path, line, _)) = self.proj.bp_cond_edit.take() else {
+                    return Task::none();
+                };
+                let set = self
+                    .debug
+                    .breakpoints
+                    .get(&path)
+                    .is_some_and(|m| m.contains_key(&line));
+                if set {
+                    self.on_breakpoint_toggle(path, line)
+                } else {
+                    Task::none()
+                }
+            }
             DebugMsg::WatchInput(s) => {
                 self.debug.watch_input = s;
                 Task::none()
@@ -2562,9 +2877,250 @@ pub(crate) struct Closing {
     pub(crate) teardown: Task<Message>,
 }
 
+/// For each line of `lines`, the line its statement starts on: a line
+/// inside brackets left open, or after one ending in `\`, continues the
+/// statement above it. A line at the left edge that is no closing bracket
+/// or chained call starts one whatever came before — a bracket in a string
+/// miscounted stops at the next statement.
+fn statement_starts(lines: &[&str]) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(lines.len());
+    let (mut depth, mut start, mut continued) = (0i32, 0usize, false);
+    for (i, line) in lines.iter().enumerate() {
+        let fresh = line
+            .chars()
+            .next()
+            .is_some_and(|c| !c.is_whitespace() && !matches!(c, ')' | ']' | '}' | '.'));
+        if fresh || (depth <= 0 && !continued) {
+            start = i;
+            depth = 0;
+        }
+        starts.push(start);
+        for c in line.chars() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        continued = line.trim_end().ends_with('\\');
+    }
+    starts
+}
+
+/// Whether `line` is a statement that does something when its file runs: a
+/// call, or a block that calls (`if __name__ == "__main__":`) — not a
+/// declaration, an import, an assignment or a decorator, whose calls only
+/// make a value.
+fn is_call_statement(line: &str) -> bool {
+    let t = line.trim_start();
+    let t = t.strip_prefix("await ").unwrap_or(t);
+    // The name it starts with: `app.run`, `Foo::bar`, `$app->run`,
+    // `App.run!`, `handlers[0].run`.
+    let mut head_len = 0;
+    while head_len < t.len() {
+        let rest = &t[head_len..];
+        if rest.starts_with("::") || rest.starts_with("->") {
+            head_len += 2;
+        } else if rest.starts_with('[') && head_len > 0 {
+            // An index, as part of the name: `handlers[0].run()`, and
+            // `counts[k] = f()` still an assignment after it.
+            match rest.find(']') {
+                Some(close) => head_len += close + 1,
+                None => break,
+            }
+        } else if (rest.starts_with('!') || rest.starts_with('?'))
+            && head_len > 0
+            && !rest[1..].starts_with('=')
+        {
+            // Ruby's `run!`, `ready?`: part of the name, not an operator.
+            head_len += 1;
+        } else if let Some(c) = rest
+            .chars()
+            .next()
+            .filter(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '$'))
+        {
+            head_len += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let (head, rest) = t.split_at(head_len);
+    if head.is_empty() {
+        return false;
+    }
+    const DECLARES: &[&str] = &[
+        "def",
+        "class",
+        "async",
+        "import",
+        "from",
+        "fn",
+        "func",
+        "function",
+        "let",
+        "const",
+        "var",
+        "val",
+        "pub",
+        "use",
+        "mod",
+        "struct",
+        "enum",
+        "type",
+        "interface",
+        "export",
+        "static",
+        "final",
+        "public",
+        "private",
+        "protected",
+        "global",
+        "nonlocal",
+        "require",
+        "require_relative",
+        "include",
+        "extend",
+        "using",
+        "package",
+        "namespace",
+        "module",
+    ];
+    if DECLARES.contains(&head) {
+        return false;
+    }
+    let rest = rest.trim_start();
+    // A value given a name (`x = f()`, `x: int = f()`, `x += f()`), or
+    // indexed into: no statement of its own.
+    !rest.starts_with(|c: char| "=:+-*/%&|^<>![,".contains(c)) || rest.starts_with("==")
+}
+
+/// Folders whose `main` is not the program's: its tests and their inputs,
+/// examples, helper scripts and tools, docs, benchmarks, others' code.
+const NOT_THE_PROGRAM: &[&str] = &[
+    "test",
+    "tests",
+    "testdata",
+    "test_data",
+    "fixture",
+    "fixtures",
+    "__fixtures__",
+    "example",
+    "examples",
+    "script",
+    "scripts",
+    "tool",
+    "tools",
+    "doc",
+    "docs",
+    "bench",
+    "benches",
+    "benchmark",
+    "benchmarks",
+    "vendor",
+    "third_party",
+    "node_modules",
+];
+
+/// Whether `rel`, a file of the project, is where its program evidently
+/// starts: named `main` or `__main__`, in none of [`NOT_THE_PROGRAM`].
+fn is_program_start_file(rel: &str) -> bool {
+    let mut parts = rel.rsplit(['/', '\\']);
+    let named = parts
+        .next()
+        .and_then(|name| Path::new(name).file_stem())
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| matches!(stem, "main" | "__main__"));
+    named && !parts.any(|dir| NOT_THE_PROGRAM.contains(&dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call that is a statement does something when the file runs; one
+    /// that only makes a value, or decorates, does not.
+    #[test]
+    fn a_call_statement_is_not_a_value_made() {
+        for line in [
+            "main()",
+            "    main()",
+            "app.run(debug=True)",
+            "if __name__ == \"__main__\":",
+            "asyncio.run(main())",
+            "await main()",
+            "puts \"hi\"",
+            "console.log(total);",
+            "$app->run();",
+            "$kernel->terminate($request, $response);",
+            "Sinatra::Application.run!",
+            "App.run!",
+            "handlers[0].run()",
+        ] {
+            assert!(is_call_statement(line), "{line}");
+        }
+        for line in [
+            "TAX_RATE = Decimal(\"0.08\")",
+            "rate: Decimal = Decimal(\"0.08\")",
+            "@dataclass(frozen=True)",
+            "app = Flask(__name__)",
+            "const total = sum(items);",
+            "let x = f();",
+            "import os",
+            "def helper(x=f()):",
+            "counts[k] = f()",
+            "x += f()",
+            "$app = new App();",
+            "ok = ready? ",
+        ] {
+            assert!(!is_call_statement(line), "{line}");
+        }
+    }
+
+    /// A line inside a statement's brackets belongs to the statement: the
+    /// call on a constant's second line is the constant's value.
+    #[test]
+    fn a_statement_spans_its_open_brackets() {
+        let lines = [
+            "TAX = Decimal(",
+            "    str(0.08)",
+            ")",
+            "urlpatterns = [",
+            "    path(\"a\", view),",
+            "]",
+            "if __name__ == \"__main__\":",
+            "    main()",
+            "x = 1 + \\",
+            "    f()",
+        ];
+        assert_eq!(statement_starts(&lines), [0, 0, 0, 3, 3, 3, 6, 7, 8, 8]);
+    }
+
+    /// A program evidently starts in a `main` or `__main__` file outside its
+    /// tests, scripts, tools and the like — not in any file with a `main`.
+    #[test]
+    fn a_program_start_is_a_main_file_of_the_program_itself() {
+        for rel in [
+            "main.py",
+            "app/__main__.py",
+            "cmd/serve/main.go",
+            "src\\main.py",
+        ] {
+            assert!(is_program_start_file(rel), "{rel}");
+        }
+        for rel in [
+            "scripts/seed_db.py",
+            "scripts/main.py",
+            "tests/main.py",
+            "tools/gen/main.go",
+            "examples/demo/main.go",
+            "benches/main.py",
+            "utils.py",
+            "main_test.go",
+            "domain.py",
+        ] {
+            assert!(!is_program_start_file(rel), "{rel}");
+        }
+    }
 
     /// Clew's notice comes out of the launch body — the adapter never sees
     /// it — and is what the console shows; a body without one is untouched.
@@ -2581,10 +3137,23 @@ mod tests {
         assert_eq!(take_notice(plain.clone()), (plain, None));
     }
 
+    /// A run's launch body tells the adapter `noDebug`, and not to stop at
+    /// the entry: a config's own `stopOnEntry` is a debugging choice.
+    #[test]
+    fn a_run_launches_without_the_debugger() {
+        let mut launch = serde_json::json!({ "program": "/p/app", "stopOnEntry": true });
+        without_debugger(&mut launch);
+        assert_eq!(
+            launch,
+            serde_json::json!({ "program": "/p/app", "noDebug": true, "stopOnEntry": false })
+        );
+    }
+
     fn blank_session() -> DebugSession {
         DebugSession {
             client: None,
             status: DebugStatus::Running,
+            exit_code: None,
             thread_id: None,
             frames: Vec::new(),
             scopes: Vec::new(),

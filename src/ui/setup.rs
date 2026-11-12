@@ -2,7 +2,9 @@
 //! where clew keeps its data, its language servers, explaining it — and
 //! "Set up project…" and Explain All asking again.
 
-use iced::widget::{button, checkbox, column, container, row, space, text};
+use iced::widget::{checkbox, column, container, row, space, text};
+
+use super::button;
 use iced::{Element, Fill, Padding};
 
 use super::chrome::{Backdrop, CONFIRM_PAD, DIALOG_W, Placement, modal};
@@ -11,7 +13,7 @@ use crate::app::message::{Message, ProjectMsg};
 use crate::app::setup::{ProjectSetup, SetupMode, explain_line, servers_line};
 use crate::app::state::App;
 use crate::theme;
-use crate::tr;
+use crate::{tr, trn};
 
 /// Room under a tick for what it takes, lined up with its label.
 const DETAIL_INDENT: f32 = 26.0;
@@ -34,6 +36,12 @@ pub(crate) fn servers_row(
     {
         None => Some((true, false, tr!("Checking the project…").to_string())),
         Some([]) if remote && mode == SetupMode::Open => None,
+        // A folder with no code: none to read, not all of them ready.
+        Some([]) if setup.is_some_and(|s| s.no_code) => Some((
+            false,
+            false,
+            tr!("No code here for them to read.").to_string(),
+        )),
         Some([]) => Some((true, false, tr!("Ready.").to_string())),
         Some(list) => Some((setup.is_some_and(|s| s.servers), true, servers_line(list))),
     }
@@ -57,7 +65,34 @@ pub(crate) fn setup_sheet<'a>(
         .unwrap_or_else(|| root.display().to_string());
     let census = setup.and_then(|s| s.census.as_ref());
     let calls = setup.map(|s| s.census.as_ref().map(|c| c.calls));
-    let explain_says = explain_line(app.llm_available, calls.flatten(), app.embed_available);
+    // What those calls are likely to cost, with the count of them: said
+    // before anything is spent, not after.
+    let counted = calls.flatten().flatten();
+    let estimate = counted.and_then(|n| Some((n, app.explain_estimate(n)?)));
+    // The count, its tokens and its money in one sentence of one weight —
+    // the count stood bold over a dim line of the rest — and what else
+    // explaining does on a line of its own.
+    let (explain_says, explain_also) = match &estimate {
+        Some((n, e)) => (
+            e.said(*n),
+            if app.embed_available {
+                tr!("Also builds the semantic index.").to_string()
+            } else {
+                String::new()
+            },
+        ),
+        // A folder with no code in it says so: "Nothing left to explain"
+        // read as if all of it had been explained. The sheet's folder, as
+        // its look found it — on a first open, not the project open now.
+        None if counted == Some(0) && setup.is_some_and(|s| s.no_code) => (
+            tr!("There is no code here to explain.").to_string(),
+            String::new(),
+        ),
+        None => (
+            explain_line(app.llm_available, calls.flatten(), app.embed_available),
+            String::new(),
+        ),
+    };
 
     let title = match mode {
         SetupMode::Open => tr!("Open {name}", name = name),
@@ -66,7 +101,7 @@ pub(crate) fn setup_sheet<'a>(
     };
     let title = text(title).size(ts::TITLE).color(theme::fg());
     // A first open's ×, as Escape: the project is not opened — said in its
-    // tip, beside Skip setup, which opens it.
+    // tip, beside Open without setup, which opens it.
     let header: Element<'a, Message> = if mode == SetupMode::Open {
         row![
             title,
@@ -84,24 +119,46 @@ pub(crate) fn setup_sheet<'a>(
         .align_y(iced::Center)
         .into()
     } else {
-        title.into()
+        // The other sheets' × too, as their Cancel: the first open's had
+        // one, "Set up" none, and the same dialog looked two ways.
+        row![
+            title,
+            space().width(Fill),
+            super::chrome::close_button_saying(
+                Message::Project(ProjectMsg::SetupClose),
+                tr!("Close"),
+            ),
+        ]
+        .align_y(iced::Center)
+        .into()
     };
     let mut body = column![header].spacing(14);
 
     if mode == SetupMode::Open {
         body = body.push(
-            row![
-                text(tr!("Project data folder:"))
-                    .size(ts::BODY)
-                    .color(theme::dim()),
-                text(format!("{}/.clew", root.display()))
-                    .size(ts::BODY)
-                    .font(crate::fonts::CODE)
-                    .color(theme::fg_muted())
-                    .wrapping(iced::widget::text::Wrapping::Glyph),
+            column![
+                row![
+                    text(tr!("Project data folder:"))
+                        .size(ts::BODY)
+                        .color(theme::dim()),
+                    text(format!("{}/.clew", root.display()))
+                        .size(ts::BODY)
+                        .font(crate::fonts::CODE)
+                        .color(theme::fg_muted())
+                        .wrapping(iced::widget::text::Wrapping::Glyph),
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
+                // What of it git sees: its bookmarks and notes showed up
+                // among the reader's uncommitted changes with no word why.
+                text(tr!(
+                    "Its bookmarks, notes and project settings can be committed with the project; your own reading state stays out of git."
+                ))
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(iced::widget::text::Wrapping::Word),
             ]
-            .spacing(6)
-            .align_y(iced::Center),
+            .spacing(4),
         );
     }
 
@@ -109,7 +166,9 @@ pub(crate) fn setup_sheet<'a>(
                   on: bool,
                   toggle: Option<fn(bool) -> Message>,
                   detail: String,
-                  lines: f32|
+                  lines: f32,
+                  more: Option<String>,
+                  ai: bool|
      -> Element<'a, Message> {
         let tick = checkbox(on)
             .style(theme::check)
@@ -120,10 +179,26 @@ pub(crate) fn setup_sheet<'a>(
         if let Some(toggle) = toggle {
             super::heard::switch(label, on, toggle);
         }
-        column![
-            match toggle {
-                Some(toggle) => tick.on_toggle(toggle),
-                None => tick,
+        let col = column![
+            // A tick is pressed by its jump code and the keyboard's ring as
+            // by a click.
+            {
+                let tick: Element<'a, Message> = match toggle {
+                    Some(toggle) => super::jump::mark(tick.on_toggle(toggle), toggle(!on)),
+                    None => tick.into(),
+                };
+                // What spends AI calls is marked so, as everywhere else.
+                if ai {
+                    row![
+                        tick,
+                        crate::glyph::icon(crate::glyph::Glyph::Sparkle, theme::accent(), 13.0),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Center)
+                    .into()
+                } else {
+                    tick
+                }
             },
             container(row![
                 // The room the line keeps, whatever it says for now: a pixel
@@ -137,9 +212,24 @@ pub(crate) fn setup_sheet<'a>(
                 left: DETAIL_INDENT - 1.0,
                 ..Padding::ZERO
             }),
-        ]
-        .spacing(3)
-        .into()
+        ];
+        // A line of its own under the detail, kept while it is empty.
+        let col = match more {
+            Some(more) => col.push(
+                container(row![
+                    space()
+                        .width(1)
+                        .height(text::LineHeight::default().to_absolute(ts::SMALL.into()).0),
+                    text(more).size(ts::SMALL).color(theme::dim()),
+                ])
+                .padding(Padding {
+                    left: DETAIL_INDENT - 1.0,
+                    ..Padding::ZERO
+                }),
+            ),
+            None => col,
+        };
+        col.spacing(3).into()
     };
 
     match mode {
@@ -150,16 +240,28 @@ pub(crate) fn setup_sheet<'a>(
                 let toggle = changeable.then_some(
                     (|on| Message::Project(ProjectMsg::SetupServers(on))) as fn(bool) -> Message,
                 );
-                body = body.push(choice(tr!("Language servers"), on, toggle, detail, 2.0));
+                body = body.push(choice(
+                    tr!("Language servers"),
+                    on,
+                    toggle,
+                    detail,
+                    2.0,
+                    None,
+                    false,
+                ));
             }
             let can_explain =
                 app.llm_available && !matches!(census.map(|c| c.calls), Some(Some(0)));
+            // Its line, and the estimate's under it: room for both kept
+            // while the count is still coming.
             body = body.push(choice(
                 tr!("Explain the project"),
                 setup.is_some_and(|s| s.explain),
                 can_explain.then_some(|on| Message::Project(ProjectMsg::SetupExplain(on))),
                 explain_says,
                 1.0,
+                Some(explain_also),
+                true,
             ));
             // No key: where one is added, a click away — the line said
             // "in Settings" and left the reader to find it.
@@ -188,7 +290,69 @@ pub(crate) fn setup_sheet<'a>(
             }
         }
         SetupMode::Explain => {
-            body = body.push(text(explain_says).size(ts::BODY).color(theme::fg_muted()));
+            body = body.push(match estimate {
+                // What it will likely take, as three figures of one weight:
+                // the calls, their tokens, their money.
+                Some((n, e)) => {
+                    let tile = |value: String, label: String| -> Element<'a, Message> {
+                        container(
+                            column![
+                                text(value)
+                                    .size(ts::TITLE)
+                                    .font(crate::fonts::UI_MEDIUM)
+                                    .color(theme::fg()),
+                                text(label).size(ts::SMALL).color(theme::dim()),
+                            ]
+                            .spacing(2),
+                        )
+                        .padding([10, 12])
+                        .width(Fill)
+                        .style(theme::form_card)
+                        .into()
+                    };
+                    let cost = e.cost.map_or_else(|| "—".to_string(), crate::app::usage::money);
+                    let mut notes = column![
+                        text(e.basis())
+                            .size(ts::SMALL)
+                            .color(theme::dim())
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                    ]
+                    .spacing(2);
+                    if e.cost.is_none() {
+                        notes = notes.push(
+                            text(tr!(
+                                "Clew doesn't know this model's prices: enter them under Usage and cost to see what it costs."
+                            ))
+                            .size(ts::SMALL)
+                            .color(theme::dim())
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                        );
+                    }
+                    if !explain_also.is_empty() {
+                        notes = notes.push(
+                            text(explain_also).size(ts::SMALL).color(theme::dim()),
+                        );
+                    }
+                    column![
+                        row![
+                            tile(
+                                crate::app::setup::about(n),
+                                trn!("AI call", "AI calls", n).to_string()
+                            ),
+                            tile(
+                                crate::app::usage::tokens(e.tokens),
+                                tr!("Tokens").to_string()
+                            ),
+                            tile(cost, tr!("Estimated cost").to_string()),
+                        ]
+                        .spacing(8),
+                        notes,
+                    ]
+                    .spacing(10)
+                    .into()
+                }
+                None => Element::from(text(explain_says).size(ts::BODY).color(theme::fg_muted())),
+            });
         }
     }
 
@@ -212,12 +376,12 @@ pub(crate) fn setup_sheet<'a>(
             false,
         ),
     };
-    // A first open's Skip setup opens the project, with nothing set up: an
+    // A first open's Open without setup opens the project, with nothing set up: an
     // answer to the question as Open is, so pressed only once it can have
     // been read. Not opening it at all is the ×, or Escape.
     let (decline_label, decline, decline_gated) = if mode == SetupMode::Open {
         (
-            tr!("Skip setup"),
+            tr!("Open without setup"),
             Message::Project(ProjectMsg::OpenWithoutSetup(root.to_path_buf())),
             true,
         )
@@ -252,7 +416,7 @@ pub(crate) fn setup_sheet<'a>(
         .style(theme::toolbar_button)
         .padding([6, 16])
         .on_press_maybe(decline_ready.then(|| {
-            // Skip setup opens the project: no "no" to opening it, which
+            // Open without setup opens the project: no "no" to opening it, which
             // the × is; Cancel is.
             if decline_gated {
                 super::heard::said(decline_label, decline)
@@ -260,8 +424,22 @@ pub(crate) fn setup_sheet<'a>(
                 super::heard::answer(decline_label, super::heard::Answer::No, decline)
             }
         }));
-    let decline_button: Element<'a, Message> = if decline_gated {
-        crate::ui::fresh::allow(decline_ready, decline_button)
+    // A first open of a folder with no code, nothing to set up for it: the
+    // two buttons did the same — Open alone.
+    let nothing_to_set_up = mode == SetupMode::Open
+        && setup.is_some_and(|s| s.no_code)
+        && census.is_some_and(|c| c.servers.is_empty());
+    let decline_button: Element<'a, Message> = if nothing_to_set_up {
+        space().into()
+    } else if decline_gated {
+        // What it leaves out, said where the pointer rests: beside Open, it
+        // opened the project too, and said nothing of the ticks it ignored.
+        super::toolbar::tip_at(
+            crate::ui::fresh::allow(decline_ready, decline_button),
+            tr!("Open the project and set nothing up. The choices above are ignored."),
+            None,
+            iced::widget::tooltip::Position::Top,
+        )
     } else {
         decline_button.into()
     };
@@ -275,11 +453,48 @@ pub(crate) fn setup_sheet<'a>(
             None,
             iced::widget::tooltip::Position::Top,
         )
+    } else if gated && !asked.ready {
+        // Held a moment, so it is not pressed before the sheet is read —
+        // or while the window is behind another: a press then did nothing,
+        // with no word why.
+        super::toolbar::tip_at(
+            accept_button,
+            tr!("Ready in a moment, once the sheet is in front"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        )
     } else {
         accept_button
     };
+    // Why its main button waits, said beside it: greyed with nothing said,
+    // Apply read as broken.
+    let why_not: Option<&str> = (!something && !looking).then_some(()).and_then(|()| {
+        match (mode, setup) {
+            (SetupMode::Manage, Some(s))
+                if !s.explain && census.is_some_and(|c| c.servers.is_empty()) =>
+            {
+                Some(tr!(
+                    "Nothing to apply: the language servers are already set up."
+                ))
+            }
+            // Said once: the line about explaining above says it already
+            // ("Nothing left to explain." twice, a line apart).
+            (SetupMode::Explain, Some(s)) if s.explain && counted == Some(0) => None,
+            (SetupMode::Explain, Some(s)) if s.explain => Some(tr!("Nothing is left to explain.")),
+            _ => Some(tr!("Nothing to apply: tick what to set up.")),
+        }
+    });
+    let left: Element<'a, Message> = match why_not {
+        Some(why) => text(why)
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .wrapping(iced::widget::text::Wrapping::Word)
+            .width(Fill)
+            .into(),
+        None => space().width(Fill).into(),
+    };
     body = body.push(
-        row![space().width(Fill), decline_button, accept_button,]
+        row![left, decline_button, accept_button,]
             .spacing(10)
             .align_y(iced::Center),
     );

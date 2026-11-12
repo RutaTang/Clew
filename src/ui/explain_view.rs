@@ -50,6 +50,60 @@ pub(crate) fn render_answer<'a>(
     )
 }
 
+/// A cited path's words held on one line: a path broke after a `/`
+/// ("(teashop/" over "pricing.py:32)") and a line number after its `:`.
+/// A word joiner after each, which draws nothing — in what is shown
+/// only: the link goes where it went. Only a citation (code with a link):
+/// other code wraps as it did.
+pub(crate) fn held_together<L>(
+    mut span: iced::widget::text::Span<'static, L>,
+    code: iced::Font,
+) -> iced::widget::text::Span<'static, L> {
+    if span.link.is_some() && span.font == Some(code) && span.text.contains(['/', '\\', ':']) {
+        let mut held = String::with_capacity(span.text.len() + 12);
+        for c in span.text.chars() {
+            held.push(c);
+            if matches!(c, '/' | '\\' | ':') {
+                held.push('\u{2060}');
+            }
+        }
+        span.text = held.into();
+    }
+    span
+}
+
+/// The markdown viewer of prose set in no type of its own: iced's own
+/// look, a citation's path held on one line ([`held_together`]).
+#[derive(Clone, Copy)]
+struct Plain;
+
+impl<'a> iced::widget::markdown::Viewer<'a, Message> for Plain {
+    fn on_link_click(url: iced::widget::markdown::Uri) -> Message {
+        Message::Content(ContentMsg::OpenLink(url))
+    }
+
+    fn paragraph(
+        &self,
+        settings: iced::widget::markdown::Settings,
+        text: &iced::widget::markdown::Text,
+    ) -> Element<'a, Message> {
+        let code = settings.style.inline_code_font;
+        let spans: Vec<_> = text
+            .spans(settings.style)
+            .iter()
+            .cloned()
+            .map(|span| held_together(span, code))
+            .collect();
+        iced::widget::rich_text(spans)
+            .size(settings.text_size)
+            // A cited path held together is one word: longer than the
+            // column, it breaks by letter rather than run past its edge.
+            .wrapping(Wrapping::WordOrGlyph)
+            .on_link_click(Self::on_link_click)
+            .into()
+    }
+}
+
 /// A margin note's text size.
 pub(crate) const NOTE_SIZE: f32 = 13.0;
 /// A margin note's line height, relative to its size.
@@ -125,8 +179,14 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for Prose {
                 .line_height(line)
         };
         let mut spans = Vec::new();
-        for span in text.spans(settings.style).iter().cloned() {
-            if span.font == Some(settings.style.inline_code_font) {
+        let code = settings.style.inline_code_font;
+        for span in text
+            .spans(settings.style)
+            .iter()
+            .cloned()
+            .map(|span| held_together(span, code))
+        {
+            if span.font == Some(code) {
                 spans.push(room());
                 spans.push(
                     span.size(PROSE_CODE_SIZE)
@@ -146,6 +206,7 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for Prose {
         iced::widget::rich_text(spans)
             .size(settings.text_size)
             .line_height(line)
+            .wrapping(Wrapping::WordOrGlyph)
             .on_link_click(Self::on_link_click)
             .into()
     }
@@ -167,10 +228,11 @@ fn render_segments<'a>(
                     &prose,
                 ))
             }
-            PreparedSeg::Markdown(items) => out.push(
-                iced::widget::markdown::view(items, theme::markdown_settings())
-                    .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string()))),
-            ),
+            PreparedSeg::Markdown(items) => out.push(iced::widget::markdown::view_with(
+                items,
+                theme::markdown_settings(),
+                &Plain,
+            )),
             PreparedSeg::DisplayMath(key, tex) => out.push(match app.proj.explain.svgs.get(key) {
                 Some(sv) => container(svg_widget(sv))
                     .width(Fill)
@@ -199,10 +261,18 @@ fn render_segments<'a>(
                         // The prose around an equation is markdown too
                         // (bold, code, `clew:` citation links), not raw text.
                         PreparedInline::Text(piece) => line.push(
-                            iced::widget::rich_text(piece.spans(theme::markdown_settings().style))
-                                .color(theme::fg())
-                                .on_link_click(|v| Message::Content(ContentMsg::OpenLink(v)))
-                                .into(),
+                            iced::widget::rich_text({
+                                let style = theme::markdown_settings().style;
+                                piece
+                                    .spans(style)
+                                    .into_iter()
+                                    .map(|span| held_together(span, style.inline_code_font))
+                                    .collect::<Vec<_>>()
+                            })
+                            .color(theme::fg())
+                            .wrapping(Wrapping::WordOrGlyph)
+                            .on_link_click(|v| Message::Content(ContentMsg::OpenLink(v)))
+                            .into(),
                         ),
                         PreparedInline::Math(key, tex) => {
                             line.push(match app.proj.explain.svgs.get(key) {
@@ -418,13 +488,27 @@ pub(crate) fn call_flow_rows<'a>(
             // live one.
             let is_live = to_call && live_parent.as_deref() == Some(n.name.as_str());
             let live = theme::success();
-            // Wrapped, the place under the name where the margin is narrow:
-            // cut at its edge, the two read as one clipped word.
+            // The arrow and the name are one unit, the name cut to the
+            // margin's room with an ellipsis (whole where the pointer
+            // rests): a long test name wrapped under its arrow, left alone
+            // on the line above, and ran past the margin's edge unmarked.
+            // The place, wrapped, goes under them where the margin is
+            // narrow: cut at its edge, the two read as one clipped word.
+            let shown_name =
+                super::steady::cut(&n.name, call_name_room(app), ts::BODY, crate::fonts::UI);
+            let name_cut = shown_name != n.name;
             let mut r = row![
-                text(arrow)
-                    .size(ts::SMALL)
-                    .color(if is_live { live } else { theme::dim() }),
-                text(n.name.clone()).size(ts::BODY).color(name_color),
+                row![
+                    text(arrow)
+                        .size(ts::SMALL)
+                        .color(if is_live { live } else { theme::dim() }),
+                    text(shown_name)
+                        .size(ts::BODY)
+                        .color(name_color)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
                 text(place).size(ts::CAPTION).color(theme::dim()),
             ]
             .spacing(6);
@@ -445,18 +529,29 @@ pub(crate) fn call_flow_rows<'a>(
             } else {
                 Message::Semantic(SemanticMsg::OpenNode(target))
             };
-            out.push(
-                button(col)
-                    .style(theme::list_row(false))
-                    .width(Fill)
-                    .padding([3, 6])
-                    .on_press(heard::said(&n.name, msg))
-                    .into(),
-            );
+            let row_button = button(col)
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding([3, 6])
+                .on_press(heard::said(&n.name, msg));
+            out.push(if name_cut {
+                super::toolbar::tip_at(row_button, n.name.clone(), None, tooltip::Position::Top)
+            } else {
+                row_button.into()
+            });
         }
     }
     out
 }
+
+/// The room a call-flow row's name has: the margin, less its padding, the
+/// row's own, the arrow and the gap after it, and the scroller's lane.
+fn call_name_room(app: &App) -> f32 {
+    (super::margin_w(app) - CALL_ROW_CHROME).max(48.0)
+}
+
+/// What of the margin's width a call-flow row's name does not get.
+const CALL_ROW_CHROME: f32 = 64.0;
 
 /// How many "reached from" chains the panel shows, and how many calls deep
 /// the walk looks for an entry point.
@@ -548,13 +643,25 @@ fn reached_from_rows<'a>(
         out.push(caption(tr!("No entry point reaches this").into()));
         return out;
     }
+    // The room a chain has: the margin's, less its padding.
+    let room = super::panes::margin_w(app) - 24.0;
     for chain in chains {
         let mut steps: Vec<Element<'a, Message>> = Vec::new();
+        // How wide its entry is, with the arrow after it.
+        let mut entry_w = 0.0;
         let last = chain.len().saturating_sub(1);
         for (i, &step) in chain.iter().enumerate() {
             let n = g.node(step);
             if i == last {
-                steps.push(text(tr!("this")).size(ts::SMALL).color(theme::dim()).into());
+                // Named, as the steps before it are: "› this" said which
+                // function only to one who remembered it.
+                steps.push(
+                    text(format!("{}()", n.name))
+                        .size(ts::SMALL)
+                        .font(crate::fonts::UI_MEDIUM)
+                        .color(theme::fg())
+                        .into(),
+                );
                 break;
             }
             let entry = i == 0;
@@ -563,39 +670,94 @@ fn reached_from_rows<'a>(
                     .entry_kind_of(&n.file, &n.name)
                     .map(|k| crate::i18n::lookup(k.label()))
                     .unwrap_or(tr!("test"));
-                row![
-                    text(n.name.clone()).size(ts::SMALL).color(theme::success()),
-                    text(kind).size(ts::CAPTION).color(theme::dim()),
+                let w = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
+                let whole = format!("{}()", n.name);
+                // Its tag, its arrow, and the padding round them.
+                let around = 4.0 + w(kind, ts::CAPTION) + 10.0 + 8.0 + 4.0 + w("›", ts::SMALL);
+                // A name longer than the line is cut with an ellipsis, whole
+                // where the pointer rests: "test_tax_is_on_the_discounted_
+                // amount()" ran its tag past the margin's edge.
+                let shown = super::steady::cut(&whole, room - around, ts::SMALL, crate::fonts::UI);
+                entry_w = w(&shown, ts::SMALL) + around;
+                // Its kind as a tag, set apart from its name: side by
+                // side in one face, "main main" read as the name twice.
+                let entry = row![
+                    text(shown.clone())
+                        .size(ts::SMALL)
+                        .color(theme::success())
+                        .wrapping(iced::widget::text::Wrapping::None),
+                    // Its tag on one line: in Chinese, "测试" was set a
+                    // character to a line, the row as tall as two.
+                    container(
+                        text(kind)
+                            .size(ts::CAPTION)
+                            .color(theme::dim())
+                            .wrapping(iced::widget::text::Wrapping::None)
+                    )
+                    .padding([0, 5])
+                    .style(theme::chip),
                 ]
                 .spacing(4)
-                .into()
+                .align_y(iced::Center);
+                if shown == whole {
+                    entry.into()
+                } else {
+                    super::toolbar::tip_at(entry, whole, None, tooltip::Position::Top)
+                }
             } else {
-                text(n.name.clone())
+                // A function, said as one, as the last step is.
+                text(format!("{}()", n.name))
                     .size(ts::SMALL)
                     .color(theme::accent())
                     .into()
             };
+            // A step and the arrow after it, one piece: wrapped apart, a
+            // line began with the arrow.
             steps.push(
-                button(label)
-                    .style(theme::list_row(false))
-                    .padding([1, 4])
-                    .on_press(heard::said(
-                        &n.name,
-                        Message::Semantic(SemanticMsg::OpenNode(Node::Function {
-                            file: n.file.clone(),
-                            name: n.name.clone(),
-                            ordinal: g.ordinals().get(step).copied().unwrap_or(0),
-                        })),
-                    ))
-                    .into(),
-            );
-            steps.push(text("›").size(ts::SMALL).color(theme::dim()).into());
-        }
-        out.push(
-            container(iced::widget::Row::with_children(steps).spacing(4).wrap())
-                .padding([1, 6])
+                row![
+                    button(label)
+                        .style(theme::list_row(false))
+                        .padding([1, 4])
+                        .on_press(heard::said(
+                            &n.name,
+                            Message::Semantic(SemanticMsg::OpenNode(Node::Function {
+                                file: n.file.clone(),
+                                name: n.name.clone(),
+                                ordinal: g.ordinals().get(step).copied().unwrap_or(0),
+                            })),
+                        )),
+                    text("›").size(ts::SMALL).color(theme::dim()),
+                ]
+                .spacing(4)
+                .align_y(iced::Center)
                 .into(),
-        );
+            );
+        }
+        // Its entry first, the rest wrapping beside it: a line the chain
+        // ran on to began flush left, under the entry ("discounts()" alone
+        // at the start of a line), and read as a chain of its own. An entry
+        // that takes most of the line has the rest under it, set in: beside
+        // it, a step wider than the room left was cut at the margin's edge
+        // ("total(").
+        let mut steps = steps.into_iter();
+        let rest = |steps: Vec<Element<'a, Message>>| {
+            iced::widget::Row::with_children(steps)
+                .spacing(4)
+                .width(Fill)
+                .wrap()
+                .vertical_spacing(2)
+        };
+        let line: Element<'a, Message> = match steps.next() {
+            Some(entry) if entry_w > room * 0.45 => column![
+                entry,
+                container(rest(steps.collect())).padding(iced::padding::left(14)),
+            ]
+            .spacing(2)
+            .into(),
+            Some(entry) => row![entry, rest(steps.collect())].spacing(4).into(),
+            None => space().height(0).into(),
+        };
+        out.push(container(line).padding([1, 6]).into());
     }
     out
 }
@@ -616,7 +778,7 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
         Node::Function { file, name, .. } => (
             name.clone(),
             match file.file_name() {
-                Some(f) => format!("fn · {}", f.to_string_lossy()),
+                Some(f) => tr!("function in {file}", file = f.to_string_lossy()),
                 None => "fn".to_string(),
             },
             true,
@@ -693,7 +855,13 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     }
     // Not explained yet: what explains it, where the note says so.
     if !app.proj.explain.running && !app.proj.explain.cache.contains_key(node) {
-        actions.push(act(tr!("Explain All"), super::toolbar::explain_all_message(app)).into());
+        actions.push(
+            act(
+                tr!("Explain All…"),
+                super::toolbar::explain_all_message(app),
+            )
+            .into(),
+        );
     } else if app.llm_available {
         actions.push(
             act(
@@ -793,7 +961,7 @@ pub(crate) fn explain_children(
 /// borrows nothing from it: a `format!`ed label may be a temporary.
 pub(crate) fn section_header<'a>(label: &str) -> Element<'a, Message> {
     container(
-        text(label.to_uppercase())
+        text(crate::i18n::caps(label))
             .size(ts::CAPTION)
             .color(theme::fg_muted()),
     )
@@ -829,6 +997,7 @@ pub(crate) fn lsp_consent_modal(
 ) -> Element<'_, Message> {
     let asked = asked.into();
     let ready = asked.ready;
+    let use_path = consent.on_path.is_some();
     use crate::LspProvision;
     let server_blurb = tr!("Clew installs it in its own folder, not system-wide:");
     let (title, blurb, action) = match consent.provision {
@@ -925,28 +1094,39 @@ pub(crate) fn lsp_consent_modal(
                         Message::Lsp(LspMsg::ConsentDismissed(number))
                     )),
                 // Each Allow offered to the voice only once it can be
-                // pressed: read first, said yes to after.
-                consent.on_path.as_ref().map(|_| crate::ui::fresh::allow(
-                    ready,
-                    button(text(tr!("Use that one")).size(ts::BASE))
-                        .style(theme::toolbar_button)
-                        .padding([6, 16])
-                        .on_press_maybe(ready.then(|| heard::said(
-                            tr!("Use that one"),
-                            Message::Lsp(LspMsg::ConsentUsePath(number))
-                        )))
-                )),
+                // pressed: read first, said yes to after. The server's own
+                // program already here is the better answer — no download,
+                // the version the user keeps up to date — so it is the
+                // primary one when there is one, and the one a "yes" picks.
                 crate::ui::fresh::allow(
                     ready,
                     button(text(action.clone()).size(ts::BASE))
+                        .style(if use_path {
+                            theme::toolbar_button
+                        } else {
+                            theme::primary_button
+                        })
+                        .padding([6, 16])
+                        .on_press_maybe(ready.then(|| {
+                            let allowed = Message::Lsp(LspMsg::ConsentAllowed(number));
+                            if use_path {
+                                heard::said(&action, allowed)
+                            } else {
+                                heard::answer(&action, heard::Answer::Yes, allowed)
+                            }
+                        }))
+                ),
+                use_path.then(|| crate::ui::fresh::allow(
+                    ready,
+                    button(text(tr!("Use that one")).size(ts::BASE))
                         .style(theme::primary_button)
                         .padding([6, 16])
                         .on_press_maybe(ready.then(|| heard::answer(
-                            &action,
+                            tr!("Use that one"),
                             heard::Answer::Yes,
-                            Message::Lsp(LspMsg::ConsentAllowed(number))
+                            Message::Lsp(LspMsg::ConsentUsePath(number))
                         )))
-                ),
+                )),
             ]
             .spacing(10)
             .align_y(iced::Center),
@@ -1058,7 +1238,7 @@ pub(crate) fn lsp_command_modal(
             .color(theme::fg()),
             column(blocks).spacing(8),
             text(tr!(
-                "Language: {language} · Server: {server} {version}",
+                "Language: {language}, server: {server} {version}",
                 language = crate::app::languages::language_name(&pending.language),
                 server = pending.server_name,
                 version = pending.version

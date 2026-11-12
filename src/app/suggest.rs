@@ -22,7 +22,8 @@ pub(crate) const SUGGEST_SYSTEM: &str = "You suggest questions a developer readi
      might ask an assistant about it. Write the questions only, one per line, with no \
      numbering, bullets or quotes. Each is short (under 12 words), specific to what you are \
      shown, and different from the others: what something is for, how it works, how data \
-     flows, why it is written this way, edge cases, how to change it safely.";
+     flows, why it is written this way, edge cases, how to change it safely. Write names \
+     from the code (functions, types, files) in backticks, like `total()`.";
 
 /// What the questions were written for: the file the reader was on, and the
 /// function under the caret. Questions for another place are not offered.
@@ -32,12 +33,8 @@ pub struct SuggestKey {
     pub function: Option<String>,
 }
 
-/// The questions the model wrote, and for where.
-#[derive(Debug, Clone, Default)]
-pub struct Suggestions {
-    pub key: SuggestKey,
-    pub pool: Vec<String>,
-}
+/// How many places' questions are kept: past it, the oldest are let go.
+const PLACES_KEPT: usize = 64;
 
 /// The questions in what the model wrote: one a line, numbering, bullets
 /// and quotes taken off; what is not a question, or too long for a line of
@@ -79,34 +76,45 @@ impl App {
     /// The model's questions for where the reader is, `SHOWN` of them picked
     /// by this session's draw — `None` while there are none for here.
     pub(crate) fn ai_suggestions(&self) -> Option<Vec<String>> {
-        let s = self.proj.suggestions.as_ref()?;
-        if s.key != self.suggest_key() || s.pool.is_empty() {
+        // Switched off, the general questions are offered, as it says.
+        if !self.suggest_questions {
             return None;
         }
-        let n = s.pool.len();
+        let pool = self.proj.suggestions.get(&self.suggest_key())?;
+        if pool.is_empty() {
+            return None;
+        }
+        // `SHOWN` in a row from where this session's draw starts: every one
+        // differs, so as many show as there are (a stride of three over a
+        // pool of three showed one).
+        let n = pool.len();
         let start = (self.proj.suggest_draw as usize) % n;
         Some(
             (0..SHOWN.min(n))
-                .map(|i| s.pool[(start + i * 3) % n].clone())
-                .fold(Vec::new(), |mut picked, q| {
-                    if !picked.contains(&q) {
-                        picked.push(q);
-                    }
-                    picked
-                }),
+                .map(|i| pool[(start + i) % n].clone())
+                .collect(),
         )
     }
 
-    /// Ask the model for questions for where the reader is: as an empty
-    /// conversation is shown, when there are none for here yet — or `fresh`,
-    /// for a new session, whatever there is. Only with a key, and once at a
-    /// time; never with a conversation under way.
+    /// Whether the model is writing questions for where the reader is now:
+    /// "Try asking" waits for them, rather than offering templates that
+    /// change under the pointer when they come.
+    pub(crate) fn suggestions_coming(&self) -> bool {
+        self.suggest_questions && self.proj.suggest_asked.as_ref() == Some(&self.suggest_key())
+    }
+
+    /// Ask the model for questions for where the reader is, as an empty
+    /// conversation is shown, when there are none for here yet: one small
+    /// call a place, not one a session. A new session (`fresh`) draws
+    /// another few of what came. Only with a key and the setting on (Settings
+    /// → Usage and cost), once at a time, never with a conversation under way.
     pub(crate) fn ask_for_suggestions(&mut self, fresh: bool) -> Task<Message> {
         if fresh {
-            // Another draw from what is here, at once, while others come.
+            // Another draw from what is here.
             self.proj.suggest_draw = self.proj.suggest_draw.wrapping_add(1 + rand_step());
         }
         if !self.llm_available
+            || !self.suggest_questions
             || self.proj.project.is_none()
             || !self.proj.ask_turns.is_empty()
             || self.proj.asking
@@ -117,9 +125,9 @@ impl App {
         let have = self
             .proj
             .suggestions
-            .as_ref()
-            .is_some_and(|s| s.key == key && !s.pool.is_empty());
-        if (have && !fresh) || self.proj.suggest_asked.as_ref() == Some(&key) {
+            .get(&key)
+            .is_some_and(|pool| !pool.is_empty());
+        if have || self.proj.suggest_asked.as_ref() == Some(&key) {
             return Task::none();
         }
         let Some(cfg) = self.llm_config() else {
@@ -130,7 +138,10 @@ impl App {
         let ai = self.ai_client();
         let stamp = self.stamp();
         Task::perform(
-            async move { ai.complete(cfg, SUGGEST_SYSTEM, prompt, 300).await },
+            async move {
+                ai.complete(cfg, crate::app::usage::SUGGEST, SUGGEST_SYSTEM, prompt, 300)
+                    .await
+            },
             move |result| {
                 Message::Ask(AskMsg::SuggestionsCame {
                     stamp: stamp.clone(),
@@ -151,9 +162,16 @@ impl App {
             return;
         };
         let pool = parse_questions(&said);
-        if !pool.is_empty() {
-            self.proj.suggestions = Some(Suggestions { key, pool });
+        if pool.is_empty() {
+            return;
         }
+        // Kept for the place it was written for (shown only there, and only
+        // while the setting is on): one for a place left meanwhile replaced
+        // the questions for where the reader is, under the pointer.
+        if self.proj.suggestions.len() >= PLACES_KEPT {
+            self.proj.suggestions.clear();
+        }
+        self.proj.suggestions.insert(key, pool);
     }
 
     /// What the model is shown: the project, the reader's file and its

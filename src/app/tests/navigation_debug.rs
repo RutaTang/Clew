@@ -155,6 +155,7 @@ fn control_session(
     app.debug.session = Some(DebugSession {
         client: Some(client),
         status: DebugStatus::Stopped,
+        exit_code: None,
         thread_id: Some(1),
         frames: vec![dap::StackFrame {
             id: 7,

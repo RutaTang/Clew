@@ -17,6 +17,10 @@ use super::fallback::{Fallback, Fallbacks, MonospaceFallbackInfo, PlatformFallba
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FontMatchKey {
+    /// clew patch: 0 for a face of the style asked for, 1 for an upright
+    /// one standing in for an italic (`Attrs::matches`): first in the
+    /// order, so a family's own italic is taken before its upright face.
+    pub(crate) font_style_diff: u8,
     pub(crate) font_weight_diff: u16,
     pub(crate) font_weight: u16,
     pub(crate) id: fontdb::ID,
@@ -328,6 +332,7 @@ impl FontSystem {
                     .faces()
                     .filter(|face| attrs.matches(face))
                     .map(|face| FontMatchKey {
+                        font_style_diff: u8::from(face.style != attrs.style),
                         font_weight_diff: attrs.weight.0.abs_diff(face.weight.0),
                         font_weight: face.weight.0,
                         id: face.id,
@@ -358,6 +363,7 @@ impl FontSystem {
                     } else if let Some(face) = self.db.face(id) {
                         // else insert in front
                         let match_key = FontMatchKey {
+                            font_style_diff: u8::from(face.style != attrs.style),
                             font_weight_diff: attrs.weight.0.abs_diff(face.weight.0),
                             font_weight: face.weight.0,
                             id,

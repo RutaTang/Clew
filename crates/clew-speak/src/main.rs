@@ -13,23 +13,43 @@
 //! writes answers to stdout, one JSON object per line:
 //!
 //! ```text
-//! clew-speak supertonic <model dir>     (or: kokoro <model dir>)
+//! clew-speak supertonic <model dir>     (or: qwen3 <model dir>)
 //! → {"ready":{"rate":44100,"voices":10}}
 //! ← {"say":{"id":1,"text":"Hello.","lang":"en","voice":0,"speed":1.0}}
 //! → {"audio":{"id":1,"pcm":"<base64: 16-bit little-endian samples>"}}
 //! ```
 //!
-//! It also makes embeddings (`clew-speak embed <model dir>`, [`embed`]) and
+//! A voice that streams ([`qwen3`]) answers a sentence in parts, as they
+//! are made, each `"more":true` — then the last, `"more"` left out (its
+//! `pcm` may be empty):
+//!
+//! ```text
+//! → {"audio":{"id":1,"pcm":"…","more":true}}
+//! → {"audio":{"id":1,"pcm":"…","more":true}}
+//! → {"audio":{"id":1,"pcm":""}}
+//! ```
+//!
+//! It also makes embeddings (`clew-speak embed <model dir>`, [`embed`]),
 //! hears when a speaker has finished (`clew-speak turn <model file>`,
-//! [`turn`]).
+//! [`turn`]), and waits to be called (`clew-speak listen <model dir>
+//! <keyword>…`, [`listen`]).
 //!
 //! A request that cannot be met is answered `{"failed":{"id":1,"error":…}}`;
 //! a model that cannot be loaded, `{"error":…}` before it exits. It exits
 //! when stdin closes.
+//!
+//! What is no longer wanted — the reader stopped it — is said
+//! `{"cancel":{"id":1}}`: a voice that streams stops making that sentence
+//! at its next part (answered `failed`), and one not yet begun is passed
+//! over. The next sentence waits for none of it.
 
 mod embed;
+mod graph;
+mod listen;
 mod mel;
+mod qwen3;
 mod runtime;
+mod stretch;
 mod turn;
 
 use std::io::{BufRead, Write};
@@ -41,20 +61,27 @@ use serde::{Deserialize, Serialize};
 /// A model family, and the files of its folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Family {
-    /// Supertonic: characters in, any of its 31 languages.
+    /// Supertonic: characters in, any of its languages; a sentence made
+    /// whole.
     Supertonic,
-    /// Kokoro: words looked up in its lexicons (Mandarin and English).
-    Kokoro,
+    /// Qwen3-TTS: speech as a person says it, streamed ([`qwen3`]).
+    Qwen3,
 }
 
 impl Family {
     fn parse(name: &str) -> Option<Family> {
         match name {
             "supertonic" => Some(Family::Supertonic),
-            "kokoro" => Some(Family::Kokoro),
+            "qwen3" => Some(Family::Qwen3),
             _ => None,
         }
     }
+}
+
+/// A model loaded.
+enum Voice {
+    Sherpa(sherpa_onnx::OfflineTts),
+    Qwen3(Box<qwen3::Qwen3>),
 }
 
 /// One request: say `text`.
@@ -62,8 +89,7 @@ impl Family {
 struct Say {
     id: u64,
     text: String,
-    /// Its language, as a code (`en`, `ko`, `fr`): Supertonic's choice of
-    /// pronunciation; Kokoro reads it from its lexicons.
+    /// Its language, as a code (`en`, `ko`, `fr`): how it is pronounced.
     #[serde(default)]
     lang: Option<String>,
     /// The model's voice, by number.
@@ -82,14 +108,78 @@ fn one() -> f32 {
 #[serde(rename_all = "lowercase")]
 enum Request {
     Say(Say),
+    /// The sentence `id` is no longer wanted.
+    Cancel {
+        id: u64,
+    },
+}
+
+/// What stdin says, read on a thread of its own so a sentence being made
+/// hears a `cancel` for it: requests waiting their turn, in order.
+struct Inbox {
+    lines: std::sync::mpsc::Receiver<String>,
+    /// Requests read while a sentence was being made, not yet answered.
+    waiting: std::collections::VecDeque<String>,
+    /// Sentences cancelled before they were begun.
+    cancelled: std::collections::HashSet<u64>,
+}
+
+impl Inbox {
+    fn new(lines: std::sync::mpsc::Receiver<String>) -> Inbox {
+        Inbox {
+            lines,
+            waiting: std::collections::VecDeque::new(),
+            cancelled: std::collections::HashSet::new(),
+        }
+    }
+
+    /// The next request's line: one read while a sentence was being made,
+    /// else the next to come. `None` once stdin has closed.
+    fn next(&mut self) -> Option<String> {
+        self.waiting.pop_front().or_else(|| self.lines.recv().ok())
+    }
+
+    /// Whether the sentence `id`, being made, has been cancelled: what has
+    /// come meanwhile is read, a cancel kept, anything else kept for its
+    /// turn.
+    fn cancelled(&mut self, id: u64) -> bool {
+        while let Ok(line) = self.lines.try_recv() {
+            match serde_json::from_str::<Request>(&line) {
+                Ok(Request::Cancel { id: gone }) => {
+                    self.cancelled.insert(gone);
+                }
+                _ => self.waiting.push_back(line),
+            }
+        }
+        self.cancelled.contains(&id)
+    }
+
+    /// Whether the sentence `id`, about to be begun, was cancelled already;
+    /// forgotten after this.
+    fn take_cancelled(&mut self, id: u64) -> bool {
+        self.cancelled(id);
+        self.cancelled.remove(&id)
+    }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Answer {
-    Ready { rate: i32, voices: i32 },
-    Audio { id: u64, pcm: String },
-    Failed { id: u64, error: String },
+    Ready {
+        rate: i32,
+        voices: i32,
+    },
+    Audio {
+        id: u64,
+        pcm: String,
+        /// More of the sentence is coming.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        more: bool,
+    },
+    Failed {
+        id: u64,
+        error: String,
+    },
     Error(String),
 }
 
@@ -109,6 +199,14 @@ fn main() {
         };
         std::process::exit(embed::run(Path::new(&dir)));
     }
+    if first.as_deref() == Some("listen") {
+        let Some(dir) = args.next() else {
+            eprintln!("usage: clew-speak listen <model dir> <keyword>…");
+            std::process::exit(2);
+        };
+        let keywords: Vec<String> = args.map(|a| a.to_string_lossy().into_owned()).collect();
+        std::process::exit(listen::run(Path::new(&dir), &keywords));
+    }
     if first.as_deref() == Some("turn") {
         let Some(file) = args.next() else {
             eprintln!("usage: clew-speak turn <model file>");
@@ -117,43 +215,113 @@ fn main() {
         std::process::exit(turn::run(Path::new(&file)));
     }
     let (Some(family), Some(dir)) = (first.as_deref().and_then(Family::parse), args.next()) else {
-        eprintln!("usage: clew-speak supertonic|kokoro <model dir>");
+        eprintln!("usage: clew-speak supertonic|qwen3 <model dir>");
         std::process::exit(2);
     };
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let tts = match load(family, Path::new(&dir)) {
-        Ok(tts) => tts,
+    let loaded = match family {
+        Family::Qwen3 => qwen3::Qwen3::load(Path::new(&dir)).map(|q| Voice::Qwen3(Box::new(q))),
+        Family::Supertonic => load(family, Path::new(&dir)).map(Voice::Sherpa),
+    };
+    let mut voice = match loaded {
+        Ok(voice) => voice,
         Err(e) => {
             let _ = send(&mut out, &Answer::Error(e));
             std::process::exit(1);
         }
     };
-    if send(
-        &mut out,
-        &Answer::Ready {
-            rate: tts.sample_rate(),
-            voices: tts.num_speakers().max(1),
-        },
-    )
-    .is_err()
-    {
+    let (rate, voices) = match &voice {
+        Voice::Sherpa(tts) => (tts.sample_rate(), tts.num_speakers().max(1)),
+        Voice::Qwen3(_) => (qwen3::RATE, qwen3::VOICES),
+    };
+    if send(&mut out, &Answer::Ready { rate, voices }).is_err() {
         return;
     }
-    for line in std::io::stdin().lock().lines() {
-        let Ok(line) = line else { break };
+    let (sender, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut inbox = Inbox::new(lines);
+    while let Some(line) = inbox.next() {
         if line.trim().is_empty() {
             continue;
         }
-        let answer = match serde_json::from_str::<Request>(&line) {
-            Ok(Request::Say(say)) => match speak(&tts, family, &say) {
+        let say = match serde_json::from_str::<Request>(&line) {
+            Ok(Request::Say(say)) => say,
+            // For a sentence already made, or not yet begun.
+            Ok(Request::Cancel { id }) => {
+                inbox.cancelled.insert(id);
+                continue;
+            }
+            Err(e) => {
+                if send(&mut out, &Answer::Error(format!("not a request: {e}"))).is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
+        let id = say.id;
+        if inbox.take_cancelled(id) {
+            let answer = Answer::Failed {
+                id,
+                error: "cancelled".into(),
+            };
+            if send(&mut out, &answer).is_err() {
+                break;
+            }
+            continue;
+        }
+        let answer = match &mut voice {
+            Voice::Sherpa(tts) => match speak(tts, family, &say) {
                 Ok(samples) => Answer::Audio {
-                    id: say.id,
+                    id,
                     pcm: pcm16(&samples),
+                    more: false,
                 },
-                Err(error) => Answer::Failed { id: say.id, error },
+                Err(error) => Answer::Failed { id, error },
             },
-            Err(e) => Answer::Error(format!("not a request: {e}")),
+            Voice::Qwen3(qwen3) => {
+                // Each part as it is made; a reader gone ends it.
+                let mut gone = false;
+                let said = qwen3.say(
+                    &say.text,
+                    say.lang.as_deref().unwrap_or(""),
+                    say.voice,
+                    say.speed,
+                    &mut |samples| {
+                        if inbox.cancelled(id) {
+                            return Err("cancelled".to_string());
+                        }
+                        let part = Answer::Audio {
+                            id,
+                            pcm: pcm16(samples),
+                            more: true,
+                        };
+                        send(&mut out, &part).map_err(|e| {
+                            gone = true;
+                            e.to_string()
+                        })
+                    },
+                );
+                if gone {
+                    break;
+                }
+                inbox.cancelled.remove(&id);
+                match said {
+                    Ok(()) => Answer::Audio {
+                        id,
+                        pcm: String::new(),
+                        more: false,
+                    },
+                    Err(error) => Answer::Failed { id, error },
+                }
+            }
         };
         if send(&mut out, &answer).is_err() {
             break;
@@ -192,27 +360,7 @@ fn load(family: Family, dir: &Path) -> Result<sherpa_onnx::OfflineTts, String> {
                 voice_style: Some(file("voice.bin")?),
             };
         }
-        Family::Kokoro => {
-            let lexicons = ["lexicon-us-en.txt", "lexicon-zh.txt"]
-                .iter()
-                .map(|name| file(name))
-                .collect::<Result<Vec<_>, _>>()?;
-            config.model.kokoro = OfflineTtsKokoroModelConfig {
-                model: Some(file("model.int8.onnx")?),
-                voices: Some(file("voices.bin")?),
-                tokens: Some(file("tokens.txt")?),
-                lexicon: Some(lexicons.join(",")),
-                dict_dir: Some(dir.join("dict").to_string_lossy().into_owned()),
-                ..Default::default()
-            };
-            config.rule_fsts = Some(
-                ["date-zh.fst", "number-zh.fst", "phone-zh.fst"]
-                    .iter()
-                    .map(|name| file(name))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(","),
-            );
-        }
+        Family::Qwen3 => return Err("not a sherpa-onnx model".into()),
     }
     // Half the cores, at least one: the editor goes on drawing meanwhile.
     config.model.num_threads =
@@ -223,81 +371,41 @@ fn load(family: Family, dir: &Path) -> Result<sherpa_onnx::OfflineTts, String> {
     }
 }
 
-/// `say`'s text as samples, at the model's rate.
-fn speak(tts: &sherpa_onnx::OfflineTts, family: Family, say: &Say) -> Result<Vec<f32>, String> {
+/// How many steps Supertonic refines each sentence's sound in. Its own
+/// default, 5, keeps a grain in the voice that 8 smooths out; each step
+/// costs about a fortieth of the sentence's length on two cores of a slow
+/// laptop CPU, so 8 still makes speech some four times faster than it is
+/// said, well ahead of the reader.
+const SUPERTONIC_STEPS: i32 = 8;
+
+/// How `say` is made with `family`'s model, of `speakers` voices.
+fn generation(family: Family, say: &Say, speakers: i32) -> sherpa_onnx::GenerationConfig {
     let mut config = sherpa_onnx::GenerationConfig {
-        sid: say.voice.clamp(0, (tts.num_speakers() - 1).max(0)),
+        sid: say.voice.clamp(0, (speakers - 1).max(0)),
         speed: say.speed.clamp(0.5, 2.0),
         ..Default::default()
     };
-    if family == Family::Supertonic
-        && let Some(lang) = &say.lang
-    {
-        config.extra = Some(
-            [("lang".to_string(), serde_json::Value::from(lang.as_str()))]
-                .into_iter()
-                .collect(),
-        );
+    if family == Family::Supertonic {
+        config.num_steps = SUPERTONIC_STEPS;
+        if let Some(lang) = &say.lang {
+            config.extra = Some(
+                [("lang".to_string(), serde_json::Value::from(lang.as_str()))]
+                    .into_iter()
+                    .collect(),
+            );
+        }
     }
+    config
+}
+
+/// `say`'s text as samples, at the model's rate.
+fn speak(tts: &sherpa_onnx::OfflineTts, family: Family, say: &Say) -> Result<Vec<f32>, String> {
+    let config = generation(family, say, tts.num_speakers());
     let Some(audio) = tts.generate_with_config(&say.text, &config, None::<fn(&[f32], f32) -> bool>)
     else {
         return Err("nothing could be made of it".into());
     };
-    let mut samples = audio.samples().to_vec();
-    if family == Family::Kokoro {
-        without_hop_whine(&mut samples, tts.sample_rate());
-    }
-    Ok(samples)
-}
-
-/// How narrow each notch of [`without_hop_whine`] is: its centre over the
-/// width it takes out.
-const WHINE_Q: f64 = 20.0;
-
-/// Kokoro's int8 model whines at a fifth and two fifths of its rate — 4.8
-/// and 9.6 kHz at its 24 kHz — from its vocoder's five-sample hop, which
-/// int8 weights leave a steady tone of: measured 15 to 25 dB above what is
-/// around it, all through the speech and the pauses between (the full-size
-/// model, three times the download, about 5). Two narrow notches there, run
-/// forward and back so nothing is shifted in time, take it out and leave
-/// the rest of the voice within a fraction of a dB. (The pattern's other
-/// harmonics fold onto these two below the Nyquist frequency.)
-fn without_hop_whine(samples: &mut [f32], rate: i32) {
-    if rate <= 0 {
-        return;
-    }
-    let rate = f64::from(rate);
-    for fifths in [1.0, 2.0] {
-        let (b, a) = notch(rate * fifths / 5.0, rate, WHINE_Q);
-        biquad(samples, b, a);
-        samples.reverse();
-        biquad(samples, b, a);
-        samples.reverse();
-    }
-}
-
-/// A notch at `centre` Hz (the audio EQ cookbook's), normalized: the
-/// numerator and the denominator's last two.
-fn notch(centre: f64, rate: f64, q: f64) -> ([f64; 3], [f64; 2]) {
-    let w = std::f64::consts::TAU * centre / rate;
-    let alpha = w.sin() / (2.0 * q);
-    let a0 = 1.0 + alpha;
-    let cos = w.cos();
-    (
-        [1.0 / a0, -2.0 * cos / a0, 1.0 / a0],
-        [-2.0 * cos / a0, (1.0 - alpha) / a0],
-    )
-}
-
-/// `samples` through the biquad `b`/`a`, in place.
-fn biquad(samples: &mut [f32], b: [f64; 3], a: [f64; 2]) {
-    let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
-    for sample in samples.iter_mut() {
-        let x = f64::from(*sample);
-        let y = b[0] * x + b[1] * x1 + b[2] * x2 - a[0] * y1 - a[1] * y2;
-        (x2, x1, y2, y1) = (x1, x, y1, y);
-        *sample = y as f32;
-    }
+    Ok(audio.samples().to_vec())
 }
 
 /// Samples in [-1, 1] as 16-bit little-endian PCM, in base64.
@@ -311,66 +419,68 @@ fn pcm16(samples: &[f32]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    /// How strong `hz` is in `samples` at `rate`, in dB, over their middle
-    /// half (the filters' edges left out).
-    fn level(samples: &[f32], rate: f64, hz: f64) -> f64 {
-        let (from, to) = (samples.len() / 4, samples.len() * 3 / 4);
-        let (mut re, mut im) = (0.0, 0.0);
-        for (n, &s) in samples.iter().enumerate().take(to).skip(from) {
-            let phase = std::f64::consts::TAU * hz * n as f64 / rate;
-            re += f64::from(s) * phase.cos();
-            im += f64::from(s) * phase.sin();
-        }
-        10.0 * ((re * re + im * im) / ((to - from) as f64).powi(2)).log10()
+    /// Supertonic refines each sentence in more steps than its default —
+    /// a smoother voice — in the language it is told.
+    #[test]
+    fn supertonic_speaks_in_more_steps_than_its_default() {
+        let say = |lang: Option<&str>| super::Say {
+            id: 1,
+            text: "Hello.".into(),
+            lang: lang.map(String::from),
+            voice: 9,
+            speed: 1.0,
+        };
+        let config = super::generation(super::Family::Supertonic, &say(Some("fr")), 10);
+        assert_eq!(config.num_steps, super::SUPERTONIC_STEPS);
+        assert!(super::SUPERTONIC_STEPS > sherpa_onnx::GenerationConfig::default().num_steps);
+        assert_eq!(config.sid, 9);
+        assert_eq!(
+            config.extra.as_ref().and_then(|e| e.get("lang")),
+            Some(&serde_json::Value::from("fr"))
+        );
+        let config = super::generation(super::Family::Supertonic, &say(None), 4);
+        assert_eq!(config.sid, 3, "a voice it has");
+        assert!(config.extra.is_none());
     }
 
-    /// Kokoro's whine at a fifth and two fifths of its rate is taken out;
-    /// the voice around it — low, middle, high, and right beside the
-    /// notches — is left as it was.
+    use super::*;
+
+    /// While a sentence is made, a cancel for it is heard and kept; any
+    /// other request read meanwhile waits its turn, in order; and a sentence
+    /// cancelled before it began is passed over once.
     #[test]
-    fn the_hop_whine_is_taken_out_and_the_voice_left() {
-        let rate = 24_000.0;
-        let probes = [
-            200.0, 1_000.0, 3_000.0, 4_300.0, 7_000.0, 10_400.0, 11_000.0,
-        ];
-        let whine = [4_800.0, 9_600.0];
-        let mut samples: Vec<f32> = (0..24_000)
-            .map(|n| {
-                let t = f64::from(n) / rate;
-                probes
-                    .iter()
-                    .chain(&whine)
-                    .map(|hz| 0.05 * (std::f64::consts::TAU * hz * t).sin())
-                    .sum::<f64>() as f32
-            })
-            .collect();
-        let before: Vec<f64> = probes.iter().map(|&hz| level(&samples, rate, hz)).collect();
-        let whine_before: Vec<f64> = whine.iter().map(|&hz| level(&samples, rate, hz)).collect();
-        without_hop_whine(&mut samples, rate as i32);
-        for (hz, was) in probes.iter().zip(before) {
-            let now = level(&samples, rate, *hz);
-            assert!(
-                (now - was).abs() < 0.5,
-                "{hz} Hz went from {was:.1} to {now:.1} dB"
-            );
-        }
-        for (hz, was) in whine.iter().zip(whine_before) {
-            let now = level(&samples, rate, *hz);
-            assert!(
-                was - now > 40.0,
-                "{hz} Hz only from {was:.1} to {now:.1} dB"
-            );
-        }
+    fn the_inbox_hears_a_cancel_and_keeps_the_rest_in_order() {
+        let (send, lines) = std::sync::mpsc::channel();
+        let mut inbox = Inbox::new(lines);
+        send.send(r#"{"say":{"id":2,"text":"Next."}}"#.to_string())
+            .unwrap();
+        assert!(!inbox.cancelled(1));
+        send.send(r#"{"cancel":{"id":1}}"#.to_string()).unwrap();
+        send.send(r#"{"cancel":{"id":3}}"#.to_string()).unwrap();
+        send.send(r#"{"say":{"id":3,"text":"Gone."}}"#.to_string())
+            .unwrap();
+        assert!(inbox.cancelled(1), "the sentence being made");
+        assert!(inbox.next().unwrap().contains(r#""id":2"#), "in its turn");
+        assert!(inbox.next().unwrap().contains(r#""id":3"#));
+        assert!(inbox.take_cancelled(3), "cancelled before it began");
+        assert!(!inbox.take_cancelled(3), "once");
+        drop(send);
+        assert!(inbox.next().is_none(), "stdin closed");
+        let Request::Cancel { id } = serde_json::from_str(r#"{"cancel":{"id":7}}"#).unwrap() else {
+            panic!("a cancel");
+        };
+        assert_eq!(id, 7);
     }
 
     /// A request reads as the client writes it; what is left out is the
     /// model's own.
     #[test]
     fn requests_and_answers_read_as_written() {
-        let Request::Say(say) =
-            serde_json::from_str(r#"{"say":{"id":3,"text":"Hi.","lang":"ko"}}"#).unwrap();
+        let Ok(Request::Say(say)) =
+            serde_json::from_str(r#"{"say":{"id":3,"text":"Hi.","lang":"ko"}}"#)
+        else {
+            panic!("a say");
+        };
         assert_eq!((say.id, say.voice, say.speed), (3, 0, 1.0));
         assert_eq!(say.lang.as_deref(), Some("ko"));
         assert_eq!(
@@ -384,6 +494,20 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Answer::Error("x".into())).unwrap(),
             r#"{"error":"x"}"#
+        );
+        // A sentence whole reads as it always has; a part says more comes.
+        let audio = |more| Answer::Audio {
+            id: 1,
+            pcm: "AA==".into(),
+            more,
+        };
+        assert_eq!(
+            serde_json::to_string(&audio(false)).unwrap(),
+            r#"{"audio":{"id":1,"pcm":"AA=="}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&audio(true)).unwrap(),
+            r#"{"audio":{"id":1,"pcm":"AA==","more":true}}"#
         );
     }
 
@@ -401,7 +525,8 @@ mod tests {
     #[test]
     fn families_are_named() {
         assert_eq!(Family::parse("supertonic"), Some(Family::Supertonic));
-        assert_eq!(Family::parse("kokoro"), Some(Family::Kokoro));
+        assert_eq!(Family::parse("qwen3"), Some(Family::Qwen3));
+        assert_eq!(Family::parse("kokoro"), None);
         assert_eq!(Family::parse("piper"), None);
     }
 }

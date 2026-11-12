@@ -128,6 +128,70 @@ pub fn word_at(lines: &[HlLine], line: usize, col: usize) -> Option<String> {
     Some(line_window(l, start, end).into_iter().collect())
 }
 
+/// [`word_at`], for a word of the code itself: none inside a string or a
+/// comment — but for one in `{…}` in a string, an interpolation
+/// (`println!("{total}")`, `${total}`, an f-string), where it is a variable.
+/// Clicked inside "declined@example.com", every `declined` variable of the
+/// function lit up, as if the text named it.
+pub fn code_word_at(lines: &[HlLine], line: usize, col: usize) -> Option<String> {
+    let (start, end) = word_range_at(lines, line, col)?;
+    let (_, _, _, style) = locate(lines, line, start)?;
+    if is_literal(style) && !interpolated(lines.get(line)?, start, end) {
+        return None;
+    }
+    word_at(lines, line, col)
+}
+
+/// Whether the word at columns `start..end` of `line` sits in an
+/// interpolation: in braces in the same string as the word — a `{`
+/// opening before it and a `}` closing after it, neither doubled (`{{` is a
+/// brace written out) — in a string made for them: an f-string, a `$"…"`
+/// or a template with `${`, a format macro's (`println!(`), or one
+/// `.format(`ted. Braces anywhere on the line made a word in
+/// `{"declined": 0}` a variable's.
+fn interpolated(line: &HlLine, start: usize, end: usize) -> bool {
+    // The string the word is in: the run of literal spans around it.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut col = 0;
+    for (text, style) in &line.spans {
+        let n = text.chars().count();
+        if is_literal(*style) {
+            match runs.last_mut() {
+                Some(run) if run.1 == col => run.1 = col + n,
+                _ => runs.push((col, col + n)),
+            }
+        }
+        col += n;
+    }
+    let Some(&(from, to)) = runs.iter().find(|(a, b)| *a <= start && end <= *b) else {
+        return false;
+    };
+    let string = line_window(line, from, to);
+    let (at, until) = (start - from, end - from);
+    let open = string[..at]
+        .iter()
+        .rposition(|c| matches!(c, '{' | '}'))
+        .filter(|&i| string[i] == '{' && (i == 0 || string[i - 1] != '{'));
+    let close = string[until..]
+        .iter()
+        .position(|c| matches!(c, '{' | '}'))
+        .map(|i| until + i)
+        .filter(|&i| string[i] == '}' && string.get(i + 1) != Some(&'}'));
+    let (Some(open), Some(_)) = (open, close) else {
+        return false;
+    };
+    let lead: String = string
+        .iter()
+        .take_while(|c| !matches!(c, '"' | '\'' | '`'))
+        .collect();
+    let before: String = line_window(line, 0, from).into_iter().collect();
+    let after: String = line_window(line, to, to + 16).into_iter().collect();
+    lead.contains(['f', 'F', '$'])
+        || (open > 0 && string[open - 1] == '$')
+        || before.contains("!(")
+        || after.trim_start().starts_with(".format(")
+}
+
 /// Whole-word occurrences of `word` across `lines`, as (line, col0, col1) in
 /// display columns. `cap` bounds how many matches are returned, not how much is
 /// scanned: every line is still visited, so the per-line cost has to stay low.
@@ -357,6 +421,68 @@ pub fn fold_ranges(lines: &[HlLine]) -> Vec<(usize, usize)> {
     out
 }
 
+/// How far up a block's header is followed to the line its signature
+/// starts on.
+const SIGNATURE_LINES: usize = 64;
+
+/// The line the signature of the block opened on `header` starts on, for a
+/// block whose opening line only continues it: rustfmt's `where` clause and
+/// lone `{`, a `) -> T {` closing a parameter list, Python's `):`, K&R C's
+/// `{` under `int main()`. The scope pinned over a function's body read
+/// `where` or `{`, not the `fn` the reader looks for. (Folds stay where
+/// the indentation opens them: Skim folds the body, not the parameters.)
+/// The walk goes up over deeper lines (the parameters, the bounds) and
+/// further continuation lines at the header's own indent; a line above that
+/// ends a statement (`;`, `}`) means the block stands on its own.
+pub fn signature_start(lines: &[HlLine], header: usize) -> usize {
+    let text = |line: usize| -> String { line_chars(lines, line).into_iter().collect() };
+    let continues = |t: &str| {
+        let t = t.trim_start();
+        t.starts_with('{')
+            || t.starts_with(')')
+            || t.starts_with(']')
+            || t.starts_with("->")
+            || t == "where"
+            || t.starts_with("where ")
+    };
+    let head = text(header);
+    let Some(at) = indent(&head.chars().collect::<Vec<_>>()) else {
+        return header;
+    };
+    if !continues(&head) {
+        return header;
+    }
+    let mut above = header;
+    let mut first = true;
+    while above > 0 && header - above < SIGNATURE_LINES {
+        above -= 1;
+        let line = text(above);
+        let Some(di) = indent(&line.chars().collect::<Vec<_>>()) else {
+            continue;
+        };
+        if first {
+            first = false;
+            let t = line.trim_end();
+            if t.ends_with(';') || t.ends_with('}') || (di <= at && t.ends_with('{')) {
+                return header;
+            }
+        }
+        if di > at {
+            continue;
+        }
+        if di < at {
+            break;
+        }
+        // At the header's own indent: the signature's first line, or one
+        // more line continuing it.
+        if !continues(&line) {
+            return above;
+        }
+    }
+    // Still a continuation: no signature line found above it.
+    header
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +594,35 @@ mod tests {
         let lines = highlight_lines(src, Some("rust"));
         let occ = occurrences("foo", &lines, 100);
         assert_eq!(occ, vec![(0, 4, 7)]);
+        // And the caret in the string's or the comment's `foo` lights
+        // nothing: the word there is not the variable's.
+        assert_eq!(code_word_at(&lines, 0, 5).as_deref(), Some("foo"));
+        assert_eq!(code_word_at(&lines, 1, 10), None);
+        assert_eq!(code_word_at(&lines, 2, 4), None);
+    }
+
+    /// A word in `{…}` in a string is a variable's, interpolated: the caret
+    /// there lights it, as on the code's own.
+    #[test]
+    fn an_interpolated_word_is_the_variables() {
+        use crate::highlight::highlight_lines;
+        let src = "let total = 1;\nprintln!(\"{total} items\");\nlet s = `${total}`;\n";
+        let lines = highlight_lines(src, Some("rust"));
+        assert_eq!(code_word_at(&lines, 1, 12).as_deref(), Some("total"));
+        // Beside the braces, the string's words are still its own.
+        assert_eq!(code_word_at(&lines, 1, 19), None);
+        let lines = highlight_lines("const s = `${total} of ${all}`;\n", Some("javascript"));
+        assert_eq!(code_word_at(&lines, 0, 14).as_deref(), Some("total"));
+        // A plain string in braces is no interpolation: its words are its own.
+        let lines = highlight_lines("counts = {\"declined\": 0}\n", Some("python"));
+        assert_eq!(code_word_at(&lines, 0, 13), None);
+        let lines = highlight_lines("notify({ to: \"declined\" });\n", Some("javascript"));
+        assert_eq!(code_word_at(&lines, 0, 17), None);
+        let lines = highlight_lines("fn f() { log(\"declined\"); }\n", Some("rust"));
+        assert_eq!(code_word_at(&lines, 0, 17), None);
+        // Braces written out, doubled, are not an interpolation either.
+        let lines = highlight_lines("println!(\"{{total}}\");\n", Some("rust"));
+        assert_eq!(code_word_at(&lines, 0, 13), None);
     }
 
     /// Reference implementation of bracket matching: the plain per-character
@@ -636,5 +791,35 @@ mod tests {
         // A single-line body with no deeper following line is not foldable.
         let flat = plain_lines("a\nb\nc\n");
         assert_eq!(fold_ranges(&flat), Vec::<(usize, usize)>::new());
+    }
+
+    /// A block whose opening line only continues a signature — rustfmt's
+    /// `where` and lone `{`, a parameter list closed by `) -> T {`, Python's
+    /// `):`, K&R C's `{` — is named by the line the signature starts on: the
+    /// scope pinned over its body reads `fn`, not `where` or `{`.
+    #[test]
+    fn a_block_opened_under_its_signature_is_named_by_the_signature() {
+        let src = "impl X {\n    pub fn ser<S>(&self, s: S) -> R\n    where\n        S: Ser,\n    {\n        body();\n    }\n}\n";
+        let lines = plain_lines(src);
+        assert_eq!(signature_start(&lines, 4), 1, "the `{{`");
+        assert_eq!(signature_start(&lines, 2), 1, "the `where`");
+        assert_eq!(signature_start(&lines, 0), 0, "a header that is its own");
+
+        let lines = plain_lines("fn long(\n    a: i32,\n) -> i32 {\n    a\n}\n");
+        assert_eq!(signature_start(&lines, 2), 0);
+        let lines = plain_lines("def f(\n    a,\n):\n    return a\n");
+        assert_eq!(signature_start(&lines, 2), 0);
+        let lines = plain_lines("int main()\n{\n    return 0;\n}\n");
+        assert_eq!(signature_start(&lines, 1), 0);
+
+        // A block after a finished statement is a block of its own.
+        let lines = plain_lines("let a =\n    f();\n{\n    g();\n}\n");
+        assert_eq!(signature_start(&lines, 2), 2);
+        // `} else {` is the `else`'s, not the `if`'s.
+        let lines = plain_lines("if a {\n    x();\n} else {\n    y();\n}\n");
+        assert_eq!(signature_start(&lines, 2), 2);
+        // Nothing above to start it: the line itself.
+        let lines = plain_lines("{\n    x();\n}\n");
+        assert_eq!(signature_start(&lines, 0), 0);
     }
 }

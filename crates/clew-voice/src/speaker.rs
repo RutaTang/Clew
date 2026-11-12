@@ -19,16 +19,30 @@ use crate::speech::VoiceModel;
 
 /// How long loading a model may take.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
-/// How long one sentence may take to be made.
+/// How long one sentence — or, of a voice that streams, the next part of
+/// it — may take to be made.
 const SAY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What `clew-speak` answers.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Answer {
-    Ready { rate: u32, voices: u32 },
-    Audio { id: u64, pcm: String },
-    Failed { id: u64, error: String },
+    Ready {
+        rate: u32,
+        voices: u32,
+    },
+    /// A sentence's audio — or, of a voice that streams, a part of it, with
+    /// `more` to come.
+    Audio {
+        id: u64,
+        pcm: String,
+        #[serde(default)]
+        more: bool,
+    },
+    Failed {
+        id: u64,
+        error: String,
+    },
     Error(String),
 }
 
@@ -133,15 +147,19 @@ impl Speaker {
         self.voices
     }
 
-    /// `text` said in `lang` by voice `voice` at `speed`: one channel, at
-    /// [`Speaker::rate`].
+    /// `text` said in `lang` by voice `voice` at `speed`, given to `part` as
+    /// it comes — whole, or a part at a time from a voice that streams: one
+    /// channel, at [`Speaker::rate`]. `part` answers whether more is wanted:
+    /// `false` (what is being said was stopped) ends the sentence there, and
+    /// the voice is told to stop making it.
     pub fn say(
         &mut self,
         text: &str,
         lang: &str,
         voice: i32,
         speed: f32,
-    ) -> Result<Vec<f32>, SayError> {
+        part: &mut dyn FnMut(Vec<f32>) -> bool,
+    ) -> Result<(), SayError> {
         self.next += 1;
         let id = self.next;
         let request = serde_json::json!({
@@ -152,8 +170,20 @@ impl Speaker {
             .map_err(|e| SayError::Voice(format!("the voice stopped accepting text: {e}")))?;
         loop {
             match self.answers.recv_timeout(SAY_TIMEOUT) {
-                Ok(Ok(Answer::Audio { id: got, pcm })) if got == id => {
-                    return decode(&pcm).map_err(SayError::Voice);
+                Ok(Ok(Answer::Audio { id: got, pcm, more })) if got == id => {
+                    let samples = decode(&pcm).map_err(SayError::Voice)?;
+                    // Not wanted any more (it was stopped): the voice is
+                    // told to stop making it, and what it sends of it yet
+                    // is passed over as an earlier request's — the next
+                    // sentence waits for none of it.
+                    if !samples.is_empty() && !part(samples) {
+                        let cancel = serde_json::json!({"cancel": {"id": id}});
+                        let _ = writeln!(self.stdin, "{cancel}").and_then(|()| self.stdin.flush());
+                        return Ok(());
+                    }
+                    if !more {
+                        return Ok(());
+                    }
                 }
                 Ok(Ok(Answer::Failed { id: got, error })) if got == id => {
                     return Err(SayError::Sentence(error));
@@ -221,9 +251,10 @@ impl Speakers {
         }
     }
 
-    /// `text` said by `model` (its files in `dir`): samples, and their rate.
-    /// The model is loaded once, kept for what is said next with it, and
-    /// started again if it ended.
+    /// `text` said by `model` (its files in `dir`), given to `part` as it
+    /// comes ([`Speaker::say`]) with its rate. The model is loaded once,
+    /// kept for what is said next with it, and started again if it ended.
+    #[allow(clippy::too_many_arguments)]
     pub fn say(
         &self,
         model: &'static VoiceModel,
@@ -232,7 +263,8 @@ impl Speakers {
         lang: &str,
         voice: i32,
         speed: f32,
-    ) -> Result<(Vec<f32>, u32), SayError> {
+        part: &mut dyn FnMut(Vec<f32>, u32) -> bool,
+    ) -> Result<(), SayError> {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         let reuse = running
             .as_mut()
@@ -256,13 +288,15 @@ impl Speakers {
         let Some(r) = running.as_mut() else {
             return Err(SayError::Voice("the voice is not running".into()));
         };
-        let result = r.speaker.say(text, lang, voice, speed);
         let rate = r.speaker.rate();
+        let result = r
+            .speaker
+            .say(text, lang, voice, speed, &mut |samples| part(samples, rate));
         r.used = Instant::now();
         if matches!(result, Err(SayError::Voice(_))) {
             *running = None;
         }
-        result.map(|samples| (samples, rate))
+        result
     }
 
     /// Let the model go: what is running ends — and with it its hold on
@@ -308,6 +342,26 @@ impl Speakers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// All `speakers` says of `text`, its parts put together, and its rate.
+    #[allow(clippy::too_many_arguments)]
+    fn said(
+        speakers: &Speakers,
+        model: &'static VoiceModel,
+        dir: &Path,
+        text: &str,
+        lang: &str,
+        voice: i32,
+        speed: f32,
+    ) -> Result<(Vec<f32>, u32), SayError> {
+        let mut all = (Vec::new(), 0);
+        speakers.say(model, dir, text, lang, voice, speed, &mut |part, rate| {
+            all.0.extend(part);
+            all.1 = rate;
+            true
+        })?;
+        Ok(all)
+    }
 
     /// PCM reads back as the samples it was made of.
     #[test]
@@ -360,13 +414,104 @@ mod tests {
         let model = &crate::speech::VOICE_MODELS[0];
         let dir = model_dir("missing", model);
         let speakers = Speakers::new(PathBuf::from("/nonexistent/clew-speak"));
-        let err = speakers.say(model, &dir, "hi", "en", 0, 1.0).unwrap_err();
+        let err = said(&speakers, model, &dir, "hi", "en", 0, 1.0).unwrap_err();
         assert!(
             matches!(&err, SayError::Voice(e) if e.contains("could not start the voice")),
             "{err}"
         );
         assert!(!speakers.loaded());
         assert!(!speakers.stop_if_idle(Duration::ZERO));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A voice that streams: its parts are given as they come, in order,
+    /// and the sentence ends with its last; a part that cannot be read is
+    /// the voice's failure, not the sentence's.
+    #[cfg(unix)]
+    #[test]
+    fn a_streaming_voice_gives_its_parts_as_they_come() {
+        use std::os::unix::fs::PermissionsExt;
+        let model = &crate::speech::VOICE_MODELS[0];
+        let dir = model_dir("stream", model);
+        let program = dir.join("clew-speak");
+        // Two parts of one sample each (0.5, then -0.5), then the end; then
+        // a part that is not base64.
+        std::fs::write(
+            &program,
+            "#!/bin/sh\n\
+             echo '{\"ready\":{\"rate\":24000,\"voices\":8}}'\n\
+             n=0\n\
+             while read -r line; do\n\
+               n=$((n+1))\n\
+               if [ $n = 1 ]; then\n\
+                 echo '{\"audio\":{\"id\":1,\"pcm\":\"AEA=\",\"more\":true}}'\n\
+                 echo '{\"audio\":{\"id\":1,\"pcm\":\"AMA=\",\"more\":true}}'\n\
+                 echo '{\"audio\":{\"id\":1,\"pcm\":\"\"}}'\n\
+               else\n\
+                 echo '{\"audio\":{\"id\":2,\"pcm\":\"%%\",\"more\":true}}'\n\
+               fi\n\
+             done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let speakers = Speakers::new(program);
+        let mut parts = Vec::new();
+        speakers
+            .say(model, &dir, "Hello.", "en", 0, 1.0, &mut |part, rate| {
+                parts.push((part, rate));
+                true
+            })
+            .unwrap();
+        assert_eq!(parts, [(vec![0.5], 24_000), (vec![-0.5], 24_000)]);
+        let err = said(&speakers, model, &dir, "Again.", "en", 0, 1.0).unwrap_err();
+        assert!(matches!(err, SayError::Voice(_)), "{err}");
+        assert!(!speakers.loaded(), "a voice that failed is let go");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A sentence stopped part way (`part` answers `false`): the voice is
+    /// told to stop making it, nothing more of it is given, and the next
+    /// sentence is said — its own, not the rest of the stopped one.
+    #[cfg(unix)]
+    #[test]
+    fn a_sentence_stopped_part_way_is_given_up_and_the_voice_told() {
+        use std::os::unix::fs::PermissionsExt;
+        let model = &crate::speech::VOICE_MODELS[0];
+        let dir = model_dir("cancel", model);
+        let program = dir.join("clew-speak");
+        let heard = dir.join("heard");
+        // Each request written down; the first sentence's three parts, the
+        // second's one.
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n\
+                 echo '{{\"ready\":{{\"rate\":24000,\"voices\":8}}}}'\n\
+                 while read -r line; do\n\
+                   echo \"$line\" >> '{}'\n\
+                   case \"$line\" in\n\
+                     *'\"id\":1,'*) for i in 1 2 3; do echo '{{\"audio\":{{\"id\":1,\"pcm\":\"AEA=\",\"more\":true}}}}'; done; echo '{{\"audio\":{{\"id\":1,\"pcm\":\"\"}}}}' ;;\n\
+                     *'\"id\":2,'*) echo '{{\"audio\":{{\"id\":2,\"pcm\":\"AMA=\"}}}}' ;;\n\
+                   esac\n\
+                 done\n",
+                heard.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let speakers = Speakers::new(program);
+        let mut parts = 0;
+        speakers
+            .say(model, &dir, "Hello.", "en", 0, 1.0, &mut |_, _| {
+                parts += 1;
+                false
+            })
+            .unwrap();
+        assert_eq!(parts, 1, "nothing more once stopped");
+        let (next, _) = said(&speakers, model, &dir, "Next.", "en", 0, 1.0).unwrap();
+        assert_eq!(next, [-0.5], "the next sentence's own");
+        let heard = std::fs::read_to_string(&heard).unwrap();
+        assert!(heard.contains(r#"{"cancel":{"id":1}}"#), "{heard}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -381,7 +526,7 @@ mod tests {
         speakers.stop_while(model, &mut || {
             std::fs::remove_dir_all(&dir).unwrap();
         });
-        let err = speakers.say(model, &dir, "hi", "en", 0, 1.0).unwrap_err();
+        let err = said(&speakers, model, &dir, "hi", "en", 0, 1.0).unwrap_err();
         assert!(matches!(err, SayError::Sentence(_)), "{err}");
         assert!(!speakers.loaded());
     }
@@ -395,22 +540,27 @@ mod tests {
         let dir = PathBuf::from(std::env::var("CLEW_SPEAK_MODEL").unwrap());
         let speakers = Speakers::new(program);
         let model = &crate::speech::VOICE_MODELS[0];
-        let (samples, rate) = speakers
-            .say(model, &dir, "The total adds every price.", "en", 0, 1.0)
-            .unwrap();
+        let (samples, rate) = said(
+            &speakers,
+            model,
+            &dir,
+            "The total adds every price.",
+            "en",
+            0,
+            1.0,
+        )
+        .unwrap();
         let seconds = samples.len() as f32 / rate as f32;
         assert!((1.0..6.0).contains(&seconds), "{seconds}");
         // Again, with the model kept: and in Korean.
-        let (samples, _) = speakers
-            .say(model, &dir, "안녕하세요.", "ko", 3, 1.0)
-            .unwrap();
+        let (samples, _) = said(&speakers, model, &dir, "안녕하세요.", "ko", 3, 1.0).unwrap();
         assert!(!samples.is_empty());
         // Idle long enough, it is let go; asked again, it starts again.
         assert!(speakers.loaded());
         assert!(!speakers.stop_if_idle(Duration::from_secs(600)));
         assert!(speakers.stop_if_idle(Duration::ZERO));
         assert!(!speakers.loaded());
-        let (samples, _) = speakers.say(model, &dir, "Again.", "en", 5, 1.2).unwrap();
+        let (samples, _) = said(&speakers, model, &dir, "Again.", "en", 5, 1.2).unwrap();
         assert!(!samples.is_empty());
     }
 
@@ -446,8 +596,8 @@ mod tests {
         }
         let speakers = std::sync::Arc::new(Speakers::new(program));
         // Loaded, and saying what it is asked.
-        let (said, _) = speakers.say(model, &dir, "Loaded.", "en", 0, 1.0).unwrap();
-        assert!(!said.is_empty());
+        let (loaded, _) = said(&speakers, model, &dir, "Loaded.", "en", 0, 1.0).unwrap();
+        assert!(!loaded.is_empty());
         // Another model removed: this one stays loaded.
         speakers.stop_while(&crate::speech::VOICE_MODELS[1], &mut || {});
         assert!(speakers.loaded(), "let go for another model's removal");
@@ -456,7 +606,7 @@ mod tests {
         speakers.stop_while(model, &mut || {
             let (speakers, there) = (speakers.clone(), dir.clone());
             waiting = Some(std::thread::spawn(move || {
-                speakers.say(model, &there, "Waiting.", "en", 0, 1.0)
+                said(&speakers, model, &there, "Waiting.", "en", 0, 1.0)
             }));
             std::thread::sleep(Duration::from_millis(300));
             std::fs::remove_dir_all(&dir).unwrap();

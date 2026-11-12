@@ -209,6 +209,32 @@ fn python(routes: &mut Routes, source: &Source) {
             }
         }
     }
+    // `@app.get(...)` is Flask's (2.0 on) and FastAPI's alike: the file's
+    // own import says whose. A file importing neither says both.
+    let imports = |module: &str| {
+        let named = |token: &str| {
+            token == module
+                || token
+                    .strip_prefix(module)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        };
+        src.lines().map(str::trim_start).any(|line| {
+            if let Some(rest) = line.strip_prefix("from ") {
+                rest.split_whitespace().next().is_some_and(named)
+            } else if let Some(rest) = line.strip_prefix("import ") {
+                rest.split(',')
+                    .filter_map(|part| part.split_whitespace().next())
+                    .any(named)
+            } else {
+                false
+            }
+        })
+    };
+    let either = match (imports("flask"), imports("fastapi")) {
+        (true, false) => "Flask",
+        (false, true) => "FastAPI",
+        _ => "FastAPI / Flask",
+    };
     for decorated in all_of(root, "decorated_definition") {
         let Some(def) = decorated.child_by_field_name("definition") else {
             continue;
@@ -278,11 +304,7 @@ fn python(routes: &mut Routes, source: &Source) {
                 Some((_, prefix)) => join(prefix, &path),
                 None => path,
             };
-            let framework = if verb == "route" {
-                "Flask"
-            } else {
-                "FastAPI / Flask"
-            };
+            let framework = if verb == "route" { "Flask" } else { either };
             for method in methods {
                 routes.add(
                     framework,
@@ -1500,6 +1522,43 @@ mod tests {
                 r("POST /login", "login", "app/api.py:9"),
             ]
         );
+    }
+
+    /// `@app.get` is Flask's and FastAPI's both: the file's import says
+    /// whose route it is, and only a file importing neither is said to be
+    /// either's.
+    #[test]
+    fn a_python_route_names_the_framework_its_file_imports() {
+        let framework = |src: &str| {
+            let maps = maps(&Corpus::of(&[("api.py", src)]));
+            let map = maps.first().expect("a routes graph");
+            map.nodes
+                .iter()
+                .find(|n| n.label == "GET /teas")
+                .expect("the route")
+                .detail
+                .clone()
+        };
+        let route = "\n@app.get('/teas')\ndef teas():\n    pass\n";
+        assert_eq!(
+            framework(&format!("from flask import Flask{route}")),
+            "Flask"
+        );
+        assert_eq!(framework(&format!("import flask{route}")), "Flask");
+        assert_eq!(
+            framework(&format!("from flask.views import View{route}")),
+            "Flask"
+        );
+        assert_eq!(
+            framework(&format!("from fastapi import FastAPI{route}")),
+            "FastAPI"
+        );
+        assert_eq!(framework(&format!("import fastapi, os{route}")), "FastAPI");
+        assert_eq!(
+            framework(&format!("import flask_login{route}")),
+            "FastAPI / Flask"
+        );
+        assert_eq!(framework(route), "FastAPI / Flask");
     }
 
     #[test]

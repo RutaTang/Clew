@@ -7,11 +7,17 @@ rust-version = "1.95"
 [dependencies]
 # What `clew-speak` answers: JSON lines, its audio in base64.
 base64 = "0.22.1"
+# The wake phrase model comes as a `.tar.bz2` (pure Rust bzip2).
+bzip2 = "0.6.1"
 cpal = "0.18.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha1 = "0.11"
 sha2 = "0.11"
+# Echo cancellation (WebRTC's AEC3, in Rust): what Clew says, taken back out
+# of what the microphone hears, so the reader can talk over it.
+sonora = "0.3.0"
+tar = "0.4.46"
 whisper-rs = "0.16.0"
 
 # whisper.cpp on the GPU where every machine has one: Metal on macOS (Apple

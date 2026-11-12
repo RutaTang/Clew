@@ -234,6 +234,19 @@ pub fn remove(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Whether `path` is under the `.clew` of a project folder no longer there:
+/// a write or a lock there made the folder anew — a project deleted while
+/// Clew had it open came back, holding only Clew's own state.
+fn project_gone(path: &Path) -> bool {
+    use std::path::PathBuf;
+    let comps: Vec<_> = path.components().collect();
+    let Some(pos) = comps.iter().position(|c| c.as_os_str() == ".clew") else {
+        return false;
+    };
+    let root: PathBuf = comps[..pos].iter().collect();
+    !root.as_os_str().is_empty() && matches!(root.try_exists(), Ok(false))
+}
+
 /// Every directory from the path's `.clew` component down to its parent must
 /// be a real directory, not a symlink: `.clew` ships with the repository, so
 /// `.clew -> /outside` (or `.clew/cache -> …`) would redirect every state
@@ -296,9 +309,14 @@ pub(crate) fn repo_dirs_are_real(path: &Path) -> bool {
 /// alone get committed by an `git add -A`. Bookmarks and notes, `lsp.toml` and
 /// `launch.json` are deliberately NOT listed: they are meant to travel with
 /// the project.
+///
+/// It lists itself too: written afresh on each reader's machine, it showed as
+/// a change the reader never made the moment a project was opened.
 pub const CLEW_GITIGNORE: &str = "\
 # Written by clew: per-reader state that does not belong in the repository.
 # Bookmarks, notes, lsp.toml and launch.json stay trackable on purpose.
+# This file too is written on each reader's machine.
+.gitignore
 history.json
 reading.toml
 *.lock
@@ -331,6 +349,9 @@ fn ensure_clew_gitignore(path: &Path) {
         return;
     };
     let ignore = dir.join(".gitignore");
+    // One already there is left as it is, clew's own earlier one too: it may
+    // be committed, and rewritten it showed as a change in every reader's
+    // tree.
     if std::fs::symlink_metadata(&ignore).is_ok() || !dir.is_dir() {
         return;
     }
@@ -379,6 +400,12 @@ fn write_atomic_mode(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::R
     if !repo_dirs_are_real(path) {
         return Err(std::io::Error::other(
             "a state directory is a symlink — refusing to write through it",
+        ));
+    }
+    if project_gone(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the project folder is no longer there",
         ));
     }
     std::fs::create_dir_all(dir)?;
@@ -1413,6 +1440,12 @@ pub fn lock_named(path: &Path, lock_name: &str) -> std::io::Result<FileLock> {
     let dir = path
         .parent()
         .ok_or_else(|| std::io::Error::other("state path has no parent"))?;
+    if project_gone(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the project folder is no longer there",
+        ));
+    }
     std::fs::create_dir_all(dir)?;
     ensure_clew_gitignore(path);
     lock_file(&dir.join(lock_name))
@@ -1707,6 +1740,27 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
+    /// A project folder deleted while Clew had it open is not made again
+    /// by Clew writing or locking its own state there: it came back,
+    /// holding only `.clew`. Its `.clew` gone alone is made again, as
+    /// on a first open.
+    #[test]
+    fn a_project_folder_gone_is_not_made_again_for_its_state() {
+        let d = dir("clew-statefile-gone");
+        let root = d.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let state = root.join(".clew").join("history.json");
+        write_atomic(&state, b"{}").unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        let err = write_atomic(&state, b"{}").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+        assert!(lock_named(&state, "history.json.lock").is_err());
+        assert!(!root.exists(), "the deleted project came back");
+        std::fs::create_dir_all(&root).unwrap();
+        write_atomic(&state, b"{}").unwrap();
+        assert!(state.is_file(), "its .clew not made again");
+    }
+
     /// The first write into a project's `.clew/` leaves an ignore file behind
     /// that keeps per-reader state out of `git status` — and never replaces
     /// one the user or the repository already has.
@@ -1733,6 +1787,7 @@ mod tests {
 
         // A nested write (`.clew/cache/…`) puts it in `.clew`, not in `cache`.
         let nested = d.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
         write_atomic(&nested.join(".clew/cache/walkthroughs.json"), b"[]").unwrap();
         assert!(nested.join(".clew/.gitignore").is_file());
         assert!(!nested.join(".clew/cache/.gitignore").exists());
@@ -1751,6 +1806,10 @@ mod tests {
         // Paths outside any `.clew` (the global data dir) get nothing.
         write_atomic(&d.join("data").join("trust.toml"), b"").unwrap();
         assert!(!d.join("data/.gitignore").exists());
+
+        // It keeps itself out of `git status`: opening a project showed
+        // `.clew/.gitignore` as a change the reader never made.
+        assert!(ignore.lines().any(|l| l == ".gitignore"), "{ignore:?}");
     }
 
     #[test]

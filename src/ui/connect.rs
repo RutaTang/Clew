@@ -48,6 +48,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     };
 
     let provider = form::pick(
+        tr!("Provider"),
         Provider::ALL.map(ProviderChoice),
         Some(ProviderChoice(app.settings.provider)),
         |v: ProviderChoice| Message::Settings(SettingsMsg::ProviderPicked(v.0)),
@@ -68,14 +69,17 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     let key = input(&key_hint, &app.settings.key, |v| {
         Message::Settings(SettingsMsg::KeyChanged(v))
     })
+    .id(super::settings_key_id())
     .secure(true);
     let (model_hint, base_hint) = model_field_hints(app.settings.provider);
     let model = input(model_hint, &app.settings.model, |v| {
         Message::Settings(SettingsMsg::ModelChanged(v))
-    });
+    })
+    .id(super::settings_model_id());
     let base = input(base_hint, &app.settings.base_url, |v| {
         Message::Settings(SettingsMsg::BaseUrlChanged(v))
-    });
+    })
+    .id(super::settings_base_url_id());
     // What Test connection found, under its button.
     let tested = match &app.settings.connection_test {
         crate::app::state::ConnectionTest::Untried => None,
@@ -83,18 +87,30 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         crate::app::state::ConnectionTest::Answered(model) => {
             Some(tr!("Connected: {model} answered.", model = model))
         }
-        crate::app::state::ConnectionTest::Failed(why) => Some(crate::i18n::message(why)),
+        crate::app::state::ConnectionTest::Failed(why) => Some(why.said()),
     };
     let testing = matches!(
         app.settings.connection_test,
         crate::app::state::ConnectionTest::Testing(_)
     );
-    let test = form::item(
+    // What it costs, said where the pointer rests: it is an AI call, as
+    // the Usage page then lists it.
+    let failed = matches!(
+        app.settings.connection_test,
+        crate::app::state::ConnectionTest::Failed(_)
+    );
+    let test = form::item_saying(
         tr!("Connection"),
         tested,
-        form::action(
-            tr!("Test connection"),
-            (!testing).then_some(Message::Settings(SettingsMsg::TestConnection)),
+        failed,
+        super::toolbar::tip_at(
+            form::ai_action(
+                tr!("Test connection"),
+                (!testing).then_some(Message::Settings(SettingsMsg::TestConnection)),
+            ),
+            tr!("Sends one tiny AI request to check the key (a fraction of a cent)"),
+            None,
+            iced::widget::tooltip::Position::Top,
         ),
     );
 
@@ -131,11 +147,13 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     // Which theme fills the light slot, and the dark.
     use crate::theme::ThemeChoice;
     let language = form::pick(
+        tr!("Display language"),
         crate::i18n::LangPref::all(),
         Some(crate::i18n::pref()),
         |p| Message::Settings(SettingsMsg::SetLanguage(p)),
     );
     let light_pick = form::pick(
+        tr!("Light theme"),
         crate::theme::light_choices(),
         Some(ThemeChoice(crate::theme::current_light())),
         |c: ThemeChoice| {
@@ -146,6 +164,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         },
     );
     let dark_pick = form::pick(
+        tr!("Dark theme"),
         crate::theme::dark_choices(),
         Some(ThemeChoice(crate::theme::current_dark())),
         |c: ThemeChoice| {
@@ -193,11 +212,8 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 form::item(tr!("Dark theme"), None, dark_pick),
             ],
         )]),
-        SettingsPage::Updates => form::page(vec![form::group(
-            "",
-            None,
-            None,
-            vec![
+        SettingsPage::Updates => {
+            let mut rows = vec![
                 form::toggle(
                     tr!("Check for updates automatically"),
                     None,
@@ -207,13 +223,18 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 form::item(
                     tr!("Version"),
                     Some(format!("Clew {}", crate::updater::current_version())),
-                    form::action(tr!("Check now"), Some(Message::Updater(UpdaterMsg::Check))),
+                    check_now(app),
                 ),
-            ],
-        )]),
+            ];
+            rows.extend(update_status(app));
+            form::page(vec![form::group("", None, None, rows)])
+        }
         SettingsPage::LanguageModel => form::page(vec![form::group(
             "",
-            None,
+            // Opened by an AI action asked without a key: why, above the
+            // field it needs — it opened on the form with no word of it.
+            (app.settings.key_asked && app.settings.key.trim().is_empty())
+                .then(|| tr!("That needs an AI model: add an API key below, then try it again.").to_string()),
             None,
             [
                 form::field(tr!("Provider"), None, provider),
@@ -272,6 +293,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         ]),
         SettingsPage::Languages => languages_section(app),
         SettingsPage::Shortcuts => shortcuts_body(app),
+        SettingsPage::Usage => super::usage::usage_page(app),
     };
 
     let mut header = row![
@@ -359,6 +381,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             bottom: 20.0,
             left: 24.0,
         }))
+        .id(crate::ui::settings_scroll_id())
         .direction(thin_scroll())
         .style(theme::overlay_scrollbar)
         .height(Fill),
@@ -408,6 +431,7 @@ fn settings_glyph(page: SettingsPage) -> Glyph {
         SettingsPage::Integrations => Glyph::Plug,
         SettingsPage::Languages => Glyph::Braces,
         SettingsPage::Shortcuts => Glyph::Shortcuts,
+        SettingsPage::Usage => Glyph::Stats,
     }
 }
 
@@ -501,7 +525,12 @@ fn other_path<'a>(
 fn chip<'a>(label: String, on: bool, msg: Message) -> Element<'a, Message> {
     button(text(label).size(ts::BODY))
         .style(theme::toggle(on))
-        .padding([3, 9])
+        .padding(Padding {
+            top: form::CHIP_PAD_Y,
+            bottom: form::CHIP_PAD_Y,
+            left: 9.0,
+            right: 9.0,
+        })
         .on_press(msg)
         .into()
 }
@@ -546,6 +575,15 @@ pub(crate) fn model_field_hints(provider: crate::llm::Provider) -> (&'static str
     }
 }
 
+/// `s` begun with a capital, as a line of its own begins.
+fn sentence_start(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     if app.proj.project.is_none() {
         return space().height(0).into();
@@ -555,7 +593,9 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     let mut servers = Vec::new();
     for language in &rows {
         let server = match choices.servers.as_ref().and_then(|s| s.get(language)) {
-            Some(choice) => tr!("Your program: {program}", program = program_line(choice)),
+            // The server program the reader chose: "Your program:" read as
+            // the reader's own code.
+            Some(choice) => tr!("{program} (your choice)", program = program_line(choice)),
             None => app
                 .effective_server(language)
                 .map(|s| match s.command {
@@ -578,7 +618,10 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             crate::highlight::lang_name(language)
                 .map(str::to_string)
                 .unwrap_or_else(|| language.clone()),
-            Some(format!("{server} · {status}")),
+            // The server, and under it how it stands — a line of its own,
+            // so begun as a sentence is: the status bar's "pyright: ready"
+            // read here as a bare "ready".
+            Some(format!("{server}\n{}", sentence_start(&status))),
             action,
         ));
     }
@@ -621,8 +664,10 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             listed.then(|| tr!("Checking the project's options…").to_string()),
         ),
     };
+    // Under the page's own title, "Language servers": its first group is
+    // each language's, not the page's name again.
     parts.push(form::group(
-        tr!("Language servers"),
+        tr!("By language"),
         servers_about,
         listed.then(|| {
             form::action(
@@ -742,7 +787,7 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             |c, path| c.zig = path,
         ));
     }
-    parts.push(servers_block(app));
+    parts.extend(servers_block(app));
     parts.push(installed_servers(app));
     parts.push(server_log(app));
     form::page(parts)
@@ -758,7 +803,7 @@ pub(crate) fn installed_servers(app: &App) -> Element<'_, Message> {
             form::item(
                 srv.name.clone(),
                 Some(format!(
-                    "{} · {}",
+                    "{}, {}",
                     srv.version,
                     super::explain_view::human_size(srv.bytes)
                 )),
@@ -837,12 +882,7 @@ fn server_log(app: &App) -> Element<'_, Message> {
             .height(180),
         )
     };
-    form::group(
-        tr!("Server log"),
-        Some(tr!("Latest output from the current file's server.").into()),
-        None,
-        vec![row],
-    )
+    form::group(tr!("Server log"), None, None, vec![row])
 }
 
 /// The Python interpreter: the one in use and who named it, the ones
@@ -871,7 +911,7 @@ fn python_block<'a>(
         if let Some(path) = &effect.interpreter {
             in_use = in_use.push(form::path(path.clone()));
         }
-        rows.push(form::field(tr!("In use"), None, in_use));
+        rows.push(form::field_text(tr!("In use"), None, in_use));
         if let Some(bad) = &effect.unusable_choice {
             rows.push(form::plain(
                 text(tr!(
@@ -901,10 +941,10 @@ fn python_block<'a>(
                 PythonEnvKind::System => tr!("System"),
             };
             let label = match (&candidate.kind, &candidate.version) {
-                (PythonEnvKind::System, Some(version)) => format!("{kind} · Python {version}"),
+                (PythonEnvKind::System, Some(version)) => format!("{kind} Python {version}"),
                 (PythonEnvKind::System, None) => kind.to_string(),
-                (_, Some(version)) => format!("{kind} · {} · Python {version}", candidate.name),
-                (_, None) => format!("{kind} · {}", candidate.name),
+                (_, Some(version)) => format!("{} (Python {version}, {kind})", candidate.name),
+                (_, None) => format!("{} ({kind})", candidate.name),
             };
             rows.push(form::choice(
                 label,
@@ -943,7 +983,7 @@ fn python_block<'a>(
 }
 
 /// The Cargo features and target rust-analyzer loads the project with.
-fn rust_block<'a>(
+pub(super) fn rust_block<'a>(
     app: &'a App,
     options: Option<&'a clew_protocol::RustOptions>,
 ) -> Element<'a, Message> {
@@ -951,13 +991,23 @@ fn rust_block<'a>(
     let choices = &app.proj.lang_choices;
     let rust = choices.rust.clone().unwrap_or_default();
     let check = |label: &'static str, on: bool, set: fn(&mut clew_protocol::RustChoices, bool)| {
-        iced::widget::checkbox(on)
-            .style(theme::check)
-            .label(label)
-            .on_toggle(move |on| choose_with(choices, |c| set(c.rust.get_or_insert_default(), on)))
-            .text_size(ts::BASE)
-            .size(15)
-            .spacing(8)
+        let press = choose_with(choices, |c| set(c.rust.get_or_insert_default(), !on));
+        // Said as every switch is: by its name, and "on" or "off".
+        super::heard::switch(label, on, |v| {
+            choose_with(choices, |c| set(c.rust.get_or_insert_default(), v))
+        });
+        super::jump::mark(
+            iced::widget::checkbox(on)
+                .style(theme::check)
+                .label(label)
+                .on_toggle(move |on| {
+                    choose_with(choices, |c| set(c.rust.get_or_insert_default(), on))
+                })
+                .text_size(ts::BASE)
+                .size(15)
+                .spacing(8),
+            press,
+        )
     };
     let mut features = column![check(
         tr!("All features of all packages"),
@@ -1035,7 +1085,7 @@ fn rust_block<'a>(
     targets.retain(|t| seen.insert(t.clone()));
     let selected = rust.target.clone().unwrap_or_else(|| host_choice().into());
     let target = column![
-        form::pick(targets, Some(selected), move |t: String| {
+        form::pick(tr!("Target"), targets, Some(selected), move |t: String| {
             choose_with(choices, |c| {
                 c.rust.get_or_insert_default().target = (t != host_choice()).then_some(t)
             })
@@ -1060,14 +1110,16 @@ fn rust_block<'a>(
         ),
         None,
         vec![
-            form::field(tr!("Features"), None, features),
+            // Its first line is a checkbox's words: on the label's line,
+            // not 7 above it.
+            form::field_text(tr!("Features"), None, features),
             form::field(tr!("Target"), None, target),
         ],
     )
 }
 
 /// The build tags and platform gopls loads the project with.
-fn go_block<'a>(
+pub(super) fn go_block<'a>(
     app: &'a App,
     options: Option<&'a clew_protocol::GoOptions>,
 ) -> Element<'a, Message> {
@@ -1079,6 +1131,7 @@ fn go_block<'a>(
     let mut seen = std::collections::HashSet::new();
     all.retain(|t| seen.insert(t.clone()));
     let mut tags = column![].spacing(8);
+    let no_tags = all.is_empty();
     if all.is_empty() {
         tags = tags.push(form::note(tr!("No build tags in this project.")));
     } else {
@@ -1129,7 +1182,7 @@ fn go_block<'a>(
                     .font(crate::fonts::CODE)
                     .color(theme::dim())
                     .width(60),
-                form::pick(list, Some(selected), move |v: String| {
+                form::pick(label, list, Some(selected), move |v: String| {
                     choose_with(choices, |c| {
                         set(
                             c.go.get_or_insert_default(),
@@ -1161,7 +1214,11 @@ fn go_block<'a>(
         ),
         None,
         vec![
-            form::field(tr!("Build tags"), None, tags),
+            if no_tags {
+                form::field_text(tr!("Build tags"), None, tags)
+            } else {
+                form::field_chips(tr!("Build tags"), None, tags)
+            },
             form::field(tr!("Platform"), None, platform),
         ],
     )
@@ -1405,9 +1462,11 @@ fn toolchain_block<'a>(
     form::group(title, Some(about), None, rows)
 }
 
-/// The server programs the user chose, and the form to choose one — for a
-/// language clew serves (another build, another server) or one it does not.
-fn servers_block(app: &App) -> Element<'_, Message> {
+/// The server programs the user chose, and, apart, the form to add one —
+/// for a language clew serves (another build, another server) or one it
+/// does not. The form sat in the chosen list's card with no heading, its
+/// Use on the Arguments row as though it applied to them.
+fn servers_block(app: &App) -> Vec<Element<'_, Message>> {
     use crate::{LangField as F, LanguagesMsg as L};
     let choices = &app.proj.lang_choices;
     let remote = app.connection.is_remote();
@@ -1436,18 +1495,29 @@ fn servers_block(app: &App) -> Element<'_, Message> {
             .align_y(iced::Center),
         ));
     }
+    let mut groups = Vec::new();
+    if !rows.is_empty() {
+        groups.push(form::group(tr!("Server programs"), None, None, rows));
+    }
+    let mut rows = Vec::new();
     let mut languages = app.proj.file_languages.clone();
     languages.extend(app.proj.project_languages.iter().cloned());
     languages.sort();
     languages.dedup();
+    // By their names ("Python"), as the rest of the page says them — not
+    // their keys ("python").
+    let languages: Vec<LanguageChoice> = languages.into_iter().map(LanguageChoice).collect();
     let ready = drafts.server_language.is_some();
     rows.push(form::field(
         tr!("programming language\u{4}Language"),
         None,
-        form::pick(languages, drafts.server_language.clone(), |l: String| {
-            Message::Languages(L::ServerLanguage(l))
-        })
-        .placeholder(tr!("Choose…")),
+        form::pick_with(
+            tr!("programming language\u{4}Language"),
+            languages,
+            drafts.server_language.clone().map(LanguageChoice),
+            |l: LanguageChoice| Message::Languages(L::ServerLanguage(l.0)),
+            Some(tr!("Choose…").to_string()),
+        ),
     ));
     let mut program = row![draft_field(
         app,
@@ -1470,19 +1540,21 @@ fn servers_block(app: &App) -> Element<'_, Message> {
     rows.push(form::field(
         tr!("Arguments"),
         None,
+        draft_field(app, tr!("Optional"), F::ServerArgs),
+    ));
+    rows.push(form::plain(
         row![
-            draft_field(app, tr!("Optional"), F::ServerArgs),
-            form::action(
-                tr!("Use"),
+            space().width(Fill),
+            form::primary(
+                tr!("Add"),
                 (ready && !drafts.server_command.trim().is_empty())
                     .then_some(Message::Languages(L::UseDraft(F::ServerCommand)))
             ),
         ]
-        .spacing(6)
         .align_y(iced::Center),
     ));
-    form::group(
-        tr!("Server programs"),
+    groups.push(form::group(
+        tr!("Add a server program"),
         Some(
             tr!(
                 "Your own server program for a language: a different build, or a server Clew doesn't support."
@@ -1491,7 +1563,8 @@ fn servers_block(app: &App) -> Element<'_, Message> {
         ),
         None,
         rows,
-    )
+    ));
+    groups
 }
 
 /// An MCP server's approval policy as its picker lists it: clew-core's
@@ -1527,11 +1600,11 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 _ if !server.enabled => (tr!("Off").to_string(), theme::dim()),
                 Some(Status::Connected { info, tools }) => (
                     if info.name.is_empty() {
-                        trn!("Connected · 1 tool", "Connected · {n} tools", *tools)
+                        trn!("Connected, 1 tool", "Connected, {n} tools", *tools)
                     } else {
                         trn!(
-                            "Connected to {server} · 1 tool",
-                            "Connected to {server} · {n} tools",
+                            "Connected to {server}, 1 tool",
+                            "Connected to {server}, {n} tools",
                             *tools,
                             server = info.name
                         )
@@ -1543,21 +1616,13 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 Some(Status::Idle) | None => (tr!("Not connected yet").to_string(), theme::dim()),
             };
             let name = server.name.clone();
-            if super::heard::gathering() {
-                for a in clew_core::mcp::Approve::ALL {
-                    super::heard::said(
-                        &ApproveChoice(a).to_string(),
-                        Message::Integrations(M::McpApprove(server.name.clone(), a)),
-                    );
-                }
-            }
-            let policy = pick_list(
+            // Each policy said by what the list shows for it.
+            let policy = super::picker::picker(
                 clew_core::mcp::Approve::ALL.map(ApproveChoice),
                 Some(ApproveChoice(server.approve)),
                 move |a: ApproveChoice| Message::Integrations(M::McpApprove(name.clone(), a.0)),
             )
-            .style(theme::pick)
-            .menu_style(theme::pick_menu)
+            .label(tr!("Tool calls"))
             .text_size(ts::BODY)
             .padding([4, 8]);
             // An HTTP server reached without a header of the user's signs in.
@@ -1566,9 +1631,14 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 clew_core::mcp::Transport::Http { headers, .. }
                     if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
             );
-            let mut actions = row![policy, space().width(Fill)]
-                .spacing(6)
-                .align_y(iced::Center);
+            // Named where it stands: "Always ask" alone did not say of what.
+            let mut actions = row![
+                text(tr!("Tool calls")).size(ts::BODY).color(theme::dim()),
+                policy,
+                space().width(Fill)
+            ]
+            .spacing(6)
+            .align_y(iced::Center);
             if oauth {
                 actions = actions.push(if draft.signed_in.contains(&server.name) {
                     small(
@@ -1625,6 +1695,55 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         });
         servers.push(row);
     }
+    let registry = registry_group(draft);
+    // What the server last picked from the registry reads, which the form
+    // leaves to the user: each variable or header, what it is for, and
+    // whether it is needed and secret.
+    let mut needs: Vec<Element<'_, Message>> = Vec::new();
+    if let Some(used) = &draft.registry.used {
+        use clew_core::mcp::registry::Install;
+        let vars = match &used.install {
+            Install::Stdio { env, .. } => env.as_slice(),
+            Install::Remote { headers, .. } => headers.as_slice(),
+            Install::Unsupported(_) => &[],
+        };
+        for v in vars {
+            let mut tags = Vec::new();
+            if v.required {
+                tags.push(tr!("required"));
+            }
+            if v.secret {
+                tags.push(tr!("secret"));
+            }
+            let head = if tags.is_empty() {
+                v.name.clone()
+            } else {
+                format!("{} ({})", v.name, tags.join(", "))
+            };
+            needs.push(
+                column![
+                    text(head)
+                        .size(ts::SMALL)
+                        .font(crate::fonts::CODE)
+                        .color(theme::fg()),
+                    text(v.description.clone())
+                        .size(ts::SMALL)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::WordOrGlyph),
+                ]
+                .spacing(1)
+                .into(),
+            );
+        }
+    }
+    let mut add_rows = Vec::new();
+    if !needs.is_empty() {
+        add_rows.push(form::field_text(
+            tr!("It reads"),
+            None,
+            Column::with_children(needs).spacing(6),
+        ));
+    }
     let add_mcp = form::group(
         tr!("Add an MCP server"),
         None,
@@ -1661,26 +1780,40 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 )
                 .secure(true),
             ),
+            // Add only with something to add; and why it did not, beside
+            // it, as the Connect form says what it lacks.
             form::plain(
                 row![
-                    space().width(Fill),
-                    form::primary(tr!("Add server"), Some(Message::Integrations(M::McpAdd))),
+                    add_said(draft.mcp_add_error.as_deref()),
+                    form::primary(
+                        tr!("Add server"),
+                        (!draft.new_mcp_target.trim().is_empty())
+                            .then_some(Message::Integrations(M::McpAdd)),
+                    ),
                 ]
+                .spacing(12)
                 .align_y(iced::Center),
             ),
-        ],
+        ]
+        .into_iter()
+        .chain(add_rows)
+        .collect(),
     );
 
     let mut agents = Vec::new();
     for agent in &draft.acp {
         let name = agent.name.clone();
-        let share = iced::widget::checkbox(agent.share_mcp)
-            .style(theme::check)
-            .label(tr!("Share my MCP servers"))
-            .on_toggle(move |on| Message::Integrations(M::AcpShareMcp(name.clone(), on)))
-            .text_size(ts::BODY)
-            .size(15)
-            .spacing(6);
+        let flip = Message::Integrations(M::AcpShareMcp(name.clone(), !agent.share_mcp));
+        let share = super::jump::mark(
+            iced::widget::checkbox(agent.share_mcp)
+                .style(theme::check)
+                .label(tr!("Share my MCP servers"))
+                .on_toggle(move |on| Message::Integrations(M::AcpShareMcp(name.clone(), on)))
+                .text_size(ts::BODY)
+                .size(15)
+                .spacing(6),
+            flip,
+        );
         super::heard::about_with(
             || crate::app::integrations::acp_label(agent),
             || {
@@ -1754,9 +1887,14 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     ));
     add_acp.push(form::plain(
         row![
-            space().width(Fill),
-            form::primary(tr!("Add agent"), Some(Message::Integrations(M::AcpAdd))),
+            add_said(draft.acp_add_error.as_deref()),
+            form::primary(
+                tr!("Add agent"),
+                (!draft.new_acp_name.trim().is_empty() && !draft.new_acp_command.trim().is_empty())
+                    .then_some(Message::Integrations(M::AcpAdd)),
+            ),
         ]
+        .spacing(12)
         .align_y(iced::Center),
     ));
 
@@ -1785,6 +1923,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         None,
         servers,
     ));
+    parts.push(registry);
     parts.push(add_mcp);
     parts.push(form::group(
         tr!("ACP agents"),
@@ -2076,6 +2215,16 @@ pub(crate) fn host_key_changed_prompt<'a>(
 /// when the connection is local (there is nothing to grant).
 pub(crate) fn live_ai_keys_row(app: &App) -> Option<Element<'_, Message>> {
     let held = app.live_ai_opt_in()?;
+    // No key here: nothing for a host to hold, or not. The keys configured
+    // (`llm_available`: config.toml or the environment), not only the
+    // Settings draft — empty until Settings is opened, and never holding
+    // a key from the environment.
+    let has_key = app.llm_available
+        || !app.settings.key.trim().is_empty()
+        || !app.settings.embed_key.trim().is_empty();
+    if !held && !has_key {
+        return None;
+    }
     let host = app.connection.label();
     let row: Element<'_, Message> = if held {
         row![
@@ -2182,7 +2331,11 @@ pub(crate) fn connect_picker<'a>(
     let mut col = Column::new().spacing(12);
 
     // New-connection form. Enter in any field connects, like the button.
-    let field = |title: &str, input: Element<'a, Message>| column![label(title), input].spacing(3);
+    // Each field named by its label for the ring, as a form's row names
+    // its own.
+    let field = |title: &str, input: Element<'a, Message>| {
+        column![label(title), super::jump::field_named(input, title)].spacing(3)
+    };
     // A field what is wrong is about is marked, until it is edited.
     let input = |placeholder: &str, value: &str, f: ConnectField| {
         text_input(placeholder, value)
@@ -2246,7 +2399,7 @@ pub(crate) fn connect_picker<'a>(
     // Per-host consent for AI keys. Off: keys stay on this machine and AI
     // calls run locally. On: this host's clew-server receives the keys and
     // runs Ask/Explain remotely.
-    col = col.push(
+    col = col.push(super::jump::mark(
         iced::widget::checkbox(ui.send_ai_keys)
             .style(theme::check)
             .label(tr!("Send my API keys to this host"))
@@ -2259,6 +2412,20 @@ pub(crate) fn connect_picker<'a>(
             .size(14)
             .text_size(ts::BODY)
             .spacing(8),
+        Message::Connect(ConnectMsg::ToggleAiKeys(!ui.send_ai_keys)),
+    ));
+    // What the box decides, said: whether the reader's paid keys leave this
+    // computer. Under its label (the box's 14 px and its 8 px gap).
+    col = col.push(
+        container(
+            text(tr!(
+                "Lets Clew on that computer call your AI provider, so Ask and Explain run there. The keys go over the SSH connection and are kept in memory only, never written to disk."
+            ))
+            .size(ts::SMALL)
+            .color(theme::fg_muted())
+            .wrapping(Wrapping::WordOrGlyph),
+        )
+        .padding(Padding::default().left(22.0)),
     );
     let said: Element<'a, Message> = match error {
         Some(why) => text(crate::i18n::quoted(why).into_owned())
@@ -2492,40 +2659,68 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
             .align_y(iced::Center)
             .into()
         } else {
-            let pill = button(
-                text(app.keymap.chord(action).caps())
-                    .size(ts::BODY)
-                    .color(theme::fg()),
-            )
-            .style(theme::secondary_button)
-            .padding([3, 10])
-            .on_press(Message::Window(WindowMsg::RebindStart(action)));
+            // Its keys as caps, as the command bar draws them: here, where
+            // shortcuts are learned, they were one pill of words ("Ctrl+L")
+            // and its other keys plain text beside it.
+            let pill = button(super::toolbar::row_keycap(app.keymap.chord(action).caps()))
+                .style(theme::secondary_button)
+                .padding([2, 4])
+                .on_press(super::heard::said_to_with(
+                    tr!("Change shortcut"),
+                    || action.label().to_string(),
+                    Message::Window(WindowMsg::RebindStart(action)),
+                ));
+            // The chord other editors use for it, where it reaches it too:
+            // said beside the one a click rebinds.
+            let pill: Element<'_, Message> = match app.keymap.alias(action) {
+                Some(alias) => row![
+                    pill,
+                    text(tr!("or")).size(ts::SMALL).color(theme::dim()),
+                    super::toolbar::row_keycap(alias.caps()),
+                ]
+                .spacing(6)
+                .align_y(iced::Center)
+                .into(),
+                None => pill.into(),
+            };
             if app.keymap.is_overridden(action) {
                 row![
                     button(text("↺").size(ts::BASE).color(theme::dim()))
                         .style(theme::toolbar_button)
                         .padding([2, 7])
-                        .on_press(Message::Window(WindowMsg::RebindReset(action))),
+                        .on_press(super::heard::said_to_with(
+                            tr!("Reset"),
+                            || action.label().to_string(),
+                            Message::Window(WindowMsg::RebindReset(action)),
+                        )),
                     pill,
                 ]
                 .spacing(4)
                 .align_y(iced::Center)
                 .into()
             } else {
-                pill.into()
+                pill
             }
         };
         cmds.push(slim(action.label().to_string(), binding));
     }
 
     // Read-only reading motions (not part of the customizable keymap).
-    let motions: [(&str, &str); 16] = [
+    // The keys as they are named on the keyboard: Return on a Mac's,
+    // Enter on others'.
+    let press_keys = if cfg!(target_os = "macos") {
+        "Return   Space"
+    } else {
+        "Enter   Space"
+    };
+    let motions: [(&str, &str); 25] = [
         (tr!("Move left / down / up / right"), "h j k l   ← ↓ ↑ →"),
         (tr!("Word forward / back"), "w   b"),
-        (tr!("Line start / end"), "0   $"),
-        (tr!("File start / end"), "gg   G"),
-        (tr!("Go to definition"), "gd"),
-        (tr!("Find references"), "gr"),
+        (tr!("Line start / end"), "0   $   Home   End"),
+        (tr!("File start / end"), "gg   G   ⌘Home   ⌘End"),
+        (tr!("Page up / down"), "PgUp   PgDn"),
+        (tr!("Go to definition"), "gd   F12"),
+        (tr!("Find references"), "gr   ⇧F12"),
         (tr!("Go to implementation"), "gi"),
         (tr!("Go to type definition"), "gy"),
         (tr!("Call hierarchy"), "gc"),
@@ -2534,21 +2729,23 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
         (tr!("Open all folds"), "zR"),
         (tr!("Close all folds"), "zM"),
         (tr!("Time Travel: older / newer commit"), "⌘←   ⌘→"),
-        (tr!("Next / previous field"), "tab   ⇧tab"),
-        (tr!("Close the top panel / clear selection"), "esc"),
+        (tr!("Next / previous control or field"), "Tab   ⇧Tab"),
+        (tr!("Press the control the ring is on"), press_keys),
+        (tr!("Code / sidebar / file tree / Ask"), "F6   ⇧F6"),
+        (
+            tr!("File tree: walk it, open a folder / close it"),
+            "↑ ↓ → ←   j k l h",
+        ),
+        (tr!("Close the top panel / clear selection"), "Esc"),
+        (tr!("The menu of the code or file there"), "⇧F10"),
+        (tr!("Debugger: breakpoint on this line"), "F9"),
+        (tr!("Debugger: start / continue, stop"), "F5   ⇧F5"),
+        (tr!("Debugger: step over"), "F10"),
+        (tr!("Debugger: step into / out"), "F11   ⇧F11"),
     ];
     let vim = motions
         .into_iter()
-        .map(|(label, keys)| {
-            slim(
-                label.to_string(),
-                text(crate::keymap::local_keys(keys))
-                    .size(ts::BODY)
-                    .font(crate::fonts::CODE)
-                    .color(theme::fg_muted())
-                    .into(),
-            )
-        })
+        .map(|(label, keys)| slim(label.to_string(), motion_caps(keys)))
         .collect();
 
     form::page(vec![
@@ -2562,6 +2759,22 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
         ),
         form::note(tr!("Saved to {path}", path = crate::llm::config_hint())).into(),
     ])
+}
+
+/// A reading motion's keys as caps, as every other shortcut's are: each
+/// group (three spaces apart in `keys`) its keys side by side, the groups
+/// set apart. They were a line of code-font text.
+fn motion_caps<'a>(keys: &str) -> Element<'a, Message> {
+    let keys = crate::keymap::local_keys(keys);
+    let mut groups = Row::new().spacing(10).align_y(iced::Center);
+    for group in keys.split("   ").filter(|g| !g.trim().is_empty()) {
+        let mut caps = Row::new().spacing(3).align_y(iced::Center);
+        for key in group.split(' ').filter(|k| !k.is_empty()) {
+            caps = caps.push(super::toolbar::row_keycap(key.to_string()));
+        }
+        groups = groups.push(caps);
+    }
+    groups.into()
 }
 
 /// A shortcut's row: what it does, and its keys at the right — slimmer
@@ -2605,11 +2818,24 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
             Message::Settings(SettingsMsg::CancelEmbedDownload),
         )
     } else if app.embed_model_installed() {
-        form::action(
-            tr!("Remove"),
-            Some(Message::Settings(SettingsMsg::RemoveEmbedModel)),
-        )
-        .into()
+        // Just downloaded: "Ready" where Cancel was, not yet Remove — a
+        // click meant for Cancel removed what had just arrived.
+        let just = app
+            .local_embedding
+            .downloaded_at
+            .is_some_and(|at| at.elapsed() < crate::app::embedding::JUST_DOWNLOADED);
+        if just {
+            text(tr!("Downloaded"))
+                .size(ts::SMALL)
+                .color(theme::success())
+                .into()
+        } else {
+            form::action(
+                tr!("Remove"),
+                Some(Message::Settings(SettingsMsg::RemoveEmbedModel)),
+            )
+            .into()
+        }
     } else {
         form::primary(
             &tr!("Download ({size} MB)", size = MODEL.size_mb()),
@@ -2652,4 +2878,251 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
         ),
     ));
     rows
+}
+
+/// The MCP registry search in Settings: what servers added here are for
+/// (Clew's own agent, not an ACP agent's), the search, and what it found —
+/// each with how it runs, and Use to fill the add form with it.
+fn registry_group(draft: &crate::app::integrations::IntegrationsDraft) -> Element<'_, Message> {
+    use crate::IntegrationsMsg as M;
+    use clew_core::mcp::registry::Install;
+    let reg = &draft.registry;
+    let searching = reg.searching.is_some();
+    let search = row![
+        super::jump::field_named(
+            form::input(tr!("Search, e.g. github, postgres, browser"), &reg.query)
+                .on_input(|v| Message::Integrations(M::RegistryQuery(v)))
+                .on_submit(Message::Integrations(M::RegistrySearch)),
+            tr!("Search, e.g. github, postgres, browser"),
+        ),
+        form::action(
+            if searching {
+                tr!("Searching…")
+            } else {
+                tr!("Search")
+            },
+            (!searching && !reg.query.trim().is_empty())
+                .then_some(Message::Integrations(M::RegistrySearch)),
+        ),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+    super::heard::field(&reg.query, |v| Message::Integrations(M::RegistryQuery(v)));
+    let mut rows: Vec<Element<'_, Message>> = vec![form::plain(search)];
+    match &reg.found {
+        None => {}
+        Some(Err(why)) => rows.push(form::plain(
+            text(tr!(
+                "The registry could not be searched: {why}",
+                why = why.clone()
+            ))
+            .size(ts::BODY)
+            .color(theme::danger()),
+        )),
+        Some(Ok(entries)) if entries.is_empty() => {
+            rows.push(form::plain(form::note(tr!("Nothing found"))))
+        }
+        Some(Ok(entries)) => {
+            for (i, entry) in entries.iter().enumerate() {
+                let how = match &entry.install {
+                    Install::Stdio { kind, .. } => {
+                        format!("{} {}", registry_kind(kind), entry.version)
+                    }
+                    Install::Remote { .. } => format!("{} {}", tr!("remote"), entry.version),
+                    Install::Unsupported(why) => tr!("Clew can't run it: {why}", why = why.clone()),
+                };
+                let usable = !matches!(entry.install, Install::Unsupported(_));
+                let use_button: Element<'_, Message> = if usable {
+                    super::heard::about(&entry.name, || {
+                        form::action(tr!("Use"), Some(Message::Integrations(M::RegistryUse(i))))
+                    })
+                    .into()
+                } else {
+                    space().into()
+                };
+                rows.push(form::plain(
+                    row![
+                        column![
+                            text(entry.name.clone())
+                                .size(ts::BASE)
+                                .font(crate::fonts::UI_MEDIUM)
+                                .color(theme::fg())
+                                .wrapping(Wrapping::WordOrGlyph),
+                            text(entry.description.clone())
+                                .size(ts::SMALL)
+                                .color(theme::fg())
+                                .wrapping(Wrapping::WordOrGlyph),
+                            text(how).size(ts::SMALL).color(theme::dim()),
+                        ]
+                        .spacing(2)
+                        .width(Fill),
+                        use_button,
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Center),
+                ));
+            }
+            rows.push(form::plain(form::note(tr!(
+                "The registry lists what publishers say about their servers; it does not check them. Read the command before you add one."
+            ))));
+        }
+    }
+    form::group(tr!("Find in the MCP registry"), None, None, rows)
+}
+
+/// How a registry package is said: its ecosystem's own name.
+fn registry_kind(kind: &str) -> String {
+    match kind {
+        "npm" => "npm".into(),
+        "pypi" => "PyPI".into(),
+        "oci" => "Docker".into(),
+        "nuget" => "NuGet".into(),
+        other => other.to_string(),
+    }
+}
+
+/// "Check now", and while a check runs its icon turning and "Checking…" in
+/// its place, as wide either way: pressed, it said nothing — the answer went
+/// to the status bar the Settings window covers.
+fn check_now(app: &App) -> Element<'_, Message> {
+    use super::steady::width_of;
+    let checking = app.update.checking;
+    let updating = matches!(
+        app.update.phase,
+        crate::UpdatePhase::Downloading | crate::UpdatePhase::Installing
+    );
+    let idle = tr!("Check now");
+    let busy = tr!("Checking…");
+    const ICON: f32 = 13.0;
+    const GAP: f32 = 6.0;
+    let width = width_of(idle, ts::BODY, crate::fonts::UI)
+        .max(width_of(busy, ts::BODY, crate::fonts::UI) + ICON + GAP)
+        + 2.0 * 12.0
+        + 2.0;
+    let words: Element<'_, Message> = if checking {
+        row![
+            super::meter::spinning(Glyph::Refresh, theme::fg_muted(), ICON),
+            text(busy).size(ts::BODY).wrapping(Wrapping::None),
+        ]
+        .spacing(GAP)
+        .align_y(iced::Center)
+        .into()
+    } else {
+        text(idle).size(ts::BODY).wrapping(Wrapping::None).into()
+    };
+    button(container(words).center_x(Fill))
+        .style(theme::secondary_button)
+        .padding([5, 12])
+        .width(width)
+        .on_press_maybe(
+            (!checking && !updating)
+                .then(|| super::heard::said(idle, Message::Updater(UpdaterMsg::Check))),
+        )
+        .into()
+}
+
+/// What the last check found, under the Version row: up to date, a newer
+/// Clew (with what is new in it and the way to it), an update on its way,
+/// or why the check failed. Nothing while a check runs — its button says
+/// so — or before any.
+fn update_status(app: &App) -> Option<Element<'_, Message>> {
+    use crate::{CheckOutcome, UpdatePhase};
+    let u = &app.update;
+    if u.checking {
+        return None;
+    }
+    let line = |mark: Element<'static, Message>, said: String, color: iced::Color| {
+        row![
+            mark,
+            text(said)
+                .size(ts::SMALL)
+                .color(color)
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Fill),
+        ]
+        .spacing(6)
+        .align_y(iced::Center)
+    };
+    let mark = |g: Glyph, color: iced::Color| -> Element<'static, Message> {
+        crate::glyph::icon(g, color, 13.0)
+    };
+    let body: Element<'_, Message> = match (&u.phase, &u.available, &u.last_check) {
+        (UpdatePhase::Downloading, Some(a), _) => line(
+            super::meter::spinning(Glyph::Refresh, theme::accent(), 13.0),
+            tr!("Downloading Clew {version}…", version = a.version),
+            theme::fg_muted(),
+        )
+        .into(),
+        (UpdatePhase::Installing, Some(_), _) => line(
+            super::meter::spinning(Glyph::Refresh, theme::accent(), 13.0),
+            tr!("Installing update… Clew will relaunch").into(),
+            theme::fg_muted(),
+        )
+        .into(),
+        (UpdatePhase::Failed(e), Some(_), _) => line(
+            mark(Glyph::Info, theme::danger()),
+            tr!("Update failed: {error}", error = e),
+            theme::danger(),
+        )
+        .push(form::action(
+            tr!("Retry"),
+            Some(Message::Updater(UpdaterMsg::InstallStart)),
+        ))
+        .into(),
+        (_, Some(a), _) => line(
+            mark(Glyph::Sparkle, theme::accent()),
+            tr!("Clew {version} is available", version = a.version),
+            theme::fg(),
+        )
+        .push(form::action(
+            tr!("What's new"),
+            Some(Message::Updater(UpdaterMsg::ShowNotes)),
+        ))
+        .push(form::primary(
+            tr!("Update now"),
+            Some(Message::Updater(UpdaterMsg::InstallStart)),
+        ))
+        .into(),
+        (_, None, Some(CheckOutcome::UpToDate)) => line(
+            mark(Glyph::CheckCircle, theme::success()),
+            tr!("Clew is up to date").into(),
+            theme::fg_muted(),
+        )
+        .into(),
+        (_, None, Some(CheckOutcome::Failed(e))) => line(
+            mark(Glyph::Info, theme::danger()),
+            tr!("Update check failed: {error}", error = e),
+            theme::danger(),
+        )
+        .into(),
+        _ => return None,
+    };
+    Some(form::row_of(body))
+}
+
+/// Why an Add of the Integrations page's forms did not add, in the danger
+/// colour, filling the row up to its button; nothing, and the row is the
+/// same height, when it did.
+fn add_said<'a>(error: Option<&str>) -> Element<'a, Message> {
+    match error {
+        Some(why) => {
+            text(crate::i18n::quoted(&tr!("Not added: {error}.", error = why)).into_owned())
+                .size(ts::BODY)
+                .color(theme::danger())
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Fill)
+                .into()
+        }
+        None => space().width(Fill).into(),
+    }
+}
+
+/// A language in a drop-down, by its key, shown by its name.
+#[derive(Debug, Clone, PartialEq)]
+struct LanguageChoice(String);
+
+impl std::fmt::Display for LanguageChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(crate::app::languages::language_name(&self.0))
+    }
 }

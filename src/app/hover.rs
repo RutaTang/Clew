@@ -64,6 +64,51 @@ impl App {
         )
     }
 
+    /// The pointer moved onto gutter line `line` of `pane` (or off the
+    /// gutter): its tip, if the line has a breakpoint or a bookmark, shows
+    /// once the pointer has rested there, as every tooltip does.
+    pub(crate) fn on_gutter_hover(
+        &mut self,
+        pane: usize,
+        line: Option<usize>,
+        x: f32,
+        y: f32,
+    ) -> Task<Message> {
+        let Some(line) = line else {
+            self.proj.gutter_tip = None;
+            return Task::none();
+        };
+        // In the window, as the peek is placed: the code reports the
+        // pointer in its scrolled space.
+        let (sx, sy) = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .map_or((0.0, 0.0), |v| (v.scroll_x, v.scroll_y));
+        self.proj.gutter_seq = self.proj.gutter_seq.wrapping_add(1);
+        let generation = self.proj.gutter_seq;
+        self.proj.gutter_tip = Some(crate::app::state::GutterTip {
+            pane,
+            line,
+            x: x - sx,
+            y: y - sy,
+            scroll: (sx, sy),
+            generation,
+            shown: false,
+        });
+        let stamp = self.stamp();
+        Task::perform(
+            async { tokio::time::sleep(GUTTER_TIP_DELAY).await },
+            move |_| {
+                Message::Hover(HoverMsg::GutterDue {
+                    stamp: stamp.clone(),
+                    generation,
+                })
+            },
+        )
+    }
+
     pub(crate) fn on_hover_dwell(
         &mut self,
         hover_gen: u64,
@@ -75,6 +120,22 @@ impl App {
     ) -> Task<Message> {
         if hover_gen != self.proj.hover_gen || self.proj.hover_pinned {
             return Task::none(); // cursor moved on, or is inside the tooltip
+        }
+        // Rested past the line's end, over nothing: no word is under the
+        // pointer, and none is peeked at — the hit there is the line's end,
+        // and the peek of its last word opened over the blank space beside
+        // it, covering the code below. What was peeked at goes once the
+        // pointer rests here, as when it leaves the code; until then it
+        // stays, for the pointer crossing blank space on its way into it.
+        let past_end = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .is_some_and(|v| col >= v.line_len(line));
+        if past_end {
+            self.proj.hover = None;
+            return Task::none();
         }
         let stamp = self.stamp();
         self.proj.hover = Some(HoverState {
@@ -96,6 +157,7 @@ impl App {
         // evaluation has no side effects, otherwise only after the reader
         // opted in (see `dap::hover_eval_allowed`).
         if dap::hover_eval_allowed(self.debug.hover_safe, self.debug_hover_eval)
+            && self.real_run_shown()
             && let Some(session) = self
                 .debug
                 .session
@@ -211,6 +273,20 @@ impl App {
             self.proj.hover_gen = self.proj.hover_gen.wrapping_add(1);
         }
         Task::none()
+    }
+
+    /// A gutter's tip put away: its pane's file replaced, or the pane gone
+    /// (`None`: any pane's). Only the gutter itself put it away, as the
+    /// pointer left it, and a pane gone has no gutter to.
+    pub(crate) fn forget_gutter_tip(&mut self, pane: Option<usize>) {
+        if self
+            .proj
+            .gutter_tip
+            .as_ref()
+            .is_some_and(|tip| pane.is_none_or(|p| p == tip.pane))
+        {
+            self.proj.gutter_tip = None;
+        }
     }
 
     /// The document under the cursor changed, so every hover in flight is
@@ -389,6 +465,8 @@ impl App {
             .and_then(|v| v.lang_key)
             .and_then(InsightKind::for_lang);
         let served = self.served(pane);
+        // One menu at a time: the tree's would come back when this closes.
+        self.proj.tree_menu = None;
         self.proj.context_menu = Some(ContextMenu {
             pane,
             line,
@@ -398,6 +476,7 @@ impl App {
             insight,
             served,
             by_pointer: true,
+            line_top: None,
         });
         // The menu acts where it was opened: the caret goes there, as a
         // click puts it — the code said nothing of what it would act on. A
@@ -416,6 +495,57 @@ impl App {
             return self.sync_reading_context();
         }
         Task::none()
+    }
+
+    /// ⇧F10 or the Menu key in the code: its menu at the caret, as a
+    /// right-click there opens it — the menu was the pointer's alone.
+    pub(crate) fn open_context_menu_at_caret(&mut self) -> Task<Message> {
+        // Not for code that is not on screen: a page over it (Weak Spots,
+        // the statistics, a doc page), or the large Ask window. The menu
+        // opened over the page, for a line no one could see.
+        if crate::ui::pane_cover(self).is_some() || self.ask_view == crate::AskView::Expanded {
+            return Task::none();
+        }
+        let pane = self.proj.active;
+        let Some(v) = self.active_viewer() else {
+            return Task::none();
+        };
+        let Some((line, col)) = v.caret else {
+            return Task::none();
+        };
+        let Some(panes) = crate::ui::panes_rect(self) else {
+            return Task::none();
+        };
+        // The pane's half, where the panes are split.
+        let (left, width) = if self.proj.split {
+            let half = panes.width / 2.0;
+            (panes.x + if pane == 1 { half } else { 0.0 }, half)
+        } else {
+            (panes.x, panes.width)
+        };
+        let size = self.font_size;
+        let lh = self.line_height();
+        // The code's gutter and a column of its font, as the view sets
+        // them (`editor::codeview`): close enough to open the menu by the
+        // caret, and kept inside the pane.
+        let gutter = (48.0 + 20.0) * size / 13.0;
+        let column = size * 0.6;
+        let x = left + gutter + col as f32 * column - v.scroll_x;
+        let y = panes.y + (v.row_of(line) + 1) as f32 * lh - v.scroll_y;
+        let x = x.clamp(left, (left + width - 1.0).max(left));
+        let y = y.clamp(panes.y, (panes.y + panes.height - 1.0).max(panes.y));
+        let (sx, sy) = (v.scroll_x, v.scroll_y);
+        // In the content's space, as a click's point comes.
+        let opened = self.on_context_menu_opened(pane, line, col, x + sx, y + sy);
+        // Where its line starts: with no room below it, the menu opens
+        // above the line, not over it.
+        if let Some(menu) = self.proj.context_menu.as_mut() {
+            menu.line_top = Some((y - lh).max(panes.y));
+        }
+        // Opened from the keys, on its first row: Enter runs it. With
+        // nothing chosen, Enter did nothing until ↓ was pressed.
+        let ring = self.on_tab(true, false);
+        Task::batch([opened, ring])
     }
 
     /// Whether the language server of what `pane` shows is ready.
@@ -451,7 +581,8 @@ impl App {
                 };
                 self.goto_request(menu.pane, menu.line, menu.col, kind)
             }
-            HoverMsg::Insight => self.on_insight_from_menu(),
+            HoverMsg::Insight => self.on_insight_from_menu(None),
+            HoverMsg::InsightOf(kind) => self.on_insight_from_menu(Some(kind)),
             HoverMsg::InsightAtCursor => self.insight_at_cursor(),
             HoverMsg::InsightAnswered { token, result, .. } => {
                 self.on_insight_answered(token, result)
@@ -499,6 +630,18 @@ impl App {
                 Task::none()
             }
             HoverMsg::Cleared => self.on_hover_cleared(),
+            HoverMsg::Gutter { pane, line, x, y } => self.on_gutter_hover(pane, line, x, y),
+            HoverMsg::GutterDue { generation, .. } => {
+                if let Some(tip) = self
+                    .proj
+                    .gutter_tip
+                    .as_mut()
+                    .filter(|t| t.generation == generation)
+                {
+                    tip.shown = true;
+                }
+                Task::none()
+            }
             HoverMsg::Pin(inside) => {
                 self.proj.hover_pinned = inside;
                 if !inside {
@@ -511,3 +654,7 @@ impl App {
         }
     }
 }
+
+/// How long the pointer rests on a gutter line before its tip shows: as
+/// long as any tooltip's.
+pub(crate) const GUTTER_TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);

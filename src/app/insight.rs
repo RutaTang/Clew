@@ -7,18 +7,19 @@
 //!
 //! Its messages are [`HoverMsg`]'s `Insight*`, through `App::update_hover`.
 
-use clew_core::lsp::client::{ExpandedMacro, LeanGoal, hover_parts};
+use clew_core::lsp::client::{ExpandedMacro, LeanGoal, MemoryLayout, RelatedTest, hover_parts};
 
 use crate::app::prelude::*;
 use crate::*;
 
 impl App {
-    /// The context menu's language action, at the menu's position.
-    pub(crate) fn on_insight_from_menu(&mut self) -> Task<Message> {
+    /// The context menu's language action — its own (`None`), or `kind`,
+    /// one of its others — at the menu's position.
+    pub(crate) fn on_insight_from_menu(&mut self, kind: Option<InsightKind>) -> Task<Message> {
         let Some(menu) = self.proj.context_menu.take() else {
             return Task::none();
         };
-        let Some(kind) = menu.insight else {
+        let Some(kind) = kind.or(menu.insight) else {
             return Task::none();
         };
         let task = self.start_insight(kind, menu.pane, menu.line, menu.col);
@@ -68,6 +69,12 @@ impl App {
             (InsightKind::GoalState, _) => tr!("Goal at line {line}", line = line + 1),
             (InsightKind::TypeAtPoint, Some(w)) => tr!("Type of {name}", name = w),
             (InsightKind::TypeAtPoint, None) => tr!("Type at line {line}", line = line + 1),
+            (InsightKind::MemoryLayout, Some(w)) => tr!("Memory layout of {name}", name = w),
+            (InsightKind::MemoryLayout, None) => {
+                tr!("Memory layout at line {line}", line = line + 1)
+            }
+            (InsightKind::RelatedTests, Some(w)) => tr!("Tests of {name}", name = w),
+            (InsightKind::RelatedTests, None) => tr!("Tests at line {line}", line = line + 1),
         };
         self.proj.insight = Some(Insight {
             token,
@@ -133,7 +140,9 @@ impl App {
         }
         // The rest is the language server's to say.
         let server = match kind {
-            InsightKind::ExpandMacro => "rust-analyzer",
+            InsightKind::ExpandMacro | InsightKind::MemoryLayout | InsightKind::RelatedTests => {
+                "rust-analyzer"
+            }
             InsightKind::GoalState => tr!("The Lean server"),
             InsightKind::TypeAtPoint => "haskell-language-server",
         };
@@ -159,6 +168,8 @@ impl App {
             }
         };
         let character = viewer::Col(col).to_offset(&source_line, client.encoding);
+        // Where the tests' paths are read from, to link them.
+        let root = self.proj.project.as_ref().map(|p| p.root.clone());
         Task::perform(
             async move {
                 match kind {
@@ -174,6 +185,14 @@ impl App {
                         .hover(&abs, line, character)
                         .await
                         .map(|h| h.as_deref().and_then(haskell_answer)),
+                    InsightKind::MemoryLayout => client
+                        .memory_layout(&abs, line, character)
+                        .await
+                        .map(|m| m.map(|m| layout_answer(&m))),
+                    InsightKind::RelatedTests => client
+                        .related_tests(&abs, line, character)
+                        .await
+                        .map(|t| tests_answer(&t, root.as_deref())),
                 }
             },
             done,
@@ -237,6 +256,132 @@ pub(crate) fn rust_answer(m: ExpandedMacro) -> InsightAnswer {
         ),
         defined: None,
     }
+}
+
+/// rust-analyzer's memory layout, as the popup shows it: the type's size
+/// and alignment and the padding in it, then each field where rustc put it
+/// — not where the source declares it — and the gaps between them.
+pub(crate) fn layout_answer(layout: &MemoryLayout) -> InsightAnswer {
+    let Some(root) = layout.nodes.first() else {
+        return InsightAnswer {
+            markdown: String::new(),
+            defined: None,
+        };
+    };
+    let padding = layout.padding();
+    let mut md = format!(
+        "**`{}`** — {}",
+        root.typename,
+        trn!(
+            "1 byte, aligned to {align}",
+            "{n} bytes, aligned to {align}",
+            root.size as usize,
+            align = root.alignment
+        )
+    );
+    if padding > 0 {
+        md.push_str(", ");
+        md.push_str(&trn!(
+            "1 byte of padding",
+            "{n} bytes of padding",
+            padding as usize
+        ));
+    }
+    let fields = layout.fields();
+    if fields.is_empty() {
+        return InsightAnswer {
+            markdown: md,
+            defined: None,
+        };
+    }
+    // A table in a code block: its columns stay lined up in any font the
+    // popup's text has.
+    let name_w = fields
+        .iter()
+        .map(|f| f.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(tr!("(padding)").chars().count());
+    let row = |offset: String, size: String, name: &str, ty: &str| {
+        format!(
+            "{offset:>6}  {size:>4}  {name:<width$}  {ty}",
+            width = name_w
+        )
+        .trim_end()
+        .to_string()
+    };
+    let mut lines = vec![row(
+        tr!("offset").into(),
+        tr!("size").into(),
+        tr!("field"),
+        tr!("type"),
+    )];
+    let mut end = 0;
+    for field in &fields {
+        if field.offset > end {
+            lines.push(row(
+                end.to_string(),
+                (field.offset - end).to_string(),
+                tr!("(padding)"),
+                "",
+            ));
+        }
+        lines.push(row(
+            field.offset.to_string(),
+            field.size.to_string(),
+            &field.name,
+            &field.typename,
+        ));
+        end = end.max(field.offset + field.size);
+    }
+    if root.size > end {
+        lines.push(row(
+            end.to_string(),
+            (root.size - end).to_string(),
+            tr!("(padding)"),
+            "",
+        ));
+    }
+    md.push_str(&format!("\n\n```text\n{}\n```", lines.join("\n")));
+    InsightAnswer {
+        markdown: md,
+        defined: None,
+    }
+}
+
+/// rust-analyzer's related tests, as the popup shows them: each a link to
+/// where it is in the project; `None` when there are none.
+pub(crate) fn tests_answer(tests: &[RelatedTest], root: Option<&Path>) -> Option<InsightAnswer> {
+    if tests.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = tests
+        .iter()
+        .map(|t| {
+            match root.and_then(|r| t.path.strip_prefix(r).ok()) {
+                Some(rel) => format!(
+                    "- [`{}`](clew:{}:{})",
+                    t.name,
+                    clew_core::rel_string(rel),
+                    t.line + 1
+                ),
+                // Out of the project (a dependency's): named, not linked.
+                None => format!("- `{}`", t.name),
+            }
+        })
+        .collect();
+    Some(InsightAnswer {
+        markdown: format!(
+            "{}\n\n{}",
+            trn!(
+                "1 test exercises this:",
+                "{n} tests exercise this:",
+                tests.len()
+            ),
+            lines.join("\n")
+        ),
+        defined: None,
+    })
 }
 
 /// A C or C++ expansion: what was expanded, what it became, the

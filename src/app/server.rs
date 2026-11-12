@@ -205,6 +205,7 @@ impl App {
     /// the rest of the session — no project, no fallback, and re-picking the
     /// folder just re-parked it.
     pub(crate) fn on_handshake_failed(&mut self, why: String) -> Task<Message> {
+        let never_up = self.dialling();
         // Drop the transport. Nothing can be asked of a server whose protocol
         // we don't share — it refuses every later request anyway — and
         // dropping the last sender ends the writer task, so the server sees
@@ -227,7 +228,13 @@ impl App {
         {
             ui.stage = ConnectStage::Error(why.clone());
         }
-        self.status = why;
+        self.status = why.clone();
+        // A connect from the form refused: back to where the reader was.
+        if never_up {
+            self.pending_scan_root = None;
+            self.scanning = false;
+            return self.back_home_after_failed_connect(why);
+        }
         let Some(root) = self.pending_scan_root.take() else {
             return Task::none();
         };
@@ -245,6 +252,18 @@ impl App {
     /// business requests flow to the server.
     pub(crate) fn on_server_ready(&mut self) -> Task<Message> {
         self.server.ready = true;
+        // The host dialled from the form answered: now it is one to keep —
+        // with the keys it holds now. A Revoke clicked while it connected
+        // has cleared them, and saving the form's tick wrote them back.
+        if let Some(dial) = self.dial.take()
+            && dial.to == self.connection
+            && let Some(conn) = dial.save
+        {
+            self.remember_connection(connect::SavedConnection {
+                send_ai_keys: self.remote_ai_opt_in,
+                ..conn
+            });
+        }
         // The switch is done: "Connecting to Local…" stayed in the status
         // line for good once nothing else came to replace it. A headline
         // carrying a note (what the switch dropped) is left to be read.
@@ -525,7 +544,9 @@ impl App {
         let closed = Task::batch(cut.into_iter().map(|stream| {
             self.on_ask_stream_ended(
                 stream,
-                clew_protocol::StreamOutcome::Failed(tr!("server disconnected").into()),
+                // In English, said in the language spoken where it is shown
+                // (`tasks::plain_detail`): it was kept in the one spoken then.
+                clew_protocol::StreamOutcome::Failed(tr_noop!("server disconnected").into()),
             )
         }));
         self.proj.asking = false;
@@ -539,13 +560,18 @@ impl App {
         // any adapter started while no server was up) does not ride it, and
         // goes on: ended here, the program it debugs was cut off mid-session
         // for nothing. A run still starting may yet be proxied, and goes.
-        if self.debug_rides_transport() {
-            if let Some(session) = self.debug.session.as_mut() {
-                session.status = DebugStatus::Terminated;
-                session.current = None;
+        let end = |app: &mut App| {
+            if app.debug_rides_transport() {
+                if let Some(session) = app.debug.session.as_mut() {
+                    session.status = DebugStatus::Terminated;
+                    session.current = None;
+                }
+                app.bump_debug_run();
             }
-            self.bump_debug_run();
-        }
+        };
+        end(self);
+        // And each run in a tab not on screen, the same way.
+        self.for_each_parked_debug(end);
         closed
     }
 
@@ -904,10 +930,47 @@ impl App {
                     let _ = tx.send(AgentPiece::Delta(text));
                 }
             }
+            Event::AgentDraft { stream, text } => {
+                if let Some(tx) = self.proj.link.agent_streams.get(&stream) {
+                    let _ = tx.send(AgentPiece::Draft(text));
+                }
+            }
+            Event::AgentDraftEnd {
+                stream,
+                kept,
+                again,
+            } => {
+                if let Some(tx) = self.proj.link.agent_streams.get(&stream) {
+                    let _ = tx.send(AgentPiece::DraftEnd { kept, again });
+                }
+            }
             Event::AgentDone { stream, outcome } => {
                 if let Some(tx) = self.proj.link.agent_streams.remove(&stream) {
                     let _ = tx.send(AgentPiece::Done(outcome));
                 }
+            }
+            // A model call made for this window: what it used, for the
+            // ledger and the answer it was for.
+            Event::Usage {
+                work,
+                purpose,
+                model,
+                input,
+                cached,
+                written,
+                output,
+            } => {
+                task = self.on_spent(
+                    work,
+                    purpose,
+                    model,
+                    clew_core::llm::Usage {
+                        input,
+                        cached,
+                        written,
+                        output,
+                    },
+                );
             }
             // An unsolicited notice about the connection's background work
             // (the watcher, a process that died, withheld lsp.toml options).
@@ -977,6 +1040,12 @@ impl App {
                     return Task::none();
                 }
                 self.adopt_remote_state_content(&root, &rel, text.as_deref());
+                // The trail as it was left, read for an open: back where it
+                // was read, as a local project's load goes — not on a
+                // reconnect's read, which keeps the reader where they are.
+                if first_trail_read && let Some(task) = self.back_where_read() {
+                    return task;
+                }
             }
             Event::ProjectSymbols {
                 root: snap_root,
@@ -2047,7 +2116,15 @@ impl App {
                                 == Some(id) =>
                         {
                             self.proj.link.pane_pending[pane] = None;
-                            self.proj.link.pane_opening[pane] = None;
+                            // Gone since it was asked for: said so, and the
+                            // trail back on the visit shown, as when a read
+                            // of its own fails (`gone_on_load`).
+                            if let Some(open) = self.proj.link.pane_opening[pane].take()
+                                && self.is_gone(&open.abs)
+                            {
+                                self.forget_history_open(&open.abs);
+                                return self.gone_on_load(pane, &open.abs);
+                            }
                         }
                         // An open a later request took the place of: the pane
                         // shows, or waits for, what was asked for since, and
@@ -2110,7 +2187,17 @@ impl App {
             // project's state.
             ServerMsg::Connected { tx, .. } => self.on_server_connected(tx),
             ServerMsg::Disconnected { reason, .. } => self.on_server_disconnected(reason),
-            ServerMsg::Unavailable { reason, .. } => self.on_server_unavailable(reason),
+            ServerMsg::Unavailable { reason, .. } => {
+                // A connect from the form that never came up: the reader
+                // goes back to where they were (`back_home_after_failed_connect`).
+                let never_up = self.dialling();
+                let task = self.on_server_unavailable(reason.clone());
+                if never_up {
+                    Task::batch([task, self.back_home_after_failed_connect(reason)])
+                } else {
+                    task
+                }
+            }
             ServerMsg::HostKeyUnknown { reason, key, .. } => self.on_host_key_unknown(reason, key),
             ServerMsg::HostKeyChanged {
                 reason,

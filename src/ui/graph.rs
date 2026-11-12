@@ -5,6 +5,17 @@ use super::*;
 // iced's column!/row! from the prelude macros of the same name.
 use iced::widget::{column, row};
 
+/// The height of the picked node's row over the map: its name, its place
+/// and Open.
+const PICKED_ROW_H: f32 = 28.0;
+
+/// The room between the graph dialog's header controls.
+const HEADER_GAP: f32 = 4.0;
+
+/// How wide the map's search is: its field, its count, its two steps
+/// (`graph_search_field`).
+const GRAPH_SEARCH_W: f32 = 190.0 + 72.0 + 2.0 * (14.0 + 12.0) + 3.0 * 2.0;
+
 /// Modal frame shared by the project-graph overlays: a titled panel with a
 /// List/Map toggle, over a dismissable backdrop.
 #[allow(clippy::too_many_arguments)]
@@ -14,11 +25,20 @@ pub(crate) fn graph_modal_frame<'a>(
     graph_3d: bool,
     graph_spin: bool,
     graph_heat: bool,
-    extra: Option<Element<'a, Message>>,
+    extra: Option<(Element<'a, Message>, f32)>,
+    search: Option<Element<'a, Message>>,
     picked: Option<Element<'a, Message>>,
     window: iced::Size,
     body: Element<'a, Message>,
 ) -> Element<'a, Message> {
+    // As large as the window allows, an edge of it left round — it was
+    // 760 × 640 in any window, a big map squeezed into the middle of a big
+    // screen — and never smaller than that where the window has room.
+    let width = (window.width - 2.0 * GRAPH_MODAL_EDGE)
+        .min(GRAPH_MODAL_MAX_W)
+        .max(GRAPH_MODAL_W.min(window.width - 2.0 * MODAL_MARGIN));
+    let height = (window.height - 2.0 * GRAPH_MODAL_EDGE)
+        .max(GRAPH_MODAL_MAX_H.min(window.height - 2.0 * MODAL_MARGIN));
     // Header controls are icon buttons; each names itself on hover (`chrome_tip`).
     let icon_btn = |g: Glyph, tip: &'static str, msg: Message| -> Element<'a, Message> {
         chrome_tip(
@@ -30,19 +50,34 @@ pub(crate) fn graph_modal_frame<'a>(
             None,
         )
     };
-    let mut header = row![
-        text(title).size(ts::TITLE).color(theme::fg()),
-        space().width(Fill)
-    ]
-    .spacing(4)
-    .align_y(iced::Center);
-    if let Some(extra) = extra {
-        header = header.push(extra);
+    // Two choices side by side, the one in effect lit: what each is, in
+    // words — shapes for 2D and the map read as ◇ and ▽.
+    let pair = |a: (String, bool), b: (String, bool), msg: Message| -> Element<'a, Message> {
+        // The chosen one filled in the accent, its word in the colour made
+        // to be read on it: the ink, on a cyan accent, was white on cyan.
+        let seg = |(label, on): (String, bool)| {
+            button(text(label.clone()).size(ts::SMALL).color(if on {
+                theme::on_accent()
+            } else {
+                theme::fg_muted()
+            }))
+            .style(theme::toggle(on))
+            .padding([4, 8])
+            .on_press_maybe((!on).then(|| super::heard::said(&label, msg.clone())))
+        };
+        row![seg(a), seg(b)].spacing(2).into()
+    };
+    // The map's own controls: a spin start/stop (3D only), back to where
+    // the map starts (its zoom, its pan, its turn), the 2D/3D projection,
+    // and Heat. Each icon shows the action / the mode it switches to.
+    let mut map_controls: Vec<Element<'a, Message>> = Vec::new();
+    // In 2D its place is kept, empty: gone, the controls after it moved
+    // 36 px — "Find in the graph" jumped under the pointer at each switch.
+    if graph_mode && !graph_3d {
+        map_controls.push(space().width(Length::Fixed(16.0 + 16.0)).into());
     }
-    // Map mode: a spin start/stop (3D only), then a 2D/3D projection toggle. Each
-    // icon shows the action / the mode it switches to.
     if graph_mode && graph_3d {
-        header = header.push(if graph_spin {
+        map_controls.push(if graph_spin {
             icon_btn(
                 Glyph::Pause,
                 tr!("Stop spinning"),
@@ -56,31 +91,13 @@ pub(crate) fn graph_modal_frame<'a>(
             )
         });
     }
-    // Back to where the map starts: its zoom, its pan, its turn.
-    // Two choices side by side, the one in effect lit: what each is, in
-    // words — shapes for 2D and the map read as ◇ and ▽.
-    let pair = |a: (String, bool), b: (String, bool), msg: Message| -> Element<'a, Message> {
-        let seg = |(label, on): (String, bool)| {
-            button(text(label.clone()).size(ts::SMALL).color(if on {
-                theme::fg()
-            } else {
-                theme::fg_muted()
-            }))
-            .style(theme::toggle(on))
-            .padding([4, 8])
-            .on_press_maybe((!on).then(|| super::heard::said(&label, msg.clone())))
-        };
-        row![seg(a), seg(b)].spacing(2).into()
-    };
     if graph_mode {
-        header = header.push(icon_btn(
+        map_controls.push(icon_btn(
             Glyph::Recenter,
-            tr!("Fit the map"),
+            tr!("Fit the graph"),
             Message::Graph(GraphMsg::FitView),
         ));
-    }
-    if graph_mode {
-        header = header.push(pair(
+        map_controls.push(pair(
             ("2D".to_string(), !graph_3d),
             ("3D".to_string(), graph_3d),
             Message::Graph(GraphMsg::Toggle3D),
@@ -88,9 +105,9 @@ pub(crate) fn graph_modal_frame<'a>(
         // Heat: colour by how often each file changed, instead of by language.
         // A toggle: lit while on, its word the same either way — a dot
         // added after it widened the button, and moved those beside it.
-        header = header.push(chrome_tip(
+        map_controls.push(chrome_tip(
             button(text(tr!("Heat")).size(ts::SMALL).color(if graph_heat {
-                theme::fg()
+                theme::on_accent()
             } else {
                 theme::fg_muted()
             }))
@@ -108,27 +125,101 @@ pub(crate) fn graph_modal_frame<'a>(
             None,
         ));
     }
-    header = header
-        .push(pair(
-            (tr!("Map").to_string(), graph_mode),
+    // What leaves the dialog, and the List it switches to, are always
+    // placed, at the right: in French at 1100 px the row ran past the
+    // dialog's edge and took List and Close with it.
+    let fixed = row![
+        pair(
+            (tr!("Graph").to_string(), graph_mode),
             (tr!("List").to_string(), !graph_mode),
             Message::Graph(GraphMsg::OverlayViewToggle),
-        ))
-        .push(icon_btn(
+        ),
+        icon_btn(
             Glyph::Close,
             tr!("Close"),
             Message::Graph(GraphMsg::CloseOverlay),
-        ));
-    // As large as the window allows, an edge of it left round — it was
-    // 760 × 640 in any window, a big map squeezed into the middle of a big
-    // screen — and never smaller than that where the window has room.
-    let width = (window.width - 2.0 * GRAPH_MODAL_EDGE)
-        .min(GRAPH_MODAL_MAX_W)
-        .max(GRAPH_MODAL_W.min(window.width - 2.0 * MODAL_MARGIN));
-    let height = (window.height - 2.0 * GRAPH_MODAL_EDGE)
-        .max(GRAPH_MODAL_MAX_H.min(window.height - 2.0 * MODAL_MARGIN));
+        ),
+    ]
+    .spacing(HEADER_GAP)
+    .align_y(iced::Center);
+    // Whether the map's controls and its search fit beside the title on
+    // one line, in the words of the language spoken: else they go on a
+    // line of their own under it.
+    let one_line = {
+        let measure = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
+        let seg = |s: &str| measure(s, ts::SMALL) + 16.0;
+        let icon = 16.0 + 16.0;
+        let fixed_w = seg(tr!("Graph")) + seg(tr!("List")) + 2.0 + HEADER_GAP + icon;
+        let lead_w =
+            measure(title, ts::TITLE) + extra.as_ref().map_or(0.0, |(_, w)| w + HEADER_GAP);
+        let map_w = if graph_mode {
+            let spin = icon + HEADER_GAP;
+            let search = if search.is_some() {
+                GRAPH_SEARCH_W + HEADER_GAP
+            } else {
+                0.0
+            };
+            search
+                + spin
+                + icon
+                + HEADER_GAP
+                + seg("2D")
+                + seg("3D")
+                + 2.0
+                + HEADER_GAP
+                + seg(tr!("Heat"))
+                + HEADER_GAP
+        } else {
+            0.0
+        };
+        lead_w + map_w + fixed_w + 2.0 * HEADER_GAP <= width - 2.0 * MODAL_PAD
+    };
+    let mut lead = row![
+        text(title).size(ts::TITLE).color(theme::fg()),
+        space().width(Fill)
+    ]
+    .spacing(HEADER_GAP)
+    .align_y(iced::Center);
+    if let Some((extra, _)) = extra {
+        lead = lead.push(extra);
+    }
+    let mut second = None;
+    if one_line {
+        if let Some(search) = search {
+            lead = lead.push(search);
+        }
+        for control in map_controls {
+            lead = lead.push(control);
+        }
+    } else {
+        let mut line = row![].spacing(HEADER_GAP).align_y(iced::Center);
+        if let Some(search) = search {
+            line = line.push(search);
+        }
+        line = line.push(space().width(Fill));
+        for control in map_controls {
+            line = line.push(control);
+        }
+        second = Some(line);
+    }
+    let header = column![
+        row![container(lead).width(Fill).clip(true), fixed]
+            .spacing(HEADER_GAP)
+            .align_y(iced::Center)
+    ]
+    .push(second)
+    .spacing(8);
     let mut parts = column![header].spacing(12);
-    if let Some(picked) = picked {
+    // On the map, the picked node's row has its place whether a node is
+    // picked or not: coming as one was clicked, it pushed the map down and
+    // every node moved from under the pointer.
+    if graph_mode {
+        parts = parts.push(
+            container(picked.unwrap_or_else(|| space().into()))
+                .height(PICKED_ROW_H)
+                .align_y(iced::Center),
+        );
+    } else if let Some(picked) = picked {
         parts = parts.push(picked);
     }
     let panel = container(parts.push(body))
@@ -144,17 +235,28 @@ pub(crate) fn graph_modal_frame<'a>(
     )
 }
 
+/// A project graph's title, in English: titled as the strip, the menu and
+/// the command bar name what opens it — and as voice puts it away ("close
+/// the call graph").
+pub(crate) fn graph_title(overlay: crate::Overlay) -> &'static str {
+    match overlay {
+        crate::Overlay::ProjectImports => tr_noop!("Import Graph"),
+        crate::Overlay::ProjectCalls => tr_noop!("Call Graph"),
+        crate::Overlay::ProjectTypes => tr_noop!("Type Graph"),
+        crate::Overlay::ProjectMaps => tr_noop!("Project Graphs"),
+    }
+}
+
 pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element<'_, Message> {
     // Its list's rows counted from 1, as voice picks them.
     super::heard::list();
-    let title = match overlay {
-        crate::Overlay::ProjectImports => tr!("Project Import Graph"),
-        crate::Overlay::ProjectCalls => tr!("Project Call Graph"),
-        crate::Overlay::ProjectTypes => tr!("Project Type Map"),
-        crate::Overlay::ProjectMaps => tr!("Project Maps"),
-    };
+    let title = crate::i18n::lookup(graph_title(overlay));
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
+        // Each state in the room the button takes (`calls_extra_room`),
+        // what does not fit whole where the pointer rests: as wide as its
+        // words, the header changed lines as refining ended — the search
+        // field moved with it, and lost its caret mid-word.
         crate::Overlay::ProjectCalls => Some(if let Some(progress) = app.refine_progress_label() {
             // As wide as it reads at its end: counting, its left edge — and
             // what it said — shook at every file.
@@ -164,28 +266,45 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
                 }
                 _ => progress.clone(),
             };
-            super::steady::slot(
+            let label = super::steady::slot(
                 text(progress.clone())
                     .size(ts::SMALL)
-                    .color(theme::warning()),
+                    .color(theme::warning())
+                    .wrapping(iced::widget::text::Wrapping::None),
                 &progress,
                 &[&widest],
                 ts::SMALL,
-            )
+            );
+            in_calls_room(label, progress)
         } else if let Some(precise) = app.precise_label() {
-            text(precise).size(ts::SMALL).color(theme::accent()).into()
+            let label = text(precise.clone())
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .wrapping(iced::widget::text::Wrapping::None)
+                .into();
+            in_calls_room(label, precise)
         } else {
             // With no project there is nothing to refine.
-            button(text(tr!("Refine with LSP")).size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([3, 10])
-                .on_press_maybe(app.proj.project.is_some().then(|| {
-                    super::heard::said(
-                        tr!("Refine with LSP"),
-                        Message::Graph(GraphMsg::RefineProjectCalls),
-                    )
-                }))
-                .into()
+            // In words, with what it does said where the pointer rests:
+            // "Refine with LSP" was an acronym and no more.
+            super::toolbar::tip_at(
+                // A button that looks like one: as plain words it read as a
+                // caption until the pointer found it.
+                button(text(tr!("Check calls with the language server")).size(ts::SMALL))
+                    .style(theme::secondary_button)
+                    .padding([3, 10])
+                    .on_press_maybe(app.proj.project.is_some().then(|| {
+                        super::heard::said(
+                            tr!("Check calls with the language server"),
+                            Message::Graph(GraphMsg::RefineProjectCalls),
+                        )
+                    })),
+                tr!(
+                    "Ask each language's server which calls are real, and redraw the graph with only those"
+                ),
+                None,
+                iced::widget::tooltip::Position::Bottom,
+            )
         }),
         crate::Overlay::ProjectImports => None,
         crate::Overlay::ProjectTypes => app.docs_loading().then(|| {
@@ -239,6 +358,8 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
             .into()
         },
     );
+    let search = app.graph_mode.then(|| graph_search_field(app));
+    let extra = extra.map(|extra| (extra, graph_extra_w(app, overlay)));
     graph_modal_frame(
         title,
         app.graph_mode,
@@ -246,10 +367,216 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         app.graph_spin,
         app.graph_heat,
         extra,
+        search,
         picked,
         iced::Size::new(app.window_width, app.window_height),
         body,
     )
+}
+
+/// The room beside the call graph's title, whatever stands there: the
+/// button's, which every state of it keeps.
+pub(crate) fn calls_extra_room() -> f32 {
+    super::steady::width_of(
+        tr!("Check calls with the language server"),
+        ts::SMALL,
+        crate::fonts::UI,
+    ) + 20.0
+}
+
+/// `label` in the call graph's room beside the title, cut at its edge and
+/// said whole (`said`) where the pointer rests.
+fn in_calls_room<'a>(label: Element<'a, Message>, said: String) -> Element<'a, Message> {
+    super::toolbar::tip_at(
+        container(label)
+            .width(calls_extra_room())
+            .align_x(iced::Right)
+            .clip(true),
+        said,
+        None,
+        iced::widget::tooltip::Position::Bottom,
+    )
+}
+
+/// How wide the control beside a graph dialog's title is, as
+/// `project_graph_modal` draws it — measured in the words of the language
+/// spoken, for the header to know whether the map's controls fit beside it.
+pub(crate) fn graph_extra_w(app: &App, overlay: crate::Overlay) -> f32 {
+    let measure = |s: &str| super::steady::width_of(s, ts::SMALL, crate::fonts::UI);
+    match overlay {
+        // One room whatever stands in it, so the header keeps its lines.
+        crate::Overlay::ProjectCalls => calls_extra_room(),
+        crate::Overlay::ProjectImports => 0.0,
+        crate::Overlay::ProjectTypes => measure(tr!("Building the API docs…")),
+        // The picker as wide as its widest map, its padding and its arrow.
+        crate::Overlay::ProjectMaps => {
+            app.proj
+                .maps
+                .iter()
+                .map(|m| measure(&MapChoice::of(m).to_string()))
+                .fold(0.0, f32::max)
+                + 16.0
+                + 24.0
+        }
+    }
+}
+
+/// Node `i` of the map `kind` laid out as `layout`, picked: what it is,
+/// and how to open it — none for a node that opens nothing.
+pub(crate) fn node_pick(
+    layout: &crate::graphlayout::Layout,
+    kind: crate::Overlay,
+    i: usize,
+) -> Option<crate::app::model::GraphPick> {
+    let node = layout.nodes.get(i)?;
+    let open = node_open_message(layout, kind, i)?;
+    Some(crate::app::model::GraphPick {
+        node: i,
+        label: node.label.clone(),
+        file: node.file.clone(),
+        open: Box::new(open),
+    })
+}
+
+/// The message that opens node `i` of the map `kind`, if it is part of
+/// `layout`.
+pub(crate) fn node_open_message(
+    layout: &crate::graphlayout::Layout,
+    kind: crate::Overlay,
+    i: usize,
+) -> Option<Message> {
+    let node = layout.nodes.get(i)?;
+    let file = node.file.clone();
+    Some(match kind {
+        crate::Overlay::ProjectImports => Message::Graph(GraphMsg::OverlayOpenImports(file)),
+        crate::Overlay::ProjectCalls => {
+            Message::Graph(GraphMsg::OverlayOpenAt { abs: file, line: 1 })
+        }
+        crate::Overlay::ProjectTypes => Message::Graph(GraphMsg::OverlayOpenAt {
+            abs: file,
+            line: node.line,
+        }),
+        // A node defined nowhere (a route's path) opens nothing.
+        crate::Overlay::ProjectMaps if file.as_os_str().is_empty() => return None,
+        crate::Overlay::ProjectMaps => Message::Graph(GraphMsg::OverlayOpenAt {
+            abs: file,
+            line: node.line,
+        }),
+    })
+}
+
+/// The nodes of `layout` the map's search `query` finds, best first: a
+/// name that is the query, then one that starts with it (or a part of its
+/// path does), then one that holds it — case aside — and among each, the
+/// weightier first. None for an empty query.
+pub(crate) fn graph_matches(layout: &crate::graphlayout::Layout, query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let mut found: Vec<(u8, usize)> = layout
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, node)| {
+            let label = node.label.to_lowercase();
+            let parts = || label.split(['/', '\\', ':', '.']);
+            let rank = if label == query || parts().any(|p| p == query) {
+                0
+            } else if label.starts_with(&query) || parts().any(|p| p.starts_with(&query)) {
+                1
+            } else if label.contains(&query) {
+                2
+            } else {
+                return None;
+            };
+            Some((rank, i))
+        })
+        .collect();
+    found.sort_by(|(ra, a), (rb, b)| {
+        ra.cmp(rb)
+            .then(layout.nodes[*b].weight.total_cmp(&layout.nodes[*a].weight))
+            .then(layout.nodes[*a].label.cmp(&layout.nodes[*b].label))
+    });
+    found.into_iter().map(|(_, i)| i).collect()
+}
+
+/// The map's search as the canvas draws it: which nodes it found, the one
+/// the camera is on and its neighbours — lit, the rest dimmed.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Lit {
+    pub(crate) found: Vec<bool>,
+    pub(crate) near: Vec<bool>,
+    pub(crate) focus: Option<usize>,
+    /// What it is, for the scene cache: the query and the node in focus.
+    pub(crate) key: u64,
+}
+
+impl Lit {
+    /// Whether node `i` is drawn lit.
+    pub(crate) fn lit(&self, i: usize) -> bool {
+        self.focus == Some(i)
+            || self.found.get(i).copied().unwrap_or(false)
+            || self.near.get(i).copied().unwrap_or(false)
+    }
+}
+
+/// The map's search, in its header: the field, how many it found and which
+/// the camera is on, and the way to the one before and after.
+pub(crate) fn graph_search_field(app: &App) -> Element<'_, Message> {
+    let found = app.graph_matches().len();
+    let searching = !app.graph_search.trim().is_empty();
+    // As wide as it reads at its widest, so the field never shifts.
+    let count: Element<'_, Message> = if !searching {
+        slot()
+    } else if found == 0 {
+        text(tr!("No matches"))
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .into()
+    } else {
+        text(tr!(
+            "{step} of {total}",
+            step = app.graph_found % found + 1,
+            total = found
+        ))
+        .size(ts::SMALL)
+        .color(theme::fg_muted())
+        .into()
+    };
+    let step = |g: Glyph, tip: &'static str, forward: bool| -> Element<'_, Message> {
+        chrome_tip(
+            button(glyph::icon(g, theme::fg_muted(), 14.0))
+                .style(theme::toolbar_button)
+                .padding([4, 6])
+                .on_press_maybe((found > 1).then(|| {
+                    super::heard::said(tip, Message::Graph(GraphMsg::SearchStep(forward)))
+                })),
+            tip,
+            None,
+        )
+    };
+    row![
+        super::jump::field_named(
+            text_input(tr!("Find in the graph"), &app.graph_search)
+                .id(super::graph_search_id())
+                .on_input(|q| Message::Graph(GraphMsg::Search(q)))
+                .on_submit(Message::Graph(GraphMsg::SearchStep(true)))
+                .style(theme::input)
+                .size(ts::SMALL)
+                .padding([4, 8])
+                .width(190),
+            tr!("Find in the graph"),
+        ),
+        container(count)
+            .width(72)
+            .align_x(iced::alignment::Horizontal::Center),
+        step(Glyph::ChevronLeft, tr!("Previous match"), false),
+        step(Glyph::ChevronRight, tr!("Next match"), true),
+    ]
+    .spacing(2)
+    .align_y(iced::Center)
+    .into()
 }
 
 /// The node-link map: a force-directed canvas plus a legend.
@@ -266,14 +593,14 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     // empty — say so, rather than "Nothing to show" (which reads as "no data").
     let empty_msg = if app.proj.project.is_none() {
         // Not "Nothing to show.", which reads as a project with nothing in it.
-        tr!("Open a project to see its map")
+        tr!("Open a project to see its graph")
     } else if app.proj.project_calls.building {
         tr!("Building call graph…")
     } else if app.scanning || app.proj.indexing {
         tr!("Indexing the project…")
     } else if app.proj.graph_layout_pending {
         // Laid out off the UI thread (`App::refresh_graph_layout`).
-        tr!("Laying out the map…")
+        tr!("Laying out the graph…")
     } else {
         tr!("Nothing to show.")
     };
@@ -302,11 +629,20 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
             app.proj.churn_rev,
         )
         .with_visited(Some(trace_files(app)), app.debug.trace_rev)
-        .with_fit(app.graph_fit_rev),
+        .with_fit(app.graph_fit_rev)
+        .with_search(
+            &app.graph_search,
+            &app.graph_matches(),
+            app.graph_found,
+            app.graph_focus_rev,
+        )
+        .with_pick(app.proj.graph_pick.as_ref()),
     )
     .width(Fill)
     .height(Fill);
-    map.into()
+    // Clipped to its frame: a canvas draws where its geometry says, and a
+    // map zoomed in drew its edges over the header above it.
+    super::clipped::Clipped::new(map).into()
 }
 
 /// A distinct base colour per graphed language (see `theme::language_hue`).
@@ -391,6 +727,15 @@ pub(crate) struct GraphCanvas<'a> {
     pub(crate) visited_rev: u64,
     /// Bumped to put the camera back where it starts (`GraphMsg::FitView`).
     pub(crate) fit_rev: u64,
+    /// The map's search, while one is typed: what it lit.
+    pub(crate) lit: Option<Lit>,
+    /// Bumped to send the camera to the search's node in focus, or back
+    /// over the whole map once the search is cleared.
+    pub(crate) focus_rev: u64,
+    /// The node the app has picked — the one the row over the map names —
+    /// when the app keeps the pick ([`GraphCanvas::with_pick`]); else the
+    /// map keeps its own.
+    pub(crate) pick: Option<Option<usize>>,
 }
 
 impl<'a> GraphCanvas<'a> {
@@ -414,7 +759,89 @@ impl<'a> GraphCanvas<'a> {
             visited: None,
             visited_rev: 0,
             fit_rev: 0,
+            lit: None,
+            focus_rev: 0,
+            pick: None,
         }
+    }
+
+    /// Light the node `pick` names, the app's pick: the row over the map
+    /// names it. The map lit its own last click, and the two parted — a
+    /// search moved the row to another node, or cleared it, and the node
+    /// clicked stayed lit. A pick that no longer names its node (the map
+    /// laid out anew) lights nothing.
+    pub(crate) fn with_pick(mut self, pick: Option<&crate::app::model::GraphPick>) -> Self {
+        self.pick = Some(pick.and_then(|p| {
+            self.layout
+                .nodes
+                .get(p.node)
+                .filter(|n| n.label == p.label && n.file == p.file)
+                .map(|_| p.node)
+        }));
+        self
+    }
+
+    /// The node picked: the app's, when it keeps the pick, else the map's
+    /// own while its layout is the one it was picked on.
+    fn picked(&self, state: &GraphState) -> Option<usize> {
+        match self.pick {
+            Some(pick) => pick,
+            None => state
+                .picked
+                .filter(|&(_, sig)| sig == state.sig)
+                .map(|(i, _)| i),
+        }
+    }
+
+    /// Light what the search `query` finds — `matches`, the list its header
+    /// counts (`App::graph_matches`: the Call Graph's adds the files of the
+    /// functions it finds) — `found` being which of them (counted from 0,
+    /// round) the camera goes to each time `focus_rev` moves on. The map
+    /// matched labels on its own, and the two lists parted: "1 of 1" over a
+    /// map with nothing lit, or the camera on one file and Open under the
+    /// header naming another.
+    pub(crate) fn with_search(
+        mut self,
+        query: &str,
+        matches: &[usize],
+        found: usize,
+        focus_rev: u64,
+    ) -> Self {
+        self.focus_rev = focus_rev;
+        if query.trim().is_empty() {
+            return self;
+        }
+        let matches: Vec<usize> = matches
+            .iter()
+            .copied()
+            .filter(|&i| i < self.layout.nodes.len())
+            .collect();
+        let n = self.layout.nodes.len();
+        let focus = (!matches.is_empty()).then(|| matches[found % matches.len()]);
+        let mut lit = Lit {
+            found: vec![false; n],
+            near: vec![false; n],
+            focus,
+            key: 0,
+        };
+        for &i in &matches {
+            lit.found[i] = true;
+        }
+        if let Some(f) = focus {
+            for &(a, b) in &self.layout.edges {
+                if a == f && b < n {
+                    lit.near[b] = true;
+                } else if b == f && a < n {
+                    lit.near[a] = true;
+                }
+            }
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        (query.trim().to_lowercase(), focus).hash(&mut h);
+        lit.key = h.finish() | 1;
+        self.lit = Some(lit);
+        self
     }
 
     /// Put the camera back where it starts each time `rev` moves on.
@@ -468,6 +895,9 @@ pub(crate) fn heat_color(heat: f32) -> iced::Color {
 const GRAPH_PAD: f32 = 48.0;
 /// Below this cooling factor the force simulation stops stepping.
 const ALPHA_REST: f32 = 0.02;
+
+/// How far a press may move and still be a click, not a drag.
+const CLICK_SLOP: f32 = 5.0;
 /// A label opacity this close to its target counts as arrived.
 const LABEL_EPS: f32 = 0.004;
 /// How much room past the right edge a label moved to its node's left
@@ -476,8 +906,19 @@ const LABEL_SIDE_SLACK: f32 = 24.0;
 /// How far (px) outside every disc a click may land and still pick the
 /// nearest node, so tiny discs stay easy to hit.
 const HIT_SLOP: f32 = 16.0;
+/// How far past its disc the pointer may stray from the node holding the
+/// spin before letting it go.
+const HOLD_SLACK: f32 = 28.0;
+/// The longest a frame may turn the camera by: a late frame turns it as far
+/// as the time that passed, so the spin keeps its pace through it — but a
+/// map drawn again after a pause does not leap.
+const MAX_TURN_DT: f32 = 0.25;
 /// Idle spin speed (radians per second, 3D only).
 const SPIN_RATE: f32 = 0.10;
+/// How much of itself what a search did not light keeps.
+const DIMMED: f32 = 0.22;
+/// How far the camera zooms in, at least, on the node a search found.
+const FOCUS_ZOOM: f32 = 2.4;
 
 /// Which kind of drag is in progress on the map.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -502,7 +943,7 @@ const FOCAL: f32 = 2400.0;
 /// What the cached scene was drawn for: the hovered node, the theme's
 /// revision, the layout's revision, the paint's (heat) revision and the
 /// visited set's (trace) revision.
-type SceneKey = (Option<usize>, u64, u64, u64, u64);
+type SceneKey = (Option<usize>, u64, u64, u64, u64, u64);
 
 /// Live 3D-simulation + orbit camera + interaction state, persisted by the
 /// canvas widget across frames. The force sim and the camera both run here
@@ -599,6 +1040,18 @@ pub(crate) struct GraphState {
     /// The bounds and hovered node the last tick computed for.
     last_bounds: iced::Size,
     last_hover: Option<usize>,
+    /// The node the pointer rests on, which holds the spin: the camera
+    /// eases to a stop so it can be read, and turns again once the pointer
+    /// leaves it. Kept while the pointer stays near it — it drifts on a
+    /// little as the turn slows.
+    hold: Option<usize>,
+    /// The node the search sent the camera to: it is centred and zoomed
+    /// on, and holds the spin, until the search moves on or is cleared.
+    focus: Option<usize>,
+    /// The `GraphCanvas::focus_rev` the camera last went by.
+    focus_rev: u64,
+    /// The search the cached scene and labels were laid out for.
+    lit_key: u64,
     /// The node clicked once (its index, under the layout signature it was
     /// clicked in): a click on it again opens it.
     picked: Option<(usize, u64)>,
@@ -657,6 +1110,10 @@ impl Default for GraphState {
             dirty: true,
             last_bounds: iced::Size::ZERO,
             last_hover: None,
+            hold: None,
+            focus: None,
+            focus_rev: 0,
+            lit_key: 0,
             picked: None,
             fit_rev: 0,
             scene: iced::widget::canvas::Cache::new(),
@@ -706,6 +1163,10 @@ const ZOOM_RATE: f32 = 18.0;
 const SHIFT_RATE: f32 = 9.0;
 const FRAME_TAU: f32 = 0.14;
 const LABEL_TAU: f32 = 0.11;
+/// Below this a label going out no longer holds one coming in where it is.
+const LABEL_GONE: f32 = 0.05;
+/// From this a label coming in is shown, and no longer waits.
+const LABEL_SHOWN: f32 = 0.5;
 const TURN_TAU: f32 = 0.55;
 const PITCH_TAU: f32 = 0.3;
 /// Up to this many nodes no label fades with depth; the fade is full
@@ -964,37 +1425,45 @@ impl GraphCanvas<'_> {
     /// The message that picks node `i` (see `GraphPick`), if it opens to
     /// anything.
     pub(crate) fn pick_message(&self, i: usize) -> Option<Message> {
-        let node = self.layout.nodes.get(i)?;
-        let open = self.open_message(i)?;
-        Some(Message::Graph(GraphMsg::Picked(Some(
-            crate::app::model::GraphPick {
-                label: node.label.clone(),
-                file: node.file.clone(),
-                open: Box::new(open),
-            },
-        ))))
+        node_pick(self.layout, self.kind, i)
+            .map(|pick| Message::Graph(GraphMsg::Picked(Some(pick))))
     }
 
     /// The message that opens node `i`, if it is still part of this layout.
     pub(crate) fn open_message(&self, i: usize) -> Option<Message> {
-        let node = self.layout.nodes.get(i)?;
-        let file = node.file.clone();
-        Some(match self.kind {
-            crate::Overlay::ProjectImports => Message::Graph(GraphMsg::OverlayOpenImports(file)),
-            crate::Overlay::ProjectCalls => {
-                Message::Graph(GraphMsg::OverlayOpenAt { abs: file, line: 1 })
-            }
-            crate::Overlay::ProjectTypes => Message::Graph(GraphMsg::OverlayOpenAt {
-                abs: file,
-                line: node.line,
-            }),
-            // A node defined nowhere (a route's path) opens nothing.
-            crate::Overlay::ProjectMaps if file.as_os_str().is_empty() => return None,
-            crate::Overlay::ProjectMaps => Message::Graph(GraphMsg::OverlayOpenAt {
-                abs: file,
-                line: node.line,
-            }),
-        })
+        node_open_message(self.layout, self.kind, i)
+    }
+
+    /// Whether the idle spin turns the camera now: in 3D with the spin on,
+    /// nothing grabbed, and no node holding it.
+    fn spins(&self, st: &GraphState) -> bool {
+        self.is_3d && self.spin && st.drag == Drag::None && st.hold.is_none() && st.focus.is_none()
+    }
+
+    /// The node holding the spin, the pointer being where `cursor` says and
+    /// over `hovered`: the hovered node, or the one held still while the
+    /// pointer stays within [`HOLD_SLACK`] of its disc — it drifts on as
+    /// the turn slows, and letting go there turned the camera again,
+    /// under the pointer, in a loop.
+    fn hold_for(
+        &self,
+        st: &GraphState,
+        hovered: Option<usize>,
+        cursor: iced::advanced::mouse::Cursor,
+        bounds: iced::Rectangle,
+    ) -> Option<usize> {
+        if st.drag != Drag::None {
+            return None;
+        }
+        let at = cursor.position_in(bounds)?;
+        if hovered.is_some() {
+            return hovered;
+        }
+        let held = st.hold.filter(|&i| i < self.layout.nodes.len())?;
+        let (x, y, _, persp) = self.project_all(bounds, st).get(held).copied()?;
+        let r = node_radius(self.layout.nodes[held].weight, persp);
+        let near = ((x - at.x).powi(2) + (y - at.y).powi(2)).sqrt() <= r + HOLD_SLACK;
+        near.then_some(held)
     }
 
     /// Seed the simulation for the current node set, lifted into 3D with a
@@ -1037,6 +1506,29 @@ impl GraphCanvas<'_> {
         st.sig = layout_sig(self.layout);
         st.drag = Drag::None;
         st.moved = 0.0;
+        // Nor is it seen through the last one's camera: a map that took
+        // over another's place (the Overview's, after the Call Graph's)
+        // kept its zoom and pan, and drew its nodes far outside its frame.
+        // The node indices it pointed at belonged to the last set too.
+        st.zoom = 1.0;
+        st.zoom_target = 1.0;
+        st.zoom_at = None;
+        st.zoom_vel = 0.0;
+        st.pan = iced::Vector::new(0.0, 0.0);
+        st.hold = None;
+        st.picked = None;
+        // But the search's node is this set's (`with_search` ran on this
+        // layout): the camera goes to it. A search typed while the graph was
+        // being laid out lit its match and left the camera over the whole
+        // map — the focus it was sent had gone with the reseed.
+        st.focus = self
+            .lit
+            .as_ref()
+            .and_then(|lit| lit.focus)
+            .filter(|&f| f < n);
+        if st.focus.is_some() {
+            st.zoom_target = FOCUS_ZOOM;
+        }
         st.touch();
     }
 
@@ -1065,12 +1557,15 @@ impl GraphCanvas<'_> {
         st.rev = self.rev;
         // Frame time, as it passed: a map waking from rest, or drawn again
         // after it was out of sight, steps one frame, not the whole pause.
-        let dt = st
-            .last_frame
-            .map(|t| now.duration_since(t).as_secs_f32())
+        let gap = st.last_frame.map(|t| now.duration_since(t).as_secs_f32());
+        let dt = gap
             .filter(|&gap| gap <= 0.1)
             .unwrap_or(1.0 / 60.0)
             .clamp(0.004, 0.05);
+        // The camera turns by the time that passed, a late frame's whole
+        // gap: clamped as the physics step is, a slow frame slowed the spin
+        // and the next caught up — a stutter, then a spin.
+        let turn_dt = gap.unwrap_or(1.0 / 60.0).clamp(0.004, MAX_TURN_DT);
         st.last_frame = Some(now);
 
         // A switch between 3D and 2D: a camera move over `DIM_SECS`, from
@@ -1106,14 +1601,25 @@ impl GraphCanvas<'_> {
             st.dim = st.dim_from + (to - st.dim_from) * ease_in_out(st.dim_t);
         }
 
+        // A node held is pinned, and heats the map, once the grab has become
+        // a drag: a click to pick it lasts frames, and the map moved under
+        // the pointer while it did.
         let pinned = match st.drag {
-            Drag::Node(i, sig) if sig == st.sig && i < n => Some(i),
+            Drag::Node(i, sig) if sig == st.sig && i < n && st.moved >= CLICK_SLOP => Some(i),
             _ => None,
         };
         if pinned.is_some() {
             st.alpha = st.alpha.max(0.3);
         }
 
+        // The node under the pointer holds the spin (see `GraphState::hold`).
+        let hovered = cursor
+            .position_in(bounds)
+            .and_then(|c| self.hit(c, bounds, st));
+        st.hold = self.hold_for(st, hovered, cursor, bounds);
+        // The node held is the one shown as hovered — its label kept, drawn
+        // on top — while the pointer strays near it.
+        let hovered = hovered.or(st.hold);
         // The camera's turn: followed from the pointer while orbiting (its
         // rate measured, to fling with on release), else coasting toward the
         // idle spin — or to rest — so a spin starts, stops and hands over
@@ -1125,25 +1631,21 @@ impl GraphCanvas<'_> {
             st.yaw_vel += (yaw_rate.clamp(-MAX_TURN, MAX_TURN) - st.yaw_vel) * follow;
             st.pitch_vel += (pitch_rate.clamp(-MAX_TURN, MAX_TURN) - st.pitch_vel) * follow;
         } else {
-            let spin = if self.is_3d && self.spin && st.drag == Drag::None {
-                SPIN_RATE
-            } else {
-                0.0
-            };
-            st.spin_goal += (spin - st.spin_goal) * ease_step(dt, LEAD_TAU);
+            let spin = if self.spins(st) { SPIN_RATE } else { 0.0 };
+            st.spin_goal += (spin - st.spin_goal) * ease_step(turn_dt, LEAD_TAU);
             if (st.spin_goal - spin).abs() < 1e-4 {
                 st.spin_goal = spin;
             }
-            st.yaw_vel += (st.spin_goal - st.yaw_vel) * ease_step(dt, TURN_TAU);
-            st.pitch_vel *= 1.0 - ease_step(dt, PITCH_TAU);
+            st.yaw_vel += (st.spin_goal - st.yaw_vel) * ease_step(turn_dt, TURN_TAU);
+            st.pitch_vel *= 1.0 - ease_step(turn_dt, PITCH_TAU);
             if st.yaw_vel.abs() < 1e-3 && st.spin_goal == 0.0 {
                 st.yaw_vel = 0.0;
             }
             if st.pitch_vel.abs() < 1e-3 {
                 st.pitch_vel = 0.0;
             }
-            st.yaw += st.yaw_vel * dt;
-            let pitch = st.pitch + st.pitch_vel * dt;
+            st.yaw += st.yaw_vel * turn_dt;
+            let pitch = st.pitch + st.pitch_vel * turn_dt;
             st.pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
             if st.pitch != pitch {
                 st.pitch_vel = 0.0;
@@ -1152,7 +1654,7 @@ impl GraphCanvas<'_> {
         st.last_yaw = st.yaw;
         st.last_pitch = st.pitch;
         let turning = st.yaw_vel != 0.0 || st.pitch_vel != 0.0;
-        st.spinning = turning || (self.is_3d && self.spin && st.drag == Drag::None);
+        st.spinning = turning || self.spins(st);
 
         // The zoom eases to where the wheel asked for; flat, about the
         // point under the pointer.
@@ -1183,9 +1685,6 @@ impl GraphCanvas<'_> {
 
         st.flattening = !self.is_3d && st.pos.iter().any(|p| p[2].abs() > 0.5);
         let switching = switching || st.dim_t < 1.0;
-        let hovered = cursor
-            .position_in(bounds)
-            .and_then(|c| self.hit(c, bounds, st));
         let physics = pinned.is_some() || st.alpha > ALPHA_REST;
         let resized = bounds.size() != st.last_bounds;
         let changed = st.dirty
@@ -1344,6 +1843,15 @@ impl GraphCanvas<'_> {
         } else {
             (fit_2d + (fit_3d - fit_2d) * e, box_center)
         };
+        // The node a search found: the camera centres it — eased there as
+        // any re-centring is.
+        let focused = st.focus.filter(|&f| f < n && !held);
+        let center_to = focused.map_or(center_to, |f| st.pos[f]);
+        let shift_to = if focused.is_some() {
+            (0.0, 0.0)
+        } else {
+            shift_to
+        };
         // While the mode switches, the blend of the two framings moves as
         // smoothly as the switch does: followed, not eased after.
         if reframe {
@@ -1408,20 +1916,39 @@ impl GraphCanvas<'_> {
         // farthest label away whatever the map, and a map of three files
         // named one of them. Full from a few dozen nodes up.
         let depth_fade = e * ((n as f32 - FADE_FREE_NODES) / FADE_FULL_NODES).clamp(0.0, 1.0);
-        // Priority: hovered first, then nearest the camera.
+        // Priority: hovered first, then what a search found (the node in
+        // focus before the rest), then nearest the camera.
+        let lit = self.lit.as_ref();
+        let first = |i: usize| -> u8 {
+            u8::from(hovered == Some(i)) * 4
+                + u8::from(lit.is_some_and(|l| l.focus == Some(i))) * 2
+                + u8::from(lit.is_some_and(|l| l.found.get(i) == Some(&true)))
+        };
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|&a, &b| {
-            let ha = (hovered == Some(a)) as u8;
-            let hb = (hovered == Some(b)) as u8;
-            hb.cmp(&ha).then(lproj[b].2.total_cmp(&lproj[a].2))
+            first(b)
+                .cmp(&first(a))
+                .then(lproj[b].2.total_cmp(&lproj[a].2))
         });
+        // What a label must keep clear of: the labels placed before it, and
+        // every node's own disc. A label moved off a neighbour's label went
+        // over that neighbour's dot ("discounts.py" ending on pricing.py's).
+        // A search's hits keep clear of labels only: lit, they are named
+        // over a crowd's dots, or a hit in a dense map went unnamed.
+        let discs: Vec<iced::Rectangle> = lproj
+            .iter()
+            .zip(&self.layout.nodes)
+            .map(|(&(x, y, _, persp), node)| node_disc(x, y, node_radius(node.weight, persp)))
+            .collect();
         let mut placed: Vec<iced::Rectangle> = Vec::new();
         let mut target = vec![0.0f32; n];
         let mut side = st.label_side_target.clone();
         side.resize(n, 0.0);
         for &i in &order {
             let (x, y, z, persp) = lproj[i];
-            let is_hover = hovered == Some(i);
+            // The node in focus is named as the hovered one is: whatever
+            // its depth, over whatever its label would cover.
+            let is_hover = hovered == Some(i) || lit.is_some_and(|l| l.focus == Some(i));
             let fade = if is_hover {
                 1.0
             } else {
@@ -1444,18 +1971,20 @@ impl GraphCanvas<'_> {
             if fade <= 0.006 {
                 continue; // too deep to bother placing
             }
-            let rect_x = if side[i] >= 0.5 {
-                x - r - 3.0 - width
+            let left = side[i] >= 0.5;
+            let spot = if is_hover {
+                Some((label_rect(x, y, r, width, left), left))
             } else {
-                x + r + 3.0
+                let found = lit.is_some_and(|l| l.found.get(i) == Some(&true));
+                let obstacles: &[&[iced::Rectangle]] = if found {
+                    &[&placed]
+                } else {
+                    &[&placed, &discs]
+                };
+                label_spot(obstacles, x, y, r, width, left, bounds.width)
             };
-            let rect = iced::Rectangle {
-                x: rect_x,
-                y: y - 6.5,
-                width,
-                height: 13.0,
-            };
-            if is_hover || !placed.iter().any(|pr| rects_overlap(*pr, rect)) {
+            if let Some((rect, left)) = spot {
+                side[i] = if left { 1.0 } else { 0.0 };
                 target[i] = fade;
                 // Only a (near) fully-shown label reserves space, so a barely
                 // there one can't hide a solid neighbour.
@@ -1464,13 +1993,49 @@ impl GraphCanvas<'_> {
                 }
             }
         }
+        // A label coming in waits while one going out still shows where it
+        // goes, and that one goes quickly: cross-faded over each other, the
+        // two read as neither (a small map, turning). One already shown
+        // stays; only the one leaving hurries.
+        let alpha_of = |i: usize| st.label_alpha.get(i).copied().unwrap_or(0.0);
+        let rect_of = |i: usize, left: bool| {
+            let (x, y, _, persp) = lproj[i];
+            let r = node_radius(self.layout.nodes[i].weight, persp);
+            label_rect(x, y, r, st.label_w.get(i).copied().unwrap_or(0.0), left)
+        };
+        let going: Vec<(usize, iced::Rectangle)> = (0..n)
+            .filter(|&j| target[j] <= 0.0 && alpha_of(j) > LABEL_GONE)
+            .map(|j| {
+                let left = st.label_side.get(j).copied().unwrap_or(0.0) >= 0.5;
+                (j, rect_of(j, left))
+            })
+            .collect();
+        let mut hold = vec![false; n];
+        let mut hurry = vec![false; n];
+        if !going.is_empty() {
+            for i in (0..n).filter(|&i| target[i] > 0.0) {
+                let rect = rect_of(i, side[i] >= 0.5);
+                let named = hovered == Some(i) || lit.is_some_and(|l| l.focus == Some(i));
+                for &(j, there) in &going {
+                    if j != i && rects_overlap(rect, there) {
+                        hurry[j] = true;
+                        hold[i] |= !named && alpha_of(i) < LABEL_SHOWN;
+                    }
+                }
+            }
+        }
         let step = ease_step(dt, LABEL_TAU);
-        for (now, to) in st
-            .label_alpha
-            .iter_mut()
-            .zip(&target)
-            .chain(st.label_side.iter_mut().zip(&side))
-        {
+        let quick = ease_step(dt, LABEL_TAU / 3.0);
+        for (i, (now, &to)) in st.label_alpha.iter_mut().zip(&target).enumerate() {
+            // Held where it is, never back: its target stays, so the map
+            // is not at rest until it has come in.
+            let to = if hold[i] { now.min(to) } else { to };
+            *now += (to - *now) * if hurry[i] { quick } else { step };
+            if (*now - to).abs() <= LABEL_EPS {
+                *now = to;
+            }
+        }
+        for (now, to) in st.label_side.iter_mut().zip(&side) {
             *now += (to - *now) * step;
             if (*now - to).abs() <= LABEL_EPS {
                 *now = *to;
@@ -1509,6 +2074,14 @@ impl GraphCanvas<'_> {
                 continue;
             };
             let d = 1.0 - st.dim + st.dim * (near(az) + near(bz)) * 0.5;
+            // A search on: the links of the node in focus lit, links between
+            // what it lit as they are, the rest stepped back.
+            let (d, toward) = match &self.lit {
+                Some(lit) if lit.focus == Some(a) || lit.focus == Some(b) => (1.0, true),
+                Some(lit) if lit.lit(a) && lit.lit(b) => (d, false),
+                Some(_) => (d * DIMMED, false),
+                None => (d, false),
+            };
             let (dx, dy) = (bx - ax, by - ay);
             let len = (dx * dx + dy * dy).sqrt();
             if len < 2.0 {
@@ -1519,11 +2092,17 @@ impl GraphCanvas<'_> {
             // From just off the importer to the imported node's near edge.
             let (sx, sy) = (ax + ux * (radius(a) + 1.0), ay + uy * (radius(a) + 1.0));
             let (tx, ty) = (bx - ux * (radius(b) + 1.0), by - uy * (radius(b) + 1.0));
+            let (edge, width) = if toward {
+                (theme::with_alpha(theme::accent(), 0.75), 1.4)
+            } else {
+                (
+                    theme::with_alpha(theme::graph_edge(), 0.16 + 0.34 * d),
+                    0.6 + d * 0.4,
+                )
+            };
             frame.stroke(
                 &Path::line(iced::Point::new(sx, sy), iced::Point::new(tx, ty)),
-                Stroke::default()
-                    .with_width(0.6 + d * 0.4)
-                    .with_color(theme::with_alpha(theme::graph_edge(), 0.16 + 0.34 * d)),
+                Stroke::default().with_width(width).with_color(edge),
             );
             // Small arrowhead at the imported end.
             let ah = 3.8; // length
@@ -1558,9 +2137,15 @@ impl GraphCanvas<'_> {
                 continue;
             }
             let la = st.label_alpha.get(i).copied().unwrap_or(0.0);
+            let la = match &self.lit {
+                Some(lit) if !lit.lit(i) => la * DIMMED,
+                _ => la,
+            };
             if la >= 0.01 {
                 let side = st.label_side.get(i).copied().unwrap_or(0.0);
                 self.draw_label(frame, i, p, radius(i), la, side, false);
+            } else {
+                self.keep_label(frame, i, p);
             }
         }
     }
@@ -1584,7 +2169,32 @@ impl GraphCanvas<'_> {
         } else {
             hier_shade(lang_dot_color(crate::highlight::detect(&nd.file)), nd.depth)
         };
+        // A search on: what it did not find steps back.
+        let lit = self.lit.as_ref();
+        let color = match lit {
+            Some(lit) if !hover && !lit.lit(i) => theme::with_alpha(color, DIMMED),
+            _ => color,
+        };
         frame.fill(&Path::circle(iced::Point::new(x, y), r), color);
+        // What it found is ringed in the accent; the one the camera is on,
+        // more strongly.
+        if let Some(lit) = lit {
+            let (pad, width) = if lit.focus == Some(i) {
+                (3.5, 2.4)
+            } else if lit.found.get(i) == Some(&true) {
+                (2.5, 1.4)
+            } else {
+                (0.0, 0.0)
+            };
+            if width > 0.0 {
+                frame.stroke(
+                    &Path::circle(iced::Point::new(x, y), r + pad),
+                    Stroke::default()
+                        .with_width(width)
+                        .with_color(theme::accent()),
+                );
+            }
+        }
         if self.visited.as_ref().is_some_and(|v| v.contains(&nd.file)) {
             // The last run stopped here: a ring in the live colour.
             frame.stroke(
@@ -1604,9 +2214,29 @@ impl GraphCanvas<'_> {
         }
     }
 
+    /// Keep a faded-out label's texture on the GPU: drawn invisibly, at a
+    /// point, so it stays in the renderer's image atlas. One a frame does
+    /// not draw is dropped from it as soon as any other image is added,
+    /// and every label fading back in as the map turned was uploaded
+    /// again, evicting others — work on every frame of a spin.
+    fn keep_label(
+        &self,
+        frame: &mut iced::widget::canvas::Frame,
+        i: usize,
+        (x, y, _, _): (f32, f32, f32, f32),
+    ) {
+        let nd = &self.layout.nodes[i];
+        if let Some(tex) = super::graph_labels::label_texture(&nd.label, theme::fg_muted()) {
+            frame.draw_image(
+                iced::Rectangle::new(iced::Point::new(x, y), iced::Size::new(1.0, 1.0)),
+                iced::advanced::image::Image::new(tex.handle).opacity(0.0),
+            );
+        }
+    }
+
     /// One node label at opacity `alpha`, on the node's right or — `side`
-    /// 1 — its left; between, on both, cross-faded, as a label changing
-    /// sides is drawn.
+    /// 1 — its left; between, as a label changing sides is drawn
+    /// ([`label_on_side`]).
     #[allow(clippy::too_many_arguments)]
     fn draw_label(
         &self,
@@ -1618,11 +2248,10 @@ impl GraphCanvas<'_> {
         side: f32,
         hover: bool,
     ) {
-        for (left, share) in [(false, 1.0 - side), (true, side)] {
-            let a = alpha.min(1.0) * share;
-            if a >= 0.01 {
-                self.draw_label_at(frame, i, (x, y), r, a, left, hover);
-            }
+        let (left, share) = label_side_drawn(side, hover);
+        let a = alpha.min(1.0) * share;
+        if a >= 0.01 {
+            self.draw_label_at(frame, i, (x, y), r, a, left, hover);
         }
     }
 
@@ -1685,6 +2314,85 @@ impl GraphCanvas<'_> {
     }
 }
 
+/// Which side of its node a label changing sides (`side`, 0 right … 1
+/// left) is drawn on, and how much of it: out on the one, then in on the
+/// other. Cross-faded, it showed on both sides of its node at once —
+/// "pricing.py" twice, one dim, one bright, over a neighbour's.
+fn label_on_side(side: f32) -> (bool, f32) {
+    let side = side.clamp(0.0, 1.0);
+    if side < 0.5 {
+        (false, 1.0 - 2.0 * side)
+    } else {
+        (true, 2.0 * side - 1.0)
+    }
+}
+
+/// [`label_on_side`], but the label of the node under the pointer is
+/// whole on the side it is going to: faded through nothing, the name of
+/// the node pointed at was gone for frames.
+fn label_side_drawn(side: f32, hover: bool) -> (bool, f32) {
+    if hover {
+        (side >= 0.5, 1.0)
+    } else {
+        label_on_side(side)
+    }
+}
+
+/// Where a label goes beside its node at `(x, y)` of radius `r`: right of
+/// it, or `left`.
+fn label_rect(x: f32, y: f32, r: f32, width: f32, left: bool) -> iced::Rectangle {
+    iced::Rectangle {
+        x: if left {
+            x - r - 3.0 - width
+        } else {
+            x + r + 3.0
+        },
+        y: y - 6.5,
+        width,
+        height: 13.0,
+    }
+}
+
+/// The room a node's disc of radius `r` at `(x, y)` takes from labels: the
+/// disc, and a pixel round it.
+fn node_disc(x: f32, y: f32, r: f32) -> iced::Rectangle {
+    let r = r + 1.0;
+    iced::Rectangle {
+        x: x - r,
+        y: y - r,
+        width: 2.0 * r,
+        height: 2.0 * r,
+    }
+}
+
+/// A free place for a node's label among those `placed`: on its side
+/// (`left` or right), else on the other where that is free and inside the
+/// frame — a label its neighbour's took the place of was hidden, and left a
+/// node unnamed with room to spare across it. `None`: no room either side.
+fn label_spot(
+    placed: &[&[iced::Rectangle]],
+    x: f32,
+    y: f32,
+    r: f32,
+    width: f32,
+    left: bool,
+    frame_w: f32,
+) -> Option<(iced::Rectangle, bool)> {
+    let free = |rect: iced::Rectangle| {
+        !placed
+            .iter()
+            .flat_map(|rects| rects.iter())
+            .any(|p| rects_overlap(*p, rect))
+    };
+    let own = label_rect(x, y, r, width, left);
+    if free(own) {
+        return Some((own, left));
+    }
+    let other = label_rect(x, y, r, width, !left);
+    let inside = other.x >= 2.0 && other.x + other.width <= frame_w - 2.0;
+    (inside && free(other)).then_some((other, !left))
+}
+
 /// Axis-aligned overlap test for label decluttering.
 pub(crate) fn rects_overlap(a: iced::Rectangle, b: iced::Rectangle) -> bool {
     a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
@@ -1703,9 +2411,14 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
     ) -> Vec<iced::widget::canvas::Geometry> {
         use iced::widget::canvas::Frame;
         let proj = self.project_all(bounds, state);
+        // The node under the pointer — else the one picked, lit as long as
+        // it is: clicked, nothing on the map said which.
+        let picked = self.picked(state);
         let hovered = cursor
             .position_in(bounds)
-            .and_then(|c| self.hit(c, bounds, state));
+            .and_then(|c| self.hit(c, bounds, state))
+            .or(state.hold)
+            .or(picked);
         // The scene is cached: a settled map redraws (another widget animating,
         // the cursor moving elsewhere) without re-tessellating a single edge.
         // `tick` and every interaction clear it; so does a change of the hovered
@@ -1716,6 +2429,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             self.rev,
             self.paint_rev,
             self.visited_rev,
+            self.lit.as_ref().map_or(0, |lit| lit.key),
         );
         if state.scene_key.get() != Some(key) {
             state.scene.clear();
@@ -1748,6 +2462,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
         // The camera put back where it starts, asked from the header.
         if state.fit_rev != self.fit_rev {
             state.fit_rev = self.fit_rev;
+            state.focus = None;
             state.zoom_target = 1.0;
             state.zoom_at = None;
             state.zoom_vel = 0.0;
@@ -1756,6 +2471,35 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             state.pitch = 0.35;
             state.yaw_vel = 0.0;
             state.pitch_vel = 0.0;
+            state.touch();
+            if !matches!(
+                event,
+                iced::Event::Window(iced::window::Event::RedrawRequested(_))
+            ) {
+                return Some(Action::request_redraw());
+            }
+        }
+        // The search sent the camera to a node — zoomed in on it, centred
+        // (`tick`), the spin held — or, cleared, back over the whole map.
+        let lit_key = self.lit.as_ref().map_or(0, |lit| lit.key);
+        if state.focus_rev != self.focus_rev || state.lit_key != lit_key {
+            if state.focus_rev != self.focus_rev {
+                state.focus_rev = self.focus_rev;
+                let focus = self
+                    .lit
+                    .as_ref()
+                    .and_then(|lit| lit.focus)
+                    .filter(|&f| f < self.layout.nodes.len());
+                state.focus = focus;
+                state.zoom_target = if focus.is_some() {
+                    state.zoom_target.max(FOCUS_ZOOM)
+                } else {
+                    1.0
+                };
+                state.zoom_at = None;
+                state.pan = iced::Vector::new(0.0, 0.0);
+            }
+            state.lit_key = lit_key;
             state.touch();
             if !matches!(
                 event,
@@ -1773,11 +2517,16 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 .then(Action::request_redraw),
             // A hover change re-ranks the labels (the hovered one always
             // shows), so let the next frame recompute.
+            // A node holding the spin is let go once the pointer leaves it:
+            // the next frame decides.
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.drag == Drag::None => {
                 let hovered = cursor
                     .position_in(bounds)
                     .and_then(|c| self.hit(c, bounds, state));
-                (hovered != state.last_hover).then(Action::request_redraw)
+                (hovered != state.last_hover || state.hold.is_some()).then(Action::request_redraw)
+            }
+            iced::Event::Mouse(mouse::Event::CursorLeft) if state.hold.is_some() => {
+                Some(Action::request_redraw())
             }
             // Zoom (dolly) — only where enabled; the embedded Overview map lets
             // the wheel fall through to the page.
@@ -1811,11 +2560,11 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 state.spin_goal = 0.0;
                 state.last_yaw = state.yaw;
                 state.last_pitch = state.pitch;
+                // A press on a node heats nothing: a click to pick it set
+                // the map moving under the pointer. A drag does, as it
+                // moves (`CursorMoved`).
                 state.drag = match self.hit(cin, bounds, state) {
-                    Some(i) => {
-                        state.alpha = state.alpha.max(0.5);
-                        Drag::Node(i, state.sig)
-                    }
+                    Some(i) => Drag::Node(i, state.sig),
                     None if self.is_3d => Drag::Orbit,
                     None => Drag::Pan,
                 };
@@ -1860,22 +2609,30 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 // the layout on screen: the first picks it (what it is, over
                 // the map), a second opens it.
                 if let Drag::Node(i, sig) = was
-                    && state.moved < 5.0
+                    && state.moved < CLICK_SLOP
                     && sig == state.sig
                     && sig == layout_sig(self.layout)
                 {
-                    let msg = if state.picked == Some((i, sig)) {
+                    let msg = if self.picked(state) == Some(i) {
                         self.open_message(i)
                     } else {
-                        state.picked = Some((i, sig));
-                        self.pick_message(i)
+                        let pick = self.pick_message(i);
+                        // Picked only once the app is told: a node that
+                        // opens nothing is not lit as picked.
+                        if pick.is_some() {
+                            state.picked = Some((i, sig));
+                        }
+                        pick
                     };
                     if let Some(msg) = msg {
                         return Some(Action::publish(msg).and_capture());
                     }
                 }
                 // A click off the nodes puts the picked one down.
-                if !matches!(was, Drag::Node(..)) && state.moved < 5.0 && state.picked.is_some() {
+                if !matches!(was, Drag::Node(..))
+                    && state.moved < CLICK_SLOP
+                    && self.picked(state).is_some()
+                {
                     state.picked = None;
                     return Some(
                         Action::publish(Message::Graph(GraphMsg::Picked(None))).and_capture(),
@@ -2001,14 +2758,15 @@ impl iced::widget::canvas::Program<Message> for TrafficGlyph {
 }
 
 /// A file row in the import overlay: name + directory + fan-in/out counts.
+/// A file at the project's root has no directory to name: none is shown
+/// (it said ".", which reads as a stray mark).
 pub(crate) fn import_file_row<'a>(app: &'a App, file: &RankedFile) -> Element<'a, Message> {
     let path = file.path.as_path();
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let dir = std::path::Path::new(&rel_of(app, path))
         .parent()
         .map(|p| p.to_string_lossy().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| ".".into());
+        .unwrap_or_default();
     button(
         row![
             text(name.to_string())
@@ -2083,7 +2841,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
                 ),
                 trn!("1 cycle", "{n} cycles", app.proj.import_cycles.len()),
             ]
-            .join(" · "),
+            .join(", "),
         )
         .size(ts::BODY)
         .color(theme::accent())
@@ -2135,7 +2893,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
         rows.push(section_header(tr!("External packages")));
         rows.push(
             container(
-                text(ranks.externals.join("  ·  "))
+                text(ranks.externals.join(", "))
                     .size(ts::SMALL)
                     .color(theme::dim()),
             )
@@ -2188,12 +2946,24 @@ pub(crate) fn call_symbol_row<'a>(
     id: usize,
     trailing: String,
 ) -> Element<'a, Message> {
+    let line = app.proj.project_calls.graph.node(id).line;
+    call_symbol_row_at(app, id, trailing, line)
+}
+
+/// [`call_symbol_row`], said and opened at `line` of its function (where a
+/// run stopped in it) rather than its first.
+pub(crate) fn call_symbol_row_at<'a>(
+    app: &'a App,
+    id: usize,
+    trailing: String,
+    line: usize,
+) -> Element<'a, Message> {
     let n = app.proj.project_calls.graph.node(id);
     button(
         row![
             text(n.name.clone()).size(ts::BODY).wrapping(Wrapping::None),
             space().width(6),
-            text(format!("{}:{}", rel_of(app, &n.file), n.line))
+            text(format!("{}:{}", rel_of(app, &n.file), line))
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .wrapping(Wrapping::None),
@@ -2219,7 +2989,7 @@ pub(crate) fn call_symbol_row<'a>(
         || n.name.clone(),
         Message::Graph(GraphMsg::OverlayOpenAt {
             abs: n.file.clone(),
-            line: n.line,
+            line,
         }),
     ))
     .into()
@@ -2246,7 +3016,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
         text(format!(
-            "{} · {}",
+            "{}, {}",
             trn!("1 function", "{n} functions", g.node_count()),
             trn!("1 call edge", "{n} call edges", g.edge_count()),
         ))
@@ -2254,14 +3024,11 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
         .color(theme::accent())
         .into(),
     );
-    rows.push(
-        text(app.precise_summary().unwrap_or_else(|| {
-            tr!("Name-based & approximate — Refine with LSP for exact calls.").to_string()
-        }))
-        .size(ts::CAPTION)
-        .color(theme::dim())
-        .into(),
-    );
+    // What the refinement left out, if anything: how precise the calls
+    // are is the header's badge.
+    if let Some(missing) = app.precise_summary() {
+        rows.push(text(missing).size(ts::CAPTION).color(theme::dim()).into());
+    }
 
     // Ranking walks the whole graph (and, for the test filter, the symbol
     // index): memoized per graph and index generation instead of redone per
@@ -2286,8 +3053,13 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
     let visits = trace_visits(app, g);
     if !visits.is_empty() {
         rows.push(section_header(tr!("Where the last debug run stopped")));
-        for &(id, stops) in visits.iter().take(40) {
-            rows.push(call_symbol_row(app, id, trn!("1 stop", "{n} stops", stops)));
+        for &(id, stops, line) in visits.iter().take(40) {
+            rows.push(call_symbol_row_at(
+                app,
+                id,
+                trn!("1 stop", "{n} stops", stops),
+                line,
+            ));
         }
     }
 
@@ -2341,6 +3113,81 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// A project graph's English — an edge's label, a line of a node's detail,
+/// as `clew_core::maps` writes them — in the reader's language: a phrase
+/// the catalogs know (`extern_text::MAP_WORDS`), or one of the shapes below
+/// around a name. Code (`pub use`, `select`, `gen_server:call`) and names
+/// stay as written.
+pub(crate) fn map_text(english: &str) -> String {
+    let said = crate::i18n::lookup(english);
+    if said != english {
+        return said.to_string();
+    }
+    let number = |s: &str| s.parse::<usize>().ok();
+    if let Some(n) = english.strip_prefix("base ").and_then(number) {
+        return tr!("base {n}", n = n).to_string();
+    }
+    if let Some(n) = english.strip_suffix(" lemmas").and_then(number) {
+        return trn!("1 lemma", "{n} lemmas", n).to_string();
+    }
+    if let Some(order) = english.strip_prefix("MRO: ") {
+        return tr!("MRO: {order}", order = order).to_string();
+    }
+    if let Some(scope) = english.strip_prefix("scope: ") {
+        return tr!("scope: {scope}", scope = scope).to_string();
+    }
+    if let Some(props) = english.strip_prefix("props: ") {
+        return tr!("props: {props}", props = props).to_string();
+    }
+    if let Some(sources) = english.strip_prefix("reads ") {
+        return tr!("reads {sources}", sources = sources).to_string();
+    }
+    if let Some(kind) = english
+        .strip_prefix("supervisor (")
+        .and_then(|k| k.strip_suffix(')'))
+    {
+        return tr!("supervisor ({kind})", kind = kind).to_string();
+    }
+    if let Some(name) = english.strip_prefix("alias of ") {
+        return tr!("alias of {name}", name = name).to_string();
+    }
+    if let Some(target) = english.strip_prefix("delegate to ") {
+        return tr!("delegate to {target}", target = target).to_string();
+    }
+    if let Some(module) = english.strip_prefix("imports ") {
+        return tr!("imports {module}", module = module).to_string();
+    }
+    if let Some(lifetime) = english
+        .strip_prefix("resolves to (")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        return tr!("resolves to ({lifetime})", lifetime = lifetime).to_string();
+    }
+    if let Some((what, line)) = english.rsplit_once(" made at line ")
+        && let Some(line) = number(line)
+    {
+        return tr!("{what} made at line {line}", what = what, line = line).to_string();
+    }
+    if let Some((project, system)) = english
+        .strip_prefix("pulls in ")
+        .and_then(|rest| rest.strip_suffix(" system headers"))
+        .and_then(|rest| rest.split_once(" project files and "))
+        && let (Some(project), Some(system)) = (number(project), number(system))
+    {
+        return tr!(
+            "pulls in {project} project files and {system} system headers",
+            project = project,
+            system = system
+        )
+        .to_string();
+    }
+    // A column's line: `id serial · primary key → users`.
+    match english.split_once(" (primary key)") {
+        Some((column, rest)) => format!("{column} ({}){rest}", tr!("primary key")),
+        None => english.to_string(),
+    }
+}
+
 /// The type map's list: how many types and relations, then the types most
 /// others name, the base types with the most subtypes, the types naming the
 /// most others, and the most changed files. Each type row opens its
@@ -2359,13 +3206,13 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
         } else if never_built && !app.server.is_up() {
             (
                 tr!(
-                    "The type map is drawn from the project's API index, which Clew's server builds — and it is not running."
+                    "The type graph is drawn from the project's API index, which Clew's server builds — and it is not running."
                 ),
                 false,
             )
         } else if never_built {
             (
-                tr!("The type map is drawn from the project's API index, not built yet."),
+                tr!("The type graph is drawn from the project's API index, not built yet."),
                 true,
             )
         } else {
@@ -2374,11 +3221,11 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
         let mut said = column![text(msg).size(ts::BODY).color(theme::dim())].spacing(10);
         if build {
             said = said.push(
-                button(text(tr!("Build the API Index")).size(ts::BODY))
+                button(text(tr!("Build the API index")).size(ts::BODY))
                     .style(theme::primary_button)
                     .padding([4, 12])
                     .on_press(super::heard::said(
-                        tr!("Build the API Index"),
+                        tr!("Build the API index"),
                         Message::Docs(DocsMsg::Refresh),
                     )),
             );
@@ -2388,7 +3235,7 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
         text(format!(
-            "{} · {} · {}",
+            "{}, {}, {}",
             trn!("1 type", "{n} types", g.node_count()),
             trn!("1 relation", "{n} relations", g.edge_count()),
             trn!(
@@ -2439,32 +3286,37 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// A map in the Maps overlay's picker: its title and size.
+/// A map in the Maps overlay's picker: its title. No count beside it: one
+/// of its nodes counted only where they were all of one kind (a schema's
+/// tables) — "Routes (6)" had counted three routes and their three
+/// handlers — and the one map with a number read as if the others had
+/// none, or nothing in them. What each holds is said under the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MapChoice {
     pub(crate) id: String,
     pub(crate) title: String,
-    pub(crate) nodes: usize,
+}
+
+impl MapChoice {
+    pub(crate) fn of(m: &clew_protocol::ProjectMap) -> MapChoice {
+        MapChoice {
+            id: m.id.clone(),
+            title: m.title.clone(),
+        }
+    }
 }
 
 impl std::fmt::Display for MapChoice {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The title, from clew-core, in the reader's language.
-        write!(out, "{} ({})", crate::i18n::lookup(&self.title), self.nodes)
+        write!(out, "{}", crate::i18n::lookup(&self.title))
     }
 }
 
 /// The picker of the project's maps, while there is more than one.
 pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
     let maps = &app.proj.maps;
-    let choices: Vec<MapChoice> = maps
-        .iter()
-        .map(|m| MapChoice {
-            id: m.id.clone(),
-            title: m.title.clone(),
-            nodes: m.nodes.len(),
-        })
-        .collect();
+    let choices: Vec<MapChoice> = maps.iter().map(MapChoice::of).collect();
     let selected = app
         .selected_map_index()
         .and_then(|i| choices.get(i).cloned());
@@ -2473,22 +3325,12 @@ pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
         // too, a line above.
         0 => None,
         _ => Some(
-            {
-                // Each map said by its name.
-                if super::heard::gathering() {
-                    for c in &choices {
-                        super::heard::said(
-                            &c.title,
-                            Message::Graph(GraphMsg::SelectMap(c.id.clone())),
-                        );
-                    }
-                }
-                pick_list(choices, selected, |c: MapChoice| {
-                    Message::Graph(GraphMsg::SelectMap(c.id))
-                })
-            }
-            .style(theme::pick)
-            .menu_style(theme::pick_menu)
+            // Each map said by its name; opened, walked and picked from by
+            // the keys too.
+            super::picker::picker(choices, selected, |c: MapChoice| {
+                Message::Graph(GraphMsg::SelectMap(c.id))
+            })
+            .label(tr!("Graph"))
             .text_size(ts::SMALL)
             .padding([3, 8])
             .into(),
@@ -2510,11 +3352,11 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     };
     let Some(at) = app.selected_map_index() else {
         return hint(if let Some(e) = &app.proj.maps_error {
-            tr!("Couldn't read the project's maps: {error}", error = e)
+            tr!("Couldn't read the project's graphs: {error}", error = e)
         } else if app.proj.maps_building || app.scanning {
-            tr!("Reading the project's maps…").into()
+            tr!("Reading the project's graphs…").into()
         } else {
-            tr!("No maps for this project.").into()
+            tr!("No graphs for this project.").into()
         });
     };
     let root = app
@@ -2526,7 +3368,7 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     let map = &app.proj.maps[at];
     let mut rows: Vec<Element<'_, Message>> = vec![
         text(format!(
-            "{} · {} · {}",
+            "{}, {}, {}",
             crate::i18n::lookup(&map.title),
             trn!("1 node", "{n} nodes", map.nodes.len()),
             trn!("1 arrow", "{n} arrows", map.edges.len())
@@ -2536,14 +3378,17 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
         .into(),
         // Its line on how to read it, from clew-core: in the reader's
         // language where the catalog has it.
-        text(crate::i18n::lookup(&map.description).to_string())
+        // As a sentence, its first letter a capital: the extractors write
+        // it to follow a dash ("a node per table and view, …"), and alone
+        // under the title it read as cut from something.
+        text(sentence_start(crate::i18n::lookup(&map.description)))
             .size(ts::CAPTION)
             .color(theme::dim())
             .into(),
     ];
     if let Some(e) = &app.proj.maps_error {
         rows.push(
-            text(tr!("Could not read the maps: {error}", error = e))
+            text(tr!("Could not read the graphs: {error}", error = e))
                 .size(ts::CAPTION)
                 .color(theme::warning())
                 .into(),
@@ -2600,16 +3445,18 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
                 .detail
                 .lines()
                 .take(12)
-                .map(|l| format!("  {l}"))
+                .map(|l| format!("  {}", map_text(l)))
                 .collect();
             if n.detail.lines().count() > 12 {
                 lines.push("  …".into());
             }
             for (to, label) in &out_edges[i] {
                 let target = &map.nodes[*to].label;
+                // What the arrow says, then where it goes, as it is read:
+                // "→ list_teas (handled by)" read backwards.
                 lines.push(match label.is_empty() {
                     true => format!("  → {target}"),
-                    false => format!("  → {target} ({label})"),
+                    false => format!("  {} → {target}", map_text(label)),
                 });
             }
             if !lines.is_empty() {
@@ -2672,7 +3519,8 @@ pub(crate) fn type_row(app: &App, id: usize, trailing: String) -> Element<'_, Me
 /// functions with their caller counts, and the uncalled ones with their
 /// callee counts. Test functions are left out of the uncalled list — they are
 /// always "uncalled" (the harness invokes them, not project code), so they
-/// would swamp it as false positives.
+/// would swamp it as false positives — and so is what the language reaches
+/// without a call naming it ([`Unnamed::reaches`]).
 pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph) -> CallsSummary {
     let is_test_node = |id: usize| {
         let n = g.node(id);
@@ -2695,6 +3543,7 @@ pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph
             .then_with(|| g.node(a.0).name.cmp(&g.node(b.0).name))
             .then_with(|| g.node(a.0).line.cmp(&g.node(b.0).line))
     });
+    let unnamed = Unnamed::of(app, g);
     CallsSummary {
         hubs: g
             .most_called(15)
@@ -2705,6 +3554,7 @@ pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph
             .uncalled()
             .into_iter()
             .filter(|&id| !is_test_node(id) && entry_of(id).is_none())
+            .filter(|&id| !unnamed.reaches(app, g, id))
             .map(|id| (id, g.node(id).callee_count()))
             .collect(),
         entries: entries
@@ -2712,6 +3562,79 @@ pub(crate) fn calls_summary(app: &App, g: &crate::projectcalls::ProjectCallGraph
             .map(|(id, kind)| (id, kind.label()))
             .collect(),
     }
+}
+
+/// What the language reaches without a call naming it, for
+/// [`Unnamed::reaches`]: the names any call site calls, and each called
+/// method's class, by name.
+struct Unnamed<'a> {
+    called: std::collections::HashSet<&'a str>,
+    called_in: std::collections::HashMap<&'a str, Vec<&'a str>>,
+}
+
+impl<'a> Unnamed<'a> {
+    fn of(app: &'a App, g: &'a crate::projectcalls::ProjectCallGraph) -> Unnamed<'a> {
+        let called = app
+            .proj
+            .calls_by_file
+            .values()
+            .flat_map(|c| c.calls.iter().map(|site| site.callee.as_str()))
+            .collect();
+        let mut called_in: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for id in 0..g.node_count() {
+            let n = g.node(id);
+            if n.caller_count() == 0 {
+                continue;
+            }
+            if let Some(class) = owner_of(app, &n.file, n.line) {
+                called_in.entry(n.name.as_str()).or_default().push(class);
+            }
+        }
+        Unnamed { called, called_in }
+    }
+
+    /// Whether node `id` of `g`, which no call in the graph reaches, is
+    /// reached all the same, by the language rather than by a call naming it:
+    /// - a Python property, read as an attribute (`order.amount`);
+    /// - a Python special method (`__str__`, `__eq__`, `__enter__`), run by
+    ///   the operation it stands for — and an `__init__`, run when its class
+    ///   is called (`Inventory()`, `raise OutOfStock(...)`), when a call
+    ///   anywhere names the class: a language server reports no call of it;
+    /// - a method overriding one a call reaches (`rule.amount_off(...)` of a
+    ///   `Discount` runs each subclass's), when another class's method of
+    ///   the name is called.
+    fn reaches(&self, app: &App, g: &crate::projectcalls::ProjectCallGraph, id: usize) -> bool {
+        let node = g.node(id);
+        let calls = app.proj.calls_by_file.get(&node.file);
+        if calls.is_some_and(|c| c.accessed.contains(&node.line)) {
+            return true;
+        }
+        let owner = owner_of(app, &node.file, node.line);
+        let python = calls.is_some_and(|c| c.lang == crate::highlight::Lang::Python);
+        let name = node.name.as_str();
+        if python && name.len() > 4 && name.starts_with("__") && name.ends_with("__") {
+            return match owner.filter(|_| name == "__init__") {
+                Some(class) => self.called.contains(class),
+                None => true,
+            };
+        }
+        owner.is_some_and(|own| {
+            self.called_in
+                .get(name)
+                .is_some_and(|classes| classes.iter().any(|&class| class != own))
+        })
+    }
+}
+
+/// The class the method defined at `line` of `file` belongs to, as the
+/// index's call facts say.
+fn owner_of<'a>(app: &'a App, file: &std::path::Path, line: usize) -> Option<&'a str> {
+    app.proj
+        .calls_by_file
+        .get(file)
+        .and_then(|c| c.owners.get(&line))
+        .map(String::as_str)
 }
 
 /// The files the last debug run stopped in, for the map's rings; memoized
@@ -2732,28 +3655,39 @@ pub(crate) fn trace_files(
         })
 }
 
+/// A function the last debug run stopped in: its node, how many stops, and
+/// the line it first stopped on.
+pub(crate) type TraceVisit = (usize, usize, usize);
+
 /// The call graph's nodes the last run stopped in — the innermost frame
 /// of each stop that the graph knows — with their stop counts, most first
 /// then by name; memoized per graph and trace revision.
 pub(crate) fn trace_visits(
     app: &App,
     g: &crate::projectcalls::ProjectCallGraph,
-) -> std::sync::Arc<Vec<(usize, usize)>> {
+) -> std::sync::Arc<Vec<TraceVisit>> {
     app.proj.view_memo.trace_visits.get_or(
         (app.proj.project_calls.graph_rev, app.debug.trace_rev),
         || {
-            let mut counts: std::collections::HashMap<usize, usize> =
+            // Each function the run stopped in: how often, and the line it
+            // first stopped on — where its row opens. It opened the
+            // function's first line, as the run's walkthrough once did.
+            let mut counts: std::collections::HashMap<usize, (usize, usize)> =
                 std::collections::HashMap::new();
             for stop in &app.debug.trace {
-                let Some(id) = stop.frames.iter().find_map(|f| {
+                let Some((id, line)) = stop.frames.iter().find_map(|f| {
                     let path = f.path.as_deref()?;
                     g.id_of(path, &crate::short_frame_name(&f.name))
+                        .map(|id| (id, f.line))
                 }) else {
                     continue;
                 };
-                *counts.entry(id).or_default() += 1;
+                counts.entry(id).or_insert((0, line)).0 += 1;
             }
-            let mut visits: Vec<(usize, usize)> = counts.into_iter().collect();
+            let mut visits: Vec<TraceVisit> = counts
+                .into_iter()
+                .map(|(id, (stops, line))| (id, stops, line))
+                .collect();
             visits.sort_by(|a, b| {
                 b.1.cmp(&a.1)
                     .then_with(|| g.node(a.0).name.cmp(&g.node(b.0).name))
@@ -2811,7 +3745,7 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
         }
         line = line.push(space().width(Fill)).push(
             text(format!(
-                "{} · {}",
+                "{}, {}",
                 trn!("1 commit", "{n} commits", f.commits),
                 crate::i18n::ago(f.last, now)
             ))
@@ -2859,6 +3793,15 @@ fn map_kind_label(kind: &str) -> &str {
     }
 }
 
+/// `words` with its first letter a capital (where its script has them).
+fn sentence_start(words: &str) -> String {
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2872,6 +3815,34 @@ mod tests {
             r,
             depth,
             index,
+        }
+    }
+
+    /// A label changing sides goes out on the one before it comes in on
+    /// the other — never on both at once, which drew "pricing.py" twice
+    /// beside its node — and is whole at either end.
+    #[test]
+    fn a_label_changing_sides_is_never_on_both() {
+        assert_eq!(label_on_side(0.0), (false, 1.0));
+        assert_eq!(label_on_side(1.0), (true, 1.0));
+        assert_eq!(label_on_side(0.5).1, 0.0, "gone between");
+        // The pointed-at node's label never goes: whole, on its way.
+        for k in 0..=20 {
+            let side = k as f32 / 20.0;
+            assert_eq!(label_side_drawn(side, true), (side >= 0.5, 1.0));
+            assert_eq!(label_side_drawn(side, false), label_on_side(side));
+        }
+        let mut last = None;
+        for k in 0..=20 {
+            let (left, share) = label_on_side(k as f32 / 20.0);
+            assert!((0.0..=1.0).contains(&share));
+            // One side at a time: the side turns once, through nothing.
+            if let Some((was, was_share)) = last
+                && was != left
+            {
+                assert!(was_share <= 0.11 && share <= 0.11, "both shown at {k}");
+            }
+            last = Some((left, share));
         }
     }
 
@@ -3072,6 +4043,34 @@ mod tests {
         assert!(!graph_settled(&st));
     }
 
+    /// A map that takes over another's state — the Overview's, where the
+    /// Call Graph was — is not seen through the last one's camera: zoomed
+    /// and panned, it drew its nodes far outside its frame, over the page.
+    #[test]
+    fn a_new_graph_is_not_seen_through_the_last_ones_camera() {
+        let old = layout(8);
+        let new = layout(3);
+        let mut st = GraphState::default();
+        let tick = |c: &GraphCanvas<'_>, st: &mut GraphState| {
+            let _ = c.tick(
+                st,
+                BOUNDS,
+                std::time::Instant::now(),
+                iced::advanced::mouse::Cursor::Unavailable,
+            );
+        };
+        tick(&canvas(&old, false, false), &mut st);
+        st.zoom = 4.0;
+        st.zoom_target = 4.0;
+        st.pan = iced::Vector::new(300.0, -200.0);
+        st.focus = Some(7);
+        st.hold = Some(6);
+        tick(&canvas(&new, false, false), &mut st);
+        assert_eq!((st.zoom, st.zoom_target), (1.0, 1.0));
+        assert_eq!(st.pan, iced::Vector::new(0.0, 0.0));
+        assert_eq!((st.focus, st.hold), (None, None));
+    }
+
     /// E2-4: a layout swapped in mid-drag (a rebuilt graph lands async) must
     /// not have its node `i` moved or opened on release — the index belonged
     /// to the old node set, and past its end it used to panic.
@@ -3119,6 +4118,70 @@ mod tests {
     /// what it is, over the map — and a second click opens it: a first
     /// click closed the map on a node the reader may only have wanted to
     /// look at. A click off the nodes puts the picked one down.
+    /// A click to pick a node leaves a map at rest at rest: held for a
+    /// few frames, the node heated the map, and the rest moved under the
+    /// pointer. A drag does heat it.
+    #[test]
+    fn a_click_on_a_node_leaves_the_map_at_rest() {
+        let l = layout(3);
+        let c = canvas(&l, false, false);
+        let mut st = GraphState::default();
+        let t0 = std::time::Instant::now();
+        let none = iced::advanced::mouse::Cursor::Unavailable;
+        let _ = c.tick(&mut st, BOUNDS, t0, none);
+        st.alpha = 0.0;
+        let (x, y, _, _) = c.node_screen(1, BOUNDS, &st);
+        let at = iced::advanced::mouse::Cursor::Available(Point::new(x, y));
+        let event = |e: iced::mouse::Event, st: &mut GraphState| {
+            let _ = <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+                &c,
+                st,
+                &iced::Event::Mouse(e),
+                BOUNDS,
+                at,
+            );
+        };
+        event(
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            &mut st,
+        );
+        for frame in 1..=3 {
+            let _ = c.tick(
+                &mut st,
+                BOUNDS,
+                t0 + std::time::Duration::from_millis(16 * frame),
+                at,
+            );
+        }
+        event(
+            iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            &mut st,
+        );
+        assert!(
+            st.alpha <= ALPHA_REST,
+            "a click heated the map: {}",
+            st.alpha
+        );
+        // A drag heats it.
+        event(
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            &mut st,
+        );
+        event(
+            iced::mouse::Event::CursorMoved {
+                position: Point::new(x + 40.0, y + 30.0),
+            },
+            &mut st,
+        );
+        let _ = c.tick(
+            &mut st,
+            BOUNDS,
+            t0 + std::time::Duration::from_millis(100),
+            at,
+        );
+        assert!(st.alpha > ALPHA_REST, "a drag moves the map");
+    }
+
     #[test]
     fn a_click_on_a_node_picks_it_and_a_second_opens_it() {
         let l = layout(3);
@@ -3175,6 +4238,269 @@ mod tests {
             click(&mut st, at),
             Some(Message::Graph(GraphMsg::Picked(Some(_))))
         ));
+    }
+
+    /// A frame at `at` ms past `t0`, the pointer where `cursor` says.
+    fn frame_at(
+        c: &GraphCanvas<'_>,
+        st: &mut GraphState,
+        t0: std::time::Instant,
+        at: f64,
+        cursor: iced::advanced::mouse::Cursor,
+    ) {
+        let now = t0 + std::time::Duration::from_secs_f64(at / 1000.0);
+        let _ = c.tick(st, BOUNDS, now, cursor);
+    }
+
+    /// A node the pointer rests on eases the spin to a stop — no frame
+    /// turning the camera much less than the one before — and holds it
+    /// while the pointer stays by the node, which drifts on as the turn
+    /// slows; the pointer gone, the spin picks up again as gently.
+    #[test]
+    fn a_hovered_node_eases_the_spin_to_a_stop_and_lets_it_go() {
+        use iced::advanced::mouse::Cursor;
+        let l = layout(8);
+        let c = canvas(&l, true, true);
+        let mut st = GraphState::default();
+        let t0 = std::time::Instant::now();
+        let mut t = 0.0;
+        // The physics settled, the spin at its rate.
+        while t < 12_000.0 {
+            frame_at(&c, &mut st, t0, t, Cursor::Unavailable);
+            t += 16.667;
+        }
+        assert!((st.yaw_vel - SPIN_RATE).abs() < 1e-3, "{}", st.yaw_vel);
+
+        // Onto node 3.
+        let (x, y, _, _) = c.node_screen(3, BOUNDS, &st);
+        let on = Cursor::Available(iced::Point::new(x, y));
+        let mut rates = vec![st.yaw_vel];
+        for _ in 0..240 {
+            frame_at(&c, &mut st, t0, t, on);
+            t += 16.667;
+            assert_eq!(st.hold, Some(3), "let go while the pointer stayed");
+            rates.push(st.yaw_vel);
+        }
+        assert!(st.yaw_vel.abs() < 1e-3, "still turning: {}", st.yaw_vel);
+        let steps: Vec<f32> = rates.windows(2).map(|w| w[0] - w[1]).collect();
+        assert!(steps.iter().all(|d| *d >= -1e-6), "sped up on the way down");
+        let jolt = steps.iter().cloned().fold(0.0f32, f32::max);
+        assert!(jolt < SPIN_RATE * 0.1, "stopped with a jolt: {jolt}");
+
+        // Off the node, past where it counts as hovered but still by it:
+        // held. Farther: let go.
+        let (x, y, _, persp) = c.node_screen(3, BOUNDS, &st);
+        let r = node_radius(l.nodes[3].weight, persp);
+        let by = iced::Point::new(x + r + HIT_SLOP + 6.0, y);
+        assert_eq!(c.hit(by, BOUNDS, &st), None, "no node is hovered there");
+        frame_at(&c, &mut st, t0, t, Cursor::Available(by));
+        t += 16.667;
+        assert_eq!(st.hold, Some(3), "let go by the node");
+        let past = iced::Point::new(x + r + HOLD_SLACK + 6.0, y);
+        if c.hit(past, BOUNDS, &st).is_none() {
+            frame_at(&c, &mut st, t0, t, Cursor::Available(past));
+            t += 16.667;
+            assert_eq!(st.hold, None, "held from afar");
+        }
+
+        // Away: the spin comes back, as gently.
+        let away = Cursor::Available(iced::Point::new(2.0, 2.0));
+        let mut rates = vec![st.yaw_vel];
+        for _ in 0..240 {
+            frame_at(&c, &mut st, t0, t, away);
+            t += 16.667;
+            rates.push(st.yaw_vel);
+        }
+        assert_eq!(st.hold, None);
+        assert!((st.yaw_vel - SPIN_RATE).abs() < 2e-3, "{}", st.yaw_vel);
+        let steps: Vec<f32> = rates.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(steps.iter().all(|d| *d >= -1e-6));
+        assert!(steps.iter().cloned().fold(0.0f32, f32::max) < SPIN_RATE * 0.1);
+    }
+
+    /// The spin keeps its pace through late frames: a second of it turns
+    /// the camera as far at five frames a second as at sixty. Clamped as the
+    /// physics step is, a late frame turned it less, and the next frames
+    /// caught up — a stutter, then a spin.
+    #[test]
+    fn the_spin_keeps_its_pace_through_late_frames() {
+        use iced::advanced::mouse::Cursor;
+        let l = layout(8);
+        let c = canvas(&l, true, true);
+        let t0 = std::time::Instant::now();
+        // A second of the spin, after the same warm-up, with a frame every
+        // `gap` ms.
+        let turned = |gap: f64| {
+            let mut st = GraphState::default();
+            let mut t = 0.0;
+            while t < 12_000.0 {
+                frame_at(&c, &mut st, t0, t, Cursor::Unavailable);
+                t += 16.667;
+            }
+            let from = st.yaw;
+            let end = t + 1000.0;
+            while t < end {
+                t += gap;
+                frame_at(&c, &mut st, t0, t, Cursor::Unavailable);
+            }
+            st.yaw - from
+        };
+        let smooth = turned(16.667);
+        let late = turned(200.0);
+        assert!(
+            (late - smooth).abs() < smooth * 0.05,
+            "at 5 fps it turned {late}, at 60 fps {smooth}"
+        );
+    }
+
+    /// A frame at `at` ms past `t0` as the canvas gets it: an update for the
+    /// redraw, which also takes what the view changed (a search's focus).
+    fn redraw_at(c: &GraphCanvas<'_>, st: &mut GraphState, t0: std::time::Instant, at: f64) {
+        let now = t0 + std::time::Duration::from_secs_f64(at / 1000.0);
+        let _ = <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+            c,
+            st,
+            &iced::Event::Window(iced::window::Event::RedrawRequested(now)),
+            BOUNDS,
+            iced::advanced::mouse::Cursor::Unavailable,
+        );
+    }
+
+    /// The search finds a name that is the query first, then one that
+    /// starts with it — a part of its path counts — then one that holds it;
+    /// the weightier first among each; case aside; nothing for nothing.
+    #[test]
+    fn the_search_finds_the_best_matches_first() {
+        let mut l = layout(8);
+        l.nodes[2].label = "src/pricing.py".into();
+        l.nodes[3].label = "src/pricing_rules.py".into();
+        l.nodes[4].label = "tests/test_pricing.py".into();
+        l.nodes[5].label = "Pricing".into();
+        assert_eq!(graph_matches(&l, "pricing"), [5, 2, 3, 4]);
+        assert_eq!(graph_matches(&l, "PRICING_R"), [3]);
+        assert_eq!(graph_matches(&l, "  "), Vec::<usize>::new());
+        assert_eq!(graph_matches(&l, "nothing"), Vec::<usize>::new());
+        // Among the same rank, the weightier first.
+        assert_eq!(graph_matches(&l, "file"), [7, 6, 1, 0]);
+    }
+
+    /// What a search lights: what it found, and the node in focus with its
+    /// neighbours — the rest is dimmed; nothing typed, nothing lit.
+    #[test]
+    fn the_search_lights_its_finds_and_the_focus_neighbours() {
+        let l = layout(8);
+        let c = canvas(&l, true, false).with_search("file_4", &graph_matches(&l, "file_4"), 0, 1);
+        let lit = c.lit.as_ref().expect("a search");
+        assert_eq!(lit.focus, Some(4));
+        let on: Vec<usize> = (0..8).filter(|&i| lit.lit(i)).collect();
+        assert_eq!(on, [3, 4, 5], "the found node and its neighbours");
+        assert!(
+            canvas(&l, true, false)
+                .with_search(" ", &[], 0, 1)
+                .lit
+                .is_none()
+        );
+        // Round: the third of one match is that match.
+        let c = canvas(&l, true, false).with_search("file_4", &graph_matches(&l, "file_4"), 2, 1);
+        assert_eq!(c.lit.as_ref().unwrap().focus, Some(4));
+    }
+
+    /// The node lit as picked is the one the row over the map names: a
+    /// search that moves the pick, or clears it, moves or puts out the
+    /// light, whatever was clicked last. A pick that no longer names its
+    /// node lights nothing; a map the app keeps no pick for lights its own.
+    #[test]
+    fn the_lit_node_is_the_one_the_pick_names() {
+        let l = layout(8);
+        let mut st = GraphState::default();
+        st.sig = layout_sig(&l);
+        st.picked = Some((2, st.sig));
+        let pick = |i: usize| node_pick(&l, crate::Overlay::ProjectImports, i).unwrap();
+        assert_eq!(canvas(&l, true, false).picked(&st), Some(2), "its own");
+        let c = canvas(&l, true, false).with_pick(Some(&pick(5)));
+        assert_eq!(c.picked(&st), Some(5), "the search's");
+        let c = canvas(&l, true, false).with_pick(None);
+        assert_eq!(c.picked(&st), None, "the search cleared");
+        let mut stale = pick(5);
+        stale.label = "gone.rs".into();
+        let c = canvas(&l, true, false).with_pick(Some(&stale));
+        assert_eq!(c.picked(&st), None, "not the node it named");
+    }
+
+    /// The camera goes to what the search found: centred, zoomed in, the
+    /// spin held; the search cleared, back over the whole map, spinning.
+    #[test]
+    fn the_camera_flies_to_what_the_search_found() {
+        let l = layout(8);
+        let t0 = std::time::Instant::now();
+        let mut st = GraphState::default();
+        let mut t = 0.0;
+        let plain = canvas(&l, true, true);
+        while t < 12_000.0 {
+            redraw_at(&plain, &mut st, t0, t);
+            t += 16.667;
+        }
+        let found =
+            canvas(&l, true, true).with_search("file_6", &graph_matches(&l, "file_6"), 0, 1);
+        while t < 15_000.0 {
+            redraw_at(&found, &mut st, t0, t);
+            t += 16.667;
+        }
+        let (x, y, _, _) = found.node_screen(6, BOUNDS, &st);
+        let mid = (BOUNDS.width / 2.0, BOUNDS.height / 2.0);
+        assert!(
+            (x - mid.0).abs() < 1.0 && (y - mid.1).abs() < 1.0,
+            "not centred: {x},{y}"
+        );
+        assert!(st.zoom >= FOCUS_ZOOM - 1e-3, "not zoomed in: {}", st.zoom);
+        assert!(st.yaw_vel.abs() < 1e-3, "still spinning");
+
+        let cleared = canvas(&l, true, true).with_search("", &[], 0, 2);
+        while t < 20_000.0 {
+            redraw_at(&cleared, &mut st, t0, t);
+            t += 16.667;
+        }
+        assert!((st.zoom - 1.0).abs() < 1e-3, "{}", st.zoom);
+        assert!((st.yaw_vel - SPIN_RATE).abs() < 2e-3, "{}", st.yaw_vel);
+        assert_eq!(st.focus, None);
+    }
+
+    /// A search typed before the map was first drawn — while the graph was
+    /// laid out — still sends the camera to its match: the first frame's
+    /// reseed went to it, not over the whole map.
+    #[test]
+    fn a_search_typed_before_the_map_is_drawn_is_flown_to() {
+        let l = layout(8);
+        let t0 = std::time::Instant::now();
+        let mut st = GraphState::default();
+        let found = canvas(&l, true, true).with_search("file_6", &[6], 0, 1);
+        let mut t = 0.0;
+        while t < 4_000.0 {
+            redraw_at(&found, &mut st, t0, t);
+            t += 16.667;
+        }
+        assert_eq!(st.focus, Some(6));
+        assert!(st.zoom >= FOCUS_ZOOM - 1e-3, "not zoomed in: {}", st.zoom);
+        let (x, y, _, _) = found.node_screen(6, BOUNDS, &st);
+        assert!(
+            (x - BOUNDS.width / 2.0).abs() < 1.0 && (y - BOUNDS.height / 2.0).abs() < 1.0,
+            "not centred: {x},{y}"
+        );
+    }
+
+    /// What the map lights is the list its header counts: a match the
+    /// label search would not find (a function's file, on the Call Graph)
+    /// is lit and flown to all the same.
+    #[test]
+    fn the_map_lights_the_list_the_header_counts() {
+        let l = layout(8);
+        let c = canvas(&l, true, false).with_search("deser", &[2], 0, 1);
+        let lit = c.lit.as_ref().expect("a search");
+        assert_eq!(lit.focus, Some(2));
+        assert!(lit.found[2]);
+        // An index past the map is not one of its nodes.
+        let c = canvas(&l, true, false).with_search("x", &[99], 0, 1);
+        assert_eq!(c.lit.as_ref().unwrap().focus, None);
     }
 
     /// Fit puts the camera back where it starts: zoom, pan and turn.
@@ -3568,6 +4894,142 @@ mod tests {
             "only ever slowing: {turns:?}"
         );
         assert!(graph_settled(&st), "and came to rest");
+    }
+
+    /// A label whose side of its node a neighbour's label has taken goes to
+    /// the other side, when there is room there; it was hidden.
+    #[test]
+    fn a_crowded_label_takes_the_other_side_of_its_node() {
+        // A neighbour's label already right of the node.
+        let taken = [label_rect(100.0, 50.0, 5.0, 60.0, false)];
+        let (rect, left) =
+            label_spot(&[&taken], 100.0, 50.0, 5.0, 60.0, false, 800.0).expect("a place");
+        assert!(left, "{rect:?}");
+        assert!(rect.x + rect.width <= 100.0 - 5.0);
+        // At the frame's left edge there is no other side.
+        let near_edge = [label_rect(20.0, 50.0, 5.0, 60.0, false)];
+        assert_eq!(
+            label_spot(&[&near_edge], 20.0, 50.0, 5.0, 60.0, false, 800.0).map(|s| s.1),
+            None
+        );
+        // Nothing in the way: its own side.
+        assert_eq!(
+            label_spot(&[], 100.0, 50.0, 5.0, 60.0, false, 800.0).map(|s| s.1),
+            Some(false)
+        );
+    }
+
+    /// A label keeps clear of another node's disc as of its label: one
+    /// moved off a neighbour's label was drawn over that neighbour's dot.
+    #[test]
+    fn a_label_keeps_off_another_nodes_disc() {
+        // A node just right of this one: its disc where this label would
+        // run.
+        let discs = [node_disc(100.0, 50.0, 5.0), node_disc(140.0, 52.0, 5.0)];
+        let (rect, left) =
+            label_spot(&[&discs], 100.0, 50.0, 5.0, 60.0, false, 800.0).expect("a place");
+        assert!(left, "{rect:?}");
+        // Its own disc is never in its way.
+        assert_eq!(
+            label_spot(&[&discs[..1]], 100.0, 50.0, 5.0, 60.0, false, 800.0).map(|s| s.1),
+            Some(false)
+        );
+        // A disc either side: no name at rest (the pointer still shows it).
+        let boxed = [
+            node_disc(100.0, 50.0, 5.0),
+            node_disc(140.0, 52.0, 5.0),
+            node_disc(60.0, 48.0, 5.0),
+        ];
+        assert_eq!(
+            label_spot(&[&boxed], 100.0, 50.0, 5.0, 60.0, false, 800.0),
+            None
+        );
+    }
+
+    /// A label coming in never fades in over one going out: it waits until
+    /// that one has gone, and that one goes quickly. Cross-fading over each
+    /// other, in a small map that turns, the two read as neither.
+    #[test]
+    fn a_label_fades_in_only_once_the_one_in_its_place_has_gone() {
+        let l = layout(40);
+        let c = canvas(&l, true, true);
+        let mut st = GraphState::default();
+        let small = iced::Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 480.0,
+            height: 360.0,
+        };
+        let t0 = std::time::Instant::now();
+        let n = l.nodes.len();
+        let mut crossings = 0;
+        for f in 0..1200u64 {
+            let before = st.label_alpha.clone();
+            let _ = c.tick(
+                &mut st,
+                small,
+                t0 + std::time::Duration::from_micros(16_667 * f),
+                iced::advanced::mouse::Cursor::Unavailable,
+            );
+            if f < 30 {
+                continue;
+            }
+            let at: Vec<_> = (0..n).map(|i| c.node_screen(i, small, &st)).collect();
+            let rect = |i: usize| {
+                let (x, y, _, persp) = at[i];
+                let r = node_radius(l.nodes[i].weight, persp);
+                label_rect(x, y, r, st.label_w[i], st.label_side[i] >= 0.5)
+            };
+            for i in 0..n {
+                let a = st.label_alpha[i];
+                let rising = a > before.get(i).copied().unwrap_or(0.0) + 1e-4;
+                if !rising || !(0.1..0.5).contains(&a) {
+                    continue;
+                }
+                for j in (0..n).filter(|&j| j != i) {
+                    let going = st.label_target[j] <= 0.0 && st.label_alpha[j] > 0.1;
+                    if going && rects_overlap(rect(i), rect(j)) {
+                        crossings += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(crossings, 0, "labels faded in over ones going out");
+    }
+
+    /// In a settled map, no label shown in full lies over another node's
+    /// disc: the pass that places them keeps clear of every disc, not only
+    /// of the labels before.
+    #[test]
+    fn a_settled_maps_labels_keep_off_other_nodes_discs() {
+        let l = layout(40);
+        let (st, _, _) = settled(&l, false);
+        let c = canvas(&l, false, false);
+        let at: Vec<(f32, f32, f32, f32)> = (0..l.nodes.len())
+            .map(|i| c.node_screen(i, BOUNDS, &st))
+            .collect();
+        let disc = |j: usize| {
+            let (x, y, _, persp) = at[j];
+            node_disc(x, y, node_radius(l.nodes[j].weight, persp))
+        };
+        let mut shown = 0;
+        for (i, &(x, y, _, persp)) in at.iter().enumerate() {
+            if st.label_target[i] < 0.6 {
+                continue;
+            }
+            shown += 1;
+            let r = node_radius(l.nodes[i].weight, persp);
+            let rect = label_rect(x, y, r, st.label_w[i], st.label_side_target[i] >= 0.5);
+            for j in (0..l.nodes.len()).filter(|&j| j != i) {
+                assert!(
+                    !rects_overlap(rect, disc(j)),
+                    "{}'s label over {}'s dot",
+                    l.nodes[i].label,
+                    l.nodes[j].label
+                );
+            }
+        }
+        assert!(shown > 10, "a map named at all: {shown}");
     }
 
     /// A label that would run off the right edge is drawn left of its node,

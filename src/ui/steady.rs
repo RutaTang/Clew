@@ -71,8 +71,17 @@ pub(crate) fn elide_end(content: &str, size: f32, font: Font, room: f32) -> Stri
         .unwrap_or_else(|| "…".to_string())
 }
 
-/// How many widths [`width_of`] keeps before it forgets them all.
-const MEASURED_CAP: usize = 512;
+/// How many widths [`width_of`] keeps before it forgets them all: more
+/// than a search's results (2,000), each measured to be cut — at 512 the
+/// cache was wiped several times over within one frame.
+const MEASURED_CAP: usize = 8192;
+
+thread_local! {
+    /// Texts [`cut`] to fit, by text, size, font and room: a list of
+    /// results redrawn each frame cut each of its rows again, a search of
+    /// the measuring each.
+    static CUT: RefCell<HashMap<(String, u32, Font, u32), String>> = RefCell::new(HashMap::new());
+}
 
 /// The width `content` is set in at `size` in `font`, on one line, to the
 /// whole pixel above.
@@ -128,9 +137,57 @@ pub(crate) fn slot<'a, Message: 'a>(
         .into()
 }
 
+/// `content` as it fits in `room` at `size` in the UI font: whole, or with
+/// its middle let go for an ellipsis — for a path, whose start says where
+/// it is and whose end which one it is (cut at its end, two folders under
+/// one long place read the same).
+pub(crate) fn cut_middle(content: &str, room: f32, size: f32) -> String {
+    let font = crate::fonts::UI;
+    if width_of(content, size, font) <= room {
+        return content.to_string();
+    }
+    let chars: Vec<char> = content.chars().collect();
+    let with = |n: usize| {
+        let head = n.div_ceil(2);
+        let tail = n / 2;
+        let mut cut: String = chars[..head].iter().collect();
+        cut.push('…');
+        cut.extend(&chars[chars.len() - tail..]);
+        cut
+    };
+    // The most characters that, with the ellipsis, still fit.
+    let (mut lo, mut hi) = (0usize, chars.len().saturating_sub(1));
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if width_of(&with(mid), size, font) <= room {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    with(lo)
+}
+
 /// `content` as it fits in `room` at `size` in `font`: whole, or cut short
 /// with an ellipsis where it would run past.
 pub(crate) fn cut(content: &str, room: f32, size: f32, font: Font) -> String {
+    let key = (content.to_string(), size.to_bits(), font, room.to_bits());
+    if let Some(cut) = CUT.with(|m| m.borrow().get(&key).cloned()) {
+        return cut;
+    }
+    let cut = cut_measured(content, room, size, font);
+    CUT.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= MEASURED_CAP {
+            m.clear();
+        }
+        m.insert(key, cut.clone());
+    });
+    cut
+}
+
+/// [`cut`], measured.
+fn cut_measured(content: &str, room: f32, size: f32, font: Font) -> String {
     if width_of(content, size, font) <= room {
         return content.to_string();
     }

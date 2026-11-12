@@ -19,6 +19,7 @@ pub(crate) fn all() -> Vec<&'static str> {
         MAP_KINDS,
         NOTICES,
         STEP_VERBS,
+        MAP_WORDS,
     ]
     .concat()
 }
@@ -41,10 +42,15 @@ pub(crate) const VOICE_MODELS: &[&str] = &[
 /// what it is for.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const SPEECH_MODELS: &[&str] = &[
+    tr_noop!("Qwen3-TTS"),
+    tr_noop!(
+        "Speech as a person says it, heard as it is made: English, Chinese, Japanese, Korean and six more languages."
+    ),
+    tr_noop!("Native to each language"),
     tr_noop!("Supertonic 3"),
-    tr_noop!("Natural speech in 31 languages, English, Korean, Japanese and French among them."),
-    tr_noop!("Kokoro (Chinese)"),
-    tr_noop!("Mandarin Chinese, which Supertonic does not speak."),
+    tr_noop!("Twenty-two more languages, Dutch, Polish, Turkish, Arabic and Hindi among them."),
+    // The wake phrase's model (`wake::MODEL`).
+    tr_noop!("Keyword Spotter"),
 ];
 
 /// When an MCP server's tool asks first (clew-core's `Approve::label`).
@@ -273,6 +279,9 @@ pub(crate) const NOTICES: &[&str] = &[
     tr_noop!(
         "This program's debug information is Zig's own (from Zig's built-in code generator, the default for Debug builds on x86-64), and lldb reads no variables from it: breakpoints and stepping work, but no variables show. Build it with -fllvm (or .use_llvm = true in build.zig) to see them."
     ),
+    tr_noop!(
+        "pytest is not installed for this Python, so this test file ran as a script: it defines its tests and runs none of them. Install pytest in the project's environment to run them."
+    ),
     tr_noop!("larger than 64 MB"),
     tr_noop!("not a regular file inside the project (a link, or moved since the scan)"),
 ];
@@ -287,4 +296,54 @@ pub(crate) const STEP_VERBS: &[&str] = &[
     tr_noop!("History"),
     tr_noop!("Changes"),
     tr_noop!("Explanations"),
+];
+
+/// The English words a project graph's extractors (`clew_core::maps`) label
+/// an edge or a node's detail with — code they quote (`pub use`, `select`,
+/// `gen_server:call`) stays as written. The graph's list says them through
+/// `ui::graph::map_text`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const MAP_WORDS: &[&str] = &[
+    tr_noop!("inherits"),
+    tr_noop!("instantiates"),
+    tr_noop!("overrides"),
+    tr_noop!("creates"),
+    tr_noop!("sends"),
+    tr_noop!("starts"),
+    tr_noop!("constructor"),
+    tr_noop!("field"),
+    tr_noop!("fires"),
+    tr_noop!("provides (@Bean)"),
+    tr_noop!("resolves to"),
+    tr_noop!("runs"),
+    tr_noop!("closes"),
+    tr_noop!("received by"),
+    tr_noop!("runs in"),
+    tr_noop!("means"),
+    tr_noop!("rewrites"),
+    tr_noop!("uses"),
+    tr_noop!("handled by"),
+    tr_noop!("includes"),
+    tr_noop!("calls"),
+    tr_noop!("reads"),
+    tr_noop!("contains"),
+    tr_noop!("depends on"),
+    tr_noop!("installs"),
+    tr_noop!("links"),
+    tr_noop!("returns"),
+    tr_noop!("root module"),
+    tr_noop!("root"),
+    tr_noop!("from"),
+    tr_noop!("instance"),
+    tr_noop!("application"),
+    tr_noop!("supervisor"),
+    tr_noop!("primary key"),
+    tr_noop!("includes the includer"),
+    tr_noop!("extends the includer"),
+    tr_noop!("prepends the includer"),
+    tr_noop!("every attribute the class lacks is looked up here"),
+    tr_noop!("answers calls to methods the class does not define"),
+    tr_noop!("inferred error set"),
+    tr_noop!("system library"),
+    tr_noop!("no consistent method resolution order: Python refuses this class"),
 ];

@@ -17,6 +17,8 @@ impl App {
         // What the working tree changes is read anew (`sync_git_status`).
         if !paths.is_empty() {
             self.proj.git_status_stale = true;
+            self.proj.head_stale = true;
+            self.proj.repo_tip_stale = true;
         }
         // A file the resolver reads for the whole project (go.mod, a
         // tsconfig, a base a tsconfig `extends` under any name) changed:
@@ -430,8 +432,14 @@ impl App {
                     files
                         .into_iter()
                         .map(|(path, rel, content, lang, hash)| {
-                            // One parse per file for its symbols AND imports.
-                            let facts = index::analyze_file(&path, &rel, &content, lang);
+                            // One parse per file for its symbols AND imports
+                            // — none for a minifier's output, as the full
+                            // build has none (`index::build_indexed`).
+                            let facts = if clew_core::fs_scan::is_minified_source(&content) {
+                                index::FileFacts::default()
+                            } else {
+                                index::analyze_file(&path, &rel, &content, lang)
+                            };
                             IndexedFile {
                                 symbols: facts.symbols,
                                 imports: facts.imports,

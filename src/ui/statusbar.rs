@@ -61,7 +61,7 @@ fn sync_state(app: &App) -> Option<&'static str> {
     } else if app.proj.indexing {
         tr!("Indexing…")
     } else {
-        tr!("Up to date")
+        tr!("Indexed")
     })
 }
 
@@ -80,12 +80,17 @@ pub(crate) fn target_name(target: &crate::inactive::Target) -> String {
         "macos" => "macOS",
         "windows" => "Windows",
         "freebsd" => "FreeBSD",
+        "ios" => "iOS",
+        "android" => "Android",
+        _ if target.family == "wasm" => "Web",
         _ => return target.label.clone(),
     };
-    let usual = if target.os == "macos" {
-        "aarch64"
-    } else {
-        "x86_64"
+    // The architecture each is usually read for: said only when it is
+    // another.
+    let usual = match target.os.as_str() {
+        "macos" | "ios" | "android" => "aarch64",
+        _ if target.family == "wasm" => "wasm32",
+        _ => "x86_64",
     };
     if target.label.starts_with("Host") || target.arch == usual || target.arch.is_empty() {
         return system.to_string();
@@ -108,6 +113,82 @@ pub(crate) fn target_label(target: &crate::inactive::Target) -> String {
         Some(os) => tr!("Host ({os})", os = os),
         None => target.label.clone(),
     }
+}
+
+/// The longest branch name the status bar shows whole; a longer one is cut
+/// to it, and said whole where the pointer rests.
+const BRANCH_ROOM: usize = 28;
+
+/// What the status bar says HEAD is: the branch's name, cut to
+/// [`BRANCH_ROOM`] characters — or, detached, the commit's short name.
+pub(crate) fn head_shown(head: &clew_protocol::HeadName) -> String {
+    match head {
+        clew_protocol::HeadName::Branch(name) if name.chars().count() > BRANCH_ROOM => {
+            let cut: String = name.chars().take(BRANCH_ROOM - 1).collect();
+            format!("{cut}…")
+        }
+        clew_protocol::HeadName::Branch(name) => name.clone(),
+        clew_protocol::HeadName::Detached(sha) => super::panes::short_sha(sha),
+    }
+}
+
+/// The branch checked out, after the place the code is read from — or the
+/// commit a detached HEAD is at — with the whole of it where the pointer
+/// rests. Nothing outside a repository.
+fn branch_item(app: &App) -> Option<Element<'_, Message>> {
+    let head = app.proj.head.as_ref()?;
+    let about = match head {
+        clew_protocol::HeadName::Branch(name) => {
+            tr!("On branch {branch}", branch = name.as_str())
+        }
+        clew_protocol::HeadName::Detached(sha) => tr!(
+            "Not on a branch: at commit {commit}",
+            commit = super::panes::short_sha(sha)
+        ),
+    };
+    // Set apart from the scan's state before it: "Up to date main" read
+    // as the branch's sync with its remote. Outside the button: its hover
+    // took the rule in, and stood wider before the branch than after it.
+    let rule = container(space().width(1).height(12)).style(|_: &iced::Theme| container::Style {
+        background: Some(theme::border().into()),
+        ..container::Style::default()
+    });
+    let shown = row![
+        glyph::icon(Glyph::Branch, theme::dim(), 12.0),
+        status_text(head_shown(head)),
+    ]
+    .spacing(5)
+    .align_y(iced::Center);
+    // Pressed, the branch's history: its commits, in the History view —
+    // which its tooltip says, as it named only the branch.
+    let shown = button(shown)
+        .style(theme::icon_button(false))
+        .padding([2, 4])
+        .on_press(super::heard::said(
+            tr!("History"),
+            Message::History(crate::HistoryMsg::Show { path: None }),
+        ));
+    let tip = iced::widget::column![
+        text(about).size(ts::SMALL).color(theme::tip_text()),
+        text(tr!("Click for its history"))
+            .size(ts::SMALL)
+            .color(theme::tip_text()),
+    ]
+    .spacing(2);
+    Some(
+        row![
+            rule,
+            super::tip::tip(
+                shown,
+                container(tip).padding([3, 7]).style(theme::tip),
+                tooltip::Position::Top,
+            )
+            .gap(5.0),
+        ]
+        .spacing(4)
+        .align_y(iced::Center)
+        .into(),
+    )
 }
 
 /// The status bar: one quiet line along the window's foot. On the left,
@@ -137,31 +218,46 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             border: iced::border::rounded(3),
             ..container::Style::default()
         });
-    // Scanning, indexing, up to date: in a slot as wide as the widest of
-    // them, so what Clew says beside it stays where it is.
-    let said_place = match sync_state(app) {
-        Some(state) => format!("{place} · {state}"),
-        None => place.clone(),
+    // Where the code is read from, alone in the button that opens Connect:
+    // the scan's state beside it read as the place's — "Local · Up to
+    // date ⌄" as a branch's sync with its remote.
+    let place_text = text(place.clone()).size(ts::SMALL).color(if remote {
+        theme::accent()
+    } else {
+        theme::fg_muted()
+    });
+    // Scanning, indexing, up to date: after the button, in a slot as wide
+    // as the widest of them, so what Clew says beside it stays where it is.
+    let sync: Element<'_, Message> = match sync_state(app) {
+        Some(state) => {
+            let slot = super::steady::slot(
+                status_text(state),
+                state,
+                &[tr!("Scanning…"), tr!("Indexing…"), tr!("Indexed")],
+                ts::SMALL,
+            );
+            // What is up to date: the Updates page's "Clew is up to date"
+            // is of the app, this of the project's files.
+            if state == tr!("Indexed") {
+                super::tip::tip(
+                    slot,
+                    container(
+                        text(tr!("Every file is scanned and indexed"))
+                            .size(ts::SMALL)
+                            .color(theme::tip_text()),
+                    )
+                    .padding([3, 7])
+                    .style(theme::tip),
+                    tooltip::Position::Top,
+                )
+                .gap(5.0)
+                .into()
+            } else {
+                slot
+            }
+        }
+        None => space().width(0).into(),
     };
-    let every_state: Vec<String> = [tr!("Scanning…"), tr!("Indexing…"), tr!("Up to date")]
-        .into_iter()
-        .map(|state| format!("{place} · {state}"))
-        .collect();
-    let every_state: Vec<&str> = every_state.iter().map(String::as_str).collect();
-    let place_text = super::steady::slot(
-        text(said_place.clone()).size(ts::SMALL).color(if remote {
-            theme::accent()
-        } else {
-            theme::fg_muted()
-        }),
-        &said_place,
-        if app.proj.project.is_some() {
-            &every_state
-        } else {
-            &[]
-        },
-        ts::SMALL,
-    );
     // A chevron after it, as the target picker has: it opens something —
     // Connect — which nothing said until the pointer rested on it (L23).
     let opens = glyph::icon(Glyph::ChevronDown, theme::dim(), 11.0);
@@ -173,7 +269,10 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         )
         .style(theme::icon_button(false))
         .padding([2, 8])
-        .on_press(Message::Connect(ConnectMsg::Open)),
+        .on_press(super::heard::said(
+            tr!("Connect to a remote host"),
+            Message::Connect(ConnectMsg::Open),
+        )),
         // The design's tooltip bubble.
         container(
             text(tr!("Connect to a remote host"))
@@ -198,8 +297,14 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     }))
     .width(Fill)
     .height(Length::Fixed(STATUS_LINE_H));
+    // The place, its scan's state, then the branch: "Local · Up to date ·
+    // ⎇ main", the state still read as the place's.
+    let mut left = row![conn_indicator, sync];
+    if let Some(branch) = branch_item(app) {
+        left = left.push(branch);
+    }
     let mut bar = row![
-        row![conn_indicator, said_row]
+        left.push(said_row)
             .spacing(STATUS_GAP - 8.0)
             .align_y(iced::Center)
             .width(Fill)
@@ -233,7 +338,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         let lang = v
             .lang_key
             .and_then(crate::highlight::lang_name)
-            .unwrap_or(tr!("Plain text"));
+            .unwrap_or_else(|| untagged_kind(&v.abs));
         // Language-server status for this file's language, when relevant —
         // from the snapshot this update took (so a state clew cannot read
         // shows as a problem, not as "ready").
@@ -253,8 +358,8 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             ))
         });
         let named = |status: &str| match server {
-            Some((Some(name), _)) => format!("{lang} · {name} {status}"),
-            Some((None, _)) => format!("{lang} · {status}"),
+            Some((Some(name), _)) => format!("{lang}: {name} {status}"),
+            Some((None, _)) => format!("{lang}: {status}"),
             None => lang.to_string(),
         };
         let said = match &server {
@@ -294,7 +399,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
                 &[&at_rest[0], &at_rest[1]],
                 ts::SMALL,
             );
-            (slot, (shown != said).then_some(said))
+            (slot, (shown != said).then(|| said.clone()))
         };
         // A server's state opens the page that lists them, where what it
         // says to do ("…, or choose where it is") is done — as the place
@@ -305,9 +410,16 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             .style(theme::icon_button(false))
             .padding([2, 8]);
         if server.is_some() {
-            lsp_button = lsp_button.on_press(Message::Settings(SettingsMsg::OpenAt(
-                crate::SettingsPage::Languages,
-            )));
+            let press = super::heard::said(
+                tr!("Language servers"),
+                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::Languages)),
+            );
+            // Named on the ring by what it shows, then where it leads:
+            // "Python: pyright ready" was announced "Language servers".
+            lsp_button = lsp_button.on_press(super::heard::said_with(
+                || format!("{said} — {}", tr!("Language servers")),
+                press,
+            ));
         }
         let open = tr!("Open Settings → Language servers");
         let tip = match (server.is_some(), whole) {
@@ -402,7 +514,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             row![
                 ts::set_in(
                     text(tr!(
-                        "Reading for {target}",
+                        "Built for {target}",
                         target = target_name(&app.proj.reading_target)
                     ))
                     .font(crate::fonts::in_control(crate::fonts::UI_MEDIUM))
@@ -418,8 +530,24 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         )
         .style(theme::icon_button(app.show_target_menu))
         .padding([0, 6])
-        .on_press(Message::Window(WindowMsg::ToggleTargetMenu));
-        bar = bar.push(picker);
+        .on_press(super::heard::said_with(
+            || {
+                tr!(
+                    "Built for {target}",
+                    target = target_name(&app.proj.reading_target)
+                )
+            },
+            Message::Window(WindowMsg::ToggleTargetMenu),
+        ));
+        // "Reading for Linux" said nothing of what it changes: named by
+        // what the code is read as, and what that does said where the
+        // pointer rests.
+        bar = bar.push(super::toolbar::tip_at(
+            picker,
+            tr!("Code built only for other platforms is dimmed"),
+            None,
+            tooltip::Position::Top,
+        ));
     }
 
     // The design's 20 px in from the left and 14 from the right, less the
@@ -447,6 +575,12 @@ const STATUS_LINE_H: f32 = 20.0;
 /// The least room what Clew says is given beside the chips: below it, the
 /// chips are said short, and with less still, it is not said.
 const SAID_MIN_W: f32 = 120.0;
+/// The most room kept beside a standing failure for what Clew says next —
+/// half the bar, up to this: kept whatever is said, so the failure's
+/// controls do not move, and enough for what is under way to be said
+/// whole ("Working out what discounts does…" was cut to "Working out wh…"
+/// beside an older failure given the rest).
+const SAID_KEPT_MAX_W: f32 = 320.0;
 /// What a chip takes beside its words: its mark, the room after it, and its
 /// padding.
 const CHIP_EXTRA_W: f32 = 11.0 + 5.0 + 16.0;
@@ -464,31 +598,142 @@ const EXPLAIN_EXTRA_W: f32 = 11.0 + 90.0 + 19.0 + 3.0 * 5.0;
 fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     let font = crate::fonts::UI;
     let width = |s: &str| super::steady::width_of(s, ts::SMALL, font);
+    let mut row = row![].spacing(STATUS_GAP).align_y(iced::Center);
+    // A status the back end wrote as it is (an error passed straight
+    // through) in the reader's language too, its names in the reader's
+    // quotation marks, not backticks.
+    let words_of = |s: &str| crate::i18n::quoted(&crate::i18n::message(s)).into_owned();
+    let least = SAID_MIN_W / 2.0;
+    // Words cut to `room`, said whole where the pointer rests when cut.
+    let line_of = |whole: String, room: f32, color: Option<iced::Color>| -> Element<'_, Message> {
+        let shown = super::steady::cut(&whole, room, ts::SMALL, font);
+        let mut line = status_text(shown.clone()).wrapping(iced::widget::text::Wrapping::None);
+        if let Some(color) = color {
+            line = line.color(color);
+        }
+        if shown == whole {
+            line.into()
+        } else {
+            super::toolbar::tip_at(line, whole, None, tooltip::Position::Top)
+        }
+    };
+    // A failure stands first, in the danger colour, with what to do about
+    // it — what fits of it beside the least of its words, its dismissal
+    // always — at a width that does not change with what else is said:
+    // after the chips, and shortened to make room for the next message,
+    // its Try again, Settings and × moved under the pointer, and a click
+    // meant for Settings landed on words.
+    let failure = app.failure_shown();
     let setup = setup_label(app);
     let explain = explain_label(app);
     let full_chips: f32 = setup.as_ref().map_or(0.0, |(l, _)| width(l) + CHIP_EXTRA_W)
-        + explain
-            .as_ref()
-            .map_or(0.0, |(_, widest)| width(widest) + EXPLAIN_EXTRA_W);
+        + explain.as_ref().map_or(0.0, |(_, widest)| {
+            // One node's chip has no bar: counted with one, it gave way
+            // to "…" with room to spare.
+            let bar = if app.proj.explain.pass_target.is_some() {
+                90.0 + 5.0
+            } else {
+                0.0
+            };
+            width(widest) + EXPLAIN_EXTRA_W - bar
+        });
     let chips_n = usize::from(setup.is_some()) + usize::from(explain.is_some());
-    let short = full_chips + STATUS_GAP * chips_n as f32 + SAID_MIN_W > room;
-    let mut row = row![].spacing(STATUS_GAP).align_y(iced::Center);
+    // What is under way now comes before an older failure: its chip keeps
+    // its words, and the failure's give way (whole where the pointer
+    // rests). Beside a run's failure, Explain's progress was squeezed to
+    // "✦ … ×".
+    let chips_w = full_chips + STATUS_GAP * chips_n as f32;
     let mut used = 0.0;
-    if let Some(chip) = setup_chip(app, short) {
+    if let Some(failure) = failure
+        && room >= least
+    {
+        let whole = words_of(&failure.shown());
+        let (controls, controls_w) = failure_controls(failure, room - least - STATUS_GAP);
+        // What failed: its words before the reason — ": ", or the
+        // full-width "：" Chinese and Japanese write.
+        let head = [": ", "："]
+            .iter()
+            .filter_map(|sep| whole.find(sep))
+            .min()
+            .map_or(whole.as_str(), |at| &whole[..at]);
+        // While the codes are up, what to do with them is said whole —
+        // after the failure's words it was cut to "Type the code on a…" —
+        // and what failed is said before its controls, in what room is
+        // left: without it, "Try again  Settings ×" stood with nothing
+        // said of what they were about. Its controls stay, each with its
+        // code; the whole failure is where the pointer rests.
+        if app.jump.is_some() {
+            let hint_w = width(&words_of(&app.status));
+            let free = room - controls_w - 3.0 * STATUS_GAP - chips_w - hint_w;
+            let words = width(head).min(free);
+            if words >= least {
+                let shown = super::steady::cut(head, words, ts::SMALL, font);
+                let line = status_text(shown)
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .color(theme::danger());
+                row = row.push(super::toolbar::tip_at(
+                    line,
+                    whole.clone(),
+                    None,
+                    tooltip::Position::Top,
+                ));
+                used += words + STATUS_GAP;
+            }
+            row = row.push(controls);
+            used += controls_w + STATUS_GAP;
+        } else {
+            // Half of what is free is kept for what is said next, up to
+            // `SAID_KEPT_MAX_W`; the failure keeps at least what failed
+            // (its words before the reason), its reason whole where the
+            // pointer rests.
+            let free = room - controls_w - 2.0 * STATUS_GAP - chips_w;
+            let kept = (free / 2.0).clamp(SAID_MIN_W, SAID_KEPT_MAX_W);
+            let floor = (width(head) + width("…")).min(free - SAID_MIN_W);
+            let words = (free - kept).max(floor).max(least).min(width(&whole));
+            row = row.push(line_of(whole, words, Some(theme::danger())));
+            row = row.push(controls);
+            used += words + STATUS_GAP + controls_w + STATUS_GAP;
+        }
+    }
+    let room = (room - used).max(0.0);
+    let mut used = 0.0;
+    let short = full_chips + STATUS_GAP * chips_n as f32 + SAID_MIN_W > room;
+    // A chip short of room even shortened is left out: laid out clipped to
+    // nothing, it was a control no one saw that the keyboard's ring still
+    // stopped on (its Set up is in the command bar, its pass's progress in
+    // the margin).
+    if let Some(chip) = setup_chip(app, short).filter(|chip| used + chip.1 <= room) {
         used += chip.1 + STATUS_GAP;
         row = row.push(chip.0);
     }
-    if let Some(chip) = explain_chip(app, short) {
+    if let Some(chip) = explain_chip(app, short).filter(|chip| used + chip.1 <= room) {
         used += chip.1 + STATUS_GAP;
         row = row.push(chip.0);
     }
-    // What is open, in counts — unless Clew has something to say.
-    let said = if !app.status.is_empty() {
-        // A status the back end wrote as it is (an error passed straight
-        // through) in the reader's language too, its names in the reader's
-        // quotation marks, not backticks.
-        Some(crate::i18n::quoted(&crate::i18n::message(&app.status)).into_owned())
+    // A session going on behind the hidden panel, said, and a way back to
+    // it: hidden while paused, nothing showed one was live, and Debug
+    // started a second copy of the program.
+    if let Some(chip) = session_chip(app).filter(|chip| used + chip.1 <= room) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
+    // What Clew says besides a failure that stands: the failure keeps its
+    // own place, and what is said after it (a file copied, a search done)
+    // goes beside it rather than over it — said over it, the red Explain
+    // failure was gone at the next word, its Try again with it.
+    // The failure's own words are not said again: not beside it, nor in grey
+    // while it is not shown here (an Ask answer's, with Ask open, said in
+    // the conversation).
+    let own_words = app
+        .failure_notice
+        .as_ref()
+        .is_some_and(|f| f.said == app.status);
+    let said = if !app.status.is_empty() && !own_words {
+        Some(words_of(&app.status))
+    } else if failure.is_some() {
+        None
     } else {
+        // What is open, in counts — unless Clew has something to say.
         app.proj.project.as_ref().map(|project| {
             let files = project.files.len();
             let symbols = app.proj.symbol_index.len();
@@ -499,7 +744,7 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
                 count = thousands(files)
             );
             if symbols > 0 {
-                counts.push_str(" · ");
+                counts.push_str(", ");
                 counts.push_str(&trn!(
                     "{count} symbol",
                     "{count} symbols",
@@ -512,16 +757,9 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     };
     let left = room - used;
     if let Some(said) = said
-        && left >= SAID_MIN_W / 2.0
+        && left >= least
     {
-        let shown = super::steady::cut(&said, left, ts::SMALL, font);
-        let line = status_text(shown.clone()).wrapping(iced::widget::text::Wrapping::None);
-        row = row.push(if shown == said {
-            line.into()
-        } else {
-            // Cut short: said whole where the pointer rests.
-            super::toolbar::tip_at(line, said, None, tooltip::Position::Top)
-        });
+        row = row.push(line_of(said, left, None));
     }
     container(row)
         .width(Fill)
@@ -529,6 +767,132 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         .align_y(iced::Center)
         .clip(true)
         .into()
+}
+
+/// What a failure on the status line offers (`App::failure_notice`): try
+/// it again, where it can be; the settings it may be about; and a way to
+/// take it off the line — what fits in `room` of them, the way to take it
+/// off the line always (clipped away, it was a control no one saw, and the
+/// failure stood for good). With their width.
+fn failure_controls(
+    failure: &crate::app::state::FailureNotice,
+    room: f32,
+) -> (Element<'_, Message>, f32) {
+    let font = crate::fonts::UI_MEDIUM;
+    let link = |label: &str, msg: Message| {
+        button(
+            text(label.to_string())
+                .size(ts::SMALL)
+                .font(font)
+                .color(theme::accent())
+                .wrapping(iced::widget::text::Wrapping::None),
+        )
+        .style(theme::icon_button(false))
+        .padding([1, 6])
+        .on_press(super::heard::said(label, msg))
+    };
+    let link_w = |label: &str| super::steady::width_of(label, ts::SMALL, font) + 12.0 + 2.0;
+    // A target the pointer finds: the glyph alone was 8 px of it.
+    let dismiss_w = 11.0 + 14.0;
+    // Where trying again asks first — Explain All's cost, a key — it says
+    // so, as a menu's row that opens a dialog does: "Try again" opened the
+    // cost sheet where it read as done at once.
+    let asks = failure.asks_first();
+    let again = if asks {
+        tr!("Try again…")
+    } else {
+        tr!("Try again")
+    };
+    let retry_w = failure.retry.as_ref().map_or(0.0, |_| link_w(again));
+    let settings_w = link_w(tr!("Settings"));
+    // Settings gives way first, then Try again.
+    let with_retry = retry_w > 0.0 && dismiss_w + retry_w <= room;
+    let kept_retry = if with_retry { retry_w } else { 0.0 };
+    let with_settings = dismiss_w + kept_retry + settings_w <= room;
+    let mut row = row![].spacing(2).align_y(iced::Center);
+    let mut width = 0.0;
+    if with_retry {
+        row = row.push(link(again, Message::Window(WindowMsg::RetryFailure)));
+        width += retry_w;
+    }
+    if with_settings {
+        // At the field it is about, where it is about one.
+        row = row.push(link(
+            tr!("Settings"),
+            Message::Settings(match failure.about {
+                Some(field) => SettingsMsg::Fix(field),
+                None => SettingsMsg::OpenAt(crate::app::state::SettingsPage::LanguageModel),
+            }),
+        ));
+        width += settings_w;
+    }
+    let dismiss = button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
+        .style(theme::icon_button(false))
+        .padding([5, 7])
+        .on_press(super::heard::said(
+            tr!("Dismiss"),
+            Message::Window(WindowMsg::DismissFailure),
+        ));
+    row = row.push(super::toolbar::tip_at(
+        dismiss,
+        tr!("Dismiss"),
+        None,
+        tooltip::Position::Top,
+    ));
+    width += dismiss_w;
+    (row.into(), width)
+}
+
+/// The chip of a run or debug session going on behind the hidden bottom
+/// panel — "Debugging main.py — paused" — which shows the panel again; and
+/// its width. `None` while the panel shows, or nothing is live.
+fn session_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
+    if !app.hidden_session_live() {
+        return None;
+    }
+    let session = app.debug.session.as_ref()?;
+    // A remote run's program is the project's folder there, not a file: no
+    // name (as the status line says it), where it said "Debugging Clew".
+    let file = Some(&session.program)
+        .filter(|_| !app.connection.is_remote())
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned());
+    let paused = session.status == crate::DebugStatus::Stopped;
+    let said = match (app.debug.no_debug, paused, file) {
+        (true, _, Some(file)) => tr!("Running {file}", file = file),
+        (false, true, Some(file)) => tr!("Debugging {file} — paused", file = file),
+        (false, false, Some(file)) => tr!("Debugging {file}", file = file),
+        (true, _, None) => tr!("Running").to_string(),
+        (false, true, None) => tr!("Debugging — paused").to_string(),
+        (false, false, None) => tr!("Debugging").to_string(),
+    };
+    let width = super::steady::width_of(&said, ts::SMALL, crate::fonts::UI) + CHIP_EXTRA_W;
+    let chip = button(
+        row![
+            glyph::icon(Glyph::Debug, theme::accent(), 11.0),
+            text(said.clone())
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .wrapping(iced::widget::text::Wrapping::None),
+        ]
+        .spacing(5)
+        .align_y(iced::Center),
+    )
+    .style(theme::icon_button(false))
+    .padding([2, 8])
+    .on_press(super::heard::said(
+        &said,
+        Message::Window(WindowMsg::ShowDebugPanel),
+    ));
+    Some((
+        super::toolbar::tip_at(
+            chip,
+            tr!("Show the Run/Debug panel"),
+            None,
+            tooltip::Position::Top,
+        ),
+        width,
+    ))
 }
 
 /// What the setting-up chip says, and whether it is a button: setting up,
@@ -588,12 +952,15 @@ fn setup_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
     } else {
         crate::app::setup::servers_line(&servers)
     };
+    // It asks first, as the first open's sheet does: what each server
+    // takes — a download, a build that runs the project's own code — is
+    // said there, and nothing is fetched or run until it is agreed to.
     let chip = button(quiet)
         .style(theme::icon_button(false))
         .padding([2, 8])
         .on_press(super::heard::said(
             tr!("Set up missing language servers"),
-            Message::Project(ProjectMsg::SetUpMissing),
+            Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Manage)),
         ));
     Some((
         super::toolbar::tip_at(chip, tip, None, tooltip::Position::Top),
@@ -616,6 +983,13 @@ fn explain_label(app: &App) -> Option<(String, String)> {
     if !app.proj.explain.running {
         return None;
     }
+    // One function or file asked for: named, not counted against the
+    // whole project — "Explaining 0/45" beside an Explain that said "one
+    // AI call" read as 45 paid calls started.
+    if let Some(node) = &app.proj.explain.pass_target {
+        let said = tr!("Explaining {name}…", name = node_name(node));
+        return Some((said.clone(), said));
+    }
     Some(match app.proj.explain.progress {
         Some((done, total)) if total > 0 => {
             let at = |done| tr!("Explaining {done}/{total}", done = done, total = total);
@@ -635,11 +1009,35 @@ fn explain_label(app: &App) -> Option<(String, String)> {
     })
 }
 
+#[cfg(test)]
+pub(crate) fn explain_label_for_tests(app: &App) -> Option<(String, String)> {
+    explain_label(app)
+}
+
+/// A node as the explaining chip names it: a function with its brackets,
+/// a file or folder by its own name.
+fn node_name(node: &crate::explain::Node) -> String {
+    use crate::explain::Node;
+    match node {
+        Node::Function { name, .. } => format!("{name}()"),
+        Node::File(path) | Node::Folder(path) => path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        ),
+    }
+}
+
 /// The explaining chip, `short` (its counter alone, no word, no bar) or
 /// whole, and its width.
 fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
     let (whole, widest_whole) = explain_label(app)?;
-    let (label, widest) = match app.proj.explain.progress {
+    // One node's pass has no count to show: its progress is the project's.
+    let progress = app
+        .proj
+        .explain
+        .progress
+        .filter(|_| app.proj.explain.pass_target.is_none());
+    let (label, widest) = match progress {
         Some((done, total)) if short && total > 0 => {
             (format!("{done}/{total}"), format!("{total}/{total}"))
         }
@@ -661,12 +1059,15 @@ fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
         + 5.0
         + 19.0
         + 5.0;
-    let mut chip = row![glyph::icon(Glyph::Sparkle, theme::accent(), 11.0), counter]
-        .spacing(5)
-        .align_y(iced::Center);
+    // At its own width: squeezed by the counter beside it, the sparkle drew
+    // as a sliver two pixels wide.
+    let sparkle = container(glyph::icon(Glyph::Sparkle, theme::accent(), 11.0))
+        .width(Length::Fixed(11.0))
+        .height(Length::Fixed(11.0));
+    let mut chip = row![sparkle, counter].spacing(5).align_y(iced::Center);
     // A short determinate bar once the total is known, so progress reads at
     // a glance instead of by parsing the counter.
-    if let Some((done, total)) = app.proj.explain.progress
+    if let Some((done, total)) = progress
         && total > 0
         && !short
     {
@@ -681,7 +1082,7 @@ fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
     }
     // A cancel control right on the always-visible chip, so a long pass can
     // be stopped without hunting through menus.
-    chip = chip.push(
+    chip = chip.push(super::toolbar::tip_at(
         button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
             .style(theme::icon_button(false))
             .padding([1, 4])
@@ -689,7 +1090,10 @@ fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
                 tr!("Stop explaining"),
                 Message::Explain(ExplainMsg::Cancel),
             )),
-    );
+        tr!("Stop explaining (what is explained so far is kept)"),
+        None,
+        tooltip::Position::Top,
+    ));
     let chip: Element<'_, Message> = if short {
         super::toolbar::tip_at(chip, whole, None, tooltip::Position::Top)
     } else {
@@ -722,7 +1126,8 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
             false,
         )
     } else if app.proj.refresh_pending {
-        // Seconds left before the auto pass fires (click to skip the wait).
+        // Seconds left before the auto pass fires (a click opens the Explain
+        // sheet, as the chip always does).
         let secs = app
             .proj
             .last_auto_refresh
@@ -738,10 +1143,23 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
             theme::accent(),
             true,
         )
+    } else if !app.keep_explanations_fresh && !app.proj.explain.changed_sources.is_empty() {
+        // Code changed, and nothing refreshes it by itself (Settings →
+        // Usage and cost): said, not claimed up to date.
+        (
+            format!("↻ {}", tr!("Explanations out of date")),
+            theme::accent(),
+            true,
+        )
     } else {
-        // The notes, not the project: "Up to date" beside the scan's own
-        // "Up to date" said one word for two things.
-        (format!("↻ {}", tr!("Notes up to date")), theme::dim(), true)
+        // What it knows: nothing changed since the explanations were
+        // written. "Explanations up to date" read as all of the project
+        // explained, beside a card saying "Not explained yet."
+        (
+            format!("↻ {}", tr!("No changes to explain")),
+            theme::dim(),
+            true,
+        )
     };
     // Its words in a slot as wide as the widest of them: counting down, and
     // turning from one to the next, it moved everything to its right.
@@ -755,7 +1173,8 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
                 seconds = crate::AUTO_REFRESH_MIN_INTERVAL.as_secs()
             )
         ),
-        format!("↻ {}", tr!("Notes up to date")),
+        format!("↻ {}", tr!("No changes to explain")),
+        format!("↻ {}", tr!("Explanations out of date")),
     ];
     let every: Vec<&str> = every.iter().map(String::as_str).collect();
     let words = super::steady::slot(
@@ -768,12 +1187,40 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
         .style(theme::icon_button(false))
         .padding([2, 8]);
     if enabled {
+        // As Explain All is: the sheet first, with what it would cost. A
+        // click on a label that read "up to date" ran the whole pass, every
+        // function not yet explained included, with no word of its cost.
+        // Named for what it does, Explain All, not for the state it shows:
+        // "No changes to explain" was listed in the command bar as a
+        // command, and led to a paid pass under a state's name.
         b = b.on_press(super::heard::said(
-            &label,
-            Message::Explain(ExplainMsg::RefreshAll),
+            tr!("Explain All"),
+            super::toolbar::explain_all_message(app),
+        ));
+        return Some(super::toolbar::tip_at(
+            b,
+            tr!(
+                "Explain what's new, changed or not yet explained. Shows the cost before anything runs."
+            ),
+            None,
+            tooltip::Position::Top,
         ));
     }
     Some(b.into())
+}
+
+/// What a file no grammar reads is, said by its name: prose in Markdown —
+/// a README — is Markdown, not "Plain text".
+fn untagged_kind(path: &std::path::Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("md" | "markdown" | "mdx") => "Markdown",
+        Some("rst") => "reStructuredText",
+        _ => tr!("Plain text"),
+    }
 }
 
 #[cfg(test)]
@@ -791,7 +1238,25 @@ mod target_name_tests {
         assert_eq!(named("Linux (x86_64)"), "Linux");
         assert_eq!(named("macOS (arm64)"), "macOS");
         assert_eq!(named("macOS (x86_64)"), "macOS (x86_64)");
+        assert_eq!(named("iOS (arm64)"), "iOS");
+        assert_eq!(named("Android (arm64)"), "Android");
+        assert_eq!(named("Web (wasm32)"), "Web");
         let host = Target::host();
         assert!(!target_name(&host).contains('('), "{}", target_name(&host));
+    }
+}
+
+#[cfg(test)]
+mod untagged_kind_tests {
+    use super::untagged_kind;
+    use std::path::Path;
+
+    /// A README says it is Markdown; a file of no known kind is plain text.
+    #[test]
+    fn a_readme_is_markdown() {
+        assert_eq!(untagged_kind(Path::new("/p/README.md")), "Markdown");
+        assert_eq!(untagged_kind(Path::new("/p/docs/guide.MD")), "Markdown");
+        assert_eq!(untagged_kind(Path::new("/p/notes.txt")), "Plain text");
+        assert_eq!(untagged_kind(Path::new("/p/LICENSE")), "Plain text");
     }
 }

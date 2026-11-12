@@ -21,17 +21,59 @@ these libraries, each unmodified:
 The Apache License 2.0 is in [`Apache-2.0.txt`](Apache-2.0.txt), beside
 this file; the MIT and BSD-3-Clause licenses follow.
 
+## Echo cancellation
+
+So that the reader can talk over Clew while it speaks, Clew takes its own
+voice back out of what the microphone hears with **sonora**
+(<https://github.com/dignifiedquire/sonora>), a Rust port of the WebRTC audio
+processing module's echo canceller (AEC3), built into Clew itself:
+
+| Library | License | Copyright |
+| --- | --- | --- |
+| sonora (<https://github.com/dignifiedquire/sonora>), from WebRTC (<https://webrtc.org>) | BSD-3-Clause | Copyright (c) 2011, The WebRTC Project Authors; Copyright (c) 2016, Arun Raghavan and contributors; Copyright (c) 2026, dignifiedquire. All rights reserved. |
+
+## Waiting for "Hey, Clew"
+
+So that "Hey, Clew" starts listening, `clew-speak` runs sherpa-onnx's
+keyword spotter (above). Its model is not shipped with Clew: it is
+downloaded only when the user asks for it, in Settings → Voice, from the
+sherpa-onnx project's release, checked against its published size and
+SHA-256; the four files it runs from are taken out of it, each checked too.
+
+- **sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20**, by the k2-fsa project
+  (<https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models>), under
+  the Apache License 2.0.
+
+The archive it comes in is read by these libraries, built into Clew itself:
+
+| Library | License | Copyright |
+| --- | --- | --- |
+| tar (<https://github.com/alexcrichton/tar-rs>) | MIT OR Apache-2.0 | Alex Crichton and the tar-rs contributors |
+| bzip2 (<https://github.com/trifectatechfoundation/bzip2-rs>) | MIT OR Apache-2.0 | Alex Crichton and the bzip2-rs contributors |
+| libbz2-rs-sys (<https://github.com/trifectatechfoundation/libbzip2-rs>), a Rust translation of bzip2's libbzip2 | bzip2-1.0.6 (below) | Copyright (C) 1996-2021 Julian R Seward; Copyright (C) 2019-2020 Federico Mena Quintero; Copyright (C) 2021 Micah Snyder; the translation Copyright (C) 2024-2025 Trifecta Tech Foundation and contributors |
+
 ## The voices
 
 No voice ships with Clew. Each is downloaded only when the user asks for it,
-in Settings → Voice, from the sherpa-onnx project's copies on Hugging Face,
-at a revision Clew pins and checks file by file:
+in Settings → Voice, from Hugging Face, at a revision Clew pins and checks
+file by file:
 
+- **Qwen3-TTS** 0.6B CustomVoice and the decoder of its speech tokenizer, by
+  the Qwen team, Alibaba Cloud
+  (<https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice>,
+  <https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz>), under the Apache
+  License 2.0 — as converted to ONNX, its weights quantized, by Quick
+  Inference
+  (<https://huggingface.co/danyalmalik/Qwen3-TTS-12Hz-0.6B-CustomVoice-ONNX-WebGPU>,
+  <https://huggingface.co/danyalmalik/Qwen3-TTS-Tokenizer-12Hz-ONNX-WebGPU>),
+  under the Apache License 2.0 too. As `clew-speak` loads it, it changes one
+  thing in memory: the talker's attention is given its queries and keys
+  already normalised, by operators the CPU runs, instead of normalising them
+  itself — the same arithmetic. The files are not changed.
 - **Supertonic 3**, by Supertone Inc. (<https://huggingface.co/Supertone/supertonic-3>),
   under the BigScience OpenRAIL-M license, whose use restrictions apply to
-  anyone who uses it (<https://huggingface.co/Supertone/supertonic-3/blob/main/LICENSE>).
-- **Kokoro** 1.0, by hexgrad (<https://huggingface.co/hexgrad/Kokoro-82M>),
-  under the Apache License 2.0.
+  anyone who uses it (<https://huggingface.co/Supertone/supertonic-3/blob/main/LICENSE>),
+  from the sherpa-onnx project's copy.
 
 ## MIT License
 
@@ -58,7 +100,7 @@ above.
 
 ## BSD 3-Clause License
 
-Applies to KISS FFT, with its copyright above.
+Applies to KISS FFT and to sonora, each with its copyright above.
 
 > Redistribution and use in source and binary forms, with or without
 > modification, are permitted provided that the following conditions are met:
@@ -83,3 +125,36 @@ Applies to KISS FFT, with its copyright above.
 > CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 > ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 > POSSIBILITY OF SUCH DAMAGE.
+
+## bzip2-1.0.6 License
+
+Applies to libbz2-rs-sys, with its copyright above.
+
+> Redistribution and use in source and binary forms, with or without
+> modification, are permitted provided that the following conditions are
+> met:
+>
+> 1. Redistributions of source code must retain the above copyright notice,
+>    this list of conditions and the following disclaimer.
+>
+> 2. The origin of this software must not be misrepresented; you must not
+>    claim that you wrote the original software. If you use this software in
+>    a product, an acknowledgment in the product documentation would be
+>    appreciated but is not required.
+>
+> 3. Altered source versions must be plainly marked as such, and must not be
+>    misrepresented as being the original software.
+>
+> 4. The name of the author may not be used to endorse or promote products
+>    derived from this software without specific prior written permission.
+>
+> THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+> IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+> OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN
+> NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+> SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+> TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+> PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+> LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+> NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+> SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

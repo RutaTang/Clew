@@ -141,7 +141,7 @@ fn supervision(modules: &[Module]) -> Option<ProjectMap> {
                         })
                     });
                 if let Some(s) = strategy {
-                    map.detail(sup, format!("supervisor · {s}"));
+                    map.detail(sup, format!("supervisor ({s})"));
                 }
                 for (child, kind) in children(body, src) {
                     let at = place(&mut map, &child);
@@ -471,8 +471,8 @@ mod tests {
                 .detail
                 .clone()
         };
-        assert_eq!(detail("shop_sup"), "supervisor · one_for_all");
-        assert_eq!(detail("pay_sup"), "supervisor · one_for_one");
+        assert_eq!(detail("shop_sup"), "supervisor (one_for_all)");
+        assert_eq!(detail("pay_sup"), "supervisor (one_for_one)");
         let cart = tree.nodes.iter().find(|x| x.label == "cart").unwrap();
         assert_eq!((cart.file.as_str(), cart.line), ("src/cart.erl", 1));
     }

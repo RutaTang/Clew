@@ -4,6 +4,8 @@
 //!
 //! Its messages, [`NavMsg`], arrive through `App::update_nav`.
 
+use crate::app::keys;
+use crate::app::message::TreeKey;
 use crate::app::prelude::*;
 use crate::*;
 
@@ -311,8 +313,8 @@ pub(crate) fn search_status(
         Some(first) => {
             let n = skipped_total.max(skipped.len());
             trn!(
-                "{matches} · 1 file not searched ({file}: {reason})",
-                "{matches} · {n} files not searched ({file}: {reason})",
+                "{matches}; 1 file not searched ({file}: {reason})",
+                "{matches}; {n} files not searched ({file}: {reason})",
                 n,
                 matches = matches,
                 file = first.rel,
@@ -543,6 +545,7 @@ impl App {
         self.proj.search.typed += 1;
         let seq = self.proj.search_seq;
         let mut to_read: Vec<(usize, PathBuf, usize, usize)> = Vec::new();
+        let mut at: Vec<(usize, viewer::PositionEncoding)> = Vec::new();
         let hits: Vec<SearchHit> = targets
             .into_iter()
             .take(search::MAX_HITS)
@@ -566,6 +569,7 @@ impl App {
                 if from_pane.is_none() {
                     to_read.push((i, t.path.clone(), t.line, t.character));
                 }
+                at.push((t.character, enc));
                 SearchHit {
                     abs: t.path,
                     rel,
@@ -586,6 +590,7 @@ impl App {
         // A location list is not a search: nothing was skipped.
         self.proj.search.skipped.clear();
         self.proj.search.hits = hits;
+        self.proj.search.at = at;
         self.sidebar = SidebarTab::Search;
         self.code_focused = false;
         // The preview comes from the file itself, so it may only be read where
@@ -776,6 +781,7 @@ impl App {
         };
         self.proj.search.said = Some(self.status.clone());
         self.proj.search.hits = report.hits;
+        self.proj.search.at.clear();
         self.proj.search.skipped = report.skipped;
         self.style_search_previews()
     }
@@ -845,6 +851,7 @@ impl App {
             self.refresh_suggestions();
             return;
         }
+        self.proj.finder.bar_fallback = false;
         if self.proj.finder.is_bar_search() {
             self.refresh_bar();
             return;
@@ -857,6 +864,32 @@ impl App {
                     let recent = self.proj.history.recent_files(RECENT_FILES);
                     self.proj.finder.refresh_files(&files, &symbols, &recent);
                 }
+                // No file or symbol by that name: what the command bar finds
+                // for it — its commands first ("settings"). Nor where it
+                // reads as a question: the bar's way to ask it, which the
+                // field over the window answered with "No matches", or with
+                // files whose letters a sentence held.
+                let query = self.proj.finder.query.trim();
+                let question = crate::app::palette::looks_like_a_question(query);
+                if (self.proj.finder.results.is_empty() || question)
+                    && !query.is_empty()
+                    && !self.proj.finder.is_line_query()
+                {
+                    let found = std::mem::take(&mut self.proj.finder.results);
+                    self.proj.finder.bar_fallback = true;
+                    self.refresh_bar();
+                    // What the picker found for it — its files and symbols,
+                    // in its own order — then the way to ask it: the bar's
+                    // commands and files in their place dropped every symbol
+                    // three words named ("parse config file").
+                    if !found.is_empty() {
+                        let ask_at = self.palette.len() - 1;
+                        let past = self.palette.len();
+                        let mut results: Vec<usize> = found.into_iter().map(|i| i + past).collect();
+                        results.push(ask_at);
+                        self.proj.finder.results = results;
+                    }
+                }
             }
             FinderMode::Symbols => {
                 let symbols = self.fresh_symbol_index();
@@ -866,8 +899,11 @@ impl App {
     }
 
     pub(crate) fn on_finder_opened(&mut self, mode: FinderMode) -> Task<Message> {
+        // No project, no files or symbols to find: the command bar — Open
+        // Folder, Open Remote, every command — which the field over the
+        // window offers to search too. Ctrl+P and the field did nothing.
         if self.proj.project.is_none() {
-            return Task::none();
+            return self.on_palette_opened();
         }
         self.proj.finder.open = true;
         self.proj.finder.bar = false;
@@ -888,7 +924,7 @@ impl App {
                 .and_then(|i| self.palette.get(*i))
                 .map(|c| c.title.clone());
             return match title {
-                Some(title) => self.run_palette(&title),
+                Some(title) => self.run_from_bar(&title),
                 None => Task::none(),
             };
         }
@@ -903,14 +939,19 @@ impl App {
                 return Task::none();
             };
             return match self.palette.get(idx).map(|c| c.title.clone()) {
-                Some(title) => self.run_palette(&title),
+                Some(title) => self.run_from_bar(&title),
                 None => self.finder_open_index(idx - self.palette.len()),
             };
         }
         if let Some(line) = self.proj.finder.goto_line() {
             self.proj.finder.open = false;
-            if let Some(abs) = self.active_viewer().map(|v| v.abs.clone()) {
-                return self.open_file(abs, Some(line), true);
+            // Past the end, the last line: line 99 of 24 was gone to, said
+            // as where the caret was, and kept as a stop no Back could show.
+            if let Some((abs, last)) = self
+                .active_viewer()
+                .map(|v| (v.abs.clone(), v.lines.len().max(1)))
+            {
+                return self.open_file(abs, Some(line.min(last)), true);
             }
             return Task::none();
         }
@@ -948,6 +989,8 @@ impl App {
 
     pub(crate) fn finder_open_index(&mut self, idx: usize) -> Task<Message> {
         self.proj.finder.open = false;
+        // "pricing.py:37": the file, at that line.
+        let line = self.proj.finder.file_line().map(|(_, n)| n);
         match self.proj.finder.mode {
             FinderMode::Files => {
                 let Some(files) = self.proj.project.as_ref().map(|p| &p.files) else {
@@ -964,7 +1007,7 @@ impl App {
                 let Some(entry) = files.get(idx).cloned() else {
                     return Task::none();
                 };
-                self.open_file(entry.abs, None, true)
+                self.open_file(entry.abs, line, true)
             }
             FinderMode::Symbols => {
                 let Some(entry) = self.proj.symbol_index.get(idx).cloned() else {
@@ -993,6 +1036,44 @@ impl App {
             .get(file)?
             .iter()
             .find_map(|s| (s.line == line1 && names_trail_stops(&s.kind)).then(|| s.name.clone()))
+    }
+
+    /// The innermost function or method around `(file, line1)`, where the
+    /// file is open and its outline says how far each runs: what a stop
+    /// recorded by its line, not at a definition, was inside.
+    pub(crate) fn function_around(&self, file: &Path, line1: usize) -> Option<String> {
+        let Some(v) = self.proj.panes.iter().flatten().find(|v| v.abs == file) else {
+            // Not open: what it was when the trail stopped there.
+            return self
+                .proj
+                .trail_fn
+                .get(&(file.to_path_buf(), line1))
+                .cloned();
+        };
+        v.symbols
+            .iter()
+            .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+            .filter(|s| s.line <= line1 && line1 <= s.end_line)
+            .min_by_key(|s| s.end_line.saturating_sub(s.line))
+            .map(|s| s.name.clone())
+    }
+
+    /// Keep `around`, the function `file`'s line `line1` is in, for the
+    /// trail stop made there ([`ProjectSession::trail_fn`]); none, forget
+    /// what was kept. Kept no more than the trail holds stops, about.
+    pub(crate) fn note_trail_fn(&mut self, file: &Path, line1: usize, around: Option<String>) {
+        let key = (file.to_path_buf(), line1);
+        match around {
+            Some(name) => {
+                if self.proj.trail_fn.len() >= 4 * crate::history::MAX_NODES {
+                    self.proj.trail_fn.clear();
+                }
+                self.proj.trail_fn.insert(key, name);
+            }
+            None => {
+                self.proj.trail_fn.remove(&key);
+            }
+        }
     }
 
     /// Whether `(file, name)` is a test function, per the symbol index.
@@ -1039,8 +1120,35 @@ impl App {
             .any(|syms| syms.iter().any(|s| s.entry.is_some() || s.is_test))
     }
 
-    /// The first 1-based line where `caller` (in `caller_file`) calls `callee`,
-    /// found by re-parsing the caller's live source (the open pane, else disk).
+    /// Where the text of `caller_file` is read from to find a call in it:
+    /// an open pane's text, which is the file wherever it lives; else, for
+    /// a LOCAL project only, its file on this machine's disk — for a remote
+    /// one the path names another host, and a same-pathed local file would
+    /// silently place the call in the wrong code.
+    fn call_source(&self, caller_file: &Path) -> Option<CallSource> {
+        if let Some(v) = self
+            .proj
+            .panes
+            .iter()
+            .flatten()
+            .find(|v| v.abs == caller_file)
+        {
+            return Some(CallSource::Text(v.source.clone()));
+        }
+        self.proj
+            .project
+            .as_ref()
+            .filter(|_| self.local_project_state())
+            .map(|p| CallSource::Disk {
+                root: p.root.clone(),
+                path: caller_file.to_path_buf(),
+            })
+    }
+
+    /// The first 1-based line where `caller` (in `caller_file`) calls
+    /// `callee`, found by re-parsing the caller's live source — here, on
+    /// the update loop; a jump finds it off it ([`App::jump_to_call`]).
+    #[cfg(test)]
     pub(crate) fn call_site_line(
         &self,
         caller_file: &Path,
@@ -1048,53 +1156,89 @@ impl App {
         caller_line: usize,
         callee: &str,
     ) -> Option<usize> {
-        let lang = crate::highlight::detect(caller_file)?;
-        // An open pane's text is the file wherever it lives. Falling back to
-        // this machine's disk is only meaningful for a LOCAL project: for a
-        // remote one the path names another host, and a same-pathed local
-        // file would silently place the call in the wrong code.
-        let source = self
-            .proj
-            .panes
-            .iter()
-            .flatten()
-            .find(|v| v.abs == caller_file)
-            .map(|v| v.source.as_ref().clone())
-            .or_else(|| {
-                // Same guard as every other client-side project-source read
-                // (the symbol index, `tasks::gather_*`): the
-                // call-graph node holding this path came from a scan that can
-                // be minutes old, so the leaf may since have become a symlink
-                // pointing outside the project — whose text would be parsed as
-                // this project's code — or a FIFO. This runs on the iced update
-                // loop (`NavMsg::JumpToCall`), which serves EVERY window, so a
-                // blocking `open(2)` here freezes the whole interface rather
-                // than one background task. Containment costs nothing: call
-                // graph nodes are in-root by construction.
-                self.proj
-                    .project
-                    .as_ref()
-                    .filter(|_| self.local_project_state())
-                    .and_then(|p| {
-                        clew_core::fs_scan::read_confined_capped(
-                            &p.root,
-                            caller_file,
-                            index::MAX_INDEX_FILE_BYTES,
-                        )
-                    })
-            })?;
-        projectcalls::calls_of(&source, lang)
-            .into_iter()
-            // The first call after the caller's definition: a same-name
-            // function earlier in the file holds calls of its own.
-            .filter(|cs| {
-                cs.callee == callee
-                    && cs.caller.as_deref() == Some(caller)
-                    && cs.line >= caller_line
-            })
-            .map(|cs| cs.line)
-            .min()
+        let source = self.call_source(caller_file)?;
+        call_site(caller_file, &source.read()?, caller, caller_line, callee)
     }
+
+    /// Open the caller at its call of `callee`: the line found by parsing
+    /// the caller's text off the update loop — a file of megabytes parses
+    /// for a while, and this loop serves every window — or, not found, the
+    /// caller's own line.
+    fn jump_to_call(
+        &mut self,
+        caller_file: PathBuf,
+        caller: String,
+        caller_line: usize,
+        callee: String,
+    ) -> Task<Message> {
+        let source = self.call_source(&caller_file);
+        let stamp = self.stamp();
+        Task::perform(
+            async move {
+                let file = caller_file.clone();
+                let line = tokio::task::spawn_blocking(move || {
+                    call_site(&file, &source?.read()?, &caller, caller_line, &callee)
+                })
+                .await
+                .ok()
+                .flatten();
+                (caller_file, line.unwrap_or(caller_line))
+            },
+            move |(caller_file, line)| {
+                Message::Nav(NavMsg::CallSiteFound {
+                    stamp: stamp.clone(),
+                    caller_file,
+                    line,
+                })
+            },
+        )
+    }
+}
+
+/// The text a call is looked for in (see `App::call_source`).
+enum CallSource {
+    Text(Arc<String>),
+    Disk { root: PathBuf, path: PathBuf },
+}
+
+impl CallSource {
+    /// Its text. From disk, under the same guard as every other client-side
+    /// project-source read (the symbol index, `tasks::gather_*`): the
+    /// call-graph node holding the path came from a scan that can be
+    /// minutes old, so the leaf may since have become a symlink pointing
+    /// outside the project — whose text would be parsed as this project's
+    /// code — or a FIFO. Call graph nodes are in-root by construction, so
+    /// containment costs nothing.
+    fn read(self) -> Option<Arc<String>> {
+        match self {
+            CallSource::Text(text) => Some(text),
+            CallSource::Disk { root, path } => {
+                clew_core::fs_scan::read_confined_capped(&root, &path, index::MAX_INDEX_FILE_BYTES)
+                    .map(Arc::new)
+            }
+        }
+    }
+}
+
+/// The first 1-based line in `source` (the text of `file`) where `caller`,
+/// defined at `caller_line`, calls `callee`.
+fn call_site(
+    file: &Path,
+    source: &str,
+    caller: &str,
+    caller_line: usize,
+    callee: &str,
+) -> Option<usize> {
+    let lang = crate::highlight::detect(file)?;
+    projectcalls::calls_of(source, lang)
+        .into_iter()
+        // The first call after the caller's definition: a same-name
+        // function earlier in the file holds calls of its own.
+        .filter(|cs| {
+            cs.callee == callee && cs.caller.as_deref() == Some(caller) && cs.line >= caller_line
+        })
+        .map(|cs| cs.line)
+        .min()
 }
 
 impl App {
@@ -1148,7 +1292,7 @@ impl App {
         if !self.proj.git_status_stale
             || self.proj.git_status_loading
             || !self.show_left_sidebar
-            || self.sidebar != SidebarTab::Files
+            || !matches!(self.sidebar, SidebarTab::Files | SidebarTab::History)
         {
             return None;
         }
@@ -1168,6 +1312,201 @@ impl App {
                 })
             },
         ))
+    }
+}
+
+impl App {
+    /// What HEAD is read anew when it may have moved, for the status bar:
+    /// one read at a time, another after it when it moved meanwhile.
+    /// `None` when there is nothing to read.
+    pub(crate) fn sync_head(&mut self) -> Option<Task<Message>> {
+        if !self.proj.head_stale || self.proj.head_loading {
+            return None;
+        }
+        let git = self.git_source()?;
+        self.proj.head_stale = false;
+        self.proj.head_loading = true;
+        let stamp = self.stamp();
+        Some(Task::perform(
+            async move {
+                git.run::<Option<clew_protocol::HeadName>>(clew_protocol::GitOp::Head)
+                    .await
+            },
+            move |result| Message::Project(ProjectMsg::HeadRead { stamp, result }),
+        ))
+    }
+}
+
+impl App {
+    /// The row the keyboard rests on in the Files view, while its tree has
+    /// the keyboard: the one it was put on, while it shows; else the file
+    /// being read; else the first.
+    pub(crate) fn tree_cursor_rel(&self) -> Option<String> {
+        if !self.tree_focused {
+            return None;
+        }
+        let rows = ui::tree_rows(self);
+        self.tree_cursor_at(&rows).map(|i| rows[i].rel.clone())
+    }
+
+    /// The tree no longer on screen while it had the keyboard — the sidebar
+    /// hidden, another view picked, a filter matching nothing — has it no
+    /// more, and the keys go back to the code: nothing was left holding
+    /// them, and no row was drawn as where they rest.
+    pub(crate) fn sync_tree_focus(&mut self) {
+        if !self.tree_focused {
+            return;
+        }
+        let shown = self.show_left_sidebar && self.sidebar == SidebarTab::Files;
+        if shown && ui::tree_has_rows(self) {
+            return;
+        }
+        self.tree_focused = false;
+        if self.region == keys::Region::Tree {
+            self.region = keys::Region::Code;
+            self.code_focused = true;
+        }
+    }
+
+    /// [`Self::tree_cursor_rel`]'s place among `rows`.
+    pub(crate) fn tree_cursor_at(&self, rows: &[ui::TreeRow]) -> Option<usize> {
+        let find = |rel: &str| rows.iter().position(|r| r.rel == rel);
+        self.proj
+            .tree_cursor
+            .as_deref()
+            .and_then(find)
+            .or_else(|| self.active_viewer().and_then(|v| find(&v.rel)))
+            .or((!rows.is_empty()).then_some(0))
+    }
+
+    /// How many rows of the tree show at once: what Page Up and Page Down
+    /// move by.
+    fn tree_page(&self) -> usize {
+        let (_, height) = self
+            .proj
+            .tree_scroll
+            .unwrap_or((0.0, (self.window_height - TREE_CHROME_H).max(0.0)));
+        ((height / (ui::TREE_ROW_H + ui::TREE_ROW_GAP)) as usize)
+            .saturating_sub(1)
+            .max(1)
+    }
+
+    /// The row the keyboard rests on, scrolled into view.
+    pub(crate) fn reveal_tree_cursor(&self) -> Task<Message> {
+        let rows = ui::tree_rows(self);
+        let Some(at) = self.tree_cursor_at(&rows) else {
+            return Task::none();
+        };
+        let pitch = ui::TREE_ROW_H + ui::TREE_ROW_GAP;
+        ui::reveal(
+            ui::files_tree_id(),
+            at as f32 * pitch,
+            at as f32 * pitch + ui::TREE_ROW_H,
+        )
+    }
+
+    /// A key the Files view's tree took while it has the keyboard: the
+    /// keyboard walks the tree as a pointer would, a row at a time.
+    pub(crate) fn on_tree_key(&mut self, key: TreeKey) -> Task<Message> {
+        match key {
+            TreeKey::Leave => {
+                // The Esc that leaves the tree does only that (it reaches
+                // the key handler too: `shell::forward_key`).
+                self.escape_taken = true;
+                self.code_focused = true;
+                self.region = keys::Region::Code;
+                return Task::none();
+            }
+            TreeKey::Type(c) => {
+                self.file_filter.push(c);
+                self.region = keys::Region::Sidebar;
+                return Task::batch([
+                    iced::widget::operation::focus(ui::file_filter_id()),
+                    iced::widget::operation::move_cursor_to_end(ui::file_filter_id()),
+                ]);
+            }
+            _ => {}
+        }
+        let rows = ui::tree_rows(self);
+        let Some(at) = self.tree_cursor_at(&rows) else {
+            return Task::none();
+        };
+        // ↑ on the first row goes back up to the filter, as ↓ came down.
+        if key == TreeKey::Up && at == 0 {
+            self.region = keys::Region::Sidebar;
+            return Task::batch([
+                iced::widget::operation::focus(ui::file_filter_id()),
+                iced::widget::operation::move_cursor_to_end(ui::file_filter_id()),
+            ]);
+        }
+        let last = rows.len() - 1;
+        let row = rows[at].clone();
+        // Its menu: what it is for here; where, the tree says next
+        // (`ui::tree_keys`), as a right-click on the row does.
+        if key == TreeKey::Menu {
+            self.proj.tree_menu_for = Some((row.rel.clone(), row.dir));
+            self.proj.tree_menu_keys = true;
+            return Task::none();
+        }
+        let open = row.dir && self.proj.expanded.contains(&row.rel);
+        let to = match key {
+            TreeKey::Up => at.saturating_sub(1),
+            TreeKey::Down => (at + 1).min(last),
+            TreeKey::First => 0,
+            TreeKey::Last => last,
+            TreeKey::PageUp => at.saturating_sub(self.tree_page()),
+            TreeKey::PageDown => (at + self.tree_page()).min(last),
+            // A closed folder opens; an open one steps into its first row.
+            TreeKey::Right if row.dir && !open => {
+                self.proj.expanded.insert(row.rel.clone());
+                at
+            }
+            TreeKey::Right
+                if open
+                    && rows
+                        .get(at + 1)
+                        .is_some_and(|next| next.rel.starts_with(&format!("{}/", row.rel))) =>
+            {
+                at + 1
+            }
+            // An open folder closes; anything else steps out to its folder.
+            TreeKey::Left if open => {
+                self.proj.expanded.remove(&row.rel);
+                at
+            }
+            TreeKey::Left => match row.rel.rsplit_once('/') {
+                Some((parent, _)) => rows.iter().position(|r| r.rel == parent).unwrap_or(at),
+                None => at,
+            },
+            TreeKey::Open | TreeKey::Preview if row.dir => {
+                if !self.proj.expanded.remove(&row.rel) {
+                    self.proj.expanded.insert(row.rel.clone());
+                }
+                at
+            }
+            TreeKey::Open => {
+                // Enter reads the file: the keyboard goes to its code.
+                let task = self.update(Message::Editor(EditorMsg::OpenRel {
+                    rel: row.rel.clone(),
+                    line: None,
+                }));
+                self.region = keys::Region::Code;
+                return Task::batch([task, iced::widget::operation::focus(keys::nowhere())]);
+            }
+            TreeKey::Preview => {
+                // Space shows the file, the keyboard staying in the tree.
+                let task = self.update(Message::Editor(EditorMsg::OpenRel {
+                    rel: row.rel.clone(),
+                    line: None,
+                }));
+                self.code_focused = false;
+                self.proj.tree_cursor = Some(row.rel);
+                return task;
+            }
+            _ => at,
+        };
+        self.proj.tree_cursor = Some(rows[to].rel.clone());
+        self.reveal_tree_cursor()
     }
 }
 
@@ -1250,7 +1589,7 @@ impl App {
             }
             NavMsg::FinderConfirm => self.on_finder_confirm(),
             NavMsg::PaletteOpened => self.on_palette_opened(),
-            NavMsg::PaletteRun(title) => self.run_palette(&title),
+            NavMsg::PaletteRun(title) => self.run_from_bar(&title),
             NavMsg::PaletteSuggestion(suggestion) => self.run_suggestion(suggestion),
             NavMsg::GotoLineRequested => self.on_goto_line_requested(),
             NavMsg::DefinitionResult { seq, result, .. } => {
@@ -1302,12 +1641,10 @@ impl App {
                 caller,
                 caller_line,
                 callee,
-            } => {
-                let line = self
-                    .call_site_line(&caller_file, &caller, caller_line, &callee)
-                    .unwrap_or(caller_line);
-                self.open_file(caller_file, Some(line), true)
-            }
+            } => self.jump_to_call(caller_file, caller, caller_line, callee),
+            NavMsg::CallSiteFound {
+                caller_file, line, ..
+            } => self.open_file(caller_file, Some(line), true),
         }
     }
 }
@@ -1391,6 +1728,26 @@ mod tests {
         .unwrap();
         assert_eq!(app.call_site_line(&twins, "total", 2, "helper"), Some(3));
         assert_eq!(app.call_site_line(&twins, "total", 6, "helper"), Some(7));
+
+        // A jump along the call edge finds the line off the update loop: the
+        // jump itself parses nothing, and what comes back names the line —
+        // the caller's own when the call is not found.
+        for (caller_line, found) in [(6, 7), (1, 1)] {
+            let jump = app.update(Message::Nav(NavMsg::JumpToCall {
+                caller_file: twins.clone(),
+                caller: "total".into(),
+                caller_line,
+                callee: if caller_line == 6 { "helper" } else { "absent" }.into(),
+            }));
+            let landed: Vec<usize> = crate::app::tests::run_task(jump)
+                .into_iter()
+                .filter_map(|m| match m {
+                    Message::Nav(NavMsg::CallSiteFound { line, .. }) => Some(line),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(landed, [found]);
+        }
 
         for d in [&dir, &outside_dir] {
             let _ = std::fs::remove_dir_all(d);

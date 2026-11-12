@@ -37,6 +37,15 @@ pub enum Glyph {
     Lightbulb,
     Minimap,
     Sparkle,
+    /// Play, and a spark: a run the AI works out (Fake Run).
+    FakeRun,
+    /// A warning triangle: the project's weak spots.
+    WeakSpots,
+    /// A step over, and a spark: a run the AI works out, stepped through
+    /// (Fake Debug).
+    FakeDebug,
+    /// A speech bubble, and a spark: a question the AI answers (Ask).
+    AskAi,
     Compass,
     Skim,
     Folder,
@@ -61,6 +70,9 @@ pub enum Glyph {
     Circle,
     Search,
     Bookmark,
+    /// A git tag on a commit: the Bookmark it wore read as "you
+    /// bookmarked this".
+    Tag,
     // Graph-map header
     List,
     Cube,
@@ -115,6 +127,8 @@ pub enum Glyph {
     Network,
     /// When something was: a clock face.
     Clock,
+    /// A line of work forking off another: a git branch.
+    Branch,
     /// A speech bubble: ask Clew, in the command bar.
     Message,
     // Settings' pages, and Ask's sessions
@@ -178,16 +192,17 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z'/>\
              <rect x='3' y='14' width='7' height='7' rx='1'/><circle cx='17.5' cy='17.5' r='3.5'/>"
         }
-        // A folded map.
+        // Sheets stacked: the project's graphs, one over another — schema,
+        // routes, wiring. (A folded map is the Minimap's.)
         ProjectMaps => {
-            "<polygon points='3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21'/>\
-             <line x1='9' x2='9' y1='3' y2='18'/><line x1='15' x2='15' y1='6' y2='21'/>"
+            "<path d='M12 3.5 L20.5 7.75 L12 12 L3.5 7.75 Z'/>\
+             <path d='M3.5 12 L12 16.25 L20.5 12'/><path d='M3.5 16.25 L12 20.5 L20.5 16.25'/>"
         }
         // Lines of text and a spark: what clew writes of the code (lines
         // alone read as "align left").
         TextLines => {
             "<path d='M3 6h8'/><path d='M3 12h18'/><path d='M3 18h14'/>\
-             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z'/>"
+             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
         }
         // A plug: what a language server is to clew.
         Plug => {
@@ -219,8 +234,44 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M4 6.5 L9.5 4.5 L14.5 6.5 L20 4.5 V17.5 L14.5 19.5 L9.5 17.5 L4 19.5 Z'/>\
              <path d='M9.5 4.5 V17.5'/><path d='M14.5 6.5 V19.5'/>"
         }
+        // Filled, its points full width and its body broad: drawn in
+        // outline, the four thin points closed up at 12 px into a dot, read
+        // as a list's bullet before "Why is this line here?" — the one sign
+        // that a control spends an AI call, not recognised as one; filled
+        // thin, it read at 11 px as a narrow diamond.
         Sparkle => {
-            "<path d='M12 4 C12.6 10 14 11.4 20 12 C14 12.6 12.6 14 12 20 C11.4 14 10 12.6 4 12 C10 11.4 11.4 10 12 4 Z'/>"
+            "<path d='M12 1.5 C12.9 8.4 15.6 11.1 22.5 12 C15.6 12.9 12.9 15.6 12 22.5 C11.1 15.6 8.4 12.9 1.5 12 C8.4 11.1 11.1 8.4 12 1.5 Z' fill='STROKE' stroke-width='2.2'/>"
+        }
+        // A triangle with a mark in it: look here.
+        WeakSpots => {
+            "<path d='M10.3 4.2 L2.6 17.5 A2 2 0 0 0 4.3 20.5 H19.7 A2 2 0 0 0 21.4 17.5 L13.7 4.2 A2 2 0 0 0 10.3 4.2 Z'/>\
+             <path d='M12 9.5 V13.5'/><circle cx='12' cy='16.8' r='0.9' fill='STROKE' stroke='none'/>"
+        }
+        // Play, and the spark of what the AI writes (as on TextLines).
+        FakeRun => {
+            "<path d='M5 7 L14 13 L5 19 Z'/>\
+             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
+        }
+        // Debug's own bug, and the spark — as Fake Run is Run's play and
+        // the spark: each fake one its real twin, worked out by the AI.
+        // The bug drawn smaller, its lines as thick as the rest.
+        FakeDebug => {
+            "<g transform='translate(0.2 6.6) scale(0.74)' stroke-width='2.6'>\
+             <path d='m8 2 1.88 1.88'/><path d='M14.12 3.88 16 2'/>\
+             <path d='M9 7.13v-1a3.003 3.003 0 1 1 6 0v1'/>\
+             <path d='M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6'/>\
+             <path d='M12 20v-9'/><path d='M6.53 9C4.6 8.8 3 7.1 3 5'/><path d='M6 13H2'/>\
+             <path d='M3 21c0-2.1 1.7-3.9 3.8-4'/><path d='M20.97 5c0 2.1-1.6 3.8-3.5 4'/>\
+             <path d='M22 13h-4'/><path d='M17.2 17c2.1.1 3.8 1.9 3.8 4'/></g>\
+             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
+        }
+        // Ask's bubble, and the spark Explain and the fake runs carry: what
+        // spends an AI call bears it. The bubble drawn smaller, its lines
+        // as thick as the rest.
+        AskAi => {
+            "<path transform='translate(0.6 5.2) scale(0.74)' stroke-width='2.7' \
+             d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/>\
+             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
         }
         Compass => "<circle cx='12' cy='12' r='8'/><path d='M12 6 L14.2 12 L12 18 L9.8 12 Z'/>",
         // Folded together: the bodies skimmed over.
@@ -262,6 +313,10 @@ fn body(g: Glyph) -> &'static str {
         // The design's own magnifier.
         Search => "<circle cx='11' cy='11' r='8'/><path d='m21 21-4.3-4.3'/>",
         Bookmark => "<path d='m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z'/>",
+        Tag => {
+            "<path d='M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2.4 2.4 0 0 0 3.4 0l6.6-6.6a2.4 2.4 0 0 0 0-3.4z'/>\
+             <circle cx='7.5' cy='7.5' r='1.2' fill='STROKE' stroke='none'/>"
+        }
         List => {
             "<circle cx='5.5' cy='7' r='1' fill='STROKE' stroke='none'/><path d='M9 7 H19'/>\
              <circle cx='5.5' cy='12' r='1' fill='STROKE' stroke='none'/><path d='M9 12 H19'/>\
@@ -293,8 +348,7 @@ fn body(g: Glyph) -> &'static str {
         // A microphone on its stand.
         Mic => {
             "<rect x='9' y='3' width='6' height='11.5' rx='3'/>\
-             <path d='M5.5 11 A6.5 6.5 0 0 0 18.5 11'/><path d='M12 17.5 V21'/>\
-             <path d='M8.5 21 H15.5'/>"
+             <path d='M5.5 11 A6.5 6.5 0 0 0 18.5 11'/><path d='M12 17.5 V21 M8.5 21 H15.5'/>"
         }
         // A speaker, and the sound it makes.
         Speaker => {
@@ -348,7 +402,10 @@ fn body(g: Glyph) -> &'static str {
             "<rect x='5' y='10.5' width='14' height='9.5' rx='2'/>\
              <path d='M8.5 10.5 V8 A3.5 3.5 0 0 1 15.5 8 V10.5'/>"
         }
-        Send => "<path d='M12 19.5 V5'/><path d='M6 11 L12 5 L18 11'/>",
+        // One stroke, head and stem: a stem drawn on its own, a line with
+        // no width to its bounds, was lost at some positions and the arrow
+        // read as "^".
+        Send => "<path d='M6 11 L12 5 L18 11 M12 5 V19.5'/>",
         Check => "<path d='M5 12.5 L10 17.5 L19.5 7'/>",
         File => {
             "<path d='M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z'/>\
@@ -375,6 +432,10 @@ fn body(g: Glyph) -> &'static str {
              <path d='M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3'/><path d='M12 12V8'/>"
         }
         Clock => "<circle cx='12' cy='12' r='10'/><path d='M12 6v6l4 2'/>",
+        Branch => {
+            "<circle cx='6' cy='5' r='2.5'/><circle cx='6' cy='19' r='2.5'/><circle cx='18' cy='7' r='2.5'/>\
+             <path d='M6 7.5v9'/><path d='M18 9.5c0 4.5-4 5.5-9.5 7.5'/>"
+        }
     }
 }
 

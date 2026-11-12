@@ -45,7 +45,12 @@ impl App {
         };
         // Silently check for a newer release in the background (once per process).
         let check = app.startup_update_check();
-        (app, Task::batch([open_task, check]))
+        // What the AI key has spent so far, and on which model: estimates
+        // draw on both.
+        app.refresh_usage_model();
+        let ledger = app.read_ledger();
+        let recent = app.read_recent_folders();
+        (app, Task::batch([open_task, check, ledger, recent]))
     }
 
     /// The transport this window starts on. `CLEW_SSH` selects a remote host
@@ -65,8 +70,10 @@ impl App {
             proj: ProjectSession::default(),
             server: crate::app::server::ServerLink::default(),
             pending_open: None,
+            pending_open_line: None,
             pending_consent: None,
             setup: None,
+            setup_counted_at: None,
             pending_setup: None,
             trust: clew_core::trust::Trust::load(),
             scanning: false,
@@ -76,10 +83,17 @@ impl App {
             debug_run: 0,
             debug_run_live: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             debug_stop: 0,
+            debug_run_high: 0,
+            debug_parked: Vec::new(),
+            debug_off_screen: false,
+            run_tab_last: 0,
+            run_shown: None,
             import_dir: imports::Dir::Imports,
             trail_writer: TrailWriter::default(),
             connection: Self::startup_connection(),
             left_local: None,
+            panes_covered: false,
+            dial: None,
             escape_taken: false,
             // A CLEW_SSH startup target never carries the per-host AI-key
             // opt-in; only the Connect flow can grant it.
@@ -101,7 +115,9 @@ impl App {
             embed_missing: crate::app::embedding::why_no_embeddings(),
             show_bottom: false,
             ask_view: AskView::Hidden,
+            ask_by_f6: None,
             ask_sessions_menu: false,
+            ask_menu_covered: false,
             ask_sessions_query: String::new(),
             voice: crate::app::voice::VoiceState::new(),
             local_embedding: crate::app::embedding::LocalEmbedding {
@@ -112,12 +128,17 @@ impl App {
             debug_hover_eval: false,
             llm_available: llm::Config::available(),
             llm_config_cache: None,
+            model_check: Default::default(),
             show_tools_menu: false,
+            show_run_menu: false,
             show_target_menu: false,
             show_app_menu: false,
             margin_tab: MarginTab::default(),
             show_view_menu: false,
+            show_views_menu: false,
+            picker: None,
             file_filter: String::new(),
+            tree_focused: false,
             keymap: keymap::Keymap::load(),
             rebinding: None,
             keymap_notice: None,
@@ -127,6 +148,8 @@ impl App {
             show_minimap: view_pref(VIEW_MINIMAP, false),
             show_inline_blame: view_pref(VIEW_BLAME, false),
             show_indent_guides: view_pref(VIEW_INDENT_GUIDES, false),
+            keep_explanations_fresh: view_pref(KEEP_EXPLANATIONS_FRESH, true),
+            suggest_questions: view_pref(SUGGEST_QUESTIONS, true),
             settings: SettingsDraft::default(),
             ask_agent: crate::app::integrations::stored_ask_agent(),
             overlay_open: false,
@@ -144,19 +167,25 @@ impl App {
                 auto_check: updater::auto_check_enabled(),
                 ..UpdateState::default()
             },
+            usage: Default::default(),
             graph_mode: true,
             graph_3d: true,
             graph_spin: true,
             graph_heat: false,
             graph_fit_rev: 0,
+            graph_search: String::new(),
+            graph_found: 0,
+            graph_focus_rev: 0,
             show_left_sidebar: true,
             show_right_panel: true,
             lsp_doc_rev: 1,
             blame_why_seq: 0,
             insight_seq: 0,
+            proof_seq: 0,
             palette: Vec::new(),
             palette_recent: Vec::new(),
             palette_home: Vec::new(),
+            palette_screen: Vec::new(),
             inlay_gen: 0,
             server_panel: false,
             installed_servers: Vec::new(),
@@ -164,16 +193,36 @@ impl App {
             server_panel_seq: 0,
             selecting: false,
             code_focused: true,
+            jump: None,
+            ring: None,
+            ring_code: false,
+            ring_said: String::new(),
+            ring_menu: false,
+            menu_up: false,
+            menu_tree_keys: false,
+            region: crate::app::keys::Region::Code,
             pending_g: false,
             pending_z: false,
             modifiers: keyboard::Modifiers::default(),
             status: tr!("Open a folder to start reading").to_string(),
             status_seen: tr!("Open a folder to start reading").to_string(),
             status_since: None,
+            status_lang: crate::i18n::current(),
             waiting_said: None,
+            failure_notice: None,
             main_window: None,
             tutorial: None,
             tutorial_layout: None,
+            tour_prep: None,
+            tour_sample: None,
+            // Read as the window opens (`App::new`), off this thread.
+            recent_folders: Vec::new(),
+            recent_store: if cfg!(test) {
+                None
+            } else {
+                crate::app::recent::store()
+            },
+            tour_then: None,
             window_width: 1280.0,
             window_height: 800.0,
             fullscreen: false,
@@ -191,6 +240,7 @@ impl App {
             sidebar_width: 254.0,
             right_width: 272.0,
             bottom_height: 340.0,
+            bottom_sized: false,
             font_size: DEFAULT_FONT_SIZE,
             #[cfg(test)]
             stale_dropped: 0,
@@ -277,8 +327,13 @@ impl App {
                     .map(|_| Message::Voice(crate::VoiceMsg::Tick)),
             );
         }
+        // While the microphone waits for "Hey, Clew": what it hears, heard
+        // off this thread — the window hears only of the phrase.
+        if let Some(wait) = self.voice.wake.wait() {
+            subs.push(crate::app::wake::subscription(wait));
+        }
         // While Clew speaks: the meter, and the moment all is said — when
-        // Keep listening opens the microphone.
+        // the microphone, on, opens again.
         if self.voice.speech.is_speaking() {
             subs.push(
                 iced::time::every(crate::app::speech::SPEAK_TICK)
@@ -318,6 +373,19 @@ impl App {
         self.sidebar_width = self.sidebar_width.clamp(160.0, (w * 0.5).max(200.0));
         self.right_width = self.right_width.clamp(240.0, (w * 0.6).max(280.0));
         self.bottom_height = self.bottom_height.clamp(100.0, (h * 0.75).max(160.0));
+    }
+
+    /// The bottom panel's height as laid out: the reader's, once they set
+    /// it; till then no more than about a third of the window — at 700
+    /// high, its 340 took over half the editor, and 6 lines of code showed
+    /// over a run.
+    pub(crate) fn bottom_shown_height(&self) -> f32 {
+        if self.bottom_sized {
+            self.bottom_height
+        } else {
+            self.bottom_height
+                .min((self.window_height * BOTTOM_SHARE).max(BOTTOM_LEAST))
+        }
     }
 
     /// The code's line height: airy, as the design sets code — 24 for the
@@ -382,9 +450,11 @@ impl App {
     /// Close every menu of the chrome: they open one at a time.
     pub(crate) fn close_menus(&mut self) {
         self.show_tools_menu = false;
+        self.show_run_menu = false;
         self.show_target_menu = false;
         self.show_app_menu = false;
         self.show_view_menu = false;
+        self.show_views_menu = false;
     }
 
     pub(crate) fn on_sidebar_tab_picked(&mut self, tab: SidebarTab) -> Task<Message> {
@@ -392,6 +462,7 @@ impl App {
         self.show_left_sidebar = true; // reveal it for external triggers
         // Close the menu that opened this, if one did.
         self.show_tools_menu = false;
+        self.show_views_menu = false;
         match tab {
             // The search input takes keyboard focus — except while the
             // tutorial shows the tab, whose keys step the tour.
@@ -414,7 +485,8 @@ impl App {
                     .and_then(|w| w.steps.get(self.proj.walk.step))
                 {
                     Some(step) if self.proj.walk.prepared.is_empty() => {
-                        let (prepared, task) = self.prepare_segments(&step.narration.clone());
+                        let said = step.said().into_owned();
+                        let (prepared, task) = self.prepare_segments(&said);
                         self.proj.walk.prepared = prepared;
                         task
                     }
@@ -433,8 +505,33 @@ impl App {
                 self.ensure_docs();
                 Task::none()
             }
+            // On the place being read: it opened at the oldest stop, the
+            // current one off its foot.
+            SidebarTab::Trail => self.trail_to_current(),
+            // Its first page, and the uncommitted changes at its head.
+            SidebarTab::History => {
+                self.proj.git_status_stale = true;
+                Task::batch([
+                    self.sync_history(),
+                    self.sync_git_status().unwrap_or_else(Task::none),
+                ])
+            }
             _ => Task::none(),
         }
+    }
+
+    /// The Reading trail's list scrolled to the place being read: its row
+    /// at the same share of the way down as it is of the list, so on screen
+    /// wherever it is.
+    pub(crate) fn trail_to_current(&self) -> Task<Message> {
+        let visits = self.proj.history.flatten_with(&self.proj.trail_collapsed);
+        let Some(y) = trail_offset(&visits, &self.proj.history.current_path()) else {
+            return Task::none();
+        };
+        iced::widget::operation::snap_to(
+            ui::trail_scroll_id(),
+            iced::widget::scrollable::RelativeOffset { x: 0.0, y },
+        )
     }
 
     /// Note what the status line says now: when it says something new, the
@@ -443,6 +540,21 @@ impl App {
         if self.status != self.status_seen {
             self.status_seen.clone_from(&self.status);
             self.status_since = (!self.status.is_empty()).then(std::time::Instant::now);
+            self.status_lang = crate::i18n::current();
+        }
+    }
+
+    /// The language spoken changed (here, or in another window): a plain
+    /// notice on the status line, worded in the one spoken before, goes —
+    /// what tells of work still under way stays, to be said over by its
+    /// end. Failures are worded as they are drawn, and stay.
+    pub(crate) fn status_follows_language(&mut self) {
+        if crate::i18n::current() == self.status_lang || self.status != self.status_seen {
+            return;
+        }
+        if !self.status_stands() {
+            self.status.clear();
+            self.note_status();
         }
     }
 
@@ -458,6 +570,72 @@ impl App {
             || self.handshake_failure.as_deref() == Some(self.status.as_str())
             || calls.refine_wait.is_some()
             || calls.refine_full_wait.is_some()
+    }
+
+    /// [`Self::say_failure_again`] of words already said — as tests put a
+    /// failure on the line.
+    #[cfg(test)]
+    pub(crate) fn say_failure(
+        &mut self,
+        said: String,
+        retry: Option<Message>,
+        of: crate::app::state::FailureOf,
+    ) {
+        self.say_failure_again(move || said.clone(), retry, of);
+    }
+
+    /// Say that an AI action failed: on the status line, in a place of its
+    /// own that other messages do not take, standing until it is dismissed,
+    /// tried again, or the same work succeeds (`forget_failure_of`) — with
+    /// `retry` to try it again (`App::failure_notice`). What `say` makes of
+    /// it is said again in the language spoken whenever it is shown: a
+    /// change of language says it anew.
+    pub(crate) fn say_failure_again(
+        &mut self,
+        say: impl Fn() -> String + Send + Sync + 'static,
+        retry: Option<Message>,
+        of: crate::app::state::FailureOf,
+    ) {
+        let said = say();
+        self.status = said.clone();
+        self.failure_notice = Some(crate::app::state::FailureNotice {
+            said,
+            retry,
+            of,
+            again: Some(crate::app::state::SayAgain(std::sync::Arc::new(say))),
+            about: None,
+        });
+    }
+
+    /// Say which Language model field the failure standing now is about
+    /// (`FailureNotice::about`).
+    pub(crate) fn failure_about(&mut self, field: Option<crate::app::state::LlmField>) {
+        if let Some(notice) = self.failure_notice.as_mut() {
+            notice.about = field;
+        }
+    }
+
+    /// The failure the status line stands, if it stands one.
+    pub(crate) fn failure_shown(&self) -> Option<&crate::app::state::FailureNotice> {
+        self.failure_notice
+            .as_ref()
+            .filter(|f| !f.said.is_empty())
+            .filter(|f| {
+                // An Ask answer's failure is said in the conversation while Ask
+                // is open: there alone.
+                !(f.of == crate::app::state::FailureOf::Ask && self.ask_view.is_open())
+            })
+    }
+
+    /// Take a standing failure of `of` away: what it was of was done again
+    /// successfully, or dismissed where it was asked for.
+    pub(crate) fn forget_failure_of(&mut self, of: crate::app::state::FailureOf) {
+        if self.failure_notice.as_ref().is_some_and(|f| f.of == of) {
+            let notice = self.failure_notice.take();
+            if notice.is_some_and(|f| f.said == self.status) {
+                self.status.clear();
+            }
+        }
     }
 
     /// Whether the status line says a notice that will be taken away.
@@ -524,7 +702,10 @@ impl App {
         }
         // A change queued during the auto-refresh cooldown: fire it once
         // the window has lifted and nothing is running.
+        // Not once switched off (Settings → Usage and cost): a change queued
+        // before then spends nothing after.
         let refresh = if self.proj.refresh_pending
+            && self.keep_explanations_fresh
             && !self.proj.explain.running
             && !self.proj.overview.generating
             && !self.proj.building_embeddings
@@ -584,6 +765,13 @@ impl App {
                     // A commit, a checkout made elsewhere: the Files view's
                     // marks are read anew.
                     self.proj.git_status_stale = true;
+                    self.proj.head_stale = true;
+                    self.proj.repo_tip_stale = true;
+                    // The History view on screen is read again: a branch or
+                    // a tag deleted elsewhere moves no HEAD, and stayed.
+                    if self.sidebar == SidebarTab::History && self.show_left_sidebar {
+                        self.proj.git_log.asked = false;
+                    }
                     self.follow_system_appearance();
                     // Another window may have saved Settings while this one was
                     // in the background: re-read the AI config on next use.
@@ -602,6 +790,38 @@ impl App {
             WindowMsg::ControlsHover(over) => {
                 self.controls_hovered = over;
                 Task::none()
+            }
+            WindowMsg::DismissFailure => {
+                if let Some(notice) = self.failure_notice.take()
+                    && notice.said == self.status
+                {
+                    self.status.clear();
+                }
+                Task::none()
+            }
+            // Tried again: the failure is not the news, what it tries is.
+            WindowMsg::RetryFailure => {
+                // One that asks first (the cost sheet, the key, a fake run's
+                // inputs) stands until the work starts again: cancelled
+                // there, the failure was gone, and nothing had been tried.
+                if let Some(retry) = self
+                    .failure_notice
+                    .as_ref()
+                    .filter(|n| n.asks_first())
+                    .and_then(|n| n.retry.clone())
+                {
+                    return self.update(retry);
+                }
+                let Some(notice) = self.failure_notice.take() else {
+                    return Task::none();
+                };
+                if notice.said == self.status {
+                    self.status.clear();
+                }
+                match notice.retry {
+                    Some(retry) => self.update(retry),
+                    None => Task::none(),
+                }
             }
             // Closing is the shell's (`Shell::CloseRequested`): it asks about
             // edits the window cannot send before it lets the window go, and
@@ -681,6 +901,7 @@ impl App {
             }
             WindowMsg::ResizeBottom(y) => {
                 self.bottom_height = self.window_height - y;
+                self.bottom_sized = true;
                 self.clamp_panel_sizes();
                 Task::none()
             }
@@ -698,6 +919,15 @@ impl App {
                 let open = !self.show_tools_menu && !crate::ui::tools_on_strip(self);
                 self.close_menus();
                 self.show_tools_menu = open;
+                Task::none()
+            }
+            WindowMsg::ToggleRunMenu => {
+                // The four ways to run on the strip, there is no bug to
+                // open their menu from: one opened then hung under a button
+                // not there.
+                let open = !self.show_run_menu && !crate::ui::runs_on_strip(self);
+                self.close_menus();
+                self.show_run_menu = open;
                 Task::none()
             }
             WindowMsg::ToggleTargetMenu => {
@@ -718,6 +948,12 @@ impl App {
                 self.show_view_menu = open;
                 Task::none()
             }
+            WindowMsg::ToggleViewsMenu => {
+                let open = !self.show_views_menu;
+                self.close_menus();
+                self.show_views_menu = open;
+                Task::none()
+            }
             WindowMsg::FileFilterChanged(filter) => {
                 self.file_filter = filter;
                 Task::none()
@@ -731,6 +967,42 @@ impl App {
                     self.file_filter.clear();
                     self.escape_taken = true;
                 }
+                // The field gives up the keys on Esc: they go back to the
+                // code, as Esc in the tree gives them.
+                self.code_focused = true;
+                self.region = crate::app::keys::Region::Code;
+                Task::none()
+            }
+            // ↓ in the filter: the keyboard goes down to the tree, on its
+            // first row (filtered) or the file being read.
+            WindowMsg::FileFilterDown => {
+                self.code_focused = false;
+                if !self.file_filter.trim().is_empty() {
+                    self.proj.tree_cursor =
+                        crate::ui::tree_rows(self).first().map(|r| r.rel.clone());
+                }
+                Task::batch([
+                    iced::widget::operation::focus(crate::ui::files_tree_keys_id()),
+                    self.reveal_tree_cursor(),
+                ])
+            }
+            WindowMsg::TreeFocused(focused) => {
+                self.tree_focused = focused;
+                if focused {
+                    // The keys are the tree's now, not the code's.
+                    self.code_focused = false;
+                    self.region = crate::app::keys::Region::Tree;
+                }
+                Task::none()
+            }
+            WindowMsg::TreeKey(key) => self.on_tree_key(key),
+            WindowMsg::TabPressed { forward, field } => self.on_tab(forward, field),
+            WindowMsg::RingEnd => {
+                let _ = self.end_ring(false);
+                Task::none()
+            }
+            WindowMsg::RingMoved(press, name) => {
+                self.on_ring_moved(press.map(|p| *p), name);
                 Task::none()
             }
             // Enter opens what the filter found first, as a click on its row
@@ -856,6 +1128,11 @@ impl App {
 /// minimap or blame turned on is there next launch (they were this
 /// session's only, unlike the theme).
 /// How long a notice stays on the status line: long enough to be read.
+/// The share of the window's height the bottom panel takes until the
+/// reader sizes it, and the least it is then.
+const BOTTOM_SHARE: f32 = 0.36;
+const BOTTOM_LEAST: f32 = 200.0;
+
 pub(crate) const STATUS_LIFETIME: std::time::Duration = std::time::Duration::from_secs(12);
 /// How often a notice on the status line is looked at to see whether its
 /// time is up.
@@ -867,6 +1144,25 @@ pub(crate) const VIEW_INLAY_HINTS: &str = "view_inlay_hints";
 pub(crate) const VIEW_MINIMAP: &str = "view_minimap";
 pub(crate) const VIEW_BLAME: &str = "view_inline_blame";
 pub(crate) const VIEW_INDENT_GUIDES: &str = "view_indent_guides";
+/// Whether explanations are refreshed by themselves as code changes.
+pub(crate) const KEEP_EXPLANATIONS_FRESH: &str = "keep_explanations_fresh";
+/// How far down the trail's list to scroll for the place being read: its
+/// row's share of the way down the list (so on screen, wherever it is) —
+/// or, inside a folded branch, the share of the fold that holds it. `path`
+/// is the current visit's id and its ancestors'; `None` with no trail.
+pub(crate) fn trail_offset(visits: &[crate::history::Visit], path: &[usize]) -> Option<f32> {
+    let i = path
+        .iter()
+        .find_map(|id| visits.iter().position(|v| v.id == *id))?;
+    Some(if visits.len() > 1 {
+        i as f32 / (visits.len() - 1) as f32
+    } else {
+        0.0
+    })
+}
+
+/// [`App::suggest_questions`], kept between launches.
+pub(crate) const SUGGEST_QUESTIONS: &str = "suggest_questions";
 
 /// A View-menu choice as saved, or `default` when it never was (or the
 /// config cannot be read).

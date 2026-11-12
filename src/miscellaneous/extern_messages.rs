@@ -79,6 +79,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("a `{kind}` token, which MCP does not use"),
     tr_noop!("a body that is not JSON: {e}"),
     tr_noop!("a command set by the project must be approved first"),
+    tr_noop!("a filter longer than {MAX_LOG_TEXT} bytes"),
     tr_noop!("a header line exceeds {MAX_HEADER_LINE_BYTES} bytes"),
     tr_noop!(
         "a header's name holds characters a header name cannot (letters, digits and !#$%&'*+-.^_`|~) — write each as `Name: value`"
@@ -92,8 +93,10 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("a state directory on its path is a symlink or not a directory"),
     tr_noop!("a text could not be read: {e}"),
     tr_noop!("a {n}-byte message exceeds the {MAX_FRAME_BYTES}-byte limit"),
+    tr_noop!("an attention node without {which}"),
     tr_noop!("an empty `command`"),
     tr_noop!("an index must be a whole number"),
+    tr_noop!("an offset past {MAX_LOG_SKIP} commits"),
     tr_noop!("an x-mcp-header outside the schema's plain properties"),
     tr_noop!("answered the CONNECT to {authority} with {status_line}: {what}"),
     tr_noop!("answered with address type {other}"),
@@ -142,6 +145,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("correct them in its setting ({example}, {PERCENT_ENCODING})"),
     tr_noop!("could not connect to the debug adapter on {addr}: {error}"),
     tr_noop!("could not connect to the embedding model"),
+    tr_noop!("could not connect to the keyword spotter"),
     tr_noop!("could not connect to the proxy {arg1}: {e}"),
     tr_noop!("could not connect to the voice"),
     tr_noop!("could not connect to {arg1}"),
@@ -162,6 +166,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("could not start a request thread: {e}"),
     tr_noop!("could not start listening: {e}"),
     tr_noop!("could not start the embedding model: {e}"),
+    tr_noop!("could not start the keyword spotter: {e}"),
     tr_noop!("could not start the speaker: {e}"),
     tr_noop!("could not start the speech model: {e}"),
     tr_noop!("could not start the voice: {e}"),
@@ -223,6 +228,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("invalid Content-Length {v}"),
     tr_noop!("it accepts only {schemes} logins, which Clew does not support"),
     tr_noop!("it did not answer in time"),
+    tr_noop!("it is a {other} package"),
     tr_noop!("it is larger than {cap} bytes"),
     tr_noop!("it is not a plain file"),
     tr_noop!("it is not valid UTF-8"),
@@ -240,6 +246,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("its content is not valid {arg1}"),
     tr_noop!("its filter drivers cannot be switched off: no scratch directory ({e})"),
     tr_noop!("its filter drivers cannot be switched off: {e}"),
+    tr_noop!("its package is served over {transport}"),
     tr_noop!("larger than {arg1} MB"),
     tr_noop!("launch a .java file, or name the mainClass to run"),
     tr_noop!("listing the directory took longer than {arg1}s"),
@@ -275,6 +282,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("no method {name} taking {arg1} arguments"),
     tr_noop!("no outline for {rel} (unsupported language)"),
     tr_noop!("no output name for a single-file artifact"),
+    tr_noop!("no phrase to listen for"),
     tr_noop!("no program was named"),
     tr_noop!("no request thread: {e}"),
     tr_noop!("no servers in it"),
@@ -290,6 +298,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("not JSON: {e}"),
     tr_noop!("not a WAV file"),
     tr_noop!("not a git repository"),
+    tr_noop!("not a sherpa-onnx model"),
     tr_noop!("not a ws:// address: {url}"),
     tr_noop!("not an array"),
     tr_noop!(
@@ -379,6 +388,8 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the agent needs you to sign in: {how}"),
     tr_noop!("the agent speaks ACP version {arg1}, and Clew speaks {PROTOCOL_VERSION}"),
     tr_noop!("the agent's answer is not valid ACP: {why}"),
+    tr_noop!("the archive has no {arg1}"),
+    tr_noop!("the archive is damaged: {e}"),
     tr_noop!("the arguments for `{arg1}` are not an object: {other}"),
     tr_noop!("the audio is cut short"),
     tr_noop!("the audio is unreadable: {e}"),
@@ -386,6 +397,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the authorization server does not support PKCE (S256)"),
     tr_noop!("the authorization server has no {key}"),
     tr_noop!("the authorization server's metadata names another issuer ({named}, not {issuer})"),
+    tr_noop!("the clew-speak beside Clew is older than it and cannot listen for the wake phrase"),
     tr_noop!("the clew-speak beside Clew is older than it and cannot run {arg1}"),
     tr_noop!("the connect failed: {e}"),
     tr_noop!("the connection to Xdebug broke: {e}"),
@@ -406,6 +418,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!(
         "the deprecated SSE transport is not supported — use the server's Streamable HTTP URL or its command"
     ),
+    tr_noop!("the download could not be opened: {e}"),
     tr_noop!(
         "the download does not match the published {arg1} (its {arg2} is {digest}, not {arg3}) — it was discarded"
     ),
@@ -413,6 +426,7 @@ pub(crate) const MESSAGES: &[&str] = &[
         "the download does not match the published {arg1} ({arg2} bytes, not {bytes}) — it was discarded"
     ),
     tr_noop!("the download is larger than {arg1} should be"),
+    tr_noop!("the download is not an archive: {e}"),
     tr_noop!("the embedding model answered before it was ready"),
     tr_noop!("the embedding model answered with the wrong number of vectors"),
     tr_noop!("the embedding model could not start: {why}"),
@@ -432,6 +446,12 @@ pub(crate) const MESSAGES: &[&str] = &[
         "the install changed after it was approved (was .clew/lsp.toml edited?) — refusing it; review the new prompt and approve that instead"
     ),
     tr_noop!("the install was prepared for version {arg1} but {version} was requested — refusing"),
+    tr_noop!("the keyword spotter answered before it was ready"),
+    tr_noop!("the keyword spotter ended"),
+    tr_noop!("the keyword spotter said something unreadable: {e}"),
+    tr_noop!("the keyword spotter stopped answering"),
+    tr_noop!("the keyword spotter stopped while starting — it may be damaged"),
+    tr_noop!("the keyword spotter took too long to load"),
     tr_noop!("the microphone did not open in time"),
     tr_noop!("the microphone failed: {e}"),
     tr_noop!("the microphone's sample format ({other}) is not supported"),
@@ -450,6 +470,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the model runtime could not start: {e}"),
     tr_noop!("the model runtime is missing"),
     tr_noop!("the model runtime is too old"),
+    tr_noop!("the model's graph is malformed: {what}"),
     tr_noop!("the node did not answer in time"),
     tr_noop!("the node did not connect within {arg1} s"),
     tr_noop!("the node did not connect: {e}"),
@@ -475,7 +496,9 @@ pub(crate) const MESSAGES: &[&str] = &[
     ),
     tr_noop!("the proxy {name} failed the CONNECT to {authority}: {arg1}"),
     tr_noop!("the proxy {name} failed the CONNECT to {authority}: {how}"),
+    tr_noop!("the registry's answer: {e}"),
     tr_noop!("the reply could not be encoded: {e}"),
+    tr_noop!("the reply from the keyword spotter could not be read: {e}"),
     tr_noop!("the reply from {arg1} could not be read: {e}"),
     tr_noop!("the response exceeded {arg1} MB"),
     tr_noop!("the response has a line longer than {kib} KiB"),
@@ -525,6 +548,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the stream opened more than {arg1} tool calls"),
     tr_noop!("the stream sent a line over {arg1} MB"),
     tr_noop!("the streamed response exceeded {arg1} MB"),
+    tr_noop!("the text could not be read: {e}"),
     tr_noop!("the token endpoint gave a malformed {field}"),
     tr_noop!("the tokenizer could not be read: {e}"),
     tr_noop!(
@@ -532,7 +556,9 @@ pub(crate) const MESSAGES: &[&str] = &[
     ),
     tr_noop!("the update declares an unreadable version {candidate}"),
     tr_noop!("the voice answered before it was ready"),
+    tr_noop!("the voice could not be loaded: {file}: {e}"),
     tr_noop!("the voice ended unexpectedly"),
+    tr_noop!("the voice failed: {e}"),
     tr_noop!("the voice is not downloaded"),
     tr_noop!("the voice is not running"),
     tr_noop!("the voice said something unreadable: {e}"),
@@ -542,9 +568,11 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the voice took too long to speak"),
     tr_noop!("the voice's audio is unreadable: {e}"),
     tr_noop!("the voice's reply could not be read: {e}"),
+    tr_noop!("the voice's tokenizer could not be read: {e}"),
     tr_noop!("the xz decoder failed unexpectedly"),
     tr_noop!("the {arg1} highlight query does not compile"),
     tr_noop!("the {arg1} server program you chose cannot be run: {why}"),
+    tr_noop!("the {arg1} tool failed unexpectedly"),
     tr_noop!(
         "the {language} language server is not installed — the user can open a {language} file in Clew to install it; use `search` for now"
     ),
@@ -601,6 +629,9 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("x-mcp-header on `{arg1}`, which is not a string, integer or boolean"),
     tr_noop!("xz decode failed: {e}"),
     tr_noop!("zig could not build {arg1}:\n{arg2}"),
+    tr_noop!(
+        "{STEPS_LEFT_WARNING} exploration steps remain. Gather only what is still missing, then call `answer`."
+    ),
     tr_noop!("{arg1} (requires {arg2} on PATH)"),
     tr_noop!("{arg1} answered before it was ready"),
     tr_noop!("{arg1} answered {p}, not a probability"),
@@ -663,6 +694,8 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("{mime} ({arg1} MB, too large)"),
     tr_noop!("{module} did not compile — see the output"),
     tr_noop!("{name} did not finish within {arg1} s and was stopped"),
+    tr_noop!("{name} in the archive is not the file it should be"),
+    tr_noop!("{name} in the archive is not the size it should be"),
     tr_noop!("{name} needs an object to call it on"),
     tr_noop!("{name} was cancelled and stopped"),
     tr_noop!("{name} was cancelled before it started"),
@@ -757,6 +790,8 @@ pub(crate) const TAILS: &[&str] = &[
 /// the system's error texts. The common ones, kept by hand; others stay
 /// as the program wrote them.
 pub(crate) const EXTERNAL: &[&str] = &[
+    // An MCP server's own failures (`clew_core::mcp::McpError`).
+    tr_noop!("the server is not running"),
     tr_noop!("fatal: not a git repository (or any of the parent directories): {arg1}"),
     tr_noop!(
         "fatal: ambiguous argument '{arg1}': unknown revision or path not in the working tree."

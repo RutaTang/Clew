@@ -64,6 +64,9 @@ pub struct LspStagedCommand {
 /// for an empty store (which the next save would have written over it).
 pub struct LoadedProjectState {
     pub history: Option<Result<History, String>>,
+    /// The files the trail read that are no longer there: left out of it
+    /// from the start, not only once one is gone to again.
+    pub gone: Vec<PathBuf>,
     pub bookmarks: Option<Result<Vec<Bookmark>, String>>,
     pub notes: Option<Result<Vec<notes::Note>, String>>,
     /// `Err` = a malformed `lsp.toml`, surfaced rather than replaced by
@@ -93,11 +96,20 @@ pub struct LoadedProjectState {
     pub unread: Option<String>,
 }
 
+/// Whether `file`, of the project at `root` on this machine, is gone: not
+/// there, while the project is — not on a drive unplugged or a share
+/// offline, whose files all went with it, nor one that could not be looked
+/// at (no leave to read).
+pub(crate) fn gone(root: &Path, file: &Path) -> bool {
+    matches!(file.try_exists(), Ok(false)) && root.is_dir()
+}
+
 impl LoadedProjectState {
     /// The state of a read that failed as a whole (`why`): no store was read.
     pub(crate) fn unread(why: String) -> Self {
         LoadedProjectState {
             history: None,
+            gone: Vec::new(),
             bookmarks: None,
             notes: None,
             lsp_config: None,
@@ -130,8 +142,22 @@ impl LoadedProjectState {
             ),
             None => (explain::Cache::new(), None),
         };
+        let history = local.then(|| checked(history::load_checked(root)));
+        let gone = match &history {
+            Some(Ok(trail)) => {
+                let mut seen = std::collections::HashSet::new();
+                trail
+                    .flatten()
+                    .into_iter()
+                    .map(|v| v.loc.path)
+                    .filter(|path| seen.insert(path.clone()) && gone(root, path))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
         LoadedProjectState {
-            history: local.then(|| checked(history::load_checked(root))),
+            history,
+            gone,
             bookmarks: local.then(|| checked(bookmarks::load_checked(root))),
             notes: local.then(|| checked(notes::load_checked(root))),
             lsp_config: local.then(|| lsp::config::ProjectLspConfig::load(root)),
@@ -220,6 +246,8 @@ pub enum SidebarTab {
     Notes,
     /// The project's API documentation surface.
     Docs,
+    /// The project's commits (`app::history`).
+    History,
 }
 
 /// What the WALK tab's top input does: search the saved library, or generate a
@@ -434,6 +462,10 @@ pub struct AskTurn {
     pub answer: Vec<PreparedSeg>,
     /// How much of `answer_md` is in `answer`, in bytes (see there).
     pub settled: usize,
+    /// Where the text an agent step is writing began in `answer_md`, while
+    /// it is not known yet whether it is the answer or a remark before tool
+    /// calls (`AskMsg::Draft`): a remark is taken back out from here.
+    pub draft_from: Option<usize>,
     /// The retrieved nodes (with similarity scores) that grounded this answer,
     /// shown beneath it as clickable source chips.
     pub sources: Vec<(explain::Node, f32)>,
@@ -462,6 +494,37 @@ pub struct TurnExtras {
     /// Which step chip a tool call is: an ACP tool call by its id, an MCP
     /// call as `mcp:<call>`.
     pub step_ids: HashMap<String, usize>,
+    /// The answer failed before a word of it came: the turn says why, with
+    /// a way to ask again, and lists no sources for an answer that never
+    /// came.
+    pub failed: bool,
+    /// The setting the failure is about, where one is: the card's way to
+    /// it, beside Try again — its words said "check the base URL in
+    /// Settings", and nothing led there.
+    pub fix: Option<crate::app::state::LlmField>,
+    /// How the answer ended short of one of its own, with the words that
+    /// said so in it: said again in the language spoken now when that
+    /// changes — "Couldn't answer: …" stood in English above "Impossible
+    /// de répondre : …" in one conversation.
+    pub ended: Option<(TurnEnd, String)>,
+}
+
+/// How an answer ended short of one: stopped before a word of it, stopped
+/// part-way, or failed with `raw` (said plainly where an ACP agent, not
+/// Clew's own model, failed: `own` false).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TurnEnd {
+    Stopped,
+    StoppedHere,
+    Failed {
+        raw: String,
+        own: bool,
+    },
+    /// Failed part-way, after some of the answer came.
+    FailedHere {
+        raw: String,
+        own: bool,
+    },
 }
 
 /// What an approval card answers.
@@ -611,6 +674,14 @@ pub enum AgentPiece {
         args: serde_json::Value,
     },
     Delta(String),
+    /// Text a step is writing, as it comes (`Event::AgentDraft`).
+    Draft(String),
+    /// That text was the answer (`kept`), or a remark before tool calls —
+    /// or is taken back as its step is asked `again`.
+    DraftEnd {
+        kept: bool,
+        again: bool,
+    },
     /// The turn ended, and how (see [`ChatStreamPiece::Done`]).
     Done(clew_protocol::StreamOutcome),
 }
@@ -689,7 +760,7 @@ pub struct Bp {
 pub(crate) type BpList = Vec<(usize, Option<String>)>;
 
 /// Which stepping action to send the adapter.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugCmd {
     Continue,
     StepOver,
@@ -725,6 +796,8 @@ pub struct DebugSession {
     /// The adapter handle (None between StartDebug and the adapter being ready).
     pub client: Option<dap::DapClient>,
     pub status: DebugStatus,
+    /// The code the program exited with, once it has.
+    pub exit_code: Option<i64>,
     pub thread_id: Option<i64>,
     /// The call stack at the current stop (top frame first).
     pub frames: Vec<dap::StackFrame>,
@@ -802,6 +875,15 @@ pub struct BlameWhy {
     /// asked from no point, near the top. Pinned near the top, it opened
     /// far from the line it was about.
     pub anchor: Option<f32>,
+    /// The setting its failure is about, where one is: the popup's way to
+    /// it, beside Close.
+    pub fix: Option<crate::app::state::LlmField>,
+    /// What was asked — the file and its lines, 0-based inclusive — for a
+    /// failure's Try again, asked again of the pane showing that file: by
+    /// pane, it asked about whatever that pane showed since.
+    pub asked: Option<(std::path::PathBuf, usize, usize)>,
+    /// Its answer failed: the popup says why, with Try again.
+    pub failed: bool,
 }
 
 /// A time-travel session: scrub the active file (or one function's line range)
@@ -830,6 +912,10 @@ pub struct TimeTravel {
     pub caret: Option<(usize, usize)>,
     /// The line to bring into view (symbol scope: the function's line).
     pub focus_line: Option<usize>,
+    /// Started at a commit asked for (the History view, the margin's
+    /// History): its first revision lands on the first line that commit
+    /// added — it opened at line 1, the change off screen.
+    pub reveal_change: bool,
     pub loading: bool,
     /// Bumped on every enter/step so stale async results are dropped.
     pub generation: u64,
@@ -846,8 +932,11 @@ pub struct TimeTravel {
     /// of the scope it was asked in, so one asked before a re-scope is
     /// dropped as it lands, not shown under the new scope's name.
     pub scoped: u64,
-    /// LLM "what & why" summary per commit sha (cached across steps).
-    pub why: HashMap<String, String>,
+    /// LLM "what & why" summary per commit sha (cached across steps) — or,
+    /// where it failed, why: said in the commit's band with a way to try
+    /// again. Said only on the status line, the failure was gone in ten
+    /// seconds and the band offered "What & why?" as if never asked.
+    pub why: HashMap<String, Result<String, String>>,
     /// Whether a "what & why" for the commit ON SCREEN is being generated
     /// (derived from `why_pending`; the view reads this).
     pub why_loading: bool,
@@ -933,6 +1022,10 @@ pub struct ContextMenu {
     /// the caret, which has no place on the screen: a popup asked from it
     /// opens where one asked from the keyboard does.
     pub by_pointer: bool,
+    /// Opened from the keys at the caret: the top of its line, in window
+    /// coordinates. With no room below the line, the menu opens above it —
+    /// flipped up from under it, it covered the line it was for.
+    pub line_top: Option<f32>,
 }
 
 /// What a language can say about the code under the cursor that no other
@@ -947,6 +1040,11 @@ pub enum InsightKind {
     GoalState,
     /// The type of a Haskell name, from haskell-language-server.
     TypeAtPoint,
+    /// How a Rust type is laid out in memory — its size, alignment, each
+    /// field's offset and the padding between — from rust-analyzer.
+    MemoryLayout,
+    /// The tests that exercise a Rust item, from rust-analyzer.
+    RelatedTests,
 }
 
 impl InsightKind {
@@ -960,6 +1058,15 @@ impl InsightKind {
         })
     }
 
+    /// The language's other actions, past [`InsightKind::for_lang`]'s: in
+    /// the context menu and the palette, with no key of their own.
+    pub fn more_for_lang(lang_key: &str) -> &'static [InsightKind] {
+        match lang_key {
+            "rust" => &[InsightKind::MemoryLayout, InsightKind::RelatedTests],
+            _ => &[],
+        }
+    }
+
     /// Its name, in English whatever the interface speaks: the command
     /// palette runs it by this title.
     pub fn name(self) -> &'static str {
@@ -967,6 +1074,8 @@ impl InsightKind {
             InsightKind::ExpandMacro => tr_noop!("Expand Macro"),
             InsightKind::GoalState => tr_noop!("Show Goal"),
             InsightKind::TypeAtPoint => tr_noop!("Show Type"),
+            InsightKind::MemoryLayout => tr_noop!("Memory Layout"),
+            InsightKind::RelatedTests => tr_noop!("Related Tests"),
         }
     }
 
@@ -983,6 +1092,14 @@ impl InsightKind {
                 "No goal here: the Lean server has no proof state or expected type at this point."
             ),
             InsightKind::TypeAtPoint => tr!("The language server has no type for this name."),
+            InsightKind::MemoryLayout => {
+                tr!(
+                    "No type here whose layout rust-analyzer knows: put the cursor on a type's name."
+                )
+            }
+            InsightKind::RelatedTests => {
+                tr!("No test exercises this, as far as rust-analyzer can tell.")
+            }
         }
     }
 }
@@ -1083,6 +1200,10 @@ pub struct SearchState {
     /// the line could not be had (a remote file not open here), whose
     /// preview is marked as matched in itself.
     pub marks: Vec<Option<Vec<(usize, usize)>>>,
+    /// Where each hit of a language server's list is on its line, as the
+    /// server said it: a click lands there, not on the name's first use on
+    /// the line. Empty for a text search, whose hit lands on what matched.
+    pub at: Vec<(usize, crate::viewer::PositionEncoding)>,
     /// Bumped as the previews are given out to be coloured: only the last
     /// colouring asked for is taken.
     pub styled_gen: u64,
@@ -1126,6 +1247,13 @@ pub struct DiffState {
     /// Display columns of the widest drawn line, which sizes every run so
     /// the tints span the content and long lines scroll into reach.
     pub max_cols: usize,
+    /// The last line of the file as it is now that the diff shows.
+    pub last_new: usize,
+    /// How many lines the file has now, where it is known: lines after
+    /// [`last_new`](Self::last_new) are hidden, and a `⋯` says so.
+    pub total_new: Option<usize>,
+    /// What the row after the last change says: how many lines follow it.
+    pub tail_said: Option<String>,
 }
 
 /// The node of a map the reader clicked: what it is called, the file it is
@@ -1135,6 +1263,9 @@ pub struct DiffState {
 /// wanted to look at.
 #[derive(Debug, Clone)]
 pub struct GraphPick {
+    /// The node's index in the layout it was picked on: lit there while it
+    /// still names this node (see [`crate::ui::GraphCanvas::with_pick`]).
+    pub node: usize,
     pub label: String,
     pub file: PathBuf,
     pub open: Box<crate::Message>,
@@ -1181,8 +1312,15 @@ impl DiffState {
         // and removed) — a string or a comment over several lines coloured as
         // one. A very long diff is drawn plain.
         let lang = crate::highlight::detect(&abs);
+        // Git's "\ No newline at end of file" is no line of the file: drawn
+        // as one, numbered, every line after it was numbered one too high.
+        let marker = |l: &git::DiffLine| l.text.starts_with('\\');
         let side = |keep: fn(DiffKind) -> bool| -> Vec<crate::highlight::HlLine> {
-            let src: Vec<String> = shown.iter().filter(|l| keep(l.kind)).map(code).collect();
+            let src: Vec<String> = shown
+                .iter()
+                .filter(|l| keep(l.kind) && !marker(l))
+                .map(code)
+                .collect();
             let src = src.join("\n");
             if shown.len() > DIFF_HIGHLIGHT_MAX {
                 crate::highlight::plain_lines(&src)
@@ -1202,14 +1340,41 @@ impl DiffState {
             spans: Vec<(String, Option<u8>)>,
         }
         let mut rows: Vec<Row> = Vec::new();
+        let mut last_new = 0usize;
         for l in shown {
+            if marker(l) {
+                continue;
+            }
             let text = crate::ui::diff_display_text(&code(l));
             let plain = || vec![(text.clone(), None)];
             let row = match l.kind {
                 DiffKind::Header => continue,
                 DiffKind::Hunk => {
-                    let (old, new, place) = hunk_header(&l.text);
+                    let (old, new, new_count, place) = hunk_header(&l.text);
                     (old_no, new_no) = (old, new);
+                    // A hunk from the first line hides nothing above it: its
+                    // `⋯` sat over line 1. Kept where git names its place.
+                    if old <= 1 && new <= 1 && place.is_none() {
+                        continue;
+                    }
+                    // How many lines it hides, said: a bare `⋯` said nothing
+                    // of it, and the place git names is where the next change
+                    // is, not what is hidden.
+                    // "+N,0" (nothing of the file now in it) sits after line
+                    // N: lines up to N are what it hides.
+                    let hides = if new_count == 0 {
+                        let hides = new.saturating_sub(last_new);
+                        last_new = last_new.max(new);
+                        hides
+                    } else {
+                        new.saturating_sub(last_new + 1)
+                    };
+                    let place = match (hides, place) {
+                        (0, Some(place)) => place,
+                        (0, None) => HIDDEN.to_string(),
+                        (n, None) => hidden_said(n),
+                        (n, Some(place)) => format!("{}   {place}", hidden_said(n)),
+                    };
                     Row {
                         kind: DiffKind::Hunk,
                         text: place.clone(),
@@ -1227,6 +1392,7 @@ impl DiffState {
                         text,
                         gutter: (Some(old_no), Some(new_no)),
                     };
+                    last_new = new_no;
                     old_no += 1;
                     new_no += 1;
                     row
@@ -1240,6 +1406,7 @@ impl DiffState {
                         text,
                         gutter: (None, Some(new_no)),
                     };
+                    last_new = new_no;
                     new_no += 1;
                     row
                 }
@@ -1320,9 +1487,31 @@ impl DiffState {
             lines,
             runs,
             max_cols,
+            last_new,
+            total_new: None,
+            tail_said: None,
         }
     }
+
+    /// With the file's own length: what follows the last change is marked
+    /// as hidden.
+    pub fn of_file(mut self, source: &str) -> Self {
+        let total = source.lines().count();
+        self.total_new = Some(total);
+        self.tail_said = self
+            .hides_tail()
+            .then(|| hidden_said(total - self.last_new));
+        self
+    }
+
+    /// Whether lines of the file follow the last one shown.
+    pub fn hides_tail(&self) -> bool {
+        self.last_new > 0 && self.total_new.is_some_and(|n| n > self.last_new)
+    }
 }
+
+/// What a hunk's row says where git names no place: lines are hidden here.
+pub(crate) const HIDDEN: &str = "⋯";
 
 /// Past this many lines a diff is drawn without colouring it: preparing it
 /// is done as it arrives, on the window's own thread.
@@ -1330,7 +1519,17 @@ const DIFF_HIGHLIGHT_MAX: usize = 3000;
 
 /// What a hunk's header says: where its first line is before and after, and
 /// the place it is in (`fn main()`) — `⋯` when git names none.
-fn hunk_header(header: &str) -> (usize, usize, String) {
+/// "⋯ 14 unchanged lines": what a hidden stretch of a diff says.
+fn hidden_said(n: usize) -> String {
+    format!(
+        "{HIDDEN} {}",
+        trn!("1 unchanged line", "{n} unchanged lines", n)
+    )
+}
+
+/// A hunk header's old start, new start, new line count, and the place git
+/// names for it.
+fn hunk_header(header: &str) -> (usize, usize, usize, Option<String>) {
     let mut parts = header.splitn(3, "@@");
     let _ = parts.next();
     let ranges = parts.next().unwrap_or("");
@@ -1343,12 +1542,17 @@ fn hunk_header(header: &str) -> (usize, usize, String) {
             .and_then(|n| n.parse::<usize>().ok())
             .unwrap_or(1)
     };
-    let place = if place.is_empty() {
-        "⋯".to_string()
-    } else {
-        format!("⋯  {place}")
-    };
-    (start('-'), start('+'), place)
+    let place = (!place.is_empty()).then(|| place.to_string());
+    // "+12,4": four lines; "+12" alone: one.
+    let new_count = ranges
+        .split_whitespace()
+        .find_map(|r| r.strip_prefix('+'))
+        .map_or(1, |r| {
+            r.split_once(',')
+                .and_then(|(_, n)| n.parse::<usize>().ok())
+                .unwrap_or(1)
+        });
+    (start('-'), start('+'), new_count, place)
 }
 
 /// State of the language server for one language.
@@ -2004,6 +2208,26 @@ pub struct RemoteBrowser {
 #[cfg(test)]
 mod tests {
     use super::Questions;
+
+    /// A file is gone only while its project is there: one under a root
+    /// out of reach for now — a drive unplugged, a share offline — is not
+    /// called deleted, nor left out of the trail; nor is one still there.
+    #[test]
+    fn a_file_is_gone_only_while_its_project_is_there() {
+        let dir = clew_core::testutil::TempDir::new("gone-root");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let kept = root.join("kept.rs");
+        std::fs::write(&kept, "fn main() {}\n").unwrap();
+        let deleted = root.join("deleted.rs");
+        assert!(!super::gone(&root, &kept), "still there");
+        assert!(super::gone(&root, &deleted), "deleted");
+        let away = dir.path().join("unplugged");
+        assert!(
+            !super::gone(&away, &away.join("deleted.rs")),
+            "its whole drive away"
+        );
+    }
 
     /// Each question asked is answered by its own number only: a question
     /// replaced in place is a new one, and an answer to one no longer on

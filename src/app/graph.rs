@@ -527,7 +527,98 @@ impl App {
         self.proj.type_graph_key = Some(key);
     }
 
+    /// The nodes of the map on screen its search finds, best first (see
+    /// `ui::graph_matches`).
+    pub(crate) fn graph_matches(&self) -> Vec<usize> {
+        match (&self.proj.graph_layout, self.proj.overlay) {
+            (Some(layout), Some(kind)) if self.proj.graph_layout_for == self.proj.overlay => {
+                let mut found = ui::graph_matches(layout, &self.graph_search);
+                // The Call Graph draws files, and its search found only
+                // their names: "No matches" for a function its list showed.
+                // A function found goes to the file it is in.
+                if kind == Overlay::ProjectCalls {
+                    let files = self.call_graph_files_of(&self.graph_search);
+                    if !files.is_empty() {
+                        let mut seen: std::collections::HashSet<usize> =
+                            found.iter().copied().collect();
+                        let node_of: std::collections::HashMap<&std::path::Path, usize> = layout
+                            .nodes
+                            .iter()
+                            .enumerate()
+                            .map(|(i, n)| (n.file.as_path(), i))
+                            .collect();
+                        for file in files {
+                            if let Some(&i) = node_of.get(file.as_path())
+                                && seen.insert(i)
+                            {
+                                found.push(i);
+                            }
+                        }
+                    }
+                }
+                found
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The files of the project's functions whose name `query` finds — the
+    /// whole name first, then its start, then anywhere in it — in that
+    /// order, each once.
+    fn call_graph_files_of(&self, query: &str) -> Vec<std::path::PathBuf> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let graph = &self.proj.project_calls.graph;
+        let mut ranked: Vec<(u8, &std::path::Path)> = (0..graph.node_count())
+            .filter_map(|i| {
+                let node = graph.node(i);
+                let name = node.name.to_lowercase();
+                let rank = if name == query {
+                    0
+                } else if name.starts_with(&query) {
+                    1
+                } else if name.contains(&query) {
+                    2
+                } else {
+                    return None;
+                };
+                Some((rank, node.file.as_path()))
+            })
+            .collect();
+        ranked.sort_by_key(|(rank, _)| *rank);
+        // Each file once — through a set: a query of one letter finds most of
+        // the functions, and the list it was checked against grew with them.
+        let mut seen: std::collections::HashSet<&std::path::Path> = Default::default();
+        ranked
+            .into_iter()
+            .filter(|(_, file)| seen.insert(file))
+            .map(|(_, file)| file.to_path_buf())
+            .collect()
+    }
+
+    /// The search moved to another match, or was cleared: the camera goes
+    /// to it (or back over the whole map), and it is picked — what it is,
+    /// and Open, under the header.
+    fn on_graph_found(&mut self) -> Task<Message> {
+        self.graph_focus_rev += 1;
+        let matches = self.graph_matches();
+        self.proj.graph_pick = match (&self.proj.graph_layout, self.proj.overlay) {
+            (Some(layout), Some(kind)) if !matches.is_empty() => {
+                ui::node_pick(layout, kind, matches[self.graph_found % matches.len()])
+            }
+            _ => None,
+        };
+        Task::none()
+    }
+
     pub(crate) fn on_open_overlay(&mut self, which: Overlay) -> Task<Message> {
+        // A search typed over another map is not this one's.
+        if self.proj.overlay != Some(which) {
+            self.graph_search.clear();
+            self.graph_found = 0;
+        }
         self.proj.overlay = Some(which);
         self.proj.graph_pick = None;
         // A map laid out for another overlay is not shown under this one:
@@ -623,7 +714,7 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || input.lay_out())
                     .await
-                    .map_err(|_| tr!("laying out the map failed unexpectedly").to_string())
+                    .map_err(|_| tr!("laying out the graph failed unexpectedly").to_string())
             },
             move |layout| {
                 Message::Graph(GraphMsg::GraphLaidOut {
@@ -659,7 +750,7 @@ impl App {
                 self.proj.graph_layout_rev = ui::next_layout_rev();
             }
             // What the map showed stays; the next change lays it out again.
-            Err(e) => self.status = tr!("Couldn't lay out the map: {error}", error = e),
+            Err(e) => self.status = tr!("Couldn't lay out the graph: {error}", error = e),
         }
         Task::none()
     }
@@ -1372,7 +1463,9 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || clew_core::maps::build(&root, &files))
                     .await
-                    .map_err(|_| tr!("reading the project's maps failed unexpectedly").to_string())
+                    .map_err(|_| {
+                        tr!("reading the project's graphs failed unexpectedly").to_string()
+                    })
             },
             move |maps| {
                 Message::Graph(GraphMsg::MapsBuilt {
@@ -2041,7 +2134,7 @@ impl App {
         if !calls.precise {
             return None;
         }
-        // Each part after a " · " says one thing whole.
+        // Each part after a "; " says one thing whole.
         let mut label = match self.refined_languages().as_slice() {
             [] => tr!("● LSP-precise").to_string(),
             covered => tr!(
@@ -2051,7 +2144,7 @@ impl App {
         };
         let left = self.languages_left_out();
         if !left.is_empty() {
-            label.push_str(" · ");
+            label.push_str("; ");
             label.push_str(&tr!(
                 "{languages} left out",
                 languages = crate::app::languages::language_names(&left)
@@ -2060,7 +2153,7 @@ impl App {
         match calls.unrefined.len() {
             0 => {}
             n => {
-                label.push_str(" · ");
+                label.push_str("; ");
                 label.push_str(&trn!("1 function unrefined", "{n} functions unrefined", n));
             }
         }
@@ -2068,29 +2161,25 @@ impl App {
         if !waiting.is_empty() {
             let names =
                 crate::app::languages::language_names(&waiting.into_iter().collect::<Vec<_>>());
-            label.push_str(" · ");
+            label.push_str("; ");
             label.push_str(&tr!("waiting for {languages}", languages = names));
         }
         Some(label)
     }
 
-    /// What the Calls list says of a refined graph: the languages its exact
-    /// edges are for, and those it leaves out.
+    /// What the Calls list says of a refined graph: what it leaves out —
+    /// the languages no server refined, the functions none could — or
+    /// `None` when nothing is. How precise it is, and for which languages,
+    /// is the header's badge (`precise_label`); said here again, it was a
+    /// line under it describing it.
     pub(crate) fn precise_summary(&self) -> Option<String> {
         if !self.proj.project_calls.precise {
             return None;
         }
         // Sentence by sentence, each whole.
-        let mut summary = match self.refined_languages().as_slice() {
-            [] => tr!("LSP-precise — exact caller/callee edges.").to_string(),
-            covered => tr!(
-                "LSP-precise for {languages} — exact caller/callee edges.",
-                languages = crate::app::languages::language_names(covered)
-            ),
-        };
+        let mut summary = String::new();
         let left = self.languages_left_out();
         if !left.is_empty() {
-            summary.push(' ');
             summary.push_str(&tr!(
                 "Functions in {languages} are left out: no server was ready to refine them.",
                 languages = crate::app::languages::language_names(&left)
@@ -2103,7 +2192,9 @@ impl App {
         match calls.unrefined.len() {
             0 => {}
             n => {
-                summary.push(' ');
+                if !summary.is_empty() {
+                    summary.push(' ');
+                }
                 summary.push_str(&if out_too {
                     trn!(
                         "1 function could not be refined: calls into and out of it may be missing.",
@@ -2119,7 +2210,7 @@ impl App {
                 });
             }
         }
-        Some(summary)
+        (!summary.is_empty()).then_some(summary)
     }
 
     /// The languages the refinement covers (`refined_langs`), sorted.
@@ -2214,8 +2305,16 @@ impl App {
         let mut clients = self.call_hierarchy_clients();
         clients.retain(|lang, _| !leave_out.contains(lang));
         if clients.is_empty() {
-            self.status =
-                tr!("No language server ready — open a file to start one, then retry").into();
+            // With a file open, opening one starts nothing more: its server
+            // was declined, or failed, or there is none — Settings is where
+            // one is started. "Open a file" was said with one open.
+            let open = self.proj.panes.iter().flatten().next().is_some();
+            self.status = if open {
+                tr!("No language server is running — start one in Settings → Language servers, then retry")
+            } else {
+                tr!("No language server ready — open a file to start one, then retry")
+            }
+            .into();
             return Task::none();
         }
         let all = self.refinable_defs(&clients);
@@ -2636,6 +2735,7 @@ impl App {
             GraphMsg::CloseOverlay => {
                 self.proj.overlay = None;
                 self.proj.graph_pick = None;
+                self.graph_search.clear();
                 Task::none()
             }
             GraphMsg::Picked(pick) => {
@@ -2646,10 +2746,30 @@ impl App {
                 self.graph_fit_rev += 1;
                 Task::none()
             }
+            GraphMsg::Search(query) => {
+                self.graph_search = query;
+                self.graph_found = 0;
+                self.on_graph_found()
+            }
+            GraphMsg::SearchStep(forward) => {
+                let found = self.graph_matches().len();
+                if found == 0 {
+                    return Task::none();
+                }
+                // Shift with Enter goes back, as in every find.
+                let back = !forward || self.modifiers.shift();
+                self.graph_found = if back {
+                    (self.graph_found + found - 1) % found
+                } else {
+                    (self.graph_found + 1) % found
+                };
+                self.on_graph_found()
+            }
             GraphMsg::OverlayOpenImports(path) => {
                 self.proj.overlay = None;
                 self.proj.graph_pick = None;
-                self.sidebar = SidebarTab::Imports;
+                // The sidebar stays as the reader had it: opening a module
+                // from a map swapped their Files for the Imports view.
                 self.open_file(path, None, true)
             }
             GraphMsg::OverlayOpenAt { abs, line } => {

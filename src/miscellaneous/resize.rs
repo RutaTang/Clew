@@ -4,10 +4,12 @@
 //! resize width (the left sidebar, the right context panel); horizontal ones
 //! resize height (the bottom debug / ask panel).
 //!
-//! Beside a side panel the strip is drawn as part of it, in its color, so the
-//! panel's own edge is the one border between it and the code — no line of
-//! its own a few pixels off that edge, which read as a double border. The edge
-//! lights up in the accent color while it is hovered or dragged.
+//! Beside a side panel the strip lies just past the panel's edge and draws
+//! nothing at rest: the panel's own edge is the one border between it and the
+//! code — no line of its own a few pixels off that edge, which read as a
+//! double border — and whatever is under the strip shows through it (the
+//! sheet's shadow, fading out as it does along the sheet's other edges). The
+//! edge lights up in the accent color while it is hovered or dragged.
 
 use iced::advanced::widget::{Widget, tree};
 use iced::advanced::{Clipboard, Layout, Shell, layout, mouse, renderer};
@@ -20,9 +22,16 @@ use crate::theme;
 /// (the tutorial's spotlight).
 pub const THICKNESS: f32 = 8.0;
 
+/// The thickness of the strip beside the sidebar, which lies over the code
+/// sheet's edge: it ends before the gutter's marks (a breakpoint's dot
+/// starts 4.5px in at the least), so a click on a dot never grabs the
+/// divider.
+pub const EDGE_GRIP: f32 = 4.0;
+
 pub struct Divider<'a, Message> {
     vertical: bool,
     panel: Panel,
+    thickness: f32,
     on_drag: Box<dyn Fn(f32) -> Message + 'a>,
 }
 
@@ -35,9 +44,12 @@ pub enum Panel {
     /// beside it): nothing drawn until the pointer finds it, then the
     /// accent line a drag would move.
     Seamless,
-    /// The panel is before it (left, or above): the strip is its margin.
+    /// The panel it resizes is before it (left, or above): the strip lies
+    /// just past the panel's edge, nothing drawn until the pointer finds it,
+    /// then the accent along that edge. It is not over the panel, whose
+    /// scrollbar runs down that side.
     Before,
-    /// The panel is after it (right, or below).
+    /// The panel it resizes is after it (right, or below).
     After,
 }
 
@@ -53,6 +65,7 @@ impl<'a, Message> Divider<'a, Message> {
         Self {
             vertical: true,
             panel: Panel::Within,
+            thickness: THICKNESS,
             on_drag: Box::new(on_drag),
         }
     }
@@ -62,22 +75,29 @@ impl<'a, Message> Divider<'a, Message> {
         Self {
             vertical: false,
             panel: Panel::Within,
+            thickness: THICKNESS,
             on_drag: Box::new(on_drag),
         }
     }
 
-    /// The panel it resizes is on its `side`: the strip is drawn in the
-    /// panel's color, its far edge the panel's border.
+    /// The panel it resizes is on its `side`: the strip is the panel's
+    /// edge, lit while it is found.
     pub fn panel(mut self, side: Panel) -> Self {
         self.panel = side;
         self
     }
 
+    /// How thick the strip is, if not [`THICKNESS`].
+    pub fn thickness(mut self, thickness: f32) -> Self {
+        self.thickness = thickness;
+        self
+    }
+
     fn lengths(&self) -> (Length, Length) {
         if self.vertical {
-            (Length::Fixed(THICKNESS), Length::Fill)
+            (Length::Fixed(self.thickness), Length::Fill)
         } else {
-            (Length::Fill, Length::Fixed(THICKNESS))
+            (Length::Fill, Length::Fixed(self.thickness))
         }
     }
 }
@@ -187,7 +207,6 @@ where
         let over = cursor.position().is_some_and(|p| bounds.contains(p));
         let active = state.dragging || state.hovered || over;
         let colors = Colors {
-            panel: theme::bg_panel(),
             line: theme::hairline(),
             accent: theme::accent(),
         };
@@ -206,7 +225,6 @@ where
 /// The colors a divider is painted with.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Colors {
-    pub panel: Color,
     pub line: Color,
     pub accent: Color,
 }
@@ -214,10 +232,10 @@ pub struct Colors {
 /// Width of the line an active (hovered, dragged) panel edge shows.
 const ACTIVE_LINE: f32 = 2.0;
 
-/// What a divider over `bounds` paints, in order: within a panel a 1px line
-/// down the middle (the accent while active); beside a panel the whole strip
-/// in the panel's color and, while active, an accent line along the edge it
-/// shares with the code.
+/// What a divider over `bounds` paints: within a panel a 1px line down the
+/// middle (the accent while active); beside a panel nothing at rest and,
+/// while active, an accent line along the panel's edge — the strip's side
+/// toward the panel.
 pub fn paint(
     bounds: Rectangle,
     vertical: bool,
@@ -255,17 +273,14 @@ pub fn paint(
         }
         Panel::Seamless if active => vec![(line(thickness / 2.0 - 0.5, 1.0), colors.accent)],
         Panel::Seamless => Vec::new(),
-        Panel::Before | Panel::After => {
-            let mut out = vec![(bounds, colors.panel)];
-            if active {
-                let at = match panel {
-                    Panel::Before => thickness - ACTIVE_LINE,
-                    _ => 0.0,
-                };
-                out.push((line(at, ACTIVE_LINE), colors.accent));
-            }
-            out
+        Panel::Before | Panel::After if active => {
+            let at = match panel {
+                Panel::Before => 0.0,
+                _ => thickness - ACTIVE_LINE,
+            };
+            vec![(line(at, ACTIVE_LINE), colors.accent)]
         }
+        Panel::Before | Panel::After => Vec::new(),
     }
 }
 
@@ -286,7 +301,6 @@ mod tests {
     use super::*;
 
     const COLORS: Colors = Colors {
-        panel: Color::from_rgb(0.9, 0.9, 0.9),
         line: Color::from_rgb(0.8, 0.8, 0.8),
         accent: Color::from_rgb(0.2, 0.4, 0.9),
     };
@@ -309,49 +323,49 @@ mod tests {
         }
     }
 
-    /// Beside a panel, at rest, the strip is the panel's own color and draws
-    /// no line: the panel's edge is the only border.
+    /// Beside a panel, at rest, the strip draws nothing: the panel's edge is
+    /// the only border, and what is under the strip — the sheet's shadow —
+    /// shows through it rather than stopping short at it.
     #[test]
-    fn beside_a_panel_the_strip_is_the_panel_and_draws_no_line() {
+    fn beside_a_panel_the_strip_draws_nothing_at_rest() {
         for vertical in [true, false] {
             for side in [Panel::Before, Panel::After] {
-                let painted = paint(strip(vertical), vertical, side, false, COLORS);
-                assert_eq!(painted, [(strip(vertical), COLORS.panel)]);
+                assert!(paint(strip(vertical), vertical, side, false, COLORS).is_empty());
             }
         }
     }
 
-    /// Hovered or dragged, the edge the panel shares with the code lights up:
-    /// the strip's far side from the panel.
+    /// Hovered or dragged, the panel's edge lights up: the strip's side
+    /// toward the panel.
     #[test]
-    fn an_active_edge_lights_up_where_the_panel_meets_the_code() {
-        let left = paint(strip(true), true, Panel::Before, true, COLORS);
+    fn an_active_edge_lights_up_along_the_panel() {
+        let sidebar = paint(strip(true), true, Panel::Before, true, COLORS);
         assert_eq!(
-            left[1],
-            (
+            sidebar,
+            [(
                 Rectangle {
-                    x: 100.0 + THICKNESS - ACTIVE_LINE,
+                    x: 100.0,
                     y: 0.0,
                     width: ACTIVE_LINE,
                     height: 500.0
                 },
                 COLORS.accent
-            )
+            )]
         );
         let right = paint(strip(true), true, Panel::After, true, COLORS);
-        assert_eq!(right[1].0.x, 100.0);
+        assert_eq!(right[0].0.x, 100.0 + THICKNESS - ACTIVE_LINE);
         let bottom = paint(strip(false), false, Panel::After, true, COLORS);
         assert_eq!(
-            bottom[1],
-            (
+            bottom,
+            [(
                 Rectangle {
                     x: 0.0,
-                    y: 300.0,
+                    y: 300.0 + THICKNESS - ACTIVE_LINE,
                     width: 800.0,
                     height: ACTIVE_LINE
                 },
                 COLORS.accent
-            )
+            )]
         );
     }
 

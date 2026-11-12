@@ -7,25 +7,37 @@ use iced::widget::{column, row};
 
 /// The sidebar tabs in strip order — the one source of truth for both rendering
 /// the strip and computing which one to scroll into view (`reveal_sidebar_tab`).
-pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 11] = [
+pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 12] = [
     ("FILES", SidebarTab::Files),
     ("SEARCH", SidebarTab::Search),
     ("FIND", SidebarTab::Semantic),
+    ("WALK", SidebarTab::Walk),
     ("MARKS", SidebarTab::Marks),
     ("TRAIL", SidebarTab::Trail),
+    ("HISTORY", SidebarTab::History),
     ("CALLS", SidebarTab::Calls),
     ("FLOW", SidebarTab::Flow),
     ("IMPORTS", SidebarTab::Imports),
-    ("WALK", SidebarTab::Walk),
     ("NOTES", SidebarTab::Notes),
     ("DOCS", SidebarTab::Docs),
 ];
 
 /// How many of [`SIDEBAR_TABS`] stand on the strip itself: the reader's
-/// everyday views. The rest open from what shows them — tracing a value,
-/// the import graph, a walkthrough, a symbol's docs — and from the command
-/// palette, each under a title of its own.
+/// everyday views, walkthroughs among them. The rest open from what shows
+/// them — a function's calls, tracing a value, the import graph, a symbol's
+/// docs — from the overflow, and from the command palette, each under a
+/// title of its own.
 pub(crate) const STRIP_VIEWS: usize = 6;
+
+/// The width of the ⋯ after the strip's views, which lists the rest.
+pub(crate) const MORE_VIEWS_W: f32 = 28.0;
+
+/// Where the strip's views stand: their top edge below the top bar, and
+/// their row's right edge (the ⋯'s) from the sidebar's left — what the
+/// More views menu hangs from.
+pub(crate) const VIEWS_ROW_TOP: f32 = 2.0;
+pub(crate) const VIEWS_ROW_RIGHT_PAD: f32 = 10.0 + 2.0;
+pub(crate) const VIEWS_ROW_H: f32 = 28.0 + 2.0 * 2.0;
 
 /// A view's icon on its tab.
 pub(crate) fn tab_glyph(tab: SidebarTab) -> Glyph {
@@ -41,6 +53,17 @@ pub(crate) fn tab_glyph(tab: SidebarTab) -> Glyph {
         SidebarTab::Walk => Glyph::Compass,
         SidebarTab::Notes => Glyph::Note,
         SidebarTab::Docs => Glyph::Book,
+        SidebarTab::History => Glyph::Branch,
+    }
+}
+
+/// The command that opens a view, when one does: its shortcut is said in
+/// the view's tooltip.
+pub(crate) fn tab_action(tab: SidebarTab) -> Option<crate::keymap::Action> {
+    match tab {
+        SidebarTab::Search => Some(crate::keymap::Action::ProjectSearch),
+        SidebarTab::Walk => Some(crate::keymap::Action::Walkthrough),
+        _ => None,
     }
 }
 
@@ -58,6 +81,7 @@ pub(crate) fn tab_name(tab: SidebarTab) -> &'static str {
         SidebarTab::Walk => tr!("Walkthroughs"),
         SidebarTab::Notes => tr!("Your notes"),
         SidebarTab::Docs => tr!("API docs"),
+        SidebarTab::History => tr!("History"),
     }
 }
 
@@ -66,49 +90,84 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
     super::heard::list();
     // The views as a segmented row of icons, each naming itself on hover;
     // the chosen one raised as a chip.
-    let segment = |glyph: Glyph, chosen: bool, name: &'static str, msg: Message| {
-        tip_at(
-            button(
-                container(glyph::icon(
-                    glyph,
-                    if chosen {
-                        theme::fg_bright()
-                    } else {
-                        theme::fg_muted()
-                    },
-                    15.0,
-                ))
+    let segment =
+        |glyph: Glyph, chosen: bool, name: &'static str, keys: Option<String>, msg: Message| {
+            tip_at(
+                button(
+                    container(glyph::icon(
+                        glyph,
+                        if chosen {
+                            theme::fg_bright()
+                        } else {
+                            theme::fg_muted()
+                        },
+                        15.0,
+                    ))
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(iced::Center)
+                    .align_y(iced::Center),
+                )
+                .style(theme::segment(chosen))
+                .padding(0)
                 .width(Fill)
-                .height(Fill)
-                .align_x(iced::Center)
-                .align_y(iced::Center),
+                .height(Length::Fixed(28.0))
+                .on_press(super::heard::said(name, msg)),
+                name,
+                keys,
+                tooltip::Position::Bottom,
             )
-            .style(theme::segment(chosen))
-            .padding(0)
-            .width(Fill)
-            .height(Length::Fixed(28.0))
-            .on_press(super::heard::said(name, msg)),
-            name,
-            None,
-            tooltip::Position::Bottom,
-        )
-    };
+        };
+    // A view not on the strip, opened by what shows it or from the ⋯.
+    let elsewhere = SIDEBAR_TABS
+        .iter()
+        .skip(STRIP_VIEWS)
+        .any(|(_, t)| *t == app.sidebar);
     let mut tabs_row = Row::new().spacing(2);
     for (_, this) in SIDEBAR_TABS.iter().take(STRIP_VIEWS) {
         tabs_row = tabs_row.push(segment(
             tab_glyph(*this),
             app.sidebar == *this,
             tab_name(*this),
+            tab_action(*this).map(|action| app.keymap.chord(action).caps()),
             Message::Window(WindowMsg::SidebarTabPicked(*this)),
         ));
     }
-    let tabs = container(tabs_row).padding(2).style(theme::trough);
+    // The views not on the strip, from a menu: raised while one of them
+    // shows, or the menu is open.
+    let more = tip_at(
+        button(
+            container(glyph::icon(
+                Glyph::More,
+                if elsewhere || app.show_views_menu {
+                    theme::fg_bright()
+                } else {
+                    theme::fg_muted()
+                },
+                15.0,
+            ))
+            .width(Fill)
+            .height(Fill)
+            .align_x(iced::Center)
+            .align_y(iced::Center),
+        )
+        .style(theme::segment(elsewhere || app.show_views_menu))
+        .padding(0)
+        .width(Length::Fixed(MORE_VIEWS_W))
+        .height(Length::Fixed(28.0))
+        .on_press(super::heard::said(
+            tr!("More views"),
+            Message::Window(WindowMsg::ToggleViewsMenu),
+        )),
+        tr!("More views"),
+        None,
+        tooltip::Position::Bottom,
+    );
+    let tabs = container(tabs_row.push(more))
+        .padding(2)
+        .style(theme::trough);
     // A view not on the strip, opened by what shows it, is named over it,
     // with the way back to the files.
-    let elsewhere = SIDEBAR_TABS
-        .iter()
-        .skip(STRIP_VIEWS)
-        .any(|(_, t)| *t == app.sidebar);
     let titled: Element<'_, Message> = if elsewhere {
         container(
             row![
@@ -150,52 +209,16 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
     // was pressed, and only deleting every letter brought the tree back.
     let filter: Element<'_, Message> =
         if app.sidebar == SidebarTab::Files && app.proj.project.is_some() {
-            let cleared = Message::Window(WindowMsg::FileFilterChanged(String::new()));
-            let mut field = row![
-                glyph::icon(Glyph::Filter, theme::dim(), 13.0),
-                ts::field_in(
-                    text_input(tr!("Filter files"), &app.file_filter)
-                        .id(super::file_filter_id())
-                        .on_input(|s| Message::Window(WindowMsg::FileFilterChanged(s)))
-                        .on_submit(Message::Window(WindowMsg::FileFilterSubmitted))
-                        .style(theme::bare_input),
-                    FILTER_H - 2.0,
-                    ts::INTER,
-                    ts::BODY,
-                ),
-            ]
-            .spacing(8)
-            .height(Fill)
-            .align_y(iced::Center);
-            if !app.file_filter.is_empty() {
-                field = field.push(tip_at(
-                    button(glyph::icon(Glyph::Close, theme::dim(), 12.0))
-                        .style(theme::toolbar_button)
-                        .padding(3)
-                        .on_press(super::heard::said(tr!("Clear filter"), cleared.clone())),
-                    tr!("Clear filter"),
-                    None,
-                    tooltip::Position::Bottom,
-                ));
-            }
-            container(
-                container(super::escape_clears::EscapeClears::new(
-                    field,
-                    Message::Window(WindowMsg::FileFilterEscaped),
-                ))
-                .height(Length::Fixed(FILTER_H))
-                // The design's 10 inside its 1 px border, which here takes
-                // no room of its own.
-                .padding([1, 11])
-                .style(theme::field(!app.file_filter.is_empty())),
+            filter_field(
+                tr!("Filter files"),
+                &app.file_filter,
+                Some(super::file_filter_id()),
+                |s| Message::Window(WindowMsg::FileFilterChanged(s)),
+                Some(Message::Window(WindowMsg::FileFilterSubmitted)),
+                Message::Window(WindowMsg::FileFilterEscaped),
+                // ↓ goes down to the tree under it — when it shows a row.
+                tree_has_rows(app).then_some(Message::Window(WindowMsg::FileFilterDown)),
             )
-            .padding(Padding {
-                top: 0.0,
-                right: 10.0,
-                bottom: SIDEBAR_GAP,
-                left: 10.0,
-            })
-            .into()
         } else {
             slot()
         };
@@ -212,6 +235,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
         SidebarTab::Walk => walk_tab(app),
         SidebarTab::Notes => notes_tab(app),
         SidebarTab::Docs => docs_tab(app),
+        SidebarTab::History => super::history::history_tab(app),
     };
 
     // Each tab's own widgets: tabs of one shape (a list in a scrollable)
@@ -240,40 +264,53 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
 pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     let header = walk_header(app);
     // A quick action to review the current branch/PR changes as a narrated tour.
+    // Where to start reading: the guide, opened when there is one, else
+    // written.
+    let guide = crate::walkthrough::GUIDE_SCOPE;
+    let has_guide = app.proj.walk.library.iter().any(|w| w.scope == guide);
+    let guide_msg = if has_guide {
+        Message::Walk(WalkMsg::Open(guide.to_string()))
+    } else {
+        Message::Walk(WalkMsg::Generate(guide.to_string()))
+    };
     let mut actions = column![
-        button(text(format!("\u{2387} {}", tr!("Review branch changes"))).size(ts::SMALL))
-            .style(theme::toolbar_button)
-            .padding([4, 10])
-            .width(Fill)
-            .on_press(super::heard::said(
-                tr!("Review branch changes"),
-                Message::Walk(WalkMsg::GenerateDiff)
-            )),
+        walk_action(
+            Glyph::Compass,
+            tr!("Where to start reading").to_string(),
+            None,
+            tr!("The AI writes a tour of where to start, what to read next, and where to end"),
+            (app.proj.walk.generating.as_deref() != Some(guide)).then_some(guide_msg),
+            !has_guide,
+        ),
+        // What it reviews is what its tour is then called: a branch's
+        // changes, or the last commit where the branch has none — said
+        // "Review branch changes", it made "Review changes (last commit)".
+        walk_action(
+            Glyph::Diff,
+            tr!("Review changes").to_string(),
+            None,
+            tr!("The AI writes a tour of this branch's changes, or of the last commit when there are none"),
+            Some(Message::Walk(WalkMsg::GenerateDiff)),
+            true,
+        ),
     ]
     .spacing(4);
     // The last debug run, once it stopped somewhere: a tour of the path it
     // actually took.
     if !app.debug.trace.is_empty() {
-        actions = actions.push(
-            button(
-                text(format!(
-                    "\u{25B6} {}",
-                    trn!(
-                        "Walk the last run (1 stop)",
-                        "Walk the last run ({n} stops)",
-                        app.debug.trace.len()
-                    )
-                ))
-                .size(ts::SMALL),
+        actions = actions.push(walk_action(
+            Glyph::Play,
+            trn!(
+                "Walk the last run (1 stop)",
+                "Walk the last run ({n} stops)",
+                app.debug.trace.len()
             )
-            .style(theme::toolbar_button)
-            .padding([4, 10])
-            .width(Fill)
-            .on_press(super::heard::said(
-                tr!("Walk the last run"),
-                Message::Walk(WalkMsg::GenerateTrace),
-            )),
-        );
+            .to_string(),
+            Some(tr!("Walk the last run").to_string()),
+            tr!("The AI writes a tour of the path the last run took"),
+            Some(Message::Walk(WalkMsg::GenerateTrace)),
+            true,
+        ));
     }
     let review = container(actions).padding(Padding {
         top: 0.0,
@@ -286,36 +323,143 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     // its steps inline (accordion) and its narration into the bottom pane — no
     // separate "back to library" navigation. Generation is shown per-row, so the
     // rest of the library stays usable while a tour is being built.
-    let list = walk_library(app);
     let Some(wt) = app.proj.walk.open_tour() else {
-        return column![header, review, hairline(), list]
+        return column![header, review, hairline(), walk_library(app)]
             .height(Fill)
             .into();
     };
 
-    let narration_block = walk_narration(app, wt);
     // The divider says where the pointer is in the window; the narration
-    // is inside its frame.
+    // is inside its frame. The narration as tall as the room leaves the
+    // list its steps (`narration_room`).
     let frame = app.window_frame;
-    column![
-        header,
-        review,
-        hairline(),
-        list,
-        crate::resize::Divider::horizontal(move |v| {
-            Message::Walk(WalkMsg::ResizeNarration(v - frame))
-        }),
-        narration_block,
-    ]
-    .height(Fill)
-    .into()
+    let set = app.walk_ui.narration_height;
+    // Built only when laid out, which a gathering of what voice can press
+    // never does: built once more for it, here, so the tours' rows and the
+    // narration's buttons are said as clicked.
+    if super::heard::gathering() {
+        drop(walk_library(app));
+        drop(walk_narration(app, wt, NARRATION_TALL));
+    }
+    let lower = iced::widget::responsive(move |room| {
+        column![
+            walk_library(app),
+            crate::resize::Divider::horizontal(move |v| {
+                Message::Walk(WalkMsg::ResizeNarration(v - frame))
+            }),
+            walk_narration(app, wt, narration_room(set, room.height)),
+        ]
+        .height(Fill)
+        .into()
+    });
+    column![header, review, hairline(), lower]
+        .height(Fill)
+        .into()
+}
+
+/// The most the open tour's narration takes until the reader sets it.
+const NARRATION_TALL: f32 = 240.0;
+/// The least it takes: its nav row and a line or two of its words.
+const NARRATION_SHORT: f32 = 90.0;
+/// The least the tours' list keeps above it: the open tour's row and a
+/// step or two under it.
+const STEPS_ROOM: f32 = 150.0;
+
+/// How tall the open tour's narration is, of `room` it shares with the
+/// list of tours above it: the height the reader `set` by the divider, or
+/// two fifths of the room up to [`NARRATION_TALL`] — each short of the
+/// list's [`STEPS_ROOM`]. 240 tall in any window, it left a short one's
+/// list (French, 1100×700) a tour's title, why it has fewer steps than
+/// stops, and half a step, over a narration of three lines and blank.
+pub(crate) fn narration_room(set: Option<f32>, room: f32) -> f32 {
+    let most = (room - STEPS_ROOM).max(NARRATION_SHORT);
+    set.unwrap_or_else(|| (room * 0.4).clamp(NARRATION_SHORT, NARRATION_TALL))
+        .min(most)
+}
+
+/// A tour's title as shown: a run's plain one ("Run: main.py", kept in
+/// English as made) said in the language spoken now — it stayed English
+/// beside French words — and as what it is, a debug run: "Run: main.py"
+/// over "Debug run (main.py)" said it two ways.
+pub(crate) fn walk_title(wt: &crate::walkthrough::Walkthrough) -> String {
+    match plain_run_of(wt) {
+        Some(program) => tr!("Debug run of {program}", program = program),
+        None => wt.title.clone(),
+    }
+}
+
+/// Why a run's tour has fewer steps than the run had stops, when it has:
+/// steps through one function make one step, and a stop outside the
+/// project makes none. `None` for any other tour, and for a run's whose
+/// every stop is a step.
+pub(crate) fn folded_stops(wt: &crate::walkthrough::Walkthrough) -> Option<String> {
+    // How many the run made: as kept with its steps, else (a tour saved
+    // before it was) at least the last one it kept — stops left out at
+    // the end, outside the project, went uncounted.
+    let stops = wt
+        .steps
+        .iter()
+        .filter_map(|s| s.stop.as_ref().map(|f| f.ordinal.max(f.of)))
+        .max()?;
+    let steps = wt.steps.len();
+    (stops > steps).then(|| {
+        trn!(
+            "1 step from {stops} stops: a function stepped through is one step, and stops outside the project are left out.",
+            "{n} steps from {stops} stops: a function stepped through is one step, and stops outside the project are left out.",
+            steps,
+            stops = stops
+        )
+    })
+}
+
+/// The program a run's tour made without a model is of: its title, as
+/// shown, already names it.
+fn plain_run_of(wt: &crate::walkthrough::Walkthrough) -> Option<&str> {
+    wt.scope
+        .strip_prefix("@trace ")
+        .filter(|program| wt.title == crate::walkthrough::plain_run_title(program))
+}
+
+/// A step's title as shown: a run's step made without a model named by its
+/// stop as well — "Stop 3: discounts", counted as the debug panel counts
+/// them — in the language spoken now. A breakpoint hit fourteen times in
+/// one function listed fourteen "discounts", and nothing told them apart.
+pub(crate) fn step_title(step: &crate::walkthrough::Step) -> String {
+    match &step.stop {
+        Some(facts) if step.symbol.as_deref() == Some(step.title.as_str()) => {
+            tr!("Stop {n}: {name}", n = facts.ordinal, name = step.title)
+        }
+        _ => step.title.clone(),
+    }
+}
+
+/// What a tour's row says under its title: its scope, and when a run's
+/// tour was made — "Debug run (main.py), 5 min ago", or "5 min ago" alone
+/// under "Debug run of main.py" — as every run of one program is named
+/// alike.
+pub(crate) fn walk_subtitle(wt: &crate::walkthrough::Walkthrough) -> String {
+    let scope = scope_label(&wt.scope);
+    let when = wt
+        .made
+        .map(|made| crate::app::ask_sessions::when(made, crate::app::ask_sessions::now()));
+    match when {
+        // Its title says what it is: under it, when ("5 min ago").
+        Some(when) if plain_run_of(wt).is_some() => when,
+        Some(when) => tr!("{what}, {when}", what = scope, when = when),
+        None => scope,
+    }
 }
 
 /// A human label for a walkthrough's scope: the whole codebase, a change review,
-/// a debug run, or the user's feature prompt.
+/// a debug run, or the user's feature prompt — each named as the action
+/// that makes it is, in the language spoken now.
 pub(crate) fn scope_label(scope: &str) -> String {
     if scope.is_empty() {
         tr!("Whole codebase").to_string()
+    } else if scope == crate::walkthrough::GUIDE_SCOPE {
+        // As its action says: "Reading guide" under "Where to start
+        // reading" read as another thing.
+        tr!("Where to start reading").to_string()
     } else if let Some(rest) = scope.strip_prefix("@trace") {
         match rest.trim() {
             "" => tr!("Debug run").to_string(),
@@ -323,8 +467,19 @@ pub(crate) fn scope_label(scope: &str) -> String {
         }
     } else if let Some(rest) = scope.strip_prefix("@diff") {
         match rest.trim() {
-            "" => tr!("Change review").to_string(),
-            label => tr!("Change review ({label})", label = label),
+            // The review on its way, before its branch is known: titled
+            // "Change review (changes)", it said "changes" twice.
+            // Named as the button that makes it: "Change review" under
+            // "Review changes" read as another thing.
+            _ if scope == crate::app::DIFF_SCOPE_PENDING => tr!("Review changes").to_string(),
+            "" => tr!("Review changes").to_string(),
+            // What it was against, as git's side wrote it in English:
+            // said in the language spoken now.
+            "last commit" => tr!("Review changes (last commit)").to_string(),
+            label => match label.strip_prefix("vs ") {
+                Some(base) => tr!("Review changes (vs {base})", base = base),
+                None => tr!("Review changes ({label})", label = label),
+            },
         }
     } else {
         scope.to_string()
@@ -334,7 +489,10 @@ pub(crate) fn scope_label(scope: &str) -> String {
 /// The top bar: a Search/Walk segmented toggle, the shared input, and (in Walk
 /// mode) a Generate button.
 pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
-    let is_search = app.walk_ui.mode == crate::WalkMode::Search;
+    // With no tour yet there is nothing to search: the tab opens on New,
+    // where it opened on an empty "Search walkthroughs…" field.
+    let empty = app.proj.walk.library.is_empty();
+    let is_search = app.walk_ui.mode == crate::WalkMode::Search && !empty;
     // Two segments, the mode in use raised; only the other is pressable (it
     // flips mode). On a line of its own — beside the field it left the field
     // too narrow to say what it is for — and across it, in halves, as tall
@@ -350,7 +508,9 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
         .padding([5, 0])
         .width(Fill)
         .on_press_maybe(
-            (!active).then(|| super::heard::said(label, Message::Walk(WalkMsg::ToggleMode))),
+            // With no tour, Search has nothing to search: not offered.
+            (!(active || (empty && label == tr!("Search"))))
+                .then(|| super::heard::said(label, Message::Walk(WalkMsg::ToggleMode))),
         )
     };
     let toggle =
@@ -362,7 +522,7 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
     let placeholder = if is_search {
         tr!("Search walkthroughs…")
     } else {
-        tr!("A feature, or leave empty for all")
+        tr!("A feature (optional)")
     };
     let mut input = text_input(placeholder, &app.walk_ui.input)
         .style(theme::input)
@@ -373,17 +533,28 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
         // Enter submits the same way the Generate button does ("" = whole codebase).
         input = input.on_submit(Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone())));
     }
-    let mut field = row![input].spacing(6).align_y(iced::Center);
+    let mut field = row![super::jump::field_named(input, placeholder)]
+        .spacing(6)
+        .align_y(iced::Center);
     if !is_search {
-        field = field.push(
-            button(text(tr!("Generate")).size(ts::SMALL))
-                .style(theme::secondary_button)
-                .padding([5, 10])
-                .on_press(super::heard::said(
-                    tr!("Generate"),
-                    Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone())),
-                )),
-        );
+        // It writes with the model: marked so, and said so where the
+        // pointer rests — Enter in the field does the same.
+        field = field.push(super::toolbar::tip_at(
+            button(super::toolbar::ai_words(
+                tr!("Generate"),
+                ts::SMALL,
+                theme::fg(),
+            ))
+            .style(theme::secondary_button)
+            .padding([5, 10])
+            .on_press(super::heard::said(
+                tr!("Generate"),
+                Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone())),
+            )),
+            tr!("The AI writes a tour of this feature, or of the whole codebase (one AI call)"),
+            None,
+            iced::widget::tooltip::Position::Bottom,
+        ));
     }
     container(column![toggle, field].spacing(8))
         .padding(8)
@@ -400,7 +571,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
     };
     let matches = |wt: &crate::walkthrough::Walkthrough| {
         query.is_empty()
-            || wt.title.to_lowercase().contains(&query)
+            || walk_title(wt).to_lowercase().contains(&query)
             || wt.scope.to_lowercase().contains(&query)
     };
 
@@ -413,16 +584,33 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         .filter(|(_, wt)| matches(wt))
         .collect();
 
-    // The scope currently generating, and — if it's a brand-new scope not yet in
-    // the library — the label for a temporary "pending" row at the top.
+    // The scope currently generating, and — if no row below shows it (a
+    // brand-new scope, or one a search hides) — a temporary "pending" row at
+    // the top, so what is being made, and its Stop, are always in sight.
     let gen_scope = app.proj.walk.generating.as_deref();
     let pending_new: Option<&str> =
-        gen_scope.filter(|s| !app.proj.walk.library.iter().any(|w| w.scope.as_str() == *s));
+        gen_scope.filter(|s| !visible.iter().any(|(_, w)| w.scope.as_str() == *s));
 
-    if app.proj.walk.library.is_empty() && pending_new.is_none() {
+    // A generation that failed, for a scope with no tour yet: its row stays,
+    // saying why, with a way to try again.
+    let failed = app
+        .proj
+        .walk
+        .failed
+        .as_ref()
+        .filter(|_| gen_scope.is_none());
+    let failed_new = failed.filter(|(scope, _)| {
+        !app.proj
+            .walk
+            .library
+            .iter()
+            .any(|w| w.scope.as_str() == scope.as_str())
+    });
+
+    if app.proj.walk.library.is_empty() && pending_new.is_none() && failed_new.is_none() {
         return empty_state(Glyph::Compass, tr!("No walkthroughs yet"), "", None);
     }
-    if visible.is_empty() && pending_new.is_none() {
+    if visible.is_empty() && pending_new.is_none() && failed_new.is_none() {
         return empty_state(Glyph::Search, tr!("No matches"), "", None);
     }
 
@@ -436,30 +624,138 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
     let mut list = Column::new().spacing(2).padding(8);
 
     // A new tour being generated shows a pending row until it lands in the library.
+    // Stoppable as a regenerated row is: a first tour, a change review and a
+    // first narration are made here, and had no control at all.
     if let Some(scope) = pending_new {
         let label = scope_label(scope);
+        let stop = super::toolbar::tip_at(
+            button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
+                .style(theme::toolbar_button)
+                .padding([7, 9])
+                .on_press(super::heard::said_to(
+                    tr!("Stop"),
+                    &label,
+                    Message::Walk(WalkMsg::Cancel),
+                )),
+            tr!("Stop generating it"),
+            None,
+            tooltip::Position::Bottom,
+        );
         list = list.push(
             container(
-                column![
-                    text(label).size(ts::BASE).color(theme::fg()),
-                    text(tr!("Generating…"))
-                        .size(ts::CAPTION)
-                        .color(theme::accent()),
+                row![
+                    column![
+                        text(label).size(ts::BASE).color(theme::fg()),
+                        text(tr!("Generating…"))
+                            .size(ts::CAPTION)
+                            .color(theme::accent()),
+                    ]
+                    .spacing(1)
+                    .width(Fill),
+                    stop,
                 ]
-                .spacing(1),
+                .spacing(4)
+                .align_y(iced::Center),
             )
             .width(Fill)
-            .padding([6, 8]),
+            .padding(Padding {
+                top: 6.0,
+                right: 0.0,
+                bottom: 6.0,
+                left: 8.0,
+            }),
         );
+    }
+
+    if let Some((scope, why)) = failed_new {
+        let label = scope_label(scope);
+        let retry = button(
+            text(tr!("Try again"))
+                .size(ts::SMALL)
+                .color(theme::accent()),
+        )
+        .style(theme::toolbar_button)
+        .padding([4, 8])
+        .on_press(super::heard::said_to(
+            tr!("Try again"),
+            &label,
+            Message::Walk(WalkMsg::again(scope)),
+        ));
+        let forget = button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
+            .style(theme::toolbar_button)
+            .padding([7, 9])
+            .on_press(super::heard::said_to(
+                tr!("Dismiss"),
+                &label,
+                Message::Walk(WalkMsg::ForgetFailure),
+            ));
+        // Where it points at a setting (the base URL, the key), the way
+        // there: beside Try again and as it is, not plain words on a line
+        // of their own.
+        let settings = crate::app::tasks::setting_to_fix(why).map(|field| {
+            button(text(tr!("Settings")).size(ts::SMALL).color(theme::accent()))
+                .style(theme::toolbar_button)
+                .padding([4, 8])
+                .on_press(super::heard::said(
+                    tr!("Settings"),
+                    Message::Settings(crate::SettingsMsg::Fix(field)),
+                ))
+        });
+        // Its title across the row, with only its × beside it; why it
+        // failed under that, and the ways forward under that, as Time
+        // Travel's failed band has them. Beside Try again and Settings the
+        // title was squeezed to a word a line ("Review / changes / (last /
+        // commit)"), "checkout" cut to "checkou" in French; and beside
+        // them the reason was a column a word or two wide, five lines tall.
+        let body = column![
+            row![
+                text(label)
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                    .width(Fill),
+                super::toolbar::tip_at(forget, tr!("Dismiss"), None, tooltip::Position::Bottom),
+            ]
+            .spacing(2)
+            .align_y(iced::Center),
+            // Kept as it failed, said in the language spoken now.
+            text(tr!(
+                "Failed: {reason}",
+                reason = crate::app::tasks::ai_reason(why)
+            ))
+            .size(ts::CAPTION)
+            .color(theme::danger())
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            .width(Fill),
+            row![retry]
+                .extend(settings.map(Element::from))
+                .spacing(2)
+                .align_y(iced::Center),
+        ]
+        .spacing(2);
+        list = list.push(container(body).width(Fill).padding([6, 8]));
     }
 
     for (_, wt) in visible {
         let is_open = app.proj.walk.open.as_deref() == Some(wt.scope.as_str());
         let busy = gen_scope == Some(wt.scope.as_str());
+        // Its regeneration failed: said under its title until it is asked
+        // for again (the tour it had is kept).
+        let failed_here = failed
+            .filter(|(scope, _)| scope.as_str() == wt.scope.as_str())
+            .map(|(_, why)| why);
         let (subtitle, sub_color) = if busy {
             (tr!("Generating…").to_string(), theme::accent())
+        } else if let Some(why) = failed_here {
+            (
+                tr!(
+                    "Couldn't regenerate it: {reason}",
+                    reason = crate::app::tasks::ai_reason(why)
+                ),
+                theme::danger(),
+            )
         } else {
-            (scope_label(&wt.scope), theme::dim())
+            (walk_subtitle(wt), theme::dim())
         };
         // The tour row: a full-width clickable title (so its selected highlight
         // spans the whole row) with the regenerate/delete controls layered on top
@@ -467,7 +763,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         // text never runs under the controls.
         let title = button(
             column![
-                text(wt.title.clone()).size(ts::BASE).color(if is_open {
+                text(walk_title(wt)).size(ts::BASE).color(if is_open {
                     theme::fg_bright()
                 } else {
                     theme::fg()
@@ -480,68 +776,143 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         .width(Fill)
         .padding(Padding {
             top: 6.0,
-            right: if busy { 8.0 } else { 62.0 },
+            right: if busy { 36.0 } else { 62.0 },
             bottom: 6.0,
             left: 8.0,
         })
         .on_press(super::heard::row(
-            || scope_label(&wt.scope),
+            || walk_title(wt),
             if is_open {
                 Message::Walk(WalkMsg::Back)
             } else {
                 Message::Walk(WalkMsg::Open(wt.scope.clone()))
             },
         ));
-        let tour_row: Element<'_, Message> = if busy {
-            title.into()
+        // Each control says what it does where the pointer rests: ↻ (paid)
+        // and × (gone for good) looked alike, and said nothing.
+        let tip = |control: Element<'static, Message>, words: &'static str| {
+            super::toolbar::tip_at(control, words, None, tooltip::Position::Bottom)
+        };
+        let controls: Element<'_, Message> = if busy {
+            // Stoppable while it is made: the row had no control at all.
+            tip(
+                button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
+                    .style(theme::toolbar_button)
+                    .padding([7, 9])
+                    .on_press(super::heard::said_to_with(
+                        tr!("Stop"),
+                        || walk_title(wt),
+                        Message::Walk(WalkMsg::Cancel),
+                    ))
+                    .into(),
+                tr!("Stop generating it"),
+            )
         } else {
-            let controls = container(
-                row![
-                    button(text("↻").size(ts::BASE))
-                        .style(theme::toolbar_button)
-                        .padding([6, 9])
-                        .on_press(super::heard::said_to(
-                            tr!("Regenerate"),
-                            &scope_label(&wt.scope),
-                            Message::Walk(WalkMsg::Regenerate(wt.scope.clone()))
-                        )),
+            // A debug run's tour is made again only from the run it records.
+            let again = app.can_regenerate(&wt.scope);
+            let regenerate = button(glyph::icon(
+                Glyph::Refresh,
+                if again { theme::accent() } else { theme::dim() },
+                13.0,
+            ))
+            .style(theme::toolbar_button)
+            .padding([6, 9])
+            .on_press_maybe(again.then(|| {
+                super::heard::said_to_with(
+                    tr!("Regenerate"),
+                    || walk_title(wt),
+                    Message::Walk(WalkMsg::Regenerate(wt.scope.clone())),
+                )
+            }));
+            row![
+                tip(
+                    regenerate.into(),
+                    if !again {
+                        tr!(
+                            "This walkthrough records a debug run — debug the program again to record a new one"
+                        )
+                    } else if wt.scope.starts_with("@trace ") {
+                        // It takes the last run of the program, which may
+                        // not be the one this tour records: said, as it
+                        // replaces this one.
+                        tr!("Replace with the last run, narrated with AI (one AI call)")
+                    } else {
+                        tr!("Regenerate with AI (one AI call)")
+                    },
+                ),
+                tip(
                     button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
                         .style(theme::toolbar_button)
                         .padding([7, 9])
-                        .on_press(super::heard::said_to(
+                        .on_press(super::heard::said_to_with(
                             tr!("Delete"),
-                            &scope_label(&wt.scope),
-                            Message::Walk(WalkMsg::Delete(wt.scope.clone()))
-                        )),
-                ]
-                .spacing(2),
-            )
-            .width(Fill)
-            .height(Fill)
-            .align_x(iced::Right)
-            .align_y(iced::Center)
-            .padding(Padding {
-                top: 0.0,
-                right: 6.0,
-                bottom: 0.0,
-                left: 0.0,
-            });
+                            || walk_title(wt),
+                            Message::Walk(WalkMsg::Delete(wt.scope.clone())),
+                        ))
+                        .into(),
+                    tr!("Delete this walkthrough"),
+                ),
+            ]
+            .spacing(2)
+            .into()
+        };
+        let tour_row: Element<'_, Message> = {
+            let controls = container(controls)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::Right)
+                .align_y(iced::Center)
+                .padding(Padding {
+                    top: 0.0,
+                    right: 6.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                });
             stack![title, controls].into()
         };
         list = list.push(tour_row);
 
         // Expanded: the tour's steps, indented, current one highlighted.
         if is_open {
+            // A run's tour has fewer steps than the run had stops: said
+            // why, above them — "Stop 1" then "Stop 4" said nothing of 2
+            // and 3, under "Walk the last run (4 stops)".
+            if let Some(why) = folded_stops(wt) {
+                list = list.push(
+                    container(
+                        text(why)
+                            .size(ts::CAPTION)
+                            .color(theme::dim())
+                            .wrapping(iced::widget::text::Wrapping::Word),
+                    )
+                    .padding(Padding {
+                        top: 2.0,
+                        right: 8.0,
+                        bottom: 4.0,
+                        left: 22.0,
+                    }),
+                );
+            }
+            // A reading guide is a tree: each step under the one it is read
+            // from, by its depth, with a branch mark where a tour numbers it.
+            let tree = crate::walkthrough::is_guide(wt);
             for (si, step) in wt.steps.iter().enumerate() {
                 let is_cur = cur == Some(si);
+                let (mark, indent) = if tree {
+                    let mark = if step.depth == 0 {
+                        "\u{25C9}"
+                    } else {
+                        "\u{2514}"
+                    };
+                    (mark.to_string(), 14.0 * step.depth as f32)
+                } else {
+                    (format!("{}", si + 1), 0.0)
+                };
                 list = list.push(
                     button(
                         row![
-                            text(format!("{}", si + 1))
-                                .size(ts::CAPTION)
-                                .color(theme::dim())
-                                .width(18),
-                            text(step.title.clone()).size(ts::BODY).color(if is_cur {
+                            text(mark).size(ts::CAPTION).color(theme::dim()).width(18),
+                            text(step_title(step)).size(ts::BODY).color(if is_cur {
                                 theme::fg()
                             } else {
                                 theme::dim()
@@ -556,10 +927,10 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                         top: 4.0,
                         right: 8.0,
                         bottom: 4.0,
-                        left: 22.0,
+                        left: 22.0 + indent,
                     })
                     .on_press(super::heard::row(
-                        || step.title.clone(),
+                        || step_title(step),
                         Message::Walk(WalkMsg::Goto {
                             scope: wt.scope.clone(),
                             step: si,
@@ -582,6 +953,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
 pub(crate) fn walk_narration<'a>(
     app: &'a App,
     wt: &'a crate::walkthrough::Walkthrough,
+    height: f32,
 ) -> Element<'a, Message> {
     let n = wt.steps.len();
     let cur = app.proj.walk.step.min(n.saturating_sub(1));
@@ -594,13 +966,19 @@ pub(crate) fn walk_narration<'a>(
             .size(ts::CAPTION)
             .color(theme::accent()),
         space().width(Fill),
-        button(text("‹").size(ts::EMPHASIS))
-            .style(theme::toolbar_button)
-            .padding([1, 8])
-            .on_press(super::heard::said(
-                tr!("Previous step"),
-                Message::Walk(WalkMsg::Step(-1))
-            )),
+        // Named where the pointer rests, and nothing to press at either
+        // end: at "1/1" both stayed lit, and did nothing.
+        super::toolbar::tip_at(
+            button(text("‹").size(ts::EMPHASIS))
+                .style(theme::toolbar_button)
+                .padding([1, 8])
+                .on_press_maybe((cur > 0).then(|| {
+                    super::heard::said(tr!("Previous step"), Message::Walk(WalkMsg::Step(-1)))
+                })),
+            tr!("Previous step"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        ),
         // As wide as it reads at the last step: the ‹ before it moved as
         // the count gained a digit, under the pointer stepping through.
         {
@@ -612,13 +990,35 @@ pub(crate) fn walk_narration<'a>(
                 ts::SMALL,
             )
         },
-        button(text("›").size(ts::EMPHASIS))
+        super::toolbar::tip_at(
+            button(text("›").size(ts::EMPHASIS))
+                .style(theme::toolbar_button)
+                .padding([1, 8])
+                .on_press_maybe((cur + 1 < n).then(|| {
+                    super::heard::said(tr!("Next step"), Message::Walk(WalkMsg::Step(1)))
+                })),
+            tr!("Next step"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        ),
+        // The tour put away, back to the list of them: only a second
+        // click on its row in the list did that.
+        super::toolbar::tip_at(
+            button(crate::glyph::icon(
+                crate::glyph::Glyph::Close,
+                theme::fg_muted(),
+                10.0
+            ))
             .style(theme::toolbar_button)
-            .padding([1, 8])
+            .padding([4, 6])
             .on_press(super::heard::said(
-                tr!("Next step"),
-                Message::Walk(WalkMsg::Step(1))
+                tr!("Close"),
+                Message::Walk(WalkMsg::Back)
             )),
+            tr!("Close"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        ),
     ]
     .spacing(6)
     .align_y(iced::Center)
@@ -641,7 +1041,7 @@ pub(crate) fn walk_narration<'a>(
     };
 
     let body: Element<'_, Message> = if app.proj.walk.prepared.is_empty() {
-        text(step.narration.clone())
+        text(step.said().into_owned())
             .size(ts::BODY)
             .color(theme::fg())
             .width(Fill)
@@ -668,7 +1068,7 @@ pub(crate) fn walk_narration<'a>(
     );
 
     container(column![nav, note, narration])
-        .height(Length::Fixed(app.walk_ui.narration_height))
+        .height(Length::Fixed(height))
         .into()
 }
 
@@ -679,6 +1079,20 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
         // welcome hero, so the sidebar just states what's going on.
         return if app.scanning {
             empty_state(Glyph::Search, tr!("Scanning…"), "", None)
+        } else if let Some(root) = &app.pending_consent {
+            // The first-open sheet is up for it: "No folder open / Open a
+            // folder to start reading" behind "Open teashop" said the
+            // opposite of the sheet.
+            let name = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.display().to_string());
+            empty_state(
+                Glyph::Folder,
+                &tr!("Opening {name}…", name = name),
+                "",
+                None,
+            )
         } else if app.connection.is_remote() {
             empty_state(
                 Glyph::Remote,
@@ -696,17 +1110,27 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
         };
     };
 
+    // A folder with nothing in it Clew reads says so: the tree stood
+    // blank, as if still loading.
+    // In a line: the pane beside it says why, with the way to another
+    // folder — the same words in both was noise.
+    if project.tree.dirs.is_empty() && project.tree.files.is_empty() {
+        return compact_empty_state(Glyph::Folder, tr!("Nothing here to read"));
+    }
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let filter = app.file_filter.trim();
+    // The row the keyboard rests on, drawn so while the tree has it.
+    let cursor = app.tree_cursor_rel();
+    let cursor = cursor.as_deref();
     if filter.is_empty() {
-        append_tree_rows(&mut rows, &project.tree, "", 0, app);
+        append_tree_rows(&mut rows, &project.tree, "", 0, app, cursor);
     } else {
-        filtered_file_rows(&mut rows, project, filter, app);
+        filtered_file_rows(&mut rows, project, filter, app, cursor);
         if rows.is_empty() {
             return empty_state(Glyph::Filter, tr!("No matching files"), "", None);
         }
     }
-    scrollable(
+    let tree = scrollable(
         container(
             Column::with_children(rows)
                 .spacing(TREE_ROW_GAP)
@@ -728,8 +1152,31 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
     })
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)
-    .height(Fill)
-    .into()
+    .height(Fill);
+    // A right-click on a row opens its menu where the click was: the row
+    // says which (`mouse_area`), this says where, in the window.
+    let tree = super::RightPress::new(tree, |at| {
+        Message::Project(ProjectMsg::TreeMenuAt { x: at.x, y: at.y })
+    });
+    // Something over the tree holding the keys takes them from it.
+    let held_above =
+        super::active_overlay(app).is_some_and(|o| o.holds_keys()) || app.tutorial.is_some();
+    // Where the row the keyboard rests on is, scrolled: ⇧F10 opens its
+    // menu there.
+    let cursor_row_y = {
+        let rows = super::tree_rows(app);
+        app.tree_cursor_at(&rows).map(|at| {
+            let scrolled = app.proj.tree_scroll.map_or(0.0, |(offset, _)| offset);
+            at as f32 * (TREE_ROW_H + TREE_ROW_GAP) - scrolled
+        })
+    };
+    // Named for the ring, as the view it is: the status bar was blank on it.
+    super::jump::field_named(
+        super::tree_keys::TreeKeys::new(tree, super::files_tree_keys_id())
+            .release(app.code_focused || held_above)
+            .cursor_row_y(cursor_row_y),
+        tr!("Files"),
+    )
 }
 
 /// What the working tree changes in the file at `rel`, as git letters it —
@@ -746,21 +1193,44 @@ pub(crate) fn file_change_mark<'a>(app: &App, rel: &str) -> Element<'a, Message>
     }
 }
 
-/// A folder holding a change: a dot, as editors mark one.
-fn dir_change_mark<'a>(app: &App, rel: &str) -> Element<'a, Message> {
+/// A folder holding a change: a dot, as editors mark one. `node` is the
+/// folder as the tree lays it out.
+fn dir_change_mark<'a>(app: &App, rel: &str, node: &DirNode) -> Element<'a, Message> {
     let inside = format!("{rel}/");
-    if app
+    // Only what the tree shows inside: a dot for `__pycache__/*.pyc`, which
+    // the tree hides, or for a file deleted, led nowhere when the folder was
+    // opened.
+    let changed = app
         .proj
         .git_status
         .keys()
-        .any(|changed| changed.starts_with(&inside))
-    {
+        .filter_map(|changed| changed.strip_prefix(&inside))
+        .filter(|under| tree_holds(node, under))
+        .count();
+    if changed == 0 {
+        return space().width(0).into();
+    }
+    super::toolbar::tip_at(
         text("●")
             .size(ts::CAPTION)
-            .color(theme::with_alpha(theme::warning(), 0.8))
-            .into()
-    } else {
-        space().width(0).into()
+            .color(theme::with_alpha(theme::warning(), 0.8)),
+        trn!("1 changed file inside", "{n} changed files inside", changed),
+        None,
+        iced::widget::tooltip::Position::Right,
+    )
+}
+
+/// Whether the tree under `node` shows the file at `rel`, relative to it.
+/// Not a rule of folder names: a tracked file in a folder the tree leaves
+/// out is listed all the same.
+pub(crate) fn tree_holds(node: &DirNode, rel: &str) -> bool {
+    match rel.split_once('/') {
+        Some((dir, rest)) => node
+            .dirs
+            .iter()
+            .find(|(name, _)| name == dir)
+            .is_some_and(|(_, child)| tree_holds(child, rest)),
+        None => node.files.iter().any(|f| f == rel),
     }
 }
 
@@ -771,6 +1241,73 @@ fn change_color(letter: char) -> iced::Color {
         'D' | '!' => theme::danger(),
         'R' => theme::info(),
         _ => theme::warning(),
+    }
+}
+
+/// A row of the Files view as the keyboard walks it: its path, and whether
+/// it is a folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TreeRow {
+    pub rel: String,
+    pub dir: bool,
+}
+
+/// The rows the Files view shows, in its order: the tree with its open
+/// folders' rows (as [`append_tree_rows`] lays them out), or, filtered, the
+/// files the filter lists.
+pub(crate) fn tree_rows(app: &App) -> Vec<TreeRow> {
+    let Some(project) = &app.proj.project else {
+        return Vec::new();
+    };
+    let filter = app.file_filter.trim();
+    if !filter.is_empty() {
+        return filtered_files(project, filter)
+            .map(|f| TreeRow {
+                rel: f.rel.clone(),
+                dir: false,
+            })
+            .collect();
+    }
+    fn walk(
+        node: &DirNode,
+        prefix: &str,
+        expanded: &std::collections::HashSet<String>,
+        rows: &mut Vec<TreeRow>,
+    ) {
+        for (name, child) in &node.dirs {
+            let rel = join_rel(prefix, name);
+            let open = expanded.contains(&rel);
+            rows.push(TreeRow {
+                rel: rel.clone(),
+                dir: true,
+            });
+            if open {
+                walk(child, &rel, expanded, rows);
+            }
+        }
+        for name in &node.files {
+            rows.push(TreeRow {
+                rel: join_rel(prefix, name),
+                dir: false,
+            });
+        }
+    }
+    let mut rows = Vec::new();
+    walk(&project.tree, "", &app.proj.expanded, &mut rows);
+    rows
+}
+
+/// Whether the Files view shows any row for the keyboard to rest on: a
+/// file the filter lists, or, unfiltered, anything in the project.
+pub(crate) fn tree_has_rows(app: &App) -> bool {
+    let Some(project) = &app.proj.project else {
+        return false;
+    };
+    let filter = app.file_filter.trim();
+    if filter.is_empty() {
+        !project.tree.dirs.is_empty() || !project.tree.files.is_empty()
+    } else {
+        filtered_files(project, filter).next().is_some()
     }
 }
 
@@ -829,6 +1366,13 @@ pub(crate) fn filtered_files<'a>(
         .take(FILTER_LIMIT)
 }
 
+/// Whether the file tree's menu is open on the row for `rel`: that row is
+/// ringed while it is, as the keys' row is — lit, the open file's row read
+/// as the one the menu was for.
+fn menu_on(app: &App, rel: &str) -> bool {
+    app.proj.tree_menu.as_ref().is_some_and(|m| m.rel == rel)
+}
+
 /// The Files view narrowed by its filter: every file whose path holds it
 /// (any case), as its name with its folder beside it.
 fn filtered_file_rows<'a>(
@@ -836,42 +1380,54 @@ fn filtered_file_rows<'a>(
     project: &'a crate::Project,
     filter: &str,
     app: &'a App,
+    cursor: Option<&str>,
 ) {
     for f in filtered_files(project, filter) {
         let (folder, name) = f.rel.rsplit_once('/').unwrap_or(("", f.rel.as_str()));
         let is_current = app.active_viewer().is_some_and(|v| v.rel == f.rel);
+        let menu = Message::Project(ProjectMsg::TreeMenuFor {
+            rel: f.rel.clone(),
+            dir: false,
+        });
         rows.push(
-            button(
-                row![
-                    quiet_icon(Glyph::File, theme::dim()),
-                    text(crate::highlight::in_order(name))
-                        .size(ts::BASE)
-                        .color(if is_current {
-                            theme::fg_bright()
-                        } else {
-                            theme::fg()
-                        })
-                        .wrapping(Wrapping::None),
-                    text(crate::highlight::in_order(folder))
-                        .size(ts::SMALL)
-                        .color(theme::dim())
-                        .wrapping(Wrapping::None),
-                    space().width(Fill),
-                    file_change_mark(app, &f.rel),
-                ]
-                .spacing(6)
-                .align_y(iced::Center),
+            mouse_area(
+                button(
+                    row![
+                        quiet_icon(Glyph::File, theme::dim()),
+                        text(crate::highlight::in_order(name))
+                            .size(ts::BASE)
+                            .color(if is_current {
+                                theme::fg_bright()
+                            } else {
+                                theme::fg()
+                            })
+                            .wrapping(Wrapping::None),
+                        text(crate::highlight::in_order(folder))
+                            .size(ts::SMALL)
+                            .color(theme::dim())
+                            .wrapping(Wrapping::None),
+                        space().width(Fill),
+                        file_change_mark(app, &f.rel),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Center),
+                )
+                .style(theme::tree_row(
+                    is_current,
+                    cursor == Some(f.rel.as_str()) || menu_on(app, &f.rel),
+                ))
+                .width(Fill)
+                .height(Length::Fixed(TREE_ROW_H))
+                .padding([0, 8])
+                .on_press(super::heard::row(
+                    || f.rel.clone(),
+                    Message::Editor(EditorMsg::OpenRel {
+                        rel: f.rel.clone(),
+                        line: None,
+                    }),
+                )),
             )
-            .style(theme::list_row(is_current))
-            .width(Fill)
-            .padding([4, 8])
-            .on_press(super::heard::row(
-                || f.rel.clone(),
-                Message::Editor(EditorMsg::OpenRel {
-                    rel: f.rel.clone(),
-                    line: None,
-                }),
-            ))
+            .on_right_press(menu)
             .into(),
         );
     }
@@ -901,6 +1457,7 @@ pub(crate) fn append_tree_rows<'a>(
     prefix: &str,
     depth: u16,
     app: &'a App,
+    cursor: Option<&str>,
 ) {
     let indent = 6.0 + depth as f32 * 14.0;
     let pad = Padding {
@@ -936,25 +1493,34 @@ pub(crate) fn append_tree_rows<'a>(
                 ts::BASE,
             ),
             space().width(Fill),
-            dir_change_mark(app, &rel),
+            dir_change_mark(app, &rel, child),
         ]
         .spacing(6)
         .height(Fill)
         .align_y(iced::Center);
         rows.push(
-            button(content)
-                .style(theme::list_row(false))
-                .width(Fill)
-                .height(Length::Fixed(TREE_ROW_H))
-                .padding(pad)
-                .on_press(super::heard::row(
-                    || name.to_string(),
-                    Message::Project(ProjectMsg::ToggleDir(rel.clone())),
-                ))
-                .into(),
+            mouse_area(
+                button(content)
+                    .style(theme::tree_row(
+                        false,
+                        cursor == Some(rel.as_str()) || menu_on(app, &rel),
+                    ))
+                    .width(Fill)
+                    .height(Length::Fixed(TREE_ROW_H))
+                    .padding(pad)
+                    .on_press(super::heard::row(
+                        || name.to_string(),
+                        Message::Project(ProjectMsg::ToggleDir(rel.clone())),
+                    )),
+            )
+            .on_right_press(Message::Project(ProjectMsg::TreeMenuFor {
+                rel: rel.clone(),
+                dir: true,
+            }))
+            .into(),
         );
         if expanded {
-            append_tree_rows(rows, child, &rel, depth + 1, app);
+            append_tree_rows(rows, child, &rel, depth + 1, app, cursor);
         }
     }
 
@@ -1006,17 +1572,28 @@ pub(crate) fn append_tree_rows<'a>(
         .spacing(6)
         .height(Fill)
         .align_y(iced::Center);
+        let style = theme::tree_row(
+            is_current,
+            cursor == Some(rel.as_str()) || menu_on(app, &rel),
+        );
+        let menu = Message::Project(ProjectMsg::TreeMenuFor {
+            rel: rel.clone(),
+            dir: false,
+        });
         rows.push(
-            button(content)
-                .style(theme::list_row(is_current))
-                .width(Fill)
-                .height(Length::Fixed(TREE_ROW_H))
-                .padding(pad)
-                .on_press(super::heard::row(
-                    || name.to_string(),
-                    Message::Editor(EditorMsg::OpenRel { rel, line: None }),
-                ))
-                .into(),
+            mouse_area(
+                button(content)
+                    .style(style)
+                    .width(Fill)
+                    .height(Length::Fixed(TREE_ROW_H))
+                    .padding(pad)
+                    .on_press(super::heard::row(
+                        || name.to_string(),
+                        Message::Editor(EditorMsg::OpenRel { rel, line: None }),
+                    )),
+            )
+            .on_right_press(menu)
+            .into(),
         );
     }
 }
@@ -1069,9 +1646,20 @@ pub(crate) fn tree_icon(glyph: char, color: iced::Color) -> Element<'static, Mes
 /// and an optional action button — so every "nothing here yet" screen matches.
 pub(crate) fn empty_state<'a>(
     g: Glyph,
-    title: &'a str,
-    subtitle: &'a str,
-    action: Option<(&'a str, Message)>,
+    title: &str,
+    subtitle: &str,
+    action: Option<(&str, Message)>,
+) -> Element<'a, Message> {
+    empty_state_saying(g, title, subtitle, action.map(|(l, m)| (l.to_string(), m)))
+}
+
+/// [`empty_state`] whose action's label is made as it is drawn ("Show for
+/// total()").
+pub(crate) fn empty_state_saying<'a>(
+    g: Glyph,
+    title: &str,
+    subtitle: &str,
+    action: Option<(String, Message)>,
 ) -> Element<'a, Message> {
     let mut col = column![
         glyph::icon(g, theme::empty_state_icon(), 42.0),
@@ -1096,10 +1684,12 @@ pub(crate) fn empty_state<'a>(
     if let Some((label, msg)) = action {
         col = col.push(space().height(10));
         col = col.push(
-            button(text(label.to_string()).size(ts::BASE))
-                .style(theme::toolbar_button)
+            // A button at rest too: plain words until hovered, the one way
+            // on from an empty page was hard to find.
+            button(text(label.clone()).size(ts::BASE))
+                .style(theme::secondary_button)
                 .padding([7, 16])
-                .on_press(super::heard::said(label, msg)),
+                .on_press(super::heard::said(&label, msg)),
         );
     }
     center(col).padding(20).into()
@@ -1144,6 +1734,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         .on_submit(Message::Nav(NavMsg::SearchSubmitted))
         .size(ts::BASE)
         .padding(7);
+    let input = super::jump::field_named(input, tr!("Search text…"));
 
     // Match-option toggles: case-sensitive, whole-word, regex — as round as
     // the fields, outlined while off, filled in the accent while on. Beside
@@ -1198,12 +1789,14 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     .on_submit(Message::Nav(NavMsg::SearchSubmitted))
     .size(ts::BODY)
     .padding(5);
+    let include = super::jump::field_named(include, tr!("files to include (e.g. src/**)"));
     let exclude = text_input(tr!("files to exclude"), &app.proj.search.exclude)
         .style(theme::input)
         .on_input(|v| Message::Nav(NavMsg::SearchExcludeChanged(v)))
         .on_submit(Message::Nav(NavMsg::SearchSubmitted))
         .size(ts::BODY)
         .padding(5);
+    let exclude = super::jump::field_named(exclude, tr!("files to exclude"));
 
     let status_line = if let Some(err) = &app.proj.search.error {
         // As clew-core, or the host, said it: in the reader's language.
@@ -1228,6 +1821,12 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let mut last_rel: Option<&str> = None;
+    // What a preview has beside its line number, inside the view's and the
+    // row's padding and clear of the scrollbar: a longer line is cut there
+    // with an ellipsis, not clipped mid-letter at the panel's edge.
+    let preview_room =
+        (app.sidebar_width - 2.0 * 8.0 - (8.0 + 6.0) - (36.0 + 4.0) - crate::ui::SCROLLBAR_W - 2.0)
+            .max(0.0);
     for (i, hit) in app.proj.search.hits.iter().enumerate() {
         if last_rel != Some(hit.rel.as_str()) {
             last_rel = Some(hit.rel.as_str());
@@ -1240,7 +1839,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                         .size(ts::SMALL)
                         .color(theme::dim())
                         .width(36),
-                    search_preview(app, i, &hit.preview),
+                    search_preview(app, i, &hit.preview, preview_room),
                 ]
                 .spacing(4),
             )
@@ -1254,10 +1853,10 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
             })
             .on_press(super::heard::row(
                 || format!("{} {}", hit.rel, hit.line),
-                Message::Editor(EditorMsg::OpenAbs {
+                Message::Editor(EditorMsg::OpenHit {
                     abs: hit.abs.clone(),
-                    line: Some(hit.line),
-                    push: true,
+                    line: hit.line,
+                    at: app.proj.search.at.get(i).copied(),
                 }),
             ))
             .into(),
@@ -1269,9 +1868,11 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     // back to the search: it took the search's place under the search's
     // own empty fields, "(references)" the only word of what it was.
     let mut col = match &app.proj.search.listing {
+        // Named when it was made, maybe in another language: said in the
+        // reader's ("References to “cents”" stayed English in French).
         Some(list) => column![
             row![
-                text(list.clone())
+                text(crate::i18n::message(list))
                     .size(ts::BASE)
                     .color(theme::fg())
                     .wrapping(Wrapping::WordOrGlyph)
@@ -1305,7 +1906,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
 /// (`SearchState::styled`), what the search matched — or the symbol a
 /// reference list is of — marked as the code view marks a find. It was
 /// plain text, and the reader had to look for the match along the line.
-fn search_preview<'a>(app: &'a App, i: usize, preview: &'a str) -> Element<'a, Message> {
+fn search_preview<'a>(app: &'a App, i: usize, preview: &'a str, room: f32) -> Element<'a, Message> {
     // As the code view draws the line, wherever the preview came from — the
     // server's search, a reference read from disk or from an open pane: a
     // direction control in it reordered it here.
@@ -1342,7 +1943,7 @@ fn search_preview<'a>(app: &'a App, i: usize, preview: &'a str) -> Element<'a, M
             .map(|m| m.ranges_in_preview(&shown))
             .unwrap_or_default(),
     };
-    let pieces = mark_spans(spans, &marks);
+    let pieces = fit_pieces(mark_spans(spans, &marks), &shown, room);
     let mark = theme::with_alpha(theme::find(), 0.35);
     let spans: Vec<iced::widget::text::Span<'static, Message>> = pieces
         .into_iter()
@@ -1364,6 +1965,38 @@ fn search_preview<'a>(app: &'a App, i: usize, preview: &'a str) -> Element<'a, M
     iced::widget::rich_text(spans)
         .wrapping(Wrapping::None)
         .into()
+}
+
+/// `pieces` of `shown` as they fit in `room`: whole, or as many of their
+/// characters as `steady::cut` keeps, an ellipsis after them — each piece
+/// keeping its colour and its mark.
+pub(crate) fn fit_pieces(
+    pieces: Vec<(String, Option<u8>, bool)>,
+    shown: &str,
+    room: f32,
+) -> Vec<(String, Option<u8>, bool)> {
+    // One look-up a row once cut: the cut is kept (`steady::cut`).
+    let cut = super::steady::cut(shown, room, ts::BODY, crate::fonts::UI);
+    if cut == shown {
+        return pieces;
+    }
+    let mut keep = cut.chars().count().saturating_sub(1);
+    let mut out = Vec::new();
+    for (piece, style, marked) in pieces {
+        if keep == 0 {
+            break;
+        }
+        let n = piece.chars().count();
+        if n <= keep {
+            keep -= n;
+            out.push((piece, style, marked));
+        } else {
+            out.push((piece.chars().take(keep).collect(), style, marked));
+            keep = 0;
+        }
+    }
+    out.push(("…".to_string(), None, false));
+    out
 }
 
 /// `spans` cut where `marks` (byte ranges of their joined text) begin and
@@ -1402,6 +2035,43 @@ pub(crate) fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> Strin
     if let Some(name) = label {
         return name.to_string();
     }
+    file_stop_label(loc)
+}
+
+/// A trail stop as the trail's views name it: a function with `()` — as the
+/// reading trail over the code says it; the sidebar said "cents" where the
+/// row over the code said "cents()" — anything else by its name, a file by
+/// its file name and line.
+pub(crate) fn stop_label(app: &App, loc: &crate::history::Loc, label: Option<&str>) -> String {
+    match label {
+        Some(name)
+            if app
+                .proj
+                .symbol_index_by_file
+                .get(&loc.path)
+                .is_some_and(|symbols| {
+                    symbols
+                        .iter()
+                        .any(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))
+                }) =>
+        {
+            format!("{name}()")
+        }
+        // A stop recorded by its line: the function it was in, and the
+        // line — "pricing.py:20" did not say it was inside discounts().
+        None => match loc
+            .line
+            .and_then(|line| Some((app.function_around(&loc.path, line)?, line)))
+        {
+            Some((name, line)) => format!("{name}():{line}"),
+            None => loc_label(loc, label),
+        },
+        _ => loc_label(loc, label),
+    }
+}
+
+/// A file's stop: its name, and its line when it has one.
+fn file_stop_label(loc: &crate::history::Loc) -> String {
     let base = loc.path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
     match loc.line {
         Some(l) => format!("{base}:{l}"),
@@ -1415,7 +2085,16 @@ pub(crate) fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> Strin
 /// click a node to jump. Rows are the panel's width, as the file tree's are;
 /// a name too long for it is cut at the edge.
 pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
-    let visits = app.proj.history.flatten_with(&app.proj.trail_collapsed);
+    // Files found no longer there are left out of it, as the sheet's trail
+    // row leaves them: listed here, a press on one said only the system's
+    // error.
+    let visits: Vec<_> = app
+        .proj
+        .history
+        .flatten_with(&app.proj.trail_collapsed)
+        .into_iter()
+        .filter(|v| !app.proj.gone_files.contains(&v.loc.path))
+        .collect();
     if visits.is_empty() {
         return empty_state(Glyph::Minimap, tr!("No reading trail yet"), "", None);
     }
@@ -1443,14 +2122,27 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for v in &visits {
-        // Indent by tree depth, but cap it: past ~8 levels a deep branch would
-        // otherwise push the node (including the current one) off the panel's
-        // right edge. Beyond the cap, depth stops adding indent.
-        let indent = (v.depth.min(8) as f32) * 14.0;
+        // Indented under each fork above it — a hop that just followed the
+        // one before stays in line — and capped: past ~8 branches a deep one
+        // would push the node off the panel's right edge.
+        let indent = (v.indent.min(8) as f32) * 14.0;
+        // What is left for its name and file after the row's indent, chevron,
+        // mark and icon: cut with an ellipsis, where they were cut bare.
+        let room = (app.sidebar_width
+            - indent
+            - CHEVRON_W
+            - 10.0
+            - 12.0
+            - 3.0 * 6.0
+            - 14.0
+            - crate::ui::SCROLLBAR_W)
+            .max(0.0);
 
         // A collapse chevron for nodes with children (forks stand out in accent);
         // leaves get a fixed-width spacer so names still line up.
-        let toggle: Element<'_, Message> = if v.has_children {
+        // Only where the trail branches (or was folded there): in a straight
+        // run every row had one, and folding one hid every later stop.
+        let toggle: Element<'_, Message> = if v.has_children && (v.forks || v.collapsed) {
             chevron(
                 !v.collapsed,
                 Message::Reading(ReadingMsg::TrailToggleCollapse {
@@ -1485,6 +2177,11 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         // The row is the whole width, as the file tree's are — its depth
         // indents what is in it, not the row — and the place being read is
         // the row lit as the open file is, its name in the medium weight.
+        let name_font = if v.is_current {
+            crate::fonts::UI_MEDIUM
+        } else {
+            crate::fonts::UI
+        };
         let jump = button(
             row![
                 space().width(indent),
@@ -1492,19 +2189,25 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                 marker,
                 container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12),
                 container(column![
-                    text(loc_label(&v.loc, v.label.as_deref()))
-                        .size(ts::BODY)
-                        .font(if v.is_current {
-                            crate::fonts::UI_MEDIUM
-                        } else {
-                            crate::fonts::UI
-                        })
-                        .color(theme::fg())
-                        .wrapping(Wrapping::None),
-                    text(rel_of(app, &v.loc.path))
-                        .size(ts::CAPTION)
-                        .color(theme::dim())
-                        .wrapping(Wrapping::None),
+                    text(super::steady::elide_end(
+                        &stop_label(app, &v.loc, v.label.as_deref()),
+                        ts::BODY,
+                        name_font,
+                        room,
+                    ))
+                    .size(ts::BODY)
+                    .font(name_font)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
+                    text(super::steady::elide_start(
+                        &trail_caption(app, v),
+                        ts::CAPTION,
+                        crate::fonts::UI,
+                        room,
+                    ))
+                    .size(ts::CAPTION)
+                    .color(theme::dim())
+                    .wrapping(Wrapping::None),
                 ])
                 .width(Fill)
                 .clip(true),
@@ -1521,7 +2224,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
             left: 6.0,
         })
         .on_press(super::heard::row(
-            || loc_label(&v.loc, v.label.as_deref()),
+            || stop_label(app, &v.loc, v.label.as_deref()),
             Message::Reading(ReadingMsg::HistoryJump {
                 id: v.id,
                 loc: v.loc.clone(),
@@ -1533,11 +2236,41 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     column![
         header,
         scrollable(Column::with_children(rows).spacing(1))
+            .id(super::trail_scroll_id())
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
             .height(Fill),
     ]
     .into()
+}
+
+/// What a trail row says under its name: the file a place is in — or, for
+/// a whole file, the folder it is in: "pricing.py" over
+/// "teashop/pricing.py" said its name twice.
+fn trail_caption(app: &App, v: &crate::history::Visit) -> String {
+    let rel = rel_of(app, &v.loc.path);
+    // A named place says its file; one its name already gives ("pricing.py",
+    // "pricing.py:42") says the folder the file is in — the project's own,
+    // by its name, for one at its root. Named by the function its line is
+    // in ("main():12", `stop_label`) is named too: it said "teashop/" under
+    // that, and "main.py" under "main()".
+    let named = v.label.is_some()
+        || v.loc
+            .line
+            .is_some_and(|line| app.function_around(&v.loc.path, line).is_some());
+    if named {
+        return rel;
+    }
+    match rel.rsplit_once('/') {
+        Some((dir, _)) => format!("{dir}/"),
+        None => app
+            .proj
+            .project
+            .as_ref()
+            .and_then(|p| p.root.file_name())
+            .map(|n| format!("{}/", n.to_string_lossy()))
+            .unwrap_or_default(),
+    }
 }
 
 pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
@@ -1552,6 +2285,19 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let mut last_rel: Option<&str> = None;
+    // What a preview has beside its line number and the row's pencil and ✕:
+    // cut to it with an ellipsis — cut at 48 characters, a narrower panel
+    // clipped it mid-letter.
+    let preview_room = (app.sidebar_width
+        - 8.0
+        - 4.0
+        - 36.0
+        - 4.0
+        - 2.0 * 2.0
+        - 2.0 * (13.0 + 12.0)
+        - crate::ui::SCROLLBAR_W
+        - 4.0)
+        .max(0.0);
     for bm in &app.proj.bookmarks {
         if last_rel != Some(bm.rel.as_str()) {
             last_rel = Some(bm.rel.as_str());
@@ -1559,21 +2305,29 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         }
         // Clip the preview to its own column so a long line never draws over the
         // trailing pencil/✕ icons; truncate with an ellipsis for the cut affordance.
+        // A blank line says so: its row showed its number and nothing else.
+        let line_text = crate::highlight::line_in_order(&bm.preview);
+        let preview = if line_text.trim().is_empty() {
+            text(tr!("(blank line)"))
+                .size(ts::BODY)
+                .color(theme::dim())
+                .wrapping(Wrapping::None)
+        } else {
+            text(super::steady::cut(
+                &line_text,
+                preview_room,
+                ts::BODY,
+                crate::fonts::UI,
+            ))
+            .size(ts::BODY)
+            .wrapping(Wrapping::None)
+        };
         let top = row![
             text(bm.line.to_string())
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .width(36),
-            container(
-                text(truncate_ellipsis(
-                    &crate::highlight::line_in_order(&bm.preview),
-                    48
-                ))
-                .size(ts::BODY)
-                .wrapping(Wrapping::None)
-            )
-            .clip(true)
-            .width(Fill),
+            container(preview).clip(true).width(Fill),
         ]
         .spacing(4)
         .width(Fill);
@@ -1625,6 +2379,24 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
                     line: bm.line,
                 }),
             ));
+        // Each icon says what it does where the pointer rests: a pencil and
+        // a × said nothing, and × might only have hidden the row.
+        let pencil = super::toolbar::tip_at(
+            pencil,
+            if bm.note.is_some() {
+                tr!("Edit note")
+            } else {
+                tr!("Add a note")
+            },
+            None,
+            tooltip::Position::Bottom,
+        );
+        let close = super::toolbar::tip_at(
+            close,
+            tr!("Remove bookmark"),
+            None,
+            tooltip::Position::Bottom,
+        );
         rows.push(
             button(row![main, pencil, close].spacing(2).align_y(iced::Center))
                 .style(theme::list_row(false))
@@ -1646,14 +2418,31 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         );
     }
 
+    // Titled as the other lists are ("Reading trail", "History"): it was
+    // the one view whose rows began with no name over them.
+    let header = row![
+        text(tr!("Bookmarks")).size(ts::SMALL).color(theme::dim()),
+        space().width(Fill),
+        text(super::statusbar::thousands(app.proj.bookmarks.len()))
+            .size(ts::CAPTION)
+            .color(theme::dim()),
+    ]
+    .align_y(iced::Center)
+    .padding(Padding {
+        top: 4.0,
+        right: 8.0,
+        bottom: 2.0,
+        left: 8.0,
+    });
     column![
+        header,
         scrollable(Column::with_children(rows).width(Fill))
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
             .height(Fill)
     ]
     .padding(Padding {
-        top: 6.0,
+        top: 2.0,
         right: 0.0,
         bottom: 0.0,
         left: 0.0,
@@ -1668,7 +2457,11 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
 /// is marked understood or given a note — over every note in the project.
 pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
     if app.active_viewer().is_none() {
-        return notes_list(app);
+        return column![
+            row![space().width(Fill), notes_export(app)],
+            notes_list(app)
+        ]
+        .into();
     }
     let label = |s: &'static str| {
         container(
@@ -1688,16 +2481,61 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
         label(tr!("In this file")),
         container(outline_content(app)).height(Length::FillPortion(1)),
         hairline(),
-        label(tr!("All notes")),
+        row![
+            label(tr!("All notes")),
+            space().width(Fill),
+            notes_export(app)
+        ]
+        .align_y(iced::Bottom),
         container(notes_list(app)).height(Length::FillPortion(1)),
     ]
     .into()
 }
 
-/// Every reading note in the project, file by file.
-fn notes_list(app: &App) -> Element<'_, Message> {
+/// The notes exported, as one Markdown file — here, where they are: none
+/// yet, nothing to export.
+fn notes_export(app: &App) -> Element<'_, Message> {
     if app.proj.notes.is_empty() {
-        return empty_state(Glyph::Note, tr!("No notes of your own yet"), "", None);
+        return space().into();
+    }
+    container(
+        button(
+            text(tr!("Export…"))
+                .size(ts::SMALL)
+                .color(theme::fg_muted()),
+        )
+        .style(theme::toolbar_button)
+        .padding([2, 8])
+        .on_press(super::heard::said(
+            tr!("Export notes"),
+            Message::Export(ExportMsg::Start),
+        )),
+    )
+    .padding(Padding {
+        right: 8.0,
+        ..Padding::ZERO
+    })
+    .into()
+}
+
+/// Every reading note in the project, file by file — the notes on
+/// symbols, then those on bookmarks: a note written on a bookmark was in
+/// Bookmarks alone, and this view, which says it holds the reader's notes,
+/// said there were none.
+fn notes_list(app: &App) -> Element<'_, Message> {
+    let marked: Vec<&crate::bookmarks::Bookmark> = app
+        .proj
+        .bookmarks
+        .iter()
+        .filter(|b| b.note.as_deref().is_some_and(|n| !n.trim().is_empty()))
+        .collect();
+    if app.proj.notes.is_empty() && marked.is_empty() {
+        return empty_state(
+            Glyph::Note,
+            tr!("No notes of your own yet"),
+            tr!("A note you write on a symbol or a bookmark is listed here."),
+            None,
+        );
     }
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
@@ -1801,6 +2639,31 @@ fn notes_list(app: &App) -> Element<'_, Message> {
                     symbol: n.symbol.clone(),
                 }),
             ));
+        // Each icon says what it does where the pointer rests: an empty
+        // circle beside "0/6 understood" was not seen to be a toggle, and
+        // the pencil and × said nothing.
+        let toggle = super::toolbar::tip_at(
+            toggle,
+            if n.understood {
+                tr!("Mark not understood")
+            } else {
+                tr!("Mark understood")
+            },
+            None,
+            tooltip::Position::Bottom,
+        );
+        let pencil = super::toolbar::tip_at(
+            pencil,
+            if n.text.is_empty() {
+                tr!("Add a note")
+            } else {
+                tr!("Edit note")
+            },
+            None,
+            tooltip::Position::Bottom,
+        );
+        let close =
+            super::toolbar::tip_at(close, tr!("Remove note"), None, tooltip::Position::Bottom);
         // The name area jumps; the toggle/pencil/✕ capture their own clicks.
         let jump = button(main)
             .style(theme::list_row(false))
@@ -1824,6 +2687,77 @@ fn notes_list(app: &App) -> Element<'_, Message> {
                 .align_y(iced::Center)
                 .into(),
         );
+    }
+
+    // The notes written on bookmarks: each opens its line, as its row in
+    // Bookmarks does; its pencil edits it there.
+    if !marked.is_empty() {
+        rows.push(
+            container(
+                text(tr!("On bookmarks"))
+                    .size(ts::SMALL)
+                    .font(crate::fonts::UI_SEMIBOLD)
+                    .color(theme::dim()),
+            )
+            .padding(Padding {
+                top: 10.0,
+                right: 6.0,
+                bottom: 2.0,
+                left: 8.0,
+            })
+            .into(),
+        );
+        for bm in marked {
+            let place = format!("{}:{}", bm.rel, bm.line);
+            let note = bm.note.clone().unwrap_or_default();
+            let main = column![
+                row![
+                    glyph::icon(Glyph::Bookmark, theme::dim(), 12.0),
+                    text(place.clone())
+                        .size(ts::CAPTION)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::None),
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
+                text(note)
+                    .size(ts::CAPTION)
+                    .color(theme::fg_muted())
+                    .wrapping(Wrapping::Word),
+            ]
+            .spacing(1)
+            .width(Fill);
+            let jump = button(main)
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding(Padding {
+                    top: 2.0,
+                    right: 4.0,
+                    bottom: 2.0,
+                    left: 8.0,
+                })
+                .on_press(super::heard::row(
+                    || place.clone(),
+                    Message::Editor(EditorMsg::OpenRel {
+                        rel: bm.rel.clone(),
+                        line: Some(bm.line),
+                    }),
+                ));
+            let pencil = super::toolbar::tip_at(
+                button(glyph::icon(Glyph::Edit, theme::accent(), 13.0))
+                    .style(theme::list_row(false))
+                    .padding([2, 6])
+                    .on_press(super::heard::said_to_with(
+                        tr!("Edit note"),
+                        || place.clone(),
+                        Message::Reading(ReadingMsg::BookmarkNoteEdit(bm.rel.clone(), bm.line)),
+                    )),
+                tr!("Edit note"),
+                None,
+                tooltip::Position::Bottom,
+            );
+            rows.push(row![jump, pencil].spacing(1).align_y(iced::Center).into());
+        }
     }
 
     column![
@@ -1880,6 +2814,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         .on_submit(Message::Semantic(SemanticMsg::Search))
         .size(ts::BASE)
         .padding(7);
+    let input = super::jump::field_named(input, tr!("Search by meaning…"));
 
     let building = app.proj.building_embeddings;
     // It is built from the notes Explain All writes, by an embedding model:
@@ -1887,6 +2822,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     // looked ready, and answered in the status bar.
     let can_build = !app.proj.explain.cache.is_empty() && app.embed_available;
     let press = (!building && can_build).then_some(Message::Semantic(SemanticMsg::BuildIndex));
+    let can_press = press.is_some();
     // While it builds, the button's own icon turns, in its place: words
     // that came in for the build ("Building…", "Building the index…") moved
     // what stood beside them, and the count went for as long as it ran.
@@ -1894,7 +2830,14 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         if building {
             super::meter::spinning(crate::glyph::Glyph::Refresh, theme::accent(), size)
         } else {
-            crate::glyph::icon(crate::glyph::Glyph::Refresh, theme::fg_muted(), size)
+            // Dimmed with its words when there is nothing it can do: its
+            // icon at full strength, it looked ready.
+            let tint = if can_press {
+                theme::fg_muted()
+            } else {
+                theme::dim()
+            };
+            crate::glyph::icon(crate::glyph::Glyph::Refresh, tint, size)
         }
     };
     // The first build is asked for in words; building again, as the other
@@ -1919,13 +2862,14 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     };
     // The index builds itself from explanation summaries (automatically, after
     // Explain All) — so the hint only reports state, never asks for a manual step.
+    // (No model and no index is said below, in a sentence and a button.)
     let info: Element<'_, Message> = if n == 0 && app.proj.explain.cache.is_empty() {
         // The step that gets there, as a link.
-        button(
-            text(tr!("Explain All…"))
-                .size(ts::CAPTION)
-                .color(theme::accent()),
-        )
+        button(super::toolbar::ai_words(
+            tr!("Explain All…"),
+            ts::CAPTION,
+            theme::accent(),
+        ))
         .style(theme::icon_button(false))
         .padding([2, 6])
         .on_press(super::heard::said(
@@ -1947,11 +2891,59 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     };
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    rows.push(
-        row![build, space().width(Fill), info]
-            .align_y(iced::Center)
+    if !app.embed_available && n == 0 {
+        // No model and no index: one sentence on what it needs, and one
+        // button to set it up — a greyed Build index, a small link and a
+        // line from Settings said it three ways, none of them a way in.
+        rows.push(
+            text(tr!(
+                "Find by meaning needs an embedding model, on this computer or from a service."
+            ))
+            .size(ts::SMALL)
+            .color(theme::fg_muted())
+            .wrapping(Wrapping::WordOrGlyph)
             .into(),
-    );
+        );
+        rows.push(
+            button(text(tr!("Set Up Find by Meaning…")).size(ts::SMALL))
+                .style(theme::secondary_button)
+                .padding([4, 10])
+                .on_press(super::heard::said(
+                    tr!("Set Up Find by Meaning…"),
+                    Message::Settings(crate::SettingsMsg::OpenAt(crate::SettingsPage::Embeddings)),
+                ))
+                .into(),
+        );
+        // What in particular is missing, when it is more than "set one
+        // up" (the model chosen, not yet downloaded): said under it.
+        if !app.embed_missing.is_empty()
+            && app.embed_missing != tr!("Configure an embedding endpoint in Settings")
+        {
+            rows.push(
+                text(app.embed_missing.clone())
+                    .size(ts::SMALL)
+                    .color(theme::dim())
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .into(),
+            );
+        }
+    } else {
+        rows.push(
+            row![build, space().width(Fill), info]
+                .align_y(iced::Center)
+                .into(),
+        );
+        // And why the panel stays empty, said in it: a search pressed
+        // showed nothing, and said why only for a moment in the status bar.
+        if !app.embed_available && !app.embed_missing.is_empty() {
+            rows.push(
+                text(app.embed_missing.clone())
+                    .size(ts::SMALL)
+                    .color(theme::dim())
+                    .into(),
+            );
+        }
+    }
     if app.proj.searching_semantic {
         rows.push(
             text(tr!("Searching…"))
@@ -1962,7 +2954,9 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     }
     for (node, score) in &app.proj.semantic_results {
         let label = match node {
-            Node::Function { file, name, .. } => format!("{name} · {}", rel_of(app, file)),
+            Node::Function { file, name, .. } => {
+                tr!("{name} in {file}", name = name, file = rel_of(app, file))
+            }
             Node::File(p) => rel_of(app, p),
             Node::Folder(p) => rel_of(app, p),
         };
@@ -2040,4 +3034,121 @@ pub(crate) fn source_chip<'a>(node: &crate::explain::Node) -> Element<'a, Messag
         .padding([1, 6])
         .on_press(Message::Semantic(SemanticMsg::OpenNode(node.clone())))
         .into()
+}
+
+/// A quick action of the Walkthroughs tab: its icon and words (`spoken`,
+/// when a voice says it otherwise), and on the pointer what it does — each
+/// has the AI write a tour, which a plain button did not say.
+/// `spends`: it calls the model even while it cannot be pressed (its call
+/// under way): marked so then too.
+fn walk_action<'a>(
+    glyph: Glyph,
+    label: String,
+    spoken: Option<String>,
+    does: impl Into<String>,
+    press: Option<Message>,
+    spends: bool,
+) -> Element<'a, Message> {
+    // One that writes with the model is marked so, as every such control
+    // is: "Where to start reading" looked like the free rows beside it.
+    let spends = press.as_ref().is_some_and(crate::app::palette::spends_ai) || spends;
+    // Said by its short name, and named on the ring as it shows ("Walk
+    // the last run (10 stops)"): the ring said the short name alone.
+    let press = press.map(|msg| {
+        let msg = super::heard::said(spoken.as_deref().unwrap_or(&label), msg);
+        match &spoken {
+            Some(_) => super::heard::said_with(|| label.clone(), msg),
+            None => msg,
+        }
+    });
+    let face = row![
+        if spends {
+            crate::glyph::icon(Glyph::Sparkle, theme::accent(), 13.0)
+        } else {
+            crate::glyph::icon(glyph, theme::fg_muted(), 13.0)
+        },
+        text(label).size(ts::SMALL),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    let control = button(face)
+        .style(theme::toolbar_button)
+        .padding([4, 10])
+        .width(Fill)
+        .on_press_maybe(press);
+    let does: String = does.into();
+    let does = if spends {
+        tr!("{what} (one AI call)", what = does)
+    } else {
+        does
+    };
+    super::toolbar::tip_at(control, does, None, iced::widget::tooltip::Position::Bottom)
+}
+
+/// A sidebar view's filter: the filter mark, the field, and — once there is
+/// something in it — a × that empties it; Escape in it does too
+/// (`escaped`). The Files view's and the API docs': the docs' was a plain
+/// field of another style.
+pub(crate) fn filter_field<'a>(
+    placeholder: &'a str,
+    value: &'a str,
+    id: Option<iced::widget::Id>,
+    on_input: fn(String) -> Message,
+    on_submit: Option<Message>,
+    escaped: Message,
+    down: Option<Message>,
+) -> Element<'a, Message> {
+    let mut input = text_input(placeholder, value)
+        .on_input(on_input)
+        .style(theme::bare_input);
+    if let Some(id) = id {
+        input = input.id(id);
+    }
+    if let Some(submit) = on_submit {
+        input = input.on_submit(submit);
+    }
+    let mut field = row![
+        glyph::icon(Glyph::Filter, theme::dim(), 13.0),
+        super::jump::field_named(
+            ts::field_in(input, FILTER_H - 2.0, ts::INTER, ts::BODY),
+            placeholder,
+        ),
+    ]
+    .spacing(8)
+    .height(Fill)
+    .align_y(iced::Center);
+    if !value.is_empty() {
+        field = field.push(tip_at(
+            button(glyph::icon(Glyph::Close, theme::dim(), 12.0))
+                .style(theme::toolbar_button)
+                .padding(3)
+                .on_press(super::heard::said(
+                    tr!("Clear filter"),
+                    on_input(String::new()),
+                )),
+            tr!("Clear filter"),
+            None,
+            tooltip::Position::Bottom,
+        ));
+    }
+    container(
+        super::escape_clears::EscapeClears::new(
+            container(field)
+                .height(Length::Fixed(FILTER_H))
+                // The design's 10 inside its 1 px border, which here
+                // takes no room of its own.
+                .padding([1, 11])
+                .style(theme::field(!value.is_empty())),
+            escaped,
+        )
+        .ringed(9.0)
+        .on_down(down),
+    )
+    .padding(Padding {
+        top: 0.0,
+        right: 10.0,
+        bottom: SIDEBAR_GAP,
+        left: 10.0,
+    })
+    .into()
 }

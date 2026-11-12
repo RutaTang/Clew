@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
-use iced::widget::{button, checkbox, container, pick_list, progress_bar, scrollable, text_input};
+use iced::widget::{button, checkbox, container, progress_bar, scrollable, text_input};
 use iced::{Border, Color, Theme};
 
 /// Build a `Color` from a `0xRRGGBB` literal.
@@ -473,7 +473,8 @@ const CYBERPUNK_PAL: Palette = Palette {
     fg: rgb(0xe5e0ff),
     fg_bright: rgb(0xffffff),
     fg_muted: rgb(0x8b84b8),
-    dim: rgb(0x565080),
+    // Line numbers, captions: 3.8:1 on the void, where they read at 2.6.
+    dim: rgb(0x6e67a0),
     accent: rgb(0x00f0ff),
     warn: rgb(0xff2e6c),
     border: rgb(0x05030f),
@@ -501,6 +502,400 @@ const CYBERPUNK_TOK: TokenColors = TokenColors {
     parameter: 0xb47dff,
     operator: 0x00ffcc,
     punctuation: 0x8b84b8,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
+};
+
+// ---- Nord, Dracula, Tokyo Night, Catppuccin, Rosé Pine, Solarized ---------
+//
+// Well-loved open palettes, each with its own syntax colours. Where a
+// palette's status colours (success, warning, danger, info) or accent read
+// below 4.5:1 on its surfaces, they are drawn a little toward the ink — the
+// rest is the palette as its authors made it.
+
+const NORD_PAL: Palette = Palette {
+    bg: rgb(0x2e3440),
+    bg_panel: rgb(0x272c36),
+    bg_hover: rgb(0x353c4a),
+    selected: rgb(0x3b4252),
+    fg: rgb(0xd8dee9),
+    fg_bright: rgb(0xeceff4),
+    fg_muted: rgb(0xaab3c3),
+    dim: rgb(0x8590a6),
+    accent: rgb(0x88c0d0),
+    warn: rgb(0xd18d94),
+    border: rgb(0x3b4252),
+    hairline: rgb(0x343a46),
+    elevated: rgb(0x323846),
+    on_accent: rgb(0x2e3440),
+    accent_hover: rgb(0x8fbcbb),
+    scrollbar: rgb(0x4c566a),
+    success: rgb(0xa3be8c),
+    warning: rgb(0xebcb8b),
+    danger: rgb(0xd18d94),
+    info: rgb(0x8fbcbb),
+    find: rgb(0xebcb8b),
+    selection: rgb(0x434c5e),
+};
+const NORD_TOK: TokenColors = TokenColors {
+    comment: 0x6c7891,
+    keyword: 0x81a1c1,
+    escape: 0xebcb8b,
+    string: 0xa3be8c,
+    number: 0xb48ead,
+    function: 0x88c0d0,
+    type_: 0x8fbcbb,
+    property: 0xd8dee9,
+    parameter: 0xd8dee9,
+    operator: 0x81a1c1,
+    punctuation: 0x9aa5b8,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
+};
+
+const DRACULA_PAL: Palette = Palette {
+    bg: rgb(0x282a36),
+    bg_panel: rgb(0x21222c),
+    bg_hover: rgb(0x313341),
+    selected: rgb(0x3a3c4e),
+    fg: rgb(0xf8f8f2),
+    fg_bright: rgb(0xffffff),
+    fg_muted: rgb(0xb9bccc),
+    dim: rgb(0x858aa8),
+    accent: rgb(0xbd93f9),
+    warn: rgb(0xff6e6e),
+    border: rgb(0x343746),
+    hairline: rgb(0x2f3140),
+    elevated: rgb(0x2d2f3d),
+    on_accent: rgb(0x282a36),
+    accent_hover: rgb(0xcaa8fa),
+    scrollbar: rgb(0x44475a),
+    success: rgb(0x50fa7b),
+    warning: rgb(0xffb86c),
+    danger: rgb(0xff6e6e),
+    info: rgb(0x8be9fd),
+    find: rgb(0xf1fa8c),
+    selection: rgb(0x44475a),
+};
+const DRACULA_TOK: TokenColors = TokenColors {
+    comment: 0x6f7cb0,
+    keyword: 0xff79c6,
+    escape: 0xff79c6,
+    string: 0xf1fa8c,
+    number: 0xbd93f9,
+    function: 0x50fa7b,
+    type_: 0x8be9fd,
+    property: 0x8be9fd,
+    parameter: 0xffb86c,
+    operator: 0xff79c6,
+    punctuation: 0xd6d6cf,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
+};
+
+const TOKYO_NIGHT_PAL: Palette = Palette {
+    bg: rgb(0x1a1b26),
+    bg_panel: rgb(0x16161e),
+    bg_hover: rgb(0x20222e),
+    selected: rgb(0x292e42),
+    fg: rgb(0xc0caf5),
+    fg_bright: rgb(0xe0e6ff),
+    fg_muted: rgb(0xa9b1d6),
+    dim: rgb(0x737aa2),
+    accent: rgb(0x7aa2f7),
+    warn: rgb(0xf7768e),
+    border: rgb(0x292e42),
+    hairline: rgb(0x232433),
+    elevated: rgb(0x1f2335),
+    on_accent: rgb(0x1a1b26),
+    accent_hover: rgb(0x8cb0fa),
+    scrollbar: rgb(0x3b4261),
+    success: rgb(0x9ece6a),
+    warning: rgb(0xe0af68),
+    danger: rgb(0xf7768e),
+    info: rgb(0x7dcfff),
+    find: rgb(0xe0af68),
+    selection: rgb(0x283457),
+};
+const TOKYO_NIGHT_TOK: TokenColors = TokenColors {
+    comment: 0x5f6896,
+    keyword: 0xbb9af7,
+    escape: 0x89ddff,
+    string: 0x9ece6a,
+    number: 0xff9e64,
+    function: 0x7aa2f7,
+    type_: 0x2ac3de,
+    property: 0x73daca,
+    parameter: 0xe0af68,
+    operator: 0x89ddff,
+    punctuation: 0x9aa5ce,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
+};
+
+const CATPPUCCIN_MOCHA_PAL: Palette = Palette {
+    bg: rgb(0x1e1e2e),
+    bg_panel: rgb(0x181825),
+    bg_hover: rgb(0x262637),
+    selected: rgb(0x313244),
+    fg: rgb(0xcdd6f4),
+    fg_bright: rgb(0xeef1fd),
+    fg_muted: rgb(0xa6adc8),
+    dim: rgb(0x7f849c),
+    accent: rgb(0xcba6f7),
+    warn: rgb(0xf38ba8),
+    border: rgb(0x313244),
+    hairline: rgb(0x29293b),
+    elevated: rgb(0x24243a),
+    on_accent: rgb(0x1e1e2e),
+    accent_hover: rgb(0xd6b9f9),
+    scrollbar: rgb(0x45475a),
+    success: rgb(0xa6e3a1),
+    warning: rgb(0xfab387),
+    danger: rgb(0xf38ba8),
+    info: rgb(0x89dceb),
+    find: rgb(0xf9e2af),
+    selection: rgb(0x45475a),
+};
+const CATPPUCCIN_MOCHA_TOK: TokenColors = TokenColors {
+    comment: 0x7f849c,
+    keyword: 0xcba6f7,
+    escape: 0xf5c2e7,
+    string: 0xa6e3a1,
+    number: 0xfab387,
+    function: 0x89b4fa,
+    type_: 0xf9e2af,
+    property: 0xb4befe,
+    parameter: 0xeba0ac,
+    operator: 0x89dceb,
+    punctuation: 0x9399b2,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
+};
+
+const ROSE_PINE_PAL: Palette = Palette {
+    bg: rgb(0x191724),
+    bg_panel: rgb(0x14121e),
+    bg_hover: rgb(0x1f1d2e),
+    selected: rgb(0x26233a),
+    fg: rgb(0xe0def4),
+    fg_bright: rgb(0xf5f3ff),
+    fg_muted: rgb(0x908caa),
+    dim: rgb(0x6e6a86),
+    accent: rgb(0xc4a7e7),
+    warn: rgb(0xeb6f92),
+    border: rgb(0x26233a),
+    hairline: rgb(0x211f30),
+    elevated: rgb(0x1f1d2e),
+    on_accent: rgb(0x191724),
+    accent_hover: rgb(0xd0b9ec),
+    scrollbar: rgb(0x403d52),
+    success: rgb(0x9ccfd8),
+    warning: rgb(0xf6c177),
+    danger: rgb(0xeb6f92),
+    info: rgb(0x9ccfd8),
+    find: rgb(0xf6c177),
+    selection: rgb(0x2f2c45),
+};
+const ROSE_PINE_TOK: TokenColors = TokenColors {
+    comment: 0x6e6a86,
+    keyword: 0x3e8fb0,
+    escape: 0xeb6f92,
+    string: 0xf6c177,
+    number: 0xebbcba,
+    function: 0xebbcba,
+    type_: 0x9ccfd8,
+    property: 0xc4a7e7,
+    parameter: 0xc4a7e7,
+    operator: 0x908caa,
+    punctuation: 0x908caa,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
+};
+
+const SOLARIZED_DARK_PAL: Palette = Palette {
+    bg: rgb(0x002b36),
+    bg_panel: rgb(0x00222b),
+    bg_hover: rgb(0x073642),
+    selected: rgb(0x0b3d4a),
+    fg: rgb(0xa1adad),
+    fg_bright: rgb(0xeee8d5),
+    fg_muted: rgb(0x839496),
+    dim: rgb(0x657b83),
+    accent: rgb(0x3c97d6),
+    warn: rgb(0xe56765),
+    border: rgb(0x0b3d4a),
+    hairline: rgb(0x063340),
+    elevated: rgb(0x063541),
+    on_accent: rgb(0x002b36),
+    accent_hover: rgb(0x3d9be0),
+    scrollbar: rgb(0x29505a),
+    success: rgb(0x859900),
+    warning: rgb(0xb58900),
+    danger: rgb(0xe56765),
+    info: rgb(0x2aa198),
+    find: rgb(0xb58900),
+    selection: rgb(0x0e4655),
+};
+const SOLARIZED_DARK_TOK: TokenColors = TokenColors {
+    comment: 0x5f7880,
+    keyword: 0x859900,
+    escape: 0xcb4b16,
+    string: 0x2aa198,
+    number: 0xd33682,
+    function: 0x268bd2,
+    type_: 0xb58900,
+    property: 0x6c71c4,
+    parameter: 0xcb4b16,
+    operator: 0x859900,
+    punctuation: 0x839496,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
+};
+
+const SOLARIZED_LIGHT_PAL: Palette = Palette {
+    bg: rgb(0xfdf6e3),
+    bg_panel: rgb(0xf5eedb),
+    bg_hover: rgb(0xeee8d5),
+    selected: rgb(0xe6dfc8),
+    fg: rgb(0x52676e),
+    fg_bright: rgb(0x073642),
+    fg_muted: rgb(0x657b83),
+    dim: rgb(0x93a1a1),
+    accent: rgb(0x1e6fa8),
+    warn: rgb(0xca2e2b),
+    border: rgb(0xe3dcc6),
+    hairline: rgb(0xece5cf),
+    elevated: rgb(0xfffaee),
+    on_accent: rgb(0xfdf6e3),
+    accent_hover: rgb(0x1e74b0),
+    scrollbar: rgb(0xc7c0a9),
+    success: rgb(0x627100),
+    warning: rgb(0x866500),
+    danger: rgb(0xca2e2b),
+    info: rgb(0x1f7770),
+    find: rgb(0xe8c547),
+    selection: rgb(0xeee8d5),
+};
+const SOLARIZED_LIGHT_TOK: TokenColors = TokenColors {
+    comment: 0x93a1a1,
+    keyword: 0x859900,
+    escape: 0xcb4b16,
+    string: 0x2aa198,
+    number: 0xd33682,
+    function: 0x268bd2,
+    type_: 0xb58900,
+    property: 0x6c71c4,
+    parameter: 0xcb4b16,
+    operator: 0x859900,
+    punctuation: 0x657b83,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
+};
+
+const CATPPUCCIN_LATTE_PAL: Palette = Palette {
+    bg: rgb(0xeff1f5),
+    bg_panel: rgb(0xe6e9ef),
+    bg_hover: rgb(0xe3e6ed),
+    selected: rgb(0xdce0e8),
+    fg: rgb(0x4c4f69),
+    fg_bright: rgb(0x303446),
+    fg_muted: rgb(0x6c6f85),
+    dim: rgb(0x9ca0b0),
+    accent: rgb(0x8538ea),
+    warn: rgb(0xce0f38),
+    border: rgb(0xccd0da),
+    hairline: rgb(0xdce0e8),
+    elevated: rgb(0xf9fafc),
+    on_accent: rgb(0xeff1f5),
+    accent_hover: rgb(0x7a2ee0),
+    scrollbar: rgb(0xacb0be),
+    success: rgb(0x2f7620),
+    warning: rgb(0x8f5b13),
+    danger: rgb(0xce0f38),
+    info: rgb(0x036d97),
+    find: rgb(0xdf8e1d),
+    selection: rgb(0xccd0da),
+};
+const CATPPUCCIN_LATTE_TOK: TokenColors = TokenColors {
+    comment: 0x8c8fa1,
+    keyword: 0x8839ef,
+    escape: 0xea76cb,
+    string: 0x40a02b,
+    number: 0xfe640b,
+    function: 0x1e66f5,
+    type_: 0xdf8e1d,
+    property: 0x7287fd,
+    parameter: 0xe64553,
+    operator: 0x04a5e5,
+    punctuation: 0x7c7f93,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
+};
+
+const ROSE_PINE_DAWN_PAL: Palette = Palette {
+    bg: rgb(0xfaf4ed),
+    bg_panel: rgb(0xf2e9e1),
+    bg_hover: rgb(0xf4ede8),
+    selected: rgb(0xe8e1dc),
+    fg: rgb(0x575279),
+    fg_bright: rgb(0x3e3a5c),
+    fg_muted: rgb(0x797593),
+    dim: rgb(0x9893a5),
+    accent: rgb(0x286983),
+    warn: rgb(0x975366),
+    border: rgb(0xdfdad9),
+    hairline: rgb(0xece6e2),
+    elevated: rgb(0xfffaf3),
+    on_accent: rgb(0xfaf4ed),
+    accent_hover: rgb(0x1f5569),
+    scrollbar: rgb(0xcecacd),
+    success: rgb(0x406e76),
+    warning: rgb(0x8c5e1f),
+    danger: rgb(0x975366),
+    info: rgb(0x286983),
+    find: rgb(0xea9d34),
+    selection: rgb(0xdfdad9),
+};
+const ROSE_PINE_DAWN_TOK: TokenColors = TokenColors {
+    comment: 0x9893a5,
+    keyword: 0x286983,
+    escape: 0xb4637a,
+    string: 0xea9d34,
+    number: 0xd7827e,
+    function: 0xd7827e,
+    type_: 0x56949f,
+    property: 0x907aa9,
+    parameter: 0x907aa9,
+    operator: 0x797593,
+    punctuation: 0x797593,
     plain: None,
     definition: None,
     module: None,
@@ -575,6 +970,69 @@ pub static THEMES: &[ThemeDef] = &[
         palette: CYBERPUNK_PAL,
         tokens: CYBERPUNK_TOK,
     },
+    ThemeDef {
+        id: "nord",
+        name: "Nord",
+        is_light: false,
+        palette: NORD_PAL,
+        tokens: NORD_TOK,
+    },
+    ThemeDef {
+        id: "dracula",
+        name: "Dracula",
+        is_light: false,
+        palette: DRACULA_PAL,
+        tokens: DRACULA_TOK,
+    },
+    ThemeDef {
+        id: "tokyo-night",
+        name: "Tokyo Night",
+        is_light: false,
+        palette: TOKYO_NIGHT_PAL,
+        tokens: TOKYO_NIGHT_TOK,
+    },
+    ThemeDef {
+        id: "catppuccin-mocha",
+        name: "Catppuccin Mocha",
+        is_light: false,
+        palette: CATPPUCCIN_MOCHA_PAL,
+        tokens: CATPPUCCIN_MOCHA_TOK,
+    },
+    ThemeDef {
+        id: "rose-pine",
+        name: "Rosé Pine",
+        is_light: false,
+        palette: ROSE_PINE_PAL,
+        tokens: ROSE_PINE_TOK,
+    },
+    ThemeDef {
+        id: "solarized-dark",
+        name: "Solarized Dark",
+        is_light: false,
+        palette: SOLARIZED_DARK_PAL,
+        tokens: SOLARIZED_DARK_TOK,
+    },
+    ThemeDef {
+        id: "solarized-light",
+        name: "Solarized Light",
+        is_light: true,
+        palette: SOLARIZED_LIGHT_PAL,
+        tokens: SOLARIZED_LIGHT_TOK,
+    },
+    ThemeDef {
+        id: "catppuccin-latte",
+        name: "Catppuccin Latte",
+        is_light: true,
+        palette: CATPPUCCIN_LATTE_PAL,
+        tokens: CATPPUCCIN_LATTE_TOK,
+    },
+    ThemeDef {
+        id: "rose-pine-dawn",
+        name: "Rosé Pine Dawn",
+        is_light: true,
+        palette: ROSE_PINE_DAWN_PAL,
+        tokens: ROSE_PINE_DAWN_TOK,
+    },
 ];
 
 const DEFAULT_DARK: &str = "clew-dark";
@@ -586,13 +1044,43 @@ const OLD_DEFAULT_LIGHT: &str = "one-light";
 const THEMES_GENERATION_KEY: &str = "theme_generation";
 const THEMES_GENERATION: i64 = 2;
 
-/// 0 = dark, 1 = light. The three-way preference (Dark/Light/System) resolves to
-/// this binary flag whenever it is set (see `apply_pref`).
-static MODE: AtomicU8 = AtomicU8::new(0);
-/// Which THEMES entry is the chosen light / dark variant: Clew's own pair
-/// until the user picks otherwise.
-static LIGHT_ID: AtomicUsize = AtomicUsize::new(1); // clew-light
-static DARK_ID: AtomicUsize = AtomicUsize::new(0); // clew-dark
+/// A piece of the appearance every window is drawn in: the process's own —
+/// and, in the tests, each test thread's, so that a test previewing a light
+/// theme cannot light the pixels another test reads at that moment. `name`
+/// lends it to what is passed.
+macro_rules! appearance_cell {
+    ($(#[$doc:meta])* $name:ident: $ty:ty = $init:expr) => {
+        $(#[$doc])*
+        fn $name<R>(f: impl FnOnce(&$ty) -> R) -> R {
+            #[cfg(not(test))]
+            {
+                static CELL: $ty = $init;
+                f(&CELL)
+            }
+            #[cfg(test)]
+            {
+                thread_local! { static CELL: $ty = const { $init }; }
+                CELL.with(f)
+            }
+        }
+    };
+}
+
+appearance_cell!(
+    /// 0 = dark, 1 = light. The three-way preference (Dark/Light/System) resolves to
+    /// this binary flag whenever it is set (see `apply_pref`).
+    mode: AtomicU8 = AtomicU8::new(0)
+);
+appearance_cell!(
+    /// Which THEMES entry is the chosen light variant: Clew's own
+    /// (clew-light) until the user picks otherwise.
+    light_id: AtomicUsize = AtomicUsize::new(1)
+);
+appearance_cell!(
+    /// Which THEMES entry is the chosen dark variant: Clew's own
+    /// (clew-dark) until the user picks otherwise.
+    dark_id: AtomicUsize = AtomicUsize::new(0)
+);
 
 /// Bumped whenever the resolved appearance changes (mode, or either theme
 /// selection). The palette above is process-global while windows are not, so
@@ -619,12 +1107,12 @@ pub fn redraw_everywhere() {
 
 /// Whether a light theme is currently active.
 pub fn is_light() -> bool {
-    MODE.load(Ordering::Relaxed) == 1
+    mode(|c| c.load(Ordering::Relaxed)) == 1
 }
 
 /// Switch between the light and dark selection. Request a redraw afterwards.
 pub fn set_light(light: bool) {
-    if MODE.swap(u8::from(light), Ordering::Relaxed) != u8::from(light) {
+    if mode(|c| c.swap(u8::from(light), Ordering::Relaxed)) != u8::from(light) {
         bump_revision();
     }
 }
@@ -632,9 +1120,9 @@ pub fn set_light(light: bool) {
 /// Index into [`THEMES`] of the theme currently in effect.
 pub fn active_index() -> usize {
     let id = if is_light() {
-        LIGHT_ID.load(Ordering::Relaxed)
+        light_id(|c| c.load(Ordering::Relaxed))
     } else {
-        DARK_ID.load(Ordering::Relaxed)
+        dark_id(|c| c.load(Ordering::Relaxed))
     };
     id.min(THEMES.len() - 1)
 }
@@ -659,14 +1147,14 @@ fn theme_index(id: &str, is_light: bool) -> Option<usize> {
 /// Choose the light / dark variant by id (ignored if unknown or wrong polarity).
 pub fn set_light_theme(id: &str) {
     if let Some(i) = theme_index(id, true)
-        && LIGHT_ID.swap(i, Ordering::Relaxed) != i
+        && light_id(|c| c.swap(i, Ordering::Relaxed)) != i
     {
         bump_revision();
     }
 }
 pub fn set_dark_theme(id: &str) {
     if let Some(i) = theme_index(id, false)
-        && DARK_ID.swap(i, Ordering::Relaxed) != i
+        && dark_id(|c| c.swap(i, Ordering::Relaxed)) != i
     {
         bump_revision();
     }
@@ -674,10 +1162,10 @@ pub fn set_dark_theme(id: &str) {
 
 /// The currently-selected light / dark theme (regardless of which is active).
 pub fn current_light() -> &'static ThemeDef {
-    &THEMES[LIGHT_ID.load(Ordering::Relaxed).min(THEMES.len() - 1)]
+    &THEMES[light_id(|c| c.load(Ordering::Relaxed)).min(THEMES.len() - 1)]
 }
 pub fn current_dark() -> &'static ThemeDef {
-    &THEMES[DARK_ID.load(Ordering::Relaxed).min(THEMES.len() - 1)]
+    &THEMES[dark_id(|c| c.load(Ordering::Relaxed)).min(THEMES.len() - 1)]
 }
 
 /// The user's theme preference, persisted in the shared `config.toml`. `System`
@@ -730,15 +1218,17 @@ impl ThemePref {
     }
 }
 
-/// The last OS appearance read from the platform: 0 = never read, 1 = dark,
-/// 2 = light. See [`system_is_light`].
-static SYSTEM_APPEARANCE: AtomicU8 = AtomicU8::new(0);
+appearance_cell!(
+    /// The last OS appearance read from the platform: 0 = never read, 1 = dark,
+    /// 2 = light. See [`system_is_light`].
+    system_appearance: AtomicU8 = AtomicU8::new(0)
+);
 
 /// Remember the OS appearance just read, for callers that cannot ask (only
 /// macOS reads one).
 #[cfg(any(target_os = "macos", test))]
 fn record_system_appearance(light: bool) {
-    SYSTEM_APPEARANCE.store(if light { 2 } else { 1 }, Ordering::Relaxed);
+    system_appearance(|c| c.store(if light { 2 } else { 1 }, Ordering::Relaxed));
 }
 
 /// Whether the OS is currently in light appearance.
@@ -756,18 +1246,20 @@ pub fn system_is_light() -> bool {
             return light;
         }
     }
-    SYSTEM_APPEARANCE.load(Ordering::Relaxed) == 2
+    system_appearance(|c| c.load(Ordering::Relaxed)) == 2
 }
 
-/// The three-way preference in effect. Global for the same reason the palette
-/// is: one process paints every window from it, so two windows holding
-/// different preferences could only ever disagree about what is on screen.
-static PREF: AtomicU8 = AtomicU8::new(ThemePref::System as u8);
+appearance_cell!(
+    /// The three-way preference in effect. Global for the same reason the palette
+    /// is: one process paints every window from it, so two windows holding
+    /// different preferences could only ever disagree about what is on screen.
+    pref_cell: AtomicU8 = AtomicU8::new(ThemePref::System as u8)
+);
 
 /// The appearance preference currently in effect, for a window adopting a
 /// change another window made.
 pub fn current_pref() -> ThemePref {
-    match PREF.load(Ordering::Relaxed) {
+    match pref_cell(|c| c.load(Ordering::Relaxed)) {
         x if x == ThemePref::Dark as u8 => ThemePref::Dark,
         x if x == ThemePref::Light as u8 => ThemePref::Light,
         _ => ThemePref::System,
@@ -783,7 +1275,7 @@ pub fn current_pref() -> ThemePref {
 /// appearance change had one of them call `apply_pref(System)` and overwrite
 /// the user's explicit choice.
 pub fn apply_pref(pref: ThemePref) {
-    if PREF.swap(pref as u8, Ordering::Relaxed) != pref as u8 {
+    if pref_cell(|c| c.swap(pref as u8, Ordering::Relaxed)) != pref as u8 {
         bump_revision();
     }
     set_light(pref.resolve_light());
@@ -1086,18 +1578,23 @@ pub fn language_hue(lang: Option<&str>) -> Color {
 /// so the faint lines read against either background.
 pub fn graph_edge() -> Color {
     if is_light() {
-        rgb(0xaab0ba)
+        GRAPH_EDGE_LIGHT
     } else {
-        rgb(0x5a6272)
+        GRAPH_EDGE_DARK
     }
 }
 pub fn graph_arrow() -> Color {
     if is_light() {
-        rgb(0x878d99)
+        rgb(0x6b7280)
     } else {
         rgb(0x9098ab)
     }
 }
+
+/// A graph's edges, drawn at a third to half strength: in light, as plain
+/// against the page as in dark — a paler grey all but vanished on white.
+const GRAPH_EDGE_DARK: Color = rgb(0x5a6272);
+const GRAPH_EDGE_LIGHT: Color = rgb(0x7a8190);
 
 /// The native macOS window-control colors (close / minimize / zoom), and the
 /// gray they all take while the window is inactive. Platform constants, not
@@ -1132,7 +1629,7 @@ pub enum TextRole {
     Reading,
     /// Emphasized lines: dialog headlines, the finder input.
     Emphasis,
-    /// Sub-headings inside a page (a doc member, "Module map").
+    /// Sub-headings inside a page (a doc member, "Module graph").
     Subtitle,
     /// Modal and card titles.
     Title,
@@ -1264,8 +1761,31 @@ pub fn editor(_theme: &Theme) -> container::Style {
     }
 }
 
-/// Status bar background, its corners as the window's (see [`chrome`]).
+/// The status bar: no fill of its own — the window's ([`chrome`]) is
+/// behind it, corners and all. Its own, painted after the sheet, cut the
+/// sheet's shadow off in a hard line under the sheet's rounded corners.
 pub fn statusbar(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: None,
+        text_color: Some(dim()),
+        ..container::Style::default()
+    }
+}
+
+/// The tool strip down the window's right edge: no fill of its own, as
+/// [`statusbar`] — painted after the sheet, it cut the sheet's shadow off
+/// along the sheet's right edge.
+pub fn strip(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: None,
+        text_color: Some(fg()),
+        ..container::Style::default()
+    }
+}
+
+/// The Time Travel bar along the foot of the sheet: the chrome's tone, its
+/// corners the window's.
+pub fn time_travel_bar(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(bg_panel().into()),
         border: Border {
@@ -1355,20 +1875,16 @@ pub fn with_shadow_scale<R>(scale: f32, draw: impl FnOnce() -> R) -> R {
     drawn
 }
 
-/// A tooltip, in the window's own appearance: a white bubble with a
-/// hairline edge in light, the dark one in dark — not a dark bubble over a
-/// light window. Its shadow lifts it off what it covers.
+/// A tooltip, in the window's own appearance: the theme's raised surface
+/// with a hairline edge — not a dark bubble over a light window, nor a
+/// white one over a cream theme. Its shadow lifts it off what it covers.
 pub fn tip(_theme: &Theme) -> container::Style {
     let light = is_light();
     container::Style {
-        background: Some(if light { Color::WHITE } else { rgb(0x2A2A2F) }.into()),
+        background: Some(raised().into()),
         text_color: Some(tip_text()),
         border: Border {
-            color: if light {
-                hairline()
-            } else {
-                Color::from_rgba(1.0, 1.0, 1.0, 0.08)
-            },
+            color: if light { hairline() } else { wash(0.08) },
             width: 1.0,
             radius: 8.0.into(),
         },
@@ -1383,21 +1899,30 @@ pub fn tip(_theme: &Theme) -> container::Style {
 
 /// A tooltip's words (`tipText`): the window's own text colour.
 pub fn tip_text() -> Color {
-    if is_light() { fg() } else { rgb(0xEDEDEF) }
+    fg()
+}
+
+/// A surface raised off the window — a tooltip, a drop-down's list, the
+/// chosen segment's chip: the theme's own floating surface in light, lifted
+/// a little toward its text in dark, where a floating panel reads lighter.
+pub fn raised() -> Color {
+    raised_in(active(), is_light())
+}
+
+/// [`raised`] in the palette `p` (`light` or dark).
+fn raised_in(p: &Palette, light: bool) -> Color {
+    if light {
+        p.elevated
+    } else {
+        mix(p.elevated, p.fg, 0.06)
+    }
 }
 
 /// A key of a tooltip's shortcut (`tipKey`): a wash over the bubble — of
 /// the text's colour on the light one, of white on the dark.
 pub fn tip_key(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(
-            if is_light() {
-                wash(0.07)
-            } else {
-                Color::from_rgba(1.0, 1.0, 1.0, 0.10)
-            }
-            .into(),
-        ),
+        background: Some(wash(if is_light() { 0.07 } else { 0.10 }).into()),
         text_color: Some(tip_text()),
         border: Border {
             radius: 4.0.into(),
@@ -1603,23 +2128,67 @@ pub fn input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
     }
 }
 
-/// A drop-down: the same rounded well as a field ([`input`]), its edge lit
-/// while it is open.
-pub fn pick(_theme: &Theme, status: pick_list::Status) -> pick_list::Style {
-    pick_list::Style {
+/// A drop-down's well (`ui::picker`): the same rounded well as a field
+/// ([`input`]), its edge lit while its list is open.
+pub fn pick_well(open: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| button::Style {
+        background: Some(wash(if is_light() { 0.035 } else { 0.045 }).into()),
         text_color: fg(),
-        placeholder_color: dim(),
-        handle_color: dim(),
-        background: wash(if is_light() { 0.035 } else { 0.045 }).into(),
         border: Border {
-            color: match status {
-                pick_list::Status::Opened { .. } => with_alpha(accent(), 0.65),
-                pick_list::Status::Hovered => wash(0.16),
-                pick_list::Status::Active => hairline(),
+            color: if open {
+                with_alpha(accent(), 0.65)
+            } else {
+                match status {
+                    button::Status::Hovered | button::Status::Pressed => wash(0.16),
+                    _ => hairline(),
+                }
             },
             width: 1.0,
             radius: 9.0.into(),
         },
+        ..button::Style::default()
+    }
+}
+
+/// A drop-down with nothing to choose from: its well, at rest for good.
+pub fn pick_well_idle(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(wash(if is_light() { 0.02 } else { 0.025 }).into()),
+        border: Border {
+            color: hairline(),
+            width: 1.0,
+            radius: 9.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A drop-down's list (`ui::picker`): [`pick_menu`]'s panel.
+pub fn pick_list_panel(theme: &Theme) -> container::Style {
+    let menu = pick_menu(theme);
+    container::Style {
+        background: Some(menu.background),
+        text_color: Some(menu.text_color),
+        border: menu.border,
+        shadow: menu.shadow,
+        ..container::Style::default()
+    }
+}
+
+/// A row of a drop-down's list: lit where the keys rest (`lit`), and under
+/// the pointer.
+pub fn pick_row(lit: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: (lit || hovered).then(|| wash(if lit { 0.1 } else { 0.06 }).into()),
+            text_color: if lit { fg_bright() } else { fg() },
+            border: Border {
+                radius: 7.0.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
+        }
     }
 }
 
@@ -1627,11 +2196,7 @@ pub fn pick(_theme: &Theme, status: pick_list::Status) -> pick_list::Style {
 /// pointer lit as theirs.
 pub fn pick_menu(_theme: &Theme) -> iced::overlay::menu::Style {
     iced::overlay::menu::Style {
-        background: if is_light() {
-            Color::WHITE.into()
-        } else {
-            mix(bg(), Color::WHITE, 0.06).into()
-        },
+        background: raised().into(),
         border: Border {
             color: hairline(),
             width: 1.0,
@@ -1811,7 +2376,7 @@ pub fn form_choice(_theme: &Theme, status: button::Status) -> button::Style {
 pub fn segment(chosen: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
         let background = if chosen {
-            Some(if is_light() { Color::WHITE } else { wash(0.10) }.into())
+            Some(if is_light() { raised() } else { wash(0.10) }.into())
         } else {
             hover_wash(status)
         };
@@ -2013,7 +2578,8 @@ pub fn floating_card(_theme: &Theme) -> container::Style {
 }
 
 /// The pill Ask hides to, in the window's corner: the floating card's
-/// surface, as round as it is tall.
+/// surface, as round as it is tall, lifted by a shadow of its own size —
+/// the card's, made for a panel, spread a grey haze round a small control.
 pub fn floating_pill(theme: &Theme) -> container::Style {
     let card = floating_card(theme);
     container::Style {
@@ -2021,9 +2587,23 @@ pub fn floating_pill(theme: &Theme) -> container::Style {
             radius: 20.0.into(),
             ..card.border
         },
+        shadow: pill_shadow(),
         ..card
     }
 }
+
+/// The shadow of a small floating control: close and soft.
+pub fn pill_shadow() -> iced::Shadow {
+    iced::Shadow {
+        color: scrim(if is_light() { 0.10 } else { 0.35 }),
+        offset: iced::Vector::new(0.0, PILL_SHADOW_OFFSET),
+        blur_radius: PILL_SHADOW_BLUR,
+    }
+}
+
+/// How far [`pill_shadow`] falls below its control, and how far it blurs.
+pub const PILL_SHADOW_OFFSET: f32 = 3.0;
+pub const PILL_SHADOW_BLUR: f32 = 12.0;
 
 /// Dimmed backdrop behind the modal: over the whole window, its corners
 /// as the window's, so they stay clear.
@@ -2075,12 +2655,32 @@ pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::St
     }
 }
 
+/// A row of the Files view: a [`list_row`], and, where the keyboard rests
+/// (`cursor`), the accent edge of the keyboard's ring.
+pub fn tree_row(selected: bool, cursor: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut style = list_row(selected)(theme, status);
+        // The ring the keyboard's Tab draws: one mark for where the keys
+        // are, whichever way they came there.
+        if cursor {
+            style.border.color = accent();
+            style.border.width = 2.0;
+        }
+        style
+    }
+}
+
 /// A row of the finder and the command bar: a [`list_row`], its corners
 /// rounder.
 pub fn finder_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {
         let mut style = list_row(selected)(theme, status);
         style.border.radius = 8.0.into();
+        // The row under the pointer only faintly: the one Enter opens — the
+        // keys' — stays the one row lit. Both lit as much read as two picks.
+        if !selected && matches!(status, button::Status::Hovered) {
+            style.background = Some(with_alpha(bg_hover(), 0.45).into());
+        }
         style
     }
 }
@@ -2169,10 +2769,11 @@ pub fn switch(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     }
 }
 
-/// A switch's knob: white, round.
+/// A switch's knob: round, in the colour drawn on the accent — white in
+/// most themes, the theme's own paper in those whose accent wants it.
 pub fn switch_knob(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(Color::WHITE.into()),
+        background: Some(on_accent().into()),
         border: Border {
             radius: 6.0.into(),
             ..Border::default()
@@ -2313,7 +2914,115 @@ mod tests {
         }
     }
 
+    /// Clew's own themes write their quiet words — the line numbers, a
+    /// caption — at 3.5:1 or more on their surface: Cyberpunk's were 2.6.
+    /// (The others' are their authors'.)
+    #[test]
+    fn clews_own_themes_quiet_words_read() {
+        for theme in THEMES
+            .iter()
+            .filter(|t| matches!(t.id, "clew-dark" | "clew-light" | "cyberpunk"))
+        {
+            let p = &theme.palette;
+            let ratio = contrast(p.dim, p.bg);
+            assert!(ratio >= 3.5, "{}: dim on bg is {ratio:.2}:1", theme.id);
+        }
+    }
+
     use super::*;
+
+    /// A graph's edges read as plainly on Clew's light page as on its dark
+    /// one, at the strengths they are drawn at.
+    #[test]
+    fn graph_edges_read_in_light_as_in_dark() {
+        let page = |id: &str| {
+            THEMES
+                .iter()
+                .find(|t| t.id == id)
+                .expect("a theme")
+                .palette
+                .bg
+        };
+        let over = |edge: Color, bg: Color, a: f32| Color {
+            r: edge.r * a + bg.r * (1.0 - a),
+            g: edge.g * a + bg.g * (1.0 - a),
+            b: edge.b * a + bg.b * (1.0 - a),
+            a: 1.0,
+        };
+        for a in [0.33, 0.5] {
+            let dark = contrast(
+                over(GRAPH_EDGE_DARK, page("clew-dark"), a),
+                page("clew-dark"),
+            );
+            let light = contrast(
+                over(GRAPH_EDGE_LIGHT, page("clew-light"), a),
+                page("clew-light"),
+            );
+            assert!(
+                light >= dark * 0.95,
+                "at {a}: light {light:.2} vs dark {dark:.2}"
+            );
+        }
+    }
+
+    /// A raised surface — a tooltip, a drop-down's list, the chosen
+    /// segment — is the theme's own: never brighter than the theme's
+    /// brightest surface in light (a white list over Gruvbox's cream was),
+    /// and dark in dark; and what is drawn on the accent reads on it.
+    #[test]
+    fn raised_surfaces_are_the_themes_own() {
+        for theme in THEMES {
+            let p = &theme.palette;
+            let raised = raised_in(p, theme.is_light);
+            if theme.is_light {
+                let brightest = [p.bg, p.bg_panel, p.elevated]
+                    .into_iter()
+                    .map(luminance)
+                    .fold(0.0, f32::max);
+                assert!(
+                    luminance(raised) <= brightest + 1e-4,
+                    "{}: a raised surface brighter than any of its own",
+                    theme.id
+                );
+            } else {
+                assert!(
+                    luminance(raised) < 0.2,
+                    "{}: a light surface in dark",
+                    theme.id
+                );
+            }
+            assert!(
+                contrast(raised, p.fg) >= 4.5,
+                "{}: text on a raised surface is {:.2}:1",
+                theme.id,
+                contrast(raised, p.fg)
+            );
+            assert!(
+                contrast(p.on_accent, p.accent) >= 4.5,
+                "{}: on_accent on accent is {:.2}:1",
+                theme.id,
+                contrast(p.on_accent, p.accent)
+            );
+        }
+        // Ids are unique, and there are themes of both kinds to choose.
+        let mut ids: Vec<&str> = THEMES.iter().map(|t| t.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), THEMES.len());
+        assert!(THEMES.iter().filter(|t| t.is_light).count() >= 7);
+        assert!(THEMES.iter().filter(|t| !t.is_light).count() >= 10);
+    }
+
+    /// A small floating control casts a small shadow: Ask's pill, under
+    /// the panel's, spread a haze several times its own height.
+    #[test]
+    fn the_pill_casts_a_shadow_of_its_size() {
+        let pill = floating_pill(&Theme::Dark).shadow;
+        let panel = panel_shadow();
+        assert!(pill.offset.y + pill.blur_radius <= 16.0, "{pill:?}");
+        assert!(pill.color.a < panel.color.a);
+        assert!(pill.blur_radius < panel.blur_radius / 4.0);
+    }
 
     /// What Clew writes — explanations, answers, notes — is set in the
     /// interface's own face, never the system's sans-serif.

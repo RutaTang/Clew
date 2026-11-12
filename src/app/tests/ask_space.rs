@@ -198,6 +198,7 @@ fn ask_without_vector_retrieval_keeps_live_grounding_across_space_changes() {
             app.debug.session = Some(DebugSession {
                 client: None,
                 status: DebugStatus::Stopped,
+                exit_code: None,
                 thread_id: Some(1),
                 frames: vec![dap::StackFrame {
                     id: 7,
@@ -383,6 +384,7 @@ fn a_question_with_nothing_else_is_answered_from_the_open_file() {
     let _ = app.update(Message::Ask(AskMsg::Submit));
     assert!(!app.proj.asking);
     assert!(app.proj.ask_notice.is_some(), "{}", app.status);
+    assert!(!app.proj.ask_notice_embeddings, "embeddings can be made");
     assert_eq!(app.proj.ask_input, "what is Point?");
     // The next question clears what was said of the last.
     let _ = app.update(Message::Ask(AskMsg::Submit));

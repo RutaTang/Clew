@@ -193,7 +193,7 @@ impl App {
                     reason = reason
                 ),
                 Some(reason) => tr!(
-                    "Rendered {rendered} · {failed} failed ({reason})",
+                    "Rendered {rendered}, {failed} failed ({reason})",
                     rendered = rendered,
                     failed = failed,
                     reason = reason
@@ -268,6 +268,7 @@ impl App {
         if let Some((abs, line)) = self.resolve_project_link(&url) {
             self.proj.overview.showing = false;
             self.proj.stats.showing = false;
+            self.proj.weak.showing = false;
             self.proj.glossary.showing = false;
             return self.open_file(abs, line, true);
         }
@@ -417,7 +418,8 @@ impl App {
         // symbol inside this loop scanned the whole list per symbol —
         // quadratic, on every caret move.
         let ordinals = outline::fn_ordinals(&v.symbols);
-        for (s, &symbol_ordinal) in v.symbols.iter().zip(&ordinals) {
+        let keys = crate::notes::note_keys(&v.symbols);
+        for ((s, &symbol_ordinal), key) in v.symbols.iter().zip(&ordinals).zip(&keys) {
             if matches!(s.kind.as_str(), "function" | "method")
                 && s.name == name
                 && symbol_ordinal == ordinal
@@ -443,10 +445,7 @@ impl App {
             if has_summary {
                 h += 14.0;
             }
-            if notes
-                .get(s.name.as_str())
-                .is_some_and(|n| !n.text.is_empty())
-            {
+            if notes.get(key.as_str()).is_some_and(|n| !n.text.is_empty()) {
                 h += 14.0;
             }
             y += h;
@@ -466,6 +465,83 @@ impl App {
             ContentMsg::OpenLink(url) => self.on_open_link(url),
         }
     }
+}
+
+/// The file at `rel` — a project path written with '/', as the tree
+/// writes it — under `root`, joined part by part: on Windows `root.join`
+/// kept the slashes ("C:\\proj\\src/app/main.rs"), which Explorer's
+/// `/select` does not read.
+pub(crate) fn rel_abs(root: &std::path::Path, rel: &str) -> std::path::PathBuf {
+    rel.split('/')
+        .filter(|part| !part.is_empty())
+        .fold(root.to_path_buf(), |path, part| path.join(part))
+}
+
+/// `path` as people write it: without Windows' `\\?\` long-path prefix,
+/// which a canonical path carries and Explorer does not read.
+pub(crate) fn plain_path(path: &std::path::Path) -> String {
+    let shown = path.display().to_string();
+    if let Some(share) = shown.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{share}")
+    } else if let Some(local) = shown.strip_prefix(r"\\?\") {
+        local.to_string()
+    } else {
+        shown
+    }
+}
+
+/// Show `path` in the system's file manager: selected in its folder where
+/// the manager can (Finder, Explorer), else its folder opened. On this
+/// computer only — a remote project's files are not here.
+pub(crate) fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut open = {
+        let mut open = clew_core::spawn::command("/usr/bin/open");
+        open.arg("-R").arg(path);
+        open
+    };
+    #[cfg(windows)]
+    let mut open = {
+        let program = clew_core::linerpc::resolve_program("explorer").ok_or_else(|| {
+            tr!(
+                "Couldn't show it: {program} was not found",
+                program = "explorer"
+            )
+        })?;
+        let mut open = clew_core::spawn::command(program);
+        // Explorer reads `/select,"…"` itself: std's quoting of the whole
+        // argument would hide a path with a space from it.
+        std::os::windows::process::CommandExt::raw_arg(
+            &mut open,
+            format!("/select,\"{}\"", plain_path(path)),
+        );
+        open
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut open = {
+        // The folder it is in: Linux's file managers have no common way
+        // to select a file.
+        let folder = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        let program = clew_core::linerpc::resolve_program("xdg-open").ok_or_else(|| {
+            tr!(
+                "Couldn't show it: {program} was not found",
+                program = "xdg-open"
+            )
+        })?;
+        let mut open = clew_core::spawn::command(program);
+        open.arg(folder);
+        open
+    };
+    open.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    spawn_reaped(open)
+        .map(|_| ())
+        .map_err(|e| tr!("Couldn't show it: {error}", error = e))
 }
 
 /// Hand a plain http(s) URL to the system's opener — never `file://`,
@@ -579,5 +655,57 @@ mod tests {
         // A batch that ran is passed through as it came.
         let fine = run_render_batch(vec![7], SvgBatch::default).await;
         assert!(fine.rendered.is_empty() && fine.failed.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::{plain_path, rel_abs};
+    use std::path::Path;
+
+    /// A canonical Windows path is shown as people write it; any other
+    /// path as it is.
+    #[test]
+    fn a_long_path_prefix_is_not_shown() {
+        assert_eq!(plain_path(Path::new(r"\\?\C:\proj\a.rs")), r"C:\proj\a.rs");
+        assert_eq!(
+            plain_path(Path::new(r"\\?\UNC\server\share\a.rs")),
+            r"\\server\share\a.rs"
+        );
+        assert_eq!(plain_path(Path::new("/home/ada/a.rs")), "/home/ada/a.rs");
+    }
+
+    /// A tree path is joined part by part under the root: no slash of its
+    /// own survives on Windows, and an empty part adds nothing.
+    #[test]
+    fn a_tree_path_is_joined_part_by_part() {
+        let root = Path::new("/proj");
+        assert_eq!(
+            rel_abs(root, "src/app/main.rs"),
+            root.join("src").join("app").join("main.rs")
+        );
+        assert_eq!(rel_abs(root, "README.md"), root.join("README.md"));
+        // Pinned on every OS, not only where `\` is the separator: joined
+        // whole, a path with a slash before it left the root behind, and
+        // one with two together kept them.
+        assert_eq!(
+            rel_abs(root, "/etc/passwd"),
+            root.join("etc").join("passwd")
+        );
+        assert_eq!(
+            rel_abs(root, "src//app/main.rs").display().to_string(),
+            root.join("src")
+                .join("app")
+                .join("main.rs")
+                .display()
+                .to_string()
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            rel_abs(Path::new(r"C:\proj"), "src/app/main.rs")
+                .display()
+                .to_string(),
+            r"C:\proj\src\app\main.rs"
+        );
     }
 }

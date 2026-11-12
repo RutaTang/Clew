@@ -1,0 +1,825 @@
+//! Fake run and fake debug (`app::fakerun`): the sheet opens on the
+//! definition asked for, the run is an agent turn whose answer becomes a
+//! trace, and the trace is stepped through as a debugger steps.
+
+use super::*;
+use crate::fakerun::Field;
+use crate::{FakeMsg, SimCmd};
+
+/// A project open on `src/lib.rs`, with a model configured.
+fn fake_app(tag: &str) -> App {
+    let mut app = scanned_app(tag);
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    open_synchronously(&mut app, "src/lib.rs", None);
+    assert!(
+        !app.active_viewer().unwrap().symbols.is_empty(),
+        "the file's outline is known"
+    );
+    app
+}
+
+/// The context menu, opened on 0-based `line` of the active pane.
+fn menu_at(app: &mut App, line: usize) {
+    app.proj.context_menu = Some(crate::ContextMenu {
+        pane: app.proj.active,
+        line,
+        col: 0,
+        x: 0.0,
+        y: 0.0,
+        insight: None,
+        served: true,
+        by_pointer: true,
+        line_top: None,
+    });
+}
+
+/// What the app sent the server's agent: the question, and the tools it
+/// was offered.
+fn asked(
+    rx: &mut tokio::sync::mpsc::Receiver<clew_protocol::ClientMessage>,
+) -> Option<(u64, String, usize)> {
+    std::iter::from_fn(|| rx.try_recv().ok()).find_map(|m| match m.request {
+        clew_protocol::Request::AgentAsk {
+            stream,
+            question,
+            tools,
+            ..
+        } => Some((stream, question, tools.len())),
+        _ => None,
+    })
+}
+
+/// A trace over `src/lib.rs`'s `origin` (lines 3–5), with one step on a
+/// file the project does not have.
+const TRACE: &str = r#"{"returns": "Point { x: 0.0 }", "output": [],
+ "assumptions": ["nothing else"],
+ "steps": [
+  {"file": "src/lib.rs", "line": 3, "function": "origin", "depth": 0,
+   "note": "origin is called", "vars": {}},
+  {"file": "src/gone.rs", "line": 1, "depth": 0},
+  {"file": "src/lib.rs", "line": 4, "function": "origin", "depth": 0,
+   "note": "builds the point", "vars": {"x": "0.0"}}
+ ]}"#;
+
+/// The menu's Fake Run… opens the sheet on the innermost function there,
+/// else the type: a function with no parameters asks only for context; a
+/// struct for how it is made and what is called on it.
+#[test]
+fn the_sheet_opens_on_the_definition_asked_for() {
+    let mut app = fake_app("fake-sheet");
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let sheet = app.proj.fake.sheet.as_ref().expect("the sheet is open");
+    assert_eq!(sheet.target.name, "origin");
+    assert_eq!(sheet.target.rel, "src/lib.rs");
+    assert_eq!(sheet.target.line, 3);
+    assert!(
+        sheet
+            .target
+            .source
+            .starts_with("pub fn origin() -> Point {")
+    );
+    assert_eq!(sheet.fields, [Field::Context]);
+    assert!(app.proj.context_menu.is_none(), "the menu closed");
+
+    let _ = app.update(Message::Fake(FakeMsg::CloseSheet));
+    menu_at(&mut app, 0);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let sheet = app.proj.fake.sheet.as_ref().unwrap();
+    assert_eq!(sheet.target.name, "Point");
+    assert_eq!(
+        sheet.fields,
+        [Field::Construct, Field::Calls, Field::Context]
+    );
+
+    // Between definitions: said, and no sheet.
+    let _ = app.update(Message::Fake(FakeMsg::CloseSheet));
+    menu_at(&mut app, 1);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    assert!(app.proj.fake.sheet.is_none());
+    assert!(app.status.contains("fake-run"), "{}", app.status);
+}
+
+/// Run sends an agent turn — the target's numbered source and the inputs
+/// in its question, no tool of the window's offered — and its answer,
+/// once the turn ends, is a trace: the remark before a tool call left
+/// out, a step on no file of the project dropped and counted, the first
+/// line opened and lit.
+#[test]
+fn a_run_is_an_agent_turn_whose_answer_is_stepped_through() {
+    let mut app = fake_app("fake-turn");
+    let mut rx = attach_server(&mut app);
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Field(
+        0,
+        "the clock reads noon".into(),
+    )));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    assert!(app.proj.fake.sheet.is_none());
+    let (stream, question, tools) = asked(&mut rx).expect("an agent turn was asked");
+    assert_eq!(tools, 0, "no tool of the window's");
+    assert!(
+        question.contains("    3| pub fn origin() -> Point {"),
+        "{question}"
+    );
+    assert!(question.contains("the clock reads noon"), "{question}");
+    assert!(question.contains("read the code it calls"), "{question}");
+    assert_eq!(
+        app.proj.fake.working.as_ref().and_then(|w| w.stream),
+        Some(stream)
+    );
+    assert!(app.show_bottom, "the panel shows the run being worked out");
+    assert!(app.proj.link.agent_streams.contains_key(&stream));
+    assert!(app.proj.link.agent_stream.is_none(), "Ask is left free");
+
+    let stamp = app.stamp();
+    for msg in [
+        FakeMsg::Read {
+            stamp: stamp.clone(),
+            stream,
+            title: "Read src/lib.rs".into(),
+        },
+        FakeMsg::Draft {
+            stamp: stamp.clone(),
+            stream,
+            text: "Let me read it first.".into(),
+        },
+        FakeMsg::DraftEnd {
+            stamp: stamp.clone(),
+            stream,
+            kept: false,
+        },
+        FakeMsg::Delta {
+            stamp: stamp.clone(),
+            stream,
+            text: TRACE.into(),
+        },
+    ] {
+        let _ = app.update(Message::Fake(msg));
+    }
+    assert_eq!(
+        app.proj.fake.working.as_ref().unwrap().reading,
+        ["Read src/lib.rs"]
+    );
+    let _ = app.update(Message::Fake(FakeMsg::TurnEnded {
+        stamp,
+        stream,
+        outcome: clew_protocol::StreamOutcome::Done,
+    }));
+    assert!(app.proj.fake.working.is_none());
+    assert!(!app.proj.link.agent_streams.contains_key(&stream));
+    let sim = app.proj.fake.sim.as_ref().expect("a trace");
+    assert_eq!(sim.trace.steps.len(), 2);
+    assert_eq!(sim.trace.dropped, 1);
+    assert_eq!(sim.trace.returns, "Point { x: 0.0 }");
+    assert!(app.status.contains("left out"), "{}", app.status);
+    let abs = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");
+    assert_eq!(app.fake_line(&abs), Some(3), "its first line lit");
+}
+
+/// What the server is sent, held so the link stays up.
+type Sent = tokio::sync::mpsc::Receiver<clew_protocol::ClientMessage>;
+
+/// A trace, made from [`TRACE`] as the turn would bring it.
+fn traced(tag: &str) -> (App, Sent) {
+    let mut app = fake_app(tag);
+    let mut rx = attach_server(&mut app);
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let (stream, ..) = asked(&mut rx).unwrap();
+    let stamp = app.stamp();
+    let _ = app.update(Message::Fake(FakeMsg::Delta {
+        stamp: stamp.clone(),
+        stream,
+        text: TRACE.into(),
+    }));
+    let _ = app.update(Message::Fake(FakeMsg::TurnEnded {
+        stamp,
+        stream,
+        outcome: clew_protocol::StreamOutcome::Done,
+    }));
+    assert!(app.proj.fake.sim.is_some());
+    (app, rx)
+}
+
+fn at(app: &App) -> (usize, bool) {
+    let sim = app.proj.fake.sim.as_ref().unwrap();
+    (sim.at, sim.ended)
+}
+
+/// The step commands move as a debugger's: over, back, on to a
+/// breakpoint, past the end (nothing lit, what it returns shown), back
+/// from the end, and to the start again; a stack frame goes to its line.
+#[test]
+fn the_trace_steps_as_a_debugger_does() {
+    let (mut app, _rx) = traced("fake-steps");
+    let abs = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");
+    let step = |app: &mut App, cmd| {
+        let _ = app.update(Message::Fake(FakeMsg::Step(cmd)));
+    };
+    step(&mut app, SimCmd::Over);
+    assert_eq!(at(&app), (1, false));
+    assert_eq!(app.fake_line(&abs), Some(4));
+    step(&mut app, SimCmd::Back);
+    assert_eq!(at(&app), (0, false));
+    step(&mut app, SimCmd::Back);
+    assert_eq!(at(&app), (0, false), "nothing before the first line");
+
+    // On to a breakpoint.
+    app.debug
+        .breakpoints
+        .entry(abs.clone())
+        .or_default()
+        .insert(4, Default::default());
+    step(&mut app, SimCmd::Continue);
+    assert_eq!(at(&app), (1, false), "stopped at the breakpoint");
+    // None after it: to the end.
+    step(&mut app, SimCmd::Continue);
+    assert_eq!(at(&app), (1, true));
+    assert_eq!(app.fake_line(&abs), None, "finished: nothing lit");
+    step(&mut app, SimCmd::Over);
+    assert_eq!(at(&app), (1, true), "nothing past the end");
+    step(&mut app, SimCmd::Back);
+    assert_eq!(at(&app), (1, false), "back to the last line");
+    step(&mut app, SimCmd::Restart);
+    assert_eq!(at(&app), (0, false));
+    let _ = app.update(Message::Fake(FakeMsg::Goto(1)));
+    assert_eq!(at(&app), (1, false));
+    let _ = app.update(Message::Fake(FakeMsg::Goto(9)));
+    assert_eq!(at(&app), (1, false), "no such step");
+
+    let _ = app.update(Message::Fake(FakeMsg::Close));
+    assert!(!app.proj.fake.shown());
+    assert_eq!(app.fake_line(&abs), None);
+}
+
+/// With no agent turn to be had (no server), the run is one call; only
+/// the newest call's answer is taken.
+#[test]
+fn without_a_server_the_run_is_one_call() {
+    let mut app = fake_app("fake-one-call");
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let seq = {
+        let w = app.proj.fake.working.as_ref().expect("working");
+        assert_eq!(w.stream, None);
+        w.seq
+    };
+    let _ = app.update(Message::Fake(FakeMsg::Answered {
+        stamp: app.stamp(),
+        seq: seq + 7,
+        result: Ok(TRACE.into()),
+    }));
+    assert!(app.proj.fake.sim.is_none(), "another run's answer");
+    let _ = app.update(Message::Fake(FakeMsg::Answered {
+        stamp: app.stamp(),
+        seq,
+        result: Ok(TRACE.into()),
+    }));
+    assert_eq!(app.proj.fake.sim.as_ref().unwrap().trace.steps.len(), 2);
+}
+
+/// A run that fails says why, and Try again opens the sheet with the
+/// inputs it ran on; Stop cancels the turn on the server.
+#[test]
+fn a_failed_run_says_why_and_can_be_tried_again() {
+    let mut app = fake_app("fake-failed");
+    let mut rx = attach_server(&mut app);
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Field(0, "noon".into())));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let (stream, ..) = asked(&mut rx).unwrap();
+    let _ = app.update(Message::Fake(FakeMsg::Delta {
+        stamp: app.stamp(),
+        stream,
+        text: "I cannot do that.".into(),
+    }));
+    let _ = app.update(Message::Fake(FakeMsg::TurnEnded {
+        stamp: app.stamp(),
+        stream,
+        outcome: clew_protocol::StreamOutcome::Done,
+    }));
+    assert!(app.proj.fake.sim.is_none());
+    assert!(
+        app.proj
+            .fake
+            .failed
+            .as_deref()
+            .is_some_and(|w| w.contains("no JSON")),
+        "{:?}",
+        app.proj.fake.failed
+    );
+    assert!(app.proj.fake.shown(), "the panel says why");
+    // Said there, with its Try again and Settings: not on the status bar
+    // as well — both at once said the one failure twice.
+    assert!(app.failure_shown().is_none(), "said twice");
+    // H1: nor is it said to be still at work.
+    assert!(
+        !app.status.contains("Working out"),
+        "still working, says the status bar: {}",
+        app.status
+    );
+    let _ = app.update(Message::Fake(FakeMsg::EditInputs));
+    assert_eq!(app.proj.fake.sheet.as_ref().unwrap().values, ["noon"]);
+
+    // Failed with its panel put away: the status bar says it, with its Try
+    // again — of a fake debug, not "the fake run".
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let (stream, ..) = asked(&mut rx).unwrap();
+    app.show_bottom = false;
+    let _ = app.update(Message::Fake(FakeMsg::Delta {
+        stamp: app.stamp(),
+        stream,
+        text: "I cannot do that.".into(),
+    }));
+    let _ = app.update(Message::Fake(FakeMsg::TurnEnded {
+        stamp: app.stamp(),
+        stream,
+        outcome: clew_protocol::StreamOutcome::Done,
+    }));
+    let notice = app.failure_shown().expect("a standing failure");
+    assert_eq!(notice.of, crate::app::state::FailureOf::FakeRun);
+    assert!(notice.said.contains("no JSON"), "{}", notice.said);
+    assert!(
+        notice.said.starts_with("The fake debug failed"),
+        "{}",
+        notice.said
+    );
+    assert!(matches!(
+        notice.retry,
+        Some(Message::Fake(FakeMsg::EditInputs))
+    ));
+    let _ = app.update(Message::Fake(FakeMsg::EditInputs));
+    assert_eq!(app.proj.fake.sheet.as_ref().unwrap().values, ["noon"]);
+
+    // Run again, then Stop: the turn is cancelled.
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    assert!(
+        app.failure_shown().is_none(),
+        "tried again, the failure stood on"
+    );
+    let (stream, ..) = asked(&mut rx).unwrap();
+    let _ = app.update(Message::Fake(FakeMsg::Stop));
+    assert!(app.proj.fake.working.is_none());
+    assert!(!app.proj.link.agent_streams.contains_key(&stream));
+    let cancelled = std::iter::from_fn(|| rx.try_recv().ok())
+        .any(|m| matches!(m.request, clew_protocol::Request::Cancel { id } if id == stream));
+    assert!(cancelled, "the turn was cancelled on the server");
+    // Its tab stays, saying it was stopped, with Try again there.
+    let stopped = app.proj.fake.failed.clone();
+    assert!(
+        stopped.as_deref().is_some_and(|w| w.contains("stopped")),
+        "{stopped:?}"
+    );
+    assert!(app.proj.fake.shown());
+    // Its late end changes nothing.
+    let _ = app.update(Message::Fake(FakeMsg::TurnEnded {
+        stamp: app.stamp(),
+        stream,
+        outcome: clew_protocol::StreamOutcome::Done,
+    }));
+    assert!(app.proj.fake.sim.is_none());
+    assert_eq!(app.proj.fake.failed, stopped);
+    // Its panel closed, a failure goes with it: the status bar's Try
+    // again stood for a panel no longer there.
+    app.say_failure_again(
+        || "The fake run failed".into(),
+        Some(Message::Fake(FakeMsg::EditInputs)),
+        crate::app::state::FailureOf::FakeRun,
+    );
+    assert!(app.failure_shown().is_some());
+    let _ = app.update(Message::Fake(FakeMsg::Close));
+    assert!(
+        app.failure_shown().is_none(),
+        "its panel closed, the failure stood on"
+    );
+}
+
+/// H1: a fake run closed while it works takes "Working out what … does…"
+/// off the status bar with it: it stood there after the tab was gone.
+#[test]
+fn a_fake_run_closed_while_it_works_is_no_longer_said_to_work() {
+    let mut app = fake_app("fake-close-working");
+    let _rx = attach_server(&mut app);
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: false }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    assert!(app.status.contains("Working out"), "{}", app.status);
+    let _ = app.update(Message::Fake(FakeMsg::Close));
+    assert!(app.proj.fake.working.is_none());
+    assert!(!app.status.contains("Working out"), "{}", app.status);
+}
+
+/// A fake run set aside in its tab, closed while it works, leaves the run
+/// on screen said to work: both work out the same function, and the closed
+/// one's "Working out what … does…" taken off the status line took the
+/// shown one's, which was still working.
+#[test]
+fn closing_a_set_aside_fake_run_leaves_the_shown_one_said_to_work() {
+    use crate::app::state::RunTab;
+    let mut app = fake_app("fake-close-parked-working");
+    let _rx = attach_server(&mut app);
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: false }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let first = app.proj.fake.tab;
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    assert_ne!(app.proj.fake.tab, first);
+    let said = app.status.clone();
+    assert!(said.contains("Working out"), "{said}");
+    let _ = app.update(Message::Debug(DebugMsg::CloseTab(RunTab::Fake(first))));
+    assert_eq!(app.run_tabs().len(), 1);
+    assert!(app.proj.fake.working.is_some(), "the shown one still works");
+    assert_eq!(app.status, said, "said no longer to work");
+}
+
+/// The other way round: the run on screen is done, and the one set aside
+/// still works. Closed, it takes its "Working out what … does…" with it:
+/// put back as the shown run's, it stood for good over a run done.
+#[test]
+fn closing_a_set_aside_fake_run_over_a_done_one_says_nothing_works() {
+    use crate::app::state::RunTab;
+    let mut app = fake_app("fake-close-parked-over-done");
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: false }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let first = app.proj.fake.tab;
+    let first_seq = app.proj.fake.working.as_ref().unwrap().seq;
+    let _ = app.update(Message::Fake(FakeMsg::Answered {
+        stamp: app.stamp(),
+        seq: first_seq,
+        result: Ok(TRACE.into()),
+    }));
+    assert!(app.proj.fake.working.is_none(), "the first is done");
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let second = app.proj.fake.tab;
+    assert!(app.status.contains("Working out"), "{}", app.status);
+    let _ = app.update(Message::Debug(DebugMsg::ShowTab(RunTab::Fake(first))));
+    assert_eq!(app.shown_run_tab(), Some(RunTab::Fake(first)));
+    let _ = app.update(Message::Debug(DebugMsg::CloseTab(RunTab::Fake(second))));
+    assert_eq!(app.run_tabs(), [RunTab::Fake(first)]);
+    assert!(!app.status.contains("Working out"), "{}", app.status);
+}
+
+/// Fake runs run side by side, each in its own tab: a second does not stop
+/// the first; the first's answer, come while the second is on screen, is
+/// taken in its own tab and shows nothing; Edit inputs runs again in the
+/// same tab; closed, the tab beside it is shown.
+#[test]
+fn fake_runs_run_side_by_side_each_in_its_own_tab() {
+    use crate::app::state::RunTab;
+    let mut app = fake_app("fake-tabs");
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: false }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let first_seq = app.proj.fake.working.as_ref().unwrap().seq;
+    let first = app.proj.fake.tab;
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let second_seq = app.proj.fake.working.as_ref().unwrap().seq;
+    let second = app.proj.fake.tab;
+    assert_ne!(first, second);
+    assert_eq!(app.run_tabs(), [RunTab::Fake(first), RunTab::Fake(second)]);
+    assert_eq!(app.shown_run_tab(), Some(RunTab::Fake(second)));
+
+    // The first's answer, off screen: in its own tab.
+    let _ = app.update(Message::Fake(FakeMsg::Answered {
+        stamp: app.stamp(),
+        seq: first_seq,
+        result: Ok(TRACE.into()),
+    }));
+    assert!(app.proj.fake.working.is_some(), "the second still works");
+    assert_eq!(app.proj.fake.tab, second);
+    assert!(app.status.contains("ready in its tab"), "{}", app.status);
+    let _ = app.update(Message::Debug(DebugMsg::ShowTab(RunTab::Fake(first))));
+    assert_eq!(app.proj.fake.tab, first);
+    assert_eq!(app.proj.fake.sim.as_ref().unwrap().trace.steps.len(), 2);
+    let caret = app.active_viewer().unwrap().caret;
+
+    // The second's, a fake debug off screen now: its first line is not
+    // shown over the first's.
+    let _ = app.update(Message::Fake(FakeMsg::Answered {
+        stamp: app.stamp(),
+        seq: second_seq,
+        result: Ok(TRACE.into()),
+    }));
+    assert_eq!(app.proj.fake.tab, first, "the tab on screen stays");
+    assert_eq!(app.active_viewer().unwrap().caret, caret);
+    assert_eq!(
+        app.run_tab_faces()[1].state,
+        crate::app::runs::TabState::Paused,
+        "the fake debug waits on its first line"
+    );
+
+    // Edit inputs, run: again, in its own tab.
+    let _ = app.update(Message::Fake(FakeMsg::EditInputs));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    assert_eq!(app.proj.fake.tab, first);
+    assert_eq!(app.run_tabs().len(), 2);
+
+    // Closed: its work stopped, the tab beside it shown.
+    let _ = app.update(Message::Fake(FakeMsg::Close));
+    assert_eq!(app.run_tabs(), [RunTab::Fake(second)]);
+    assert_eq!(app.proj.fake.tab, second);
+    assert!(app.proj.fake.sim.is_some());
+}
+
+/// R16-5: a fake run that fails in its own tab while another is on screen
+/// is said by the status bar's word that its tab says why — not by a
+/// standing notice whose Try again, worked out with the runs swapped,
+/// reopened the inputs of the run on screen.
+#[test]
+fn a_parked_fake_runs_failure_raises_no_notice_for_another_run() {
+    let mut app = fake_app("fake-parked-failure");
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: false }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let first_seq = app.proj.fake.working.as_ref().unwrap().seq;
+    // A real debug session opened since, in a tab after the first's.
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    });
+    app.debug.tab = app.next_run_tab();
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let second = app.proj.fake.tab;
+    let _ = app.update(Message::Fake(FakeMsg::Answered {
+        stamp: app.stamp(),
+        seq: first_seq,
+        result: Err("rate limited".into()),
+    }));
+    assert_eq!(app.proj.fake.tab, second, "the tab on screen stays");
+    assert!(app.status.contains("its tab says why"), "{}", app.status);
+    assert!(
+        app.failure_notice.is_none(),
+        "a notice for the run off screen: {:?}",
+        app.failure_notice
+    );
+}
+
+/// Suggested inputs fill the fields left empty, not what was typed; a
+/// suggestion asked before the newest is dropped.
+#[test]
+fn suggested_inputs_fill_only_the_empty_fields() {
+    let mut app = fake_app("fake-suggest");
+    menu_at(&mut app, 0);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Field(0, "Point { x: 2.0 }".into())));
+    let _ = app.update(Message::Fake(FakeMsg::Suggest));
+    let seq = app.proj.fake.sheet.as_ref().unwrap().suggesting.unwrap();
+    let _ = app.update(Message::Fake(FakeMsg::Suggested {
+        stamp: app.stamp(),
+        seq: seq - 1,
+        result: Ok(vec!["no".into(), "no".into(), "no".into()]),
+    }));
+    assert_eq!(app.proj.fake.sheet.as_ref().unwrap().values[1], "");
+    let _ = app.update(Message::Fake(FakeMsg::Suggested {
+        stamp: app.stamp(),
+        seq,
+        result: Ok(vec!["Point { x: 1.0 }".into(), "p.x".into(), String::new()]),
+    }));
+    let sheet = app.proj.fake.sheet.as_ref().unwrap();
+    assert_eq!(sheet.values, ["Point { x: 2.0 }", "p.x", ""]);
+    assert_eq!(sheet.suggesting, None);
+    // None came: said in the sheet, where Suggest inputs asks again — on
+    // the status bar, under the sheet, its Try again closed the sheet (a
+    // click on the backdrop) or, the sheet closed, did nothing.
+    let _ = app.update(Message::Fake(FakeMsg::Suggest));
+    let seq = app.proj.fake.sheet.as_ref().unwrap().suggesting.unwrap();
+    let _ = app.update(Message::Fake(FakeMsg::Suggested {
+        stamp: app.stamp(),
+        seq,
+        result: Err("request failed: Connection refused (os error 111)".into()),
+    }));
+    let sheet = app.proj.fake.sheet.as_ref().unwrap();
+    assert!(sheet.suggest_failed.is_some());
+    assert!(app.failure_shown().is_none(), "nothing under the sheet");
+    // Asked again, the failure goes while it is asked.
+    let _ = app.update(Message::Fake(FakeMsg::Suggest));
+    assert!(
+        app.proj
+            .fake
+            .sheet
+            .as_ref()
+            .unwrap()
+            .suggest_failed
+            .is_none()
+    );
+}
+
+/// Ask why sends the step — where it is, what the model said of it, its
+/// values — to Ask as a question.
+#[test]
+fn ask_why_asks_about_the_step_shown() {
+    let (mut app, _rx) = traced("fake-ask-why");
+    let _ = app.update(Message::Fake(FakeMsg::Step(SimCmd::Over)));
+    let _ = app.update(Message::Fake(FakeMsg::AskWhy));
+    let turn = app.proj.ask_turns.last().expect("a question was asked");
+    assert!(turn.question.contains("src/lib.rs:4"), "{}", turn.question);
+    assert!(
+        turn.question.contains("builds the point"),
+        "{}",
+        turn.question
+    );
+    assert!(turn.question.contains("x = 0.0"), "{}", turn.question);
+}
+
+/// The shortcut fake-runs the definition the caret is in.
+#[test]
+fn the_shortcut_runs_where_the_caret_is() {
+    let mut app = fake_app("fake-caret");
+    app.active_viewer_mut().unwrap().caret = Some((4, 0));
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::FakeRun,
+    )));
+    assert_eq!(
+        app.proj.fake.sheet.as_ref().map(|s| s.target.name.as_str()),
+        Some("origin")
+    );
+}
+
+/// Inside a method, the method is what runs, not the class around it;
+/// on the class's own lines, the class.
+#[test]
+fn the_innermost_function_wins_over_its_type() {
+    let mut app = fake_app("fake-innermost");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("src/cart.py"),
+        "class Cart:\n    def __init__(self):\n        self.items = []\n\n    def add(self, sku, qty=1):\n        self.items.append((sku, qty))\n",
+    )
+    .unwrap();
+    open_synchronously(&mut app, "src/cart.py", None);
+    let pane = app.proj.active;
+    let add = app.fake_target_at(pane, 6).expect("a target");
+    assert_eq!(add.name, "add");
+    assert_eq!(
+        crate::fakerun::fields(&add),
+        [
+            Field::Param {
+                name: "sku".into(),
+                hint: String::new(),
+                default: String::new()
+            },
+            Field::Param {
+                name: "qty".into(),
+                hint: String::new(),
+                default: "1".into()
+            },
+            Field::Context
+        ],
+        "self is no input"
+    );
+    let cart = app.fake_target_at(pane, 1).expect("the class");
+    assert_eq!(cart.name, "Cart");
+    assert!(cart.is_type());
+    assert_eq!(
+        crate::fakerun::fields(&cart),
+        [Field::Construct, Field::Calls, Field::Context]
+    );
+}
+
+/// A trace, made from [`TRACE`] as the turn brings it, of a run asked for
+/// as Fake Run (`debug` false) or Fake Debug.
+fn traced_as(tag: &str, debug: bool) -> (App, Sent) {
+    let mut app = fake_app(tag);
+    let mut rx = attach_server(&mut app);
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug }));
+    assert_eq!(app.proj.fake.sheet.as_ref().map(|s| s.debug), Some(debug));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    assert_eq!(app.proj.fake.working.as_ref().map(|w| w.debug), Some(debug));
+    let (stream, ..) = asked(&mut rx).unwrap();
+    let stamp = app.stamp();
+    let _ = app.update(Message::Fake(FakeMsg::Delta {
+        stamp: stamp.clone(),
+        stream,
+        text: TRACE.into(),
+    }));
+    let _ = app.update(Message::Fake(FakeMsg::TurnEnded {
+        stamp,
+        stream,
+        outcome: clew_protocol::StreamOutcome::Done,
+    }));
+    (app, rx)
+}
+
+/// Fake Run lands on the run's end — what it returns shown, no line lit —
+/// and its steps are there to go back through; Fake Debug starts on its
+/// first line, lit, as a debugger stops at a breakpoint.
+#[test]
+fn a_fake_run_lands_on_its_end_and_a_fake_debug_on_its_first_line() {
+    let (mut app, _rx) = traced_as("fake-run-end", false);
+    let abs = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");
+    let sim = app.proj.fake.sim.as_ref().expect("a trace");
+    assert!(!sim.debug);
+    assert_eq!(at(&app), (1, true), "at the end");
+    assert_eq!(app.fake_line(&abs), None, "nothing lit");
+    assert!(app.status.contains("Fake run done"), "{}", app.status);
+    let _ = app.update(Message::Fake(FakeMsg::Step(SimCmd::Restart)));
+    assert_eq!(at(&app), (0, false), "stepped through from the start");
+    assert_eq!(app.fake_line(&abs), Some(3));
+
+    let (app, _rx) = traced_as("fake-debug-start", true);
+    assert!(app.proj.fake.sim.as_ref().unwrap().debug);
+    assert_eq!(at(&app), (0, false), "on its first line");
+    assert_eq!(app.fake_line(&abs_of(&app)), Some(3), "lit");
+    assert!(app.status.contains("Fake debug ready"), "{}", app.status);
+}
+
+fn abs_of(app: &App) -> std::path::PathBuf {
+    app.proj.project.as_ref().unwrap().root.join("src/lib.rs")
+}
+
+/// From the strip's Run menu no caret was placed: Fake Run takes the
+/// definition where the reader is — the one in view, else the first under
+/// it — and says which in its sheet. A caret placed between definitions
+/// is still said to be in none.
+#[test]
+fn fake_run_from_the_menu_takes_the_definition_in_view() {
+    let mut app = fake_app("fake-in-view");
+    {
+        let v = app.active_viewer_mut().unwrap();
+        v.caret = None;
+        v.target_line = None;
+        v.scroll_y = 0.0;
+    }
+    // The strip's Fake Run is ready exactly where it finds a definition.
+    assert!(app.has_fake_target());
+    let _ = app.update(Message::Fake(FakeMsg::AtCaret { debug: true }));
+    let sheet = app.proj.fake.sheet.as_ref().expect("a sheet");
+    assert_eq!(sheet.target.name, "Point", "the definition at the top");
+    assert!(sheet.debug);
+    let _ = app.update(Message::Fake(FakeMsg::CloseSheet));
+
+    // The view's top on the blank line under Point: the first one below.
+    let line_height = app.line_height();
+    app.active_viewer_mut().unwrap().scroll_y = line_height;
+    assert!(app.has_fake_target());
+    let _ = app.update(Message::Fake(FakeMsg::AtCaret { debug: false }));
+    let sheet = app.proj.fake.sheet.as_ref().expect("a sheet");
+    assert_eq!(sheet.target.name, "origin", "the first one under it");
+    assert!(!sheet.debug);
+    let _ = app.update(Message::Fake(FakeMsg::CloseSheet));
+
+    // A caret placed there is the reader's: no definition, said.
+    app.active_viewer_mut().unwrap().caret = Some((1, 0));
+    assert!(!app.has_fake_target(), "drawn ready where it runs nothing");
+    let _ = app.update(Message::Fake(FakeMsg::AtCaret { debug: false }));
+    assert!(app.proj.fake.sheet.is_none());
+    // Called the cursor, as everywhere else: "caret" here, "cursor" in
+    // the margin beside it.
+    assert!(app.status.contains("cursor"), "{}", app.status);
+}
+
+/// A step on a file that is not open is kept only on a line the file has —
+/// read from the disk for a local project: past its end it is the model's
+/// mistake, left out and counted, as on an open file.
+#[test]
+fn a_step_past_an_unopened_files_end_is_left_out() {
+    let mut app = fake_app("fake-unopened-end");
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let seq = app.proj.fake.working.as_ref().expect("working").seq;
+    let answer = r#"{"steps": [
+      {"file": "src/lib.rs", "line": 3, "function": "origin"},
+      {"file": "notes.txt", "line": 1},
+      {"file": "notes.txt", "line": 40}]}"#;
+    let _ = app.update(Message::Fake(FakeMsg::Answered {
+        stamp: app.stamp(),
+        seq,
+        result: Ok(answer.into()),
+    }));
+    let sim = app.proj.fake.sim.as_ref().expect("a trace");
+    let steps: Vec<(&str, usize)> = sim
+        .trace
+        .steps
+        .iter()
+        .map(|s| (s.file.as_str(), s.line))
+        .collect();
+    assert_eq!(steps, [("src/lib.rs", 3), ("notes.txt", 1)]);
+    assert_eq!(sim.trace.dropped, 1);
+}

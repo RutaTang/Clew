@@ -167,12 +167,14 @@ const COVERED: &[&str] = &[
     "Event",
     "GitOp",
     "GitResult",
+    "HeadName",
     "LspResolution",
     "NotebookOutput",
     "Patch",
     "ProviderFailure",
     "PythonEnvKind",
     "PythonSource",
+    "RefKind",
     "Refusal",
     "Request",
     "ServerMessage",
@@ -256,6 +258,9 @@ fn event_index(e: &Event) -> usize {
         Event::BuildFacts { .. } => 33,
         Event::ProjectMaps { .. } => 34,
         Event::MacroExpansion { .. } => 35,
+        Event::AgentDraft { .. } => 36,
+        Event::AgentDraftEnd { .. } => 37,
+        Event::Usage { .. } => 38,
     }
 }
 
@@ -432,6 +437,9 @@ fn git_op_index(op: &GitOp) -> usize {
         GitOp::RangePatch { .. } => 10,
         GitOp::Churn { .. } => 11,
         GitOp::WorkingStatus => 12,
+        GitOp::Head => 13,
+        GitOp::Log { .. } => 14,
+        GitOp::CommitDetail { .. } => 15,
     }
 }
 
@@ -450,6 +458,9 @@ fn git_result_index(r: &GitResult) -> usize {
         GitResult::RangePatch(_) => 10,
         GitResult::Churn(_) => 11,
         GitResult::WorkingStatus(_) => 12,
+        GitResult::Head(_) => 13,
+        GitResult::Log(_) => 14,
+        GitResult::CommitDetail(_) => 15,
     }
 }
 
@@ -524,6 +535,22 @@ fn server_message_index(m: &ServerMessage) -> usize {
     match m {
         ServerMessage::Reply { .. } => 0,
         ServerMessage::Notification { .. } => 1,
+    }
+}
+
+fn ref_kind_index(k: &RefKind) -> usize {
+    match k {
+        RefKind::Head => 0,
+        RefKind::Branch => 1,
+        RefKind::Remote => 2,
+        RefKind::Tag => 3,
+    }
+}
+
+fn head_name_index(h: &HeadName) -> usize {
+    match h {
+        HeadName::Branch(_) => 0,
+        HeadName::Detached(_) => 1,
     }
 }
 
@@ -616,6 +643,16 @@ fn git_ops() -> Vec<GitOp> {
         },
         GitOp::Churn { commits: 300 },
         GitOp::WorkingStatus,
+        GitOp::Head,
+        GitOp::Log {
+            all: true,
+            rel: Some("src".into()),
+            author: Some("ada".into()),
+            grep: Some("fix".into()),
+            skip: 100,
+            limit: 100,
+        },
+        GitOp::CommitDetail { sha: "abc".into() },
     ]
 }
 
@@ -680,6 +717,56 @@ fn git_results() -> Vec<GitResult> {
         GitResult::CommitSubjects(vec!["s".into()]),
         GitResult::ChangedFiles(vec![("a.rs".into(), 'M')]),
         GitResult::WorkingStatus(vec![("a.rs".into(), 'M'), ("new.rs".into(), 'U')]),
+        GitResult::Head(Some(HeadName::Branch("main".into()))),
+        GitResult::Head(Some(HeadName::Detached("abc".into()))),
+        GitResult::Head(None),
+        GitResult::Log(LogPage {
+            commits: vec![LogCommit {
+                sha: "abc".into(),
+                parents: vec!["def".into(), "fed".into()],
+                author: "Ada".into(),
+                time: 1,
+                subject: "Merge".into(),
+                refs: [
+                    RefKind::Head,
+                    RefKind::Branch,
+                    RefKind::Remote,
+                    RefKind::Tag,
+                ]
+                .into_iter()
+                .map(|kind| LogRef {
+                    kind,
+                    name: "main".into(),
+                })
+                .collect(),
+            }],
+            more: true,
+        }),
+        GitResult::CommitDetail(Some(CommitDetail {
+            sha: "abc".into(),
+            parents: vec!["def".into()],
+            author: "Ada".into(),
+            time: 1,
+            message: "Fix\n\nWhy.".into(),
+            files: vec![
+                CommitFile {
+                    rel: "b.rs".into(),
+                    old: Some("a.rs".into()),
+                    status: 'R',
+                    added: Some(1),
+                    removed: Some(2),
+                },
+                CommitFile {
+                    rel: "logo.png".into(),
+                    old: None,
+                    status: 'A',
+                    added: None,
+                    removed: None,
+                },
+            ],
+            more_files: 3,
+        })),
+        GitResult::CommitDetail(None),
         GitResult::RangePatch(String::new()),
         GitResult::Churn(vec![FileChurn {
             rel: "a.rs".into(),
@@ -1023,6 +1110,7 @@ fn request_samples() -> Vec<Request> {
             system: "s".into(),
             messages: vec![chat_msg()],
             max_tokens: 64,
+            purpose: "explain".into(),
         },
         Request::Embed {
             texts: vec!["t".into()],
@@ -1032,6 +1120,7 @@ fn request_samples() -> Vec<Request> {
             system: "s".into(),
             messages: vec![chat_msg()],
             max_tokens: 64,
+            purpose: "ask".into(),
         },
         Request::AgentAsk {
             stream: 1,
@@ -1447,6 +1536,15 @@ fn notification_samples() -> Vec<Event> {
             stream: 1,
             text: "t".into(),
         },
+        Event::AgentDraft {
+            stream: 1,
+            text: "Let me read it.".into(),
+        },
+        Event::AgentDraftEnd {
+            stream: 1,
+            kept: false,
+            again: true,
+        },
         // ...and one on the agent's, which shares the type.
         Event::AgentDone {
             stream: 1,
@@ -1454,6 +1552,15 @@ fn notification_samples() -> Vec<Event> {
         },
         Event::Status {
             message: "file watching is unavailable".into(),
+        },
+        Event::Usage {
+            work: 1,
+            purpose: "ask".into(),
+            model: "deepseek-v4-flash".into(),
+            input: 1200,
+            cached: 800,
+            written: 100,
+            output: 300,
         },
     ]);
     samples
@@ -1567,6 +1674,25 @@ fn every_variant_has_a_sample() {
         .map(|l| l.kind)
         .collect();
     assert_covers("DiffKind", &diff_kinds, diff_kind_index);
+    let head_names: Vec<HeadName> = git_results()
+        .into_iter()
+        .filter_map(|r| match r {
+            GitResult::Head(head) => head,
+            _ => None,
+        })
+        .collect();
+    assert_covers("HeadName", &head_names, head_name_index);
+    let ref_kinds: Vec<RefKind> = git_results()
+        .into_iter()
+        .filter_map(|r| match r {
+            GitResult::Log(page) => Some(page.commits),
+            _ => None,
+        })
+        .flatten()
+        .flat_map(|c| c.refs)
+        .map(|r| r.kind)
+        .collect();
+    assert_covers("RefKind", &ref_kinds, ref_kind_index);
     let change_kinds: Vec<ChangeKind> = events
         .iter()
         .filter_map(|e| match e {
@@ -1881,6 +2007,9 @@ fn only_the_pinned_fields_may_be_left_out() {
         "Reply.event.Docs.files[].items[].refs",
         "Reply.event.Error.code.Provider.Status.kind",
         "Reply.event.GitInfo.info",
+        "Reply.event.GitResult.result.CommitDetail.files[].added",
+        "Reply.event.GitResult.result.CommitDetail.files[].old",
+        "Reply.event.GitResult.result.CommitDetail.files[].removed",
         "Reply.event.LanguageOptions.options.c",
         "Reply.event.LanguageOptions.options.go",
         "Reply.event.LanguageOptions.options.python",
@@ -1931,6 +2060,9 @@ fn only_the_pinned_fields_may_be_left_out() {
         "request.BuildFacts.choices.typescript",
         "request.BuildFacts.choices.zig",
         "request.EditState.merge.edit.Patch.insert",
+        "request.Git.op.Log.author",
+        "request.Git.op.Log.grep",
+        "request.Git.op.Log.rel",
         "request.Hello.fingerprint",
         "request.LanguageOptions.choices.c",
         "request.LanguageOptions.choices.c.compile_commands",

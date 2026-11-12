@@ -1735,6 +1735,52 @@ pub(crate) fn resolve_rel(root: &Path, p: &str) -> PathBuf {
     if pb.is_absolute() { pb } else { root.join(pb) }
 }
 
+/// What a Rust crate at `root` builds to run, by its `Cargo.toml`: the
+/// binary's name — a `[[bin]]`'s; the package's for `src/main.rs`; for
+/// `src/bin/<name>.rs` (or `src/bin/<name>/main.rs`) that file's name, as
+/// Cargo names it — or, a library with none, nothing to run. `None`
+/// without a package to read (no manifest, a bare workspace), and for a
+/// workspace's root library: its members may well run.
+pub(crate) fn cargo_binary(root: &Path) -> Option<Option<String>> {
+    let text = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let manifest: toml::Value = toml::from_str(&text).ok()?;
+    let package = manifest.get("package")?.get("name")?.as_str()?.to_string();
+    let named_bin = manifest
+        .get("bin")
+        .and_then(|b| b.as_array())
+        .and_then(|bins| bins.iter().find_map(|b| b.get("name")?.as_str()))
+        .map(str::to_string);
+    if named_bin.is_some() {
+        return Some(named_bin);
+    }
+    if root.join("src/main.rs").is_file() {
+        return Some(Some(package));
+    }
+    let mut bins: Vec<String> = std::fs::read_dir(root.join("src/bin"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "rs") && path.is_file() {
+                path.file_stem()?.to_str().map(str::to_string)
+            } else if path.join("main.rs").is_file() {
+                path.file_name()?.to_str().map(str::to_string)
+            } else {
+                None
+            }
+        })
+        .collect();
+    bins.sort();
+    if let Some(first) = bins.into_iter().next() {
+        return Some(Some(first));
+    }
+    if manifest.get("workspace").is_some() {
+        return None;
+    }
+    Some(None)
+}
+
 /// A `launch.json` for a program in `lang` (a language key, as a pane has),
 /// for the project at `root`: what Debug suggests writing when there is
 /// none. It suggested a Python script whatever the project was written in.
@@ -1759,7 +1805,12 @@ pub(crate) fn launch_example(root: &Path, lang: Option<&str>) -> String {
         .map(|(_, lang)| lang)
     });
     let program = match lang {
-        Some("rust") => format!("target/debug/{name}"),
+        // The binary Cargo builds, by its own name: the folder's was a
+        // guess, often wrong.
+        Some("rust") => format!(
+            "target/debug/{}",
+            cargo_binary(root).flatten().unwrap_or(name)
+        ),
         Some("c" | "cpp") => format!("build/{name}"),
         Some("zig") => format!("zig-out/bin/{name}"),
         Some("go") => "main.go".into(),
@@ -2036,10 +2087,28 @@ pub enum ExplainFailure {
     /// The provider could not serve it now: a 5xx, an overload or a rate
     /// limit (408, 429), or a failure it reported mid-answer.
     Unavailable(String),
-    /// No answer came: the connection to the provider — or, for a remote
-    /// project, to the clew-server that calls it — could not be made, broke,
-    /// or went quiet.
+    /// The provider said so, and kept saying so through the waits every
+    /// request makes (`llm::send_with_retry`): a status it is sent again
+    /// for — 408, 429, 500, 503, 529 — that came back each time. Said as
+    /// [`ExplainFailure::Unavailable`] is; unlike a 502 or a stream cut off,
+    /// which come back at once, it counts toward stopping a pass
+    /// ([`Unanswered`]): out of credit, or down, every later call answers
+    /// the same.
+    Busy(String),
+    /// No answer came: the connection to the provider broke, or went quiet.
     Network(String),
+    /// For a project on another machine, the link to the clew-server that
+    /// makes the calls is gone ("not connected to a server"): every later
+    /// call goes the same way, so it counts toward stopping a pass
+    /// ([`Unanswered`]) — said as the server's, not the provider's.
+    ServerLost(String),
+    /// No connection to the provider could be made at all, after the
+    /// attempts every request makes (`llm::send_with_retry`): an address
+    /// that refuses connections, a name that does not resolve, a network
+    /// that is down. Told apart from [`Self::Network`] because it is what
+    /// stops a pass (`Unanswered`): a connection that broke mid-answer
+    /// says nothing of the next call.
+    Unreached(String),
     /// The provider answered, and the answer could not be used: not what
     /// its API sends, or no text in it.
     Unusable(String),
@@ -2096,7 +2165,7 @@ impl ExplainFailure {
             CallError::Rpc(RpcError {
                 code: None,
                 message,
-            }) => ExplainFailure::Network(first_line(message)),
+            }) => ExplainFailure::ServerLost(first_line(message)),
             CallError::Rpc(RpcError {
                 code: Some(code),
                 message,
@@ -2119,9 +2188,8 @@ impl ExplainFailure {
                 // Never reached the provider (llm sent it again while
                 // another attempt could get further), or reached it and
                 // broke.
-                ProviderFailure::Unreached | ProviderFailure::Broken => {
-                    ExplainFailure::Network(detail)
-                }
+                ProviderFailure::Unreached => ExplainFailure::Unreached(detail),
+                ProviderFailure::Broken => ExplainFailure::Network(detail),
                 ProviderFailure::Stream => ExplainFailure::Unavailable(detail),
                 ProviderFailure::Unusable => ExplainFailure::Unusable(detail),
                 ProviderFailure::Settings => ExplainFailure::Rejected {
@@ -2155,7 +2223,8 @@ impl ExplainFailure {
         model: &str,
     ) -> ExplainFailure {
         let what = match code {
-            408 | 429 | 500..=599 => return ExplainFailure::Unavailable(detail),
+            408 | 429 | 500 | 503 | 529 => return ExplainFailure::Busy(detail),
+            500..=599 => return ExplainFailure::Unavailable(detail),
             401 | 403 => Rejection::Key,
             404 if is_about_the_model(kind, message, model) => Rejection::Model(model.to_string()),
             404 => Rejection::Endpoint,
@@ -2174,7 +2243,7 @@ impl ExplainFailure {
                 detail,
             } => tr!(
                 "the provider rejected the API key ({detail}) — check it in Settings",
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Length,
@@ -2182,7 +2251,7 @@ impl ExplainFailure {
             } => tr!(
                 "the prompt is too long for the model ({detail}) — a model with a larger \
                  context window can explain it",
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Model(model),
@@ -2191,50 +2260,62 @@ impl ExplainFailure {
                 "the provider has no model `{model}` at this endpoint ({detail}) — check the \
                  model and endpoint in Settings",
                 model = model,
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Endpoint,
                 detail,
             } => tr!(
                 "the endpoint was not found ({detail}) — check the base URL in Settings",
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Request,
                 detail,
             } => tr!(
                 "the request was refused ({detail}) — check the model and endpoint in Settings",
-                detail = detail
+                detail = plain_detail(detail)
             ),
-            ExplainFailure::Unavailable(detail) => {
+            ExplainFailure::Unavailable(detail) | ExplainFailure::Busy(detail) => {
                 tr!(
                     "the provider was unavailable ({detail}) — try again later",
-                    detail = detail
+                    detail = plain_detail(detail)
                 )
             }
-            ExplainFailure::Network(detail) => {
+            // Said once, the same way everywhere a call failed so: what
+            // to check, not "try again" beside a Try again.
+            ExplainFailure::Unreached(detail) => {
                 tr!(
-                    "the connection failed ({detail}) — check the network and try again",
-                    detail = detail
+                    "couldn't reach the AI provider ({detail}) — check the base URL in Settings",
+                    detail = plain_detail(detail)
                 )
             }
+            // Reached, and lost: mid-answer, a model too slow to answer, the
+            // link to the clew-server — none of them the base URL's fault.
+            ExplainFailure::Network(detail) => tr!(
+                "the connection to the AI was lost ({detail})",
+                detail = plain_detail(detail)
+            ),
+            ExplainFailure::ServerLost(detail) => tr!(
+                "the connection to the server was lost ({detail})",
+                detail = plain_detail(detail)
+            ),
             ExplainFailure::Unusable(detail) => tr!(
                 "the provider's answer could not be used ({detail}) — check the model and \
                  endpoint in Settings",
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::Cancelled => {
                 tr!("its requests were cancelled — run it again to finish").to_string()
             }
             ExplainFailure::Internal(detail) => tr!(
                 "Clew failed internally ({detail}) — try again, and report it if it happens again",
-                detail = detail
+                detail = plain_detail(detail)
             ),
             ExplainFailure::ProjectUnreadable(detail) => tr!(
                 "the project folder could not be read ({detail}) — nothing was changed; check \
                  that it is still there",
-                detail = detail
+                detail = plain_detail(detail)
             ),
         }
     }
@@ -2244,11 +2325,14 @@ impl ExplainFailure {
     /// answer that could not be used is answered again, and a cancellation
     /// was asked for. The pass sends such a call again, once (see
     /// [`explain_pass`]); failing again, a later pass retries the group.
-    fn may_pass_later(&self) -> bool {
+    pub(crate) fn may_pass_later(&self) -> bool {
         matches!(
             self,
             ExplainFailure::Unavailable(_)
+                | ExplainFailure::Busy(_)
                 | ExplainFailure::Network(_)
+                | ExplainFailure::ServerLost(_)
+                | ExplainFailure::Unreached(_)
                 | ExplainFailure::Internal(_)
         )
     }
@@ -2280,7 +2364,10 @@ impl ExplainFailure {
 
     /// Whether `other` is worded as this one is, whatever its detail.
     fn same_kind(&self, other: &ExplainFailure) -> bool {
+        use ExplainFailure::{Busy, Unavailable};
         match (self, other) {
+            // Said in the same words: one is enough.
+            (Unavailable(_) | Busy(_), Unavailable(_) | Busy(_)) => true,
             (
                 ExplainFailure::Rejected { what: a, .. },
                 ExplainFailure::Rejected { what: b, .. },
@@ -2322,10 +2409,164 @@ fn is_length_refusal(kind: Option<&str>, message: &str) -> bool {
     kind.is_some_and(|kind| KINDS.contains(&kind)) || WORDS.iter().any(|w| message.contains(w))
 }
 
-/// An error's first line, trimmed and capped: what the status line quotes.
+/// An error's first line, trimmed and capped: what the status line quotes,
+/// kept in the words it came in — said in plain words ([`plain_detail`])
+/// where it is described, in the language spoken then: made plain as it
+/// failed, it stayed in that language ("couldn't reach the AI provider
+/// (该地址没有响应)" once switched back to English).
 fn first_line(err: &str) -> String {
     let line = err.trim().lines().next().unwrap_or_default().trim();
     line.chars().take(160).collect()
+}
+
+/// A failed call's words as a reader takes them: without the transport's
+/// "request failed: " and the system's "(os error 111)", and a connection
+/// that could not be made said for what it means. One refused connection
+/// read ten ways across Clew, each with the OS's jargon: "the connection
+/// failed (request failed: Connection refused (os error 111))".
+pub(crate) fn plain_detail(raw: &str) -> String {
+    let mut said = raw.trim();
+    while let Some(rest) = said.strip_prefix("request failed: ") {
+        said = rest.trim_start();
+    }
+    let said = match said.rfind(" (os error ") {
+        Some(at) if said.ends_with(')') => said[..at].trim_end(),
+        _ => said,
+    };
+    let lower = said.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
+    if has(REFUSED) {
+        tr!("nothing answered at that address").to_string()
+    } else if has(NO_SUCH_HOST) {
+        tr!("no such address was found").to_string()
+    } else if has(&["timed out", "deadline has elapsed"]) {
+        tr!("no answer came in time").to_string()
+    } else if has(&[
+        "connection reset",
+        "broken pipe",
+        "connection closed before",
+    ]) {
+        tr!("the connection was cut").to_string()
+    } else {
+        // In the language spoken now, where it is one Clew says (kept in
+        // English, said where shown): a reason made in French stayed
+        // French after the language changed.
+        crate::i18n::message(said)
+    }
+}
+
+impl ExplainFailure {
+    /// The Language model field this failure is about, if one is: where
+    /// its Settings puts the keyboard.
+    pub(crate) fn field(&self) -> Option<crate::app::state::LlmField> {
+        use crate::app::state::LlmField;
+        match self {
+            ExplainFailure::Unreached(_)
+            | ExplainFailure::Rejected {
+                what: Rejection::Endpoint,
+                ..
+            } => Some(LlmField::BaseUrl),
+            ExplainFailure::Rejected {
+                what: Rejection::Key,
+                ..
+            } => Some(LlmField::Key),
+            ExplainFailure::Rejected {
+                what: Rejection::Model(_),
+                ..
+            } => Some(LlmField::Model),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a failed AI call's `raw` words say no connection to the
+/// provider could be made at all — what the base URL is to blame for.
+pub(crate) fn unreached(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    REFUSED
+        .iter()
+        .chain(NO_SUCH_HOST)
+        .any(|w| lower.contains(w))
+}
+
+/// Whether a failed AI call's `raw` words say every call to the provider
+/// fails alike: nothing could reach it, or it refused the key. Another
+/// call — Ask's answer from the index after its tools failed — only fails
+/// again, as long after.
+pub(crate) fn provider_refuses_all(raw: &str) -> bool {
+    setting_to_fix(raw).is_some()
+}
+
+/// The Language model setting a failed AI call's `raw` words point at, if
+/// they point at one: the base URL where nothing could be reached, the key
+/// where the provider refused it — what a failure's Settings opens at.
+pub(crate) fn setting_to_fix(raw: &str) -> Option<crate::app::state::LlmField> {
+    use crate::app::state::LlmField;
+    if unreached(raw) {
+        return Some(LlmField::BaseUrl);
+    }
+    let lower = raw.to_lowercase();
+    (has_code(&lower, "401")
+        || has_code(&lower, "403")
+        || [
+            "unauthorized",
+            "invalid api key",
+            "invalid_api_key",
+            "incorrect api key",
+            "authentication",
+        ]
+        .iter()
+        .any(|w| lower.contains(w)))
+    .then_some(LlmField::Key)
+}
+
+/// Whether `text` holds the status `code` as a number of its own: "HTTP
+/// 401", "(403)" — not inside another ("140123 tokens", "req_4031",
+/// "403ms", "130,401 tokens", "1.403 s"), where the key was blamed and
+/// Ask's answer from the index was not tried.
+fn has_code(text: &str, code: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    // A ',' or '.' between digits joins them into one number.
+    let joined = |mark: Option<char>, beyond: Option<char>| {
+        matches!(mark, Some(',' | '.')) && beyond.is_some_and(|c| c.is_ascii_digit())
+    };
+    text.match_indices(code).any(|(at, _)| {
+        let mut before = text[..at].chars().rev();
+        let mut after = text[at + code.len()..].chars();
+        let (b1, b2) = (before.next(), before.next());
+        let (a1, a2) = (after.next(), after.next());
+        !b1.is_some_and(word) && !a1.is_some_and(word) && !joined(b1, b2) && !joined(a1, a2)
+    })
+}
+
+/// How a refused connection is worded: by Linux and macOS ("Connection
+/// refused"), and by Windows ("… the target machine actively refused it"),
+/// which matched nothing, and was said in the OS's own words.
+const REFUSED: &[&str] = &["connection refused", "actively refused"];
+
+/// How an address that names no host is worded: by the resolver, by each
+/// OS, and by ureq ("host not found").
+const NO_SUCH_HOST: &[&str] = &[
+    "dns error",
+    "failed to lookup address",
+    "name or service not known",
+    "nodename nor servname",
+    "no such host",
+    "host not found",
+];
+
+/// What an AI call that failed with `raw` says to the reader, wherever it
+/// failed: no connection to the provider at all — nothing at the address,
+/// no such address — in the one sentence Explain says, naming the AI
+/// provider and where its address is set (a walkthrough, Ask, a fake run
+/// said only "nothing answered at that address", and three places the
+/// OS's own words); anything else in plain words ([`plain_detail`]).
+pub(crate) fn ai_reason(raw: &str) -> String {
+    if unreached(raw) {
+        ExplainFailure::Unreached(raw.to_string()).describe()
+    } else {
+        plain_detail(raw)
+    }
 }
 
 /// How an explain pass fell short, if it did.
@@ -2378,6 +2619,66 @@ fn was_rejected(model: &str, hash: incremental::Version) -> bool {
 /// the status line says of it, and whether the pass sends it again
 /// ([`ExplainFailure::may_pass_later`]).
 type CallOutcome = Result<String, ExplainFailure>;
+
+/// Calls of a pass that could not reach the provider, one after another:
+/// no connection could be made, after the attempts every request makes
+/// (`llm::send_with_retry`). With nothing answered yet, a few such calls in
+/// a row mean the provider cannot be reached — an endpoint that refuses
+/// connections, a network that is down — and every later call would fail
+/// as they did: a pass whose every call failed so ran each of them in turn,
+/// its bar filling for a minute of work that all failed. Before anything is
+/// answered, an answer that is no provider's (a page where JSON was due:
+/// a captive portal, a web server at the base URL) or a request refused as
+/// it stands counts too. Once calls have been answered, only calls that
+/// reached nothing count — no connection, a provider busy or out of credit
+/// through every wait, the link to the clew-server gone — and only as many
+/// in a row as the pass makes at once stop it: the network lost mid-pass.
+///
+/// Calls end in the order they finish, not the order they were sent, so
+/// only failures that took their retries count: a 502 or a connection
+/// reset mid-answer comes back at once, ahead of answers still on their
+/// way, and three of them stopped a healthy pass (they are sent again
+/// once, at the end of their level).
+#[derive(Debug, Default)]
+struct Unanswered {
+    in_a_row: usize,
+    answered: bool,
+}
+
+/// Unanswered calls in a row that stop a pass none of whose calls was
+/// answered (see [`Unanswered`]).
+const UNANSWERED_FIRST: usize = 3;
+
+impl Unanswered {
+    /// Note how a call ended: whether the pass stops for it.
+    fn note(&mut self, outcome: &CallOutcome) -> bool {
+        match outcome {
+            Ok(_) => {
+                self.answered = true;
+                self.in_a_row = 0;
+            }
+            Err(
+                ExplainFailure::Unreached(_)
+                | ExplainFailure::Busy(_)
+                | ExplainFailure::ServerLost(_),
+            ) => self.in_a_row += 1,
+            Err(
+                ExplainFailure::Unusable(_)
+                | ExplainFailure::Rejected {
+                    what: Rejection::Request,
+                    ..
+                },
+            ) if !self.answered => self.in_a_row += 1,
+            Err(_) => {}
+        }
+        let limit = if self.answered {
+            EXPLAIN_CONCURRENCY
+        } else {
+            UNANSWERED_FIRST
+        };
+        self.in_a_row >= limit
+    }
+}
 
 /// How long after a call failed in a way that may pass the pass sends it
 /// again (see [`explain_pass`]): time for a gateway that lost one answer,
@@ -2550,6 +2851,7 @@ where
     let total = pass.total();
     let pass = Arc::new(Mutex::new(pass));
     let mut failures = PassFailures::default();
+    let mut unanswered = Unanswered::default();
 
     // Show a determinate 0/total at once so the bar appears immediately, then
     // update as items land (see the throttle below).
@@ -2618,6 +2920,14 @@ where
             }))
             .buffer_unordered(EXPLAIN_CONCURRENCY);
             while let Some((job, outcome)) = calls.next().await {
+                // A provider that cannot be reached fails every call the
+                // same way: the pass stops, saying so, instead of making
+                // each of them fail in turn (`Unanswered`).
+                if unanswered.note(&outcome)
+                    && let Err(why) = &outcome
+                {
+                    failures.stopped.get_or_insert_with(|| why.clone());
+                }
                 // Settled counts reused and skipped groups too, so the bar
                 // reaches the total.
                 let (done, failed) = {
@@ -2627,7 +2937,15 @@ where
                             ran.insert(job.group);
                             pass.complete(&job, summary);
                         }
-                        Err(why) if resend && why.may_pass_later() => {
+                        // (Not a provider that could not be reached at
+                        // all: llm's send resent it already, until another
+                        // attempt could not get further — sent again here,
+                        // a refused address took 17 s to be said.)
+                        Err(why)
+                            if resend
+                                && why.may_pass_later()
+                                && !matches!(why, ExplainFailure::Unreached(_)) =>
+                        {
                             last_failed = Some(std::time::Instant::now());
                             again.push((job, why));
                         }
@@ -2750,7 +3068,10 @@ pub(crate) async fn explain_stream(
     let complete = move |prompt: String| {
         let ai = ai.clone();
         let cfg = cfg.clone();
-        async move { ai.complete_typed(cfg, EXPLAIN_SYSTEM, prompt, 400).await }
+        async move {
+            ai.complete_typed(cfg, crate::app::usage::EXPLAIN, EXPLAIN_SYSTEM, prompt, 400)
+                .await
+        }
     };
     let outcome = match gathered {
         Ok((inputs, prev)) => {
@@ -3998,7 +4319,6 @@ mod pass_tests {
         let twice = [
             CallError::Llm(status(502, None, "Bad Gateway")),
             from_server(&status(502, None, "Bad Gateway")),
-            CallError::Llm(LlmError::Connect("connection refused".into())),
             CallError::Llm(LlmError::Transport("connection reset by peer".into())),
             CallError::Llm(status(429, None, "Rate limit reached")),
             CallError::Llm(status(503, None, "Service Unavailable")),
@@ -4020,9 +4340,12 @@ mod pass_tests {
         }
         // (A refusal of the prompt's length is not sent again either — nor
         // asked again this session at all: `was_rejected`, tested apart.)
+        // Nor is a provider that could not be reached at all: llm's send
+        // resent it already, for as long as another attempt might connect.
         let once = [
             CallError::Llm(status(422, None, "Unprocessable Entity")),
             from_server(&status(422, None, "Unprocessable Entity")),
+            CallError::Llm(LlmError::Connect("connection refused".into())),
         ];
         for failure in &once {
             assert_eq!(sent(explicit(), failure), 1, "sent again: {failure:?}");
@@ -4152,6 +4475,206 @@ mod pass_tests {
             }
             assert_eq!(outcome.tally.retry.len(), files.len(), "{refusal:?}");
         }
+    }
+
+    /// A provider that cannot be reached — an endpoint that refuses
+    /// connections — stops the pass after a few calls, saying why: it ran
+    /// every call of the project in turn, its bar filling for a minute, to
+    /// say "0 explained; 42 failed" at the end. What it had is kept.
+    #[test]
+    fn a_provider_that_cannot_be_reached_stops_the_pass() {
+        let bodies: Vec<String> = (0..30).map(|i| format!("pub fn f{i}() {{}}\n")).collect();
+        let files: Vec<(String, &str)> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| (format!("src/f{i}.rs"), body.as_str()))
+            .collect();
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(rel, body)| (rel.as_str(), *body))
+            .collect();
+        for gone in [
+            llm::LlmError::Connect("Connection refused (os error 111)".into()),
+            // A page where JSON was due: a web server at the base URL.
+            llm::LlmError::Protocol("expected value at line 1 column 1".into()),
+        ] {
+            let failure = gone.clone();
+            let (outcome, calls) = pass_with(project(&files), explain::Cache::new(), "m-gone", {
+                move |_| Err(CallError::Llm(failure.clone()))
+            });
+            assert!(calls <= EXPLAIN_CONCURRENCY, "{calls} calls: {gone:?}");
+            assert!(
+                matches!(
+                    outcome.failures.stopped,
+                    Some(ExplainFailure::Unreached(_) | ExplainFailure::Unusable(_))
+                ),
+                "{gone:?}: {:?}",
+                outcome.failures
+            );
+            assert!(outcome.written.is_empty(), "{:?}", outcome.written);
+        }
+        // Out of credit, down through every wait, or the link to the
+        // clew-server gone: every later call answers the same, and the
+        // pass ran all of them, each resent, for an hour of failing work.
+        for gone in [
+            CallError::Llm(status(
+                429,
+                Some("insufficient_quota"),
+                "You exceeded your current quota",
+            )),
+            CallError::Llm(status(503, None, "Service Unavailable")),
+            CallError::Rpc(RpcError {
+                code: None,
+                message: "not connected to a server".into(),
+            }),
+        ] {
+            let failure = gone.clone();
+            let (outcome, calls) = pass_with(project(&files), explain::Cache::new(), "m-gone", {
+                move |_| Err(failure.clone())
+            });
+            assert!(
+                calls <= EXPLAIN_CONCURRENCY && outcome.failures.stopped.is_some(),
+                "{gone:?}: {calls} calls, {:?}",
+                outcome.failures
+            );
+        }
+    }
+
+    /// A refused key is told by its status as a number of its own: "401"
+    /// inside a token count or a request id blamed the key, and kept Ask
+    /// from answering from the index.
+    #[test]
+    fn a_key_is_blamed_for_401_and_403_alone() {
+        use crate::app::state::LlmField;
+        for raw in [
+            "HTTP 401: invalid api key",
+            "provider said (403) forbidden",
+            "status: 401",
+            "status 403.",
+            "error 401, unauthorized",
+        ] {
+            assert_eq!(setting_to_fix(raw), Some(LlmField::Key), "{raw}");
+        }
+        for raw in [
+            "this model's maximum context length is 128000 tokens; your messages resulted in 140123 tokens",
+            "request req_4031 failed",
+            "rate limited: retry after 403ms",
+            "you requested 130,401 tokens",
+            "retry after 1.403 s",
+            "used 401.5 credits",
+        ] {
+            assert_eq!(setting_to_fix(raw), None, "{raw}");
+            assert!(!provider_refuses_all(raw), "{raw}");
+        }
+    }
+
+    /// A failure is said in the language spoken where it is said, all of
+    /// it: made plain as it failed, its detail stayed in that language —
+    /// "couldn't reach the AI provider (该地址没有响应)" in English.
+    #[test]
+    fn a_failures_detail_is_said_in_the_language_spoken_now() {
+        let raw = CallError::Rpc(RpcError {
+            code: Some(clew_protocol::ErrorCode::Provider(
+                clew_protocol::ProviderFailure::Unreached,
+            )),
+            message: "request failed: Connection refused (os error 111)".into(),
+        });
+        let failed =
+            crate::i18n::with_lang(crate::i18n::Lang::Zh, || ExplainFailure::of_call(&raw, "m"));
+        let said = failed.describe();
+        assert!(said.contains("nothing answered at that address"), "{said}");
+        assert!(
+            !said.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+            "{said}"
+        );
+        let in_chinese = crate::i18n::with_lang(crate::i18n::Lang::Zh, || failed.describe());
+        assert!(!in_chinese.contains("nothing answered"), "{in_chinese}");
+    }
+
+    /// Only a connection that could not be made is said to be the base
+    /// URL's: one lost mid-answer, a model too slow to answer, the link to
+    /// the clew-server are none of its doing.
+    #[test]
+    fn only_an_unreached_provider_is_sent_to_the_base_url() {
+        for lost in [
+            ExplainFailure::Network("timed out reading response".into()),
+            ExplainFailure::Network("connection reset".into()),
+            ExplainFailure::ServerLost("not connected to a server".into()),
+        ] {
+            assert!(!lost.describe().contains("base URL"), "{lost:?}");
+        }
+        assert!(
+            ExplainFailure::Unreached("Connection refused (os error 111)".into())
+                .describe()
+                .contains("check the base URL in Settings")
+        );
+        let remote = CallError::Rpc(RpcError {
+            code: None,
+            message: "not connected to a server".into(),
+        });
+        assert!(
+            ExplainFailure::of_call(&remote, "m")
+                .describe()
+                .starts_with("the connection to the server was lost")
+        );
+        // Every OS's way of saying it, and ureq's: on Windows a refused
+        // connection was said in the OS's own words, with no way to Settings.
+        for raw in [
+            "request failed: Connection refused (os error 111)",
+            "No connection could be made because the target machine actively refused it. (os error 10061)",
+            "dns error: failed to lookup address information: Name or service not known",
+            "host not found",
+        ] {
+            assert!(unreached(raw), "{raw}");
+            assert!(ai_reason(raw).contains("base URL"), "{raw}");
+        }
+        for raw in ["timed out reading response", "connection reset by peer"] {
+            assert!(!unreached(raw), "{raw}");
+        }
+    }
+
+    /// Once calls are answered, a few unanswered ones do not stop the
+    /// pass — a call lost now and then is sent again — but as many in a row
+    /// as the pass makes at once do: the network went away mid-pass.
+    #[test]
+    fn unanswered_calls_stop_a_pass_only_in_a_row() {
+        let lost = || Err(ExplainFailure::Unreached("connection refused".into()));
+        let mut fresh = Unanswered::default();
+        assert!(!fresh.note(&lost()));
+        // What fails at once, ahead of answers on their way, never counts:
+        // a gateway's 502, a connection reset mid-answer.
+        assert!(!fresh.note(&Err(ExplainFailure::Unavailable("502".into()))));
+        assert!(!fresh.note(&Err(ExplainFailure::Network("reset".into()))));
+        assert!(!fresh.note(&lost()));
+        assert!(
+            fresh.note(&lost()),
+            "nothing answered: a few in a row stop it"
+        );
+        // Before an answer, a page where JSON was due counts too; after
+        // one, it is that call's own failure.
+        let page = || Err(ExplainFailure::Unusable("not JSON".into()));
+        let mut odd = Unanswered::default();
+        assert!(!odd.note(&page()));
+        assert!(!odd.note(&page()));
+        assert!(odd.note(&page()));
+        let mut answered = Unanswered::default();
+        assert!(!answered.note(&Ok("does a".into())));
+        for _ in 0..EXPLAIN_CONCURRENCY {
+            assert!(!answered.note(&page()));
+        }
+        let mut going = Unanswered::default();
+        assert!(!going.note(&Ok("does a".into())));
+        for _ in 1..EXPLAIN_CONCURRENCY {
+            assert!(!going.note(&lost()));
+        }
+        assert!(
+            !going.note(&Ok("does b".into())),
+            "an answer starts the count again"
+        );
+        for _ in 1..EXPLAIN_CONCURRENCY {
+            assert!(!going.note(&lost()));
+        }
+        assert!(going.note(&lost()));
     }
 
     /// Bodies come off the syntax tree: a C prototype has none and is not an
@@ -4361,7 +4884,7 @@ mod pass_tests {
             for call in [CallError::Llm(limited.clone()), from_server(&limited)] {
                 let failure = ExplainFailure::of_call(&call, "m");
                 assert!(
-                    matches!(failure, ExplainFailure::Unavailable(_)),
+                    matches!(failure, ExplainFailure::Busy(_)),
                     "{call:?}: {failure:?}"
                 );
                 assert!(!failure.stops_the_pass(), "{call:?}");
@@ -4386,6 +4909,44 @@ mod pass_tests {
             ExplainFailure::of_call(&from_server(&quoted), "m"),
             ExplainFailure::Network(_)
         ));
+    }
+
+    /// A failed call's words are said plainly, one way for one cause:
+    /// without the transport's prefix and the OS's error number, and a
+    /// connection that could not be made for what it means. What is none of
+    /// these is kept as it was.
+    #[test]
+    fn a_failure_is_said_in_plain_words() {
+        assert_eq!(
+            plain_detail("request failed: Connection refused (os error 111)"),
+            "nothing answered at that address"
+        );
+        assert_eq!(
+            plain_detail("request failed: dns error: failed to lookup address information"),
+            "no such address was found"
+        );
+        assert_eq!(
+            plain_detail("request failed: operation timed out"),
+            "no answer came in time"
+        );
+        assert_eq!(
+            plain_detail("Connection reset by peer (os error 104)"),
+            "the connection was cut"
+        );
+        assert_eq!(
+            plain_detail(
+                "request failed: the proxy answered HTTP 407 (Proxy Authentication Required)"
+            ),
+            "the proxy answered HTTP 407 (Proxy Authentication Required)"
+        );
+        assert_eq!(
+            plain_detail("Permission denied (os error 13)"),
+            "Permission denied"
+        );
+        assert_eq!(
+            plain_detail("HTTP 401: invalid key"),
+            "HTTP 401: invalid key"
+        );
     }
 
     /// A failed call is classified by what failed, as the side that made it
@@ -4482,7 +5043,10 @@ mod pass_tests {
             assert_eq!(rejected(&call), Some(Rejection::Request), "{call:?}");
         }
 
-        let unavailable = [408, 429, 500, 502, 503, 504, 529]
+        // What comes back at once, and what came back through every wait
+        // (`llm::send_with_retry`): only the second counts toward stopping
+        // a pass.
+        let unavailable = [502, 504]
             .map(|code| status(code, None, "try later"))
             .into_iter()
             .chain([LlmError::Stream("overloaded".into())]);
@@ -4492,25 +5056,39 @@ mod pass_tests {
                 "{call:?}"
             );
         }
+        let busy = [408, 429, 500, 503, 529]
+            .map(|code| status(code, None, "try later"))
+            .into_iter();
+        for call in busy.flat_map(both) {
+            assert!(matches!(of(&call), ExplainFailure::Busy(_)), "{call:?}");
+        }
 
-        let network = [
-            LlmError::Connect("connection refused".into()),
-            LlmError::Transport("timed out after 4013 ms".into()),
-        ]
-        .into_iter()
-        .flat_map(both)
-        .chain(
-            [
-                "server gone",
-                "server dropped the request",
-                "no reply from the server within 600s",
-                "the server took no requests for 600s",
-                "not connected to a server",
-            ]
-            .map(|words| rpc(None, words)),
-        );
+        // No connection made at all: unreached, which stops a pass.
+        for call in both(LlmError::Connect("connection refused".into())) {
+            assert!(
+                matches!(of(&call), ExplainFailure::Unreached(_)),
+                "{call:?}"
+            );
+        }
+        let network = [LlmError::Transport("timed out after 4013 ms".into())]
+            .into_iter()
+            .flat_map(both);
         for call in network {
             assert!(matches!(of(&call), ExplainFailure::Network(_)), "{call:?}");
+        }
+        // The clew-server's own words, with no code: the link to it.
+        for words in [
+            "server gone",
+            "server dropped the request",
+            "no reply from the server within 600s",
+            "the server took no requests for 600s",
+            "not connected to a server",
+        ] {
+            let call = rpc(None, words);
+            assert!(
+                matches!(of(&call), ExplainFailure::ServerLost(_)),
+                "{call:?}"
+            );
         }
 
         let unusable = [

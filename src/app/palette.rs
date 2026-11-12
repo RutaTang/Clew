@@ -20,6 +20,84 @@ use crate::*;
 /// Most commands the palette remembers as recently run.
 const MAX_RECENT: usize = 8;
 
+/// Whether `msg` uses the AI model: explaining, asking why, a fake run,
+/// a written overview, story or walkthrough.
+pub(crate) fn spends_ai(msg: &Message) -> bool {
+    matches!(
+        msg,
+        Message::Editor(EditorMsg::RunAction(
+            keymap::Action::ExplainAll | keymap::Action::FakeRun | keymap::Action::FakeDebug
+        )) | Message::Explain(
+            ExplainMsg::FromMenu | ExplainMsg::Project | ExplainMsg::ReexplainNode
+        ) | Message::TimeTravel(
+            TimeTravelMsg::WhyIsThisHere | TimeTravelMsg::Why | TimeTravelMsg::Story
+        ) | Message::Fake(FakeMsg::FromMenu { .. } | FakeMsg::AtCaret { .. })
+            | Message::Overview(OverviewMsg::Generate)
+            | Message::Walk(WalkMsg::Generate(_) | WalkMsg::GenerateTrace | WalkMsg::GenerateDiff)
+            | Message::Ask(AskMsg::Suggested(_))
+    )
+}
+
+/// The command bar's title for asking `question` of Clew: in English, as
+/// every command's title is ([`PaletteCommand::title`]), and read back by
+/// [`asked_in`].
+fn ask_title(question: &str) -> String {
+    format!("{ASK_PREFIX}{question}{ASK_SUFFIX}")
+}
+
+const ASK_PREFIX: &str = "Ask Clew: \u{201c}";
+const ASK_SUFFIX: &str = "\u{201d}";
+/// The end of the title of a row that only puts what was typed in Ask's
+/// field (`draft_title`): the ellipsis of a command that asks for more.
+const DRAFT_SUFFIX: &str = "\u{201d}\u{2026}";
+
+/// The question a command bar row titled `title` asks, if it asks one.
+pub(crate) fn asked_in(title: &str) -> Option<&str> {
+    title.strip_prefix(ASK_PREFIX)?.strip_suffix(ASK_SUFFIX)
+}
+
+/// The command bar's title for opening Ask with `typed` in its field,
+/// asking nothing yet: read back by [`drafted_in`].
+fn draft_title(typed: &str) -> String {
+    format!("{ASK_PREFIX}{typed}{DRAFT_SUFFIX}")
+}
+
+/// What a command bar row titled `title` puts in Ask's field, if it is
+/// such a row.
+pub(crate) fn drafted_in(title: &str) -> Option<&str> {
+    title.strip_prefix(ASK_PREFIX)?.strip_suffix(DRAFT_SUFFIX)
+}
+
+/// The command bar's row that asks `question` of Clew, in the Ask window.
+fn ask_command(question: &str) -> PaletteCommand {
+    PaletteCommand {
+        title: ask_title(question),
+        keys: None,
+        action: PaletteAction::Send(Message::Ask(AskMsg::Suggested(question.to_string()))),
+        shown_as: Some(tr!("Ask Clew: “{question}”", question = question)),
+    }
+}
+
+/// The command bar's row offered where nothing matched what was typed and
+/// it reads as no question — a name mistyped, likely: it opens Ask with
+/// the words in its field, to be asked once they are. Asked at once, as a
+/// question's row is, Enter on "mian.rs" spent an AI call on a typo.
+fn draft_command(typed: &str) -> PaletteCommand {
+    PaletteCommand {
+        title: draft_title(typed),
+        keys: None,
+        action: PaletteAction::Send(Message::Ask(AskMsg::Open)),
+        shown_as: Some(tr!("Ask Clew about “{question}”…", question = typed)),
+    }
+}
+
+/// Whether what was typed into the command bar reads as a question to ask:
+/// it has a question mark, or three words or more — "how is tax
+/// computed" — where a command's or a file's name is a word or two.
+pub(crate) fn looks_like_a_question(typed: &str) -> bool {
+    typed.contains(['?', '？']) || typed.split_whitespace().count() >= 3
+}
+
 /// One command in the palette.
 #[derive(Debug, Clone)]
 pub(crate) struct PaletteCommand {
@@ -37,11 +115,31 @@ pub(crate) struct PaletteCommand {
 }
 
 impl PaletteCommand {
+    /// Whether running it uses the AI model (and so costs money): its row
+    /// is marked so, as every control that does is.
+    pub(crate) fn spends_ai(&self) -> bool {
+        match &self.action {
+            PaletteAction::Send(m) | PaletteAction::AtCaret(m) => spends_ai(m),
+            PaletteAction::Goto(_) | PaletteAction::Insight => false,
+        }
+    }
+
     /// What the row says: its title, in the reader's language.
     pub(crate) fn shown(&self) -> &str {
         self.shown_as
             .as_deref()
             .unwrap_or_else(|| crate::i18n::lookup(&self.title))
+    }
+
+    /// What a query is matched against: what the row says, and the other
+    /// words it goes by ([`also_called`]).
+    fn searched(&self) -> String {
+        with_aliases(self.shown(), &self.title)
+    }
+
+    /// [`Self::searched`], in English.
+    fn searched_in_english(&self) -> String {
+        with_aliases(&self.title, &self.title)
     }
 
     /// Whether running it costs something beyond what the window shows —
@@ -52,16 +150,32 @@ impl PaletteCommand {
     pub(crate) fn costly(&self) -> bool {
         use keymap::Action;
         match &self.action {
-            PaletteAction::Send(message) | PaletteAction::AtCaret(message) => matches!(
-                message,
-                Message::Editor(EditorMsg::RunAction(
-                    Action::ExplainAll | Action::StartDebug
-                )) | Message::Debug(_)
-                    | Message::Explain(_)
-                    | Message::Project(ProjectMsg::OpenFolderPressed)
-                    | Message::Connect(ConnectMsg::Open)
-                    | Message::Export(_)
-            ),
+            PaletteAction::Send(message) | PaletteAction::AtCaret(message) => match message {
+                // What only shows, or stops spending, costs nothing: a
+                // variable opened, a condition or watch being typed, an
+                // explanation shown, an explain pass stopped.
+                Message::Debug(
+                    DebugMsg::ToggleVar(_)
+                    | DebugMsg::WatchInput(_)
+                    | DebugMsg::BpConditionInput(_)
+                    | DebugMsg::BpConditionCancel,
+                )
+                | Message::Explain(ExplainMsg::Cancel | ExplainMsg::Show(_)) => false,
+                _ => matches!(
+                    message,
+                    Message::Editor(EditorMsg::RunAction(
+                        Action::ExplainAll | Action::StartDebug | Action::Run
+                    )) | Message::Debug(_)
+                        | Message::Explain(_)
+                        | Message::Project(
+                            ProjectMsg::OpenFolderPressed
+                                | ProjectMsg::FolderPicked(_)
+                                | ProjectMsg::CloseFolder
+                        )
+                        | Message::Connect(ConnectMsg::Open)
+                        | Message::Export(_)
+                ),
+            },
             PaletteAction::Goto(_) | PaletteAction::Insight => false,
         }
     }
@@ -86,11 +200,13 @@ impl PaletteCommand {
         matches!(
             message,
             Message::Voice(
-                VoiceMsg::SetKeepListening(_)
-                    | VoiceMsg::SetSendQuestions(_)
+                VoiceMsg::SetSendQuestions(_)
                     | VoiceMsg::SetRunCommands(_)
+                    | VoiceMsg::SetTalkOver(_)
+                    | VoiceMsg::SetWake(_)
                     | VoiceMsg::PickModel(_)
-            ) | Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
+            ) | Message::Editor(EditorMsg::RunAction(crate::keymap::Action::Voice))
+                | Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
                 | Message::Updater(UpdaterMsg::SetAuto(_))
         )
     }
@@ -174,6 +290,10 @@ impl PaletteCommand {
             | Message::Debug(DebugMsg::Start) => {
                 (Glyph::Debug, tr!("This builds the program and runs it."))
             }
+            Message::Editor(EditorMsg::RunAction(Action::Run)) | Message::Debug(DebugMsg::Run) => (
+                Glyph::Play,
+                tr!("This builds the program and runs it, without the debugger."),
+            ),
             Message::Debug(DebugMsg::Control(_)) => (
                 Glyph::Debug,
                 tr!("This resumes the program from where it stopped."),
@@ -190,9 +310,13 @@ impl PaletteCommand {
                 Glyph::Sparkle,
                 tr!("This uses the AI model, which costs money."),
             ),
-            Message::Project(ProjectMsg::OpenFolderPressed) => (
+            Message::Project(ProjectMsg::OpenFolderPressed | ProjectMsg::FolderPicked(_)) => (
                 Glyph::FolderOpen,
                 tr!("This opens another folder in this window."),
+            ),
+            Message::Project(ProjectMsg::CloseFolder) => (
+                Glyph::Close,
+                tr!("This closes the folder open in this window."),
             ),
             Message::Connect(ConnectMsg::Open) => {
                 (Glyph::Remote, tr!("This connects to another computer."))
@@ -217,6 +341,58 @@ impl PaletteCommand {
     }
 }
 
+/// The other words a command titled `title` goes by — a name it had, the
+/// short word people use — that a query finds it by, though its row does
+/// not show them: "map" finds Project Graphs, once Project Maps, and
+/// "stats" Code Statistics.
+fn also_called(title: &str) -> &'static str {
+    match title {
+        "Project Graphs" => "map maps schema routes",
+        "Type Graph" => "type map",
+        "Code Statistics" => "stats",
+        "Architecture Overview" => "overview",
+        "Talk" => "voice microphone listen",
+        "Diff with Last Commit" => "head diff vs head",
+        _ => "",
+    }
+}
+
+/// The name the command titled `title` had before it took that title,
+/// heard as a title of its own when the words said name no command by its
+/// title: "show the stats" still opens Code Statistics.
+fn formerly(title: &str) -> Option<&'static str> {
+    match title {
+        "Project Graphs" => Some("Project Maps"),
+        "Type Graph" => Some("Type Map"),
+        "Code Statistics" => Some("Stats"),
+        "Architecture Overview" => Some("Overview"),
+        "Diff with Last Commit" => Some("Diff vs HEAD"),
+        _ => None,
+    }
+}
+
+/// The index in `commands` of the command `said` plainly names: by its
+/// title, or, when no title is named, by the name it had ([`formerly`]).
+pub(crate) fn command_said(said: &str, commands: &[PaletteCommand]) -> Option<usize> {
+    let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+    clew_voice::intent::command(said, &titles).or_else(|| {
+        let (names, at): (Vec<&str>, Vec<usize>) = commands
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| formerly(&c.title).map(|name| (name, i)))
+            .unzip();
+        clew_voice::intent::command(said, &names).map(|k| at[k])
+    })
+}
+
+/// `row`, and the words the command titled `title` also goes by.
+fn with_aliases(row: &str, title: &str) -> String {
+    match also_called(title) {
+        "" => row.to_string(),
+        also => format!("{row} {also}"),
+    }
+}
+
 /// What running a command does.
 #[derive(Debug, Clone)]
 pub(crate) enum PaletteAction {
@@ -235,6 +411,8 @@ impl App {
     /// Open the command bar: the finder, nothing typed, its suggestions
     /// showing.
     pub(crate) fn on_palette_opened(&mut self) -> Task<Message> {
+        // What is on screen under it, for the bar to list by name.
+        self.palette_screen = crate::ui::heard::gather(self);
         self.proj.finder.open = true;
         self.proj.finder.bar = true;
         self.proj.finder.mode = FinderMode::Files;
@@ -257,6 +435,8 @@ impl App {
     /// more that their English titles match.
     pub(crate) fn refresh_bar(&mut self) {
         self.palette = self.palette_commands();
+        let on_screen = self.screen_commands(&self.palette);
+        self.palette.extend(on_screen);
         let files = self
             .proj
             .project
@@ -264,13 +444,30 @@ impl App {
             .map(|p| p.files.clone())
             .unwrap_or_default();
         let n = self.palette.len();
-        let english = self.ranked_in_english(|finder, titles| finder.refresh_bar(titles, &files));
-        let shown: Vec<&str> = self.palette.iter().map(PaletteCommand::shown).collect();
-        self.proj.finder.refresh_bar(&shown, &files);
-        if let Some(english) = english {
+        let english = self.ranked_in_english(|finder, titles| {
+            finder.refresh_bar(titles, &files);
+            finder.bar_worded
+        });
+        let searched: Vec<String> = self.palette.iter().map(PaletteCommand::searched).collect();
+        let searched: Vec<&str> = searched.iter().map(String::as_str).collect();
+        self.proj.finder.refresh_bar(&searched, &files);
+        if let Some((english, english_worded)) = english {
+            let worded = self.proj.finder.bar_worded;
             let results = &mut self.proj.finder.results;
             let (mut commands, files): (Vec<usize>, Vec<usize>) =
                 results.iter().partition(|&&i| i < n);
+            // Titles that say what was typed, in either language, before
+            // any that only hold its letters: the English merge brought
+            // back "Thème clair : One Light" for "ligne", and an English
+            // phrase typed in French came after six loose matches.
+            let english = match (worded, english_worded) {
+                (false, true) => {
+                    commands.clear();
+                    english
+                }
+                (true, false) => Vec::new(),
+                _ => english,
+            };
             let most = commands
                 .len()
                 .max(english.iter().filter(|&&i| i < n).count());
@@ -283,21 +480,54 @@ impl App {
             commands.extend(files);
             *results = commands;
         }
+        // What was typed, asked of Clew: a row of its own, listed last.
+        // Only the empty bar offered Ask, so a question typed into it found
+        // commands and files and no way to ask it. Not ranked with the
+        // commands — its title holds every word typed, and would have
+        // been the one "worded" match that put the rest out — but added
+        // after them, the files' places moved one on.
+        // In the bar, and in the file picker searching as the bar does
+        // (`bar_fallback`): the field over the window, and Ctrl+P.
+        let question = self.proj.finder.query.trim().to_string();
+        if (self.proj.finder.bar || self.proj.finder.bar_fallback) && !question.is_empty() {
+            let ask_at = self.palette.len();
+            let asks = looks_like_a_question(&question);
+            self.palette.push(if asks {
+                ask_command(&question)
+            } else {
+                draft_command(&question)
+            });
+            let results = &mut self.proj.finder.results;
+            for i in results.iter_mut().filter(|i| **i >= ask_at) {
+                *i += 1;
+            }
+            // Offered where it reads as a question — several words, or a
+            // question mark — or, to be asked once written, where nothing
+            // else was found.
+            if asks || results.is_empty() {
+                results.push(ask_at);
+            }
+        }
     }
 
     /// The finder's results ranked, by `rank`, against the commands'
     /// English titles — `None` while the interface speaks English, where
     /// those are the titles shown.
-    fn ranked_in_english(
+    fn ranked_in_english<T>(
         &mut self,
-        rank: impl FnOnce(&mut crate::finder::Finder, &[&str]),
-    ) -> Option<Vec<usize>> {
+        rank: impl FnOnce(&mut crate::finder::Finder, &[&str]) -> T,
+    ) -> Option<(Vec<usize>, T)> {
         if crate::i18n::current() == crate::i18n::Lang::En {
             return None;
         }
-        let titles: Vec<&str> = self.palette.iter().map(|c| c.title.as_str()).collect();
-        rank(&mut self.proj.finder, &titles);
-        Some(std::mem::take(&mut self.proj.finder.results))
+        let titles: Vec<String> = self
+            .palette
+            .iter()
+            .map(PaletteCommand::searched_in_english)
+            .collect();
+        let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
+        let said = rank(&mut self.proj.finder, &titles);
+        Some((std::mem::take(&mut self.proj.finder.results), said))
     }
 
     /// What the command bar suggests here, in the order it lists them.
@@ -415,16 +645,23 @@ impl App {
     /// match.
     pub(crate) fn refresh_palette(&mut self) {
         self.palette = self.palette_commands();
-        let recent = self.palette_recent.clone();
-        let english =
-            self.ranked_in_english(|finder, titles| finder.refresh_commands(titles, &recent));
-        let shown: Vec<&str> = self.palette.iter().map(PaletteCommand::shown).collect();
-        let recent: Vec<String> = recent
+        let on_screen = self.screen_commands(&self.palette);
+        self.palette.extend(on_screen);
+        // The recent commands, as the ranking finds them: by the words
+        // each is matched against, in English and as shown.
+        let recent: Vec<&PaletteCommand> = self
+            .palette_recent
             .iter()
-            .map(|t| crate::i18n::lookup(t).to_string())
+            .filter_map(|t| self.palette.iter().find(|c| &c.title == t))
             .collect();
-        self.proj.finder.refresh_commands(&shown, &recent);
-        if let Some(english) = english {
+        let recent_english: Vec<String> = recent.iter().map(|c| c.searched_in_english()).collect();
+        let recent: Vec<String> = recent.iter().map(|c| c.searched()).collect();
+        let english = self
+            .ranked_in_english(|finder, titles| finder.refresh_commands(titles, &recent_english));
+        let searched: Vec<String> = self.palette.iter().map(PaletteCommand::searched).collect();
+        let searched: Vec<&str> = searched.iter().map(String::as_str).collect();
+        self.proj.finder.refresh_commands(&searched, &recent);
+        if let Some((english, ())) = english {
             let results = &mut self.proj.finder.results;
             for i in english {
                 if !results.contains(&i) {
@@ -432,6 +669,84 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The controls on screen when the command bar opened that no command
+    /// in `commands` already names, each a command of its own: what it
+    /// says, and the press its click sends. Only the bar lists them, and
+    /// only the reader runs them ([`App::run_from_bar`]).
+    fn screen_commands(&self, commands: &[PaletteCommand]) -> Vec<PaletteCommand> {
+        if !self.proj.finder.bar {
+            return Vec::new();
+        }
+        let mut seen: std::collections::HashSet<&str> =
+            commands.iter().map(|c| c.title.as_str()).collect();
+        // A control named for one of the project's files — a tree row, a
+        // crumb — is that file, which the bar lists as a file: listed again
+        // as a command, it sat above itself.
+        let files: std::collections::HashSet<&str> = self
+            .proj
+            .project
+            .iter()
+            .flat_map(|p| p.files.iter())
+            .flat_map(|f| [f.rel.as_str(), f.rel.rsplit('/').next().unwrap_or(&f.rel)])
+            .collect();
+        self.palette_screen
+            .iter()
+            .filter(|t| t.typing.is_none() && !t.title.trim().is_empty())
+            .filter(|t| !files.contains(t.title.as_str()))
+            .filter(|t| seen.insert(t.title.as_str()))
+            .map(|t| PaletteCommand {
+                title: t.title.clone(),
+                keys: None,
+                action: PaletteAction::Send(t.message.clone()),
+                shown_as: (t.shown != crate::i18n::lookup(&t.title)).then(|| t.shown.clone()),
+            })
+            .collect()
+    }
+
+    /// Run what the reader picked in the command bar: the command titled
+    /// `title`, or else the control on screen it names ([`Self::screen_commands`]),
+    /// pressed as a click presses it. The agent runs commands by
+    /// [`Self::run_palette`], which never reaches what is on screen.
+    pub(crate) fn run_from_bar(&mut self, title: &str) -> Task<Message> {
+        // What was typed, asked: the Ask window opened on its answer.
+        // Asked first, the window opened after: opened first, on an empty
+        // conversation, it asked the model for questions to suggest — a
+        // call paid for, its answer never shown.
+        if let Some(question) = asked_in(title).map(str::to_string) {
+            self.proj.finder.open = false;
+            let asked = self.ask_typed(question);
+            let open = self.update(Message::Ask(AskMsg::Open));
+            return Task::batch([asked, open]);
+        }
+        // What was typed, put in Ask's field to be asked once written: after
+        // a draft there, which it keeps.
+        if let Some(typed) = drafted_in(title).map(str::to_string) {
+            self.proj.finder.open = false;
+            let draft = self.proj.ask_input.trim_end();
+            self.proj.ask_input = if draft.is_empty() {
+                typed
+            } else {
+                format!("{draft}\n\n{typed}")
+            };
+            self.proj.ask_spoken = false;
+            return self.update(Message::Ask(AskMsg::Open));
+        }
+        if self.palette_commands().iter().any(|c| c.title == title) {
+            return self.run_palette(title);
+        }
+        let Some(message) = self
+            .palette_screen
+            .iter()
+            .find(|t| t.typing.is_none() && t.title == title)
+            .map(|t| t.message.clone())
+        else {
+            return Task::none();
+        };
+        self.proj.finder.open = false;
+        self.code_focused = true;
+        self.update(message)
     }
 
     /// Run the command titled `title` — looked up afresh, so a click on a
@@ -470,6 +785,7 @@ impl App {
                     insight,
                     served,
                     by_pointer: false,
+                    line_top: None,
                 });
                 self.update(message)
             }
@@ -510,13 +826,14 @@ impl App {
                     | keymap::Action::ZoomOut
                     | keymap::Action::ZoomReset
                     | keymap::Action::Shortcuts
+                    | keymap::Action::Tutorial
             );
             if !(project || global) {
                 continue;
             }
             add(
                 action.menu().title.to_string(),
-                Some(self.keymap.chord(action).caps()),
+                Some(self.keymap.shown(action)),
                 send(Message::Editor(EditorMsg::RunAction(action))),
             );
         }
@@ -524,14 +841,14 @@ impl App {
         // At the caret: what the context menu and the reading keys do there.
         if project && self.caret().is_some() {
             for (kind, keys) in [
-                (GotoKind::Definition, "gd"),
-                (GotoKind::References, "gr"),
-                (GotoKind::Implementation, "gi"),
-                (GotoKind::TypeDefinition, "gy"),
+                (GotoKind::Definition, "F12".to_string()),
+                (GotoKind::References, crate::keymap::local_keys("⇧F12")),
+                (GotoKind::Implementation, "gi".to_string()),
+                (GotoKind::TypeDefinition, "gy".to_string()),
             ] {
                 add(
                     kind.name().to_string(),
-                    Some(keys.into()),
+                    Some(keys),
                     PaletteAction::Goto(kind),
                 );
             }
@@ -544,6 +861,21 @@ impl App {
                     kind.name().to_string(),
                     Some("ge".into()),
                     PaletteAction::Insight,
+                );
+            }
+            let lang = self.active_viewer().and_then(|v| v.lang_key);
+            for &kind in lang.map_or(&[][..], InsightKind::more_for_lang) {
+                add(
+                    kind.name().to_string(),
+                    None,
+                    PaletteAction::AtCaret(Message::Hover(HoverMsg::InsightOf(kind))),
+                );
+            }
+            if lang == Some("lean") {
+                add(
+                    tr_noop!("Step Through Proof").to_string(),
+                    None,
+                    PaletteAction::AtCaret(Message::Proof(crate::ProofMsg::FromMenu)),
                 );
             }
             let at_caret = |m| PaletteAction::AtCaret(m);
@@ -592,8 +924,13 @@ impl App {
             }
         }
 
-        // The debugger, while a session runs.
-        if let Some(session) = &self.debug.session {
+        // The debugger, while the run whose tab is shown goes on.
+        if let Some(session) = self
+            .debug
+            .session
+            .as_ref()
+            .filter(|s| s.status != DebugStatus::Terminated && self.real_run_shown())
+        {
             if session.status == DebugStatus::Stopped {
                 for (title, cmd) in [
                     (tr_noop!("Debug: Continue"), DebugCmd::Continue),
@@ -658,7 +995,7 @@ impl App {
                 (
                     tr_noop!("Go to End of File"),
                     Some("G"),
-                    EditorMsg::MoveCaret(viewer::Motion::FileEnd),
+                    EditorMsg::MoveCaret(viewer::Motion::LastLine),
                 ),
                 (tr_noop!("Fold All"), Some("zM"), EditorMsg::FoldAll(true)),
                 (
@@ -679,9 +1016,9 @@ impl App {
                 );
             }
             for (title, tab) in [
-                (tr_noop!("Margin Notes"), MarginTab::Notes),
-                (tr_noop!("Margin Calls"), MarginTab::Calls),
-                (tr_noop!("Margin History"), MarginTab::History),
+                (tr_noop!("Margin: Explanations"), MarginTab::Notes),
+                (tr_noop!("Margin: Calls"), MarginTab::Calls),
+                (tr_noop!("Margin: History"), MarginTab::History),
             ] {
                 add(
                     title.into(),
@@ -693,6 +1030,7 @@ impl App {
         // Each page of Settings, by its name.
         for (title, page) in [
             (tr_noop!("Settings: Appearance"), SettingsPage::Appearance),
+            (tr_noop!("Settings: Usage and cost"), SettingsPage::Usage),
             (tr_noop!("Settings: Updates"), SettingsPage::Updates),
             (
                 tr_noop!("Settings: Language Model"),
@@ -736,19 +1074,8 @@ impl App {
             send(Message::Window(WindowMsg::ToggleFullscreen)),
         );
 
-        // The toolbar's own tools.
-        if project {
-            add(
-                tr_noop!("Overview").into(),
-                None,
-                send(Message::Overview(OverviewMsg::Show)),
-            );
-            add(
-                tr_noop!("Stats").into(),
-                None,
-                send(Message::Overview(OverviewMsg::ShowStats)),
-            );
-        }
+        // The toolbar's own tools (Overview and Stats are keymap actions,
+        // listed with the rest above).
         add(
             tr_noop!("Settings").into(),
             Some(crate::keymap::local_keys("⌘,")),
@@ -840,19 +1167,13 @@ impl App {
             ] {
                 add(toggle(shown, hide, show), None, send(message));
             }
-            // The ⋯ menu's tools that have no chord of their own.
+            // The tools that have no chord of their own.
             for (title, message) in [
-                (tr_noop!("Glossary"), Message::Glossary(GlossaryMsg::Open)),
                 (
                     tr_noop!("Skim (Fold Bodies)"),
                     Message::Editor(EditorMsg::SkimFile),
                 ),
                 (tr_noop!("Export Notes…"), Message::Export(ExportMsg::Start)),
-                (
-                    tr_noop!("Set Up Project…"),
-                    Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Manage)),
-                ),
-                (tr_noop!("Tutorial"), Message::Tutorial(TutorialMsg::Start)),
             ] {
                 add(title.into(), None, send(message));
             }
@@ -911,9 +1232,19 @@ impl App {
             None,
             send(Message::Connect(ConnectMsg::Open)),
         );
+        // The file being read's commits, in the History view.
+        if let Some(rel) = self.active_viewer().map(|v| v.rel.clone()) {
+            add(
+                tr_noop!("History of This File").into(),
+                None,
+                send(Message::History(crate::HistoryMsg::Show {
+                    path: Some(rel),
+                })),
+            );
+        }
 
         // Every setting's every choice: the language, the theme, how voice
-        // listens and speaks ("Language: French", "Read answers aloud: Off").
+        // listens and speaks ("Language: French", "Read answers aloud: Never").
         for setting in self.settings_choices() {
             for choice in setting.choices {
                 out.push(PaletteCommand {
@@ -923,6 +1254,25 @@ impl App {
                     shown_as: Some(choice.shown),
                 });
             }
+        }
+        // The folders opened before, by their names ("Open Recent:
+        // teashop"), as the app menu lists them; and the way back to the
+        // welcome screen.
+        for (name, place, message) in crate::ui::app_menu_recent(self) {
+            out.push(PaletteCommand {
+                title: format!("Open Recent: {name} ({place})"),
+                keys: None,
+                action: PaletteAction::Send(message),
+                shown_as: Some(tr!("Open Recent: {name}", name = name)),
+            });
+        }
+        if self.proj.project.is_some() {
+            out.push(PaletteCommand {
+                title: tr_noop!("Close Folder").into(),
+                keys: None,
+                action: PaletteAction::Send(Message::Project(ProjectMsg::CloseFolder)),
+                shown_as: None,
+            });
         }
         out
     }
@@ -943,5 +1293,6 @@ fn sidebar_title(tab: SidebarTab) -> &'static str {
         SidebarTab::Walk => tr_noop!("Sidebar: Walkthroughs"),
         SidebarTab::Notes => tr_noop!("Sidebar: Your Notes"),
         SidebarTab::Docs => tr_noop!("Sidebar: API Docs"),
+        SidebarTab::History => tr_noop!("Sidebar: History"),
     }
 }

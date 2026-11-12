@@ -60,6 +60,13 @@ pub(crate) const MAX_LINE_CHIPS: usize = 256;
 pub(crate) const MAX_LINE_CHIP_CHARS: usize = 4096;
 
 impl App {
+    /// Whether `language`'s server is left "not set up" when it would ask:
+    /// the first open left the servers for later, and the reader has not
+    /// asked for this one since ("Ask again" asks about that one only).
+    pub(crate) fn server_left_for_later(&self, language: &str) -> bool {
+        self.proj.servers_not_now && !self.proj.servers_asked.contains(language)
+    }
+
     /// Read every READY language server's state once per update — one lock
     /// each — for the view that follows: the status bar, the diagnostic
     /// underlines, the hover's diagnostic and the server panel all take their
@@ -261,6 +268,10 @@ impl App {
                 return Task::none();
             }
         };
+        if self.server_left_for_later(language) {
+            self.leave_server_for_later(language);
+            return Task::none();
+        }
         self.proj
             .link
             .lsp
@@ -316,6 +327,16 @@ impl App {
         )
     }
 
+    /// The project was opened without its servers set up: `language`'s is
+    /// not asked about, and stays "not set up" — the status bar offers to
+    /// set it up, the Languages page to ask again.
+    fn leave_server_for_later(&mut self, language: &str) {
+        self.proj.link.lsp.insert(
+            language.to_string(),
+            LspSlot::Declined(tr_noop!("not set up").into()),
+        );
+    }
+
     /// The program the download question for `language` would fetch was
     /// found on PATH and runs: the question, if it is still waiting, is
     /// asked again offering it — under a number of its own, so the new
@@ -355,18 +376,29 @@ impl App {
         let Some(program) = c.on_path else {
             return Task::none();
         };
+        self.use_server_program(&c.language, &program)
+    }
+
+    /// `program`, the server's own on this computer, chosen for
+    /// `language` in the project — and started, out of any slot it waited
+    /// in.
+    pub(crate) fn use_server_program(
+        &mut self,
+        language: &str,
+        program: &std::path::Path,
+    ) -> Task<Message> {
         let mut next = self.proj.lang_choices.clone();
         next.servers.get_or_insert_with(Default::default).insert(
-            c.language.clone(),
+            language.to_string(),
             clew_protocol::ServerChoice {
                 command: program.to_string_lossy().into_owned(),
                 args: None,
             },
         );
         // Out of the slot it waited in, so the choice starts it afresh.
-        self.proj.link.lsp.remove(&c.language);
+        self.proj.link.lsp.remove(language);
         let chosen = self.choose(next);
-        Task::batch([chosen, self.ensure_lsp(&c.language)])
+        Task::batch([chosen, self.ensure_lsp(language)])
     }
 
     /// Hash the repository-named `command` (with its args and init options —
@@ -675,6 +707,10 @@ impl App {
                     .trust
                     .is_build_trusted(None, &root, &server.server_name)
             {
+                if self.server_left_for_later(language) {
+                    self.leave_server_for_later(language);
+                    return Task::none();
+                }
                 self.proj
                     .link
                     .lsp
@@ -1379,7 +1415,7 @@ impl App {
             // read "ready": that lie is what stops the user from restarting a
             // server whose every request now fails.
             Some(LspSlot::Ready(c)) if !c.alive() => {
-                (tr!("stopped · restarts on open").into(), restart())
+                (tr!("stopped, restarts on open").into(), restart())
             }
             // Progress, or the server's complaint — including a state clew
             // can no longer read — from this update's snapshot.
@@ -1412,7 +1448,7 @@ impl App {
             // (`refresh_server_panel`), never from probing here per frame.
             None => match self.lsp_located.get(language) {
                 Some(LocatedKind::Ready) => (
-                    tr!("installed · starts on open").into(),
+                    tr!("installed, starts on open").into(),
                     provision(tr!("Start")),
                 ),
                 Some(LocatedKind::NeedsDownload) => {
@@ -1752,7 +1788,10 @@ impl App {
             }
             LspMsg::Remove { name, version } => self.on_lsp_remove(name, version),
             LspMsg::DownloadFor(language) => {
-                // Force a fresh provisioning attempt for this language.
+                // Force a fresh provisioning attempt for this language —
+                // asked about, whatever the first open left for later; the
+                // other languages stay left for later.
+                self.proj.servers_asked.insert(language.clone());
                 self.proj.link.lsp.remove(&language);
                 self.ensure_lsp(&language)
             }
@@ -1765,13 +1804,13 @@ impl App {
 /// are given (`linerpc::child_path`: on macOS, an app opened from the
 /// Finder is given the login shell's).
 #[cfg(test)]
-fn path_set_here() -> Option<std::ffi::OsString> {
+pub(crate) fn path_set_here() -> Option<std::ffi::OsString> {
     SEARCH_PATH.with(|path| path.borrow().clone())
 }
 
 /// See the test build's: none.
 #[cfg(not(test))]
-fn path_set_here() -> Option<std::ffi::OsString> {
+pub(crate) fn path_set_here() -> Option<std::ffi::OsString> {
     None
 }
 

@@ -54,7 +54,14 @@ pub enum Action {
     GoBack,
     GoForward,
     TraceValue,
+    /// Fake Run on the definition the caret is in (`app::fakerun`): the
+    /// model works its run out, and shows what it returns.
+    FakeRun,
+    /// Fake Debug: the same, stepped through from its first line.
+    FakeDebug,
     ToggleAsk,
+    /// Run the program without the debugger (`noDebug`).
+    Run,
     StartDebug,
     CallGraph,
     ImportGraph,
@@ -67,11 +74,20 @@ pub enum Action {
     LspServers,
     Shortcuts,
     CommandPalette,
+    /// A code on every control on screen, to press it by (`ui::jump`).
+    Jump,
     Voice,
+    Overview,
+    Stats,
+    /// The weak spots page (`app::weakspots`).
+    WeakSpots,
+    Glossary,
+    SetUpProject,
+    Tutorial,
 }
 
 impl Action {
-    pub const ALL: [Action; 28] = [
+    pub const ALL: [Action; 38] = [
         Action::OpenFile,
         Action::OpenSymbol,
         Action::ProjectSearch,
@@ -86,7 +102,10 @@ impl Action {
         Action::GoBack,
         Action::GoForward,
         Action::TraceValue,
+        Action::FakeRun,
+        Action::FakeDebug,
         Action::ToggleAsk,
+        Action::Run,
         Action::StartDebug,
         Action::CallGraph,
         Action::ImportGraph,
@@ -99,7 +118,14 @@ impl Action {
         Action::LspServers,
         Action::Shortcuts,
         Action::CommandPalette,
+        Action::Jump,
         Action::Voice,
+        Action::Overview,
+        Action::Stats,
+        Action::WeakSpots,
+        Action::Glossary,
+        Action::SetUpProject,
+        Action::Tutorial,
     ];
 
     /// Stable identifier used as the TOML key. Never change these.
@@ -119,6 +145,7 @@ impl Action {
             Action::GoBack => "go_back",
             Action::GoForward => "go_forward",
             Action::ToggleAsk => "toggle_ask",
+            Action::Run => "run",
             Action::StartDebug => "start_debug",
             Action::CallGraph => "call_graph",
             Action::TypeGraph => "type_graph",
@@ -130,9 +157,18 @@ impl Action {
             Action::Walkthrough => "walkthrough",
             Action::LspServers => "lsp_servers",
             Action::TraceValue => "trace_value",
+            Action::FakeRun => "fake_run",
+            Action::FakeDebug => "fake_debug",
             Action::Shortcuts => "shortcuts",
             Action::CommandPalette => "command_palette",
+            Action::Jump => "jump",
             Action::Voice => "voice",
+            Action::Overview => "overview",
+            Action::Stats => "stats",
+            Action::WeakSpots => "weak_spots",
+            Action::Glossary => "glossary",
+            Action::SetUpProject => "set_up_project",
+            Action::Tutorial => "tutorial",
         }
     }
 
@@ -148,30 +184,40 @@ impl Action {
             Action::OpenSymbol => tr!("Go to symbol"),
             Action::ProjectSearch => tr!("Search text"),
             Action::FindInFile => tr!("Find in file"),
-            Action::CopySelection => tr!("Copy selection"),
+            Action::CopySelection => tr!("Copy"),
             Action::ToggleBookmark => tr!("Toggle bookmark"),
             Action::GotoLine => tr!("Go to line"),
-            Action::ToggleSplit => tr!("Toggle split view"),
+            Action::ToggleSplit => tr!("Split view"),
             Action::ZoomIn => tr!("Zoom in"),
             Action::ZoomOut => tr!("Zoom out"),
             Action::ZoomReset => tr!("Actual size"),
             Action::GoBack => tr!("Back"),
             Action::GoForward => tr!("Forward"),
-            Action::TraceValue => tr!("Trace value at cursor"),
+            Action::TraceValue => tr!("Trace value"),
+            Action::FakeRun => tr!("Fake run"),
+            Action::FakeDebug => tr!("Fake debug"),
             Action::ToggleAsk => tr!("Ask"),
+            Action::Run => tr!("Run without debugging"),
             Action::StartDebug => tr!("Start debugging"),
-            Action::CallGraph => tr!("Project call graph"),
-            Action::ImportGraph => tr!("Project import graph"),
-            Action::TypeGraph => tr!("Project type map"),
-            Action::ProjectMaps => tr!("Project maps (schema, routes, …)"),
+            Action::CallGraph => tr!("Call graph"),
+            Action::ImportGraph => tr!("Import graph"),
+            Action::TypeGraph => tr!("Type graph"),
+            Action::ProjectMaps => tr!("Project graphs"),
             Action::ExplainAll => tr!("Explain All"),
-            Action::ToggleDiff => tr!("Diff vs HEAD"),
+            Action::ToggleDiff => tr!("Diff with Last Commit"),
             Action::TimeTravel => tr!("Time Travel"),
             Action::Walkthrough => tr!("Walkthroughs"),
             Action::LspServers => tr!("Language servers"),
             Action::Shortcuts => tr!("Keyboard shortcuts"),
             Action::CommandPalette => tr!("Command palette"),
-            Action::Voice => tr!("Talk (voice)"),
+            Action::Jump => tr!("Jump to a control"),
+            Action::Voice => tr!("Talk"),
+            Action::Overview => tr!("Architecture overview"),
+            Action::Stats => tr!("Code statistics"),
+            Action::WeakSpots => tr!("Weak spots"),
+            Action::Glossary => tr!("Glossary"),
+            Action::SetUpProject => tr!("Set up project"),
+            Action::Tutorial => tr!("Tutorial"),
         }
     }
 
@@ -197,20 +243,32 @@ impl Action {
             Action::GotoLine => at(MenuSection::Go, tr_noop!("Go to Line…")),
             Action::ToggleBookmark => at(MenuSection::Go, tr_noop!("Toggle Bookmark")),
             Action::TraceValue => at(MenuSection::Go, tr_noop!("Trace Value")),
+            Action::FakeRun => at(MenuSection::Tools, tr_noop!("Fake Run…")),
+            Action::FakeDebug => at(MenuSection::Tools, tr_noop!("Fake Debug…")),
             Action::ToggleAsk => at(MenuSection::Tools, tr_noop!("Ask")),
+            Action::Run => at(MenuSection::Tools, tr_noop!("Run Without Debugging")),
             Action::StartDebug => at(MenuSection::Tools, tr_noop!("Start Debugging")),
             Action::CallGraph => at(MenuSection::Tools, tr_noop!("Call Graph")),
             Action::ImportGraph => at(MenuSection::Tools, tr_noop!("Import Graph")),
-            Action::TypeGraph => at(MenuSection::Tools, tr_noop!("Type Map")),
-            Action::ProjectMaps => at(MenuSection::Tools, tr_noop!("Project Maps")),
-            Action::ExplainAll => at(MenuSection::Tools, tr_noop!("Explain All")),
-            Action::ToggleDiff => at(MenuSection::Tools, tr_noop!("Diff vs HEAD")),
+            Action::TypeGraph => at(MenuSection::Tools, tr_noop!("Type Graph")),
+            Action::ProjectMaps => at(MenuSection::Tools, tr_noop!("Project Graphs")),
+            // It opens its cost sheet first: "…", as the Overview's button
+            // has it.
+            Action::ExplainAll => at(MenuSection::Tools, tr_noop!("Explain All…")),
+            Action::ToggleDiff => at(MenuSection::Tools, tr_noop!("Diff with Last Commit")),
             Action::TimeTravel => at(MenuSection::Tools, tr_noop!("Time Travel")),
             Action::Walkthrough => at(MenuSection::Tools, tr_noop!("Walkthroughs")),
             Action::LspServers => at(MenuSection::View, tr_noop!("Language Servers…")),
             Action::Shortcuts => at(MenuSection::View, tr_noop!("Keyboard Shortcuts…")),
             Action::CommandPalette => at(MenuSection::View, tr_noop!("Command Palette…")),
+            Action::Jump => at(MenuSection::Go, tr_noop!("Jump to a Control")),
             Action::Voice => at(MenuSection::Tools, tr_noop!("Talk")),
+            Action::Overview => at(MenuSection::Tools, tr_noop!("Architecture Overview")),
+            Action::Stats => at(MenuSection::Tools, tr_noop!("Code Statistics")),
+            Action::WeakSpots => at(MenuSection::Tools, tr_noop!("Weak Spots")),
+            Action::Glossary => at(MenuSection::Tools, tr_noop!("Glossary")),
+            Action::SetUpProject => at(MenuSection::Tools, tr_noop!("Set Up Project…")),
+            Action::Tutorial => at(MenuSection::View, tr_noop!("Tutorial")),
         }
     }
 
@@ -244,13 +302,42 @@ impl Action {
             Action::Walkthrough => Chord::cmd_shift('j'),
             Action::LspServers => Chord::cmd_shift('l'),
             Action::TraceValue => Chord::cmd_shift('v'),
+            // Fake run: eXecute it on paper; fake debug: hunt the Bug on
+            // paper.
+            Action::FakeRun => Chord::cmd_shift('x'),
+            Action::FakeDebug => Chord::cmd_shift('b'),
+            // Run, as Xcode's ⌘R: the program, without the debugger.
+            Action::Run => Chord::cmd('r'),
             Action::Shortcuts => Chord::cmd('/'),
             Action::CommandPalette => Chord::cmd_shift('p'),
+            Action::Jump => Chord::cmd('j'),
             // "Speak". Pressed again — or a pause once something was said —
             // it stops listening.
             Action::Voice => Chord::cmd_shift('s'),
+            // The rest of the strip's tools, so every one has a chord:
+            // Overview, the Numbers, glossarY, setting up to Read it,
+            // tUtorial.
+            Action::Overview => Chord::cmd_shift('o'),
+            Action::Stats => Chord::cmd_shift('n'),
+            // Where the Issues are likely to be.
+            Action::WeakSpots => Chord::cmd('i'),
+            Action::Glossary => Chord::cmd_shift('y'),
+            Action::SetUpProject => Chord::cmd_shift('r'),
+            Action::Tutorial => Chord::cmd_shift('u'),
         }
     }
+}
+
+/// What stands between an action's two shortcuts where a list shows both
+/// ([`Keymap::shown`]); a key cap shows each as its own keys either side.
+pub(crate) const CAPS_OR: &str = " / ";
+
+/// A chord other editors use for an action, taken as that action while no
+/// action of the keymap is bound to it: Ctrl+G is Go to Line in VS Code,
+/// JetBrains and Sublime, and did nothing here — and gave no sign — where
+/// Go to Line is ⌘L. Not on macOS, where ⌘G is Find Next.
+pub fn alias_for(chord: &Chord) -> Option<Action> {
+    (!MAC_KEYS && *chord == Chord::cmd('g')).then_some(Action::GotoLine)
 }
 
 /// Whether shortcuts are spelled the Mac's way (`⇧⌘P`) rather than in words
@@ -758,6 +845,24 @@ impl Keymap {
         self.stamp
     }
 
+    /// The chord other editors use for `action` that reaches it here too
+    /// (`alias_for`), while no action is bound to it: Ctrl+G for Go to
+    /// Line. It worked, and no list of keys said so.
+    pub fn alias(&self, action: Action) -> Option<Chord> {
+        let g = Chord::cmd('g');
+        (alias_for(&g) == Some(action) && self.action_for(&g).is_none()).then_some(g)
+    }
+
+    /// `action`'s keys as lists say them: its chord, and the one other
+    /// editors use for it where that reaches it too ("Ctrl+L / Ctrl+G").
+    pub fn shown(&self, action: Action) -> String {
+        let own = self.chord(action).caps();
+        match self.alias(action) {
+            Some(alias) => format!("{own}{CAPS_OR}{}", alias.caps()),
+            None => own,
+        }
+    }
+
     /// The action currently bound to `chord`, if any.
     pub fn action_for(&self, chord: &Chord) -> Option<Action> {
         self.bindings
@@ -1105,6 +1210,34 @@ mod tests {
         for action in Action::ALL {
             assert_eq!(Action::from_id(action.id()), Some(action));
             assert!(!action.menu().title.is_empty());
+        }
+    }
+
+    /// The shortcut list names each command as the menus and the command
+    /// bar do — its menu title, less the "…" — in every language. It said
+    /// "Toggle split view" where the menu said "Split View", "Project call
+    /// graph" for "Call Graph", "Talk (voice)" for "Talk", and in French,
+    /// Chinese, Japanese and Korean another name for Jump to a Control.
+    /// One stays its own: the list's "Find in file", where the Edit menu
+    /// has the platform's "Find…" (and voice says "find" to it). In a list
+    /// with no menu round it, a bare "Find" would not say what is searched;
+    /// and "Find" is already the name of finding by meaning.
+    #[test]
+    fn the_shortcut_list_names_each_command_as_the_menu_does() {
+        for lang in crate::i18n::Lang::ALL {
+            crate::i18n::with_lang(lang, || {
+                for action in Action::ALL {
+                    if action == Action::FindInFile {
+                        continue;
+                    }
+                    let title = crate::i18n::lookup(action.menu().title);
+                    assert_eq!(
+                        action.label().to_lowercase(),
+                        title.trim_end_matches('…').to_lowercase(),
+                        "{lang:?}: {action:?}"
+                    );
+                }
+            });
         }
     }
 }

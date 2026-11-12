@@ -295,6 +295,11 @@ fn what_is_missing_to_make_embeddings_is_said() {
     app.status.clear();
     let _ = app.update(Message::Semantic(SemanticMsg::BuildIndex));
     assert_eq!(app.status, download);
+    // A question asked with nothing else to answer from: Ask's card says
+    // so too, known to be about the embeddings (its Settings button).
+    let _ = app.on_ask_submit_rag("where is the total".into(), false);
+    assert_eq!(app.proj.ask_notice.as_deref(), Some(download.as_str()));
+    assert!(app.proj.ask_notice_embeddings);
     // Downloaded: the program is what is missing.
     let program =
         "clew-speak, which makes embeddings on this computer, is not installed beside Clew";

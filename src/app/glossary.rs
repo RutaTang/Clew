@@ -607,6 +607,7 @@ impl App {
                 self.proj.glossary.showing = true;
                 self.proj.overview.showing = false;
                 self.proj.stats.showing = false;
+                self.proj.weak.showing = false;
                 self.proj.docs.page = None;
                 // The terms come from the docs index, which is only built
                 // on demand: bring it up to date for the page (single-flight,

@@ -272,6 +272,10 @@ pub struct FileCalls {
     /// line → its name. What narrows a call whose receiver's type is known
     /// to that type's method of the name ([`CallSite::receiver`]).
     pub owners: HashMap<usize, String>,
+    /// Definition lines of the methods read as attributes, never called (a
+    /// Python `@property`; see [`crate::outline::Located::accessed`]): no
+    /// call reaches them, and none needs to for them to be used.
+    pub accessed: HashSet<usize>,
 }
 
 impl FileCalls {
@@ -311,7 +315,10 @@ impl FileCalls {
     /// bodyless declaration to tell a definition from, and no method whose
     /// class a call elsewhere may name.
     pub fn is_empty(&self) -> bool {
-        self.calls.is_empty() && self.declarations.is_empty() && self.owners.is_empty()
+        self.calls.is_empty()
+            && self.declarations.is_empty()
+            && self.owners.is_empty()
+            && self.accessed.is_empty()
     }
 
     /// Assemble from facts already read off the file's tree (see
@@ -347,6 +354,11 @@ impl FileCalls {
                 .map(|(_, line, span)| (line, span))
                 .collect(),
             owners,
+            accessed: symbols
+                .iter()
+                .filter(|l| l.accessed && is_callable(&l.symbol.kind))
+                .map(|l| l.symbol.line)
+                .collect(),
         }
     }
 }
@@ -451,6 +463,18 @@ impl ProjectCallGraph {
             .map(|n| owner_at.get(&(n.file.as_path(), n.line)).copied())
             .collect();
 
+        // Python runs a class's `__init__` when the class is called:
+        // `Inventory(...)`, `raise OutOfStock(...)`. By the class's name.
+        let mut inits: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, n) in nodes.iter().enumerate() {
+            if n.name == "__init__"
+                && facts[i].lang == Some(Lang::Python)
+                && let Some(class) = owner[i]
+            {
+                inits.entry(class).or_default().push(i);
+            }
+        }
+
         let empty_scope: HashSet<PathBuf> = HashSet::new();
         let mut edges: HashSet<(usize, usize)> = HashSet::new();
         for fc in files {
@@ -509,7 +533,16 @@ impl ProjectCallGraph {
                 } else {
                     &narrowed
                 };
-                for &callee in targets {
+                // A class called: its `__init__`, of a class this file
+                // defines or imports.
+                let constructed = (fc.lang == Lang::Python)
+                    .then(|| inits.get(cs.callee.as_str()))
+                    .flatten()
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(|&i| nodes[i].file == fc.file || imported.contains(&nodes[i].file));
+                for callee in targets.iter().copied().chain(constructed) {
                     // Skip self-edges so a recursive function with no other
                     // callers still reads as "uncalled".
                     if callee != caller && edges.len() < MAX_EDGES {
@@ -3332,6 +3365,62 @@ mod edge_tests {
             .collect();
         out.sort();
         out
+    }
+
+    /// Calling a Python class runs its `__init__`: `Inventory()` and
+    /// `raise OutOfStock(...)` call them, of a class the file defines or
+    /// imports; a class of the same name elsewhere is not the one called.
+    /// A property is read, not called: it is kept apart.
+    #[test]
+    fn calling_a_python_class_calls_its_init() {
+        let shop = "\
+class OutOfStock(Exception):
+    def __init__(self, tea):
+        self.tea = tea
+
+class Inventory:
+    def __init__(self):
+        self.tins = {}
+
+    @property
+    def count(self):
+        return len(self.tins)
+
+    def take(self, tea):
+        if tea not in self.tins:
+            raise OutOfStock(tea)
+";
+        let main = "\
+from shop import Inventory
+
+def main():
+    inventory = Inventory()
+    inventory.take('sencha')
+";
+        let other = "\
+class Inventory:
+    def __init__(self):
+        pass
+";
+        let files = [
+            ("/p/shop.py", shop),
+            ("/p/main.py", main),
+            ("/p/other.py", other),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let scope = HashMap::from([(
+            PathBuf::from("/p/main.py"),
+            HashSet::from([PathBuf::from("/p/shop.py")]),
+        )]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        assert_eq!(callers_named(&g, "/p/shop.py", "__init__", 0), ["take@13"]);
+        assert_eq!(callers_named(&g, "/p/shop.py", "__init__", 1), ["main@3"]);
+        assert!(callers_named(&g, "/p/other.py", "__init__", 0).is_empty());
+        let calls = FileCalls::read(Path::new("/p/shop.py"), shop).unwrap();
+        assert_eq!(calls.accessed, HashSet::from([10]));
     }
 
     /// A method called on a receiver whose type the caller states links to

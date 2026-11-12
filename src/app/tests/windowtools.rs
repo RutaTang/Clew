@@ -165,10 +165,15 @@ fn the_agent_lists_and_runs_the_windows_commands() {
         "{listed}"
     );
     assert!(listed.contains(&format!(
-        "- Explain All ({}) — asks the user first",
+        "- Explain All… ({}) — asks the user first",
         keys("⇧⌘E")
     )));
-    assert!(listed.contains("- Overview\n"), "{listed}");
+    assert!(
+        listed.contains(&format!("- Architecture Overview ({})\n", keys("⇧⌘O"))),
+        "{listed}"
+    );
+    // One with no key: its title alone.
+    assert!(listed.contains("- Window: Minimize\n"), "{listed}");
     // Something that only shows: run at once.
     let _ = call(
         &mut app,
@@ -191,6 +196,17 @@ fn the_agent_lists_and_runs_the_windows_commands() {
     );
     assert!(app.proj.stats.showing);
     assert!(!results(&mut rx)[0].2);
+    // And the name a command had before it was renamed: Overview is now
+    // Architecture Overview.
+    let _ = call(
+        &mut app,
+        stream,
+        5,
+        RUN_COMMAND,
+        json!({"title": "show the overview"}),
+    );
+    assert!(app.proj.overview.showing);
+    assert!(!results(&mut rx)[0].2);
     // No such command: said, and how to find one.
     let _ = call(
         &mut app,
@@ -212,11 +228,13 @@ fn the_agent_lists_and_runs_the_windows_commands() {
 fn the_agent_asks_before_a_setting_that_listens_or_sends() {
     let (mut app, stream, mut rx) = turn_app("wt-private");
     app.asking.delay = std::time::Duration::ZERO;
-    let listening = app.voice.keep_listening;
+    app.voice.prefs.wake = false;
+    let listening = app.voice.mic_on;
     for (call_id, title) in [
-        (1, "Keep listening: On"),
+        (1, "Talk"),
         (2, "Send spoken questions to Ask right away: On"),
         (3, "Embeddings: A service"),
+        (4, "Start listening when you say “Hey, Clew”: On"),
     ] {
         let _ = call(
             &mut app,
@@ -235,18 +253,19 @@ fn the_agent_asks_before_a_setting_that_listens_or_sends() {
             .unwrap_or_else(|| panic!("no card for {title}"));
         assert!(card.title.contains(title), "{}", card.title);
     }
-    assert_eq!(app.voice.keep_listening, listening, "it changed unasked");
+    assert_eq!(app.voice.mic_on, listening, "it changed unasked");
+    assert!(!app.voice.prefs.wake, "it changed unasked");
     // How the window looks is the agent's to change.
     let _ = call(
         &mut app,
         stream,
-        4,
+        5,
         RUN_COMMAND,
         json!({"title": "Theme: Dark"}),
     );
     assert_eq!(
         results(&mut rx),
-        [(4, "Ran “Theme: Dark”.".to_string(), false)]
+        [(5, "Ran “Theme: Dark”.".to_string(), false)]
     );
 }
 
@@ -286,7 +305,7 @@ fn a_costly_command_waits_for_the_users_yes() {
     );
     assert_eq!(
         results(&mut rx),
-        [(1, "Ran “Explain All”.".to_string(), false)]
+        [(1, "Ran “Explain All…”.".to_string(), false)]
     );
     assert_eq!(
         app.proj

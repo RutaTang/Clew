@@ -231,6 +231,17 @@ thread_local! {
 }
 
 /// The language spoken now.
+/// `label` in capitals, as a section's heading is written — in a language
+/// written in capitals and small letters. Chinese, Japanese and Korean have
+/// none: capitals there only shout the Latin words among them (`main` as
+/// `MAIN`).
+pub fn caps(label: &str) -> String {
+    match current() {
+        Lang::En | Lang::Fr => label.to_uppercase(),
+        Lang::Zh | Lang::Ja | Lang::Ko => label.to_string(),
+    }
+}
+
 pub fn current() -> Lang {
     OVERRIDE
         .with(Cell::get)
@@ -1032,6 +1043,39 @@ mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
 
+    /// A control's label led by a symbol — "▶ Continue" — has it in the
+    /// interface font itself, in every language: "⤼ Over", "⤒ Out",
+    /// "⟲ Start" and "⏭ End" were in none of the bundled faces, so each
+    /// machine drew them in whatever font it had (boxes where it had none),
+    /// and the debug panel's header broke where that font's widths put it.
+    /// A sentence is not a control's label: the tour's last step names the
+    /// app menu by its ☰ ("☰ メニューから…").
+    #[test]
+    fn a_labels_symbol_is_the_interface_fonts_own() {
+        use ab_glyph::Font as _;
+        let inter = ab_glyph::FontRef::try_from_slice(crate::fonts::ALL[0]).expect("Inter");
+        let mut led = 0;
+        for lang in [Lang::Fr, Lang::Zh, Lang::Ja, Lang::Ko] {
+            for (source, shown) in catalog(lang) {
+                for label in [source.as_str(), shown] {
+                    if label.chars().count() > 24 {
+                        continue;
+                    }
+                    let mut chars = label.chars();
+                    let (Some(lead), Some(' ')) = (chars.next(), chars.next()) else {
+                        continue;
+                    };
+                    if lead.is_ascii() || lead.is_alphanumeric() {
+                        continue;
+                    }
+                    led += 1;
+                    assert_ne!(inter.glyph_id(lead).0, 0, "{lang:?}: {label:?}");
+                }
+            }
+        }
+        assert!(led > 0, "no label led by a symbol was looked at");
+    }
+
     /// Whether a key is one form of a count (`trn!`), whose `{n}` a
     /// translation may use or leave out.
     #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1354,6 +1398,7 @@ mod tests {
             written.push(m.name.into());
             written.push(m.about.into());
         }
+        written.push(clew_voice::wake::MODEL.name.into());
         written.extend(clew_core::mcp::config::Approve::ALL.map(|a| a.label().to_string()));
         written.push(clew_core::llm::Provider::Custom.label().into());
         written.extend(
@@ -2090,6 +2135,22 @@ mod tests {
         }
         out.push_str(rest);
         out
+    }
+
+    /// Labels that sit side by side say different things in every
+    /// language: the sheet header's Explain button and its Explanations tab
+    /// were one word in Chinese, Japanese and Korean (解释 · 解释).
+    #[test]
+    fn side_by_side_labels_differ_in_every_language() {
+        for lang in Lang::ALL {
+            with_lang(lang, || {
+                assert_ne!(
+                    lookup("Explain"),
+                    lookup("Explanations"),
+                    "{lang:?}: Explain / Explanations"
+                );
+            });
+        }
     }
 
     /// No catalog keeps text the program no longer shows.

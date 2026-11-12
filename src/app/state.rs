@@ -13,12 +13,16 @@ use crate::*;
 /// hand-maintained list of what to stop, and a field added here is dropped
 /// (and its task aborted) without anyone having to remember a teardown site.
 /// Where on its line a jump lands (`landing`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum LandingAt {
     /// The character a language server named, in its position encoding.
     Char(usize, crate::viewer::PositionEncoding),
     /// The first place the line spells this name as a word.
     Name(String),
+    /// Where the search first matched the line: a result opened at the
+    /// line's start, lighting whatever word stood there, and the reader
+    /// had to find the match along the line again.
+    Match(clew_core::search::PreviewMatcher),
 }
 
 #[derive(Default, Debug)]
@@ -188,6 +192,13 @@ pub struct PendingAsk {
 pub struct DebugState {
     /// The active debug session (DAP), if any.
     pub session: Option<DebugSession>,
+    /// The session ended by the reader's Stop, not by itself: its output
+    /// says it was stopped, not that the program printed nothing.
+    pub stopped_by_reader: bool,
+    /// The session was started by Run, not Debug: the program runs
+    /// without the debugger — the adapter is told `noDebug`, and no
+    /// breakpoint is set in it, there at the start or added later.
+    pub no_debug: bool,
     /// The last run's stops, in order (see [`TraceStop`]): what the program
     /// actually did, kept after the session ends so a walkthrough can be
     /// made of it; cleared when the next run starts.
@@ -203,17 +214,24 @@ pub struct DebugState {
     /// the trace records once its stack arrives.
     pub pending_reason: String,
     /// What the debugger last put on the status line about the run —
-    /// "Debugger running…", "Stopped: breakpoint" — taken down when the run
+    /// "Debugger running…", "Paused: breakpoint" — taken down when the run
     /// ends: it went on saying "Debugger running…" over a program that had
     /// exited.
     pub said: Option<String>,
+    /// The file being read when Run picked another program to run for it
+    /// ("pricing.py" when main.py ran): said in the run's panel for as long
+    /// as the run is there. Said only on the status line, it was gone in
+    /// under half a second, and the reader took it that pricing.py ran.
+    pub ran_for: Option<String>,
     /// Watch expressions (persist across stops/sessions).
     pub watches: Vec<String>,
     /// The add-watch input box.
     pub watch_input: String,
-    /// The last function the debugger stopped in — so entering a NEW function
-    /// records one reading-trail entry (not one per line step).
-    pub last_fn: Option<String>,
+    /// The functions this run has stopped in, by file and name: entering
+    /// one for the first time records one reading-trail entry — not one per
+    /// line step, nor one each time it is entered again (stepping between
+    /// two functions filled the trail with them in turn).
+    pub trail_fns: std::collections::HashSet<(std::path::PathBuf, String)>,
     /// Breakpoints per file (absolute path → 1-based line → breakpoint),
     /// independent of a running session so they can be set before and persist
     /// across runs.
@@ -242,6 +260,58 @@ pub struct DebugState {
     /// `variablesReference`, and the children each was read to have. A
     /// reference names a value only while the program stays where it
     /// stopped, so both go with the stop (`App::bump_debug_stop`).
+    pub open_vars: std::collections::HashSet<i64>,
+    pub var_children: HashMap<i64, Vec<crate::dap::Variable>>,
+    /// The tab of the bottom panel the session here is ([`RunTab::Real`]);
+    /// 0 while there is none.
+    pub tab: u64,
+}
+
+/// A tab of the bottom panel: a run of the program (Run or Debug), or one
+/// the model works out (Fake Run or Fake Debug). By an id of its own, from
+/// one counter for both kinds, so the tabs stand in the order they were
+/// opened; a run that takes an ended one's place keeps its id, and so its
+/// place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RunTab {
+    Real(u64),
+    Fake(u64),
+}
+
+impl RunTab {
+    /// Its id, which orders the tabs.
+    pub fn id(self) -> u64 {
+        match self {
+            RunTab::Real(id) | RunTab::Fake(id) => id,
+        }
+    }
+}
+
+/// A run of the program in a tab not on screen: all [`DebugState`] and the
+/// [`App`] hold of the one on screen that is a run's own — its session,
+/// its children, its trace, its run and stop counters and the token that
+/// cancels it — kept aside, and swapped back in to be shown, or for a
+/// message of its own to be handled as the one on screen's is
+/// (`App::with_parked_debug`). The breakpoints and the watch expressions
+/// are every run's, and stay.
+pub struct ParkedDebug {
+    pub tab: u64,
+    pub run: u64,
+    pub live: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub stop: u64,
+    pub session: Option<DebugSession>,
+    pub no_debug: bool,
+    pub trace: Vec<TraceStop>,
+    pub trace_cut: bool,
+    pub trace_program: Option<String>,
+    pub pending_reason: String,
+    pub said: Option<String>,
+    pub ran_for: Option<String>,
+    pub trail_fns: std::collections::HashSet<(std::path::PathBuf, String)>,
+    pub hover_safe: bool,
+    pub child_started: Option<u64>,
+    pub children: DebugChildren,
+    pub proxied_run: Option<u64>,
     pub open_vars: std::collections::HashSet<i64>,
     pub var_children: HashMap<i64, Vec<crate::dap::Variable>>,
 }
@@ -567,11 +637,22 @@ pub struct WalkState {
     pub generating: Option<String>,
     /// The request `generating` belongs to (see `WalkMsg::Done::seq`).
     pub pending: Option<u64>,
+    /// Stops that request (`WalkMsg::Cancel`): while a tour was "Generating…"
+    /// its row had no control at all, and nothing could stop it.
+    pub abort: Option<iced::task::Handle>,
+    /// The request last stopped: its answer, if it was on its way already,
+    /// is not kept — Stop said "nothing it would have brought is kept", and
+    /// it was saved, "finished in the background".
+    pub cancelled: Option<u64>,
     /// Mints generation requests.
     pub seq: u64,
     /// True while a walkthrough generation is on its one automatic retry (the LLM
     /// occasionally emits malformed JSON); prevents an endless retry loop.
     pub retried: bool,
+    /// The scope whose generation failed last, and why: kept in the list
+    /// where it was asked for, with a way to try again, until it is asked
+    /// for again. The row said "Generating…" and then was simply gone.
+    pub failed: Option<(String, String)>,
     /// The current step's narration, prepared for rich display (markdown, plus
     /// mermaid diagrams and math rendered as inline SVGs — same pipeline as the
     /// overview and explanations).
@@ -654,9 +735,11 @@ pub struct WalkUi {
     pub input: String,
     /// Whether the top input searches the library or generates a new tour.
     pub mode: WalkMode,
-    /// Height of the narration block in the WALK tab; the steps list above it
-    /// takes the rest. The divider between them is draggable.
-    pub narration_height: f32,
+    /// Height of the narration block in the WALK tab, once the reader set
+    /// it by the divider between it and the steps list above; until then
+    /// it is as much of the room as leaves the list its steps
+    /// (`ui::sidebar::narration_room`).
+    pub narration_height: Option<f32>,
 }
 
 impl Default for WalkUi {
@@ -664,7 +747,7 @@ impl Default for WalkUi {
         Self {
             input: String::new(),
             mode: WalkMode::Search,
-            narration_height: 240.0,
+            narration_height: None,
         }
     }
 }
@@ -714,6 +797,17 @@ pub struct ExplainState {
     pub pass_automatic: bool,
     /// The node the running pass re-explains (`ExplainMsg::ReexplainNode`).
     pub pass_target: Option<explain::Node>,
+    /// That node had no explanation: the pass writes its first
+    /// (`ExplainMsg::Explain`), said so when it is done.
+    pub pass_target_new: bool,
+    /// The node a pass was asked to explain on its own, and why that pass
+    /// failed: said on its note, with a way to try again, until it is
+    /// explained or asked for again. Said only on the status line, a
+    /// failure was gone in seconds, and the card where Explain was pressed
+    /// still said "Not explained yet." as if it had never been. With it,
+    /// the Language model setting the failure is about, if one is: the
+    /// card's way there.
+    pub node_failed: Option<(explain::Node, SayAgain, Option<LlmField>)>,
     /// The functions whose blocks are being explained (`ExplainMsg::Blocks`)
     /// until the answer lands: asked again meanwhile, each click made one
     /// more paid call for the same answer.
@@ -754,6 +848,85 @@ pub struct ExplainState {
 }
 
 /// What the Language model page's Test connection found, for the fields as
+/// An AI action's failure, standing on the status line
+/// (`App::failure_notice`): what it says there, what tries it again, and
+/// what it is of — what doing that again successfully takes it away.
+#[derive(Debug, Clone)]
+pub struct FailureNotice {
+    /// What it said when it was said (and the status line with it).
+    pub said: String,
+    pub retry: Option<Message>,
+    pub of: FailureOf,
+    /// It, said again in the language spoken now: changed in Settings, the
+    /// failure stood on in the language it was said in, beside "Réessayer"
+    /// and "Réglages". `None`: `said` as it is.
+    pub again: Option<SayAgain>,
+    /// The Language model field it is about, where its Settings puts the
+    /// keyboard: "check the base URL in Settings" opened the page and left
+    /// the reader to find the field.
+    pub about: Option<LlmField>,
+}
+
+/// A field of Settings' Language model page a failure can be about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmField {
+    Key,
+    Model,
+    BaseUrl,
+}
+
+impl FailureNotice {
+    /// Whether trying again asks first — Explain All's cost, a key, a fake
+    /// run's inputs to look at — and is said so ("Try again…"). Pressed,
+    /// it leaves the failure standing until the work is started again:
+    /// put away there, it was gone with nothing tried.
+    pub fn asks_first(&self) -> bool {
+        matches!(
+            self.retry,
+            Some(crate::Message::Project(crate::ProjectMsg::SetupShow(_)))
+                | Some(crate::Message::Settings(crate::SettingsMsg::NeedKey))
+                | Some(crate::Message::Fake(crate::FakeMsg::EditInputs))
+        )
+    }
+
+    /// What it says now, in the language spoken now.
+    pub fn shown(&self) -> String {
+        self.again
+            .as_ref()
+            .map_or_else(|| self.said.clone(), |again| (again.0)())
+    }
+}
+
+/// A failure's words, made again in the language spoken when they are
+/// shown (`FailureNotice::again`).
+#[derive(Clone)]
+pub struct SayAgain(pub std::sync::Arc<dyn Fn() -> String + Send + Sync>);
+
+impl std::fmt::Debug for SayAgain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SayAgain(..)")
+    }
+}
+
+/// What a standing failure is of (`FailureNotice::of`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureOf {
+    /// An Explain pass: a pass that completes takes it away.
+    Explain,
+    /// A walkthrough: one generated, or its row dismissed, takes it away.
+    Walkthrough,
+    /// A commit's "what & why": one summarized takes it away.
+    Summary,
+    /// A fake run: one that runs takes it away.
+    FakeRun,
+    /// Time Travel's story: one written, or the session left, takes it
+    /// away.
+    Story,
+    /// An Ask answer, failed while Ask was put away to its pill: asked
+    /// again, or answered, takes it away.
+    Ask,
+}
+
 /// they stood when it was asked.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum ConnectionTest {
@@ -764,9 +937,100 @@ pub enum ConnectionTest {
     Testing(u64),
     /// The model named answered.
     Answered(String),
-    /// Why it could not be reached, in English: said in the language spoken
-    /// when it is shown (`i18n::message`).
-    Failed(String),
+    /// Why it could not be reached: kept as what failed, said in the
+    /// language spoken when it is shown.
+    Failed(TestFailure),
+}
+
+/// The gutter line the pointer rests on (0-based, in pane `pane`), where
+/// in the window it is, and whether it has rested long enough for its tip
+/// (`shown`) — a breakpoint's condition, a bookmark's note: the dot and the
+/// bar said neither, a condition was read only by opening its dialog again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GutterTip {
+    pub pane: usize,
+    pub line: usize,
+    pub x: f32,
+    pub y: f32,
+    /// The pane's scroll (x, y) when the pointer came to rest: scrolled
+    /// since, another line is under it, and the tip is not shown.
+    pub scroll: (f32, f32),
+    /// Bumped as the pointer moves to another line: a dwell for an older
+    /// one shows nothing.
+    pub generation: u64,
+    pub shown: bool,
+}
+
+/// Why Test connection failed, kept as what failed and not as its words:
+/// worded once, in the language spoken then, the tour's sheet kept its
+/// English "Couldn't reach 127.0.0.1:9 …" among French words until it was
+/// tested again.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TestFailure {
+    /// One of Clew's own sentences, in English (`i18n::message` says it).
+    Said(String),
+    /// The call failed: how, and the host it was made to.
+    Call {
+        failure: crate::app::tasks::ExplainFailure,
+        host: String,
+    },
+}
+
+impl TestFailure {
+    /// In the language spoken now.
+    pub fn said(&self) -> String {
+        match self {
+            TestFailure::Said(words) => crate::i18n::message(words),
+            TestFailure::Call { failure, host } => {
+                crate::app::settings::connection_failure_said(failure, host)
+            }
+        }
+    }
+}
+
+/// The file tree's right-click menu: the file or folder it is of
+/// (project-relative), and where in the window it opens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TreeMenu {
+    pub rel: String,
+    pub dir: bool,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// What the file tree's menu does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeAct {
+    Open,
+    OpenToSide,
+    CopyPath,
+    CopyRelativePath,
+    Reveal,
+}
+
+/// Test connection of the model as saved (the tour's sheet asks for it):
+/// kept apart from Settings' form, whose test is of fields not yet saved and
+/// is forgotten each time Settings opens — the sheet's "All set." went back
+/// to "Check that it answers" on a visit to Settings for embeddings. Kept
+/// with what it was of, so a change to the saved model makes it untried.
+#[derive(Debug, Clone, Default)]
+pub struct ModelCheck {
+    pub result: ConnectionTest,
+    /// The provider, model, endpoint and key the check was of.
+    pub of: Option<(llm::Provider, String, String, String)>,
+}
+
+impl ModelCheck {
+    /// What a check of `cfg` is known by: changed, the check is of
+    /// something else.
+    pub fn of_config(cfg: &llm::Config) -> (llm::Provider, String, String, String) {
+        (
+            cfg.provider,
+            cfg.model.clone(),
+            cfg.base_url.clone(),
+            cfg.api_key.clone(),
+        )
+    }
 }
 
 /// The LLM settings modal: whether it's open, plus its draft chat / embedding
@@ -825,6 +1089,10 @@ pub struct SettingsDraft {
     pub integrations: crate::app::integrations::IntegrationsDraft,
     /// The page Settings shows: one feature's settings at a time.
     pub page: SettingsPage,
+    /// Opened by an AI action asked with no key (`SettingsMsg::NeedKey`):
+    /// the Language model page says so above its fields — it opened with
+    /// no word of why. Cleared as Settings closes.
+    pub key_asked: bool,
 }
 
 /// The fields of Settings that are kept as it closes, not as they change —
@@ -875,25 +1143,29 @@ impl AiFields {
 pub enum SettingsPage {
     #[default]
     Appearance,
-    Updates,
     LanguageModel,
     Embeddings,
     Voice,
     Integrations,
     Languages,
     Shortcuts,
+    Usage,
+    Updates,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 8] = [
+    /// In the order the Settings list shows them: what a reader sets up
+    /// first, Clew's own updates last.
+    pub const ALL: [SettingsPage; 9] = [
         SettingsPage::Appearance,
-        SettingsPage::Updates,
         SettingsPage::LanguageModel,
         SettingsPage::Embeddings,
         SettingsPage::Voice,
         SettingsPage::Integrations,
         SettingsPage::Languages,
         SettingsPage::Shortcuts,
+        SettingsPage::Usage,
+        SettingsPage::Updates,
     ];
 
     /// The page's title, in English: shown through `crate::i18n::lookup`.
@@ -907,6 +1179,7 @@ impl SettingsPage {
             SettingsPage::Integrations => tr_noop!("Integrations"),
             SettingsPage::Languages => tr_noop!("Language servers"),
             SettingsPage::Shortcuts => tr_noop!("Keyboard shortcuts"),
+            SettingsPage::Usage => tr_noop!("Usage and cost"),
         }
     }
 }
@@ -943,6 +1216,7 @@ impl Default for SettingsDraft {
             save_failed: false,
             integrations: Default::default(),
             page: SettingsPage::Appearance,
+            key_asked: false,
         }
     }
 }
@@ -1013,6 +1287,21 @@ pub struct UpdateState {
     pub consent_waits: bool,
     /// Whether clew checks for updates automatically at startup (persisted).
     pub auto_check: bool,
+    /// What the last check found, said under Settings' Version row: a check
+    /// pressed there answered only on the status bar the Settings window
+    /// covers, so pressing it seemed to do nothing. `None` until one ran.
+    pub last_check: Option<CheckOutcome>,
+}
+
+/// What a check for updates found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckOutcome {
+    /// This is the newest release.
+    UpToDate,
+    /// A newer one is on offer (`UpdateState::available`).
+    Found,
+    /// The check could not be made: why.
+    Failed(String),
 }
 
 impl Default for UpdateState {
@@ -1027,6 +1316,7 @@ impl Default for UpdateState {
             checking: false,
             consent_waits: false,
             auto_check: true,
+            last_check: None,
         }
     }
 }
@@ -1067,11 +1357,18 @@ pub struct App {
     /// File to open automatically once the initial scan completes
     /// (set when the CLI argument is a file path).
     pub pending_open: Option<PathBuf>,
+    /// The line (1-based) [`Self::pending_open`] opens at, when it is one
+    /// to come back to.
+    pub pending_open_line: Option<usize>,
     /// Project root awaiting the user's consent to create `.clew`.
     /// While `Some`, the setup sheet asks it (`setup`).
     pub pending_consent: Option<PathBuf>,
     /// The setup sheet on screen, if any (see `crate::app::setup`).
     pub setup: Option<crate::app::setup::ProjectSetup>,
+    /// When the sheet's estimate came in (`setup`'s census): Enter presses
+    /// its Explain only once it has stood a moment to be read
+    /// ([`crate::app::setup::SHEET_READ`]).
+    pub setup_counted_at: Option<std::time::Instant>,
     /// What a first open's sheet asked for, waiting for the project to be
     /// open and its state loaded.
     pub pending_setup: Option<crate::app::setup::SetupIntent>,
@@ -1111,6 +1408,22 @@ pub struct App {
     /// carry the value minted at their stop and are checked with
     /// `owns_debug_stop`.
     pub debug_stop: u64,
+    /// The highest run id handed out: runs in tabs not on screen keep theirs
+    /// ([`ParkedDebug::run`]), and a new one is above them all.
+    pub debug_run_high: u64,
+    /// The runs of the program in tabs not on screen, with all of each that
+    /// is its own ([`ParkedDebug`]).
+    pub debug_parked: Vec<ParkedDebug>,
+    /// A parked run is swapped in to handle a message of its own, off
+    /// screen: what it would show (the file it stopped in) is not shown.
+    pub debug_off_screen: bool,
+    /// The last tab id handed out ([`RunTab`]): one counter for real and fake
+    /// runs, so the tabs stand in the order they were opened.
+    pub run_tab_last: u64,
+    /// The tab of the bottom panel on screen. The real run in it is the one
+    /// in [`Self::debug`], the fake one the one in `proj.fake`: shown, a
+    /// tab's run is swapped in.
+    pub run_shown: Option<RunTab>,
     /// Persisted Imports/Importers direction preference across focus changes.
     pub import_dir: imports::Dir,
     /// Writes the reading trail off the UI thread, one write at a time (see
@@ -1126,6 +1439,13 @@ pub struct App {
     /// closes it, and a connect that failed left the window empty, the
     /// project it was reading a folder pick away.
     pub left_local: Option<std::path::PathBuf>,
+    /// Whether a page (Statistics, the Overview, a docs page…) covered the
+    /// code panes when the window was last drawn: once it is put away, the
+    /// code comes back scrolled where the reader left it.
+    pub panes_covered: bool,
+    /// A connect asked from the Connect form or its saved hosts, until the
+    /// host answers (see [`Dial`]).
+    pub dial: Option<Dial>,
     /// The Escape now reaching the key handler has done its work already —
     /// it cleared the Files filter (`WindowMsg::FileFilterEscaped`) — and is
     /// to do nothing more. Any key press consumes it.
@@ -1223,10 +1543,17 @@ pub struct App {
     pub show_bottom: bool,
     /// Where the floating Ask window is.
     pub ask_view: AskView,
+    /// Ask opened by F6 on its way round the regions, with this many turns:
+    /// F6 going on puts it away again, nothing typed or asked in it since —
+    /// it was left open over the code.
+    pub(crate) ask_by_f6: Option<usize>,
     /// The menu of Ask's sessions, open under the card's title.
     pub ask_sessions_menu: bool,
     /// What the menu's search looks for; cleared as the menu closes.
     pub ask_sessions_query: String,
+    /// Whether something was over the window at the last update — the
+    /// tutorial, a dialog — so the sessions menu closes as one comes up.
+    pub(crate) ask_menu_covered: bool,
     /// Voice: listening, the words heard, the speech models.
     pub(crate) voice: crate::app::voice::VoiceState,
     /// EmbeddingGemma's download, for embeddings made on this computer.
@@ -1247,21 +1574,46 @@ pub struct App {
     /// when a project opens, and when the window regains focus (another
     /// window may have saved Settings meanwhile). See `App::llm_config`.
     pub llm_config_cache: Option<Option<llm::Config>>,
+    /// Test connection of the saved model, as the tour's sheet asked for it.
+    pub model_check: ModelCheck,
     /// Whether the toolbar's "More" overflow menu is open.
     pub show_tools_menu: bool,
+    /// Whether the strip's Run menu is open: Run, Debug, Fake Run and Fake
+    /// Debug, under the bug.
+    pub show_run_menu: bool,
     /// The interactive tutorial: the current step index while a tour is running,
     /// `None` when idle (see `crate::app::tutorial`).
     pub tutorial: Option<usize>,
     /// The layout the running tour began from, given back when it ends.
     pub(crate) tutorial_layout: Option<crate::app::tutorial::TourLayout>,
+    /// The sheet before the tour, while it is up.
+    pub(crate) tour_prep: Option<crate::app::tutorial::TourPrep>,
+    /// The sample this window's tour is on: set as the window opens it,
+    /// for the tour to begin once it is open.
+    pub(crate) tour_sample: Option<crate::app::tour_sample::Placed>,
+    /// Folders opened on this machine before, newest first: offered on the
+    /// welcome screen (`crate::app::recent`).
+    pub(crate) recent_folders: Vec<PathBuf>,
+    /// Where they are kept: clew's data directory, none for a test's app
+    /// (one sets its own) — every test's data directory is the same, and
+    /// hundreds of them opening folders at once wrote over each other's.
+    pub(crate) recent_store: Option<PathBuf>,
+    /// What the step on screen shows once the file it opened has loaded.
+    pub(crate) tour_then: Option<(PathBuf, Message)>,
     /// The status-bar `#[cfg]` target dropdown is open.
     pub show_target_menu: bool,
     /// The app menu of Windows and Linux (the ☰ in the top bar) is open.
     pub show_app_menu: bool,
     /// The reader's View menu (View ▾ among the file tools) is open.
     pub show_view_menu: bool,
+    /// The sidebar's More views menu (the ⋯ after its views) is open.
+    pub show_views_menu: bool,
+    /// The drop-down open in the window (`ui::picker`), if one is.
+    pub picker: Option<crate::app::pickers::Picker>,
     /// What the Files view is narrowed to; empty shows the whole tree.
     pub file_filter: String,
+    /// Whether the Files view's tree has the keyboard (`ui::tree_keys`).
+    pub tree_focused: bool,
     /// The customizable command keymap (loaded from the global config).
     pub keymap: keymap::Keymap,
     /// The action currently awaiting a new chord (capture mode), if any.
@@ -1283,6 +1635,14 @@ pub struct App {
     /// Lines down the code's indentation (the View menu's "Indent guides").
     /// Off as the design has it.
     pub show_indent_guides: bool,
+    /// Explain again, by itself, the code a change on disk made new or
+    /// different — a few AI calls at a time (Settings → Usage and cost).
+    /// Off, the status bar says the explanations are out of date, and
+    /// refreshing them asks first, with what it would cost.
+    pub keep_explanations_fresh: bool,
+    /// Whether Ask's "Try asking" questions are written by the model for
+    /// where the reader is (one small call a place), or templates.
+    pub suggest_questions: bool,
     /// The LLM settings modal: whether it's open and its draft fields (see
     /// [`SettingsDraft`]).
     pub settings: SettingsDraft,
@@ -1306,6 +1666,9 @@ pub struct App {
     /// Auto-update state: the available release plus any in-progress download /
     /// install (see [`UpdateState`]).
     pub update: UpdateState,
+    /// What the AI key spends: the ledger as last read, the balance, the
+    /// prices being typed (`app::usage`).
+    pub usage: crate::app::usage::UsageState,
     /// Overlay view: `true` shows the node-link map, `false` the list.
     pub graph_mode: bool,
     /// Map projection: `true` renders the force graph in 3D (orbit + depth),
@@ -1319,6 +1682,13 @@ pub struct App {
     pub graph_heat: bool,
     /// Bumped to put the map's camera back where it starts (`GraphMsg::FitView`).
     pub graph_fit_rev: u64,
+    /// What the map's search field holds (`GraphMsg::Search`).
+    pub graph_search: String,
+    /// Which of the search's matches the camera is on, counted from 0.
+    pub graph_found: usize,
+    /// Bumped to send the map's camera to the match it is on, or back over
+    /// the whole map once the search is cleared.
+    pub graph_focus_rev: u64,
     /// Whether the left sidebar (files / search / marks / calls / imports) is shown.
     pub show_left_sidebar: bool,
     /// Whether the right sidebar (Outline / Explain tabs) is shown.
@@ -1330,6 +1700,8 @@ pub struct App {
     pub blame_why_seq: u64,
     /// Mints [`crate::app::model::Insight::token`], like `blame_why_seq`.
     pub insight_seq: u64,
+    /// Mints [`crate::app::proof::ProofWalk::token`], likewise.
+    pub proof_seq: u64,
     /// The command palette's list, as last built (see `app::palette`).
     pub(crate) palette: Vec<crate::app::palette::PaletteCommand>,
     /// The titles of the palette commands run last, most recent first.
@@ -1337,6 +1709,10 @@ pub struct App {
     /// The command bar's suggestions, as last built: what it offers with
     /// nothing typed (see `app::palette`).
     pub(crate) palette_home: Vec<crate::app::palette::Suggestion>,
+    /// What the window offered a click when the command bar opened
+    /// (`ui::heard::gather`): each control the bar lists by its name, for
+    /// the reader to run (`App::run_from_bar`) — never the agent.
+    pub(crate) palette_screen: Vec<crate::ui::heard::Target>,
     /// Bumped whenever inlay hints are turned off, invalidating every request
     /// still in flight (see [`crate::app::message::LspMsg::InlayHintsLoaded`]).
     pub inlay_gen: u64,
@@ -1356,6 +1732,30 @@ pub struct App {
     /// True when the code view (not a text input/finder) has keyboard focus,
     /// so Vim-style motion keys move the cursor instead of typing.
     pub code_focused: bool,
+    /// Jump mode (⌘J): what has been typed of a control's code while the
+    /// codes are up (`ui::jump`); `None` while they are not.
+    pub jump: Option<String>,
+    /// The keyboard's ring (Tab with no field holding the keys): where it
+    /// is asked to be (`ui::ring`); `None` while it is not up.
+    pub(crate) ring: Option<crate::ui::RingAsk>,
+    /// Whether the code held the keys when the ring came up — or was given
+    /// them since, by a control the ring pressed: they go back to it when
+    /// the ring is put away by a key.
+    pub ring_code: bool,
+    /// What the ring last said in the status bar (the name of the control
+    /// it is on): taken away with the ring, unless something else has been
+    /// said there since.
+    pub(crate) ring_said: String,
+    /// Whether the ring came up on a menu: it goes with the menu, and Esc
+    /// puts both away, the keys going back where they were.
+    pub(crate) ring_menu: bool,
+    /// Whether a menu was up as the last message was handled, and whether
+    /// the tree held the keys as it came up: they are the tree's again as
+    /// it goes (`App::sync_menu_keys`).
+    pub(crate) menu_up: bool,
+    pub(crate) menu_tree_keys: bool,
+    /// The region F6 last put the keys in (`App::cycle_region`).
+    pub(crate) region: crate::app::keys::Region,
     /// Pending `g` prefix for two-key motions (gg / gd / gr / gi / gy).
     pub pending_g: bool,
     /// Pending `z` prefix for fold commands (za / zR / zM).
@@ -1369,6 +1769,17 @@ pub struct App {
     /// and for an empty line.
     pub status_seen: String,
     pub status_since: Option<std::time::Instant>,
+    /// The language the status line's words were last said in: a notice
+    /// said before the language changed stays in the old one ("调试器已停止"
+    /// on an English screen) — it goes when the language does.
+    pub status_lang: crate::i18n::Lang,
+    /// An AI action that failed, as the status line says it: it stands, in
+    /// a place of its own — in the danger colour, with a way to try again
+    /// and a way to the settings — beside whatever else is said, until it
+    /// is dismissed, tried again, or done again successfully. A failure
+    /// said with the other notices went with them: missed by anyone who
+    /// looked away for ten seconds, or said over by the next message.
+    pub failure_notice: Option<FailureNotice>,
     /// What the status line said last, in the wait a close or a quit is in,
     /// of the window waiting for its host (`App::show_waiting`): said once,
     /// it is not said again over what the line says since, unless that is
@@ -1424,6 +1835,10 @@ pub struct App {
     pub sidebar_width: f32,
     pub right_width: f32,
     pub bottom_height: f32,
+    /// Whether the reader set the bottom panel's height (dragged its
+    /// divider): until then it takes no more than a share of a short
+    /// window ([`App::bottom_shown_height`]).
+    pub bottom_sized: bool,
     pub font_size: f32,
     /// How many asynchronous messages `dispatch` dropped at its one ownership
     /// check (see `Message::origin`). Test instrumentation: it is how a test
@@ -1883,8 +2298,22 @@ pub struct ProjectSession {
     /// The cursor is inside the hover tooltip — keep it open (so you can move into
     /// it and scroll it) and ignore code-view hover events until it leaves.
     pub hover_pinned: bool,
+    /// The gutter line the pointer rests on, and whether its tip is due:
+    /// what a breakpoint or a bookmark there says (`ui::gutter_tip`).
+    pub gutter_tip: Option<GutterTip>,
+    /// Counts the gutter lines rested on, for [`GutterTip::generation`]:
+    /// kept apart from the tip, which leaving the gutter takes away.
+    pub gutter_seq: u64,
+    /// The tree's menu asked for from the keys (⇧F10, the Menu key), not
+    /// by a right-click: it opens with its first row chosen.
+    pub tree_menu_keys: bool,
     /// An open right-click navigation menu: (pane, line, col, window x, y).
     pub context_menu: Option<ContextMenu>,
+    /// The file tree's right-click: the row it was on — said before where
+    /// it was (`ui::right_press`) — and the menu then open. Right-click did
+    /// nothing in the tree: no Copy path, no Open to the side.
+    pub tree_menu_for: Option<(String, bool)>,
+    pub tree_menu: Option<TreeMenu>,
     /// When set, the active pane shows this file's diff against `HEAD`.
     pub diff: Option<DiffState>,
     /// The diff load in flight: its request stamp and the file. A second
@@ -1910,6 +2339,24 @@ pub struct ProjectSession {
     /// The commit the next Time Travel session lands on (the margin's
     /// History, a commit picked), and not the newest.
     pub time_travel_at: Option<String>,
+    /// A file asked for from the History view, opened to be read as a
+    /// commit left it: Time Travel starts at that commit once it opens.
+    pub time_travel_after_open: Option<(PathBuf, String)>,
+    /// A changed file asked for from the History view: its Diff shown once
+    /// it opens.
+    pub diff_after_open: Option<PathBuf>,
+    /// The History view: the project's commits (`crate::app::history`).
+    pub git_log: crate::app::history::HistoryView,
+    /// The project's newest commit as last read: when it moves (a commit,
+    /// a checkout, a pull made elsewhere), what was read of the history —
+    /// the gutter's blame, the margin's History, the History view — is
+    /// read anew.
+    pub repo_tip: Option<String>,
+    /// Whether it may have moved since: a new project, the window back in
+    /// front, a file changed.
+    pub repo_tip_stale: bool,
+    /// A read of it on its way.
+    pub repo_tip_loading: bool,
     /// The commits that touched the file being read, for the margin's
     /// History: its file, and them once they come.
     pub margin_history: Option<(PathBuf, Option<FileHistory>)>,
@@ -1922,12 +2369,24 @@ pub struct ProjectSession {
     /// What the working tree changes against HEAD, by root-relative path:
     /// the letter the Files view marks each with (`GitOp::WorkingStatus`).
     pub git_status: HashMap<String, char>,
+    /// The row of the Files view the keyboard rests on, while its tree has
+    /// the keyboard (`ui::tree_keys`); `None` rests it on the file being
+    /// read, or the first row.
+    pub tree_cursor: Option<String>,
     /// Whether the working tree may have changed since `git_status` was
     /// read: a new project, a file changed, the window back in front (a
     /// commit made elsewhere).
     pub git_status_stale: bool,
     /// A read of it on its way.
     pub git_status_loading: bool,
+    /// What HEAD is — the branch the status bar names — as last read
+    /// (`GitOp::Head`); `None` outside a repository.
+    pub head: Option<clew_protocol::HeadName>,
+    /// Whether HEAD may have moved since `head` was read: a new project,
+    /// the window back in front (a checkout made elsewhere), a file changed.
+    pub head_stale: bool,
+    /// A read of it on its way.
+    pub head_loading: bool,
     /// Numbers the time-travel requests — each start (`time_start`), each
     /// revision a session asks for (`TimeTravel::generation`) — so no two
     /// share one. A reply applies only while its own request is still the
@@ -1977,8 +2436,17 @@ pub struct ProjectSession {
     pub view_memo: crate::ui::ViewMemo,
     // -- The reading session -----------------------------------------------------
     pub history: History,
+    /// The function each trail stop was in, by its file and line, as it was
+    /// when the stop was made — with its file open, its functions' ends
+    /// known. Once the reader left the file, "main():23" became
+    /// "main.py:23": the name was looked up in a file no longer open.
+    pub trail_fn: HashMap<(PathBuf, usize), String>,
     /// Trail nodes whose subtree is collapsed in the TRAIL view.
     pub trail_collapsed: std::collections::HashSet<usize>,
+    /// Files gone to and found no longer there: the trail leaves them out.
+    /// A deleted file stayed in it, and a press on it said only an error
+    /// of the system's ("cannot resolve path: No such file or directory").
+    pub gone_files: std::collections::HashSet<PathBuf>,
     /// The `History::renumbering` stamp `trail_collapsed` was recorded under:
     /// when the history's node ids change meaning (an eviction renumbers the
     /// survivors, a clear empties the tree) the marks are dropped (see
@@ -2053,6 +2521,12 @@ pub struct ProjectSession {
     /// The Walkthroughs feature — the saved-tour library and the reader/composer
     /// state for the WALK tab (see [`WalkState`]).
     pub walk: WalkState,
+    /// Fake run and fake debug (`app::fakerun`).
+    pub fake: crate::app::fakerun::FakeRun,
+    /// A Lean proof being stepped through (`app::proof`).
+    pub proof: Option<crate::app::proof::ProofWalk>,
+    /// The weak spots page (`app::weakspots`).
+    pub weak: crate::app::weakspots::WeakSpots,
     /// The API documentation view's state (see [`DocsState`]).
     pub docs: DocsState,
     /// The Glossary page (`app::glossary`).
@@ -2111,9 +2585,15 @@ pub struct ProjectSession {
     /// Why the last question could not be asked, said in the card where it
     /// was (and on the status line): cleared by the next.
     pub ask_notice: Option<String>,
-    /// The model's questions for "Try asking", and for where
-    /// (`app::suggest`).
-    pub suggestions: Option<crate::app::suggest::Suggestions>,
+    /// That notice is that no embeddings can be made: the card has Settings
+    /// beside it, to the Embeddings page. Known when it is said — worked
+    /// out in the view, the config was read on every redraw, and compared
+    /// with words in the language spoken then.
+    pub ask_notice_embeddings: bool,
+    /// The model's questions for "Try asking", by where they were written
+    /// for (`app::suggest`): a reply for a place the reader has left is
+    /// kept for it, not put in place of the questions for where they are.
+    pub suggestions: std::collections::HashMap<crate::app::suggest::SuggestKey, Vec<String>>,
     /// Where questions were last asked for, while the request is out.
     pub suggest_asked: Option<crate::app::suggest::SuggestKey>,
     /// This session's draw of which of them are offered.
@@ -2160,6 +2640,15 @@ pub struct ProjectSession {
     /// The language-server (and debug-adapter) provisionings awaiting the
     /// user's consent, asked one at a time (see [`ConsentQueue`]).
     pub pending_lsp_consent: ConsentQueue,
+    /// The project was opened without setting its language servers up
+    /// (the setup sheet's servers unticked, or Open without setup): a
+    /// server that would need a download, an install or the leave to build
+    /// is left "not set up" instead of asking, and the status bar offers to
+    /// set it up. Cleared by any set-up the user asks for.
+    pub servers_not_now: bool,
+    /// The languages whose server the reader has asked for since ("Ask
+    /// again"): asked about as ever, the others still left for later.
+    pub servers_asked: std::collections::HashSet<String>,
     /// Files git TRACKS that the ignore rules (or a build-directory name)
     /// would have hidden, listed anyway by the scan — a local one's report,
     /// or the server's `Event::Tree` — marked in the file tree (see
@@ -2318,7 +2807,12 @@ impl Default for ProjectSession {
             hover: Default::default(),
             hover_gen: Default::default(),
             hover_pinned: Default::default(),
+            gutter_tip: None,
+            gutter_seq: 0,
             context_menu: Default::default(),
+            tree_menu_keys: false,
+            tree_menu_for: None,
+            tree_menu: None,
             diff: Default::default(),
             diff_pending: Default::default(),
             diff_refresh: None,
@@ -2327,12 +2821,22 @@ impl Default for ProjectSession {
             insight: Default::default(),
             time_travel: Default::default(),
             time_travel_at: None,
+            time_travel_after_open: None,
+            diff_after_open: None,
+            git_log: Default::default(),
+            repo_tip: None,
+            repo_tip_stale: true,
+            repo_tip_loading: false,
             margin_history: None,
             tree_revealed: None,
             tree_scroll: None,
             git_status: HashMap::new(),
             git_status_stale: true,
             git_status_loading: false,
+            tree_cursor: None,
+            head: None,
+            head_stale: true,
+            head_loading: false,
             time_gen: Default::default(),
             time_start: Default::default(),
             overlay: Default::default(),
@@ -2345,7 +2849,9 @@ impl Default for ProjectSession {
             citation_index: Default::default(),
             view_memo: Default::default(),
             history: Default::default(),
+            trail_fn: Default::default(),
             trail_collapsed: Default::default(),
+            gone_files: Default::default(),
             trail_renumbering: Default::default(),
             bookmarks: Default::default(),
             note_edit: Default::default(),
@@ -2372,6 +2878,9 @@ impl Default for ProjectSession {
             overview: Default::default(),
             stats: Default::default(),
             walk: Default::default(),
+            fake: Default::default(),
+            proof: None,
+            weak: Default::default(),
             docs: Default::default(),
             glossary: Default::default(),
             last_auto_refresh: Default::default(),
@@ -2390,7 +2899,8 @@ impl Default for ProjectSession {
             ask_spoken: false,
             ask_unread: false,
             ask_notice: None,
-            suggestions: None,
+            ask_notice_embeddings: false,
+            suggestions: Default::default(),
             suggest_asked: None,
             suggest_draw: 0,
             ask_turns: Default::default(),
@@ -2406,6 +2916,8 @@ impl Default for ProjectSession {
             build_facts: Default::default(),
             remote_lsp_init: Default::default(),
             pending_lsp_consent: Default::default(),
+            servers_not_now: false,
+            servers_asked: Default::default(),
             tracked_ignored: Default::default(),
             tree_rescans: (0, 0),
             adapter_install_cancel: Default::default(),
@@ -2720,3 +3232,28 @@ impl LanguageDrafts {
         }
     }
 }
+
+/// A connect asked from the Connect form or its saved hosts, from the moment
+/// it is asked until the host answers (`on_server_ready`): what to save once
+/// it does, and where the reader was, to go back to if it never does
+/// (`back_home_after_failed_connect`). A connect clew makes on its own — at
+/// startup, or again after a link that came up and dropped — is not one: it
+/// has nowhere else to go back to.
+#[derive(Debug, Clone)]
+pub struct Dial {
+    /// The host dialled.
+    pub to: connect::ConnTarget,
+    /// The form's host, kept among the saved hosts once it answers — not
+    /// before: a typo that never connected was listed for good. `None` for
+    /// a host already saved.
+    pub save: Option<connect::SavedConnection>,
+    /// Where the window was: this machine, or the host it was on.
+    pub from: connect::ConnTarget,
+    /// The project it was reading there, and the file and line (1-based) it
+    /// was at — or the ones a project on its way back was to reopen at.
+    pub root: Option<PathBuf>,
+    pub at: Option<ReadAt>,
+}
+
+/// A file read, and the line (1-based) the caret was on in it.
+pub type ReadAt = (PathBuf, Option<usize>);

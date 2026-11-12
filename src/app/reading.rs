@@ -38,6 +38,37 @@ enum Kept {
 }
 
 impl App {
+    /// Back or Forward (`step`), past visits to files of this machine's no
+    /// longer there, as the trail leaves them out: each is marked gone. The
+    /// way back stopped at a deleted file — its open failed with the
+    /// system's error, the trail moved onto it, and the next Back stopped
+    /// there again. With only gone files that way, the trail stays where it
+    /// is and says so.
+    fn step_trail(&mut self, step: fn(&mut History, usize) -> Option<Loc>) -> Task<Message> {
+        let before = self.proj.history.clone();
+        let rows = self.first_rows();
+        let mut gone: Option<std::path::PathBuf> = None;
+        while let Some(loc) = step(&mut self.proj.history, rows) {
+            if !self.is_gone(&loc.path) {
+                let saved = self.save_history();
+                let opened = self.open_file(loc.path, loc.line, false);
+                // Passed over on the way: said so — the reader expected it,
+                // and landed on another file with no reason given.
+                if let Some(path) = &gone {
+                    self.status = tr!("{file} is no longer there", file = self.rel_of(path));
+                }
+                return Task::batch([saved, opened]);
+            }
+            self.proj.gone_files.insert(loc.path.clone());
+            gone = Some(loc.path);
+        }
+        if let Some(path) = gone {
+            self.proj.history = before;
+            self.say_gone(&path);
+        }
+        Task::none()
+    }
+
     /// Persist the navigation tree to the project's `.clew/` — on the local
     /// disk, or over the protocol for a remote project. A local write that
     /// fails is reported in the status line; the trail is kept for the
@@ -147,20 +178,61 @@ impl App {
     }
 
     pub(crate) fn on_bookmark_toggled(&mut self) -> Task<Message> {
+        let line_height = self.line_height();
+        let Some(line) = self.active_viewer().map(|v| v.current_line(line_height)) else {
+            return Task::none();
+        };
+        self.bookmark_line(self.proj.active, line, None)
+    }
+
+    /// From the code's context menu: the bookmark on the line it was opened
+    /// on put on or taken off — or its note written, the bookmark put on as
+    /// the note is saved ([`Self::on_bookmark_note_save`]): cancelled, there
+    /// is none. A note could only be written from the Bookmarks list, for
+    /// a bookmark already made.
+    pub(crate) fn on_bookmark_from_menu(&mut self, note: bool) -> Task<Message> {
+        let Some(menu) = self.proj.context_menu.take() else {
+            return Task::none();
+        };
+        // menu.line is 0-based; bookmarks are 1-based.
+        let line = menu.line + 1;
+        if !note {
+            return self.bookmark_line(menu.pane, line, None);
+        }
+        if ui::time_travel_pane(self).is_some() {
+            self.status = tr!("Exit Time Travel to add a bookmark").into();
+            return Task::none();
+        }
+        let Some(rel) = self
+            .proj
+            .panes
+            .get(menu.pane)
+            .and_then(Option::as_ref)
+            .map(|v| v.rel.clone())
+        else {
+            return Task::none();
+        };
+        if !self.keeps_reading_state(&rel, Kept::Bookmarks) {
+            return Task::none();
+        }
+        self.on_bookmark_note_edit(rel, line)
+    }
+
+    /// Put a bookmark on 1-based `line` of pane `pane`'s file, or take it
+    /// off: `put` says which, `None` the other of what the line shows.
+    fn bookmark_line(&mut self, pane: usize, line: usize, put: Option<bool>) -> Task<Message> {
         // A past revision on screen: its lines are not the live file's, and
         // the bookmark went on the hidden live file's caret line instead.
         if ui::time_travel_pane(self).is_some() {
             self.status = tr!("Exit Time Travel to add a bookmark").into();
             return Task::none();
         }
-        let line_height = self.line_height();
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
-        let Some(v) = self.active_viewer() else {
+        let Some(v) = self.proj.panes.get(pane).and_then(Option::as_ref) else {
             return Task::none();
         };
-        let line = v.current_line(line_height);
         let mut preview = v.line_text(line).trim().to_string();
         if preview.chars().count() > 80 {
             preview = preview.chars().take(80).collect();
@@ -173,11 +245,15 @@ impl App {
         // a line shown bare, none on one shown marked. Decided by the file
         // instead, a bookmark another window had put on that line was
         // removed by the press meant to add one.
-        let added = !self
+        let marked = self
             .proj
             .bookmarks
             .iter()
             .any(|b| b.rel == rel && b.line == line);
+        let added = put.unwrap_or(!marked);
+        if added == marked {
+            return Task::none();
+        }
         // A remote project's bookmarks persist over the protocol, where the
         // project lives — never in a same-pathed local .clew.
         let saved = if self.local_project_state() {
@@ -297,6 +373,37 @@ impl App {
         if self.proj.project.is_none() {
             return Task::none();
         }
+        // A note written for a line with no bookmark yet (Bookmark with
+        // Note…): the bookmark is put on with it.
+        if let Some((rel, line, _)) = self.proj.note_edit.clone() {
+            let marked = |app: &Self| {
+                app.proj
+                    .bookmarks
+                    .iter()
+                    .any(|b| b.rel == rel && b.line == line)
+            };
+            if !marked(self) {
+                match self
+                    .proj
+                    .panes
+                    .iter()
+                    .position(|v| v.as_ref().is_some_and(|v| v.rel == rel))
+                {
+                    Some(pane) => {
+                        let _ = self.bookmark_line(pane, line, Some(true));
+                    }
+                    None => self.status = tr!("Open the file to bookmark this line").into(),
+                }
+                // Not put on — Time Travel on screen, the file no longer
+                // open, a refused remote write (each says why): the note
+                // stays in its editor, to be saved once it can be. It was
+                // attached to no bookmark, the editor closed, and the text
+                // lost.
+                if !marked(self) {
+                    return Task::none();
+                }
+            }
+        }
         if let Some((rel, line, draft)) = self.proj.note_edit.take() {
             if !self.local_project_state() {
                 // Only the note field travels, so a bookmark another client
@@ -403,12 +510,19 @@ impl App {
     pub fn note_symbol_line(&self, rel: &str, symbol: &str) -> Option<usize> {
         let root = &self.proj.project.as_ref()?.root;
         let abs = root.join(rel);
-        self.proj
-            .symbol_index_by_file
-            .get(&abs)?
+        let symbols = self.proj.symbol_index_by_file.get(&abs)?;
+        if let Some(s) = symbols.iter().find(|s| s.name == symbol) {
+            return Some(s.line);
+        }
+        // A name the file has twice is kept under what it is inside
+        // (`notes::note_keys`): the first of the name after that.
+        let (outer, name) = symbol.rsplit_once('.')?;
+        let after = symbols.iter().find(|s| s.name == outer)?.line;
+        symbols
             .iter()
-            .find(|s| s.name == symbol)
+            .filter(|s| s.name == name && s.line > after)
             .map(|s| s.line)
+            .min()
     }
 
     pub(crate) fn on_target_selected(&mut self, target: inactive::Target) -> Task<Message> {
@@ -462,6 +576,7 @@ impl App {
             ReadingMsg::BookmarkToggled => self.on_bookmark_toggled(),
             ReadingMsg::BookmarkRemoved { rel, line } => self.on_bookmark_removed(&rel, line),
             ReadingMsg::BookmarkNoteEdit(rel, line) => self.on_bookmark_note_edit(rel, line),
+            ReadingMsg::BookmarkFromMenu { note } => self.on_bookmark_from_menu(note),
             ReadingMsg::BookmarkNoteInput(s) => {
                 if let Some((_, _, draft)) = &mut self.proj.note_edit {
                     *draft = s;
@@ -551,25 +666,21 @@ impl App {
             ReadingMsg::GoBack if self.active_viewer().is_some() && self.put_away_page() => {
                 Task::none()
             }
-            ReadingMsg::GoBack => match self.proj.history.back() {
-                Some(loc) => {
-                    let saved = self.save_history();
-                    Task::batch([saved, self.open_file(loc.path, loc.line, false)])
-                }
-                None => Task::none(),
-            },
-            ReadingMsg::GoForward => match self.proj.history.forward() {
-                Some(loc) => {
-                    let saved = self.save_history();
-                    Task::batch([saved, self.open_file(loc.path, loc.line, false)])
-                }
-                None => Task::none(),
-            },
+            ReadingMsg::GoBack => self.step_trail(History::back_showing),
+            ReadingMsg::GoForward => self.step_trail(History::forward_showing),
             // A click names the visit it drew: an id that no longer points
             // there (renumbered by an eviction, or a trail replaced since)
             // is dropped rather than jumping to whatever holds it now.
             ReadingMsg::HistoryJump { id, loc } => {
                 if self.proj.history.loc(id) != Some(&loc) {
+                    return Task::none();
+                }
+                // A file of this machine's deleted since it was read: said
+                // so, and the trail left where it is — it moved on to the
+                // gone file, said the system's error, and named as read a
+                // file the pane did not show.
+                if self.is_gone(&loc.path) {
+                    self.say_gone(&loc.path);
                     return Task::none();
                 }
                 match self.proj.history.goto(id) {

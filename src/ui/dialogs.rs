@@ -47,8 +47,27 @@ pub(crate) fn bp_condition_modal<'a>(
         input_id: bp_condition_input_id(),
         on_input: |v| Message::Debug(DebugMsg::BpConditionInput(v)),
         submit: Message::Debug(DebugMsg::BpConditionSet),
-        submit_label: tr!("Set"),
+        // With no condition, what it does: "Set" silently made a plain
+        // breakpoint of an empty condition.
+        submit_label: if draft.trim().is_empty() {
+            tr!("Set without condition")
+        } else {
+            tr!("Set")
+        },
         cancel: Message::Debug(DebugMsg::BpConditionCancel),
+        // A breakpoint already there can be taken away where its condition
+        // is: the dialog offered only to set one.
+        remove: app
+            .debug
+            .breakpoints
+            .get(path)
+            .is_some_and(|m| m.contains_key(line))
+            .then(|| {
+                (
+                    tr!("Remove breakpoint"),
+                    Message::Debug(DebugMsg::BpConditionRemove),
+                )
+            }),
     })
 }
 
@@ -64,6 +83,7 @@ pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_,
         submit: Message::Reading(ReadingMsg::BookmarkNoteSave),
         submit_label: tr!("Save"),
         cancel: Message::Reading(ReadingMsg::BookmarkNoteCancel),
+        remove: None,
     })
 }
 
@@ -71,7 +91,7 @@ pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_,
 pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_, Message> {
     let (rel, symbol, draft) = edit;
     prompt_modal(Prompt {
-        title: tr!("Note on {symbol}  ·  {file}", symbol = symbol, file = rel),
+        title: tr!("Note on {symbol} in {file}", symbol = symbol, file = rel),
         placeholder: tr!("what you worked out about this symbol…"),
         value: draft,
         input_id: note_input_id(),
@@ -79,6 +99,7 @@ pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_,
         submit: Message::Reading(ReadingMsg::NoteEditSave),
         submit_label: tr!("Save"),
         cancel: Message::Reading(ReadingMsg::NoteEditCancel),
+        remove: None,
     })
 }
 
@@ -145,16 +166,35 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
                 .style(theme::overlay_scrollbar)
                 .height(Length::Shrink),
         )
-        .push(row![
-            space().width(Fill),
-            button(text(tr!("Close")).size(ts::BODY))
-                .style(theme::toolbar_button)
-                .padding([4, 12])
-                .on_press(super::heard::said(
-                    tr!("Close"),
-                    Message::TimeTravel(TimeTravelMsg::BlameWhyClose),
-                )),
-        ]);
+        .push(
+            row![space().width(Fill)]
+                // Failed: asked again from here — it offered only Settings
+                // and Close — and, for what Settings puts right, the way
+                // there, as every such failure has.
+                .extend(bw.failed.then(|| {
+                    Element::from(
+                        button(text(tr!("Try again")).size(ts::BODY))
+                            .style(theme::toolbar_button)
+                            .padding([4, 12])
+                            .on_press(super::heard::said(
+                                tr!("Try again"),
+                                Message::TimeTravel(TimeTravelMsg::BlameWhyAgain),
+                            )),
+                    )
+                }))
+                .extend(bw.fix.map(super::panes::settings_fix_button))
+                .push(
+                    button(text(tr!("Close")).size(ts::BODY))
+                        .style(theme::toolbar_button)
+                        .padding([4, 12])
+                        .on_press(super::heard::said(
+                            tr!("Close"),
+                            Message::TimeTravel(TimeTravelMsg::BlameWhyClose),
+                        )),
+                )
+                .spacing(6)
+                .align_y(iced::Center),
+        );
 
     let panel = container(col)
         .width(WHY_W)
@@ -186,11 +226,11 @@ pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> El
     let mut buttons = row![space().width(Fill)].spacing(8);
     if insight.defined.is_some() {
         buttons = buttons.push(
-            button(text(tr!("Open Definition")).size(ts::BODY))
+            button(text(tr!("Open definition")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([4, 12])
                 .on_press(super::heard::said(
-                    tr!("Open Definition"),
+                    tr!("Open definition"),
                     Message::Hover(HoverMsg::InsightOpenDefinition),
                 )),
         );
@@ -236,7 +276,10 @@ pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> El
 pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     let placeholder = match app.proj.finder.mode {
         _ if app.proj.finder.bar => tr!("Run a command or open a file"),
-        FinderMode::Files => tr!("Open a file  ·  > for a command, :123 for a line"),
+        // A question typed here is offered to Ask: said, as the rest is.
+        FinderMode::Files => {
+            tr!("Open a file, ask a question, or type > for a command, :123 for a line")
+        }
         FinderMode::Symbols => tr!("Go to a symbol"),
     };
     let glyph = match app.proj.finder.mode {
@@ -246,21 +289,24 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     let input = container(
         row![
             glyph::icon(glyph, theme::dim(), 16.0),
-            ts::field_in(
-                text_input(placeholder, &app.proj.finder.query)
-                    .id(finder_input_id())
-                    .on_input({
-                        // What is said that names no row is typed in it.
-                        super::heard::field(&app.proj.finder.query, |v| {
-                            Message::Nav(NavMsg::FinderQueryChanged(v))
-                        });
-                        |v| Message::Nav(NavMsg::FinderQueryChanged(v))
-                    })
-                    .on_submit(Message::Nav(NavMsg::FinderConfirm))
-                    .style(theme::bare_input),
-                FINDER_INPUT_H,
-                ts::INTER,
-                ts::SUBTITLE,
+            super::jump::field_named(
+                ts::field_in(
+                    text_input(placeholder, &app.proj.finder.query)
+                        .id(finder_input_id())
+                        .on_input({
+                            // What is said that names no row is typed in it.
+                            super::heard::field(&app.proj.finder.query, |v| {
+                                Message::Nav(NavMsg::FinderQueryChanged(v))
+                            });
+                            |v| Message::Nav(NavMsg::FinderQueryChanged(v))
+                        })
+                        .on_submit(Message::Nav(NavMsg::FinderConfirm))
+                        .style(theme::bare_input),
+                    FINDER_INPUT_H,
+                    ts::INTER,
+                    ts::SUBTITLE,
+                ),
+                placeholder
             ),
         ]
         .spacing(11)
@@ -281,9 +327,15 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     if app.proj.finder.is_commands() {
         finder_command_rows(app, &mut rows);
     } else if let Some(n) = app.proj.finder.goto_line() {
+        // Past the end: where Enter goes, the last line, said as such.
+        let last = app.active_viewer().map(|v| v.lines.len().max(1));
+        let said = match last {
+            Some(last) if n > last => tr!("Go to line {n}, the last line", n = last),
+            _ => tr!("Go to line {n}", n = n),
+        };
         rows.push(
             container(
-                text(format!("↵  {}", tr!("Go to line {n}", n = n)))
+                text(format!("↵  {said}"))
                     .size(ts::BASE)
                     .color(theme::accent()),
             )
@@ -495,7 +547,7 @@ fn suggestion_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
         }
         let (glyph, tint, title, detail, keys) = match suggestion {
             Suggestion::Ask(title) => (
-                Glyph::Message,
+                Glyph::AskAi,
                 theme::accent(),
                 title.clone(),
                 None,
@@ -514,24 +566,32 @@ fn suggestion_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
                 Glyph::Braces,
                 theme::dim(),
                 name.clone(),
-                Some(tr!("{file} · line {line}", file = file, line = line)),
+                Some(tr!("{file}, line {line}", file = file, line = line)),
                 None,
             ),
-            Suggestion::Command { title, recent } => (
-                match title.as_str() {
-                    _ if *recent => Glyph::TimeTravel,
-                    "Open Remote…" => Glyph::Remote,
-                    "Open Folder…" => Glyph::FolderOpen,
-                    _ => Glyph::Prompt,
-                },
-                theme::dim(),
-                crate::i18n::lookup(title).to_string(),
-                None,
-                app.palette
-                    .iter()
-                    .find(|c| &c.title == title)
-                    .and_then(|c| c.keys.clone()),
-            ),
+            Suggestion::Command { title, recent } => {
+                let command = app.palette.iter().find(|c| &c.title == title);
+                // What uses the AI model is marked so here too, as when
+                // typed for: a recent Explain looked like any command.
+                let (glyph, tint) = if command.is_some_and(|c| c.spends_ai()) {
+                    (Glyph::Sparkle, theme::accent())
+                } else {
+                    let glyph = match title.as_str() {
+                        _ if *recent => Glyph::TimeTravel,
+                        "Open Remote…" => Glyph::Remote,
+                        "Open Folder…" => Glyph::FolderOpen,
+                        _ => Glyph::Prompt,
+                    };
+                    (glyph, theme::dim())
+                };
+                (
+                    glyph,
+                    tint,
+                    crate::i18n::lookup(title).to_string(),
+                    None,
+                    command.and_then(|c| c.keys.clone()),
+                )
+            }
         };
         rows.push(bar_row(
             glyph,
@@ -557,15 +617,31 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
     for (pos, &idx) in app.proj.finder.results.iter().enumerate() {
         let selected = pos == app.proj.finder.selected;
         if let Some(command) = app.palette.get(idx) {
+            // What uses the AI model is marked so: a typed "expl" put
+            // Explain first, looking like any other command.
+            let (glyph, tint) = if command.spends_ai() {
+                (Glyph::Sparkle, theme::accent())
+            } else {
+                (Glyph::Prompt, theme::dim())
+            };
             rows.push(bar_row(
-                Glyph::Prompt,
-                theme::dim(),
+                glyph,
+                tint,
                 command.shown().to_string(),
                 None,
                 command.keys.clone(),
                 selected,
                 Message::Nav(NavMsg::PaletteRun(command.title.clone())),
             ));
+            continue;
+        }
+        // Past the files, the symbols the file picker found (Ctrl+P, a
+        // question typed: what it found, then the way to ask it).
+        if let Some(symbol) = (idx - app.palette.len()).checked_sub(files.len()) {
+            rows.push(match app.proj.symbol_index.get(symbol) {
+                Some(entry) => symbol_row(entry, selected),
+                None => stale_finder_row(selected),
+            });
             continue;
         }
         let Some(entry) = files.get(idx - app.palette.len()) else {
@@ -685,14 +761,17 @@ pub(crate) fn finder_command_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, M
             Some(keys) => super::toolbar::row_keycap(keys.clone()),
             None => slot(),
         };
+        // What spends an AI call carries the sparkle here as in the
+        // command bar: ">" listed Explain and Explain All as plain commands.
+        let title: Element<'_, Message> = if command.spends_ai() {
+            super::toolbar::ai_words(command.shown(), ts::READING, theme::fg())
+        } else {
+            text(command.shown().to_string()).size(ts::READING).into()
+        };
         rows.push(finder_row(
-            row![
-                text(command.shown().to_string()).size(ts::READING),
-                space().width(Fill),
-                keys,
-            ]
-            .spacing(10)
-            .align_y(iced::Center),
+            row![title, space().width(Fill), keys,]
+                .spacing(10)
+                .align_y(iced::Center),
             pos == app.proj.finder.selected,
             command.shown().to_string(),
             Message::Nav(NavMsg::PaletteRun(command.title.clone())),

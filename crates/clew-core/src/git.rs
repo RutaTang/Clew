@@ -310,6 +310,11 @@ const PINNED_CONFIG: &[&str] = &[
     "color.ui=false",
     "log.showSignature=false",
     "log.showRoot=true",
+    // A log of one path is never turned into `--follow` behind the
+    // query's back: follow mode stops rewriting parents, and the History
+    // view's lanes dangled (a user's `log.follow=true`). The queries that
+    // follow a file's renames ask for it themselves.
+    "log.follow=false",
     "i18n.logOutputEncoding=UTF-8",
     // A submodule change is shown as its commit ids, never as a patch that a
     // git run inside the submodule would produce (see "Submodules are never
@@ -1890,6 +1895,10 @@ pub fn diff_lines(root: &Path, abs: &Path) -> Result<Option<Vec<DiffLine>>, GitE
         OsStr::new("--no-color"),
         OsStr::new("--no-ext-diff"),
         OsStr::new("--no-textconv"),
+        // Three lines of context whatever the reader's git config says: the
+        // view counts the lines hidden between hunks from their shape, and
+        // `diff.context=0` drew pure deletions as hunks after a line.
+        OsStr::new("--unified=3"),
         // A submodule's working tree is never examined (module docs).
         OsStr::new("--ignore-submodules=dirty"),
         OsStr::new("HEAD"),
@@ -2053,6 +2062,27 @@ pub fn changed_files(root: &Path, base: &str) -> Result<Vec<(String, char)>, Git
         GIT_TIMEOUT,
     )?;
     Ok(parse_name_status_z(&out))
+}
+
+/// What HEAD is: the branch checked out — one with no commit yet too — or,
+/// detached, the commit it is at. `None` when it names neither.
+pub fn head_name(root: &Path) -> Result<Option<clew_protocol::HeadName>, GitError> {
+    use clew_protocol::HeadName;
+    let git = Git::open(root)?;
+    let finished = git.run(
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+        GIT_TIMEOUT,
+        Cap::Fail(4096),
+    )?;
+    // `--quiet` says "not a branch" by exiting 1: HEAD is detached.
+    if let Ended::Exited(status) = &finished.ended
+        && status.code() == Some(1)
+    {
+        return Ok(git.resolve("HEAD")?.map(HeadName::Detached));
+    }
+    let out = finished.success()?;
+    let name = String::from_utf8_lossy(&out.bytes).trim().to_string();
+    Ok((!name.is_empty()).then_some(HeadName::Branch(name)))
 }
 
 /// The files the working tree changes against HEAD — staged or not, and
@@ -3148,6 +3178,78 @@ pub fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GitError> {
     ))
 }
 
+// ------------------------------------------------------- a history written
+
+/// One commit for [`write_history`]: its message, its date (the author's and
+/// the committer's, in a form git reads, such as `2025-03-04T10:12:00+00:00`),
+/// and the files it adds or changes, root-relative with `/`, as they are in
+/// it.
+pub struct NewCommit<'a> {
+    pub message: &'a str,
+    pub date: &'a str,
+    pub files: &'a [(&'a str, &'a str)],
+}
+
+/// Make `root`, an empty directory, a repository whose history is `commits`,
+/// oldest first: each one's files written, then committed by `author`
+/// (name, email) at its date. For a project Clew writes itself (the tour's
+/// sample), whose history is part of what it shows. Blocking (git
+/// subprocesses).
+///
+/// Run as every other command is ([`base_command`]): no hook, no fsmonitor,
+/// nothing fetched. What the reader's own configuration could add to a
+/// commit is pinned off as well: a signature (`commit.gpgsign`) would ask for
+/// a key, and a template directory would copy its hooks in.
+pub fn write_history(
+    root: &Path,
+    author: (&str, &str),
+    commits: &[NewCommit<'_>],
+) -> Result<(), GitError> {
+    installed_version()?;
+    let git = |args: &[&str], date: Option<&str>| -> Result<(), GitError> {
+        let mut cmd = base_command(root);
+        cmd.args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .arg("-c")
+        .arg(format!("user.name={}", author.0))
+        .arg("-c")
+        .arg(format!("user.email={}", author.1))
+        .args(args);
+        if let Some(date) = date {
+            cmd.env("GIT_AUTHOR_NAME", author.0)
+                .env("GIT_AUTHOR_EMAIL", author.1)
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_NAME", author.0)
+                .env("GIT_COMMITTER_EMAIL", author.1)
+                .env("GIT_COMMITTER_DATE", date);
+        }
+        execute(cmd, GIT_TIMEOUT, Cap::Fail(1 << 20))?
+            .success()
+            .map(drop)
+    };
+    git(&["init", "-q", "--template="], None)?;
+    for commit in commits {
+        for (rel, text) in commit.files {
+            check_rel(rel)?;
+            let path = root.join(rel);
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| GitError::Io(e.to_string()))?;
+            }
+            std::fs::write(&path, text).map_err(|e| GitError::Io(e.to_string()))?;
+        }
+        git(&["add", "-A"], None)?;
+        git(
+            &["commit", "-q", "--no-verify", "-m", commit.message],
+            Some(commit.date),
+        )?;
+    }
+    Ok(())
+}
+
 // ----------------------------------------------------------- one operation
 
 /// Run one [`clew_protocol::GitOp`] against the repository at `root` and
@@ -3197,11 +3299,32 @@ pub fn run_op(root: &Path, op: clew_protocol::GitOp) -> Result<clew_protocol::Gi
         GitOp::ChangedFiles { base } => GitResult::ChangedFiles(changed_files(root, &base)?),
         GitOp::Churn { commits } => GitResult::Churn(churn(root, commits)?),
         GitOp::WorkingStatus => GitResult::WorkingStatus(working_status(root)?),
+        GitOp::Head => GitResult::Head(head_name(root)?),
         GitOp::RangePatch { base, max_bytes } => {
             GitResult::RangePatch(range_patch(root, &base, max_bytes)?)
         }
+        GitOp::Log {
+            all,
+            rel,
+            author,
+            grep,
+            skip,
+            limit,
+        } => GitResult::Log(project_log(
+            root,
+            all,
+            rel.as_deref(),
+            author.as_deref(),
+            grep.as_deref(),
+            skip,
+            limit,
+        )?),
+        GitOp::CommitDetail { sha } => GitResult::CommitDetail(commit_detail(root, &sha)?),
     })
 }
+
+mod history;
+pub use history::{MAX_LOG_SKIP, check_log_text, commit_detail, project_log};
 
 #[cfg(test)]
 mod tests;

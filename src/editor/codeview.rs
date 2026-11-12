@@ -83,7 +83,7 @@ const MINIMAP_WIDTH: f32 = 56.0;
 const MINIMAP_LANE: f32 = 8.0;
 /// The gap between the code and the minimap band.
 const MINIMAP_GAP: f32 = 6.0;
-const MINIMAP_MIN_ROWS: usize = 40;
+pub(crate) const MINIMAP_MIN_ROWS: usize = 40;
 /// Display columns a full-width minimap bar represents.
 const MINIMAP_FULL_COLS: f32 = 100.0;
 /// Finite layout width for a single unwrapped line. Large enough for any line,
@@ -702,6 +702,10 @@ impl HlKind {
     }
 }
 
+/// What the gutter line the pointer rests on is reported as (see
+/// [`CodeView::on_gutter`]).
+type OnGutter<'a, Message> = Box<dyn Fn(Option<usize>, Point) -> Message + 'a>;
+
 pub struct CodeView<'a, Message> {
     lines: &'a [HlLine],
     max_cols: usize,
@@ -736,6 +740,8 @@ pub struct CodeView<'a, Message> {
     /// hollowing it would claim knowledge we do not have.
     unverified_breakpoints: HashSet<usize>,
     debug_current: Option<usize>, // 1-based current stopped line (debug)
+    /// `debug_current` is a fake debug session's line (lit in the accent).
+    debug_simulated: bool,
     /// 0-based display line → inlay chips `(display column, label)` spliced into
     /// the line at render time (inferred types, parameter names). Borrowed:
     /// the viewer owns them, and cloning both maps on every view was a
@@ -767,6 +773,10 @@ pub struct CodeView<'a, Message> {
     on_hover: Option<Box<dyn Fn(Hit, Point) -> Message + 'a>>,
     /// The cursor left the code area — clear any open peek.
     on_hover_end: Option<Box<dyn Fn() -> Message + 'a>>,
+    /// The gutter line the pointer rests on (0-based), or `None` as it
+    /// leaves the gutter, with where the pointer is: what a breakpoint or a
+    /// bookmark there says is shown beside it.
+    on_gutter: Option<OnGutter<'a, Message>>,
     /// Gutter fold-arrow click on a header line.
     on_fold: Option<Box<dyn Fn(usize) -> Message + 'a>>,
     /// Click in the line-number gutter margin: toggle a breakpoint on that
@@ -818,6 +828,7 @@ impl<'a, Message> CodeView<'a, Message> {
             cond_breakpoints: HashSet::new(),
             unverified_breakpoints: HashSet::new(),
             debug_current: None,
+            debug_simulated: false,
             inlay_hints: None,
             inlay_color: default_color,
             inactive: None,
@@ -831,6 +842,7 @@ impl<'a, Message> CodeView<'a, Message> {
             on_context: Box::new(on_context),
             on_hover: None,
             on_hover_end: None,
+            on_gutter: None,
             on_fold: None,
             on_breakpoint: None,
             indent_guides: false,
@@ -882,6 +894,12 @@ impl<'a, Message> CodeView<'a, Message> {
 
     pub fn on_hover(mut self, f: impl Fn(Hit, Point) -> Message + 'a) -> Self {
         self.on_hover = Some(Box::new(f));
+        self
+    }
+
+    /// See [`CodeView::on_gutter`]'s field.
+    pub fn on_gutter(mut self, f: impl Fn(Option<usize>, Point) -> Message + 'a) -> Self {
+        self.on_gutter = Some(Box::new(f));
         self
     }
 
@@ -999,6 +1017,12 @@ impl<'a, Message> CodeView<'a, Message> {
     }
 
     /// The current stopped line (1-based) while debugging — full-row highlight.
+    /// The current line is a fake debug session's, not a program's.
+    pub fn debug_simulated(mut self, simulated: bool) -> Self {
+        self.debug_simulated = simulated;
+        self
+    }
+
     pub fn debug_current(mut self, line: Option<usize>) -> Self {
         self.debug_current = line;
         self
@@ -1602,6 +1626,11 @@ struct State<P> {
     last_hover: Option<(usize, usize)>,
     /// Row the mouse currently hovers, to reveal the fold arrow on that line.
     hover_row: Option<usize>,
+    /// The gutter row the pointer is over, where a click sets a breakpoint:
+    /// redrawn as it moves, for the dot shown there before it is set.
+    breakpoint_row: Option<usize>,
+    /// The gutter line last reported to `on_gutter` (0-based).
+    gutter_line: Option<usize>,
     /// True while dragging the minimap to scroll.
     minimap_drag: bool,
     cache: RefCell<LineCache<P>>,
@@ -1631,6 +1660,8 @@ impl<P> Default for State<P> {
             cmd_held: false,
             last_hover: None,
             hover_row: None,
+            breakpoint_row: None,
+            gutter_line: None,
             minimap_drag: false,
             cache: RefCell::new(LineCache::default()),
             sticky_cache: RefCell::new(StickyCache::default()),
@@ -1668,7 +1699,7 @@ impl<P> State<P> {
 
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer> for CodeView<'_, Message>
 where
-    Renderer: text::Renderer<Font = Font>,
+    Renderer: text::Renderer<Font = Font> + iced::advanced::svg::Renderer,
     Renderer::Paragraph: Glyphs,
     Renderer::Paragraph: 'static,
 {
@@ -1838,6 +1869,15 @@ where
                 shell.capture_event();
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let breakpoint_row = self.on_breakpoint.as_ref().and_then(|_| {
+                    let p = cursor.position_in(bounds)?;
+                    (p.x < FOLD_ARROW_COL as f32 * state.char_width)
+                        .then(|| (p.y / self.line_height) as usize)
+                });
+                if state.breakpoint_row != breakpoint_row {
+                    state.breakpoint_row = breakpoint_row;
+                    shell.request_redraw();
+                }
                 // Track the hovered row so the fold arrow can appear on it.
                 if self.fold_headers.is_some()
                     && let Some(p) = cursor.position_in(bounds)
@@ -1869,7 +1909,25 @@ where
                     // before it actually shows). Clear it when the cursor leaves
                     // — or rests on the pinned sticky band, which is not the
                     // hidden row a hit test there would name.
-                    match cursor.position_in(bounds).filter(|_| !over_sticky) {
+                    // In the gutter: its line, reported as it changes —
+                    // not a word of the code to peek at (the hit there is
+                    // the line's first column).
+                    let gutter = cursor
+                        .position_in(bounds)
+                        .filter(|p| !over_sticky && p.x < FOLD_ARROW_COL as f32 * state.char_width)
+                        .and_then(|p| self.line_at_row((p.y / self.line_height) as usize));
+                    if let Some(on_gutter) = &self.on_gutter
+                        && state.gutter_line != gutter
+                    {
+                        state.gutter_line = gutter;
+                        let at = cursor.position().unwrap_or(Point::new(bounds.x, bounds.y));
+                        shell.publish(on_gutter(gutter, at));
+                    }
+                    let in_gutter = gutter.is_some() && self.on_gutter.is_some();
+                    match cursor
+                        .position_in(bounds)
+                        .filter(|_| !over_sticky && !in_gutter)
+                    {
                         Some(point) => {
                             if let Some(on_hover) = &self.on_hover {
                                 let hit = self.hit(state, point, Rounding::Under);
@@ -1944,6 +2002,9 @@ where
         let gutter_px = gutter_width(state.char_width, self.font_size);
         // The line numbers' column, right-aligned to its edge.
         let number_w = number_width(state.char_width, self.font_size);
+        // The room left of the file's widest number, where its marks sit.
+        let mark_room = number_w
+            - self.lines.len().max(1).to_string().len() as f32 * state.char_width * NUMBER_SCALE;
 
         // Visible row range relative to the content top (rows, not source
         // lines — collapsed folds compress the vertical space).
@@ -2018,6 +2079,13 @@ where
         let indent_step = self.indent_guides.then(|| {
             indent_step((0..self.lines.len().min(INDENT_SAMPLE_LINES)).map(|l| self.indent_of(l)))
         });
+        // The row of the gutter the pointer is over, where a click sets a
+        // breakpoint: shown there, faintly, before it is set — with nothing
+        // to see, click-to-set was found only by chance.
+        let hover_gutter_row = self.on_breakpoint.as_ref().and_then(|_| {
+            let point = cursor.position_in(bounds)?;
+            (point.x < FOLD_ARROW_COL as f32 * state.char_width).then(|| (point.y / lh) as usize)
+        });
         for row in first..last {
             if row < first_shown_row {
                 continue;
@@ -2049,7 +2117,14 @@ where
                         },
                         ..renderer::Quad::default()
                     },
-                    theme::with_alpha(theme::warning(), 0.16),
+                    theme::with_alpha(
+                        if self.debug_simulated {
+                            theme::accent()
+                        } else {
+                            theme::warning()
+                        },
+                        0.16,
+                    ),
                 );
             } else if self.read_line() == Some(i) {
                 // Current line: a faint full-width wash of the accent — the
@@ -2070,16 +2145,26 @@ where
             }
             // Its marks at the gutter's left: a bookmark's ribbon, then a
             // breakpoint — each a shape, not a colour alone (`gutter_marks`).
-            for mark in gutter_marks(
+            for mark in line_marks(
                 self.bookmarks.contains(&(i + 1)),
                 self.breakpoints.contains(&(i + 1)).then(|| BreakpointMark {
                     conditional: self.cond_breakpoints.contains(&(i + 1)),
                     refused: self.unverified_breakpoints.contains(&(i + 1)),
                 }),
+                hover_gutter_row == Some(row),
                 bounds.x,
                 y,
                 lh,
+                mark_room,
             ) {
+                if mark.ribbon {
+                    renderer.draw_svg(
+                        iced::advanced::svg::Svg::new(ribbon_handle(mark.color)),
+                        mark.bounds,
+                        mark.bounds,
+                    );
+                    continue;
+                }
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: mark.bounds,
@@ -2203,16 +2288,18 @@ where
             if let Some(status) = self.git_status
                 && let Some(Some(kind)) = status.get(i)
             {
+                // Modified in the info colour, as editors mark it — the
+                // accent is the reader's own: their bookmarks, their line.
                 let color = match kind {
                     crate::git::ChangeKind::Added => theme::success(),
-                    crate::git::ChangeKind::Modified => theme::accent(),
+                    crate::git::ChangeKind::Modified => theme::info(),
                 };
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
                             x: bounds.x,
                             y,
-                            width: 3.0,
+                            width: GIT_BAR_W,
                             height: lh,
                         },
                         ..renderer::Quad::default()
@@ -2602,6 +2689,36 @@ where
             );
         }
 
+        // A line that runs past the view's right edge fades out there, not
+        // cut off mid-word: it says the line goes on, to scroll to. Over the
+        // text, in a layer of its own (within one, quads draw before text);
+        // left of the minimap, when one is drawn.
+        let right = self
+            .minimap_band(viewport)
+            .map_or(viewport.x + viewport.width, |band| band.x);
+        let text_right = bounds.x + gutter_px + state.measured_for(self.extent_key());
+        if text_right > right + 0.5 && right - viewport.x > 2.0 * RUNS_ON_FADE {
+            let fade = Rectangle {
+                x: right - RUNS_ON_FADE,
+                y: viewport.y,
+                width: RUNS_ON_FADE,
+                height: viewport.height,
+            };
+            let bg = theme::bg();
+            let gradient = iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_2))
+                .add_stop(0.0, Color { a: 0.0, ..bg })
+                .add_stop(1.0, bg);
+            renderer.with_layer(fade, |renderer| {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: fade,
+                        ..renderer::Quad::default()
+                    },
+                    iced::Background::Gradient(iced::Gradient::Linear(gradient)),
+                );
+            });
+        }
+
         // Minimap: a compressed overview pinned to the right of the viewport,
         // one sampled bar per few pixel rows, shaped by indentation and line
         // length, with a soft rounded box marking the visible range. It is
@@ -2616,6 +2733,9 @@ where
         }
     }
 }
+
+/// How wide the fade is where a line runs past the view's right edge.
+const RUNS_ON_FADE: f32 = 28.0;
 
 /// The room either side of the words in a chip past a line's end, and the
 /// widest its words are laid out.
@@ -2643,49 +2763,82 @@ struct BreakpointMark {
 }
 
 /// A mark in the gutter: where, how round, its colour, and whether filled
-/// or only outlined.
+/// or only outlined — or, `ribbon`, a bookmark's notched ribbon.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct GutterMark {
     bounds: Rectangle,
     radius: f32,
     color: Color,
     filled: bool,
+    ribbon: bool,
 }
 
-/// The width of a bookmark's ribbon at the gutter's left edge.
-const BOOKMARK_RIBBON_W: f32 = 2.5;
+/// The width of a bookmark's ribbon at the gutter's left edge: a
+/// bookmark's shape, notched at its foot — a bar of 2.5 px read as the
+/// caret's line, or a change's.
+const BOOKMARK_RIBBON_W: f32 = 4.0;
+
+/// The width of the git change bar at the gutter's very left.
+const GIT_BAR_W: f32 = 3.0;
+
+/// Where a bookmark's ribbon starts: right of the git change bar, never on
+/// it — a modified line's bar and a bookmark's ribbon were one purple bar
+/// in one place, and a reader's own mark read as someone's change.
+const BOOKMARK_X: f32 = GIT_BAR_W + 0.5;
 
 /// The marks a line's gutter shows at its left, from the gutter's `x`, the
-/// row at `y` `lh` tall: a bookmark's ribbon down its edge — the line number
-/// tinted was its only sign, a colour alone — then a breakpoint: a dot, a
-/// rounded square when conditional (it was only amber), a ring when the
-/// adapter refused it.
+/// row at `y` `lh` tall, `room` wide before the file's widest line number
+/// starts: a bookmark's ribbon down its edge — the line number tinted was
+/// its only sign, a colour alone — then a breakpoint: a dot, a rounded
+/// square when conditional (it was only amber), a ring when the adapter
+/// refused it, centred in that room — one column for the whole file, so it
+/// doesn't shift as the numbers grow a digit — and never over the ribbon.
 fn gutter_marks(
     bookmark: bool,
     breakpoint: Option<BreakpointMark>,
     x: f32,
     y: f32,
     lh: f32,
+    room: f32,
 ) -> Vec<GutterMark> {
     let mut marks = Vec::new();
     if bookmark {
+        let height = (lh * 0.7).clamp(1.0, lh);
         marks.push(GutterMark {
             bounds: Rectangle {
-                x,
-                y: y + 2.0,
+                x: x + BOOKMARK_X,
+                y: y + (lh - height) / 2.0,
                 width: BOOKMARK_RIBBON_W,
-                height: (lh - 4.0).max(1.0),
+                height,
             },
-            radius: 1.0,
+            radius: 0.0,
             color: theme::accent(),
             filled: true,
+            ribbon: true,
         });
     }
     if let Some(bp) = breakpoint {
-        let d = (lh * 0.55).min(9.0);
+        // Right of the ribbon, and short of the numbers, in one column for
+        // the whole file: smaller where a file's numbers are long (five
+        // digits left 13 px). Past what even that leaves, a line with no
+        // ribbon has its dot where the ribbon would be, off the digits.
+        let lead = BOOKMARK_X + BOOKMARK_RIBBON_W + 1.0;
+        let full = (lh * 0.55).min(9.0);
+        let fits = room - lead - 0.5;
+        let d = if fits < full && fits >= 4.0 {
+            fits
+        } else {
+            full
+        };
+        let column = ((room - d) / 2.0).max(lead);
+        let at = if column + d <= room || bookmark {
+            column
+        } else {
+            ((room - d) / 2.0).max(GIT_BAR_W + 0.5)
+        };
         marks.push(GutterMark {
             bounds: Rectangle {
-                x: x + BOOKMARK_RIBBON_W + 1.0,
+                x: x + at,
                 y: y + (lh - d) / 2.0,
                 width: d,
                 height: d,
@@ -2697,7 +2850,46 @@ fn gutter_marks(
                 theme::danger()
             },
             filled: !bp.refused,
+            ribbon: false,
         });
+    }
+    marks
+}
+
+/// A bookmark's ribbon in `color`, notched at its foot, stretched to the
+/// box it is drawn in.
+fn ribbon_handle(color: Color) -> iced::advanced::svg::Handle {
+    let u = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let fill = format!("#{:02x}{:02x}{:02x}", u(color.r), u(color.g), u(color.b));
+    let doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 4 10' preserveAspectRatio='none'>\
+         <path d='M0 0H4V10L2 7.6L0 10Z' fill='{fill}' fill-opacity='{}'/></svg>",
+        color.a
+    );
+    iced::advanced::svg::Handle::from_memory(doc.into_bytes())
+}
+
+/// A line's gutter marks ([`gutter_marks`]), and where the pointer is over
+/// its gutter (`hovered`) with no breakpoint set there, the one a click
+/// would set: its dot, faint. With nothing shown before it was set,
+/// click-to-set was found only by chance.
+fn line_marks(
+    bookmark: bool,
+    breakpoint: Option<BreakpointMark>,
+    hovered: bool,
+    x: f32,
+    y: f32,
+    lh: f32,
+    room: f32,
+) -> Vec<GutterMark> {
+    let ghost = hovered && breakpoint.is_none();
+    let shown = breakpoint.or(ghost.then_some(BreakpointMark {
+        conditional: false,
+        refused: false,
+    }));
+    let mut marks = gutter_marks(bookmark, shown, x, y, lh, room);
+    if ghost && let Some(dot) = marks.last_mut() {
+        dot.color = theme::with_alpha(dot.color, 0.35);
     }
     marks
 }
@@ -3094,9 +3286,6 @@ pub(crate) fn guide_indent(
 #[cfg(test)]
 mod tests {
 
-    /// The minimap draws bars at least 2px apart with a gap between them —
-    /// a long file used to fill the band solid — and a short file's rows
-    /// each get their own bar.
     /// A file indented by two has a guide at every level; one indented
     /// by four, every four columns; alignment by one is not a level.
     #[test]
@@ -3129,11 +3318,38 @@ mod tests {
         assert_eq!((0..at(2)).step_by(4).collect::<Vec<_>>(), [0]);
     }
 
+    /// The gutter shows, faintly, the breakpoint a click there would set —
+    /// only where none is set, and not over a bookmark's ribbon.
+    #[test]
+    fn a_hovered_gutter_shows_the_breakpoint_a_click_would_set() {
+        use super::{BreakpointMark, line_marks};
+        let set = BreakpointMark {
+            conditional: false,
+            refused: false,
+        };
+        assert!(line_marks(false, None, false, 0.0, 0.0, 20.0, 0.0).is_empty());
+        let ghost = line_marks(false, None, true, 0.0, 0.0, 20.0, 0.0);
+        assert_eq!(ghost.len(), 1, "the dot a click would set");
+        assert!(ghost[0].color.a < 0.5 && ghost[0].filled, "{ghost:?}");
+        let real = line_marks(false, Some(set), true, 0.0, 0.0, 20.0, 0.0);
+        assert_eq!(real.len(), 1);
+        assert_eq!(
+            real[0].color.a, 1.0,
+            "a set breakpoint is not faint: {real:?}"
+        );
+        assert_eq!(real[0].bounds, ghost[0].bounds, "where it would be set");
+        // With a bookmark: its ribbon as it is, the faint dot beside it.
+        let both = line_marks(true, None, true, 0.0, 0.0, 20.0, 0.0);
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[0].color.a, 1.0, "the ribbon is not faint");
+        assert!(both[1].color.a < 0.5);
+    }
+
     /// A bookmark and a conditional breakpoint each say so by a shape, not
-    /// by a colour alone: the bookmark a ribbon down the gutter's edge (its
-    /// line number tinted was all it had), the conditional breakpoint a
-    /// rounded square beside the plain one's dot, a refused one a ring. And
-    /// both on one line, side by side.
+    /// by a colour alone: the bookmark a notched ribbon at the gutter's edge
+    /// (its line number tinted was all it had), the conditional breakpoint
+    /// a rounded square beside the plain one's dot, a refused one a ring.
+    /// And both on one line, side by side.
     #[test]
     fn gutter_marks_are_shapes_not_only_colours() {
         use super::{BreakpointMark, gutter_marks};
@@ -3141,14 +3357,38 @@ mod tests {
             conditional: false,
             refused: false,
         };
-        assert!(gutter_marks(false, None, 0.0, 0.0, 20.0).is_empty());
-        let ribbon = gutter_marks(true, None, 0.0, 0.0, 20.0);
+        assert!(gutter_marks(false, None, 0.0, 0.0, 20.0, 0.0).is_empty());
+        let ribbon = gutter_marks(true, None, 0.0, 0.0, 20.0, 0.0);
         assert_eq!(ribbon.len(), 1, "a bookmark has a mark of its own");
         assert!(
             ribbon[0].bounds.height > ribbon[0].bounds.width * 3.0,
             "a ribbon"
         );
-        let dot = gutter_marks(false, Some(plain), 0.0, 0.0, 20.0)[0];
+        assert!(
+            ribbon[0].bounds.x >= super::GIT_BAR_W,
+            "beside the git change bar, not on it"
+        );
+        // A bookmark's notched shape, wide enough to read as one: a bar of
+        // 2.5 px was taken for the caret's line or a change's bar.
+        assert!(ribbon[0].ribbon, "notched, as a bookmark is");
+        assert!(ribbon[0].bounds.width >= 4.0, "{:?}", ribbon[0]);
+        // A file of five-digit line numbers leaves 13.5 px left of them:
+        // the dot keeps to it, clear of the ribbon.
+        let tight = gutter_marks(
+            true,
+            Some(BreakpointMark {
+                conditional: false,
+                refused: false,
+            }),
+            0.0,
+            0.0,
+            20.0,
+            13.5,
+        );
+        let (ribbon, dot) = (tight[0].bounds, tight[1].bounds);
+        assert!(dot.x + dot.width <= 13.5, "over the numbers: {dot:?}");
+        assert!(dot.x >= ribbon.x + ribbon.width, "over the ribbon: {dot:?}");
+        let dot = gutter_marks(false, Some(plain), 0.0, 0.0, 20.0, 0.0)[0];
         let square = gutter_marks(
             false,
             Some(BreakpointMark {
@@ -3158,6 +3398,7 @@ mod tests {
             0.0,
             0.0,
             20.0,
+            0.0,
         )[0];
         assert!(dot.radius >= dot.bounds.width / 2.0 - 0.01, "round");
         assert!(square.radius < square.bounds.width / 3.0, "squared off");
@@ -3170,16 +3411,31 @@ mod tests {
             0.0,
             0.0,
             20.0,
+            0.0,
         )[0];
         assert!(dot.filled && !ring.filled);
-        let both = gutter_marks(true, Some(plain), 0.0, 0.0, 20.0);
+        assert!(!dot.ribbon && !square.ribbon && !ring.ribbon);
+        let both = gutter_marks(true, Some(plain), 0.0, 0.0, 20.0, 0.0);
         assert_eq!(both.len(), 2);
         assert!(
             both[1].bounds.x >= both[0].bounds.x + both[0].bounds.width,
             "side by side: {both:?}"
         );
+        // With room before the numbers, the dot sits in its middle; with
+        // little, it still keeps off the ribbon.
+        let centred = gutter_marks(true, Some(plain), 10.0, 0.0, 20.0, 30.0)[1];
+        let mid = centred.bounds.x + centred.bounds.width / 2.0;
+        assert!((mid - 25.0).abs() < 0.01, "{centred:?}");
+        let tight = gutter_marks(true, Some(plain), 0.0, 0.0, 20.0, 6.0);
+        assert!(
+            tight[1].bounds.x >= tight[0].bounds.x + tight[0].bounds.width,
+            "{tight:?}"
+        );
     }
 
+    /// The minimap draws bars at least 2px apart with a gap between them —
+    /// a long file used to fill the band solid — and a short file's rows
+    /// each get their own bar.
     #[test]
     fn minimap_bars_keep_a_gap_between_them() {
         // A long file: half a pixel a row; every fourth row, 1.2px bars.
@@ -3589,7 +3845,7 @@ mod scroll_tests {
             .unwrap_or(0);
         // Long enough that the content overflows the simulator viewport with and
         // without the chip, so both measurements are real content widths.
-        let annotation = "Ada Lovelace, 3 days ago · rework the retry budget so a cold \
+        let annotation = "rework the retry budget so a cold \
                           cache cannot stall the first request"
             .to_string();
         let chip = ": HashMap<String, Vec<u8>>".to_string();
@@ -3745,6 +4001,8 @@ mod hit_tests {
         Drag(usize, usize),
         Context(usize, usize),
         Hover(usize, usize),
+        Gutter(Option<usize>),
+        HoverEnd,
     }
 
     fn view(lines: &[crate::highlight::HlLine]) -> CodeView<'_, Msg> {
@@ -4023,6 +4281,43 @@ mod hit_tests {
                 Msg::Hover(0, 10),
                 Msg::Hover(0, 11)
             ]
+        );
+    }
+
+    /// M4/M5: the gutter line the pointer rests on is reported once, as it
+    /// changes — and not as a word of the code to peek at — so what a
+    /// breakpoint or a bookmark there says can be shown; leaving the
+    /// gutter says so, and the code is peeked at again.
+    #[test]
+    fn the_gutter_line_under_the_pointer_is_reported_as_it_changes() {
+        let src = "let a = 1;\nlet b = 2;\nlet c = 3;\n";
+        let lines = plain_lines(src);
+        let view = view(&lines)
+            .on_gutter(|line, _| Msg::Gutter(line))
+            .on_hover_end(|| Msg::HoverEnd);
+        let mut sim = iced_test::simulator(view);
+        for p in [
+            Point::new(4.0, LH * 1.5),
+            Point::new(10.0, LH * 1.6),
+            Point::new(4.0, LH * 2.5),
+            Point::new(gutter() + 2.0, LH * 2.5),
+        ] {
+            sim.point_at(p);
+            let _ = sim.simulate([Event::Mouse(mouse::Event::CursorMoved { position: p })]);
+        }
+        let said: Vec<Msg> = sim
+            .into_messages()
+            .filter(|m| matches!(m, Msg::Gutter(..) | Msg::Hover(..)))
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                Msg::Gutter(Some(1)),
+                Msg::Gutter(Some(2)),
+                Msg::Gutter(None),
+                Msg::Hover(2, 0),
+            ],
+            "once per line, no peek in the gutter"
         );
     }
 
@@ -4331,6 +4626,8 @@ mod font_tests {
         texts: Vec<(String, iced::advanced::text::Shaping)>,
         /// Each text's content, where it is drawn, and the box it is clipped to.
         boxes: Vec<(String, iced::Point, iced::Rectangle)>,
+        /// Each quad's box and colour.
+        quads: Vec<(iced::Rectangle, iced::Color)>,
     }
 
     impl iced::advanced::Renderer for Recorder {
@@ -4338,7 +4635,14 @@ mod font_tests {
         fn end_layer(&mut self) {}
         fn start_transformation(&mut self, _: iced::Transformation) {}
         fn end_transformation(&mut self) {}
-        fn fill_quad(&mut self, _: iced::advanced::renderer::Quad, _: impl Into<iced::Background>) {
+        fn fill_quad(
+            &mut self,
+            quad: iced::advanced::renderer::Quad,
+            background: impl Into<iced::Background>,
+        ) {
+            if let iced::Background::Color(color) = background.into() {
+                self.quads.push((quad.bounds, color));
+            }
         }
         fn reset(&mut self, _: iced::Rectangle) {}
         fn allocate_image(
@@ -4347,6 +4651,19 @@ mod font_tests {
             _: impl FnOnce(Result<iced::advanced::image::Allocation, iced::advanced::image::Error>)
             + Send
             + 'static,
+        ) {
+        }
+    }
+
+    impl iced::advanced::svg::Renderer for Recorder {
+        fn measure_svg(&self, _: &iced::advanced::svg::Handle) -> iced::Size<u32> {
+            iced::Size::new(1, 1)
+        }
+        fn draw_svg(
+            &mut self,
+            _: iced::advanced::svg::Svg,
+            _: iced::Rectangle,
+            _: iced::Rectangle,
         ) {
         }
     }
@@ -4465,6 +4782,66 @@ mod font_tests {
         }
     }
 
+    /// The pointer over the gutter's row shows, faintly, the breakpoint a
+    /// click there would set — at that row, and only while the pointer is
+    /// there: the marks alone were tested, and the draw could have left it
+    /// out.
+    #[test]
+    fn the_pointer_over_the_gutter_shows_the_dot_a_click_would_set() {
+        use iced::advanced::Widget;
+        use iced::advanced::widget::Tree;
+        let source: String = (1..=20).map(|n| format!("let x{n} = {n};\n")).collect();
+        let lines = crate::highlight::plain_lines(&source);
+        let lh = 20.0;
+        let mut view = crate::codeview::CodeView::new(
+            &lines,
+            20,
+            13.0,
+            lh,
+            iced::Color::WHITE,
+            |_| (),
+            |_| (),
+            |_, _| (),
+        )
+        .on_breakpoint(|_| ());
+        let widget: &mut dyn Widget<(), iced::Theme, Recorder> = &mut view;
+        let mut tree = Tree::new(&*widget);
+        let mut renderer = Recorder::default();
+        let node = widget.layout(
+            &mut tree,
+            &renderer,
+            &iced::advanced::layout::Limits::new(
+                iced::Size::ZERO,
+                iced::Size::new(800.0, f32::INFINITY),
+            ),
+        );
+        let viewport = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 400.0));
+        let mut faint_rows = |cursor: iced::mouse::Cursor| {
+            renderer.quads.clear();
+            widget.draw(
+                &tree,
+                &mut renderer,
+                &iced::Theme::Dark,
+                &iced::advanced::renderer::Style::default(),
+                iced::advanced::Layout::new(&node),
+                cursor,
+                &viewport,
+            );
+            // A dot's size, drawn faint, in the gutter.
+            renderer
+                .quads
+                .iter()
+                .filter(|(b, c)| c.a < 0.5 && c.a > 0.05 && b.width < 12.0 && b.width == b.height)
+                .map(|(b, _)| (b.center_y() / lh) as usize)
+                .collect::<Vec<_>>()
+        };
+        let over_row_6 = iced::mouse::Cursor::Available(iced::Point::new(4.0, 6.0 * lh + 5.0));
+        assert_eq!(faint_rows(over_row_6), [6], "the dot a click would set");
+        assert!(faint_rows(iced::mouse::Cursor::Unavailable).is_empty());
+        let over_code = iced::mouse::Cursor::Available(iced::Point::new(400.0, 6.0 * lh + 5.0));
+        assert!(faint_rows(over_code).is_empty(), "not over the code");
+    }
+
     /// A folded line's blame starts past its `⋯`, with the gap a line that
     /// is not folded has: drawn two columns past the line's end, it ran into
     /// the cue ("None: ⋯Tester, 4 hours ago").
@@ -4548,7 +4925,7 @@ mod font_tests {
         use iced::advanced::Widget;
         use iced::advanced::text::Shaping;
         use iced::advanced::widget::Tree;
-        let blame = "张三, 3 days ago · 修复 bug";
+        let blame = "修复 bug (张三, 3 days ago)";
         let lines = crate::highlight::plain_lines("fn main() {}\n");
         let view = crate::codeview::CodeView::new(
             &lines,

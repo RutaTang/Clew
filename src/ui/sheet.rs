@@ -69,12 +69,29 @@ pub(crate) fn text_width(content: &str, size: f32, font: iced::Font) -> f32 {
 /// How tall `content` is set at `size` in `font`, wrapped at words to
 /// `width`.
 pub(crate) fn text_height(content: &str, size: f32, font: iced::Font, width: f32) -> f32 {
+    text_height_spaced(
+        content,
+        size,
+        iced::widget::text::LineHeight::default(),
+        font,
+        width,
+    )
+}
+
+/// [`text_height`] with its lines set `line_height` apart.
+pub(crate) fn text_height_spaced(
+    content: &str,
+    size: f32,
+    line_height: iced::widget::text::LineHeight,
+    font: iced::Font,
+    width: f32,
+) -> f32 {
     use iced::advanced::text::{self, paragraph::Plain};
     let paragraph = Plain::<<iced::Renderer as text::Renderer>::Paragraph>::new(text::Text {
         content: content.to_string(),
         bounds: iced::Size::new(width.max(1.0), f32::INFINITY),
         size: size.into(),
-        line_height: text::LineHeight::default(),
+        line_height,
         font,
         align_x: text::Alignment::Left,
         align_y: iced::alignment::Vertical::Top,
@@ -96,11 +113,16 @@ pub(crate) fn margin_width_at(window_width: f32, x: f32) -> f32 {
     sheet_content_right(window_width) - (x - crate::resize::THICKNESS / 2.0)
 }
 
+/// The sheet's content's width: what the code and the margin share.
+pub(crate) fn sheet_room(app: &App) -> f32 {
+    sheet_content_right(app.window_width) - sheet_content_left(app)
+}
+
 /// Right edge of the header's file row, in window coordinates: the sheet's
 /// content, less the margin's tabs beside it.
 fn header_right(app: &App) -> f32 {
     let tabs = if super::panes::right_panel_shown(app) {
-        app.right_width
+        super::panes::margin_w(app)
     } else {
         0.0
     };
@@ -108,7 +130,7 @@ fn header_right(app: &App) -> f32 {
 }
 
 /// Left edge of the sheet's content, in window coordinates.
-fn sheet_content_left(app: &App) -> f32 {
+pub(crate) fn sheet_content_left(app: &App) -> f32 {
     // The sidebar's divider lies over it, taking no room of its own.
     let sidebar = if app.show_left_sidebar {
         app.sidebar_width
@@ -148,29 +170,99 @@ fn file_tool_w(label: &str, short: bool) -> f32 {
 /// width, up to this.
 const TITLE_MIN_W: f32 = 160.0;
 
-/// Width of the header's tools, Explain through View, labelled or `short`.
-fn file_tools_w(short: bool) -> f32 {
-    let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
-        .iter()
-        .map(|l| file_tool_w(l, short))
-        .sum::<f32>();
-    tools + TOOLS_RULE_W + view_button_w(short) + 5.0 * TOOLS_SPACING
+/// The least room the file's folder is shown in, cut short from its start:
+/// its width, up to this. With less, it gives way whole — before the
+/// header's tools give up their words, which at 1100 px went to glyphs
+/// alone for a folder's sake; and rather than as a stub ("…op").
+const FOLDER_MIN_W: f32 = 96.0;
+
+/// What the header's tools say beside their glyphs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolWords {
+    /// Each its name.
+    All,
+    /// Explain its name, the others their glyphs alone: the one that
+    /// spends an AI call, and what a reader new to Clew looks for.
+    Explain,
+    /// Their glyphs alone, their names in their tooltips.
+    None,
 }
 
-/// Whether the header's tools are said short — their glyphs alone, their
-/// names in their tooltips: where, labelled, they would leave the file's
-/// name less than its room. In a narrow window, or a language of longer
-/// words, the labelled tools took the whole row and the name was cut to
-/// nothing.
-fn file_tools_short(app: &App) -> bool {
+impl ToolWords {
+    /// Whether the tool named `explain` (or another) is said short.
+    fn short(self, explain: bool) -> bool {
+        match self {
+            ToolWords::All => false,
+            ToolWords::Explain => !explain,
+            ToolWords::None => true,
+        }
+    }
+}
+
+/// Width of the header's tools, Explain through View, saying `words`.
+fn file_tools_w(words: ToolWords) -> f32 {
+    let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
+        .iter()
+        .enumerate()
+        .map(|(i, l)| file_tool_w(l, words.short(i == 0)))
+        .sum::<f32>();
+    tools + TOOLS_RULE_W + view_button_w(words.short(false)) + 5.0 * TOOLS_SPACING
+}
+
+/// What the header's tools say: their names, where the file's name keeps
+/// its room beside them; else Explain's alone; else their glyphs alone,
+/// their names in their tooltips. In a narrow window, or a language of
+/// longer words, the labelled tools took the whole row and the name was
+/// cut to nothing — and with a name a few letters longer at 1100 px,
+/// every word went where Explain's alone had room ("test_pricing.py"
+/// showed ✦ ⤫ ⟲ ◷ where "pricing.py" showed their names).
+fn file_tool_words(app: &App) -> ToolWords {
     let Some(v) = app.active_viewer() else {
-        return false;
+        return ToolWords::All;
     };
     let (name, _) = title_parts(v);
+    // The name: its folder gives way before the tools' words do
+    // (`folder_shown`), the tools being what a reader new to Clew reads.
     let title = text_width(&name, ts::EMPHASIS, TITLE_FONT).min(TITLE_MIN_W);
     let room = header_right(app) - HEADER_PAD_RIGHT - (sheet_content_left(app) + HEADER_PAD_X);
-    room - TITLE_GAP / 2.0 - file_tools_w(false) < title
+    let fits = |words| room - TITLE_GAP / 2.0 - file_tools_w(words) >= title;
+    [ToolWords::All, ToolWords::Explain]
+        .into_iter()
+        .find(|&words| fits(words))
+        .unwrap_or(ToolWords::None)
 }
+
+/// The open file's `folder` as the header has room to show it beside
+/// its `name` and the tools: whole, cut short from its start ("…/tests"),
+/// or not at all when even "…" has no room.
+fn folder_shown(app: &App, name: &str, folder: &str) -> String {
+    if folder.is_empty() {
+        return String::new();
+    }
+    let words = file_tool_words(app);
+    let markdown = app.active_viewer().is_some_and(|v| v.md.is_some());
+    let toggle = if markdown {
+        file_tool_w(tr!("Rendered"), false).max(file_tool_w(tr!("Source"), false)) + TITLE_SPACING
+    } else {
+        0.0
+    };
+    let room = header_right(app)
+        - HEADER_PAD_RIGHT
+        - (sheet_content_left(app) + HEADER_PAD_X)
+        - TITLE_GAP
+        - file_tools_w(words)
+        - text_width(name, ts::EMPHASIS, TITLE_FONT)
+        - TITLE_SPACING
+        - toggle;
+    let whole = text_width(folder, ts::BODY, crate::fonts::UI);
+    if room < whole.min(FOLDER_MIN_W) {
+        return String::new();
+    }
+    super::steady::elide_start(folder, ts::BODY, crate::fonts::UI, room)
+}
+
+/// The room between the name, its folder and the Markdown toggle.
+const TITLE_SPACING: f32 = 8.0;
 
 /// The face of the file's name over the sheet: a title's.
 const TITLE_FONT: iced::Font = crate::fonts::titled(crate::fonts::UI_SEMIBOLD);
@@ -223,7 +315,7 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
         return None;
     }
     let row_left = sheet_content_left(app) + HEADER_PAD_X;
-    let width = file_tools_w(file_tools_short(app));
+    let width = file_tools_w(file_tool_words(app));
     let x = (header_right(app) - HEADER_PAD_RIGHT - width).max(row_left);
     Some(iced::Rectangle {
         x,
@@ -237,7 +329,7 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
 /// of the file tools.
 pub(crate) fn view_button_rect(app: &App) -> Option<iced::Rectangle> {
     let tools = file_tools_rect(app)?;
-    let w = view_button_w(file_tools_short(app));
+    let w = view_button_w(file_tool_words(app).short(false));
     Some(iced::Rectangle {
         x: tools.x + tools.width - w,
         width: w,
@@ -286,7 +378,7 @@ pub(crate) fn sheet(app: &App) -> Element<'_, Message> {
                 Message::Window(WindowMsg::ResizeBottom(v - frame))
             })
             .panel(crate::resize::Panel::Within),
-            container(bottom_panel(app)).height(Length::Fixed(app.bottom_height)),
+            container(bottom_panel(app)).height(Length::Fixed(app.bottom_shown_height())),
         ]
         .into()
     } else {
@@ -316,13 +408,20 @@ pub(crate) fn sheet(app: &App) -> Element<'_, Message> {
 fn file_tool<'a>(
     glyph: Glyph,
     label: &'a str,
+    about: Option<&'a str>,
     on: bool,
     shortcut: Option<String>,
     msg: Message,
     short: bool,
 ) -> Element<'a, Message> {
     let tint = if on { theme::fg() } else { theme::fg_muted() };
-    let mut face = row![glyph::icon(glyph, tint, FILE_TOOL_GLYPH)]
+    // What spends an AI call carries its mark in the accent, as everywhere.
+    let mark = if glyph == Glyph::Sparkle {
+        theme::accent()
+    } else {
+        tint
+    };
+    let mut face = row![glyph::icon(glyph, mark, FILE_TOOL_GLYPH)]
         .spacing(FILE_TOOL_SPACING)
         .align_y(iced::Center);
     if !short {
@@ -344,21 +443,47 @@ fn file_tool<'a>(
     .style(theme::icon_button(on))
     .padding([0.0, FILE_TOOL_PAD_X])
     .on_press(super::heard::said(label, msg));
-    // Said short, its name is in its tooltip, with its shortcut.
+    // Its tooltip says what it does (`about`) where its name alone does
+    // not, with its shortcut; said short, the tooltip is where its name is.
+    let tip = about.unwrap_or(label);
     match shortcut {
-        Some(sc) => tip_at(face, label, Some(sc), tooltip::Position::Bottom),
-        None if short => tip_at(face, label, None, tooltip::Position::Bottom),
+        Some(sc) => tip_at(face, tip, Some(sc), tooltip::Position::Bottom),
+        None if short || about.is_some() => tip_at(face, tip, None, tooltip::Position::Bottom),
         None => face.into(),
     }
 }
 
 /// The margin's tabs — Notes, Calls, History — in the header, over the
 /// margin they switch.
-fn margin_tabs(app: &App) -> Element<'_, Message> {
-    let tab = |label: &'static str, this: crate::MarginTab| {
+pub(crate) fn margin_tabs(app: &App, room: f32) -> Element<'_, Message> {
+    let labels = [
+        (tr!("Explanations"), crate::MarginTab::Notes),
+        (tr!("Calls"), crate::MarginTab::Calls),
+        (tr!("History"), crate::MarginTab::History),
+    ];
+    // As much room round each name as the margin has: in French at 1100,
+    // "Explications · Appels · Historique" ran past the margin's edge, the
+    // last tab's background cut there. Tighter first; then, where even
+    // that is too wide, each name cut short, whole in its tip.
+    let widths: Vec<f32> = labels
+        .iter()
+        .map(|(l, _)| super::steady::width_of(l, ts::BODY, FILE_TOOL_FONT))
+        .collect();
+    let words: f32 = widths.iter().sum();
+    let gaps = 2.0 * (labels.len() - 1) as f32;
+    let pad = ((room - words - gaps) / (2.0 * labels.len() as f32)).clamp(4.0, 10.0);
+    let over = words + gaps + 2.0 * pad * labels.len() as f32 - room;
+    let tab = |label: &'static str, width: f32, this: crate::MarginTab| {
         let chosen = app.margin_tab == this;
-        button(ts::set_in(
-            text(label)
+        // Each name gives up its share of what is over, by its width.
+        let keep = if over > 0.0 {
+            (width - over * width / words).max(0.0)
+        } else {
+            width
+        };
+        let shown = super::steady::cut(label, keep, ts::BODY, FILE_TOOL_FONT);
+        let face = button(ts::set_in(
+            text(shown.clone())
                 .font(FILE_TOOL_FONT)
                 .color(if chosen {
                     theme::fg()
@@ -371,16 +496,23 @@ fn margin_tabs(app: &App) -> Element<'_, Message> {
             ts::BODY,
         ))
         .style(theme::segment(chosen))
-        .padding([0, 10])
-        .on_press(Message::Window(WindowMsg::MarginTabPicked(this)))
+        .padding([0.0, pad])
+        .on_press(super::heard::said(
+            label,
+            Message::Window(WindowMsg::MarginTabPicked(this)),
+        ));
+        if shown == label {
+            face.into()
+        } else {
+            tip_at(face, label, None, tooltip::Position::Bottom)
+        }
     };
-    row![
-        tab(tr!("Notes"), crate::MarginTab::Notes),
-        tab(tr!("Calls"), crate::MarginTab::Calls),
-        tab(tr!("History"), crate::MarginTab::History),
-    ]
-    .spacing(2)
-    .into()
+    let tabs: Vec<Element<'_, Message>> = labels
+        .iter()
+        .zip(&widths)
+        .map(|((label, this), w)| tab(label, *w, *this))
+        .collect();
+    iced::widget::Row::with_children(tabs).spacing(2).into()
 }
 
 /// The sheet's header: the open file's name and folder, the tools that act
@@ -393,6 +525,10 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     };
     let caps = |action: Action| Some(app.keymap.chord(action).caps());
     let (name, folder) = title_parts(v);
+    // The folder, in the room the name and the tools leave it — cut short
+    // with "…" where it does not fit: the row clipped it mid-word ("test"
+    // for "tests", in French, whose tools take more room).
+    let folder = folder_shown(app, &name, &folder);
     // The design sets the name and its folder a line high (`line-height:
     // 1`).
     let mut title = row![ts::set_in_line(
@@ -426,6 +562,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         title = title.push(file_tool(
             glyph,
             label,
+            None,
             false,
             None,
             Message::Editor(EditorMsg::ToggleMarkdownSource(app.proj.active)),
@@ -444,8 +581,10 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             }),
     )
     .padding([0.0, (TOOLS_RULE_W - 1.0) / 2.0]);
-    // Said short where the file's name would otherwise lose its room.
-    let short = file_tools_short(app);
+    // Said short where the file's name would otherwise lose its room:
+    // Explain the last to give its name up.
+    let words = file_tool_words(app);
+    let short = words.short(false);
     let mut view_face = row![glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0)]
         .spacing(6)
         .align_y(iced::Center);
@@ -468,32 +607,54 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     )
     .style(theme::icon_button(app.show_view_menu))
     .padding(VIEW_PAD)
-    .on_press(Message::Window(WindowMsg::ToggleViewMenu));
+    .on_press(super::heard::said(
+        tr!("View"),
+        Message::Window(WindowMsg::ToggleViewMenu),
+    ));
     let view_menu: Element<'_, Message> = if short {
         tip_at(view_menu, tr!("View"), None, tooltip::Position::Bottom)
     } else {
         view_menu.into()
     };
+    let unchanged = !diffing
+        && v.git
+            .as_ref()
+            .is_some_and(|g| g.status.iter().all(Option::is_none) && g.deleted_at.is_empty());
     let tools = row![
+        // The sparkle, as every control that spends an AI call has: with
+        // lines for its mark, the one most likely to cost looked free.
         file_tool(
-            Glyph::TextLines,
+            Glyph::Sparkle,
             tr!("Explain"),
+            Some(tr!(
+                "Explain this file with AI (an AI call for each part not yet explained)"
+            )),
             false,
             None,
-            Message::Explain(ExplainMsg::Show(crate::explain::Node::File(v.abs.clone()))),
-            short,
+            Message::Explain(ExplainMsg::Explain(crate::explain::Node::File(
+                v.abs.clone(),
+            ))),
+            words.short(true),
         ),
         file_tool(
             Glyph::Skim,
             tr!("Skim"),
+            Some(tr!("Skim: fold every body to its signature")),
             v.skimmed(&app.skim_lines(&v.abs)),
             None,
             Message::Editor(EditorMsg::SkimFile),
             short,
         ),
+        // Said before it is pressed when there is nothing to show: on an
+        // unchanged file, Diff replaced the code with one line saying so.
         file_tool(
             Glyph::Diff,
             tr!("Diff"),
+            Some(if unchanged {
+                tr!("No changes since the last commit")
+            } else {
+                tr!("Changes since the last commit")
+            }),
             diffing,
             caps(Action::ToggleDiff),
             Message::Editor(EditorMsg::ToggleDiff),
@@ -504,6 +665,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         file_tool(
             Glyph::TimeTravel,
             tr!("Time Travel"),
+            None,
             time_travel,
             caps(Action::TimeTravel),
             if time_travel {
@@ -538,8 +700,8 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     // Over the margin, beside the divider, its tabs.
     let tabs: Element<'_, Message> = if right_panel(app).is_some() {
         // At the row's top, as the design has them: 14 down.
-        container(margin_tabs(app))
-            .width(Length::Fixed(app.right_width))
+        container(margin_tabs(app, super::panes::margin_w(app) - 12.0 - 16.0))
+            .width(Length::Fixed(super::panes::margin_w(app)))
             .height(Length::Fixed(SHEET_HEADER_ROW_H))
             .align_y(iced::Top)
             .padding(Padding {
@@ -558,11 +720,27 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
 /// the reader came from, each a click back to it; the file on the sheet
 /// alone before there is a way back.
 fn trail_row(app: &App) -> Element<'_, Message> {
-    let stops = app.proj.history.recent_path(TRAIL_STOPS);
+    // Files found no longer there are left out of it.
+    let stops = merged_stops(
+        app.proj
+            .history
+            .recent_path(TRAIL_STOPS)
+            .into_iter()
+            .filter(|(_, loc, _)| !app.proj.gone_files.contains(&loc.path))
+            .collect(),
+        app.first_rows(),
+    );
     let last = stops.len().saturating_sub(1);
-    let mut line = row![glyph::icon(Glyph::Route, theme::dim(), 13.0)]
-        .spacing(6)
-        .align_y(iced::Center);
+    // Its icon says what the row is where the pointer rests: read as a
+    // breadcrumb, "lib.rs › Frame" over another file was taken for that
+    // file's path.
+    let route = super::toolbar::tip_at(
+        glyph::icon(Glyph::Route, theme::dim(), 13.0),
+        tr!("Reading trail"),
+        None,
+        iced::widget::tooltip::Position::Bottom,
+    );
+    let mut line = row![route].spacing(6).align_y(iced::Center);
     // No visit recorded yet (a file restored, not gone to): the file on the
     // sheet is where the trail starts.
     if stops.is_empty()
@@ -587,16 +765,62 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         );
     }
     // Where the reader is now: the function the caret is in, when it is in
-    // one of the current stop's file's.
+    // one of the current stop's file's — or that file, the caret in it but
+    // in no function: after Ctrl+Home the crumb still said "main():24". A
+    // stop named for what is on its line (a type gone to) keeps its name
+    // while the caret is on that line: it read "lib.rs", not "Point".
     let here = match (app.cursor_target(), stops.last()) {
         (Some(crate::explain::Node::Function { file, name, .. }), Some((_, loc, _)))
             if file == loc.path =>
         {
-            Some(name)
+            Some(Some(name))
+        }
+        (_, Some((_, loc, label)))
+            if app.active_viewer().is_some_and(|v| {
+                v.abs == loc.path
+                    && v.caret
+                        .is_some_and(|(l0, _)| label.is_none() || loc.line != Some(l0 + 1))
+            }) =>
+        {
+            Some(None)
         }
         _ => None,
     };
-    let names = trail_names(&stops, here);
+    // A function's stop reads as one — "discounts()" — so it is not taken
+    // for the module of the same name ("discounts.py") beside it.
+    let is_function = |path: &std::path::Path, name: &str| {
+        app.proj
+            .symbol_index_by_file
+            .get(path)
+            .is_some_and(|symbols| {
+                symbols
+                    .iter()
+                    .any(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))
+            })
+    };
+    // A stop recorded by its line, not at a definition, named by the
+    // function it was in, where that is known: "discounts()" became
+    // "pricing.py:20" once the reader left it.
+    let around: Vec<Option<String>> = stops
+        .iter()
+        .map(|(_, loc, label)| match (label, loc.line) {
+            // A function by construction: said as one, indexed or not.
+            (None, Some(line)) => app
+                .function_around(&loc.path, line)
+                .map(|name| format!("{name}()")),
+            _ => None,
+        })
+        .collect();
+    let stops: Vec<_> = stops
+        .into_iter()
+        .zip(&around)
+        .map(|((id, loc, label), around)| (id, loc, label.or(around.as_deref())))
+        .collect();
+    let caret = app
+        .active_viewer()
+        .and_then(|v| v.caret)
+        .map(|(l0, _)| l0 + 1);
+    let names = trail_names(&stops, here, caret, is_function);
     for (i, ((id, loc, _), name)) in stops.into_iter().zip(names).enumerate() {
         if i > 0 {
             line = line.push(glyph::icon(Glyph::ChevronRight, theme::dim(), 11.0));
@@ -643,42 +867,84 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// The trail's stops as the row shows them: a stop Back passes over
+/// ([`crate::history::History::changes_nothing`], for a view `first_rows`
+/// lines tall) is not one — "main.py › main" was one place said twice, and
+/// Back from the second seemed to do nothing.
+fn merged_stops<'a>(
+    stops: Vec<(usize, &'a crate::history::Loc, Option<&'a str>)>,
+    first_rows: usize,
+) -> Vec<(usize, &'a crate::history::Loc, Option<&'a str>)> {
+    let keep: Vec<bool> = (0..stops.len())
+        .map(|i| {
+            let (_, loc, _) = stops[i];
+            !stops.get(i + 1).is_some_and(|(_, next, _)| {
+                crate::history::History::changes_nothing(loc, next, first_rows)
+            })
+        })
+        .collect();
+    stops
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(stop, keep)| keep.then_some(stop))
+        .collect()
+}
+
 /// What each trail stop is called: the function it was in, else its file's
 /// name — with its line when a stop beside it has the same name, which two
 /// visits to one file outside any function otherwise read as ("cart.py ›
-/// cart.py"). `here` names the current (last) stop when the caret is in a
-/// function of its file.
+/// cart.py"). `here` names the current (last) stop where the caret is in its
+/// file: the function it is in, or none — the file. A function's name is
+/// said with `()` (`is_function` says which names in a file are functions).
+///
+/// The current stop's line, where it says one, is the caret's (`caret`,
+/// 1-based) while the caret is in its file: it said the line the visit
+/// began on, "main.py:15" with the caret on line 1.
 fn trail_names(
     stops: &[(usize, &crate::history::Loc, Option<&str>)],
-    here: Option<String>,
+    here: Option<Option<String>>,
+    caret: Option<usize>,
+    is_function: impl Fn(&std::path::Path, &str) -> bool,
 ) -> Vec<String> {
     let last = stops.len().saturating_sub(1);
+    let caret = caret.filter(|_| here.is_some());
     let mut here = here;
+    let file_name = |loc: &crate::history::Loc| {
+        loc.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
     let mut names: Vec<(String, bool)> = stops
         .iter()
         .enumerate()
         .map(
             |(i, (_, loc, label))| match (here.take_if(|_| i == last), label) {
-                (Some(here), _) => (here, true),
+                (Some(Some(here)), _) => (format!("{here}()"), true),
+                (Some(None), _) => (file_name(loc), false),
+                (None, Some(label)) if is_function(&loc.path, label) => {
+                    (format!("{label}()"), true)
+                }
                 (None, Some(label)) => (label.to_string(), true),
-                (None, None) => (
-                    loc.path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    false,
-                ),
+                (None, None) => (file_name(loc), false),
             },
         )
         .collect();
+    // Beside a stop of the same name, a stop says its line: a file's or a
+    // function's twice in a row read as a loop ("main() › main()").
     let twins: Vec<bool> = (0..names.len())
         .map(|i| {
             let same = |j: usize| names.get(j).is_some_and(|(n, _)| *n == names[i].0);
-            !names[i].1 && ((i > 0 && same(i - 1)) || same(i + 1))
+            (i > 0 && same(i - 1)) || same(i + 1)
         })
         .collect();
     for (i, twin) in twins.into_iter().enumerate() {
-        if twin && let Some(line) = stops[i].1.line {
+        let line = if i == last {
+            caret.or(stops[i].1.line)
+        } else {
+            stops[i].1.line
+        };
+        if twin && let Some(line) = line {
             names[i].0 = format!("{}:{line}", names[i].0);
         }
     }
@@ -708,15 +974,66 @@ mod tests {
             (2, &a18, None),
             (3, &a1, None),
         ];
+        let function = |_: &std::path::Path, name: &str| name == "subtotal";
         assert_eq!(
-            trail_names(&stops, None),
-            ["main.py", "subtotal", "cart.py:18", "cart.py:1"]
+            trail_names(&stops, None, None, function),
+            ["main.py", "subtotal()", "cart.py:18", "cart.py:1"]
+        );
+        // The caret in the current stop's file: its line, not the one the
+        // visit began on.
+        assert_eq!(
+            trail_names(&stops, Some(None), Some(7), function),
+            ["main.py", "subtotal()", "cart.py:18", "cart.py:7"]
         );
         // The caret in a function names the current stop.
         assert_eq!(
-            trail_names(&stops, Some("total".into())),
-            ["main.py", "subtotal", "cart.py", "total"]
+            trail_names(&stops, Some(Some("total".into())), None, function),
+            ["main.py", "subtotal()", "cart.py", "total()"]
         );
+        // The caret in the file, in no function: the file is where it is.
+        let in_fn = vec![(0, &b, None), (1, &a18, Some("subtotal"))];
+        assert_eq!(
+            trail_names(&in_fn, Some(None), None, function),
+            ["main.py", "cart.py"]
+        );
+        // A name that is no function (a class) is said as it is.
+        assert_eq!(trail_names(&stops, None, None, |_, _| false)[1], "subtotal");
+        // One function twice in a row, at two places in it: its lines,
+        // not "subtotal() › subtotal()".
+        let a24 = loc("src/cart.py", Some(24));
+        let twice = vec![(0, &a18, Some("subtotal")), (1, &a24, Some("subtotal"))];
+        assert_eq!(
+            trail_names(&twice, None, None, function),
+            ["subtotal():18", "subtotal():24"]
+        );
+    }
+
+    /// A file's stop followed by one near its top is shown as that one:
+    /// "main.py › main" was one place said twice. Down the file, Back stops
+    /// at the file's top, and so does the trail.
+    #[test]
+    fn a_files_stop_merges_into_its_functions() {
+        let loc = |p: &str, line| crate::history::Loc {
+            path: std::path::PathBuf::from(p),
+            line,
+        };
+        let (main_top, main_fn, cart) = (
+            loc("main.py", None),
+            loc("main.py", Some(12)),
+            loc("cart.py", Some(3)),
+        );
+        let stops = || {
+            vec![
+                (0, &main_top, None),
+                (1, &main_fn, Some("main")),
+                (2, &cart, None),
+                (3, &cart, None),
+            ]
+        };
+        let ids: Vec<usize> = merged_stops(stops(), 40).iter().map(|s| s.0).collect();
+        assert_eq!(ids, [1, 3], "the same place twice is one stop");
+        let ids: Vec<usize> = merged_stops(stops(), 10).iter().map(|s| s.0).collect();
+        assert_eq!(ids, [0, 1, 3], "line 12 is off a 10-line screen");
     }
 
     /// The divider over the margin's edge, held by its middle and not yet

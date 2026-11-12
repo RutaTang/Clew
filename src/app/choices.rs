@@ -277,17 +277,45 @@ impl App {
             |on| Message::Voice(VoiceMsg::SetSendQuestions(on)),
         ));
         out.push(switch(
-            tr_noop!("Keep listening"),
-            tr_noop!("listen continuously, always listen"),
-            |on| Message::Voice(VoiceMsg::SetKeepListening(on)),
+            tr_noop!("Talk over Clew while it speaks"),
+            tr_noop!("talk over Clew, interrupt Clew, barge in"),
+            |on| Message::Voice(VoiceMsg::SetTalkOver(on)),
+        ));
+        out.push(switch(
+            tr_noop!("Start listening when you say “Hey, Clew”"),
+            tr_noop!("hey Clew, wake word, wake phrase, listen when called"),
+            |on| Message::Voice(VoiceMsg::SetWake(on)),
         ));
 
         // How Clew speaks.
-        out.push(switch(
-            tr_noop!("Read answers aloud"),
-            tr_noop!("speak answers, read aloud, text to speech"),
-            |on| Message::Voice(VoiceMsg::SetSpeak(on)),
-        ));
+        out.push(Setting {
+            name: tr_noop!("Read answers aloud"),
+            aliases: tr_noop!("speak answers, read aloud, text to speech"),
+            unnamed: false,
+            choices: crate::app::voice::ReadAloud::ALL
+                .into_iter()
+                .map(|read_aloud| {
+                    use crate::app::voice::ReadAloud;
+                    let name = read_aloud.name();
+                    // Turned on, every answer is read; off, none.
+                    let words = match read_aloud {
+                        ReadAloud::Never => OFF,
+                        ReadAloud::Spoken => tr_noop!("spoken questions, voice questions"),
+                        ReadAloud::Always => ON,
+                    };
+                    Choice {
+                        title: format!("Read answers aloud: {name}"),
+                        shown: format!(
+                            "{}: {}",
+                            tr!("Read answers aloud"),
+                            crate::i18n::lookup(name)
+                        ),
+                        names: vec![name.to_string(), words.to_string()],
+                        message: Message::Voice(VoiceMsg::SetSpeak(read_aloud)),
+                    }
+                })
+                .collect(),
+        });
         out.push(Setting {
             name: tr_noop!("Speed"),
             aliases: tr_noop!("speaking speed, reading speed, speech speed"),
@@ -365,7 +393,8 @@ pub(crate) fn voice_called(lang: crate::i18n::Lang, name: &str) -> String {
     };
     match template {
         Some(t) => crate::i18n::format(crate::i18n::lookup_in(lang, t), &[("n", &number)]),
-        None => name.to_string(),
+        // A name of a person's as it is; a voice's description translated.
+        None => crate::i18n::lookup_in(lang, name).to_string(),
     }
 }
 
@@ -941,11 +970,11 @@ mod tests {
         );
         assert_eq!(
             heard(&s, "turn off read answers aloud").as_deref(),
-            Some("Read answers aloud: Off")
+            Some("Read answers aloud: Never")
         );
         assert_eq!(
             heard(&s, "turn read answers aloud on").as_deref(),
-            Some("Read answers aloud: On")
+            Some("Read answers aloud: Always")
         );
         assert_eq!(heard(&s, "use OpenAI").as_deref(), Some("Provider: OpenAI"));
         assert_eq!(

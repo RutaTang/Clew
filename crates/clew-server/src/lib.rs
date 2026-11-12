@@ -241,6 +241,25 @@ pub(crate) fn send_scan_report(
     }
 }
 
+/// A meter for the model calls made for the client: each tells it what it
+/// used, as an [`Event::Usage`], for its ledger of what its key spent.
+fn usage_meter(out: &UnboundedSender<ServerMessage>) -> llm::Meter {
+    let out = out.clone();
+    Arc::new(move |spent: llm::Spent| {
+        let _ = out.send(ServerMessage::Notification {
+            event: Event::Usage {
+                work: spent.work,
+                purpose: spent.purpose,
+                model: spent.model,
+                input: spent.usage.input,
+                cached: spent.usage.cached,
+                written: spent.usage.written,
+                output: spent.usage.output,
+            },
+        });
+    })
+}
+
 /// A piece of AI work in flight: how to stop it, and which of the
 /// server's keys it holds a copy of ([`Server::stop_ai_work`]).
 struct AiWork {
@@ -1683,6 +1702,7 @@ impl Server {
                 system,
                 messages,
                 max_tokens,
+                purpose,
             } => {
                 let Some(cfg) = self.ai_chat.clone() else {
                     return Some(refused("no AI chat config on the server"));
@@ -1695,11 +1715,14 @@ impl Server {
                     .insert(id, AiWork::new(&flag, true, false));
                 let agents = self.agents.clone();
                 let out = self.out.clone();
+                let meter = usage_meter(&out);
                 tokio::spawn(async move {
                     let stop = flag.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        llm::complete_chat_full(&cfg, &system, &msgs, max_tokens, &|| {
-                            stop.load(Ordering::Relaxed)
+                        llm::metered(meter, &purpose, id, || {
+                            llm::complete_chat_full(&cfg, &system, &msgs, max_tokens, &|| {
+                                stop.load(Ordering::Relaxed)
+                            })
                         })
                     })
                     .await;
@@ -1730,6 +1753,7 @@ impl Server {
                 system,
                 messages,
                 max_tokens,
+                purpose,
             } => {
                 let done = move |out: &UnboundedSender<ServerMessage>, outcome: StreamOutcome| {
                     let _ = out.send(ServerMessage::Notification {
@@ -1755,6 +1779,7 @@ impl Server {
                     .unwrap_or_else(PoisonError::into_inner)
                     .insert(stream, AiWork::new(&flag, true, false));
                 let agents = self.agents.clone();
+                let meter = usage_meter(&out);
                 tokio::spawn(async move {
                     let sink = out.clone();
                     let stop = flag.clone();
@@ -1776,14 +1801,16 @@ impl Server {
                                 stop.store(true, Ordering::Relaxed);
                             }
                         };
-                        let result = llm::complete_chat_stream_full(
-                            &cfg,
-                            &system,
-                            &msgs,
-                            max_tokens,
-                            &mut on_delta,
-                            &|| stop.load(Ordering::Relaxed),
-                        );
+                        let result = llm::metered(meter, &purpose, stream, || {
+                            llm::complete_chat_stream_full(
+                                &cfg,
+                                &system,
+                                &msgs,
+                                max_tokens,
+                                &mut on_delta,
+                                &|| stop.load(Ordering::Relaxed),
+                            )
+                        });
                         // An answer cut off at the output limit says so in its
                         // own text, as it does on every other path.
                         if result.as_ref().is_ok_and(|done| done.truncated) {
@@ -1911,6 +1938,7 @@ impl Server {
                 let rt = tokio::runtime::Handle::current();
                 let files_slot = self.files.clone();
                 let pending = self.tool_calls.clone();
+                let meter = usage_meter(&out);
                 tokio::spawn(async move {
                     let turn_out = out.clone();
                     let turn = tokio::task::spawn_blocking(move || {
@@ -1926,10 +1954,14 @@ impl Server {
                             });
                             return;
                         };
-                        agent::run(
-                            root, files, chat, embed_cfg, lsp, rt, stream, question, history,
-                            context, tools, pending, &turn_out, &budget, &flag,
-                        );
+                        // What each of the turn's model calls used, for the
+                        // client's ledger and the answer's own cost.
+                        llm::metered(meter, "ask", stream, || {
+                            agent::run(
+                                root, files, chat, embed_cfg, lsp, rt, stream, question, history,
+                                context, tools, pending, &turn_out, &budget, &flag,
+                            );
+                        });
                     })
                     .await;
                     agents
@@ -2637,6 +2669,7 @@ mod tests {
                 content: "hi".into(),
             }],
             max_tokens: 64,
+            purpose: "ask".into(),
         };
         assert!(server.handle(2, chat).await.is_none());
         let first = tokio::task::spawn_blocking(move || {
@@ -2744,6 +2777,7 @@ mod tests {
                 content: "hi".into(),
             }],
             max_tokens: 64,
+            purpose: "ask".into(),
         };
         assert!(server.handle(2, chat).await.is_none());
         // The provider is streaming: its tokens have somewhere to wait.

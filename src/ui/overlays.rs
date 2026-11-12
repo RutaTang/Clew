@@ -7,7 +7,9 @@ const PEEK_GAP: f32 = 10.0;
 /// Width of the right-click menu as designed: wider where a row needs it.
 const MENU_W: f32 = 210.0;
 
-pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
+/// The code's hover peek, kept above `floor` where it fits there (see
+/// [`Anchored::floor`]).
+pub(crate) fn hover_tooltip(h: &crate::HoverState, floor: f32) -> Element<'_, Message> {
     // Nothing to say (no summary, no LSP text, no diagnostic): show nothing
     // rather than an empty box — an empty peek reads as "hover is broken".
     if h.diagnostic.is_none() && h.summary.is_none() && h.text.is_none() {
@@ -75,10 +77,88 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
         iced::Point::new(h.x, h.y),
         Anchoring::Below { gap: PEEK_GAP },
     )
+    .floor(floor)
     .into()
 }
 
+/// What gutter line `line` (0-based) of `pane` says, if anything: a
+/// breakpoint, with its condition or why it won't stop there, and a
+/// bookmark, with its note. The dot and the bar said neither; a condition
+/// was read only by opening its dialog again.
+pub(crate) fn gutter_words(app: &App, pane: usize, line: usize) -> Option<String> {
+    let v = app.proj.panes.get(pane).and_then(Option::as_ref)?;
+    let mut said = Vec::new();
+    if let Some(bp) = app
+        .debug
+        .breakpoints
+        .get(&v.abs)
+        .and_then(|m| m.get(&(line + 1)))
+    {
+        said.push(match (&bp.condition, bp.verified) {
+            // The hollow dot: what it means said where it is.
+            (_, Some(false)) => {
+                tr!("The debugger couldn't set this breakpoint: it won't stop here").to_string()
+            }
+            (Some(condition), _) => {
+                tr!(
+                    "Breaks when {condition} — click to remove, right-click to edit",
+                    condition = condition
+                )
+            }
+            (None, _) => tr!("Breakpoint — click to remove").to_string(),
+        });
+    }
+    if let Some(bm) = app
+        .proj
+        .bookmarks
+        .iter()
+        .find(|b| b.rel == v.rel && b.line == line + 1)
+    {
+        said.push(
+            match bm.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                Some(note) => tr!("Bookmark: {note}", note = note),
+                None => tr!("Bookmark").to_string(),
+            },
+        );
+    }
+    (!said.is_empty()).then(|| said.join("\n"))
+}
+
+/// The gutter line's tip ([`gutter_words`]), once the pointer has rested
+/// there — below the pointer as the code's peek is, kept above `floor`.
+/// Nothing while the code has scrolled under the pointer since: the line
+/// it named is no longer the one there.
+pub(crate) fn gutter_tip(app: &App, floor: f32) -> Option<Element<'_, Message>> {
+    let tip = app.proj.gutter_tip.as_ref().filter(|t| t.shown)?;
+    let v = app.proj.panes.get(tip.pane).and_then(Option::as_ref)?;
+    if (v.scroll_x, v.scroll_y) != tip.scroll {
+        return None;
+    }
+    let words = gutter_words(app, tip.pane, tip.line)?;
+    Some(
+        Anchored::new(
+            super::toolbar::tip_bubble(words),
+            iced::Point::new(tip.x, tip.y),
+            Anchoring::Below { gap: PEEK_GAP },
+        )
+        .floor(floor)
+        .into(),
+    )
+}
+
 // ---------------------------------------------------------------- context menu
+
+/// Whether the line the code menu is open on has a breakpoint with a
+/// condition.
+fn menu_bp_condition(app: &App, menu: &crate::ContextMenu) -> bool {
+    app.proj
+        .panes
+        .get(menu.pane)
+        .and_then(Option::as_ref)
+        .and_then(|v| app.debug.breakpoints.get(&v.abs))
+        .and_then(|m| m.get(&(menu.line + 1)))
+        .is_some_and(|bp| bp.condition.is_some())
+}
 
 pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Element<'a, Message> {
     use crate::GotoKind;
@@ -91,6 +171,8 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         msg: Message,
         keys: Option<String>,
         able: bool,
+        /// Spends an AI call: marked so, as every such control is.
+        ai: bool,
     }
     let keys = |k: &str| Some(k.to_string());
     let goto = |kind: GotoKind, k: &str| Row {
@@ -98,26 +180,62 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         msg: Message::Hover(HoverMsg::ContextGoto(kind)),
         keys: keys(k),
         able: menu.served,
+        ai: false,
     };
+    // F12 and ⇧F12, as most editors name them — where most learn them; the
+    // `g` pairs, which only reading-key users know, hid them.
+    let refs = crate::keymap::local_keys("⇧F12");
     let mut navigate = vec![
-        goto(GotoKind::Definition, "g d"),
-        goto(GotoKind::References, "g r"),
-        goto(GotoKind::Implementation, "g i"),
-        goto(GotoKind::TypeDefinition, "g y"),
+        goto(GotoKind::Definition, "F12"),
+        goto(GotoKind::References, &refs),
+        goto(GotoKind::Implementation, "gi"),
+        goto(GotoKind::TypeDefinition, "gy"),
         Row {
             label: tr!("Call Hierarchy"),
             msg: Message::Calls(CallsMsg::FromMenu),
-            keys: keys("g c"),
+            keys: keys("gc"),
             able: menu.served,
+            ai: false,
         },
     ];
-    // The language's own action, for a file whose language has one.
+    let lang = app
+        .proj
+        .panes
+        .get(menu.pane)
+        .and_then(Option::as_ref)
+        .and_then(|v| v.lang_key);
+    // The language's own action, for a file whose language has one: its
+    // language server's to answer — but C and C++'s macros, which Clew
+    // reads itself. It was offered with no server, and pressed said only
+    // that none was running.
     if let Some(kind) = menu.insight {
         navigate.push(Row {
             label: kind.label(),
             msg: Message::Hover(HoverMsg::Insight),
-            keys: keys("g e"),
-            able: true,
+            keys: keys("ge"),
+            able: menu.served || matches!(lang, Some("c" | "cpp")),
+            ai: false,
+        });
+    }
+    // And its others (Rust: a type's memory layout, an item's tests),
+    // which only its language server can answer.
+    for &kind in lang.map_or(&[][..], crate::InsightKind::more_for_lang) {
+        navigate.push(Row {
+            label: kind.label(),
+            msg: Message::Hover(HoverMsg::InsightOf(kind)),
+            keys: None,
+            able: menu.served,
+            ai: false,
+        });
+    }
+    // A Lean proof, walked one tactic at a time.
+    if lang == Some("lean") {
+        navigate.push(Row {
+            label: tr!("Step Through Proof"),
+            msg: Message::Proof(crate::ProofMsg::FromMenu),
+            keys: None,
+            able: menu.served,
+            ai: false,
         });
     }
     let plain = |label: &'static str, msg: Message| Row {
@@ -125,8 +243,30 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         msg,
         keys: None,
         able: true,
+        ai: false,
     };
-    // In groups: going somewhere, understanding what is here, debugging.
+    // What is selected, copied: the menu had no Copy, with text selected.
+    let selected = app
+        .proj
+        .panes
+        .get(menu.pane)
+        .and_then(Option::as_ref)
+        .is_some_and(|v| v.selection_ordered().is_some_and(|(a, b)| a != b));
+    if selected {
+        navigate.insert(
+            0,
+            Row {
+                keys: Some(
+                    app.keymap
+                        .chord(crate::keymap::Action::CopySelection)
+                        .caps(),
+                ),
+                ..plain(tr!("Copy"), Message::Editor(EditorMsg::CopySelection))
+            },
+        );
+    }
+    // In groups: going somewhere, understanding what is here, marking the
+    // line, debugging.
     let groups = [
         navigate,
         vec![
@@ -135,42 +275,132 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
                 keys: Some(app.keymap.chord(crate::keymap::Action::TraceValue).caps()),
                 ..plain(tr!("Trace Value"), Message::Flow(crate::FlowMsg::FromMenu))
             },
-            plain(tr!("Explain"), Message::Explain(ExplainMsg::FromMenu)),
+            Row {
+                keys: Some(app.keymap.chord(crate::keymap::Action::FakeRun).caps()),
+                ai: true,
+                ..plain(
+                    tr!("Fake Run…"),
+                    Message::Fake(crate::FakeMsg::FromMenu { debug: false }),
+                )
+            },
+            Row {
+                keys: Some(app.keymap.chord(crate::keymap::Action::FakeDebug).caps()),
+                ai: true,
+                ..plain(
+                    tr!("Fake Debug…"),
+                    Message::Fake(crate::FakeMsg::FromMenu { debug: true }),
+                )
+            },
+            Row {
+                ai: true,
+                ..plain(tr!("Explain"), Message::Explain(ExplainMsg::FromMenu))
+            },
             plain(tr!("Add to Ask"), Message::Ask(AskMsg::AboutSelection)),
-            plain(
-                tr!("Why is this here?"),
-                Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
-            ),
+            Row {
+                ai: true,
+                ..plain(
+                    tr!("Why Is This Here?"),
+                    Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
+                )
+            },
         ],
+        // A bookmark on this line, and a note to come back to it by.
+        {
+            let marked = app
+                .proj
+                .panes
+                .get(menu.pane)
+                .and_then(Option::as_ref)
+                .is_some_and(|v| {
+                    app.proj
+                        .bookmarks
+                        .iter()
+                        .any(|b| b.rel == v.rel && b.line == menu.line + 1)
+                });
+            vec![
+                Row {
+                    keys: Some(
+                        app.keymap
+                            .chord(crate::keymap::Action::ToggleBookmark)
+                            .caps(),
+                    ),
+                    ..plain(
+                        tr!("Toggle Bookmark"),
+                        Message::Reading(ReadingMsg::BookmarkFromMenu { note: false }),
+                    )
+                },
+                plain(
+                    if marked {
+                        tr!("Edit Bookmark Note…")
+                    } else {
+                        tr!("Bookmark with Note…")
+                    },
+                    Message::Reading(ReadingMsg::BookmarkFromMenu { note: true }),
+                ),
+            ]
+        },
         vec![
+            // Its key, as Settings lists it: the menu showed Ctrl+D on
+            // Toggle Bookmark and nothing on this one.
+            Row {
+                keys: keys("F9"),
+                ..plain(
+                    tr!("Toggle Breakpoint"),
+                    Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
+                )
+            },
+            // A condition there already: said as what it opens, to edit
+            // it — named as a new one, it hid where an existing condition
+            // is read and changed.
             plain(
-                tr!("Toggle Breakpoint"),
-                Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
-            ),
-            plain(
-                tr!("Conditional Breakpoint…"),
+                if menu_bp_condition(app, menu) {
+                    tr!("Edit Condition…")
+                } else {
+                    tr!("Conditional Breakpoint…")
+                },
                 Message::Debug(DebugMsg::ConditionalBreakpointFromMenu),
             ),
         ],
     ];
     // As designed, or as wide as its longest row (its keys too) in the
-    // reader's language, so none wraps.
+    // reader's language, so none wraps or is clipped. A row is its words,
+    // the room between and its keys, two gaps of 16 apart (the keys' slot
+    // is there, empty, on a row with none): counted one gap short, a long
+    // French or Japanese row's keys were cut at the menu's edge.
     let key_w = |k: &Option<String>| {
-        k.as_deref().map_or(0.0, |k| {
-            super::sheet::text_width(k, ts::SMALL, crate::fonts::UI) + 16.0
-        })
+        2.0 * ROW_GAP
+            + k.as_deref().map_or(0.0, |k| {
+                super::sheet::text_width(k, ts::SMALL, crate::fonts::UI)
+            })
     };
+    const ROW_GAP: f32 = 16.0;
     let width = groups
         .iter()
         .flatten()
         .map(|r| {
             super::sheet::text_width(r.label, ts::BASE, crate::fonts::UI)
                 + key_w(&r.keys)
+                + if r.ai { 12.0 + 6.0 } else { 0.0 }
                 + 2.0 * 12.0
                 + 2.0 * 4.0
+                + 2.0
         })
         .fold(MENU_W, f32::max)
         .ceil();
+    // Why what only the language server answers is not on offer: as it
+    // is — its download declined, its start failed — and where that is
+    // changed; "isn't ready" said of a server that would never be.
+    let not_served = match lang.and_then(|l| app.proj.link.lsp.get(l)) {
+        Some(crate::LspSlot::Declined(why) | crate::LspSlot::Unsupported(why)) => format!(
+            "{}\n{}",
+            crate::i18n::message(why),
+            tr!("Open Settings → Language servers")
+        ),
+        Some(crate::LspSlot::Failed(error)) => {
+            format!("{error}\n{}", tr!("Open Settings → Language servers"))
+        }
+        _ => tr!("The language server isn't ready").to_string(),
+    };
     let row = |r: Row| -> Element<'a, Message> {
         let words = text(r.label).size(ts::BASE).wrapping(Wrapping::None);
         let words = if r.able {
@@ -178,7 +408,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         } else {
             words.color(theme::dim())
         };
-        let trailing: Element<'a, Message> = match r.keys {
+        let keys: Element<'a, Message> = match r.keys {
             Some(k) => text(k)
                 .size(ts::SMALL)
                 .color(theme::dim())
@@ -186,21 +416,38 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
                 .into(),
             None => space().into(),
         };
+        // What spends an AI call says so, at the row's end: these sat
+        // among the free rows, alike.
+        let trailing: Element<'a, Message> = if r.ai {
+            row![keys, glyph::icon(Glyph::Sparkle, theme::accent(), 12.0)]
+                .spacing(6)
+                .align_y(iced::Center)
+                .into()
+        } else {
+            keys
+        };
         let b = button(
             row![words, space().width(Fill), trailing]
-                .spacing(16)
+                .spacing(ROW_GAP)
                 .align_y(iced::Center),
         )
         .style(theme::list_row(false))
         .width(Fill)
         .padding([5, 12])
         .on_press_maybe(r.able.then(|| super::heard::said(r.label, r.msg)));
-        if r.able {
+        if r.able && r.ai {
+            super::toolbar::tip_at(
+                b,
+                tr!("Uses one AI call"),
+                None,
+                iced::widget::tooltip::Position::Right,
+            )
+        } else if r.able {
             b.into()
         } else {
             super::toolbar::tip_at(
                 b,
-                tr!("The language server isn't ready"),
+                not_served.clone(),
                 None,
                 iced::widget::tooltip::Position::Right,
             )
@@ -236,10 +483,98 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
     let placed = Anchored::new(
         opaque(panel),
         iced::Point::new(menu.x, menu.y),
-        Anchoring::Corner,
+        match menu.line_top {
+            Some(line_top) => Anchoring::UnderLine { line_top },
+            None => Anchoring::Corner,
+        },
     );
     // A full-size backdrop closes the menu on any outside click.
-    opaque(mouse_area(placed).on_press(Message::Hover(HoverMsg::ContextMenuClosed)))
+    // A click of either button outside it puts it away — a right one going
+    // on to what is under it, to open its own menu there.
+    super::MenuBackdrop::new(
+        mouse_area(placed).on_press(Message::Hover(HoverMsg::ContextMenuClosed)),
+        Message::Hover(HoverMsg::ContextMenuClosed),
+    )
+    .into()
+}
+
+/// The file tree's right-click menu, at the click: open the file (beside
+/// what is read, too), copy its path, show it in the system's file manager.
+pub(crate) fn tree_menu<'a>(
+    app: &'a App,
+    menu: &'a crate::app::state::TreeMenu,
+) -> Element<'a, Message> {
+    use crate::app::state::TreeAct;
+    let mut acts: Vec<(&'static str, TreeAct)> = Vec::new();
+    if menu.dir {
+        let open = app.proj.expanded.contains(&menu.rel);
+        acts.push((
+            if open {
+                tr!("Collapse Folder")
+            } else {
+                tr!("Expand Folder")
+            },
+            TreeAct::Open,
+        ));
+    } else {
+        acts.push((tr!("Open"), TreeAct::Open));
+        acts.push((tr!("Open to the Side"), TreeAct::OpenToSide));
+    }
+    acts.push((tr!("Copy Path"), TreeAct::CopyPath));
+    acts.push((tr!("Copy Relative Path"), TreeAct::CopyRelativePath));
+    // Only a file on this computer is there to show.
+    if !app.connection.is_remote() {
+        acts.push((
+            if cfg!(target_os = "macos") {
+                tr!("Show in Finder")
+            } else if cfg!(target_os = "windows") {
+                tr!("Show in Explorer")
+            } else {
+                tr!("Show in File Manager")
+            },
+            TreeAct::Reveal,
+        ));
+    }
+    // As designed, or as wide as its longest row in the reader's language
+    // (its padding and the panel's), as the code's own menu is: French's
+    // "Afficher dans le gestionnaire de fichiers" ran past its edge.
+    let width = acts
+        .iter()
+        .map(|(label, _)| {
+            super::sheet::text_width(label, ts::BASE, crate::fonts::UI)
+                + 2.0 * 12.0
+                + 2.0 * 4.0
+                + 2.0
+        })
+        .fold(MENU_W, f32::max)
+        .ceil();
+    let rows = acts
+        .into_iter()
+        .map(|(label, what)| -> Element<'a, Message> {
+            button(text(label).size(ts::BASE).wrapping(Wrapping::None))
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding([5, 12])
+                .on_press(super::heard::said(
+                    label,
+                    Message::Project(ProjectMsg::TreeMenuAct(what)),
+                ))
+                .into()
+        });
+    let panel = container(Column::with_children(rows).spacing(1))
+        .width(Length::Fixed(width))
+        .padding(4)
+        .style(theme::modal_panel);
+    let placed = Anchored::new(
+        opaque(panel),
+        iced::Point::new(menu.x, menu.y),
+        Anchoring::Corner,
+    );
+    super::MenuBackdrop::new(
+        mouse_area(placed).on_press(Message::Project(ProjectMsg::TreeMenuClosed)),
+        Message::Project(ProjectMsg::TreeMenuClosed),
+    )
+    .into()
 }
 
 // ---------------------------------------------------------------- server panel
@@ -279,19 +614,20 @@ pub(crate) fn strip_backticks(s: &str) -> String {
     s.replace('`', "")
 }
 
-/// A dim, single-line secondary description: first sentence, backticks stripped,
-/// truncated with an ellipsis and clipped so it never wraps or overflows the
-/// panel. Shared by the right-panel call-flow / contains rows so they match the
+/// A dim, short secondary description: first sentence, backticks stripped,
+/// cut at `max` characters with an ellipsis, wrapped in a narrow panel.
+/// Shared by the right-panel call-flow / contains rows so they match the
 /// outline rows' treatment instead of hard-cutting mid-word.
 pub(crate) fn one_line_desc<'a>(full: &str, max: usize) -> Element<'a, Message> {
     let one = truncate_ellipsis(&first_sentence(&strip_backticks(full)), max);
+    // Wrapped, not clipped: cut at a narrow column's edge it ended mid-word
+    // ("the final amount to charg"), with no sign more was there.
     container(
         text(one)
             .size(ts::CAPTION)
             .color(theme::dim())
-            .wrapping(Wrapping::None),
+            .wrapping(Wrapping::WordOrGlyph),
     )
-    .clip(true)
     .width(Fill)
     .into()
 }

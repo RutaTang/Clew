@@ -71,10 +71,57 @@ struct Gathering {
     rows: usize,
     /// What the controls built now belong to ([`about`]), innermost last.
     about: Vec<String>,
+    /// Every press marked for jump mode ([`marked`]), in its `Debug`
+    /// form, with its layer: what a pointer can press, to be checked
+    /// against what is offered here.
+    marks: Vec<(String, Layer)>,
+}
+
+impl Default for Gathering {
+    fn default() -> Self {
+        Gathering {
+            targets: Vec::new(),
+            layer: Layer::Window,
+            list: 0,
+            rows: 0,
+            about: Vec::new(),
+            marks: Vec::new(),
+        }
+    }
 }
 
 thread_local! {
     static GATHERING: RefCell<Option<Gathering>> = const { RefCell::new(None) };
+    /// The name the control built last offered itself under, with its
+    /// press in its `Debug` form: kept while the keyboard's ring or the
+    /// codes are up, for the mark round that control to take
+    /// ([`name_of`]).
+    static LAST: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+}
+
+/// Whether what a control is called is kept as it is built
+/// ([`super::jump::naming`]), or the view is gathered.
+fn named() -> bool {
+    gathering() || super::jump::naming()
+}
+
+/// `message`'s control, built now, is called `shown`.
+fn note(shown: &str, message: &Message) {
+    if super::jump::naming() {
+        LAST.with(|l| *l.borrow_mut() = Some((format!("{message:?}"), shown.to_string())));
+    }
+}
+
+/// What the control built last, pressing `message`, is called: its own
+/// name, as it offered itself — not another's that presses the same (a
+/// tab and a row both opening the History, a × and a view's button both
+/// showing the Files), nor a switch's "On" or "Off".
+pub(crate) fn name_of(message: &Message) -> Option<String> {
+    LAST.with(|l| {
+        let l = l.borrow();
+        let (press, shown) = l.as_ref()?;
+        (*press == format!("{message:?}")).then(|| shown.clone())
+    })
 }
 
 /// Whether the view is being built to be gathered: what a label costs to
@@ -127,6 +174,7 @@ pub(crate) fn offer(shown: &str, message: &Message) {
     if gathering() {
         push(title_of(shown), shown.to_string(), message, None, false);
     }
+    note(shown, message);
 }
 
 /// `message`, offered under the label it is `shown` with: what a button's
@@ -140,7 +188,7 @@ pub(crate) fn said(shown: &str, message: Message) -> Message {
 /// question without its marks): made only while gathering, never for a
 /// frame that is only drawn.
 pub(crate) fn said_with(shown: impl FnOnce() -> String, message: Message) -> Message {
-    if gathering() {
+    if named() {
         offer(&shown(), &message);
     }
     message
@@ -152,7 +200,7 @@ pub(crate) fn said_to_with(
     item: impl FnOnce() -> String,
     message: Message,
 ) -> Message {
-    if gathering() {
+    if named() {
         return said_to(action, &item(), message);
     }
     message
@@ -170,6 +218,9 @@ pub(crate) fn said_to(action: &str, item: &str, message: Message) -> Message {
             false,
         );
     }
+    if super::jump::naming() {
+        note(&format!("{action}: {item}"), &message);
+    }
     message
 }
 
@@ -180,6 +231,9 @@ pub(crate) fn switch(name: &str, on: bool, set: impl Fn(bool) -> Message) {
     if gathering() {
         said_to(name, crate::tr!("On"), set(true));
         said_to(name, crate::tr!("Off"), set(false));
+    }
+    // Its name alone last: what the switch itself is called.
+    if named() {
         offer(name, &set(!on));
     }
 }
@@ -196,6 +250,7 @@ pub(crate) fn answer(shown: &str, answer: Answer, message: Message) -> Message {
             false,
         );
     }
+    note(shown, &message);
     message
 }
 
@@ -262,15 +317,31 @@ pub(crate) fn list() {
 /// `message`, offered as the next row of the list begun last
 /// ([`list`]), under what the row says.
 pub(crate) fn row(shown: impl FnOnce() -> String, message: Message) -> Message {
-    if gathering() {
+    if named() {
         let shown = shown();
-        push(shown.clone(), shown, &message, None, true);
+        if gathering() {
+            push(shown.clone(), shown.clone(), &message, None, true);
+        }
+        note(&shown, &message);
     }
     message
 }
 
+/// A press marked for jump mode (`super::jump::mark`): kept while
+/// gathering, so the tests can find a control a pointer presses that
+/// offers itself to no word.
+pub(crate) fn marked(message: &Message) {
+    GATHERING.with(|g| {
+        if let Some(g) = g.borrow_mut().as_mut() {
+            let layer = g.layer;
+            g.marks.push((format!("{message:?}"), layer));
+        }
+    });
+}
+
 /// What is built from here on is in `layer`.
 pub(crate) fn layer(layer: Layer) {
+    super::jump::layer(layer);
     GATHERING.with(|g| {
         if let Some(g) = g.borrow_mut().as_mut() {
             g.layer = layer;
@@ -282,48 +353,50 @@ pub(crate) fn layer(layer: Layer) {
 /// (top to bottom, as a list reads) — of the layer on top only, as a
 /// dialog over the window leaves nothing under it to press.
 pub(crate) fn gather(app: &App) -> Vec<Target> {
+    let (targets, _) = gather_all(app);
+    on_top(targets, app.ask_view == crate::AskView::Expanded)
+}
+
+/// Every target the view offers, of every layer, and every press it marks
+/// for jump mode ([`marked`]).
+pub(crate) fn gather_all(app: &App) -> (Vec<Target>, Vec<(String, Layer)>) {
     struct Stop;
     impl Drop for Stop {
         fn drop(&mut self) {
             GATHERING.with(|g| *g.borrow_mut() = None);
         }
     }
-    GATHERING.with(|g| {
-        *g.borrow_mut() = Some(Gathering {
-            targets: Vec::new(),
-            layer: Layer::Window,
-            list: 0,
-            rows: 0,
-            about: Vec::new(),
-        })
-    });
+    GATHERING.with(|g| *g.borrow_mut() = Some(Gathering::default()));
     let stop = Stop;
     drop(crate::ui::view(app));
-    let targets = GATHERING
+    let gathered = GATHERING
         .with(|g| g.borrow_mut().take())
-        .map(|g| g.targets)
         .unwrap_or_default();
     drop(stop);
-    on_top(targets, app.ask_view == crate::AskView::Expanded)
+    (gathered.targets, gathered.marks)
 }
 
 /// What building `build` offers, all of it — one part of the view,
 /// gathered as [`gather`] gathers the whole.
 #[cfg(test)]
 pub(crate) fn gather_of<T>(build: impl FnOnce() -> T) -> Vec<Target> {
-    GATHERING.with(|g| {
-        *g.borrow_mut() = Some(Gathering {
-            targets: Vec::new(),
-            layer: Layer::Window,
-            list: 0,
-            rows: 0,
-            about: Vec::new(),
-        })
-    });
+    GATHERING.with(|g| *g.borrow_mut() = Some(Gathering::default()));
     drop(build());
     GATHERING
         .with(|g| g.borrow_mut().take())
         .map(|g| g.targets)
+        .unwrap_or_default()
+}
+
+/// [`gather_of`], with every press it marks for jump mode too: what
+/// [`gather_all`] gives for the whole view.
+#[cfg(test)]
+pub(crate) fn gather_all_of<T>(build: impl FnOnce() -> T) -> (Vec<Target>, Vec<(String, Layer)>) {
+    GATHERING.with(|g| *g.borrow_mut() = Some(Gathering::default()));
+    drop(build());
+    GATHERING
+        .with(|g| g.borrow_mut().take())
+        .map(|g| (g.targets, g.marks))
         .unwrap_or_default()
 }
 

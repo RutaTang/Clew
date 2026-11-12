@@ -150,6 +150,43 @@ pub fn edit_with_fallback(
     store::edit_with_fallback(root, fallback, change)
 }
 
+/// The name each of a file's `symbols` keeps its note under: its own name,
+/// or — where the file has more than one of that name — the name of what it
+/// is inside, then its own (`Inventory.__init__`). Two classes' `__init__`
+/// shared one note: marking one understood marked both, and the outline
+/// showed two rows alike.
+pub fn note_keys(symbols: &[clew_protocol::Symbol]) -> Vec<String> {
+    let mut count: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for s in symbols {
+        *count.entry(s.name.as_str()).or_default() += 1;
+    }
+    symbols
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            if count[s.name.as_str()] < 2 {
+                return s.name.clone();
+            }
+            // The innermost other symbol whose lines hold this one's.
+            let inside = symbols
+                .iter()
+                .enumerate()
+                .filter(|&(j, o)| {
+                    j != i
+                        && o.line <= s.line
+                        && s.end_line <= o.end_line
+                        && (o.line, o.end_line) != (s.line, s.end_line)
+                })
+                .min_by_key(|(_, o)| o.end_line - o.line)
+                .map(|(_, o)| o.name.as_str());
+            match inside {
+                Some(outer) => format!("{outer}.{}", s.name),
+                None => s.name.clone(),
+            }
+        })
+        .collect()
+}
+
 /// The note for `(rel, symbol)`, if any.
 pub fn find<'a>(list: &'a [Note], rel: &str, symbol: &str) -> Option<&'a Note> {
     list.iter().find(|n| n.rel == rel && n.symbol == symbol)
@@ -311,6 +348,38 @@ pub fn coverage(list: &[Note], rel: &str, symbols: &[String]) -> (usize, usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sym(name: &str, kind: &str, line: usize, end_line: usize) -> clew_protocol::Symbol {
+        clew_protocol::Symbol {
+            name: name.into(),
+            kind: kind.into(),
+            line,
+            end_line,
+        }
+    }
+
+    /// A name the file has once is its own key; two of a name are told
+    /// apart by what each is inside.
+    #[test]
+    fn two_classes_init_keep_notes_of_their_own() {
+        let symbols = [
+            sym("OutOfStock", "class", 1, 4),
+            sym("__init__", "method", 2, 4),
+            sym("Inventory", "class", 6, 14),
+            sym("__init__", "method", 7, 9),
+            sym("left", "method", 11, 14),
+        ];
+        assert_eq!(
+            note_keys(&symbols),
+            [
+                "OutOfStock",
+                "OutOfStock.__init__",
+                "Inventory",
+                "Inventory.__init__",
+                "left"
+            ]
+        );
+    }
     use clew_core::testutil::TempDir;
 
     #[test]

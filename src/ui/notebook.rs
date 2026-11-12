@@ -50,7 +50,7 @@ pub(crate) fn notebook_pane<'a>(
         !with_outputs.is_empty() && with_outputs.iter().all(|i| v.nb_expanded.contains(i));
     let mut strip = row![
         text(format!(
-            "{} · {} · {}",
+            "{}, {}, {}",
             trn!("1 cell", "{n} cells", doc.cells.len()),
             trn!("1 with output", "{n} with output", with_outputs.len()),
             doc.language

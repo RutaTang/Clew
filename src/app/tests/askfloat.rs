@@ -129,8 +129,9 @@ fn asking_opens_the_card_and_debug_keeps_the_bottom_panel() {
 }
 
 /// The card stands in the window's bottom-right corner wherever the caret
-/// is — left of the tool strip, over the status bar — and on the debugger's
-/// panel when it shows; the large window is centred, wider than the card.
+/// is — left of the tool strip, over the status bar — and stays there when
+/// the debugger's panel shows, over the panel's corner rather than lifted
+/// above it; the large window is centred, wider than the card.
 #[test]
 fn the_card_stands_in_the_corner() {
     let mut app = scanned_app("askfloat-dodge");
@@ -167,15 +168,19 @@ fn the_card_stands_in_the_corner() {
             < 1.0,
         "{corner:?} over the status bar"
     );
-    // The debugger's panel up: the card stands on it.
+    // The debugger's panel up, however tall: the card, and the pill it
+    // hides to, stay in the corner.
     app.show_bottom = true;
-    app.bottom_height = 200.0;
-    let raised = crate::ui::ask_corner_rect(&app);
-    assert!(
-        raised.y + raised.height < corner.y + corner.height - 199.0,
-        "{raised:?}"
-    );
+    for height in [200.0, 500.0] {
+        app.bottom_height = height;
+        assert_eq!(crate::ui::ask_corner_rect(&app), corner, "{height}");
+        assert_eq!(crate::ui::ask_place(&app), Some(card), "{height}");
+    }
+    let _ = app.update(Message::Ask(AskMsg::Hide));
+    let pill = crate::ui::ask_corner_rect(&app);
     app.show_bottom = false;
+    assert_eq!(crate::ui::ask_corner_rect(&app), pill);
+    let _ = app.update(Message::Ask(AskMsg::Open));
     // Large: centred, wider than the card.
     let _ = app.update(Message::Ask(AskMsg::Expand));
     let place = crate::ui::ask_place(&app).unwrap();
@@ -184,32 +189,36 @@ fn the_card_stands_in_the_corner() {
 }
 
 /// The tour's Ask step shows the card; the steps after it put it away.
-/// The tour speaks of the project by its folder's name.
+/// Every place the tour puts the caret is in Tea Shop, on the name it
+/// says: a line the sample no longer has, or a name not on it, would land
+/// the step's caret on nothing.
 #[test]
-fn the_tour_names_the_project() {
-    let app = scanned_app("askfloat-tour-names");
-    let root = &app.proj.project.as_ref().expect("scanned").root;
-    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+fn the_tour_lands_on_the_names_it_names() {
+    let app = scanned_app("askfloat-tour-places");
     let steps = crate::app::tutorial::steps(&app);
-    for title in [
-        "Welcome to Clew",
-        "The file tree",
-        "The overview",
-        "Project stats",
-        "The call graph",
-    ] {
-        let step = steps.iter().find(|s| s.title == title).expect(title);
-        assert!(step.body.contains(&name), "{title}: {}", step.body);
+    let places: Vec<_> = steps.iter().filter_map(|s| s.place).collect();
+    assert!(places.len() >= 5, "{}", places.len());
+    for place in places {
+        let line = crate::app::tour_sample::line_of(place.rel, place.line_has)
+            .unwrap_or_else(|| panic!("{place:?}: no such line"));
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/tour/teashop")
+                .join(place.rel),
+        )
+        .unwrap();
+        let held = text.lines().nth(line - 1).unwrap();
+        assert!(held.contains(place.name), "{place:?}: {held}");
     }
 }
 
 #[test]
 fn the_tour_shows_the_ask_card() {
     let mut app = scanned_app("askfloat-tour");
-    let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+    let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
     let ask_step = crate::app::tutorial::steps(&app)
         .iter()
-        .position(|s| s.title == "Ask Clew, or tell it what to do")
+        .position(|s| s.title == "Ask Clew")
         .expect("an Ask step");
     while app.tutorial.is_some_and(|s| s < ask_step) {
         let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
@@ -219,8 +228,8 @@ fn the_tour_shows_the_ask_card() {
     assert_eq!(app.ask_view, AskView::Hidden);
     let debug_step = crate::app::tutorial::steps(&app)
         .iter()
-        .position(|s| s.title == "Debug")
-        .expect("a Debug step");
+        .position(|s| s.title == "Run and debug")
+        .expect("a Run and debug step");
     while app.tutorial.is_some_and(|s| s < debug_step) {
         let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
     }
@@ -280,6 +289,16 @@ fn ask_keeps_its_sessions() {
         app.proj.ask_sessions[0].title, "How is a host connected?",
         "newest first"
     );
+
+    // The menu, drawn over everything, goes as the command palette comes
+    // over it: it stayed on top, and took the palette's clicks.
+    let _ = app.update(Message::Ask(AskMsg::SessionsMenu(true)));
+    assert!(app.ask_sessions_menu);
+    app.ask_sessions_query = "host".into();
+    let _ = app.update(Message::Nav(crate::NavMsg::PaletteOpened));
+    assert!(!app.ask_sessions_menu, "closed under the palette");
+    assert!(app.ask_sessions_query.is_empty(), "and its search with it");
+    dismiss_overlays(&mut app);
 
     // Back to the first: its questions and answers on the card.
     let _ = app.update(Message::Ask(AskMsg::SessionsMenu(true)));
