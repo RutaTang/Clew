@@ -804,7 +804,7 @@ pub(crate) fn tour_prep_sheet<'a>(
     // The tour explains Tea Shop with the model: marked as what spends AI
     // calls, as every such control is.
     let start = button(super::toolbar::ai_words(
-        tr!("Start the Tour"),
+        tr!("Start the tour"),
         ts::BASE,
         theme::on_accent(),
     ))
@@ -812,7 +812,7 @@ pub(crate) fn tour_prep_sheet<'a>(
     .padding([6, 16])
     .on_press_maybe(
         ready
-            .then(|| super::heard::said(tr!("Start the Tour"), Message::Tutorial(TutorialMsg::Go))),
+            .then(|| super::heard::said(tr!("Start the tour"), Message::Tutorial(TutorialMsg::Go))),
     );
     // Why it cannot start yet, said beside it: in a tip alone (which a
     // held button may not show), a press on the tour's main button did

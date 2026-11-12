@@ -1029,6 +1029,10 @@ const ZOOM_RATE: f32 = 18.0;
 const SHIFT_RATE: f32 = 9.0;
 const FRAME_TAU: f32 = 0.14;
 const LABEL_TAU: f32 = 0.11;
+/// Below this a label going out no longer holds one coming in where it is.
+const LABEL_GONE: f32 = 0.05;
+/// From this a label coming in is shown, and no longer waits.
+const LABEL_SHOWN: f32 = 0.5;
 const TURN_TAU: f32 = 0.55;
 const PITCH_TAU: f32 = 0.3;
 /// Up to this many nodes no label fades with depth; the fade is full
@@ -1855,13 +1859,49 @@ impl GraphCanvas<'_> {
                 }
             }
         }
+        // A label coming in waits while one going out still shows where it
+        // goes, and that one goes quickly: cross-faded over each other, the
+        // two read as neither (a small map, turning). One already shown
+        // stays; only the one leaving hurries.
+        let alpha_of = |i: usize| st.label_alpha.get(i).copied().unwrap_or(0.0);
+        let rect_of = |i: usize, left: bool| {
+            let (x, y, _, persp) = lproj[i];
+            let r = node_radius(self.layout.nodes[i].weight, persp);
+            label_rect(x, y, r, st.label_w.get(i).copied().unwrap_or(0.0), left)
+        };
+        let going: Vec<(usize, iced::Rectangle)> = (0..n)
+            .filter(|&j| target[j] <= 0.0 && alpha_of(j) > LABEL_GONE)
+            .map(|j| {
+                let left = st.label_side.get(j).copied().unwrap_or(0.0) >= 0.5;
+                (j, rect_of(j, left))
+            })
+            .collect();
+        let mut hold = vec![false; n];
+        let mut hurry = vec![false; n];
+        if !going.is_empty() {
+            for i in (0..n).filter(|&i| target[i] > 0.0) {
+                let rect = rect_of(i, side[i] >= 0.5);
+                let named = hovered == Some(i) || lit.is_some_and(|l| l.focus == Some(i));
+                for &(j, there) in &going {
+                    if j != i && rects_overlap(rect, there) {
+                        hurry[j] = true;
+                        hold[i] |= !named && alpha_of(i) < LABEL_SHOWN;
+                    }
+                }
+            }
+        }
         let step = ease_step(dt, LABEL_TAU);
-        for (now, to) in st
-            .label_alpha
-            .iter_mut()
-            .zip(&target)
-            .chain(st.label_side.iter_mut().zip(&side))
-        {
+        let quick = ease_step(dt, LABEL_TAU / 3.0);
+        for (i, (now, &to)) in st.label_alpha.iter_mut().zip(&target).enumerate() {
+            // Held where it is, never back: its target stays, so the map
+            // is not at rest until it has come in.
+            let to = if hold[i] { now.min(to) } else { to };
+            *now += (to - *now) * if hurry[i] { quick } else { step };
+            if (*now - to).abs() <= LABEL_EPS {
+                *now = to;
+            }
+        }
+        for (now, to) in st.label_side.iter_mut().zip(&side) {
             *now += (to - *now) * step;
             if (*now - to).abs() <= LABEL_EPS {
                 *now = *to;
@@ -3024,11 +3064,11 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
         let mut said = column![text(msg).size(ts::BODY).color(theme::dim())].spacing(10);
         if build {
             said = said.push(
-                button(text(tr!("Build the API Index")).size(ts::BODY))
+                button(text(tr!("Build the API index")).size(ts::BODY))
                     .style(theme::primary_button)
                     .padding([4, 12])
                     .on_press(super::heard::said(
-                        tr!("Build the API Index"),
+                        tr!("Build the API index"),
                         Message::Docs(DocsMsg::Refresh),
                     )),
             );
@@ -4710,6 +4750,57 @@ mod tests {
             label_spot(&[&boxed], 100.0, 50.0, 5.0, 60.0, false, 800.0),
             None
         );
+    }
+
+    /// A label coming in never fades in over one going out: it waits until
+    /// that one has gone, and that one goes quickly. Cross-fading over each
+    /// other, in a small map that turns, the two read as neither.
+    #[test]
+    fn a_label_fades_in_only_once_the_one_in_its_place_has_gone() {
+        let l = layout(40);
+        let c = canvas(&l, true, true);
+        let mut st = GraphState::default();
+        let small = iced::Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 480.0,
+            height: 360.0,
+        };
+        let t0 = std::time::Instant::now();
+        let n = l.nodes.len();
+        let mut crossings = 0;
+        for f in 0..1200u64 {
+            let before = st.label_alpha.clone();
+            let _ = c.tick(
+                &mut st,
+                small,
+                t0 + std::time::Duration::from_micros(16_667 * f),
+                iced::advanced::mouse::Cursor::Unavailable,
+            );
+            if f < 30 {
+                continue;
+            }
+            let at: Vec<_> = (0..n).map(|i| c.node_screen(i, small, &st)).collect();
+            let rect = |i: usize| {
+                let (x, y, _, persp) = at[i];
+                let r = node_radius(l.nodes[i].weight, persp);
+                label_rect(x, y, r, st.label_w[i], st.label_side[i] >= 0.5)
+            };
+            for i in 0..n {
+                let a = st.label_alpha[i];
+                let rising = a > before.get(i).copied().unwrap_or(0.0) + 1e-4;
+                if !rising || !(0.1..0.5).contains(&a) {
+                    continue;
+                }
+                for j in (0..n).filter(|&j| j != i) {
+                    let going = st.label_target[j] <= 0.0 && st.label_alpha[j] > 0.1;
+                    if going && rects_overlap(rect(i), rect(j)) {
+                        crossings += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(crossings, 0, "labels faded in over ones going out");
     }
 
     /// In a settled map, no label shown in full lies over another node's

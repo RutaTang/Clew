@@ -990,9 +990,21 @@ fn ring_bounds(at: Rectangle, room: Rectangle) -> Rectangle {
 fn badge_bounds(at: Rectangle, room: Rectangle, letters: usize) -> Rectangle {
     let width = (letters as f32 * BADGE_SIZE * 0.62 + 6.0).round();
     let height = (BADGE_SIZE + 4.0).round();
+    let above = at.y + BADGE_OVER - height;
+    // No room above it (a bar that clips what it holds, the status bar's
+    // controls at its top): beside it, at its left, level with it — pushed
+    // down, it lay over the words ("DPry again" for "Try again").
+    if above < room.y && at.x - width - 1.0 >= room.x {
+        return Rectangle {
+            x: (at.x - width - 1.0).round(),
+            y: (at.center_y() - height / 2.0).max(room.y).round(),
+            width,
+            height,
+        };
+    }
     Rectangle {
         x: (at.x - BADGE_OUT).max(room.x).round(),
-        y: (at.y + BADGE_OVER - height).max(room.y).round(),
+        y: above.max(room.y).round(),
         width,
         height,
     }
@@ -1103,8 +1115,17 @@ mod tests {
         let b = badge_bounds(at, room, 2);
         assert!(b.y + b.height - at.y <= BADGE_OVER, "{b:?}");
         assert!(b.x < at.x && b.y < at.y, "{b:?}");
+        // No room above (the window's top, a bar that clips what it holds):
+        // beside it, at its left — pushed down onto it, it hid the first
+        // letters of its words ("DPry again").
         let top = Rectangle::new(Point::new(100.0, 0.0), Size::new(32.0, 20.0));
-        assert_eq!(badge_bounds(top, room, 2).y, 0.0, "kept in the window");
+        let b = badge_bounds(top, room, 2);
+        assert!(b.x + b.width <= top.x, "beside, not over its words: {b:?}");
+        assert!(b.y >= 0.0 && b.y + b.height <= top.y + top.height, "{b:?}");
+        // Nor room at its left: kept in what is seen, over its corner.
+        let corner = Rectangle::new(Point::new(2.0, 0.0), Size::new(32.0, 20.0));
+        let b = badge_bounds(corner, room, 2);
+        assert_eq!((b.x, b.y), (0.0, 0.0), "kept in the window");
     }
 
     #[test]

@@ -1352,7 +1352,7 @@ impl App {
     }
 
     /// [`Self::tree_cursor_rel`]'s place among `rows`.
-    fn tree_cursor_at(&self, rows: &[ui::TreeRow]) -> Option<usize> {
+    pub(crate) fn tree_cursor_at(&self, rows: &[ui::TreeRow]) -> Option<usize> {
         let find = |rel: &str| rows.iter().position(|r| r.rel == rel);
         self.proj
             .tree_cursor
@@ -1424,6 +1424,12 @@ impl App {
         }
         let last = rows.len() - 1;
         let row = rows[at].clone();
+        // Its menu: what it is for here; where, the tree says next
+        // (`ui::tree_keys`), as a right-click on the row does.
+        if key == TreeKey::Menu {
+            self.proj.tree_menu_for = Some((row.rel.clone(), row.dir));
+            return Task::none();
+        }
         let open = row.dir && self.proj.expanded.contains(&row.rel);
         let to = match key {
             TreeKey::Up => at.saturating_sub(1),

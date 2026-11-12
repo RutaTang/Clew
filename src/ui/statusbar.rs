@@ -610,12 +610,20 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     {
         let whole = words_of(&failure.shown());
         let (controls, controls_w) = failure_controls(failure, room - least - STATUS_GAP);
-        let words = (room - controls_w - 2.0 * STATUS_GAP - SAID_MIN_W)
-            .max(least)
-            .min(width(&whole));
-        row = row.push(line_of(whole, words, Some(theme::danger())));
-        row = row.push(controls);
-        used += words + STATUS_GAP + controls_w + STATUS_GAP;
+        // While the codes are up, what to do with them is said instead:
+        // after the failure's words it was cut to "Type the code on a…".
+        // Its controls stay, each with its code.
+        if app.jump.is_some() {
+            row = row.push(controls);
+            used += controls_w + STATUS_GAP;
+        } else {
+            let words = (room - controls_w - 2.0 * STATUS_GAP - SAID_MIN_W)
+                .max(least)
+                .min(width(&whole));
+            row = row.push(line_of(whole, words, Some(theme::danger())));
+            row = row.push(controls);
+            used += words + STATUS_GAP + controls_w + STATUS_GAP;
+        }
     }
     let room = (room - used).max(0.0);
     let mut used = 0.0;

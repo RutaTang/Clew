@@ -514,7 +514,14 @@ impl App {
                 }
                 None => None,
             };
-            self.proj.explain.node_failed = why.map(|why| (target.clone(), why));
+            // The setting to look at, where the failure names one: an
+            // address nothing answered at, a key or model refused.
+            let fix = failures
+                .stopped
+                .iter()
+                .chain(&failures.calls)
+                .find_map(|f| f.field());
+            self.proj.explain.node_failed = why.map(|why| (target.clone(), why, fix));
         }
         let said = PassSaid {
             failures: failures.clone(),

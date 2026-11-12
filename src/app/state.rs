@@ -800,8 +800,10 @@ pub struct ExplainState {
     /// failed: said on its note, with a way to try again, until it is
     /// explained or asked for again. Said only on the status line, a
     /// failure was gone in seconds, and the card where Explain was pressed
-    /// still said "Not explained yet." as if it had never been.
-    pub node_failed: Option<(explain::Node, SayAgain)>,
+    /// still said "Not explained yet." as if it had never been. With it,
+    /// the Language model setting the failure is about, if one is: the
+    /// card's way there.
+    pub node_failed: Option<(explain::Node, SayAgain, Option<LlmField>)>,
     /// The functions whose blocks are being explained (`ExplainMsg::Blocks`)
     /// until the answer lands: asked again meanwhile, each click made one
     /// more paid call for the same answer.

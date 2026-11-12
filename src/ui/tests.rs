@@ -8644,7 +8644,7 @@ fn the_margin_history_lists_the_files_commits() {
     app.margin_tab = crate::MarginTab::History;
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Reading the file's history"));
-    assert!(shows(&mut sim, "Why Is This Here?"));
+    assert!(shows(&mut sim, "Why is this here?"));
     assert!(!shows(&mut sim, "Changes since the last commit"));
     assert!(!shows(&mut sim, "This file through time"));
     drop(sim);
@@ -8674,6 +8674,8 @@ fn the_margin_history_lists_the_files_commits() {
         shows(&mut sim, "aaaaaaa by Ada"),
         "its short sha and author"
     );
+    // Headed as the Calls tab's lists are, in the margin's one style.
+    assert!(shows(&mut sim, "COMMITS TO THIS FILE"));
     drop(sim);
     let sent = click(sim_of(&app), "First reader");
     assert!(
@@ -8763,24 +8765,21 @@ fn the_margin_history_says_a_new_function_is_not_committed() {
     // All of it new.
     app.proj.panes[0].as_mut().unwrap().git = git(clew_protocol::ChangeKind::Added);
     let mut sim = sim_of(&app);
-    assert!(shows(
-        &mut sim,
-        "“helper” is not in any commit yet. The file's commits:"
-    ));
+    assert!(shows(&mut sim, "“helper” is not in any commit yet."));
     drop(sim);
     // Its own history is not offered — but its link keeps its place,
     // inert, so the paid one never comes under a click aimed at it.
     assert!(click(sim_of(&app), "This function through time").is_empty());
-    assert!(shows(&mut sim_of(&app), "Why Is This Here?"));
+    assert!(shows(&mut sim_of(&app), "Why is this here?"));
     // On a blank line there is nothing to ask why of: nothing to pay for.
     {
         let v = app.proj.panes[0].as_mut().unwrap();
         Arc::make_mut(&mut v.lines)[3] = crate::highlight::plain_lines("    \n")[0].clone();
     }
-    assert!(click(sim_of(&app), "Why Is This Here?").is_empty());
+    assert!(click(sim_of(&app), "Why is this here?").is_empty());
     app.proj.panes[0].as_mut().unwrap().caret = Some((4, 0));
     assert!(matches!(
-        click(sim_of(&app), "Why Is This Here?").as_slice(),
+        click(sim_of(&app), "Why is this here?").as_slice(),
         [Message::TimeTravel(crate::TimeTravelMsg::WhyIsThisHere)]
     ));
 }
@@ -11057,7 +11056,7 @@ fn the_insight_popup_shows_the_answer_and_where_it_points() {
         assert!(shows(&mut sim, "Expansion of MAX"));
         assert!(shows(&mut sim, "Asking…"));
     }
-    assert!(!shows(&mut sim_of(&app), "Open Definition"));
+    assert!(!shows(&mut sim_of(&app), "Open definition"));
     assert!(matches!(
         super::escape_message(&app),
         Some(Message::Hover(HoverMsg::InsightClose))
@@ -11104,7 +11103,7 @@ fn the_insight_popup_shows_the_answer_and_where_it_points() {
         let mut sim = sim_of(&app);
         assert!(!shows(&mut sim, "Asking…"));
     }
-    let sent = click(sim_of(&app), "Open Definition");
+    let sent = click(sim_of(&app), "Open definition");
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Hover(HoverMsg::InsightOpenDefinition))),
@@ -12471,6 +12470,36 @@ fn the_tour_sheet_says_why_it_cannot_start_yet() {
         "The tour starts once Tea Shop is ready (step 3)."
     ));
     assert!(!says(&app, "answers a test"));
+}
+
+/// While jump mode's codes are up, what to do with them is said whole on
+/// the status line, a failure standing there or not — after the failure's
+/// words it was cut to "Type the code on a…" — and the failure's controls
+/// stay, to be pressed by their codes.
+#[test]
+fn the_jump_hint_is_said_whole_beside_a_failure() {
+    let mut app = reader_app();
+    app.say_failure(
+        "Couldn't explain lib.rs: couldn't reach the AI provider (nothing answered at that address) — check the base URL in Settings".into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    let hint = "Type the code on a control to press it — Esc to stop";
+    app.jump = Some(String::new());
+    app.status = hint.into();
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(
+        text_at(&mut sim, |t| t == hint, 0).is_some(),
+        "the hint, whole"
+    );
+    assert!(text_at(&mut sim, |t| t == "Try again", 0).is_some());
+    assert!(!shows(&mut sim, "Couldn't explain"));
+    drop(sim);
+    // Out of jump mode, the failure is said again.
+    app.jump = None;
+    app.status = String::new();
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(shows(&mut sim, "Couldn't explain"));
 }
 
 /// A failure on the status line keeps its Try again, Settings and × where
@@ -17776,6 +17805,58 @@ fn the_arrows_walk_a_menu_and_enter_presses_its_row() {
     assert!(app.proj.tree_menu.is_none(), "{row:?} was not pressed");
 }
 
+/// ⇧F10 (or the Menu key) opens a menu from the keyboard, as a right-click
+/// opens it: the file tree's for the row the keyboard rests on, by that
+/// row; the code's at the caret, for where the caret is. Both were the
+/// pointer's alone.
+#[test]
+fn shift_f10_opens_the_menu_of_what_the_keyboard_is_on() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let size = iced::Size::new(1000.0, 640.0);
+    let mut app = sidebar_app(size);
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        dirs: Vec::new(),
+        files: vec!["README.md".into(), "main.py".into(), "zeta.txt".into()],
+    };
+    app.code_focused = false;
+    app.proj.tree_cursor = Some("main.py".into());
+    let row = {
+        let mut sim = sim_sized(&app, size);
+        text_at(&mut sim, |t| t == "main.py", 0).expect("its row")
+    };
+    let mut driven = Driven::sized(&app, size);
+    driven.focus(&app, super::files_tree_keys_id());
+    let _ = driven.key(&mut app, Key::Named(Named::F10), keyboard::Modifiers::SHIFT);
+    let menu = app.proj.tree_menu.as_ref().expect("the tree's menu");
+    assert_eq!((menu.rel.as_str(), menu.dir), ("main.py", false));
+    assert!(
+        menu.y > row.y && menu.y < row.y + 2.0 * row.height + 16.0,
+        "by its row: {menu:?} {row:?}"
+    );
+    assert!(menu.x < 300.0, "in the sidebar: {menu:?}");
+    app.proj.tree_menu = None;
+
+    // The code's, at its caret.
+    app.code_focused = true;
+    let line = 3;
+    if let Some(v) = app.proj.panes[0].as_mut() {
+        v.caret = Some((line, 4));
+    }
+    let _ = app.update(Message::Editor(crate::EditorMsg::KeyPressed(
+        Key::Named(Named::ContextMenu),
+        keyboard::Modifiers::empty(),
+    )));
+    let menu = app.proj.context_menu.as_ref().expect("the code's menu");
+    assert_eq!((menu.line, menu.col), (line, 4));
+    let panes = super::panes_rect(&app).expect("the panes");
+    assert!(
+        panes.contains(iced::Point::new(menu.x, menu.y)),
+        "{menu:?} {panes:?}"
+    );
+    assert!(app.proj.tree_menu.is_none());
+}
+
 /// With a menu up, a right-click on another row puts it away and opens
 /// that row's menu there, in the one click, as a desktop's menus do: it
 /// only put the menu away, and a second right-click was needed. A left
@@ -18001,6 +18082,51 @@ fn a_raised_cards_wrapped_rows_add_to_its_height() {
     );
     let h = |width| super::panes::raised_card_h(&app, &node, width, 2000.0);
     assert!((h(150.0) - h(600.0) - (26.0 + 2.0)).abs() < 0.01);
+}
+
+/// A note whose Explain failed for what Settings puts right — nothing
+/// answered at the address — has Settings beside Try again, and the card
+/// counts it in its rows; any other failure has no Settings. On a narrow
+/// card the reason's "check the base URL in Settings" was cut short, and
+/// nothing led there.
+#[test]
+fn a_notes_failure_settings_can_fix_has_its_settings() {
+    use crate::app::state::{LlmField, SayAgain};
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 3,
+    }];
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    app.proj.explain.view = Some(node.clone());
+    let said = || {
+        SayAgain(std::sync::Arc::new(|| {
+            "couldn't reach the AI provider".into()
+        }))
+    };
+    app.proj.explain.node_failed = Some((node.clone(), said(), None));
+    assert!(shows(&mut sim_of(&app), "Try again"));
+    assert!(!shows(&mut sim_of(&app), "Settings"), "no setting to fix");
+    let plain = super::panes::raised_card_h(&app, &node, 150.0, 2000.0);
+    app.proj.explain.node_failed = Some((node.clone(), said(), Some(LlmField::BaseUrl)));
+    assert!(shows(&mut sim_of(&app), "Try again"));
+    assert!(
+        click(sim_of(&app), "Settings").iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::Fix(LlmField::BaseUrl))
+        )),
+        "Settings opens at the base URL"
+    );
+    // Narrow, it takes a line of its own, added to the card.
+    assert!(super::panes::raised_card_h(&app, &node, 150.0, 2000.0) > plain);
 }
 
 /// A failure's Settings link opens Settings with the keys in the field to

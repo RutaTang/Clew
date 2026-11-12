@@ -2282,6 +2282,8 @@ pub enum TreeKey {
     Preview,
     /// Esc: the keyboard goes back to the code.
     Leave,
+    /// ⇧F10 or the Menu key: the row's menu, as a right-click opens it.
+    Menu,
     /// A letter: the filter above takes it, narrowing the tree.
     Type(char),
 }

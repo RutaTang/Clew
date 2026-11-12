@@ -36895,7 +36895,9 @@ fn a_failed_explain_stands_until_dismissed_with_a_way_to_try_again() {
             .explain
             .node_failed
             .as_ref()
-            .is_some_and(|(n, why)| *n == node && (why.0)().contains("couldn't reach")),
+            .is_some_and(|(n, why, fix)| *n == node
+                && (why.0)().contains("couldn't reach")
+                && *fix == Some(crate::app::state::LlmField::BaseUrl)),
         "{:?}",
         app.proj.explain.node_failed
     );
@@ -36906,7 +36908,7 @@ fn a_failed_explain_stands_until_dismissed_with_a_way_to_try_again() {
             .explain
             .node_failed
             .as_ref()
-            .map(|(_, why)| (why.0)())
+            .map(|(_, why, _)| (why.0)())
     })
     .unwrap();
     assert!(

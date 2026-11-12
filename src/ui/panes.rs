@@ -1607,6 +1607,9 @@ fn card_extra_lines(app: &App, node: &crate::explain::Node, width: f32) -> usize
     if slot {
         actions.push(note_action_w("", true, Some(note_explain_room())));
     }
+    if slot && explain_failed_fix(app, node).is_some() {
+        actions.push(note_action_w(tr!("Settings"), false, None));
+    }
     actions.push(note_action_w(tr!("Ask"), true, None));
     wrapped_lines(&facts, room) + wrapped_lines(&actions, room) - 2
 }
@@ -1621,8 +1624,25 @@ fn explain_failed(app: &App, node: &crate::explain::Node) -> Option<String> {
         .explain
         .node_failed
         .as_ref()
-        .filter(|(of, _)| of == node)
-        .map(|(_, why)| (why.0)())
+        .filter(|(of, ..)| of == node)
+        .map(|(_, why, _)| (why.0)())
+}
+
+/// The Language model setting the failed Explain of `node` is about, if
+/// one is: where the card's Settings goes.
+fn explain_failed_fix(
+    app: &App,
+    node: &crate::explain::Node,
+) -> Option<crate::app::state::LlmField> {
+    if app.proj.explain.cache.contains_key(node) {
+        return None;
+    }
+    app.proj
+        .explain
+        .node_failed
+        .as_ref()
+        .filter(|(of, ..)| of == node)
+        .and_then(|(.., fix)| *fix)
 }
 
 /// Height of the raised card while it shows the explanation in blocks: a
@@ -2231,6 +2251,7 @@ fn active_note<'a>(
         && app.proj.explain.pass_target.as_ref() == node.as_ref();
     // Its own Explain failed: why, on the card, and a way to try again.
     let failed = node.as_ref().and_then(|n| explain_failed(app, n));
+    let fix = node.as_ref().and_then(|n| explain_failed_fix(app, n));
     // One layout for every card, a function's or a file's: what is known
     // of it on one row — when it last changed, and for a function who calls
     // it — and what to do with it on the row under that: Explain while it
@@ -2267,6 +2288,20 @@ fn active_note<'a>(
             tip,
             None,
         ));
+        // A failure Settings can put right — no answer at the address, a
+        // key or model refused — and the way there, beside Try again: on
+        // a narrow card the reason's "check the base URL in Settings" was
+        // cut short, and nothing led there.
+        if let Some(field) = fix {
+            actions = actions.push(action(
+                Glyph::Settings,
+                tr!("Settings").into(),
+                false,
+                None,
+                true,
+                Message::Settings(crate::SettingsMsg::Fix(field)),
+            ));
+        }
     } else if explaining {
         actions = actions.push(
             container(
@@ -2467,10 +2502,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
     // it are not read as its own.
     let uncommitted = app.caret_function_uncommitted();
     if let Some(name) = &uncommitted {
-        rows = rows.push(note(tr!(
-            "“{name}” is not in any commit yet. The file's commits:",
-            name = name
-        )));
+        rows = rows.push(note(tr!("“{name}” is not in any commit yet.", name = name)));
     }
     let file = app.active_viewer().map(|v| &v.abs);
     match app
@@ -2492,15 +2524,11 @@ fn margin_history(app: &App) -> Element<'_, Message> {
                 .unwrap_or(0);
             // Whose commits these are: the file's — with the caret in a
             // function they read as the function's own, and some never
-            // touched it.
-            if uncommitted.is_none()
-                && let Some(name) = app
-                    .active_viewer()
-                    .and_then(|v| v.abs.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-            {
-                rows = rows.push(note(tr!("Commits to {file}", file = name)));
-            }
+            // touched it. A heading as the Calls tab's are: a dim line in
+            // sentence case there read as a second style beside its caps.
+            rows = rows.push(super::explain_view::section_header(tr!(
+                "Commits to this file"
+            )));
             for c in commits {
                 let short = short_sha(&c.sha);
                 rows = rows.push(
@@ -2584,9 +2612,10 @@ fn margin_history(app: &App) -> Element<'_, Message> {
             Some(((a, _), (b, _))) => (a..=b).any(|l| v.has_code(l)),
             None => v.caret.is_some_and(|(l, _)| v.has_code(l)),
         });
-    // Named as the code's menu and the command bar name it.
+    // The code's menu and the command bar name it as a command, in Title
+    // Case; here, among the tab's links, in their sentence case.
     let why = button(super::toolbar::ai_words(
-        tr!("Why Is This Here?"),
+        tr!("Why is this here?"),
         ts::SMALL,
         if has_code {
             theme::accent()
@@ -2598,7 +2627,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
     .padding([3, 6])
     .on_press_maybe(has_code.then(|| {
         super::heard::said(
-            tr!("Why Is This Here?"),
+            tr!("Why is this here?"),
             Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
         )
     }));

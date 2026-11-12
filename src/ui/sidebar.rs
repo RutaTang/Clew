@@ -982,8 +982,18 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
     // Something over the tree holding the keys takes them from it.
     let held_above =
         super::active_overlay(app).is_some_and(|o| o.holds_keys()) || app.tutorial.is_some();
+    // Where the row the keyboard rests on is, scrolled: ⇧F10 opens its
+    // menu there.
+    let cursor_row_y = {
+        let rows = super::tree_rows(app);
+        app.tree_cursor_at(&rows).map(|at| {
+            let scrolled = app.proj.tree_scroll.map_or(0.0, |(offset, _)| offset);
+            at as f32 * (TREE_ROW_H + TREE_ROW_GAP) - scrolled
+        })
+    };
     super::tree_keys::TreeKeys::new(tree, super::files_tree_keys_id())
         .release(app.code_focused || held_above)
+        .cursor_row_y(cursor_row_y)
         .into()
 }
 

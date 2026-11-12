@@ -437,6 +437,42 @@ impl App {
         Task::none()
     }
 
+    /// ⇧F10 or the Menu key in the code: its menu at the caret, as a
+    /// right-click there opens it — the menu was the pointer's alone.
+    pub(crate) fn open_context_menu_at_caret(&mut self) -> Task<Message> {
+        let pane = self.proj.active;
+        let Some(v) = self.active_viewer() else {
+            return Task::none();
+        };
+        let Some((line, col)) = v.caret else {
+            return Task::none();
+        };
+        let Some(panes) = crate::ui::panes_rect(self) else {
+            return Task::none();
+        };
+        // The pane's half, where the panes are split.
+        let (left, width) = if self.proj.split {
+            let half = panes.width / 2.0;
+            (panes.x + if pane == 1 { half } else { 0.0 }, half)
+        } else {
+            (panes.x, panes.width)
+        };
+        let size = self.font_size;
+        let lh = self.line_height();
+        // The code's gutter and a column of its font, as the view sets
+        // them (`editor::codeview`): close enough to open the menu by the
+        // caret, and kept inside the pane.
+        let gutter = (48.0 + 20.0) * size / 13.0;
+        let column = size * 0.6;
+        let x = left + gutter + col as f32 * column - v.scroll_x;
+        let y = panes.y + (v.row_of(line) + 1) as f32 * lh - v.scroll_y;
+        let x = x.clamp(left, (left + width - 1.0).max(left));
+        let y = y.clamp(panes.y, (panes.y + panes.height - 1.0).max(panes.y));
+        let (sx, sy) = (v.scroll_x, v.scroll_y);
+        // In the content's space, as a click's point comes.
+        self.on_context_menu_opened(pane, line, col, x + sx, y + sy)
+    }
+
     /// Whether the language server of what `pane` shows is ready.
     pub(crate) fn served(&self, pane: usize) -> bool {
         self.proj

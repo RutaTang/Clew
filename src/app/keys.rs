@@ -483,6 +483,19 @@ impl App {
         // The debugger's function keys, as editors have them — F9 a
         // breakpoint, F5 continue (or start), ⇧F5 stop, F10 over, F11 in,
         // ⇧F11 out — unless a dialog holds the keys.
+        // ⇧F10, or the Menu key: the code's menu at the caret, as a
+        // right-click opens it there (the tree's opens from the tree).
+        if self.code_focused
+            && ui::active_overlay(self).is_none()
+            && !(cmd || modifiers.alt() || modifiers.control())
+            && match key.as_ref() {
+                Key::Named(Named::F10) => modifiers.shift(),
+                Key::Named(Named::ContextMenu) => true,
+                _ => false,
+            }
+        {
+            return self.open_context_menu_at_caret();
+        }
         if !ui::active_overlay(self).is_some_and(|o| o.holds_keys())
             && let Some(msg) = self.debug_key(&key, modifiers)
         {

@@ -186,11 +186,11 @@ pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> El
     let mut buttons = row![space().width(Fill)].spacing(8);
     if insight.defined.is_some() {
         buttons = buttons.push(
-            button(text(tr!("Open Definition")).size(ts::BODY))
+            button(text(tr!("Open definition")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([4, 12])
                 .on_press(super::heard::said(
-                    tr!("Open Definition"),
+                    tr!("Open definition"),
                     Message::Hover(HoverMsg::InsightOpenDefinition),
                 )),
         );

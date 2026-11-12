@@ -404,6 +404,12 @@ pub(crate) enum ActiveOverlay<'a> {
     Hover(&'a crate::HoverState),
 }
 
+/// Where the panes are in the window: between the sidebar and the margin,
+/// under the sheet's header, over the bottom panel.
+pub(crate) fn panes_rect(app: &App) -> Option<iced::Rectangle> {
+    tutorial::region_rect(app, crate::app::tutorial::Anchor::Main)
+}
+
 /// The overlay on top right now, if any (see [`ActiveOverlay`]).
 pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
     use ActiveOverlay as O;

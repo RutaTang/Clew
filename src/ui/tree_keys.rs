@@ -21,6 +21,9 @@ pub(crate) struct TreeKeys<'a> {
     id: Id,
     /// The code has the keyboard: the tree lets it go.
     release: bool,
+    /// How far below the tree's top the row the keyboard rests on starts,
+    /// where it is scrolled to: where its menu opens from the keyboard.
+    cursor_row_y: Option<f32>,
 }
 
 impl<'a> TreeKeys<'a> {
@@ -29,7 +32,14 @@ impl<'a> TreeKeys<'a> {
             content: content.into(),
             id,
             release: false,
+            cursor_row_y: None,
         }
+    }
+
+    /// Where the row the keyboard rests on starts, below the tree's top.
+    pub(crate) fn cursor_row_y(mut self, y: Option<f32>) -> Self {
+        self.cursor_row_y = y;
+        self
     }
 
     /// The window gave the keyboard to the code — a file opened from the
@@ -90,6 +100,9 @@ pub(crate) fn tree_key(
     }
     Some(match key.as_ref() {
         keyboard::Key::Named(named) => match named {
+            // The row's menu, as on every desktop: ⇧F10, or the Menu key.
+            key::Named::F10 if modifiers.shift() => TreeKey::Menu,
+            key::Named::ContextMenu => TreeKey::Menu,
             key::Named::ArrowUp => TreeKey::Up,
             key::Named::ArrowDown => TreeKey::Down,
             key::Named::ArrowLeft => TreeKey::Left,
@@ -233,6 +246,18 @@ impl Widget<Message, iced::Theme, iced::Renderer> for TreeKeys<'_> {
                         state.focused = false;
                     }
                     shell.publish(Message::Window(WindowMsg::TreeKey(step)));
+                    // Its menu where its row is, as a right-click there
+                    // opens it: just under the row's start.
+                    if step == TreeKey::Menu
+                        && let Some(dy) = self.cursor_row_y
+                    {
+                        let b = layout.bounds();
+                        let y = (b.y + dy + super::TREE_ROW_H).clamp(b.y, b.y + b.height);
+                        shell.publish(Message::Project(crate::ProjectMsg::TreeMenuAt {
+                            x: b.x + 24.0,
+                            y,
+                        }));
+                    }
                     shell.capture_event();
                     shell.request_redraw();
                 }

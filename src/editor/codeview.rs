@@ -1681,7 +1681,7 @@ impl<P> State<P> {
 
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer> for CodeView<'_, Message>
 where
-    Renderer: text::Renderer<Font = Font>,
+    Renderer: text::Renderer<Font = Font> + iced::advanced::svg::Renderer,
     Renderer::Paragraph: Glyphs,
     Renderer::Paragraph: 'static,
 {
@@ -2121,6 +2121,14 @@ where
                 lh,
                 mark_room,
             ) {
+                if mark.ribbon {
+                    renderer.draw_svg(
+                        iced::advanced::svg::Svg::new(ribbon_handle(mark.color)),
+                        mark.bounds,
+                        mark.bounds,
+                    );
+                    continue;
+                }
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: mark.bounds,
@@ -2719,17 +2727,20 @@ struct BreakpointMark {
 }
 
 /// A mark in the gutter: where, how round, its colour, and whether filled
-/// or only outlined.
+/// or only outlined — or, `ribbon`, a bookmark's notched ribbon.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct GutterMark {
     bounds: Rectangle,
     radius: f32,
     color: Color,
     filled: bool,
+    ribbon: bool,
 }
 
-/// The width of a bookmark's ribbon at the gutter's left edge.
-const BOOKMARK_RIBBON_W: f32 = 2.5;
+/// The width of a bookmark's ribbon at the gutter's left edge: a
+/// bookmark's shape, notched at its foot — a bar of 2.5 px read as the
+/// caret's line, or a change's.
+const BOOKMARK_RIBBON_W: f32 = 4.0;
 
 /// The width of the git change bar at the gutter's very left.
 const GIT_BAR_W: f32 = 3.0;
@@ -2737,7 +2748,7 @@ const GIT_BAR_W: f32 = 3.0;
 /// Where a bookmark's ribbon starts: right of the git change bar, never on
 /// it — a modified line's bar and a bookmark's ribbon were one purple bar
 /// in one place, and a reader's own mark read as someone's change.
-const BOOKMARK_X: f32 = GIT_BAR_W + 1.5;
+const BOOKMARK_X: f32 = GIT_BAR_W + 0.5;
 
 /// The marks a line's gutter shows at its left, from the gutter's `x`, the
 /// row at `y` `lh` tall, `room` wide before the file's widest line number
@@ -2756,16 +2767,18 @@ fn gutter_marks(
 ) -> Vec<GutterMark> {
     let mut marks = Vec::new();
     if bookmark {
+        let height = (lh * 0.7).clamp(1.0, lh);
         marks.push(GutterMark {
             bounds: Rectangle {
                 x: x + BOOKMARK_X,
-                y: y + 2.0,
+                y: y + (lh - height) / 2.0,
                 width: BOOKMARK_RIBBON_W,
-                height: (lh - 4.0).max(1.0),
+                height,
             },
-            radius: 1.0,
+            radius: 0.0,
             color: theme::accent(),
             filled: true,
+            ribbon: true,
         });
     }
     if let Some(bp) = breakpoint {
@@ -2776,7 +2789,7 @@ fn gutter_marks(
         let lead = BOOKMARK_X + BOOKMARK_RIBBON_W + 1.0;
         let full = (lh * 0.55).min(9.0);
         let fits = room - lead - 0.5;
-        let d = if fits < full && fits >= 5.0 {
+        let d = if fits < full && fits >= 4.0 {
             fits
         } else {
             full
@@ -2801,9 +2814,23 @@ fn gutter_marks(
                 theme::danger()
             },
             filled: !bp.refused,
+            ribbon: false,
         });
     }
     marks
+}
+
+/// A bookmark's ribbon in `color`, notched at its foot, stretched to the
+/// box it is drawn in.
+fn ribbon_handle(color: Color) -> iced::advanced::svg::Handle {
+    let u = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let fill = format!("#{:02x}{:02x}{:02x}", u(color.r), u(color.g), u(color.b));
+    let doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 4 10' preserveAspectRatio='none'>\
+         <path d='M0 0H4V10L2 7.6L0 10Z' fill='{fill}' fill-opacity='{}'/></svg>",
+        color.a
+    );
+    iced::advanced::svg::Handle::from_memory(doc.into_bytes())
 }
 
 /// A line's gutter marks ([`gutter_marks`]), and where the pointer is over
@@ -3308,6 +3335,10 @@ mod tests {
             ribbon[0].bounds.x >= super::GIT_BAR_W,
             "beside the git change bar, not on it"
         );
+        // A bookmark's notched shape, wide enough to read as one: a bar of
+        // 2.5 px was taken for the caret's line or a change's bar.
+        assert!(ribbon[0].ribbon, "notched, as a bookmark is");
+        assert!(ribbon[0].bounds.width >= 4.0, "{:?}", ribbon[0]);
         // A file of five-digit line numbers leaves 13.5 px left of them:
         // the dot keeps to it, clear of the ribbon.
         let tight = gutter_marks(
@@ -3350,6 +3381,7 @@ mod tests {
             0.0,
         )[0];
         assert!(dot.filled && !ring.filled);
+        assert!(!dot.ribbon && !square.ribbon && !ring.ribbon);
         let both = gutter_marks(true, Some(plain), 0.0, 0.0, 20.0, 0.0);
         assert_eq!(both.len(), 2);
         assert!(
@@ -4535,6 +4567,19 @@ mod font_tests {
             _: impl FnOnce(Result<iced::advanced::image::Allocation, iced::advanced::image::Error>)
             + Send
             + 'static,
+        ) {
+        }
+    }
+
+    impl iced::advanced::svg::Renderer for Recorder {
+        fn measure_svg(&self, _: &iced::advanced::svg::Handle) -> iced::Size<u32> {
+            iced::Size::new(1, 1)
+        }
+        fn draw_svg(
+            &mut self,
+            _: iced::advanced::svg::Svg,
+            _: iced::Rectangle,
+            _: iced::Rectangle,
         ) {
         }
     }
