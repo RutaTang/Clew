@@ -19880,7 +19880,9 @@ fn the_debug_columns_keep_clear_of_the_ask_card() {
     drop(sim);
     // And the note on what ran, on its own line for want of room in the
     // header: it wrapped at the panel's full width, under the card.
-    let file = "the_rules_for_prices_discounts_and_taxes_in_every_country.py";
+    // Long enough that, wrapped at the panel's full width, it runs under
+    // the card.
+    let file = "the_rules_for_prices_discounts_taxes_and_rounding_in_every_country_and_every_currency_and_every_season_of_the_year_kept_apart_from_refunds.py";
     app.debug.ran_for = Some(file.into());
     app.debug.trace = vec![crate::TraceStop {
         reason: "breakpoint".into(),
@@ -19889,6 +19891,20 @@ fn the_debug_columns_keep_clear_of_the_ask_card() {
     app.debug.trace_rev += 1;
     let mut sim = sim_sized(&app, size);
     let note = text_at(&mut sim, move |t| t.contains(file), 0).expect("the note");
+    // Whole, it is longer than the room left of the card: it is kept clear
+    // by wrapping, not by being short.
+    let said = sim
+        .find(|c: iced_test::selector::Candidate<'_>| match c {
+            iced_test::selector::Candidate::Text { content, .. } if content.contains(file) => {
+                Some(content.to_string())
+            }
+            _ => None,
+        })
+        .expect("the note's words");
+    assert!(
+        note.x + super::steady::width_of(&said, super::ts::SMALL, crate::fonts::UI) > card.x,
+        "the note does not reach the card: {said}"
+    );
     assert!(
         note.x + note.width <= card.x,
         "the note under the card: {note:?} {card:?}"
