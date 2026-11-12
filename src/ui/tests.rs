@@ -10189,7 +10189,6 @@ fn a_call_stack_frames_line_number_fits_its_column() {
                 } if content.ends_with(&tail) => Some((bounds, content.to_string())),
                 _ => None,
             })
-            .ok()
             .expect("the frame's place");
         loc.width = super::steady::width_of(&shown, super::ts::CAPTION, crate::fonts::UI);
         let vars = text_at(&mut sim, |t| t == "VARIABLES", 0).expect("the next column");
