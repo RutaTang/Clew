@@ -185,7 +185,7 @@ fn balance_group(app: &App) -> Element<'_, Message> {
                         "Couldn't check it: {error}",
                         error = crate::app::tasks::plain_detail(e)
                     )),
-                    row![super::panes::settings_fix_button(field), refresh(false)]
+                    row![fix_in_settings(field), refresh(false)]
                         .spacing(8)
                         .align_y(iced::Center),
                 ),
@@ -211,6 +211,26 @@ fn balance_group(app: &App) -> Element<'_, Message> {
         }
     };
     form::group(tr!("Account"), None, None, vec![row])
+}
+
+/// The way to the Language model setting a failure is about, from within
+/// Settings: named by what to check there — a button called "Settings",
+/// in Settings, said nothing of where it went.
+fn fix_in_settings<'a>(field: crate::app::state::LlmField) -> Element<'a, Message> {
+    use crate::app::state::LlmField;
+    let label = match field {
+        LlmField::Key => tr!("Check the API key"),
+        LlmField::Model => tr!("Check the model"),
+        LlmField::BaseUrl => tr!("Check the base URL"),
+    };
+    button(text(label).size(ts::SMALL))
+        .style(theme::toolbar_button)
+        .padding([2, 8])
+        .on_press(super::heard::said(
+            label,
+            Message::Settings(crate::SettingsMsg::Fix(field)),
+        ))
+        .into()
 }
 
 /// What is left, as the page says it: each currency's amount, an empty

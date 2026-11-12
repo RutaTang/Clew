@@ -1858,14 +1858,14 @@ pub(crate) fn view_menu_top(app: &App) -> f32 {
 /// button it opens from, kept inside the window.
 pub(crate) fn view_menu_left(app: &App) -> f32 {
     let x = super::sheet::view_button_rect(app).map_or(0.0, |b| b.x);
-    x.min(app.window_width - STRIP_W - view_menu_w() - 8.0)
+    x.min(app.window_width - STRIP_W - view_menu_w(app) - 8.0)
         .max(8.0)
 }
 
 /// Width of the View menu, in the reader's language (its rows end in a
-/// check).
-pub(crate) fn view_menu_w() -> f32 {
-    let rows: Vec<(&str, f32)> = [
+/// check, the margin's with why it is not shown, where it is not).
+pub(crate) fn view_menu_w(app: &App) -> f32 {
+    let mut rows: Vec<(&str, f32)> = [
         tr!("Outline summaries"),
         tr!("File summary"),
         tr!("Explanation in blocks"),
@@ -1873,12 +1873,34 @@ pub(crate) fn view_menu_w() -> f32 {
         tr!("Inline blame"),
         tr!("Indent guides"),
         tr!("Minimap"),
-        tr!("Margin"),
     ]
     .into_iter()
     .map(|l| (l, 14.0))
     .collect();
+    let hidden_w = margin_hidden_why(app).map_or(0.0, |why| {
+        super::sheet::text_width(why, ts::SMALL, crate::fonts::UI) + MARGIN_WHY_GAP
+    });
+    rows.push((tr!("Margin"), 14.0 + hidden_w));
     menu_w(220.0, &rows, &[])
+}
+
+/// Room between the margin row's reason and its check.
+const MARGIN_WHY_GAP: f32 = 8.0;
+
+/// Why the margin, asked for, is not beside the code: the code split in
+/// two, or a window too narrow for it. Said on its View menu row: the
+/// margin went with no word, its row still ticked.
+pub(crate) fn margin_hidden_why(app: &App) -> Option<&'static str> {
+    if !app.show_right_panel || super::docs_stats::pane_cover(app).is_some() {
+        return None;
+    }
+    if app.proj.split {
+        Some(tr!("hidden while split"))
+    } else if app.window_width < super::panes::RIGHT_PANEL_MIN_WINDOW_W {
+        Some(tr!("hidden: window too narrow"))
+    } else {
+        None
+    }
 }
 
 /// Height of the View menu's panel.
@@ -1932,10 +1954,24 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
                     app.proj.explain.view,
                     Some(crate::explain::Node::Function { .. })
                 );
+            // The margin asked for and not shown: why, beside its tick.
+            let trailing = match (r, margin_hidden_why(app)) {
+                (ViewRow::Margin, Some(why)) => row![
+                    text(why)
+                        .size(ts::SMALL)
+                        .color(theme::dim())
+                        .wrapping(iced::widget::text::Wrapping::None),
+                    check(on)
+                ]
+                .spacing(MARGIN_WHY_GAP)
+                .align_y(iced::Center)
+                .into(),
+                _ => check(on),
+            };
             let item = menu_item(
                 Some(glyph),
                 label.into(),
-                check(on),
+                trailing,
                 enabled.then(|| r.message()),
             );
             // The minimap on, on a file too short for one: said why there is
@@ -1955,22 +1991,25 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
                         crate::codeview::MINIMAP_MIN_ROWS
                     ),
                     None,
-                    tooltip::Position::Right,
+                    tooltip::Position::Left,
                 )
             } else if enabled {
                 item
             } else {
+                // To its left, over the code: the menu stands by the
+                // strip, and on its right a tip was pushed back over the
+                // rows under it.
                 tip_at(
                     item,
                     tr!("Explain a function to read its explanation in blocks"),
                     None,
-                    tooltip::Position::Right,
+                    tooltip::Position::Left,
                 )
             }
         })
         .collect();
     let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
-        .width(view_menu_w())
+        .width(view_menu_w(app))
         .padding(MENU_PAD)
         .style(theme::modal_panel);
     modal(

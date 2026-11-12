@@ -27,16 +27,30 @@ const FIELD_INPUT: [fn(String) -> Message; 8] = [
 ];
 
 /// A field's label and the hint in it when it is empty.
-fn field_words(field: &Field) -> (String, String) {
+pub(crate) fn field_words(field: &Field) -> (String, String) {
     match field {
         // Its type, and that it may be put in words: the type alone
         // ("Order") did not say whether to type a value or describe one.
-        Field::Param { name, hint } => (
+        // A default is what an empty field leaves it, said so: "ALL — a
+        // value, or say it in words" read the default as the type.
+        Field::Param {
+            name,
+            hint,
+            default,
+        } => (
             name.clone(),
-            if hint.is_empty() {
-                tr!("a value, or say it in words").to_string()
-            } else {
-                tr!("{type} — a value, or say it in words", type = hint)
+            match (hint.is_empty(), default.is_empty()) {
+                (true, true) => tr!("a value, or say it in words").to_string(),
+                (false, true) => tr!("{type} — a value, or say it in words", type = hint),
+                (true, false) => tr!(
+                    "leave empty for {default}, or give a value",
+                    default = default
+                ),
+                (false, false) => tr!(
+                    "{type} — leave empty for {default}, or give a value",
+                    type = hint,
+                    default = default
+                ),
             },
         ),
         Field::Inputs => (tr!("Inputs").to_string(), tr!("e.g. 2, 3").to_string()),

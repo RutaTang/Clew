@@ -624,11 +624,13 @@ fn the_innermost_function_wins_over_its_type() {
         [
             Field::Param {
                 name: "sku".into(),
-                hint: String::new()
+                hint: String::new(),
+                default: String::new()
             },
             Field::Param {
                 name: "qty".into(),
-                hint: "1".into()
+                hint: String::new(),
+                default: "1".into()
             },
             Field::Context
         ],

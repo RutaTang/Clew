@@ -60,9 +60,13 @@ pub fn runnable(kind: &str) -> bool {
 /// One field of the inputs sheet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Field {
-    /// A parameter, with what its signature says of it — its type or its
-    /// default — as the field's hint.
-    Param { name: String, hint: String },
+    /// A parameter, with what its signature says of it: its type as the
+    /// field's hint, and its default, which an empty field leaves it.
+    Param {
+        name: String,
+        hint: String,
+        default: String,
+    },
     /// A function whose parameters could not be read off its signature:
     /// the inputs in one field.
     Inputs,
@@ -81,10 +85,14 @@ pub fn fields(target: &Target) -> Vec<Field> {
     let mut out = if target.is_type() {
         vec![Field::Construct, Field::Calls]
     } else {
-        match params(&target.source, &target.name, &target.lang) {
+        match param_parts(&target.source, &target.name, &target.lang) {
             Some(ps) => ps
                 .into_iter()
-                .map(|(name, hint)| Field::Param { name, hint })
+                .map(|(name, hint, default)| Field::Param {
+                    name,
+                    hint,
+                    default,
+                })
                 .collect(),
             None => vec![Field::Inputs],
         }
@@ -94,11 +102,12 @@ pub fn fields(target: &Target) -> Vec<Field> {
 }
 
 /// The parameters in the first parameter list after `name` in `source`, as
-/// (name, hint) — a receiver (`self`, `this`) left out, since it is not
-/// an input. `None` when there is no such list (Haskell, Erlang, Ruby
-/// without parentheses): the sheet then asks for the inputs whole. An
-/// empty list is `Some` of none.
-pub fn params(source: &str, name: &str, lang: &str) -> Option<Vec<(String, String)>> {
+/// (name, type, default) — either empty where the signature does not say
+/// it — a receiver (`self`, `this`) left out, since it is not an input.
+/// `None` when there is no such list (Haskell, Erlang, Ruby without
+/// parentheses): the sheet then asks for the inputs whole. An empty list
+/// is `Some` of none.
+pub fn param_parts(source: &str, name: &str, lang: &str) -> Option<Vec<(String, String, String)>> {
     let after = source.find(name).map_or(0, |at| at + name.len());
     let rest = &source[after..];
     // The list must open before the body does: `def f:` has none.
@@ -199,7 +208,7 @@ impl Angles {
 }
 
 /// One parameter's (name, hint), or `None` for a receiver or nothing.
-fn param(part: &str, lang: &str) -> Option<(String, String)> {
+fn param(part: &str, lang: &str) -> Option<(String, String, String)> {
     if part.is_empty() {
         return None;
     }
@@ -247,11 +256,7 @@ fn param(part: &str, lang: &str) -> Option<(String, String)> {
     if name.is_empty() || matches!(name.trim_start_matches('$'), "self" | "this" | "cls") {
         return None;
     }
-    let hint = default
-        .map(str::to_string)
-        .filter(|d| !d.is_empty())
-        .unwrap_or(ty);
-    Some((name, hint))
+    Some((name, ty, default.unwrap_or_default().to_string()))
 }
 
 /// Where a parameter's default begins: its first `=` outside brackets that
@@ -741,8 +746,16 @@ mod tests {
         }
     }
 
+    /// [`param_parts`], each as (name, hint): its default where it has
+    /// one, else its type.
     fn names(source: &str, name: &str, lang: &str) -> Option<Vec<(String, String)>> {
-        params(source, name, lang)
+        let parts = param_parts(source, name, lang)?;
+        Some(
+            parts
+                .into_iter()
+                .map(|(name, ty, default)| (name, if default.is_empty() { ty } else { default }))
+                .collect(),
+        )
     }
 
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -874,11 +887,13 @@ mod tests {
             vec![
                 Field::Param {
                     name: "a".into(),
-                    hint: "u32".into()
+                    hint: "u32".into(),
+                    default: String::new()
                 },
                 Field::Param {
                     name: "b".into(),
-                    hint: "u32".into()
+                    hint: "u32".into(),
+                    default: String::new()
                 },
                 Field::Context
             ]

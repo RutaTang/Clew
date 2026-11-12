@@ -955,8 +955,24 @@ fn suggest_prompt(target: &Target, fields: &[Field]) -> String {
     p.push_str("\nThe fields, in order:\n");
     for (i, field) in fields.iter().enumerate() {
         let what = match field {
-            Field::Param { name, hint } if hint.is_empty() => format!("the parameter `{name}`"),
-            Field::Param { name, hint } => format!("the parameter `{name}` ({hint})"),
+            Field::Param {
+                name,
+                hint,
+                default,
+            } => {
+                let said: Vec<String> = [
+                    (!hint.is_empty()).then(|| hint.clone()),
+                    (!default.is_empty()).then(|| format!("default {default}")),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                if said.is_empty() {
+                    format!("the parameter `{name}`")
+                } else {
+                    format!("the parameter `{name}` ({})", said.join(", "))
+                }
+            }
             Field::Inputs => "its inputs".to_string(),
             Field::Construct => "how it is made (a constructor call or a literal)".to_string(),
             Field::Calls => "the calls made on it, in order".to_string(),

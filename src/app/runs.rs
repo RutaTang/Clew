@@ -531,7 +531,14 @@ impl App {
         self.run_shown = next;
         match next {
             Some(next) => Task::batch([ended, self.show_run_tab(next)]),
-            None => ended,
+            // The last one closed: the panel goes with it, and the code and
+            // the margin have their room back — it stayed, saying "Nothing
+            // is running" over the four ways to run, once Close was pressed
+            // on the one run there was.
+            None => {
+                self.show_bottom = false;
+                ended
+            }
         }
     }
 

@@ -750,10 +750,20 @@ fn failure_controls(
     let link_w = |label: &str| super::steady::width_of(label, ts::SMALL, font) + 12.0 + 2.0;
     // A target the pointer finds: the glyph alone was 8 px of it.
     let dismiss_w = 11.0 + 14.0;
-    let retry_w = failure
-        .retry
-        .as_ref()
-        .map_or(0.0, |_| link_w(tr!("Try again")));
+    // Where trying again asks first — Explain All's cost, a key — it says
+    // so, as a menu's row that opens a dialog does: "Try again" opened the
+    // cost sheet where it read as done at once.
+    let asks = matches!(
+        failure.retry,
+        Some(Message::Project(crate::ProjectMsg::SetupShow(_)))
+            | Some(Message::Settings(crate::SettingsMsg::NeedKey))
+    );
+    let again = if asks {
+        tr!("Try again…")
+    } else {
+        tr!("Try again")
+    };
+    let retry_w = failure.retry.as_ref().map_or(0.0, |_| link_w(again));
     let settings_w = link_w(tr!("Settings"));
     // Settings gives way first, then Try again.
     let with_retry = retry_w > 0.0 && dismiss_w + retry_w <= room;
@@ -762,10 +772,7 @@ fn failure_controls(
     let mut row = row![].spacing(2).align_y(iced::Center);
     let mut width = 0.0;
     if with_retry {
-        row = row.push(link(
-            tr!("Try again"),
-            Message::Window(WindowMsg::RetryFailure),
-        ));
+        row = row.push(link(again, Message::Window(WindowMsg::RetryFailure)));
         width += retry_w;
     }
     if with_settings {

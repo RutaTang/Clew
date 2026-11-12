@@ -106,7 +106,7 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
         Anchor::ViewMenu => rect(
             view_menu_left(app),
             view_menu_top(app),
-            view_menu_w(),
+            view_menu_w(app),
             view_menu_height(),
         ),
         Anchor::Sidebar if sidebar > 1.0 => rect(0.0, top, sidebar, bot - top),
@@ -504,7 +504,7 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
             Vertical::Top,
             Padding {
                 top: view_menu_top(app),
-                left: (view_menu_left(app) + view_menu_w() + gap)
+                left: (view_menu_left(app) + view_menu_w(app) + gap)
                     .min(app.window_width - TUTORIAL_CARD_W - STRIP_W - gap),
                 ..Padding::ZERO
             },

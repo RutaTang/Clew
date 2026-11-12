@@ -1582,6 +1582,20 @@ fn note_action_w(label: &str, accent: bool, room: Option<f32>) -> f32 {
     13.0 + 6.0 + room.map_or(own, |room| room.max(own)).ceil() + 2.0 * NOTE_ACTION_PAD_X
 }
 
+/// Whether a failed card's Settings says its name: where Try again,
+/// Settings and Ask fit one row of a card `width` wide. Where they do not,
+/// it is its icon alone, its name in its tip — "Ask" fell onto a line of
+/// its own, under the two.
+fn card_settings_words(width: f32) -> bool {
+    let room = width - ACTIVE_NOTE_TEXT_INSET + NOTE_ACTION_PAD_X;
+    let row = [
+        note_action_w("", true, Some(note_explain_room())),
+        note_action_w(tr!("Settings"), false, None),
+        note_action_w(tr!("Ask"), true, None),
+    ];
+    wrapped_lines(&row, room) == 1
+}
+
 /// How many lines a row of the card's actions `widths` wide (2 apart)
 /// takes where `room` is all there is, as iced wraps it.
 fn wrapped_lines(widths: &[f32], room: f32) -> usize {
@@ -1629,7 +1643,12 @@ fn card_extra_lines(app: &App, node: &crate::explain::Node, width: f32) -> usize
         actions.push(note_action_w("", true, Some(note_explain_room())));
     }
     if slot && explain_failed_fix(app, node).is_some() {
-        actions.push(note_action_w(tr!("Settings"), false, None));
+        let words = card_settings_words(width);
+        actions.push(note_action_w(
+            if words { tr!("Settings") } else { "" },
+            false,
+            None,
+        ));
     }
     actions.push(note_action_w(tr!("Ask"), true, None));
     wrapped_lines(&facts, room) + wrapped_lines(&actions, room) - 2
@@ -1783,7 +1802,7 @@ fn notes_beside_code<'a>(
             notes.push((
                 0.0,
                 h,
-                active_note(app, name, tr!("file").into(), NoteOf::File),
+                active_note(app, name, tr!("file").into(), NoteOf::File, size.width),
             ));
         }
         for (sym, &ordinal) in v.symbols.iter().zip(&ordinals) {
@@ -1841,6 +1860,7 @@ fn notes_beside_code<'a>(
                     sym.name.clone(),
                     meta,
                     NoteOf::Function { sym, ordinal },
+                    size.width,
                 )
             } else {
                 let summary = cached
@@ -2175,6 +2195,7 @@ fn active_note<'a>(
     name: String,
     meta: String,
     of: NoteOf<'a>,
+    width: f32,
 ) -> Element<'a, Message> {
     let code = matches!(of, NoteOf::Function { .. });
     // The file's history on its way (its blame being read): the History
@@ -2314,14 +2335,20 @@ fn active_note<'a>(
         // a narrow card the reason's "check the base URL in Settings" was
         // cut short, and nothing led there.
         if let Some(field) = fix {
-            actions = actions.push(action(
+            let words = card_settings_words(width);
+            let settings = action(
                 Glyph::Settings,
                 tr!("Settings").into(),
                 false,
                 None,
-                true,
+                words,
                 Message::Settings(crate::SettingsMsg::Fix(field)),
-            ));
+            );
+            actions = actions.push(if words {
+                Element::from(settings)
+            } else {
+                chrome_tip(settings, tr!("Settings"), None)
+            });
         }
     } else if explaining {
         actions = actions.push(

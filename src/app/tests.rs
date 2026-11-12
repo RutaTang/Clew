@@ -8255,6 +8255,7 @@ fn runs_open_side_by_side_each_in_its_own_tab() {
     assert_eq!(app.run_tabs(), [RunTab::Real(second_tab)]);
     assert_eq!(app.shown_run_tab(), Some(RunTab::Real(second_tab)));
     assert_eq!(app.debug.tab, second_tab);
+    assert!(app.show_bottom, "a run is still there to read");
 }
 
 /// Stop ends the program, and its tab stays with what it printed, ended:
@@ -8289,6 +8290,9 @@ fn stop_keeps_the_tab_and_again_runs_it_in_it() {
     let _ = app.update(Message::Debug(DebugMsg::CloseTab(RunTab::Real(tab))));
     assert!(app.debug.session.is_none());
     assert!(app.run_tabs().is_empty());
+    // L16: the last run closed, the panel goes with it — it stayed saying
+    // "Nothing is running", the code and the margin short of its room.
+    assert!(!app.show_bottom, "the empty panel stays");
 }
 
 /// Stopping during `Launching` — before the adapter handed back a client —
@@ -21579,11 +21583,9 @@ fn a_debug_runs_stops_are_traced_and_walked() {
     assert_eq!(tour.title, "Run: app");
     // M15: dated, as runs of one program share its name.
     assert!(tour.made.is_some(), "which run it shows");
-    assert!(
-        crate::ui::walk_subtitle(tour).ends_with(", just now"),
-        "{}",
-        crate::ui::walk_subtitle(tour)
-    );
+    // L5: under "Debug run of app", when alone — not the run named again.
+    assert_eq!(crate::ui::walk_title(tour), "Debug run of app");
+    assert_eq!(crate::ui::walk_subtitle(tour), "just now");
     let symbols: Vec<&str> = tour
         .steps
         .iter()
@@ -35278,7 +35280,7 @@ fn an_export_names_a_runs_tour_in_the_language_spoken() {
     let written =
         crate::i18n::with_lang(crate::i18n::Lang::Fr, || app.export_markdown()).expect("an export");
     let title = crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
-        tr!("Run: {program}", program = "main.py")
+        tr!("Debug run of {program}", program = "main.py")
     });
     let scope = crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
         tr!("Debug run ({program})", program = "main.py")

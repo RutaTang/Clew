@@ -1488,6 +1488,11 @@ impl App {
                 }
             }
             self.proj.active = 0;
+            // The margin is back, beside the pane left: its card is of
+            // that pane's caret — it went on telling of the closed one's
+            // ("subtotal, line 11" over line 1) until a click in the code.
+            let follow = self.follow_caret(Task::none());
+            return Task::batch([follow, self.sync_reading_context()]);
         } else {
             self.proj.split = true;
             // Duplicate the current file for side-by-side reading.

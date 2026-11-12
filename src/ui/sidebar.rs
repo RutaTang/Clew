@@ -350,14 +350,21 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
 
 /// A tour's title as shown: a run's plain one ("Run: main.py", kept in
 /// English as made) said in the language spoken now — it stayed English
-/// beside French words.
+/// beside French words — and as what it is, a debug run: "Run: main.py"
+/// over "Debug run (main.py)" said it two ways.
 pub(crate) fn walk_title(wt: &crate::walkthrough::Walkthrough) -> String {
-    match wt.scope.strip_prefix("@trace ") {
-        Some(program) if wt.title == crate::walkthrough::plain_run_title(program) => {
-            tr!("Run: {program}", program = program)
-        }
-        _ => wt.title.clone(),
+    match plain_run_of(wt) {
+        Some(program) => tr!("Debug run of {program}", program = program),
+        None => wt.title.clone(),
     }
+}
+
+/// The program a run's tour made without a model is of: its title, as
+/// shown, already names it.
+fn plain_run_of(wt: &crate::walkthrough::Walkthrough) -> Option<&str> {
+    wt.scope
+        .strip_prefix("@trace ")
+        .filter(|program| wt.title == crate::walkthrough::plain_run_title(program))
 }
 
 /// A step's title as shown: a run's step made without a model named by its
@@ -374,16 +381,18 @@ pub(crate) fn step_title(step: &crate::walkthrough::Step) -> String {
 }
 
 /// What a tour's row says under its title: its scope, and when a run's
-/// tour was made — "Debug run (main.py), 5 min ago" — as every run of one
-/// program is named alike.
+/// tour was made — "Debug run (main.py), 5 min ago", or "5 min ago" alone
+/// under "Debug run of main.py" — as every run of one program is named
+/// alike.
 pub(crate) fn walk_subtitle(wt: &crate::walkthrough::Walkthrough) -> String {
     let scope = scope_label(&wt.scope);
-    match wt.made {
-        Some(made) => tr!(
-            "{what}, {when}",
-            what = scope,
-            when = crate::app::ask_sessions::when(made, crate::app::ask_sessions::now())
-        ),
+    let when = wt
+        .made
+        .map(|made| crate::app::ask_sessions::when(made, crate::app::ask_sessions::now()));
+    match when {
+        // Its title says what it is: under it, when ("5 min ago").
+        Some(when) if plain_run_of(wt).is_some() => when,
+        Some(when) => tr!("{what}, {when}", what = scope, when = when),
         None => scope,
     }
 }

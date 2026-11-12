@@ -10144,9 +10144,9 @@ fn walkthroughs_are_named_as_their_actions_in_the_language_spoken_now() {
         scope: "@trace main.py".into(),
         steps: Vec::new(),
     };
-    assert_eq!(super::walk_title(&run), "Run: main.py");
+    assert_eq!(super::walk_title(&run), "Debug run of main.py");
     with_lang(Lang::Fr, || {
-        assert_eq!(super::walk_title(&run), "Exécution\u{a0}: main.py");
+        assert_eq!(super::walk_title(&run), "Exécution de débogage de main.py");
         assert_eq!(
             super::scope_label("@diff last commit"),
             "Relire les modifications (dernier commit)"
@@ -13765,6 +13765,56 @@ fn the_view_menu_shows_and_hides_the_margin() {
     assert!(!shows(&mut sim, "Toggle panel"), "no toggle in the bars");
 }
 
+/// M9: the margin, asked for, is hidden while the code is split — and its
+/// View menu row says so beside its tick, where it went with no word.
+/// Once the split closes, its card is of the caret in the pane left: it
+/// went on telling of the closed pane's ("subtotal, line 11" over line 1).
+#[test]
+fn the_margin_says_why_it_is_hidden_and_follows_the_pane_left() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let sym = |name: &str, line: usize| crate::outline::Symbol {
+        name: name.into(),
+        kind: "function".into(),
+        line,
+        end_line: line,
+    };
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![sym("line_0", 1), sym("line_10", 11)];
+    app.proj.panes[0].as_mut().unwrap().caret = Some((0, 0));
+    app.show_view_menu = true;
+    assert!(!shows(&mut sim_of(&app), "hidden while split"));
+    let _ = app.update(Message::Editor(crate::EditorMsg::ToggleSplit));
+    assert!(app.proj.split);
+    let mut sim = sim_of(&app);
+    assert!(
+        shows(&mut sim, "hidden while split"),
+        "the row says nothing"
+    );
+    let margin = text_at(&mut sim, |t| t == "Margin", 0).expect("its row");
+    let why = text_at(&mut sim, |t| t == "hidden while split", 0).unwrap();
+    assert!(
+        (why.center_y() - margin.center_y()).abs() < 2.0,
+        "on its row"
+    );
+    drop(sim);
+    app.show_view_menu = false;
+    // The right half read, its caret on line 11, and its card with it.
+    app.proj.panes[1].as_mut().unwrap().caret = Some((10, 0));
+    let _ = app.follow_caret(iced::Task::none());
+    let named = |app: &App| match &app.proj.explain.view {
+        Some(crate::explain::Node::Function { name, .. }) => name.clone(),
+        other => format!("{other:?}"),
+    };
+    assert_eq!(named(&app), "line_10");
+    let _ = app.update(Message::Editor(crate::EditorMsg::ToggleSplit));
+    assert!(!app.proj.split);
+    assert_eq!(named(&app), "line_0", "the card of the pane closed");
+    // A narrow window says why too.
+    app.show_view_menu = true;
+    app.window_width = 900.0;
+    assert!(shows(&mut sim_of(&app), "hidden: window too narrow"));
+}
+
 /// On Linux and Windows the window is borderless and Clew draws the design's
 /// 1 px border round it, the room inside it what everything is laid out in;
 /// maximized, there is no frame, and restored, it is back. macOS keeps the
@@ -16516,11 +16566,11 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
         rel: "src/lib.rs".into(),
         line: 1,
         end_line: 1,
-        lang: "rust".into(),
-        source: "fn total(cart: &Cart, coupon: Option<&str>) -> f64 { 0.0 }".into(),
+        lang: "python".into(),
+        source: "def total(cart: Cart, rules: list[Discount] = ALL, note=None):".into(),
     };
     let fields = crate::fakerun::fields(&target);
-    assert_eq!(fields.len(), 3);
+    assert_eq!(fields.len(), 4);
     assert!(matches!(&fields[0], Field::Param { name, .. } if name == "cart"));
     app.proj.fake.sheet = Some(crate::app::fakerun::Sheet {
         values: vec![String::new(); fields.len()],
@@ -16534,7 +16584,17 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
     assert!(shows(&mut sim, "Fake run"));
     assert!(shows(&mut sim, "total"));
     assert!(shows(&mut sim, "cart"));
-    assert!(shows(&mut sim, "coupon"));
+    assert!(shows(&mut sim, "rules"));
+    // Its type, and its default as what an empty field leaves it: "ALL —
+    // a value, or say it in words" read the default as the type (L1).
+    let fields = &app.proj.fake.sheet.as_ref().unwrap().fields;
+    let hint = |i: usize| super::fakerun::field_words(&fields[i]).1;
+    assert_eq!(hint(0), "Cart — a value, or say it in words");
+    assert_eq!(
+        hint(1),
+        "list[Discount] — leave empty for ALL, or give a value"
+    );
+    assert_eq!(hint(2), "leave empty for None, or give a value");
     assert!(shows(&mut sim, "Anything else it depends on"));
     assert!(shows(&mut sim, "Suggest inputs"));
     let run = click(sim_of(&app), "Run");
@@ -17884,16 +17944,22 @@ fn a_balance_check_that_failed_leads_to_its_setting() {
     let mut page = sim_tall(super::usage::usage_page(&app));
     assert!(shows(&mut page, "nothing answered at that address"));
     assert!(!shows(&mut page, "in Settings"));
+    // Named by what to check there: a button called "Settings", in
+    // Settings, said nothing of where it went (L3).
+    assert!(!shows(&mut page, "Settings"));
     drop(page);
     assert!(
-        click(sim_tall(super::usage::usage_page(&app)), "Settings")
-            .iter()
-            .any(|m| matches!(
-                m,
-                Message::Settings(crate::SettingsMsg::Fix(
-                    crate::app::state::LlmField::BaseUrl
-                ))
-            )),
+        click(
+            sim_tall(super::usage::usage_page(&app)),
+            "Check the base URL"
+        )
+        .iter()
+        .any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::Fix(
+                crate::app::state::LlmField::BaseUrl
+            ))
+        )),
         "its Settings"
     );
 }
@@ -19303,9 +19369,16 @@ fn a_notes_failure_settings_can_fix_has_its_settings() {
     app.proj.explain.node_failed = Some((node.clone(), said(), None));
     assert!(shows(&mut sim_of(&app), "Try again"));
     assert!(!shows(&mut sim_of(&app), "Settings"), "no setting to fix");
-    let plain = super::panes::raised_card_h(&app, &node, 150.0, 2000.0);
+    let widths: Vec<f32> = (150..=420).step_by(2).map(|w| w as f32).collect();
+    let plain: Vec<f32> = widths
+        .iter()
+        .map(|&w| super::panes::raised_card_h(&app, &node, w, 2000.0))
+        .collect();
     app.proj.explain.node_failed = Some((node.clone(), said(), Some(LlmField::BaseUrl)));
     assert!(shows(&mut sim_of(&app), "Try again"));
+    // In a margin with room for it, named.
+    let usual = app.right_width;
+    app.right_width = 480.0;
     assert!(
         click(sim_of(&app), "Settings").iter().any(|m| matches!(
             m,
@@ -19313,8 +19386,53 @@ fn a_notes_failure_settings_can_fix_has_its_settings() {
         )),
         "Settings opens at the base URL"
     );
-    // Narrow, it takes a line of its own, added to the card.
-    assert!(super::panes::raised_card_h(&app, &node, 150.0, 2000.0) > plain);
+    app.right_width = usual;
+    // Where it pushes Ask onto a line more, the card counts the line; it
+    // is never counted shorter.
+    let fixed: Vec<f32> = widths
+        .iter()
+        .map(|&w| super::panes::raised_card_h(&app, &node, w, 2000.0))
+        .collect();
+    assert!(plain.iter().zip(&fixed).all(|(p, f)| f >= p));
+    assert!(
+        plain.iter().zip(&fixed).any(|(p, f)| f > p),
+        "never counted"
+    );
+    // L6: at the margin's width Ask stays on the row of Try again — it fell
+    // onto a line of its own, under the two — Settings its icon alone
+    // where the three would not fit, its name in its tip.
+    let mut sim = sim_of(&app);
+    let again = text_at(&mut sim, |t| t == "Try again", 0).expect("Try again");
+    let ask = text_at(&mut sim, |t| t == "Ask", 0).expect("Ask");
+    assert!(
+        (again.center_y() - ask.center_y()).abs() < 2.0,
+        "Ask on a line of its own: {again:?} {ask:?}"
+    );
+}
+
+/// L2: a failure whose Try again asks first — Explain All's cost sheet —
+/// says so with an ellipsis, as a row that opens a dialog does: it read as
+/// done at once, and opened the sheet.
+#[test]
+fn a_retry_that_asks_first_says_so() {
+    let mut app = reader_app();
+    app.say_failure(
+        "Explain couldn't continue: couldn't reach the AI provider".into(),
+        Some(Message::Project(crate::ProjectMsg::SetupShow(
+            crate::app::setup::SetupMode::Explain,
+        ))),
+        crate::app::state::FailureOf::Explain,
+    );
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(text_at(&mut sim, |t| t == "Try again…", 0).is_some());
+    drop(sim);
+    app.say_failure(
+        "Explain couldn't continue: couldn't reach the AI provider".into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(text_at(&mut sim, |t| t == "Try again", 0).is_some());
 }
 
 /// A function's own Explain that fails says why on its card, with Try

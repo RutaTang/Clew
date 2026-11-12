@@ -527,10 +527,10 @@ pub fn from_trace(root: &Path, program: &str, stops: &[crate::TraceStop]) -> Opt
     })
 }
 
-/// The title of a run's tour as made without a model: kept in English, the
-/// key it is translated by where it is shown (`ui::sidebar::walk_title`) —
-/// made in the language spoken then, it stayed in it after Display
-/// language changed.
+/// The title of a run's tour as made without a model: kept as made, a mark
+/// of such a tour, and said where it is shown (`ui::sidebar::walk_title`)
+/// in the language spoken then — made in the language spoken at the time,
+/// it stayed in it after Display language changed.
 pub fn plain_run_title(program: &str) -> String {
     format!("Run: {program}")
 }
