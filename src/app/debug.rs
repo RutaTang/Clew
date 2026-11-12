@@ -89,6 +89,12 @@ impl App {
         if matches!(lang, dap::Lang::Native | dap::Lang::CSharp) {
             return None;
         }
+        // A test file runs its tests (under pytest): Run on
+        // tests/test_pricing.py ran main.py, and said the test "does not
+        // run on its own".
+        if lang == dap::Lang::Python && clew_core::debugadapter::is_python_test(abs) {
+            return Some(abs.clone());
+        }
         // A module that only defines things does nothing run on its own:
         // the project's one program start in its language runs instead —
         // what the reader meant. Run on a library module of a project with

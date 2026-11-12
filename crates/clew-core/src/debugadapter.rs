@@ -856,12 +856,35 @@ fn python_with(
             launch.insert("module".into(), json!(package.module));
         }
     }
+    // A test file is run as its tests are: under pytest, which collects
+    // and runs them. Run as a script it defined its tests and ended, and
+    // Run picked the project's program instead, saying the test "does not
+    // run on its own".
+    if probe.has_pytest
+        && is_python_test(Path::new(program))
+        && let Some(launch) = launch.as_object_mut()
+    {
+        launch.remove("program");
+        launch.insert("module".into(), json!("pytest"));
+        let mut test_args = vec![json!(program)];
+        test_args.extend(args.iter().map(|a| json!(a)));
+        launch.insert("args".into(), json!(test_args));
+    }
     Ok(Resolution::Ready(AdapterSpec {
         command: python.to_path_buf(),
         args: vec!["-m".into(), "debugpy.adapter".into()],
         launch,
         transport: AdapterTransport::Stdio,
     }))
+}
+
+/// Whether `file` is a pytest test file by its name, as pytest finds them
+/// by default: `test_*.py` or `*_test.py`.
+pub fn is_python_test(file: &Path) -> bool {
+    let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    name.ends_with(".py") && (name.starts_with("test_") || name.ends_with("_test.py"))
 }
 
 /// The package a Python file is a module of: the folder the outermost
@@ -990,11 +1013,14 @@ struct PythonProbe {
     has_debugpy: bool,
     /// Running inside a virtualenv (`sys.prefix != sys.base_prefix`).
     in_venv: bool,
+    /// `pytest` is importable: a test file is run under it.
+    has_pytest: bool,
 }
 
 const PROBE: &str = "import sys, importlib.util\n\
 print(int(importlib.util.find_spec('debugpy') is not None), \
-int(sys.prefix != getattr(sys, 'base_prefix', sys.prefix)))";
+int(sys.prefix != getattr(sys, 'base_prefix', sys.prefix)), \
+int(importlib.util.find_spec('pytest') is not None))";
 
 /// Ask `python` about itself, time-boxed.
 fn probe_python(python: &Path) -> Result<PythonProbe, String> {
@@ -1016,6 +1042,7 @@ fn probe_python_within(python: &Path, limit: Duration) -> Result<PythonProbe, St
         (Some(debugpy), Some(venv)) => Ok(PythonProbe {
             has_debugpy: debugpy == "1",
             in_venv: venv == "1",
+            has_pytest: fields.next() == Some("1"),
         }),
         _ => Err(format!("unexpected answer from {}", python.display())),
     }
@@ -1648,6 +1675,39 @@ mod tests {
                 mark = dir.join("installed").display(),
             ),
         )
+    }
+
+    /// A test file runs its tests: under pytest, which is installed, with
+    /// the file and the run's arguments its arguments. Run as a script it
+    /// defined its tests and ended. Without pytest, or for a file that is
+    /// no test, nothing changes.
+    #[test]
+    #[cfg(unix)]
+    fn a_test_file_runs_under_pytest() {
+        let dir = TempDir::new("dap-py-test");
+        let with_pytest = fake_python(&dir, "echo '1 1 1'");
+        let launch = |python: &Path, program: &str| {
+            let Resolution::Ready(spec) =
+                python_with(python, program, &["-q".into()], Path::new("/p")).unwrap()
+            else {
+                panic!("not ready");
+            };
+            spec.launch
+        };
+        let test = launch(&with_pytest, "/p/tests/test_pricing.py");
+        assert_eq!(test["module"], "pytest");
+        assert!(test.get("program").is_none(), "{test}");
+        assert_eq!(test["args"], json!(["/p/tests/test_pricing.py", "-q"]));
+        let script = launch(&with_pytest, "/p/main.py");
+        assert_eq!(script["program"], "/p/main.py");
+        assert!(script.get("module").is_none());
+        let dir = TempDir::new("dap-py-no-pytest");
+        let without = fake_python(&dir, "echo '1 1 0'");
+        let test = launch(&without, "/p/tests/test_pricing.py");
+        assert_eq!(test["program"], "/p/tests/test_pricing.py");
+        assert!(is_python_test(Path::new("a/b_test.py")));
+        assert!(!is_python_test(Path::new("a/testing.py")));
+        assert!(!is_python_test(Path::new("a/test_x.txt")));
     }
 
     /// F3/F14: a missing debugpy is a consent request, not an install; the

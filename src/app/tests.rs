@@ -29145,6 +29145,25 @@ fn run_on_a_module_of_defs_runs_the_projects_main() {
     let _ = app.update(Message::Debug(DebugMsg::Run));
     let session = app.debug.session.as_ref().expect("a run");
     assert_eq!(session.program, root.join("main.py"));
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+
+    // A test file of definitions runs its tests (pytest is given it): it
+    // ran main.py, and said the test "does not run on its own".
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("tests/test_pricing.py"),
+        "from pricing import price\n\ndef test_price():\n    assert price() == 3\n",
+    )
+    .unwrap();
+    app.proj.symbol_index_by_file.insert(
+        root.join("tests/test_pricing.py"),
+        Arc::new(vec![symbol("tests/test_pricing.py", "test_price", None)]),
+    );
+    open_synchronously(&mut app, "tests/test_pricing.py", None);
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    let session = app.debug.session.as_ref().expect("a run");
+    assert_eq!(session.program, root.join("tests/test_pricing.py"));
+    assert_eq!(app.debug.ran_for, None);
 }
 
 /// D1-10: hovering a word while the debuggee is paused evaluates it in the top
