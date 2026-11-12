@@ -22,6 +22,9 @@ pub struct Picker {
     /// that is gone — a dialog closed by its ×, Settings by a click away —
     /// is not this drop-down's, now not drawn.
     pub owner: Option<String>,
+    /// How many times the window had been built as it opened
+    /// (`ui::picker::drawn`).
+    pub built: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +46,7 @@ impl App {
                 }
                 picker.at = picker.at.min(picker.picks.len() - 1);
                 picker.owner = self.picker_owner();
+                picker.built = crate::ui::picker::built();
                 let n = picker.picks.len();
                 let at = picker.at;
                 self.picker = Some(picker);
@@ -64,20 +68,48 @@ impl App {
         }
     }
 
-    /// What a drop-down opened now is opened over.
+    /// What a drop-down opened now is opened over: a dialog, or what else
+    /// takes every press — not a peek at a symbol under the pointer, which
+    /// comes and goes as the pointer moves (a list opened over one went
+    /// with it, under the pointer on its way to a row).
     fn picker_owner(&self) -> Option<String> {
-        crate::ui::active_overlay(self).map(|o| o.scene())
+        crate::ui::active_overlay(self)
+            .filter(|o| o.holds_keys())
+            .map(|o| o.scene())
     }
 
-    /// An open drop-down whose dialog went, or that a dialog came up over
-    /// — a question that takes every press — is put away: it stood open
-    /// over the question, and came back once it was answered.
+    /// Whether the open drop-down is still the one the window shows: what
+    /// it was opened over is still there, and its list was drawn.
+    fn picker_stands(&self, picker: &Picker) -> bool {
+        picker.owner == self.picker_owner() && crate::ui::picker::drawn(picker.key, picker.built)
+    }
+
+    /// An open drop-down whose dialog went, that a dialog came up over — a
+    /// question that takes every press — or whose list is no longer drawn
+    /// (its rows changed) is put away: it stood open over the question,
+    /// and came back once it was answered.
     pub(crate) fn drop_stale_picker(&mut self) {
-        if self
-            .picker
-            .as_ref()
-            .is_some_and(|p| p.owner != self.picker_owner())
-        {
+        if self.picker.as_ref().is_some_and(|p| !self.picker_stands(p)) {
+            self.picker = None;
+        }
+    }
+
+    /// A row of the open drop-down picked other than from its list — by
+    /// voice, which says each row — puts it away, picked: it stood open
+    /// on the row it had.
+    pub(crate) fn picked_elsewhere(&mut self, message: &Message) {
+        let Some(picker) = &self.picker else {
+            return;
+        };
+        if matches!(message, Message::Picker(_)) {
+            return;
+        }
+        let kind = std::mem::discriminant(message);
+        let said = std::cell::OnceCell::new();
+        if picker.picks.iter().any(|(_, send)| {
+            std::mem::discriminant(send) == kind
+                && format!("{send:?}") == *said.get_or_init(|| format!("{message:?}"))
+        }) {
             self.picker = None;
         }
     }
@@ -92,12 +124,12 @@ impl App {
     ) -> Option<Task<Message>> {
         use keyboard::Key;
         use keyboard::key::Named;
-        let owner = self.picker_owner();
-        let picker = self.picker.as_mut()?;
-        if picker.owner != owner {
+        let stands = self.picker_stands(self.picker.as_ref()?);
+        if !stands {
             self.picker = None;
             return None;
         }
+        let picker = self.picker.as_mut()?;
         let n = picker.picks.len();
         let chord = modifiers.command() || modifiers.control() || modifiers.alt();
         if chord {

@@ -266,6 +266,12 @@ impl App {
                 // program named after the folder sent the reader to build
                 // one that would never be.
                 Err(_) if !root.join(".clew").join("launch.json").exists() => {
+                    // A folder with no code has nothing to run: it was told
+                    // to write a launch file for a program it has not got.
+                    if self.no_code() {
+                        self.status = tr!("There is nothing to run in this folder.").into();
+                        return Task::none();
+                    }
                     let lang = self.active_viewer().and_then(|v| v.lang_key);
                     if matches!(lang, None | Some("rust"))
                         && crate::app::tasks::cargo_binary(&root) == Some(None)

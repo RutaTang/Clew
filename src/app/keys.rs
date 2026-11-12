@@ -98,10 +98,13 @@ impl App {
             self.ring_code = self.code_focused;
             self.ring_menu = ui::active_overlay(self).is_some_and(|o| o.is_menu());
         }
-        self.ring = Some(if field {
-            ui::RingAsk::AfterFocused { forward }
-        } else {
-            ui::RingAsk::Start { forward }
+        self.ring = Some(match &self.picker {
+            Some(picker) if !field => ui::RingAsk::AfterPicker {
+                forward,
+                key: picker.key,
+            },
+            _ if field => ui::RingAsk::AfterFocused { forward },
+            _ => ui::RingAsk::Start { forward },
         });
         self.code_focused = false;
         self.pending_g = false;

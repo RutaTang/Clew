@@ -529,7 +529,13 @@ impl App {
                         );
                     }
                 }
-                Err(why) => failed.push(format!("{} ({why})", found.config.name)),
+                // Why, in the reader's language: "(the server is not
+                // running)" stood in English in a Chinese line.
+                Err(why) => failed.push(format!(
+                    "{} ({})",
+                    found.config.name,
+                    crate::i18n::message(&why.to_string())
+                )),
             }
         }
         self.status = if failed.is_empty() {

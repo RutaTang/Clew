@@ -471,6 +471,47 @@ impl App {
         self.proj.gone_files.insert(abs.to_path_buf());
     }
 
+    /// The open of `abs` into `pane` failed, the file gone: said so, and
+    /// the trail put back on the visit the pane still shows — whichever way
+    /// it had stepped (a jump or Forward onto it, Back or a click in the
+    /// trail), not on as though the file had been read, nor a visit further
+    /// back than the one on screen.
+    pub(crate) fn gone_on_load(&mut self, pane: usize, abs: &Path) -> Task<Message> {
+        self.say_gone(abs);
+        if self
+            .proj
+            .history
+            .current_loc()
+            .is_none_or(|l| l.path != abs)
+        {
+            return Task::none();
+        }
+        let shown = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(|v| v.as_ref())
+            .map(|v| v.abs.clone());
+        let mut back = self.proj.history.clone();
+        let mut forward = self.proj.history.clone();
+        let to = match shown {
+            Some(shown) if back.back().is_some_and(|l| l.path == shown) => Some(back),
+            Some(shown) if forward.forward().is_some_and(|l| l.path == shown) => Some(forward),
+            // Nothing on screen to go back to: the visit before it.
+            _ => {
+                let mut before = self.proj.history.clone();
+                before.back().map(|_| before)
+            }
+        };
+        match to {
+            Some(history) => {
+                self.proj.history = history;
+                self.save_history()
+            }
+            None => Task::none(),
+        }
+    }
+
     pub(crate) fn on_file_loaded(
         &mut self,
         req: u64,
@@ -501,24 +542,12 @@ impl App {
                 // A file of this machine's no longer there is said so, and
                 // left out of the trail: "empty.py: cannot resolve path: No
                 // such file or directory (os error 2)" stood for it.
-                let mut saved = Task::none();
-                if self.is_gone(&abs) {
-                    self.say_gone(&abs);
-                    // Gone between the jump and its load: the trail goes
-                    // back to the visit still shown, not on as though it
-                    // had been read.
-                    if self
-                        .proj
-                        .history
-                        .current_loc()
-                        .is_some_and(|l| l.path == abs)
-                    {
-                        self.proj.history.back();
-                        saved = self.save_history();
-                    }
+                let saved = if self.is_gone(&abs) {
+                    self.gone_on_load(pane, &abs)
                 } else {
                     self.status = format!("{rel}: {e}");
-                }
+                    Task::none()
+                };
                 self.forget_history_open(&abs);
                 return saved;
             }
@@ -832,6 +861,8 @@ impl App {
         // Opening a file leaves the doc page (and the overview/stats homes).
         self.proj.docs.page = None;
         let abs = root.join(&rel);
+        // Back again (restored, or made anew): in the trail again.
+        self.proj.gone_files.remove(&abs);
         let git_rel = rel.clone();
         let lang_key = highlight::detect(&abs);
         let source = Arc::new(source);
@@ -988,6 +1019,8 @@ impl App {
             self.proj.docs.page = None;
         }
         let abs = root.join(&rel);
+        // Back again (restored, or made anew): in the trail again.
+        self.proj.gone_files.remove(&abs);
         // Prepare markdown cells first (this may spawn math/mermaid renders).
         let mut tasks: Vec<Task<Message>> = Vec::new();
         let mut prepared: Vec<NbCell> = Vec::new();

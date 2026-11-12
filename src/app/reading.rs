@@ -38,6 +38,37 @@ enum Kept {
 }
 
 impl App {
+    /// Back or Forward (`step`), past visits to files of this machine's no
+    /// longer there, as the trail leaves them out: each is marked gone. The
+    /// way back stopped at a deleted file — its open failed with the
+    /// system's error, the trail moved onto it, and the next Back stopped
+    /// there again. With only gone files that way, the trail stays where it
+    /// is and says so.
+    fn step_trail(&mut self, step: fn(&mut History, usize) -> Option<Loc>) -> Task<Message> {
+        let before = self.proj.history.clone();
+        let rows = self.first_rows();
+        let mut gone: Option<std::path::PathBuf> = None;
+        while let Some(loc) = step(&mut self.proj.history, rows) {
+            if !self.is_gone(&loc.path) {
+                let saved = self.save_history();
+                let opened = self.open_file(loc.path, loc.line, false);
+                // Passed over on the way: said so — the reader expected it,
+                // and landed on another file with no reason given.
+                if let Some(path) = &gone {
+                    self.status = tr!("{file} is no longer there", file = self.rel_of(path));
+                }
+                return Task::batch([saved, opened]);
+            }
+            self.proj.gone_files.insert(loc.path.clone());
+            gone = Some(loc.path);
+        }
+        if let Some(path) = gone {
+            self.proj.history = before;
+            self.say_gone(&path);
+        }
+        Task::none()
+    }
+
     /// Persist the navigation tree to the project's `.clew/` — on the local
     /// disk, or over the protocol for a remote project. A local write that
     /// fails is reported in the status line; the trail is kept for the
@@ -54,31 +85,6 @@ impl App {
     /// sync and a rename) ran on this thread on every navigation. One write
     /// at a time, in order, and only the newest trail waits behind the one
     /// running. The returned task is that write, when one starts.
-    /// Back or Forward (`step`), past visits to files of this machine's no
-    /// longer there, as the trail leaves them out: each is marked gone. The
-    /// way back stopped at a deleted file — its open failed with the
-    /// system's error, the trail moved onto it, and the next Back stopped
-    /// there again. With only gone files that way, the trail stays where it
-    /// is and says so.
-    fn step_trail(&mut self, step: fn(&mut History, usize) -> Option<Loc>) -> Task<Message> {
-        let before = self.proj.history.clone();
-        let rows = self.first_rows();
-        let mut gone = None;
-        while let Some(loc) = step(&mut self.proj.history, rows) {
-            if !self.is_gone(&loc.path) {
-                let saved = self.save_history();
-                return Task::batch([saved, self.open_file(loc.path, loc.line, false)]);
-            }
-            self.proj.gone_files.insert(loc.path.clone());
-            gone = Some(loc.path);
-        }
-        if let Some(path) = gone {
-            self.proj.history = before;
-            self.say_gone(&path);
-        }
-        Task::none()
-    }
-
     pub(crate) fn save_history(&mut self) -> Task<Message> {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();

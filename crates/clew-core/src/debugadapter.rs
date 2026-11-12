@@ -403,6 +403,13 @@ const ZIG_BACKEND_NOTICE: &str = "This program's debug information is Zig's own 
      variables from it: breakpoints and stepping work, but no variables show. Build it with \
      -fllvm (or .use_llvm = true in build.zig) to see them.";
 
+/// Whether the test file at `path` runs its own tests when run as a script
+/// — `unittest.main()`, or pytest's — as one written for `unittest` does.
+fn runs_its_own_tests(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .is_ok_and(|text| text.contains("unittest.main(") || text.contains("pytest.main("))
+}
+
 /// What a Python test file run without pytest is told.
 pub const NO_PYTEST_NOTICE: &str = "pytest is not installed for this Python, so this test file \
      ran as a script: it defines its tests and runs none of them. Install pytest in the \
@@ -874,10 +881,11 @@ fn python_with(
             let mut test_args = vec![json!(program)];
             test_args.extend(args.iter().map(|a| json!(a)));
             launch.insert("args".into(), json!(test_args));
-        } else {
+        } else if !runs_its_own_tests(Path::new(program)) {
             // Without pytest it runs as a script, which only defines its
             // tests: said, or the run ended having done nothing, with
-            // nothing said why.
+            // nothing said why. Not of one that runs them itself as a
+            // script (`unittest.main()`): told it ran none, it had.
             launch.insert(NOTICE.into(), json!(NO_PYTEST_NOTICE));
         }
     }
@@ -1720,6 +1728,15 @@ mod tests {
         assert_eq!(test[NOTICE], NO_PYTEST_NOTICE);
         assert!(script.get(NOTICE).is_none(), "a script runs as it is");
         assert!(launch(&without, "/p/main.py").get(NOTICE).is_none());
+        // One that runs its own tests as a script is not told it runs none.
+        let own = dir.path().join("test_own.py");
+        std::fs::write(
+            &own,
+            "import unittest\nclass T(unittest.TestCase):\n    def test_a(self): pass\nif __name__ == '__main__':\n    unittest.main()\n",
+        )
+        .unwrap();
+        let test = launch(&without, own.to_str().unwrap());
+        assert!(test.get(NOTICE).is_none(), "{test}");
         assert!(is_python_test(Path::new("a/b_test.py")));
         assert!(!is_python_test(Path::new("a/testing.py")));
         assert!(!is_python_test(Path::new("a/test_x.txt")));

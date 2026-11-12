@@ -1112,13 +1112,10 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
 
     // A folder with nothing in it Clew reads says so: the tree stood
     // blank, as if still loading.
+    // In a line: the pane beside it says why, with the way to another
+    // folder — the same words in both was noise.
     if project.tree.dirs.is_empty() && project.tree.files.is_empty() {
-        return empty_state(
-            Glyph::Folder,
-            tr!("Nothing here to read"),
-            tr!("This folder has no files Clew can read."),
-            None,
-        );
+        return compact_empty_state(Glyph::Folder, tr!("Nothing here to read"));
     }
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let filter = app.file_filter.trim();
@@ -1687,8 +1684,10 @@ pub(crate) fn empty_state_saying<'a>(
     if let Some((label, msg)) = action {
         col = col.push(space().height(10));
         col = col.push(
+            // A button at rest too: plain words until hovered, the one way
+            // on from an empty page was hard to find.
             button(text(label.clone()).size(ts::BASE))
-                .style(theme::toolbar_button)
+                .style(theme::secondary_button)
                 .padding([7, 16])
                 .on_press(super::heard::said(&label, msg)),
         );

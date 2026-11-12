@@ -2116,7 +2116,15 @@ impl App {
                                 == Some(id) =>
                         {
                             self.proj.link.pane_pending[pane] = None;
-                            self.proj.link.pane_opening[pane] = None;
+                            // Gone since it was asked for: said so, and the
+                            // trail back on the visit shown, as when a read
+                            // of its own fails (`gone_on_load`).
+                            if let Some(open) = self.proj.link.pane_opening[pane].take()
+                                && self.is_gone(&open.abs)
+                            {
+                                self.forget_history_open(&open.abs);
+                                return self.gone_on_load(pane, &open.abs);
+                            }
                         }
                         // An open a later request took the place of: the pane
                         // shows, or waits for, what was asked for since, and

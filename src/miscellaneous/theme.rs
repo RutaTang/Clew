@@ -2150,6 +2150,19 @@ pub fn pick_well(open: bool) -> impl Fn(&Theme, button::Status) -> button::Style
     }
 }
 
+/// A drop-down with nothing to choose from: its well, at rest for good.
+pub fn pick_well_idle(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(wash(if is_light() { 0.02 } else { 0.025 }).into()),
+        border: Border {
+            color: hairline(),
+            width: 1.0,
+            radius: 9.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// A drop-down's list (`ui::picker`): [`pick_menu`]'s panel.
 pub fn pick_list_panel(theme: &Theme) -> container::Style {
     let menu = pick_menu(theme);

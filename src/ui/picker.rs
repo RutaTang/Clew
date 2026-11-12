@@ -20,11 +20,34 @@ thread_local! {
     /// The drop-down open as the window is built, by its key, and the row
     /// the keys rest on.
     static OPEN: Cell<Option<(u64, usize)>> = const { Cell::new(None) };
+    /// How many times the window has been built.
+    static BUILT: Cell<u64> = const { Cell::new(0) };
+    /// The open drop-down's key, once its list was drawn in the window
+    /// built last.
+    static DRAWN: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 /// Say which drop-down is open as the window is built (`ui::view`).
 pub(crate) fn set_open(open: Option<&Picker>) {
     OPEN.with(|o| o.set(open.map(|p| (p.key, p.at))));
+    BUILT.with(|b| b.set(b.get() + 1));
+    DRAWN.with(|d| d.set(None));
+}
+
+/// How many times the window has been built: what a drop-down opened now
+/// is drawn after ([`drawn`]).
+pub(crate) fn built() -> u64 {
+    BUILT.with(Cell::get)
+}
+
+/// Whether the drop-down of `key`, opened when the window had been built
+/// `built` times, is the one drawn open: not built since, or its list in
+/// the window built last. One whose rows changed under it — a voice said
+/// another of them, the language they are said in changed, its options
+/// came anew — was not drawn, and stood open unseen, taking every key and
+/// picking with Enter the row it had when it opened.
+pub(crate) fn drawn(key: u64, built: u64) -> bool {
+    BUILT.with(Cell::get) == built || DRAWN.with(Cell::get) == Some(key)
 }
 
 /// Whether a drop-down is open as the window is built: the arrows are its
@@ -141,6 +164,26 @@ impl<'a> From<Pick<'a>> for Element<'a, Message> {
             width,
             ..
         } = pick;
+        // Nothing to choose from: shown, dimmed, and not pressed — it was
+        // a stop of the ring, a code and a word that opened nothing and
+        // said nothing.
+        if picks.is_empty() {
+            return container(
+                row![
+                    text(placeholder.unwrap_or_default())
+                        .size(size)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::None),
+                    glyph::icon(Glyph::ChevronDown, theme::dim(), size),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+            )
+            .padding(padding)
+            .width(width)
+            .style(theme::pick_well_idle)
+            .into();
+        }
         // Each choice said by what the list shows for it.
         if super::heard::gathering() {
             for (said, send) in &picks {
@@ -149,6 +192,9 @@ impl<'a> From<Pick<'a>> for Element<'a, Message> {
         }
         let key = key_of(&picks);
         let open = OPEN.with(Cell::get).filter(|(k, _)| *k == key);
+        if open.is_some() {
+            DRAWN.with(|d| d.set(Some(key)));
+        }
         let shown = at.and_then(|i| picks.get(i)).map(|(said, _)| said.clone());
         let well = row![
             text(shown.clone().or(placeholder).unwrap_or_default())
@@ -164,7 +210,9 @@ impl<'a> From<Pick<'a>> for Element<'a, Message> {
                 } else {
                     Length::Fill
                 }),
-            glyph::icon(Glyph::ChevronDown, theme::dim(), size - 1.0),
+            // As plain as its words, nearly: dim, it was a few faint pixels
+            // on a dark theme, and the well read as a field.
+            glyph::icon(Glyph::ChevronDown, theme::fg_muted(), size),
         ]
         .spacing(8)
         .align_y(iced::Center);
@@ -177,6 +225,7 @@ impl<'a> From<Pick<'a>> for Element<'a, Message> {
                 at: at.unwrap_or(0),
                 chosen: at,
                 owner: None,
+                built: 0,
             }))
         };
         // Opened by voice by its name — its row's — or, with none, by the
@@ -209,12 +258,7 @@ fn list<'a>(
     size: f32,
     width: Length,
 ) -> Element<'a, Message> {
-    let mut rows = Column::new().padding(4);
-    // As wide as the well at least: a list narrower than what opened it
-    // read as another control's.
-    if let Length::Fixed(w) = width {
-        rows = rows.push(space().width(Length::Fixed(w - 8.0)).height(0));
-    }
+    let mut rows = Column::new().padding(LIST_PAD);
     for (i, (said, _)) in picks.iter().enumerate() {
         let tick: Element<'a, Message> = if chosen == Some(i) {
             glyph::icon(Glyph::Check, theme::accent(), size)
@@ -232,7 +276,7 @@ fn list<'a>(
                 .align_y(iced::Center),
             )
             .width(Length::Fill)
-            .padding([5, 8])
+            .padding(Padding::from([5.0, ROW_PAD_X]))
             .style(theme::pick_row(i == row_at))
             .on_press(Message::Picker(PickerMsg::Pick(i))),
         );
@@ -243,9 +287,31 @@ fn list<'a>(
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar),
     )
+    .width(Length::Fixed(list_width(picks, size, width)))
     .max_height(LIST_MAX_H)
     .style(theme::pick_list_panel)
     .into()
+}
+
+/// The room round a list's rows, inside its panel.
+const LIST_PAD: f32 = 4.0;
+/// A row's room beside its words, each side.
+const ROW_PAD_X: f32 = 8.0;
+
+/// How wide an open list is: as its widest row — its tick, its words and
+/// the scrollbar's lane — and no narrower than the well that opened it.
+/// Its rows fill it: with no width of its own it was as wide as the
+/// window, and opened at the window's left edge, far from its well.
+fn list_width(picks: &[(String, Message)], size: f32, well: Length) -> f32 {
+    let words = picks
+        .iter()
+        .map(|(said, _)| super::steady::width_of(said, size, crate::fonts::UI))
+        .fold(0.0, f32::max);
+    let rows = 2.0 * LIST_PAD + 2.0 * ROW_PAD_X + (size + 6.0) + words.ceil() + SCROLLBAR_W + 4.0;
+    match well {
+        Length::Fixed(w) => rows.max(w),
+        _ => rows,
+    }
 }
 
 #[cfg(test)]
@@ -269,5 +335,31 @@ mod tests {
         };
         assert_eq!(key_of(&picks(&["a", "b"])), key_of(&picks(&["a", "b"])));
         assert_ne!(key_of(&picks(&["a", "b"])), key_of(&picks(&["a", "c"])));
+        // The same rows sending something else: another.
+        let mut other = picks(&["a", "b"]);
+        other[1].1 = Message::Ask(AskMsg::PickAgent(None));
+        assert_ne!(key_of(&picks(&["a", "b"])), key_of(&other));
+    }
+
+    /// A drop-down with nothing to choose from is no stop of the ring, has
+    /// no code and no word: each opened nothing and said nothing.
+    #[test]
+    fn a_drop_down_with_nothing_to_choose_from_is_pressed_by_nothing() {
+        let build = |rows: Vec<String>| {
+            super::super::heard::gather_all_of(move || -> Element<'static, Message> {
+                picker(rows, None::<String>, |_: String| Message::Tick)
+                    .label("Language")
+                    .into()
+            })
+        };
+        let (words, marks) = build(Vec::new());
+        assert!(
+            words.is_empty(),
+            "{:?}",
+            words.iter().map(|w| &w.title).collect::<Vec<_>>()
+        );
+        assert!(marks.is_empty());
+        let (words, marks) = build(vec!["python".into()]);
+        assert!(!words.is_empty() && !marks.is_empty(), "one with a row is");
     }
 }

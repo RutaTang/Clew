@@ -1175,6 +1175,22 @@ fn a_reopened_project_goes_back_where_it_was_read() {
     scan_synchronously(&mut app, root);
     assert!(app.proj.code_languages.is_empty());
     assert!(!app.proj.overview.showing, "an overview of no code");
+    assert!(app.no_code());
+    // Nor anything to run: it was told to write a launch file.
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    assert_eq!(app.status, "There is nothing to run in this folder.");
+    // Shell scripts are code, though no server is set up for them: the
+    // overview is of them.
+    let root = fixture_project("back-where-read-scripts");
+    std::fs::remove_file(root.join("src/lib.rs")).unwrap();
+    std::fs::write(root.join("deploy.sh"), "echo deploying\n").unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root);
+    assert!(
+        app.proj.overview.showing,
+        "no overview of a folder of scripts"
+    );
+    assert!(!app.no_code());
 }
 
 fn scanned_app(tag: &str) -> App {
@@ -37189,6 +37205,10 @@ fn a_deleted_file_is_said_gone_and_leaves_the_trail() {
     let _ = app.update(Message::Reading(ReadingMsg::GoBack));
     assert_eq!(current(&app), Some(root.join("src/util.rs")));
     assert!(app.proj.gone_files.contains(&notes), "passed, and left out");
+    assert_eq!(
+        app.status, "notes.txt is no longer there",
+        "passed over without a word"
+    );
     // Forward, the same way back.
     let _ = app.update(Message::Reading(ReadingMsg::GoForward));
     assert_eq!(current(&app), Some(lib.clone()));
@@ -37215,6 +37235,50 @@ fn a_deleted_file_is_said_gone_and_leaves_the_trail() {
     std::fs::write(&notes, "hello\n").unwrap();
     open_synchronously(&mut app, "notes.txt", None);
     assert!(!app.proj.gone_files.contains(&notes));
+    // Read through clew-server too: it stayed out of the trail for good.
+    app.proj.gone_files.insert(notes.clone());
+    let source = "hello\n".to_string();
+    let lines = crate::highlight::plain_lines(&source);
+    let pane = app.proj.active;
+    let _ = app.apply_file_content(
+        pane,
+        None,
+        "notes.txt".into(),
+        source,
+        lines,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(
+        !app.proj.gone_files.contains(&notes),
+        "back, read through the server, and still left out"
+    );
+
+    // Gone while Back's load is under way: the trail stays on the file
+    // still shown — it went one further back than it.
+    std::fs::write(root.join("src/util.rs"), "pub fn util() {}\n").unwrap();
+    open_synchronously(&mut app, "src/util.rs", None);
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let shown = app.active_viewer().map(|v| v.abs.clone());
+    assert_eq!(shown, Some(lib.clone()));
+    fresh(&mut app);
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    let util = root.join("src/util.rs");
+    assert_eq!(current(&app), Some(util.clone()));
+    std::fs::remove_file(&util).unwrap();
+    let pane = app.proj.active;
+    let req = app.proj.link.pane_pending[pane].expect("Back's load");
+    let _ = app.update(Message::Editor(EditorMsg::FileLoaded {
+        stamp: app.stamp(),
+        req,
+        pane,
+        abs: util.clone(),
+        target: None,
+        result: Err("No such file or directory (os error 2)".into()),
+    }));
+    assert_eq!(app.status, "src/util.rs is no longer there");
+    assert_eq!(current(&app), Some(lib.clone()), "not the file shown");
 }
 
 /// A page over the code — the overview, the statistics, a doc page — is put

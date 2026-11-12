@@ -163,15 +163,41 @@ pub(crate) fn estimate_calls(files: &[fs_scan::FileEntry]) -> usize {
             }
         }
     }
+    // None of the sample could be read (each too large, or not text): a
+    // call a file, as a guess — 0 says there is no code at all, and the
+    // sheet said so of a folder holding a 9 MB `sqlite3.c`.
     if read == 0 {
-        return 0;
+        return code.len();
     }
     let scale = code.len() as f64 / read as f64;
     // Folders are not sampled away: every folder holding a sampled file
     // with content counts once, and those the sample skipped are guessed
     // at the same rate.
     let folders = (folders.len() as f64 * scale.sqrt()).round() as usize;
-    ((functions + with_content) as f64 * scale).round() as usize + folders
+    // At least one where there is code: scripts with no functions in them
+    // are code too.
+    (((functions + with_content) as f64 * scale).round() as usize + folders).max(1)
+}
+
+/// Whether there is code among `files`: any file of a language Clew reads
+/// — what Explain explains and the overview is of. Not only the languages
+/// a server is set up for: a folder of shell scripts or SQL migrations is
+/// code too, and opened on no overview of it.
+pub(crate) fn has_code(files: &[fs_scan::FileEntry]) -> bool {
+    files.iter().any(|f| highlight::detect(&f.abs).is_some())
+}
+
+impl App {
+    /// Whether the folder open has no code in it ([`has_code`]): a
+    /// folder of notes. False with no folder open.
+    pub(crate) fn no_code(&self) -> bool {
+        self.proj.code_languages.is_empty()
+            && self
+                .proj
+                .project
+                .as_ref()
+                .is_some_and(|p| !has_code(&p.files))
+    }
 }
 
 /// What decides the servers a project runs and what each still takes to

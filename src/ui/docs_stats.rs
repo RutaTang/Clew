@@ -660,18 +660,20 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
             .center_x(Fill)
             .into(),
         );
-    } else if app.proj.code_languages.is_empty() {
-        // No code: nothing to explain, and no step to offer — Explain All
-        // here said there was nothing for it to do.
-        items.push(
-            container(
-                text(tr!("There is no code here for an overview."))
-                    .size(ts::BODY)
-                    .color(theme::dim()),
-            )
-            .center_x(Fill)
-            .into(),
-        );
+    } else if app.no_code() {
+        // No code: nothing to explain — Explain All here said there was
+        // nothing for it to do — and a page as every empty one is, with the
+        // way to a folder with some: a small dim line at the page's top
+        // was easy to miss.
+        items.push(super::sidebar::empty_state(
+            Glyph::Folder,
+            tr!("No code here"),
+            tr!("There is no code here for an overview."),
+            Some((
+                tr!("Open Folder…"),
+                Message::Project(ProjectMsg::OpenFolderPressed),
+            )),
+        ));
     } else if !ready {
         // What it is written from, and the one step that gets there — a
         // way each: the page was a dead end ("Run Explain All first.").

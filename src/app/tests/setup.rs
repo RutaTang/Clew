@@ -889,3 +889,30 @@ fn enter_allows_no_question_of_trust() {
         Some(LspSlot::AwaitingConsent)
     ));
 }
+
+/// The estimate is nothing only where there is no code: a folder whose one
+/// file is too large to sample, or scripts with no functions in them, were
+/// said to have no code to explain.
+#[test]
+fn the_estimate_is_nothing_only_without_code() {
+    use crate::app::setup::{estimate_calls, has_code};
+    let dir = test_dir("setup-estimate-code");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = |name: &str, body: &str| {
+        let abs = dir.join(name);
+        std::fs::write(&abs, body).unwrap();
+        crate::fs_scan::FileEntry {
+            abs,
+            rel: name.into(),
+        }
+    };
+    let notes = vec![entry("notes.txt", "hello\n")];
+    assert_eq!(estimate_calls(&notes), 0);
+    assert!(!has_code(&notes));
+    let big = vec![entry("sqlite3.c", &"int x;\n".repeat(120_000))];
+    assert!(estimate_calls(&big) > 0, "a large file is no code");
+    let script = vec![entry("deploy.sh", "echo deploying\n")];
+    assert!(estimate_calls(&script) > 0, "a script is no code");
+    assert!(has_code(&script));
+}

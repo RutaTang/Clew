@@ -234,6 +234,19 @@ pub fn remove(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Whether `path` is under the `.clew` of a project folder no longer there:
+/// a write or a lock there made the folder anew — a project deleted while
+/// Clew had it open came back, holding only Clew's own state.
+fn project_gone(path: &Path) -> bool {
+    use std::path::PathBuf;
+    let comps: Vec<_> = path.components().collect();
+    let Some(pos) = comps.iter().position(|c| c.as_os_str() == ".clew") else {
+        return false;
+    };
+    let root: PathBuf = comps[..pos].iter().collect();
+    !root.as_os_str().is_empty() && matches!(root.try_exists(), Ok(false))
+}
+
 /// Every directory from the path's `.clew` component down to its parent must
 /// be a real directory, not a symlink: `.clew` ships with the repository, so
 /// `.clew -> /outside` (or `.clew/cache -> …`) would redirect every state
@@ -261,19 +274,6 @@ pub fn remove(path: &Path) -> std::io::Result<()> {
 /// writing through whatever is there, and [`lock`]'s `.lock` file — the one
 /// leaf a repository can plant a link at without also having to supply its
 /// contents — opens with `O_NOFOLLOW` and type-checks its handle too.
-/// Whether `path` is under the `.clew` of a project folder no longer there:
-/// a write or a lock there made the folder anew — a project deleted while
-/// Clew had it open came back, holding only Clew's own state.
-fn project_gone(path: &Path) -> bool {
-    use std::path::PathBuf;
-    let comps: Vec<_> = path.components().collect();
-    let Some(pos) = comps.iter().position(|c| c.as_os_str() == ".clew") else {
-        return false;
-    };
-    let root: PathBuf = comps[..pos].iter().collect();
-    !root.as_os_str().is_empty() && matches!(root.try_exists(), Ok(false))
-}
-
 pub(crate) fn repo_dirs_are_real(path: &Path) -> bool {
     use std::path::PathBuf;
     let comps: Vec<_> = path.components().collect();
@@ -1740,9 +1740,6 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    /// The first write into a project's `.clew/` leaves an ignore file behind
-    /// that keeps per-reader state out of `git status` — and never replaces
-    /// one the user or the repository already has.
     /// A project folder deleted while Clew had it open is not made again
     /// by Clew writing or locking its own state there: it came back,
     /// holding only `.clew`. Its `.clew` gone alone is made again, as
@@ -1764,6 +1761,9 @@ mod tests {
         assert!(state.is_file(), "its .clew not made again");
     }
 
+    /// The first write into a project's `.clew/` leaves an ignore file behind
+    /// that keeps per-reader state out of `git status` — and never replaces
+    /// one the user or the repository already has.
     #[test]
     fn the_first_clew_write_adds_a_gitignore_but_never_replaces_one() {
         let d = dir("clew-statefile-gitignore");

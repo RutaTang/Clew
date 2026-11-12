@@ -425,7 +425,8 @@ impl App {
         self.theme_pref = pref;
         theme::apply_pref(pref);
         self.restyle_svgs();
-        self.status = tr!("Appearance: {mode}", mode = pref.label());
+        // Named as its row is, "Mode".
+        self.status = tr!("Mode: {mode}", mode = pref.label());
         self.persist_theme();
     }
 

@@ -424,7 +424,14 @@ pub(crate) fn setup_sheet<'a>(
                 super::heard::answer(decline_label, super::heard::Answer::No, decline)
             }
         }));
-    let decline_button: Element<'a, Message> = if decline_gated {
+    // A first open of a folder with no code, nothing to set up for it: the
+    // two buttons did the same — Open alone.
+    let nothing_to_set_up = mode == SetupMode::Open
+        && setup.is_some_and(|s| s.no_code)
+        && census.is_some_and(|c| c.servers.is_empty());
+    let decline_button: Element<'a, Message> = if nothing_to_set_up {
+        space().into()
+    } else if decline_gated {
         // What it leaves out, said where the pointer rests: beside Open, it
         // opened the project too, and said nothing of the ticks it ignored.
         super::toolbar::tip_at(

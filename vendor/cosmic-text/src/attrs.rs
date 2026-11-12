@@ -328,9 +328,15 @@ impl<'a> Attrs<'a> {
             Stretch::SemiExpanded | Stretch::SemiCondensed => Stretch::Normal,
             stretch => stretch,
         };
+        // clew patch: an upright face stands in for an italic one where a
+        // family has none (CJK's never do): asked only of italic faces, a
+        // run of italic Chinese found no face with its letters at all and
+        // was drawn as boxes. Ranked after the italic ones
+        // (`FontMatchKey::font_style_diff`).
+        let style = face.style == self.style
+            || (self.style != fontdb::Style::Normal && face.style == fontdb::Style::Normal);
         //TODO: smarter way of including emoji
-        face.post_script_name.contains("Emoji")
-            || (face.style == self.style && face.stretch == stretch)
+        face.post_script_name.contains("Emoji") || (style && face.stretch == stretch)
     }
 
     /// Check if this set of attributes can be shaped with another

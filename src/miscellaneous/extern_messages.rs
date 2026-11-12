@@ -790,6 +790,8 @@ pub(crate) const TAILS: &[&str] = &[
 /// the system's error texts. The common ones, kept by hand; others stay
 /// as the program wrote them.
 pub(crate) const EXTERNAL: &[&str] = &[
+    // An MCP server's own failures (`clew_core::mcp::McpError`).
+    tr_noop!("the server is not running"),
     tr_noop!("fatal: not a git repository (or any of the parent directories): {arg1}"),
     tr_noop!(
         "fatal: ambiguous argument '{arg1}': unknown revision or path not in the working tree."

@@ -1798,6 +1798,10 @@ impl App {
         if self.suggestions_coming() {
             return qs;
         }
+        // A folder with no code: of what is there, not of types, a
+        // program's entry point and its data flow — which made Clew read as
+        // unaware of what it had open.
+        let no_code = self.no_code();
         // Else the few that fit any project, and where the reader is.
         match self.cursor_target() {
             Some(explain::Node::Function { name, .. }) => {
@@ -1811,9 +1815,16 @@ impl App {
                     .and_then(|s| s.to_str())
                     .unwrap_or(tr!("this file"));
                 qs.push(tr!("What is the role of `{file}`?", file = f));
-                qs.push(tr!("What are the key types in `{file}`?", file = f));
+                if !no_code {
+                    qs.push(tr!("What are the key types in `{file}`?", file = f));
+                }
             }
             _ => {}
+        }
+        if no_code {
+            qs.push(tr!("What is in this folder?").into());
+            qs.truncate(crate::app::suggest::SHOWN);
+            return qs;
         }
         qs.push(tr!("What is the entry point of this codebase?").into());
         qs.push(tr!("How does data flow through the app?").into());

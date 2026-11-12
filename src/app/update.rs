@@ -19,6 +19,7 @@ impl App {
         // The overlay that left the keyboard where it was, as this message
         // arrives (see below).
         let left_focus = ui::active_overlay(self).and_then(|o| o.leaves_focus());
+        self.picked_elsewhere(&message);
         let task = self.dispatch(message);
         self.drop_stale_tree_menu();
         self.drop_stale_picker();

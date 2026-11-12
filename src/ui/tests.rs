@@ -3044,6 +3044,18 @@ fn a_drop_down_opens_and_is_walked_from_the_keyboard() {
     let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
     let at = |app: &App| app.picker.as_ref().map(|p| p.at);
     assert_eq!(at(&app), Some(0), "open, on the value shown");
+    // Under its well, as wide as its rows: laid out as wide as the
+    // window, it opened at the window's left edge, over the sidebar.
+    {
+        let mut sim = sim_of(&app);
+        let well = text_at(&mut sim, |t| t == "Anthropic", 0).expect("the well");
+        let row = text_at(&mut sim, |t| t == "DeepSeek", 0).expect("its list");
+        assert!(
+            row.x >= well.x - 40.0 && row.x <= well.x + 40.0,
+            "the list is not under its well: {row:?} {well:?}"
+        );
+        assert!(row.y > well.y, "{row:?} {well:?}");
+    }
     assert_eq!(
         app.settings.provider,
         Provider::Anthropic,
@@ -3097,6 +3109,113 @@ fn a_drop_down_opens_and_is_walked_from_the_keyboard() {
     app.settings.open = false;
     let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
     assert!(app.picker.is_none(), "a list not drawn held the keys");
+}
+
+/// A drop-down picked other than from its list — by voice, which says each
+/// row — is put away; one whose rows changed under it is no longer the
+/// keys'. Its list gone from the window, it stood open unseen: it took
+/// every key, and Enter picked the row it had when it opened.
+#[test]
+fn a_drop_down_whose_rows_went_is_not_the_keys() {
+    use crate::llm::Provider;
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::LanguageModel,
+    )));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::ProviderPicked(
+        Provider::Anthropic,
+    )));
+    let mut driven = Driven::new(&app);
+    let mut steps = 0;
+    while !app.status.starts_with("Provider") {
+        let _ = driven.tab(&mut app, false);
+        steps += 1;
+        assert!(steps < 80, "the ring never reached Provider");
+    }
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.picker.is_some());
+    // Said by voice: picked, and put away.
+    driven.deliver(
+        &mut app,
+        Message::Settings(crate::SettingsMsg::ProviderPicked(Provider::DeepSeek)),
+    );
+    assert!(app.picker.is_none(), "picked by voice, the list stood open");
+    assert_eq!(app.settings.provider, Provider::DeepSeek);
+    // Open again, the keys on another row; then its rows change under it.
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    let _ = driven.key(&mut app, Key::Named(Named::ArrowDown), none);
+    let picker = app.picker.as_mut().expect("open again");
+    picker.key ^= 1;
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert_eq!(
+        app.settings.provider,
+        Provider::DeepSeek,
+        "Enter picked from a list no longer drawn"
+    );
+}
+
+/// Tab from a drop-down the pointer opened puts it away and moves on from
+/// it, as from one the ring opened: the ring went back to the window's
+/// first stop.
+#[test]
+fn tab_from_a_drop_down_the_pointer_opened_moves_on_from_it() {
+    use crate::llm::Provider;
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::LanguageModel,
+    )));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::ProviderPicked(
+        Provider::Anthropic,
+    )));
+    let mut driven = Driven::new(&app);
+    let open = click(sim_of(&app), "Anthropic")
+        .into_iter()
+        .find(|m| matches!(m, Message::Picker(crate::app::pickers::PickerMsg::Open(_))))
+        .expect("a click opens it");
+    driven.deliver(&mut app, open);
+    assert!(app.picker.is_some());
+    let _ = driven.tab(&mut app, false);
+    assert!(app.picker.is_none(), "Tab left it open");
+    assert!(
+        !app.status.starts_with("Provider"),
+        "Tab stayed on it: {}",
+        app.status
+    );
+    let _ = driven.tab(&mut app, true);
+    assert_eq!(
+        app.status, "Provider: Anthropic",
+        "Tab did not move on from it"
+    );
+}
+
+/// Ask's agent drop-down opens with Enter from the ring, as every other
+/// one does: reached from its field, Enter did nothing there.
+#[test]
+fn asks_agent_drop_down_opens_with_enter() {
+    use keyboard::Key;
+    use keyboard::key::Named;
+    let none = keyboard::Modifiers::empty();
+    let mut app = reader_app();
+    app.acp_agents = vec![clew_core::acp::AgentConfig {
+        name: "fake".into(),
+        launch: clew_core::linerpc::Launch::default(),
+        share_mcp: false,
+    }];
+    app.ask_view = crate::AskView::Compact;
+    let mut driven = Driven::new(&app);
+    driven.focus(&app, super::ask_input_id());
+    let mut steps = 0;
+    while !app.status.starts_with("Agent") {
+        let _ = driven.tab(&mut app, true);
+        steps += 1;
+        assert!(steps < 40, "the ring never reached Agent: {}", app.status);
+    }
+    assert_eq!(app.status, "Agent: Clew");
+    let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
+    assert!(app.picker.is_some(), "Enter did not open it");
 }
 
 /// A control built as a dialog is laid out (a `responsive`'s) is in the
@@ -3211,8 +3330,12 @@ fn the_ring_reaches_what_is_scrolled_away_and_the_pickers() {
         presses.push(format!("{:?}", ring_at(&app).2));
         window.tab(&mut app, false);
     }
+    // Its press opens its list (whose rows set the language): pressed from
+    // the ring it moved on to the next language.
     assert!(
-        presses.iter().any(|p| p.contains("SetLanguage")),
+        presses
+            .iter()
+            .any(|p| p.contains("Picker(Open(") && p.contains("SetLanguage")),
         "the display language's picker: {presses:#?}"
     );
     // A page longer than the window: its last stops are scrolled to.
@@ -8441,6 +8564,45 @@ fn paused_debug_session() -> crate::DebugSession {
     }
 }
 
+/// A variable's value cut to its column is whole where the pointer rests,
+/// however short: counted by letters, a value of under 24 cut in a narrow
+/// column had no tip, and could be read nowhere.
+#[test]
+fn a_cut_variable_is_whole_in_its_tip() {
+    let mut app = reader_app();
+    let mut session = paused_debug_session();
+    let value = "Decimal('12.50')";
+    session.scopes = vec![crate::app::model::DebugScope {
+        name: "Locals".into(),
+        vars: vec![crate::dap::Variable {
+            name: "subtotal".into(),
+            value: value.into(),
+            type_name: None,
+            variables_reference: 0,
+        }],
+    }];
+    session.output = vec![("stdout".into(), "x\n".into())];
+    app.debug.session = Some(session);
+    let size = Size::new(520.0, 400.0);
+    app.window_width = size.width;
+    app.show_left_sidebar = false;
+    super::tip::warm_now();
+    let mut sim =
+        iced_test::Simulator::with_size(Default::default(), size, super::debug_panel(&app));
+    let at = text_at(&mut sim, |t| t.starts_with('D') && t.ends_with('…'), 0)
+        .expect("the value, cut")
+        .center();
+    assert!(!shows(&mut sim, value), "not cut: the test shows nothing");
+    sim.point_at(at);
+    let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: at,
+    })]);
+    assert!(
+        shows(&mut sim, &format!("subtotal = {value}")),
+        "cut, and whole nowhere"
+    );
+}
+
 /// I1: the Debug panel's watch rows remove by identity, and hover evaluation
 /// is a checkbox only where the adapter makes no side-effect promise.
 #[test]
@@ -8489,7 +8651,7 @@ fn a_long_watch_is_whole_in_its_tip() {
     let rested = |on: &'static str, tip: String| {
         super::tip::warm_now();
         let mut sim = sim_elem(super::debug_panel(&app));
-        let at = text_at(&mut sim, move |t| t == on, 0)
+        let at = text_at(&mut sim, move |t| t.starts_with(on), 0)
             .expect("the watch")
             .center();
         sim.point_at(at);
@@ -8498,8 +8660,22 @@ fn a_long_watch_is_whole_in_its_tip() {
         })]);
         shows(&mut sim, &tip)
     };
-    assert!(rested(expr, format!("{expr} = {value}")), "no whole value");
+    assert!(
+        rested("order.customer", format!("{expr} = {value}")),
+        "no whole value"
+    );
     assert!(!rested("a", "a = 1".into()), "a tip for a short one");
+    // M2 (round 19): a long expression is cut, its value still shown: it
+    // pushed " = " and its value out of the column.
+    let mut sim = sim_elem(super::debug_panel(&app));
+    assert!(
+        text_at(&mut sim, |t| t.starts_with("order.") && t.ends_with('…'), 0).is_some(),
+        "the expression not cut"
+    );
+    assert!(
+        text_at(&mut sim, |t| t.starts_with("'some"), 0).is_some(),
+        "its value pushed out of view"
+    );
 }
 
 fn call_item(name: &str) -> crate::lsp::client::CallItem {
@@ -12661,6 +12837,12 @@ fn a_runs_output_is_shown_at_its_end() {
         text_at(&mut sim, |t| t == "printed line 1", 0).is_none(),
         "all of it fits: the test shows nothing"
     );
+    // Its heading stays over it, as the other columns' do: among the
+    // lines, it went out of sight with the first of them.
+    assert!(
+        text_at(&mut sim, |t| t == "OUTPUT", 0).is_some(),
+        "the heading scrolled away"
+    );
 }
 
 /// While the diff or Time Travel stands in the code's place, the note the
@@ -13282,6 +13464,12 @@ fn an_empty_ask_shows_questions_not_instructions() {
     assert!(shows(&mut sim, "Open a folder to ask about its code"));
     drop(sim);
     app.proj.ask_input = "what is this?".into();
+    // L10: the send button is not lit for a question with nowhere to go.
+    let words = super::heard::gather_of(|| super::ask_panel(&app, 560.0));
+    assert!(
+        !words.iter().any(|w| w.title == "Send"),
+        "Send offered with no folder open"
+    );
     let _ = app.update(Message::Ask(AskMsg::Submit));
     assert_eq!(
         app.proj.ask_notice.as_deref(),
@@ -15781,7 +15969,11 @@ fn explain_with_nothing_to_explain_says_so_once() {
     assert_eq!(count(&app, "left to explain"), 0);
     assert_eq!(count(&app, "There is no code here to explain."), 1);
     let mut sim = sim_elem(super::sidebar::files_tab(&app));
-    assert!(shows(&mut sim, "This folder has no files Clew can read."));
+    assert!(shows(&mut sim, "Nothing here to read"));
+    assert!(
+        !shows(&mut sim, "This folder has no files Clew can read."),
+        "said twice, beside the pane that says it"
+    );
     drop(sim);
     // M3: nor does the overview offer an Explain All with nothing for it,
     // nor the pane send the reader to a tree with nothing in it.
@@ -15815,6 +16007,13 @@ fn explain_with_nothing_to_explain_says_so_once() {
     assert_eq!(count(&app, "left to explain"), 0);
     assert_eq!(count(&app, "No code here for them to read."), 1);
     assert_eq!(count(&app, "Ready."), 0, "servers said ready for no code");
+    // Nothing to set up: Open alone — beside it, Open without setup did
+    // the same.
+    assert_eq!(
+        count(&app, "Open without setup"),
+        0,
+        "two buttons that did the same"
+    );
 }
 
 /// L2: Explain on an empty file says the file is empty — the pass found
@@ -15838,6 +16037,18 @@ fn explain_on_an_empty_file_says_it_is_empty() {
     assert_eq!(
         app.status,
         "This file is empty: there is nothing in it to explain."
+    );
+    assert!(!app.proj.explain.running, "a pass began");
+    // Nor one in no language Clew reads: it was "no longer part of the
+    // project".
+    let notes = PathBuf::from("/nonexistent/notes.txt");
+    let _ = app.update(Message::Explain(ExplainMsg::Explain(
+        crate::explain::Node::File(notes),
+    )));
+    assert!(
+        app.status.ends_with("has no code in it to explain."),
+        "{}",
+        app.status
     );
     assert!(!app.proj.explain.running, "a pass began");
 }

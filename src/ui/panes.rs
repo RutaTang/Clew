@@ -189,7 +189,9 @@ pub(crate) fn time_travel_view<'a>(
 /// "Settings", where a failure says what to check there: Settings opened
 /// at `field`, the keys in it, as the status bar's own Settings does.
 pub(crate) fn settings_fix_button<'a>(field: crate::app::state::LlmField) -> Element<'a, Message> {
-    button(text(tr!("Settings")).size(ts::SMALL))
+    // In the accent, as Try again beside it: in the body's colour it read
+    // as words, not as a way to the setting.
+    button(text(tr!("Settings")).size(ts::SMALL).color(theme::accent()))
         .style(theme::toolbar_button)
         .padding([2, 8])
         .on_press(super::heard::said(

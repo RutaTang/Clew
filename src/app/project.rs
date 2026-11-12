@@ -451,7 +451,7 @@ impl App {
         // the project's state has loaded) — where there is code for it to
         // be of: over a folder with none it opened by itself, offering an
         // Explain All with nothing to explain.
-        self.proj.overview.showing = !self.proj.code_languages.is_empty();
+        self.proj.overview.showing = super::setup::has_code(&result.files);
         self.proj.file_languages = file_languages(&result.files);
         // A folder on this machine, opened: offered again on the welcome
         // screen — not the tour's sample, which the tour brings itself.

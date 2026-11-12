@@ -733,12 +733,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     }
 
     // Program output.
-    let mut out_rows: Vec<Element<'_, Message>> = vec![
-        text(tr!("OUTPUT"))
-            .size(ts::CAPTION)
-            .color(theme::dim())
-            .into(),
-    ];
+    let mut out_rows: Vec<Element<'_, Message>> = Vec::new();
     for (cat, txt) in &session.output {
         let color = if cat == "stderr" {
             theme::danger()
@@ -795,20 +790,27 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .find(|(e, _)| e == expr)
             .map(|(_, v)| v.clone())
             .unwrap_or_else(|| "…".into());
-        // Too long for its column, whole where the pointer rests, as a
-        // variable's value is: "off * 2 = ⚠ Na" could be read nowhere.
-        const SHOWN: usize = 24;
-        let whole = (expr.chars().count() + val.chars().count() > SHOWN).then(|| {
-            let val: String = val.chars().take(600).collect();
-            format!("{expr} = {val}")
-        });
+        // The expression takes at most a little over half the room, cut
+        // with an ellipsis past it, so " = " and the value always show: a
+        // long one pushed its value out of the column, and was itself cut
+        // mid-letter.
         let w = |s: &str| super::steady::width_of(s, ts::SMALL, crate::fonts::UI);
-        let val = super::steady::cut(
+        let room = (watch_room - 22.0 - w(" = ")).max(0.0);
+        let shown_expr =
+            super::steady::cut(expr, room.mul_add(0.55, 0.0), ts::SMALL, crate::fonts::UI);
+        let shown_val = super::steady::cut(
             &val,
-            (watch_room - 22.0 - w(expr) - w(" = ")).max(0.0),
+            (room - w(&shown_expr)).max(0.0),
             ts::SMALL,
             crate::fonts::UI,
         );
+        // Cut, it is whole where the pointer rests — whatever its length:
+        // counted by letters, a short value cut to "Dec…" had no tip.
+        let whole = (shown_expr != *expr || shown_val != val).then(|| {
+            let val: String = val.chars().take(600).collect();
+            format!("{expr} = {val}")
+        });
+        let val = shown_val;
         let line: Element<'_, Message> = row![
             // By identity (the expression): an index into the list drawn
             // here can name another watch once the list changes.
@@ -820,7 +822,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                     expr,
                     Message::Debug(DebugMsg::WatchRemoveExpr(expr.clone())),
                 )),
-            text(expr.clone())
+            text(shown_expr)
                 .size(ts::SMALL)
                 .color(theme::accent())
                 .wrapping(Wrapping::None),
@@ -852,7 +854,19 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     } else {
         space().height(0).into()
     };
-    let output: Element<'_, Message> = column![output_col(out_rows), foot].height(Fill).into();
+    // Its heading over the lines, not among them: kept at their end, the
+    // lines took it out of sight as soon as they overflowed, while the
+    // other columns kept theirs.
+    let heading =
+        container(text(tr!("OUTPUT")).size(ts::CAPTION).color(theme::dim())).padding(Padding {
+            top: 4.0,
+            right: 6.0,
+            bottom: 0.0,
+            left: 6.0,
+        });
+    let output: Element<'_, Message> = column![heading, output_col(out_rows), foot]
+        .height(Fill)
+        .into();
     let panels = if output_only {
         row![output]
     } else {
@@ -1715,8 +1729,15 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .on_action(|a| Message::Ask(AskMsg::Edit(a)))
         .key_binding(|press| {
             use iced::keyboard::{Key, key::Named};
-            use iced::widget::text_editor::Binding;
-            if matches!(press.key.as_ref(), Key::Named(Named::Enter)) && !press.modifiers.shift() {
+            use iced::widget::text_editor::{Binding, Status};
+            // Only while the field holds the keys: the editor is asked of
+            // every key the window gets, and took every Enter as a
+            // question asked — the ring's on a control by it too, which
+            // then did nothing.
+            if matches!(press.key.as_ref(), Key::Named(Named::Enter))
+                && !press.modifiers.shift()
+                && matches!(press.status, Status::Focused { .. })
+            {
                 return Some(Binding::Custom(Message::Ask(AskMsg::Submit)));
             }
             Binding::from_key_press(press)
@@ -1770,6 +1791,14 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     };
     // Nothing typed and nothing to stop: nothing to send, and the button
     // says so (it stood lit and pressable over an empty field).
+    // With no folder open there is nothing to ask of: not lit for a
+    // question that only repeats the notice to open one.
+    let typed = typed && app.proj.project.is_some();
+    let send_tip = if app.proj.project.is_none() {
+        tr!("Open a folder to ask about its code")
+    } else {
+        send_tip
+    };
     let ask_btn = round(send_glyph, send_tint)
         .style(theme::round_button(true))
         .on_press_maybe((streaming || typed).then(|| {
@@ -3329,23 +3358,21 @@ fn push_var_rows<'a>(
         ]
         .spacing(3)
         .align_y(iced::Center);
+        let mut cut = false;
         if !v.value.is_empty() {
             // What is left of the column for the value, cut to it with an
             // ellipsis; whole where the pointer rests (below).
             let w = |s: &str| super::steady::width_of(s, ts::SMALL, crate::fonts::UI);
             let left = room - depth as f32 * 12.0 - 10.0 - w(&v.name) - w("=") - 3.0 * 3.0;
+            let shown = super::steady::cut(&v.value, left.max(0.0), ts::SMALL, crate::fonts::UI);
+            cut = shown != v.value;
             line = line
                 .push(text("=").size(ts::SMALL).color(theme::dim()))
                 .push(
-                    text(super::steady::cut(
-                        &v.value,
-                        left.max(0.0),
-                        ts::SMALL,
-                        crate::fonts::UI,
-                    ))
-                    .size(ts::SMALL)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
+                    text(shown)
+                        .size(ts::SMALL)
+                        .color(theme::fg())
+                        .wrapping(Wrapping::None),
                 );
         }
         let row: Element<'a, Message> = if opens {
@@ -3361,9 +3388,10 @@ fn push_var_rows<'a>(
             line.into()
         };
         // A value too long for its column, whole where the pointer rests:
-        // "order = Order(customer" was all a reader could see.
-        const SHOWN: usize = 24;
-        out.push(if v.value.chars().count() > SHOWN {
+        // "order = Order(customer" was all a reader could see. Whenever it
+        // is cut, whatever its length: counted by letters, a short value
+        // cut in a narrow column had no tip.
+        out.push(if cut {
             let whole: String = v.value.chars().take(600).collect();
             super::toolbar::tip_wrapped(
                 row,

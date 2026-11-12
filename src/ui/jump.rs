@@ -186,7 +186,7 @@ pub(crate) fn mark_field<'a>(
     let named = label.is_none();
     let name = match label {
         Some(label) if value.is_empty() => label,
-        Some(label) => format!("{label}: {value}"),
+        Some(label) => crate::tr!("{label}: {value}", label = label, value = value),
         None => value,
     };
     mark_as(content, message, Some(name), named)
@@ -768,13 +768,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Root<'_> {
                     _ => None,
                 };
                 let is_tab = matches!(key.as_ref(), keyboard::Key::Named(Named::Tab));
-                // Tab from an open drop-down puts it away, nothing picked.
-                if is_tab && self.choosing {
-                    shell.publish(Message::Picker(crate::app::pickers::PickerMsg::Close));
-                }
                 match (self.ring, step) {
                     // The first Tab: the window puts the ring up — after the
-                    // field holding the keys, if one does.
+                    // field holding the keys, if one does, or the drop-down
+                    // open (`App::on_tab`), which it puts away.
                     (None, Some(forward)) if is_tab => {
                         let stops = self.stops(tree, layout, renderer);
                         let field = ring::focused(&stops).is_some();
@@ -782,46 +779,54 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Root<'_> {
                             forward,
                             field,
                         }));
+                        if self.choosing {
+                            shell.publish(Message::Picker(crate::app::pickers::PickerMsg::Close));
+                        }
                         shell.capture_event();
                         return;
                     }
-                    (Some(ask), step) => {
-                        let stops = self.stops(tree, layout, renderer);
-                        let held = ring::focused(&stops);
-                        match step {
-                            Some(forward) if is_tab || held.is_none() => {
-                                let last = PLACED.with(|p| p.borrow().get(&self.window).cloned());
-                                if !stops.is_empty() {
-                                    let from = held.or(last.as_ref().and_then(|l| l.at));
-                                    let to = from
-                                        .map_or(if forward { 0 } else { stops.len() - 1 }, |f| {
-                                            ring::step(f, forward, stops.len())
-                                        });
-                                    let stop = stops[to].clone();
-                                    self.put_on(tree, layout, renderer, &stop);
-                                    let (saved, from) =
-                                        last.map(|l| (l.saved, l.from)).unwrap_or_default();
-                                    self.keep(RingAsk::Kept, Some(to), &stops, saved, from, true);
-                                    let _ = ask;
-                                }
-                                shell.capture_event();
-                                shell.request_redraw();
-                            }
-                            // A field holds the keys: what is typed is its,
-                            // and the ring is put away. Not Esc: that puts the
-                            // ring away and does nothing else, wherever the
-                            // ring is (the window's key handler, which the
-                            // field passes it on to).
-                            _ if held.is_some()
-                                && !matches!(key.as_ref(), keyboard::Key::Named(Named::Escape)) =>
-                            {
-                                shell.publish(Message::Window(crate::WindowMsg::RingEnd));
-                                ended = true;
-                            }
-                            _ => {}
-                        }
+                    // Tab from an open drop-down puts it away, nothing
+                    // picked, and moves on from it.
+                    _ if is_tab && self.choosing => {
+                        shell.publish(Message::Picker(crate::app::pickers::PickerMsg::Close));
                     }
                     _ => {}
+                }
+                if let Some(ask) = self.ring {
+                    let stops = self.stops(tree, layout, renderer);
+                    let held = ring::focused(&stops);
+                    match step {
+                        Some(forward) if is_tab || held.is_none() => {
+                            let last = PLACED.with(|p| p.borrow().get(&self.window).cloned());
+                            if !stops.is_empty() {
+                                let from = held.or(last.as_ref().and_then(|l| l.at));
+                                let to = from
+                                    .map_or(if forward { 0 } else { stops.len() - 1 }, |f| {
+                                        ring::step(f, forward, stops.len())
+                                    });
+                                let stop = stops[to].clone();
+                                self.put_on(tree, layout, renderer, &stop);
+                                let (saved, from) =
+                                    last.map(|l| (l.saved, l.from)).unwrap_or_default();
+                                self.keep(RingAsk::Kept, Some(to), &stops, saved, from, true);
+                                let _ = ask;
+                            }
+                            shell.capture_event();
+                            shell.request_redraw();
+                        }
+                        // A field holds the keys: what is typed is its,
+                        // and the ring is put away. Not Esc: that puts the
+                        // ring away and does nothing else, wherever the
+                        // ring is (the window's key handler, which the
+                        // field passes it on to).
+                        _ if held.is_some()
+                            && !matches!(key.as_ref(), keyboard::Key::Named(Named::Escape)) =>
+                        {
+                            shell.publish(Message::Window(crate::WindowMsg::RingEnd));
+                            ended = true;
+                        }
+                        _ => {}
+                    }
                 }
             }
             // A press of the pointer puts the ring away: the pointer has
@@ -1213,18 +1218,28 @@ fn place(
         ..first
     };
     let bar = in_bar(at, room);
-    let mut tries = Vec::with_capacity(6);
+    let mut tries = Vec::with_capacity(7);
     let has_before = !bar && before.x >= room.x;
     let inline = at.height <= INLINE_MAX_H;
-    // A row of a list (a tree's, a card's): its badge on it, at its start,
-    // on its first line — stacked rows have no room between them, and a
-    // badge above or under one read as the next one's ("AU" under
-    // `__init__.py`, just over `api.py`, opened `__init__.py`). Past the
-    // badges in the way along its line, never up or down to a neighbour.
+    // A row of a list (a tree's, a card's), or a control as wide (a
+    // drop-down's well, a link of a line): its badge on its first line —
+    // stacked rows have no room between them, and a badge above or under
+    // one read as the next one's ("AU" under `__init__.py`, just over
+    // `api.py`, opened `__init__.py`). Beside it where there is room: on
+    // it, the badge hid its first letters ("Wnglish" for English). Else on
+    // it, at its start, past the badges in the way along its line — never
+    // up or down to a neighbour.
     if !bar && !inline && at.width >= ROW_WIDE * at.height {
+        let line_y = (at.y + (at.height.min(ROW_LINE_H) - height) / 2.0).round();
+        if has_before {
+            tries.push(Rectangle {
+                y: line_y,
+                ..before
+            });
+        }
         let mut on = Rectangle {
             x: (at.x + 2.0).round(),
-            y: (at.y + (at.height.min(ROW_LINE_H) - height) / 2.0).round(),
+            y: line_y,
             width,
             height,
         };
@@ -1487,6 +1502,15 @@ mod tests {
         // One in the way: along the row.
         let b2 = place(card, room, 2, &[b], &[]);
         assert!(b2.x > b.x + b.width && (b2.y - b.y).abs() < 1.0, "{b2:?}");
+        // A drop-down's well with room before it: beside it, on its line,
+        // off its value — on it, its first letters were under the badge.
+        let well = Rectangle::new(Point::new(400.0, 200.0), Size::new(220.0, 26.0));
+        let b = place(well, room, 2, &[], &[]);
+        assert!(b.x + b.width <= well.x + 2.0, "over its value: {b:?}");
+        assert!(
+            b.y >= well.y && b.y + b.height <= well.y + well.height,
+            "off its line: {b:?}"
+        );
     }
 
     fn room_wide() -> Rectangle {

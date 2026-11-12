@@ -62,6 +62,10 @@ pub(crate) enum RingAsk {
     /// On the stop after (or before) the field holding the keys: Tab from a
     /// field the pointer gave the keys to.
     AfterFocused { forward: bool },
+    /// On the stop after (or before) the drop-down of `key` (its rows'):
+    /// Tab from one the pointer opened, which puts it away. The ring went
+    /// back to the first stop of the window.
+    AfterPicker { forward: bool, key: u64 },
     /// Where it was put last.
     Kept,
 }
@@ -253,7 +257,7 @@ impl Operation for Census {
                 stop.press = Some(seen.press.clone());
                 stop.name = match (field, &seen.name) {
                     (Some(field), Some(value)) if !value.is_empty() => {
-                        Some(format!("{field}: {value}"))
+                        Some(crate::tr!("{label}: {value}", label = field, value = value))
                     }
                     (Some(field), _) => Some(field),
                     (None, name) => name.clone(),
@@ -424,6 +428,19 @@ pub(crate) fn resolve(
         RingAsk::Start { forward } => start(forward, n),
         RingAsk::AfterFocused { forward } => {
             focused(stops).map_or_else(|| start(forward, n), |f| step(f, forward, n))
+        }
+        // Its well: as it is while open (pressed, it puts it away — the
+        // only such well), or once put away (pressed, it opens these rows).
+        RingAsk::AfterPicker { forward, key } => {
+            use crate::app::pickers::PickerMsg;
+            stops
+                .iter()
+                .position(|s| match &s.press {
+                    Some(crate::Message::Picker(PickerMsg::Open(p))) => p.key == key,
+                    Some(crate::Message::Picker(PickerMsg::Close)) => true,
+                    _ => false,
+                })
+                .map_or_else(|| start(forward, n), |p| step(p, forward, n))
         }
         RingAsk::Kept => last.and_then(kept).unwrap_or(0),
     };

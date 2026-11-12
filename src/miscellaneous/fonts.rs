@@ -82,3 +82,43 @@ pub fn load() {
 pub fn sources() -> impl Iterator<Item = Cow<'static, [u8]>> {
     ALL.into_iter().map(Cow::Borrowed)
 }
+
+#[cfg(test)]
+mod tests {
+    /// Italic words in Chinese are drawn with a face that has them: CJK
+    /// faces have no italic, and asked only of italic faces the shaper
+    /// found none — Ask's failure line in Chinese was all boxes.
+    #[test]
+    fn italic_chinese_finds_a_face_with_its_letters() {
+        use iced::advanced::graphics::text::cosmic_text as ct;
+        super::load();
+        let mut system = iced::advanced::graphics::text::font_system()
+            .write()
+            .expect("the font system");
+        let fonts = system.raw();
+        let has_cjk = fonts
+            .db()
+            .faces()
+            .any(|f| f.families.iter().any(|(name, _)| name.contains("CJK")));
+        if !has_cjk {
+            // Nothing to find on a machine with no CJK face.
+            return;
+        }
+        let mut buffer = ct::Buffer::new(fonts, ct::Metrics::new(14.0, 18.0));
+        for style in [ct::Style::Normal, ct::Style::Italic] {
+            let attrs = ct::Attrs::new()
+                .family(ct::Family::Name("Inter"))
+                .style(style);
+            buffer.set_text(fonts, "无法回答：AI", &attrs, ct::Shaping::Advanced, None);
+            buffer.shape_until_scroll(fonts, false);
+            let glyphs: Vec<u16> = buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter().map(|g| g.glyph_id))
+                .collect();
+            assert!(
+                !glyphs.is_empty() && glyphs.iter().all(|&g| g != 0),
+                "{style:?}: a glyph with no face: {glyphs:?}"
+            );
+        }
+    }
+}

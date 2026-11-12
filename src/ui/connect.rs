@@ -1504,6 +1504,9 @@ fn servers_block(app: &App) -> Vec<Element<'_, Message>> {
     languages.extend(app.proj.project_languages.iter().cloned());
     languages.sort();
     languages.dedup();
+    // By their names ("Python"), as the rest of the page says them — not
+    // their keys ("python").
+    let languages: Vec<LanguageChoice> = languages.into_iter().map(LanguageChoice).collect();
     let ready = drafts.server_language.is_some();
     rows.push(form::field(
         tr!("programming language\u{4}Language"),
@@ -1511,8 +1514,8 @@ fn servers_block(app: &App) -> Vec<Element<'_, Message>> {
         form::pick_with(
             tr!("programming language\u{4}Language"),
             languages,
-            drafts.server_language.clone(),
-            |l: String| Message::Languages(L::ServerLanguage(l)),
+            drafts.server_language.clone().map(LanguageChoice),
+            |l: LanguageChoice| Message::Languages(L::ServerLanguage(l.0)),
             Some(tr!("Choose…").to_string()),
         ),
     ));
@@ -1628,9 +1631,14 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 clew_core::mcp::Transport::Http { headers, .. }
                     if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
             );
-            let mut actions = row![policy, space().width(Fill)]
-                .spacing(6)
-                .align_y(iced::Center);
+            // Named where it stands: "Always ask" alone did not say of what.
+            let mut actions = row![
+                text(tr!("Tool calls")).size(ts::BODY).color(theme::dim()),
+                policy,
+                space().width(Fill)
+            ]
+            .spacing(6)
+            .align_y(iced::Center);
             if oauth {
                 actions = actions.push(if draft.signed_in.contains(&server.name) {
                     small(
@@ -3106,5 +3114,15 @@ fn add_said<'a>(error: Option<&str>) -> Element<'a, Message> {
                 .into()
         }
         None => space().width(Fill).into(),
+    }
+}
+
+/// A language in a drop-down, by its key, shown by its name.
+#[derive(Debug, Clone, PartialEq)]
+struct LanguageChoice(String);
+
+impl std::fmt::Display for LanguageChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(crate::app::languages::language_name(&self.0))
     }
 }

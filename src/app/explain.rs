@@ -921,6 +921,18 @@ impl App {
             self.status = tr!("This file is empty: there is nothing in it to explain.").into();
             return Task::none();
         }
+        // Nor one in no language Clew reads (notes, a licence): the pass
+        // found nothing in it, and said it was no longer part of the
+        // project.
+        if let explain::Node::File(abs) = &node
+            && highlight::detect(abs).is_none()
+        {
+            self.status = tr!(
+                "{file} has no code in it to explain.",
+                file = self.rel_of(abs)
+            );
+            return Task::none();
+        }
         let shown = self.update_explain(ExplainMsg::Show(node.clone()));
         if self.proj.explain.cache.contains_key(&node) {
             return shown;
