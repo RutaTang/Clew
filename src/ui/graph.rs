@@ -9,6 +9,13 @@ use iced::widget::{column, row};
 /// and Open.
 const PICKED_ROW_H: f32 = 28.0;
 
+/// The room between the graph dialog's header controls.
+const HEADER_GAP: f32 = 4.0;
+
+/// How wide the map's search is: its field, its count, its two steps
+/// (`graph_search_field`).
+const GRAPH_SEARCH_W: f32 = 190.0 + 72.0 + 2.0 * (14.0 + 12.0) + 3.0 * 2.0;
+
 /// Modal frame shared by the project-graph overlays: a titled panel with a
 /// List/Map toggle, over a dismissable backdrop.
 #[allow(clippy::too_many_arguments)]
@@ -18,12 +25,20 @@ pub(crate) fn graph_modal_frame<'a>(
     graph_3d: bool,
     graph_spin: bool,
     graph_heat: bool,
-    extra: Option<Element<'a, Message>>,
+    extra: Option<(Element<'a, Message>, f32)>,
     search: Option<Element<'a, Message>>,
     picked: Option<Element<'a, Message>>,
     window: iced::Size,
     body: Element<'a, Message>,
 ) -> Element<'a, Message> {
+    // As large as the window allows, an edge of it left round — it was
+    // 760 × 640 in any window, a big map squeezed into the middle of a big
+    // screen — and never smaller than that where the window has room.
+    let width = (window.width - 2.0 * GRAPH_MODAL_EDGE)
+        .min(GRAPH_MODAL_MAX_W)
+        .max(GRAPH_MODAL_W.min(window.width - 2.0 * MODAL_MARGIN));
+    let height = (window.height - 2.0 * GRAPH_MODAL_EDGE)
+        .max(GRAPH_MODAL_MAX_H.min(window.height - 2.0 * MODAL_MARGIN));
     // Header controls are icon buttons; each names itself on hover (`chrome_tip`).
     let icon_btn = |g: Glyph, tip: &'static str, msg: Message| -> Element<'a, Message> {
         chrome_tip(
@@ -35,36 +50,6 @@ pub(crate) fn graph_modal_frame<'a>(
             None,
         )
     };
-    let mut header = row![
-        text(title).size(ts::TITLE).color(theme::fg()),
-        space().width(Fill)
-    ]
-    .spacing(4)
-    .align_y(iced::Center);
-    if let Some(extra) = extra {
-        header = header.push(extra);
-    }
-    if let Some(search) = search {
-        header = header.push(search);
-    }
-    // Map mode: a spin start/stop (3D only), then a 2D/3D projection toggle. Each
-    // icon shows the action / the mode it switches to.
-    if graph_mode && graph_3d {
-        header = header.push(if graph_spin {
-            icon_btn(
-                Glyph::Pause,
-                tr!("Stop spinning"),
-                Message::Graph(GraphMsg::ToggleSpin),
-            )
-        } else {
-            icon_btn(
-                Glyph::Play,
-                tr!("Spin"),
-                Message::Graph(GraphMsg::ToggleSpin),
-            )
-        });
-    }
-    // Back to where the map starts: its zoom, its pan, its turn.
     // Two choices side by side, the one in effect lit: what each is, in
     // words — shapes for 2D and the map read as ◇ and ▽.
     let pair = |a: (String, bool), b: (String, bool), msg: Message| -> Element<'a, Message> {
@@ -82,15 +67,32 @@ pub(crate) fn graph_modal_frame<'a>(
         };
         row![seg(a), seg(b)].spacing(2).into()
     };
+    // The map's own controls: a spin start/stop (3D only), back to where
+    // the map starts (its zoom, its pan, its turn), the 2D/3D projection,
+    // and Heat. Each icon shows the action / the mode it switches to.
+    let mut map_controls: Vec<Element<'a, Message>> = Vec::new();
+    if graph_mode && graph_3d {
+        map_controls.push(if graph_spin {
+            icon_btn(
+                Glyph::Pause,
+                tr!("Stop spinning"),
+                Message::Graph(GraphMsg::ToggleSpin),
+            )
+        } else {
+            icon_btn(
+                Glyph::Play,
+                tr!("Spin"),
+                Message::Graph(GraphMsg::ToggleSpin),
+            )
+        });
+    }
     if graph_mode {
-        header = header.push(icon_btn(
+        map_controls.push(icon_btn(
             Glyph::Recenter,
             tr!("Fit the graph"),
             Message::Graph(GraphMsg::FitView),
         ));
-    }
-    if graph_mode {
-        header = header.push(pair(
+        map_controls.push(pair(
             ("2D".to_string(), !graph_3d),
             ("3D".to_string(), graph_3d),
             Message::Graph(GraphMsg::Toggle3D),
@@ -98,7 +100,7 @@ pub(crate) fn graph_modal_frame<'a>(
         // Heat: colour by how often each file changed, instead of by language.
         // A toggle: lit while on, its word the same either way — a dot
         // added after it widened the button, and moved those beside it.
-        header = header.push(chrome_tip(
+        map_controls.push(chrome_tip(
             button(text(tr!("Heat")).size(ts::SMALL).color(if graph_heat {
                 theme::on_accent()
             } else {
@@ -118,25 +120,90 @@ pub(crate) fn graph_modal_frame<'a>(
             None,
         ));
     }
-    header = header
-        .push(pair(
+    // What leaves the dialog, and the List it switches to, are always
+    // placed, at the right: in French at 1100 px the row ran past the
+    // dialog's edge and took List and Close with it.
+    let fixed = row![
+        pair(
             (tr!("Graph").to_string(), graph_mode),
             (tr!("List").to_string(), !graph_mode),
             Message::Graph(GraphMsg::OverlayViewToggle),
-        ))
-        .push(icon_btn(
+        ),
+        icon_btn(
             Glyph::Close,
             tr!("Close"),
             Message::Graph(GraphMsg::CloseOverlay),
-        ));
-    // As large as the window allows, an edge of it left round — it was
-    // 760 × 640 in any window, a big map squeezed into the middle of a big
-    // screen — and never smaller than that where the window has room.
-    let width = (window.width - 2.0 * GRAPH_MODAL_EDGE)
-        .min(GRAPH_MODAL_MAX_W)
-        .max(GRAPH_MODAL_W.min(window.width - 2.0 * MODAL_MARGIN));
-    let height = (window.height - 2.0 * GRAPH_MODAL_EDGE)
-        .max(GRAPH_MODAL_MAX_H.min(window.height - 2.0 * MODAL_MARGIN));
+        ),
+    ]
+    .spacing(HEADER_GAP)
+    .align_y(iced::Center);
+    // Whether the map's controls and its search fit beside the title on
+    // one line, in the words of the language spoken: else they go on a
+    // line of their own under it.
+    let one_line = {
+        let measure = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
+        let seg = |s: &str| measure(s, ts::SMALL) + 16.0;
+        let icon = 16.0 + 16.0;
+        let fixed_w = seg(tr!("Graph")) + seg(tr!("List")) + 2.0 + HEADER_GAP + icon;
+        let lead_w =
+            measure(title, ts::TITLE) + extra.as_ref().map_or(0.0, |(_, w)| w + HEADER_GAP);
+        let map_w = if graph_mode {
+            let spin = if graph_3d { icon + HEADER_GAP } else { 0.0 };
+            let search = if search.is_some() {
+                GRAPH_SEARCH_W + HEADER_GAP
+            } else {
+                0.0
+            };
+            search
+                + spin
+                + icon
+                + HEADER_GAP
+                + seg("2D")
+                + seg("3D")
+                + 2.0
+                + HEADER_GAP
+                + seg(tr!("Heat"))
+                + HEADER_GAP
+        } else {
+            0.0
+        };
+        lead_w + map_w + fixed_w + 2.0 * HEADER_GAP <= width - 2.0 * MODAL_PAD
+    };
+    let mut lead = row![
+        text(title).size(ts::TITLE).color(theme::fg()),
+        space().width(Fill)
+    ]
+    .spacing(HEADER_GAP)
+    .align_y(iced::Center);
+    if let Some((extra, _)) = extra {
+        lead = lead.push(extra);
+    }
+    let mut second = None;
+    if one_line {
+        if let Some(search) = search {
+            lead = lead.push(search);
+        }
+        for control in map_controls {
+            lead = lead.push(control);
+        }
+    } else {
+        let mut line = row![].spacing(HEADER_GAP).align_y(iced::Center);
+        if let Some(search) = search {
+            line = line.push(search);
+        }
+        line = line.push(space().width(Fill));
+        for control in map_controls {
+            line = line.push(control);
+        }
+        second = Some(line);
+    }
+    let header = column![
+        row![container(lead).width(Fill).clip(true), fixed]
+            .spacing(HEADER_GAP)
+            .align_y(iced::Center)
+    ]
+    .push(second)
+    .spacing(8);
     let mut parts = column![header].spacing(12);
     // On the map, the picked node's row has its place whether a node is
     // picked or not: coming as one was clicked, it pushed the map down and
@@ -276,6 +343,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         },
     );
     let search = app.graph_mode.then(|| graph_search_field(app));
+    let extra = extra.map(|extra| (extra, graph_extra_w(app, overlay)));
     graph_modal_frame(
         title,
         app.graph_mode,
@@ -288,6 +356,42 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         iced::Size::new(app.window_width, app.window_height),
         body,
     )
+}
+
+/// How wide the control beside a graph dialog's title is, as
+/// `project_graph_modal` draws it — measured in the words of the language
+/// spoken, for the header to know whether the map's controls fit beside it.
+fn graph_extra_w(app: &App, overlay: crate::Overlay) -> f32 {
+    let measure = |s: &str| super::steady::width_of(s, ts::SMALL, crate::fonts::UI);
+    match overlay {
+        crate::Overlay::ProjectCalls => {
+            if let Some(progress) = app.refine_progress_label() {
+                let widest = match app.proj.project_calls.refine_progress {
+                    Some((_, total)) if total > 0 => {
+                        tr!("Refining {done}/{total}…", done = total, total = total)
+                    }
+                    _ => progress,
+                };
+                measure(&widest)
+            } else if let Some(precise) = app.precise_label() {
+                measure(&precise)
+            } else {
+                measure(tr!("Check calls with the language server")) + 20.0
+            }
+        }
+        crate::Overlay::ProjectImports => 0.0,
+        crate::Overlay::ProjectTypes => measure(tr!("Building the API docs…")),
+        // The picker as wide as its widest map, its padding and its arrow.
+        crate::Overlay::ProjectMaps => {
+            app.proj
+                .maps
+                .iter()
+                .map(|m| measure(&MapChoice::of(m).to_string()))
+                .fold(0.0, f32::max)
+                + 16.0
+                + 24.0
+        }
+    }
 }
 
 /// Node `i` of the map `kind` laid out as `layout`, picked: what it is,

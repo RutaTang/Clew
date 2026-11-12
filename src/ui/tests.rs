@@ -15318,6 +15318,74 @@ fn build_index_waits_for_notes_and_offers_explain_all() {
     assert!(shows(&mut sim, "Set Up Find by Meaning…"));
 }
 
+/// H1: a graph dialog keeps its List toggle and its Close in reach in any
+/// language: in French at 1100 px the header ran past the dialog's edge,
+/// and List and Close were not drawn. Where its line has no room, the
+/// map's own controls go on a line under it; where it has, they stay on
+/// it.
+#[test]
+fn a_graph_dialog_keeps_list_and_close_in_french_at_1100() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = reader_app();
+    app.graph_mode = true;
+    let calls = crate::Overlay::ProjectCalls;
+    // A text's place as laid out, and what of it shows.
+    let placed = |sim: &mut Sim<'_>, want: &'static str| {
+        use iced_test::selector::Candidate;
+        sim.find(move |c: Candidate<'_>| match c {
+            Candidate::Text {
+                content,
+                bounds,
+                visible_bounds,
+                ..
+            } if content == want => Some((bounds, visible_bounds.unwrap_or_default())),
+            _ => None,
+        })
+        .expect(want)
+    };
+    let header_at = |app: &App, size: Size, list: &'static str, heat: &'static str| {
+        let mut sim = iced_test::Simulator::with_size(
+            Default::default(),
+            size,
+            super::project_graph_modal(app, calls),
+        );
+        (placed(&mut sim, list), placed(&mut sim, heat).1)
+    };
+    for (lang, list, heat) in [(Lang::Fr, "Liste", "Activité"), (Lang::En, "List", "Heat")] {
+        let size = Size::new(1100.0, 700.0);
+        app.window_width = size.width;
+        app.window_height = size.height;
+        let ((list_laid, list_at), heat_at) = with_lang(lang, || header_at(&app, size, list, heat));
+        // The dialog's inner right edge: the window less its edge and pad.
+        let right = size.width - super::GRAPH_MODAL_EDGE - super::MODAL_PAD;
+        // List whole, and Close (its padding, the gap, the icon) after it.
+        assert!(
+            list_at.width >= list_laid.width - 0.5,
+            "{lang:?}: List cut: {list_at:?} of {list_laid:?}"
+        );
+        assert!(
+            list_at.x + list_at.width + 8.0 + 4.0 + 32.0 <= right + 0.5,
+            "{lang:?}: Close past the edge: {list_at:?}"
+        );
+        assert!(heat_at.width > 0.0, "{lang:?}: the map's controls dropped");
+        if lang == Lang::Fr {
+            assert!(
+                heat_at.y > list_at.y + 10.0,
+                "on its own line: {heat_at:?} {list_at:?}"
+            );
+        }
+    }
+    // With room, the map's controls stay on the title's line.
+    let size = Size::new(1600.0, 900.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    let ((_, list_at), heat_at) = header_at(&app, size, "List", "Heat");
+    assert!(
+        (heat_at.y - list_at.y).abs() < 4.0,
+        "{heat_at:?} {list_at:?}"
+    );
+}
+
 /// A map opened with no project says why it is empty, not "Nothing to
 /// show." (a project with nothing in it), and has nothing to refine.
 #[test]

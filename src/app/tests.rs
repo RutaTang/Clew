@@ -31495,6 +31495,9 @@ fn closing_the_split_moves_a_start_there_to_the_pane_left_or_gives_it_up() {
         assert_eq!(app.proj.active, 1);
         let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
         let asked = app.proj.time_gen;
+        // Closed from the left pane, the one read: the right one, with the
+        // start, goes.
+        app.proj.active = 0;
         let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
         if shown {
             assert_eq!(
@@ -31513,6 +31516,40 @@ fn closing_the_split_moves_a_start_there_to_the_pane_left_or_gives_it_up() {
             "a history landed in a session no pane shows (shown on the left: {shown})"
         );
     }
+}
+
+/// H2: closing the split keeps the pane being read. Reading the file
+/// opened to the side, in the right pane, closing the split closed that
+/// one: the file read went, the other stayed. Kept, it is where it was;
+/// read on the left, the left is kept.
+#[test]
+fn closing_the_split_keeps_the_pane_being_read() {
+    let mut app = scanned_app("split-keeps-read-pane");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    open_synchronously(&mut app, "notes.txt", None);
+    assert_eq!(app.proj.active, 1);
+    {
+        let v = app.proj.panes[1].as_mut().unwrap();
+        v.caret = Some((1, 2));
+        v.scroll_y = 18.0;
+    }
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    assert!(!app.proj.split);
+    assert!(app.proj.panes[1].is_none());
+    assert_eq!(app.proj.active, 0);
+    let kept = app.proj.panes[0].as_ref().unwrap();
+    assert_eq!(kept.rel, "notes.txt", "the file being read went");
+    assert_eq!((kept.caret, kept.scroll_y), (Some((1, 2)), 18.0));
+    assert_eq!(app.proj.link.pane_pending, [None, None]);
+
+    // Read on the left: the left is kept.
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.proj.active = 0;
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    assert_eq!(app.proj.panes[0].as_ref().unwrap().rel, "notes.txt");
+    assert!(app.proj.panes[1].is_none());
 }
 
 /// A time-travel session off screen takes no key. The reader focused the

@@ -1473,26 +1473,58 @@ impl App {
         // away, and the one opened, at the same scroll, drew it again.
         self.forget_gutter_tip(None);
         if self.proj.split {
+            // The pane kept is the one being read: closing the split while
+            // reading the second pane, opened to the side, closed that one,
+            // and the file being read went.
+            let kept = usize::from(self.proj.active == 1 && self.proj.panes[1].is_some());
+            let closed = 1 - kept;
             self.proj.split = false;
-            self.proj.panes[1] = None;
+            self.proj.panes[closed] = None;
             // A load still in flight for the closed pane must not resurrect
             // it as an invisible viewer — nor one a time-travel start there
             // superseded, carried out once its history came to nothing: into
             // a new second pane, should the split be open again by then.
-            self.cancel_pane_load(1);
-            self.proj.link.superseded_open.take_if(|s| s.pane == 1);
+            self.cancel_pane_load(closed);
+            self.proj.link.superseded_open.take_if(|s| s.pane == closed);
             // A time-travel start made there goes on in the pane left, should
             // that show its file — its history shows there, and a jump there
             // gives it up (`jump_gives_up_time_start`) — and is given up
             // otherwise: its history would bring a session no pane shows,
             // replacing the one there is, which opening its file ends.
-            let shown = self.proj.panes[0].as_ref().map(|v| v.abs.clone());
-            if let Some(start) = self.proj.time_start.as_mut().filter(|s| s.pane == 1) {
+            let shown = self.proj.panes[kept].as_ref().map(|v| v.abs.clone());
+            if let Some(start) = self.proj.time_start.as_mut().filter(|s| s.pane == closed) {
                 if shown.as_ref() == Some(&start.abs) {
-                    start.pane = 0;
+                    start.pane = kept;
                 } else {
                     // What it held back went with the pane, above.
                     let _ = self.give_up_time_travel_start();
+                }
+            }
+            self.proj.context_menu = None;
+            // The second pane kept becomes the first, where it is: what
+            // waits on it waits there. A load still on its way to it would
+            // land in no pane, and is let go.
+            let mut moved = Task::none();
+            if kept == 1 {
+                self.proj.panes.swap(0, 1);
+                self.cancel_pane_load(1);
+                if let Some(s) = self.proj.link.superseded_open.as_mut() {
+                    s.pane = 0;
+                }
+                if let Some(start) = self.proj.time_start.as_mut() {
+                    start.pane = 0;
+                }
+                if let Some(anchor) = self.proj.walk.pending_anchor.as_mut() {
+                    anchor.pane = 0;
+                }
+                if let Some(v) = self.proj.panes[0].as_ref() {
+                    moved = operation::scroll_to(
+                        ui::code_scroll_id(0),
+                        AbsoluteOffset {
+                            x: v.scroll_x,
+                            y: v.scroll_y,
+                        },
+                    );
                 }
             }
             self.proj.active = 0;
@@ -1500,7 +1532,7 @@ impl App {
             // that pane's caret — it went on telling of the closed one's
             // ("subtotal, line 11" over line 1) until a click in the code.
             let follow = self.follow_caret(Task::none());
-            return Task::batch([follow, self.sync_reading_context()]);
+            return Task::batch([moved, follow, self.sync_reading_context()]);
         } else {
             self.proj.split = true;
             // Duplicate the current file for side-by-side reading.
