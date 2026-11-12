@@ -368,7 +368,7 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
             let live = !sim.ended;
             let controls = row![
                 control(
-                    tr!("⟲ Restart"),
+                    tr!("↺ Restart"),
                     Message::Fake(FakeMsg::Step(SimCmd::Restart)),
                     true
                 ),
@@ -378,17 +378,17 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
                     sim.ended || sim.at > 0
                 ),
                 control(
-                    tr!("⤼ Over"),
+                    tr!("↪ Over"),
                     Message::Fake(FakeMsg::Step(SimCmd::Over)),
                     live
                 ),
                 control(
-                    tr!("⤓ In"),
+                    tr!("↓ In"),
                     Message::Fake(FakeMsg::Step(SimCmd::Into)),
                     live
                 ),
                 control(
-                    tr!("⤒ Out"),
+                    tr!("↑ Out"),
                     Message::Fake(FakeMsg::Step(SimCmd::Out)),
                     live
                 ),

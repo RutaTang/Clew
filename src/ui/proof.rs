@@ -48,7 +48,7 @@ pub(crate) fn proof_panel(app: &App) -> Element<'_, Message> {
     let last = total.saturating_sub(1);
     let controls = row![
         control(
-            tr!("⟲ Start"),
+            tr!("↺ Start"),
             Message::Proof(ProofMsg::Goto(0)),
             ready && walk.at > 0
         ),
@@ -63,7 +63,7 @@ pub(crate) fn proof_panel(app: &App) -> Element<'_, Message> {
             ready && walk.at < last
         ),
         control(
-            tr!("⏭ End"),
+            tr!("⇥ End"),
             Message::Proof(ProofMsg::Goto(last)),
             ready && walk.at < last
         ),

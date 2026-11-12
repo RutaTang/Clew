@@ -3545,7 +3545,7 @@
  "… {n} more lines": "… 还有 {n} 行",
  "↻ Debug Again": "↻ 再次调试",
  "↻ Run Again": "↻ 再次运行",
- "⏭ End": "⏭ 结尾",
+ "⇥ End": "⇥ 结尾",
  "■ Stop": "■ 停止",
  "▶ Continue": "▶ 继续",
  "▶ Next": "▶ 下一步",
@@ -3554,9 +3554,9 @@
  "● LSP-precise: {languages}": "● LSP 精确：{languages}",
  "● live": "● 运行中",
  "⚠ internal error — restart this language server": "⚠ 内部错误，请重启此语言服务器",
- "⟲ Restart": "⟲ 从头开始",
- "⟲ Start": "⟲ 开头",
- "⤒ Out": "⤒ 单步跳出",
- "⤓ In": "⤓ 单步进入",
- "⤼ Over": "⤼ 单步跳过"
+ "↺ Restart": "↺ 从头开始",
+ "↺ Start": "↺ 开头",
+ "↑ Out": "↑ 单步跳出",
+ "↓ In": "↓ 单步进入",
+ "↪ Over": "↪ 单步跳过"
 }

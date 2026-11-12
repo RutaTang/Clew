@@ -3545,7 +3545,7 @@
  "… {n} more lines": "… {n} lignes de plus",
  "↻ Debug Again": "↻ Déboguer à nouveau",
  "↻ Run Again": "↻ Exécuter à nouveau",
- "⏭ End": "⏭ Fin",
+ "⇥ End": "⇥ Fin",
  "■ Stop": "■ Arrêter",
  "▶ Continue": "▶ Continuer",
  "▶ Next": "▶ Suivant",
@@ -3554,9 +3554,9 @@
  "● LSP-precise: {languages}": "● Précision LSP : {languages}",
  "● live": "● en direct",
  "⚠ internal error — restart this language server": "⚠ erreur interne — redémarrez ce serveur de langage",
- "⟲ Restart": "⟲ Recommencer",
- "⟲ Start": "⟲ Début",
- "⤒ Out": "⤒ Pas sortant",
- "⤓ In": "⤓ Pas détaillé",
- "⤼ Over": "⤼ Pas principal"
+ "↺ Restart": "↺ Recommencer",
+ "↺ Start": "↺ Début",
+ "↑ Out": "↑ Pas sortant",
+ "↓ In": "↓ Pas détaillé",
+ "↪ Over": "↪ Pas principal"
 }

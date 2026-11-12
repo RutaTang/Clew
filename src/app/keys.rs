@@ -295,7 +295,9 @@ impl App {
         let Key::Named(named) = key.as_ref() else {
             return None;
         };
-        if modifiers.command() || modifiers.alt() {
+        // A chord is some other command's: on macOS Ctrl is not Command, and
+        // Ctrl+F10 stepped the program there.
+        if modifiers.command() || modifiers.control() || modifiers.logo() || modifiers.alt() {
             return None;
         }
         let status = self.debug.session.as_ref().map(|s| s.status);

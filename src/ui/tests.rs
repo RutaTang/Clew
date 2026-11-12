@@ -12501,8 +12501,9 @@ fn settings_draws_every_shortcut_as_key_caps() {
         assert!(sim.find(key).is_ok(), "{key} is a cap of its own");
     }
     assert!(sim.find("h j k l   ← ↓ ↑ →").is_err());
-    // A command's other keys after "or", as caps.
-    assert!(sim.find("or").is_ok());
+    // A command's other keys after "or", as caps: where it has some — on
+    // macOS, ⌘G is Find Next, no second key for Go to Line.
+    assert_eq!(sim.find("or").is_ok(), !crate::keymap::MAC_KEYS);
     // No text holds a chord whole, or "or" and its keys together.
     let whole = |t: &str| t.contains("Ctrl+") || t.contains("Shift+") || t.starts_with("or ");
     assert!(
@@ -18014,7 +18015,7 @@ fn the_fake_debug_panel_shows_the_trace_and_steps_it() {
     assert!(shows(&mut sim, "value is set"));
     assert!(shows(&mut sim, "7"));
     assert!(shows(&mut sim, "nothing is called"));
-    let over = click(sim_of(&app), "⤼ Over");
+    let over = click(sim_of(&app), "↪ Over");
     assert!(
         over.iter()
             .any(|m| matches!(m, Message::Fake(crate::FakeMsg::Step(crate::SimCmd::Over)))),
@@ -20268,6 +20269,18 @@ fn a_right_click_on_a_tree_row_opens_its_menu_at_the_pointer() {
     assert!(!shows(&mut sim, "Open to the Side"));
 }
 
+/// The file tree menu's last row: showing the file where this platform's
+/// own file manager is named.
+fn reveal_row() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Show in Finder"
+    } else if cfg!(target_os = "windows") {
+        "Show in Explorer"
+    } else {
+        "Show in File Manager"
+    }
+}
+
 /// A menu is the keyboard's too: ↓ puts the ring on its first row (↑ on
 /// its last), the arrows walk its rows, saying each, and Enter presses the
 /// one it is on. They did nothing: a menu was the mouse's alone.
@@ -20301,7 +20314,7 @@ fn the_arrows_walk_a_menu_and_enter_presses_its_row() {
     app.ring = None;
     let mut driven = Driven::sized(&app, size);
     let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
-    assert_eq!(app.status, "Show in File Manager", "on its last row");
+    assert_eq!(app.status, reveal_row(), "on its last row");
     let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
     let row = app.status.clone();
     let _ = driven.key(&mut app, Key::Named(Named::Enter), none);
@@ -20370,7 +20383,7 @@ fn a_menus_ring_goes_with_it_and_the_keys_go_back() {
     let _ = driven.key(&mut app, Key::Named(Named::F10), keyboard::Modifiers::SHIFT);
     assert!(app.proj.tree_menu.is_some(), "the tree's menu");
     let _ = driven.key(&mut app, Key::Named(Named::ArrowUp), none);
-    assert_eq!(app.status, "Show in File Manager", "on its last row");
+    assert_eq!(app.status, reveal_row(), "on its last row");
     // Up to Copy Relative Path, and pressed.
     while app.status != "Copy Relative Path" {
         let said = app.status.clone();
@@ -21492,9 +21505,13 @@ fn the_debug_note_is_whole_in_french_where_there_is_room() {
 }
 
 /// At a laptop's width, the debug panel's header keeps its trace whole —
-/// "Trace: 1 stop" on one line and "Walk this run" there — and it is the
-/// note on what ran that gives way: the count was squeezed to a word a
-/// line ("Tra / 1 / sto") and Walk this run pushed out of the panel.
+/// "Trace: 1 stop" on one line and "Walk this run" there — and the note
+/// on what ran is said whole at every width, on the header's row where it
+/// fits, else on a line of its own: the count was squeezed to a word a line
+/// ("Tra / 1 / sto") and Walk this run pushed out of the panel. The window
+/// is as wide as the panel drawn, as it is in the app: the step controls'
+/// arrows are the interface font's own, so no machine's fallback font
+/// widens them and moves the header's breaks.
 #[test]
 fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
     let mut app = reader_app();
@@ -21527,6 +21544,7 @@ fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
     crate::app::tests::isolated_data_dir();
     crate::fonts::load();
     for width in [1400.0, 900.0, 640.0] {
+        app.window_width = width;
         let mut sim = iced_test::Simulator::with_size(
             Default::default(),
             Size::new(width, 260.0),
@@ -21539,19 +21557,18 @@ fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
             walk.x + walk.width <= width,
             "{width}: in the panel: {walk:?}"
         );
-        // What ran is said whole while there is room, cut short where
-        // there is less, and gives way first where there is none.
-        let note = |t: &str| t.starts_with("pricing.py does not");
-        if width > 1000.0 {
-            assert!(
-                text_at(&mut sim, move |t| note(t) && !t.ends_with('…'), 0).is_some(),
-                "{width}: the note whole"
-            );
-        } else if width > 800.0 {
-            assert!(
-                text_at(&mut sim, move |t| note(t) && t.ends_with('…'), 0).is_some(),
-                "{width}: the note cut short"
-            );
-        }
+        // What ran is said whole: on the header's row where it fits, on a
+        // line of its own where it does not.
+        let note = text_at(
+            &mut sim,
+            |t| t == "pricing.py does not run on its own, so main.py ran",
+            0,
+        )
+        .unwrap_or_else(|| panic!("{width}: the note whole"));
+        assert!(note.height < 20.0, "{width}: on one line: {note:?}");
+        assert!(
+            note.x + note.width <= width,
+            "{width}: in the panel: {note:?}"
+        );
     }
 }

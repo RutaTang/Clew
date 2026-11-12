@@ -411,7 +411,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             ),
             keyed(
                 ctrl(
-                    tr!("⤼ Over"),
+                    tr!("↪ Over"),
                     Message::Debug(DebugMsg::Control(DebugCmd::StepOver)),
                     stopped
                 )
@@ -421,7 +421,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             ),
             keyed(
                 ctrl(
-                    tr!("⤓ In"),
+                    tr!("↓ In"),
                     Message::Debug(DebugMsg::Control(DebugCmd::StepIn)),
                     stopped
                 )
@@ -431,7 +431,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             ),
             keyed(
                 ctrl(
-                    tr!("⤒ Out"),
+                    tr!("↑ Out"),
                     Message::Debug(DebugMsg::Control(DebugCmd::StepOut)),
                     stopped
                 )
@@ -462,7 +462,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     let controls_w = if output_only {
         stop_w + 2.0
     } else {
-        [tr!("▶ Continue"), tr!("⤼ Over"), tr!("⤓ In"), tr!("⤒ Out")]
+        [tr!("▶ Continue"), tr!("↪ Over"), tr!("↓ In"), tr!("↑ Out")]
             .iter()
             .map(|label| w(label, ts::BODY) + 16.0)
             .sum::<f32>()
