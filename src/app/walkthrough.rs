@@ -200,8 +200,10 @@ impl App {
         let about = crate::app::tasks::setting_to_fix(&why);
         self.say_failure_again(
             move || {
+                // Plainly, in two sentences: the reason inside brackets,
+                // its own in brackets, and two dashes read as a puzzle.
                 tr!(
-                    "Couldn't narrate the run with AI ({reason}) — showing its stops as recorded",
+                    "Couldn't narrate the run: {reason}. Showing its stops as recorded.",
                     reason = crate::app::tasks::ai_reason(&why)
                 )
             },

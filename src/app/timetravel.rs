@@ -1171,10 +1171,23 @@ impl App {
         if let Some(tt) = self.proj.time_travel.as_mut() {
             tt.sync_why_loading();
         }
+        // The commit on screen: its failure is said in its banner, with Try
+        // again and Settings — on the status bar too, it was said twice.
+        let on_screen = |app: &Self, sha: &str| {
+            app.proj
+                .time_travel
+                .as_ref()
+                .and_then(|tt| tt.commits.get(tt.idx))
+                .is_some_and(|c| c.sha == sha)
+        };
         match failed {
-            // The failure the status bar stands for, with its Try again
-            // (and Settings): said only as passing text, it was squeezed
-            // in after an older failure, cut short, with no controls.
+            Some((failed_sha, _)) if on_screen(self, &failed_sha) => {
+                self.forget_failure_of(crate::app::state::FailureOf::Summary);
+            }
+            // Scrubbed away from it: the failure the status bar stands
+            // for, with its Try again (and Settings) — said only as passing
+            // text, it was squeezed in after an older failure, cut short,
+            // with no controls.
             Some((failed_sha, e)) => {
                 let about = crate::app::tasks::setting_to_fix(&e);
                 self.say_failure_again(
@@ -1338,19 +1351,39 @@ impl App {
         if self.proj.project.is_none() {
             return Task::none();
         }
-        // Nothing but blanks and comments: nothing to ask the model about,
-        // nothing paid for — and no key asked for first.
-        if let Some(v) = self.proj.panes.get(pane).and_then(Option::as_ref) {
-            let range = match v.selection_ordered() {
+        // Target line range (0-based inclusive): the selection, else the
+        // clicked/caret line.
+        let Some(range) = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .and_then(|v| match v.selection_ordered() {
                 Some(((a, _), (b, _))) => Some((a, b)),
                 None => menu_line.or(v.caret.map(|(l, _)| l)).map(|l| (l, l)),
-            };
-            if let Some((a, b)) = range
-                && !(a..=b).any(|l| v.has_code(l))
-            {
-                self.status = tr!("Put the cursor on a line of code to ask why it is there").into();
-                return Task::none();
-            }
+            })
+        else {
+            return Task::none();
+        };
+        self.ask_why(pane, range, anchor)
+    }
+
+    /// Ask why lines `l0..=l1` of `pane`'s file are there, from the commits
+    /// blame names for them: the popup shows the question and, once it is
+    /// in, the answer — or why there is none, with Try again.
+    fn ask_why(
+        &mut self,
+        pane: usize,
+        (l0, l1): (usize, usize),
+        anchor: Option<f32>,
+    ) -> Task<Message> {
+        // Nothing but blanks and comments: nothing to ask the model about,
+        // nothing paid for — and no key asked for first.
+        if let Some(v) = self.proj.panes.get(pane).and_then(Option::as_ref)
+            && !(l0..=l1).any(|l| v.has_code(l))
+        {
+            self.status = tr!("Put the cursor on a line of code to ask why it is there").into();
+            return Task::none();
         }
         let cfg = match self.require_llm() {
             Ok(cfg) => cfg,
@@ -1365,15 +1398,6 @@ impl App {
         let Some(git) = v.git.clone() else {
             self.status = tr!("No git history for this file").into();
             return Task::none();
-        };
-        // Target line range (0-based inclusive): the selection, else the
-        // clicked/caret line.
-        let (l0, l1) = match v.selection_ordered() {
-            Some(((a, _), (b, _))) => (a, b),
-            None => match menu_line.or(v.caret.map(|(l, _)| l)) {
-                Some(l) => (l, l),
-                None => return Task::none(),
-            },
         };
         // Distinct committed commits touching the range (a few at most).
         let mut seen = HashSet::new();
@@ -1419,6 +1443,8 @@ impl App {
             prepared: Vec::new(),
             anchor,
             fix: None,
+            asked: Some((pane, l0, l1)),
+            failed: false,
         });
         // The answer is only meaningful for the project it was asked in: its
         // stamp is checked on arrival, so a reply that outlives a project
@@ -1502,6 +1528,7 @@ impl App {
             return Task::none();
         }
         let mut fix = None;
+        let failed = result.is_err();
         let md = match result {
             Ok(m) => {
                 self.settle_status(&[tr!("Explaining why…")]);
@@ -1518,8 +1545,10 @@ impl App {
             }
         };
         let (prepared, task) = self.prepare_segments(&md);
-        // Where the question was asked, the answer stays.
+        // Where the question was asked, the answer stays — and what was
+        // asked, for its Try again.
         let anchor = self.proj.blame_why.as_ref().and_then(|b| b.anchor);
+        let asked = self.proj.blame_why.as_ref().and_then(|b| b.asked);
         self.proj.blame_why = Some(BlameWhy {
             token,
             title,
@@ -1528,6 +1557,8 @@ impl App {
             prepared,
             anchor,
             fix,
+            asked,
+            failed,
         });
         task
     }
@@ -1550,6 +1581,17 @@ impl App {
                 self.proj.blame_why = None;
                 Task::none()
             }
+            // Asked again, of the same lines, where it was asked.
+            TimeTravelMsg::BlameWhyAgain => match self.proj.blame_why.as_ref() {
+                Some(bw) if !bw.loading => match bw.asked {
+                    Some((pane, l0, l1)) => {
+                        let anchor = bw.anchor;
+                        self.ask_why(pane, (l0, l1), anchor)
+                    }
+                    None => Task::none(),
+                },
+                _ => Task::none(),
+            },
             TimeTravelMsg::Start { symbol } => {
                 // A plain start lands on the newest commit, whatever a pick
                 // from the margin's History that never came to be asked.
@@ -1598,7 +1640,7 @@ impl App {
                 if symbol {
                     let (scope, refused) = self.time_travel_scope(true);
                     if matches!(scope, TimeScope::File) && !refused {
-                        self.status = tr!("No function or class to follow at the caret").into();
+                        self.status = tr!("No function or class to follow at the cursor").into();
                         return Task::none();
                     }
                 }

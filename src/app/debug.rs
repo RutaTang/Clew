@@ -2775,6 +2775,23 @@ impl App {
                 self.proj.bp_cond_edit = None;
                 Task::none()
             }
+            // From its own dialog: there was no way to take a breakpoint
+            // away but its dot or the menu's toggle.
+            DebugMsg::BpConditionRemove => {
+                let Some((path, line, _)) = self.proj.bp_cond_edit.take() else {
+                    return Task::none();
+                };
+                let set = self
+                    .debug
+                    .breakpoints
+                    .get(&path)
+                    .is_some_and(|m| m.contains_key(&line));
+                if set {
+                    self.on_breakpoint_toggle(path, line)
+                } else {
+                    Task::none()
+                }
+            }
             DebugMsg::WatchInput(s) => {
                 self.debug.watch_input = s;
                 Task::none()

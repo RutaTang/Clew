@@ -103,6 +103,25 @@ pub(crate) fn search_field_rect(app: &App) -> iced::Rectangle {
 /// before them, as every such control has. Links that spent a call looked
 /// like the free links beside them.
 pub(crate) fn ai_words<'a>(label: &str, size: f32, color: iced::Color) -> Element<'a, Message> {
+    ai_words_wrapped(label, size, color, iced::widget::text::Wrapping::Word)
+}
+
+/// [`ai_words`] kept on one line, where a narrow place would wrap them: at
+/// 1100 px, the debug header's "Walk this run" stood on two lines.
+pub(crate) fn ai_words_one_line<'a>(
+    label: &str,
+    size: f32,
+    color: iced::Color,
+) -> Element<'a, Message> {
+    ai_words_wrapped(label, size, color, iced::widget::text::Wrapping::None)
+}
+
+fn ai_words_wrapped<'a>(
+    label: &str,
+    size: f32,
+    color: iced::Color,
+    wrapping: iced::widget::text::Wrapping,
+) -> Element<'a, Message> {
     // No smaller than 12: at the caption's size it drew as a dot. In a box
     // of its own size, so the words beside it never squeeze it.
     let mark = (size + 1.0).max(12.0);
@@ -119,7 +138,10 @@ pub(crate) fn ai_words<'a>(label: &str, size: f32, color: iced::Color) -> Elemen
         iced::widget::container(glyph::icon(Glyph::Sparkle, tint, mark))
             .width(iced::Length::Fixed(mark))
             .height(iced::Length::Fixed(mark)),
-        text(label.to_string()).size(size).color(color),
+        text(label.to_string())
+            .size(size)
+            .color(color)
+            .wrapping(wrapping),
     ]
     .spacing(4)
     .align_y(iced::Center)
@@ -1076,12 +1098,13 @@ pub(crate) fn strip_tool(
 
 /// Whether a tool of the strip can do anything now. What reads a project
 /// does nothing with none open: drawn so, and pressed, nothing — they
-/// looked as ready as the rest. Fake Run and Fake Debug work out code in
-/// view, so they need a file open, as their rows in the bug's menu did.
+/// looked as ready as the rest. Fake Run and Fake Debug work out the
+/// function, class or struct the cursor is in, so they need one there
+/// (with no cursor placed, one in view).
 pub(crate) fn strip_tool_able(app: &App, tool: StripTool) -> bool {
     match tool {
         StripTool::More | StripTool::Settings => true,
-        StripTool::FakeRun | StripTool::FakeDebug => app.active_viewer().is_some(),
+        StripTool::FakeRun | StripTool::FakeDebug => app.has_fake_target(),
         _ => app.proj.project.is_some(),
     }
 }
@@ -1092,12 +1115,21 @@ pub(crate) fn strip_tool_why(app: &App, tool: StripTool) -> Option<&'static str>
     if strip_tool_able(app, tool) {
         return None;
     }
+    // A file open, the cursor is what is missing: said as the shortcut's
+    // own refusal says it.
+    let open = app.active_viewer().is_some();
     Some(match tool {
+        StripTool::FakeRun if open => {
+            tr!("Put the cursor in a function, class or struct to fake-run it")
+        }
+        StripTool::FakeDebug if open => {
+            tr!("Put the cursor in a function, class or struct to fake-debug it")
+        }
         StripTool::FakeRun => {
-            tr!("Open a file and put the caret in a function, class or struct to fake-run it")
+            tr!("Open a file and put the cursor in a function, class or struct to fake-run it")
         }
         StripTool::FakeDebug => {
-            tr!("Open a file and put the caret in a function, class or struct to fake-debug it")
+            tr!("Open a file and put the cursor in a function, class or struct to fake-debug it")
         }
         _ => tr!("Open a folder first"),
     })
@@ -1597,11 +1629,12 @@ pub(crate) fn run_row_action(row: RunRow) -> Action {
 }
 
 /// What a Run menu row shows and does: its icon, its name, and its message
-/// (`None` while it can do nothing: no project to run, no code open to
-/// work out).
+/// (`None` while it can do nothing: no project to run, no function where
+/// the cursor is to work out).
 pub(crate) fn run_row(app: &App, row: RunRow) -> (Glyph, &'static str, Option<Message>) {
     let project = app.proj.project.is_some();
-    let code = app.active_viewer().is_some();
+    // As the strip's own buttons: a definition where the cursor is.
+    let fake = app.has_fake_target();
     match row {
         RunRow::Run => (
             Glyph::Play,
@@ -1616,12 +1649,12 @@ pub(crate) fn run_row(app: &App, row: RunRow) -> (Glyph, &'static str, Option<Me
         RunRow::FakeRun => (
             Glyph::FakeRun,
             tr!("Fake Run…"),
-            code.then_some(Message::Fake(crate::FakeMsg::AtCaret { debug: false })),
+            fake.then_some(Message::Fake(crate::FakeMsg::AtCaret { debug: false })),
         ),
         RunRow::FakeDebug => (
             Glyph::FakeDebug,
             tr!("Fake Debug…"),
-            code.then_some(Message::Fake(crate::FakeMsg::AtCaret { debug: true })),
+            fake.then_some(Message::Fake(crate::FakeMsg::AtCaret { debug: true })),
         ),
     }
 }
@@ -1944,8 +1977,13 @@ fn app_menu_w(app: &App) -> f32 {
     }
     rows.push((tr!("Close Window").to_string(), 0.0));
     let rows: Vec<(&str, f32)> = rows.iter().map(|(l, w)| (l.as_str(), *w)).collect();
-    menu_w(280.0, &rows, &[])
+    // And its scroller's lane, at the right of its rows (`APP_MENU_LANE`).
+    menu_w(280.0, &rows, &[]) + APP_MENU_LANE
 }
+
+/// The lane the app menu's scroller runs in, right of its rows: over them,
+/// it touched "Ctrl+," and "Ctrl+Shift+F" at their ends.
+const APP_MENU_LANE: f32 = SCROLLBAR_W + 4.0;
 
 /// The rows of the app menu that are not keymap actions, top first.
 pub(crate) fn app_menu_head(app: &App) -> Vec<(Glyph, &'static str, Option<String>, Message)> {
@@ -1988,6 +2026,41 @@ pub(crate) fn closes_app_menu(message: &Message) -> bool {
 /// in its menu bar — opening a folder or a host, Settings, and every keymap
 /// action under the title the menu bar gives it (Edit, View, Tools, Go),
 /// each with its shortcut.
+/// Whether the ☰ menu's row for `action` can do anything now: what reads
+/// the project waits for one, and what works on the file in view for a
+/// file — drawn so, as the strip's tools are. With no folder open, "Start
+/// Debugging" looked ready and, pressed, did nothing.
+pub(crate) fn menu_action_able(app: &App, action: Action) -> bool {
+    let project = app.proj.project.is_some();
+    let file = app.active_viewer().is_some();
+    match action {
+        Action::FakeRun | Action::FakeDebug => app.has_fake_target(),
+        Action::FindInFile
+        | Action::CopySelection
+        | Action::ToggleBookmark
+        | Action::GotoLine
+        | Action::TraceValue
+        | Action::ToggleDiff
+        | Action::TimeTravel => file,
+        Action::OpenSymbol
+        | Action::ProjectSearch
+        | Action::Run
+        | Action::StartDebug
+        | Action::CallGraph
+        | Action::ImportGraph
+        | Action::TypeGraph
+        | Action::ProjectMaps
+        | Action::ExplainAll
+        | Action::Walkthrough
+        | Action::Overview
+        | Action::Stats
+        | Action::WeakSpots
+        | Action::Glossary
+        | Action::SetUpProject => project,
+        _ => true,
+    }
+}
+
 pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
     let mut items: Vec<Element<'_, Message>> = Vec::new();
     for (glyph, label, chord, msg) in app_menu_head(app) {
@@ -2022,7 +2095,7 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
                 mark,
                 crate::i18n::lookup(placed.title).to_string(),
                 menu_chord(app, action),
-                Some(msg),
+                menu_action_able(app, action).then_some(msg),
             ));
         }
     }
@@ -2037,9 +2110,16 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
     // Its scroller shows at rest: in a short window, the rows that run
     // past its bottom had nothing to say they were there.
     let panel = container(
-        scrollable(Column::with_children(items).spacing(MENU_ROW_SPACING))
-            .direction(thin_scroll())
-            .style(theme::cue_scrollbar),
+        scrollable(
+            Column::with_children(items)
+                .spacing(MENU_ROW_SPACING)
+                .padding(Padding {
+                    right: APP_MENU_LANE,
+                    ..Padding::ZERO
+                }),
+        )
+        .direction(thin_scroll())
+        .style(theme::cue_scrollbar),
     )
     .width(app_menu_w(app))
     .max_height(max_h)

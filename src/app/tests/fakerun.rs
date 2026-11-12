@@ -313,11 +313,35 @@ fn a_failed_run_says_why_and_can_be_tried_again() {
         app.proj.fake.failed
     );
     assert!(app.proj.fake.shown(), "the panel says why");
-    // And the status bar, with its Try again: it said only "its panel says
-    // why", with no way back to it.
+    // Said there, with its Try again and Settings: not on the status bar
+    // as well — both at once said the one failure twice.
+    assert!(app.failure_shown().is_none(), "said twice");
+    let _ = app.update(Message::Fake(FakeMsg::EditInputs));
+    assert_eq!(app.proj.fake.sheet.as_ref().unwrap().values, ["noon"]);
+
+    // Failed with its panel put away: the status bar says it, with its Try
+    // again — of a fake debug, not "the fake run".
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let (stream, ..) = asked(&mut rx).unwrap();
+    app.show_bottom = false;
+    let _ = app.update(Message::Fake(FakeMsg::Delta {
+        stamp: app.stamp(),
+        stream,
+        text: "I cannot do that.".into(),
+    }));
+    let _ = app.update(Message::Fake(FakeMsg::TurnEnded {
+        stamp: app.stamp(),
+        stream,
+        outcome: clew_protocol::StreamOutcome::Done,
+    }));
     let notice = app.failure_shown().expect("a standing failure");
     assert_eq!(notice.of, crate::app::state::FailureOf::FakeRun);
     assert!(notice.said.contains("no JSON"), "{}", notice.said);
+    assert!(
+        notice.said.starts_with("The fake debug failed"),
+        "{}",
+        notice.said
+    );
     assert!(matches!(
         notice.retry,
         Some(Message::Fake(FakeMsg::EditInputs))
@@ -617,6 +641,8 @@ fn fake_run_from_the_menu_takes_the_definition_in_view() {
         v.target_line = None;
         v.scroll_y = 0.0;
     }
+    // The strip's Fake Run is ready exactly where it finds a definition.
+    assert!(app.has_fake_target());
     let _ = app.update(Message::Fake(FakeMsg::AtCaret { debug: true }));
     let sheet = app.proj.fake.sheet.as_ref().expect("a sheet");
     assert_eq!(sheet.target.name, "Point", "the definition at the top");
@@ -626,6 +652,7 @@ fn fake_run_from_the_menu_takes_the_definition_in_view() {
     // The view's top on the blank line under Point: the first one below.
     let line_height = app.line_height();
     app.active_viewer_mut().unwrap().scroll_y = line_height;
+    assert!(app.has_fake_target());
     let _ = app.update(Message::Fake(FakeMsg::AtCaret { debug: false }));
     let sheet = app.proj.fake.sheet.as_ref().expect("a sheet");
     assert_eq!(sheet.target.name, "origin", "the first one under it");
@@ -634,9 +661,12 @@ fn fake_run_from_the_menu_takes_the_definition_in_view() {
 
     // A caret placed there is the reader's: no definition, said.
     app.active_viewer_mut().unwrap().caret = Some((1, 0));
+    assert!(!app.has_fake_target(), "drawn ready where it runs nothing");
     let _ = app.update(Message::Fake(FakeMsg::AtCaret { debug: false }));
     assert!(app.proj.fake.sheet.is_none());
-    assert!(app.status.contains("caret"), "{}", app.status);
+    // Called the cursor, as everywhere else: "caret" here, "cursor" in
+    // the margin beside it.
+    assert!(app.status.contains("cursor"), "{}", app.status);
 }
 
 /// A step on a file that is not open is kept only on a line the file has —

@@ -55,6 +55,19 @@ pub(crate) fn bp_condition_modal<'a>(
             tr!("Set")
         },
         cancel: Message::Debug(DebugMsg::BpConditionCancel),
+        // A breakpoint already there can be taken away where its condition
+        // is: the dialog offered only to set one.
+        remove: app
+            .debug
+            .breakpoints
+            .get(path)
+            .is_some_and(|m| m.contains_key(line))
+            .then(|| {
+                (
+                    tr!("Remove breakpoint"),
+                    Message::Debug(DebugMsg::BpConditionRemove),
+                )
+            }),
     })
 }
 
@@ -70,6 +83,7 @@ pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_,
         submit: Message::Reading(ReadingMsg::BookmarkNoteSave),
         submit_label: tr!("Save"),
         cancel: Message::Reading(ReadingMsg::BookmarkNoteCancel),
+        remove: None,
     })
 }
 
@@ -85,6 +99,7 @@ pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_,
         submit: Message::Reading(ReadingMsg::NoteEditSave),
         submit_label: tr!("Save"),
         cancel: Message::Reading(ReadingMsg::NoteEditCancel),
+        remove: None,
     })
 }
 
@@ -153,8 +168,20 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
         )
         .push(
             row![space().width(Fill)]
-                // Failed for what Settings puts right: the way there, as
-                // every such failure has.
+                // Failed: asked again from here — it offered only Settings
+                // and Close — and, for what Settings puts right, the way
+                // there, as every such failure has.
+                .extend(bw.failed.then(|| {
+                    Element::from(
+                        button(text(tr!("Try again")).size(ts::BODY))
+                            .style(theme::toolbar_button)
+                            .padding([4, 12])
+                            .on_press(super::heard::said(
+                                tr!("Try again"),
+                                Message::TimeTravel(TimeTravelMsg::BlameWhyAgain),
+                            )),
+                    )
+                }))
                 .extend(bw.fix.map(super::panes::settings_fix_button))
                 .push(
                     button(text(tr!("Close")).size(ts::BODY))

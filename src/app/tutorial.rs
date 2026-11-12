@@ -266,14 +266,14 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::Follow,
             tr!("Definitions and uses"),
-            tr!("With the caret on a name, g d goes to where it is defined and g r lists everywhere it is used. ⌘-click works too."),
+            tr!("With the cursor on a name, g d goes to where it is defined and g r lists everywhere it is used. ⌘-click works too."),
             Anchor::Main,
         )
         .at(PRICING, "def total(", "total"),
         TutStep::new(
             C::Follow,
             tr!("Who calls what"),
-            tr!("Who calls total(), and who calls them, up to the API's place_order(). g c shows this for the name at the caret."),
+            tr!("Who calls total(), and who calls them, up to the API's place_order(). g c shows this for the name at the cursor."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Calls))

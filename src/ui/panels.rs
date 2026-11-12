@@ -594,19 +594,32 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .color(theme::dim())
             .into(),
     ];
+    // The stack's column: two parts of the panel's, less the gaps between
+    // the columns and its rows' padding.
+    let portions = if session.output.is_empty() {
+        12.0
+    } else {
+        14.0
+    };
+    let stack_room = ((panel_w - 3.0 * 6.0) * 2.0 / portions - 12.0).max(0.0);
     for f in &session.frames {
         let loc = f
             .path
             .as_ref()
             .map(|p| format!("{}:{}", rel_of(app, p), f.line))
             .unwrap_or_default();
+        // Cut from its start where it does not fit, so its file and line
+        // stay: cut at its end, "teashop/checkout.py:" lost the line, the
+        // one thing a reader looks at it for. Whole on hover.
+        let shown = super::steady::elide_start(&loc, ts::CAPTION, crate::fonts::UI, stack_room);
+        let cut = shown != loc;
         let mut b = button(
             column![
                 text(f.name.clone())
                     .size(ts::SMALL)
                     .color(theme::accent())
                     .wrapping(Wrapping::None),
-                text(loc)
+                text(shown)
                     .size(ts::CAPTION)
                     .color(theme::dim())
                     .wrapping(Wrapping::None),
@@ -625,7 +638,11 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 }),
             ));
         }
-        stack_rows.push(b.into());
+        stack_rows.push(if cut {
+            super::toolbar::tip_at(b, loc, None, tooltip::Position::Bottom)
+        } else {
+            b.into()
+        });
     }
 
     // Variables — each scope with its name = value rows.
@@ -637,7 +654,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     ];
     for sc in &session.scopes {
         var_rows.push(
-            text(sc.name.clone())
+            text(adapter_name(&sc.name))
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .into(),
@@ -852,7 +869,7 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
             .color(theme::dim())
             .wrapping(Wrapping::None),
         super::toolbar::tip_at(
-            button(super::toolbar::ai_words(
+            button(super::toolbar::ai_words_one_line(
                 tr!("Walk this run"),
                 ts::SMALL,
                 theme::accent()
@@ -3074,6 +3091,31 @@ const MAX_VAR_DEPTH: usize = 12;
 /// with children opening and closing on a click, its children under it
 /// once read. A group with no value of its own (debugpy's "class
 /// variables") says only its name: it was drawn "class variables =".
+/// The names debug adapters give their scopes and groups ("Locals",
+/// debugpy's "special variables"), in the reader's language: in Chinese
+/// and French the Variables column still said "Locals", "Globals" and
+/// "class variables". What no adapter commonly says stays as it came.
+const ADAPTER_NAMES: &[&str] = &[
+    tr_noop!("Locals"),
+    tr_noop!("Globals"),
+    tr_noop!("Arguments"),
+    tr_noop!("Registers"),
+    tr_noop!("Statics"),
+    tr_noop!("Closure"),
+    tr_noop!("Return value"),
+    tr_noop!("special variables"),
+    tr_noop!("function variables"),
+    tr_noop!("class variables"),
+    tr_noop!("protected variables"),
+];
+
+fn adapter_name(name: &str) -> String {
+    match ADAPTER_NAMES.iter().find(|&&known| known == name) {
+        Some(&known) => crate::i18n::lookup(known).to_string(),
+        None => name.to_string(),
+    }
+}
+
 fn push_var_rows<'a>(
     app: &'a App,
     vars: &'a [crate::dap::Variable],
@@ -3100,7 +3142,13 @@ fn push_var_rows<'a>(
         let mut line = row![
             space().width(depth as f32 * 12.0),
             marker,
-            text(v.name.clone()).size(ts::SMALL).color(theme::warning()),
+            text(if v.value.is_empty() && opens {
+                adapter_name(&v.name)
+            } else {
+                v.name.clone()
+            })
+            .size(ts::SMALL)
+            .color(theme::warning()),
         ]
         .spacing(3)
         .align_y(iced::Center);

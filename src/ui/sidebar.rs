@@ -609,19 +609,21 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                     Message::Settings(crate::SettingsMsg::Fix(field)),
                 ))
         });
-        // Its controls on its title's line, and why it failed under them
-        // across the whole row: beside them, the reason was squeezed into
-        // a column a word or two wide ("Failed: couldn't reach / the AI /
-        // provider …") five lines tall.
+        // Its title across the row, with only its × beside it; why it
+        // failed under that, and the ways forward under that, as Time
+        // Travel's failed band has them. Beside Try again and Settings the
+        // title was squeezed to a word a line ("Review / changes / (last /
+        // commit)"), "checkout" cut to "checkou" in French; and beside
+        // them the reason was a column a word or two wide, five lines tall.
         let body = column![
             row![
-                container(text(label).size(ts::BASE).color(theme::fg()))
-                    .width(Fill)
-                    .clip(true),
-                retry,
+                text(label)
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                    .width(Fill),
+                super::toolbar::tip_at(forget, tr!("Dismiss"), None, tooltip::Position::Bottom),
             ]
-            .extend(settings.map(Element::from))
-            .push(forget)
             .spacing(2)
             .align_y(iced::Center),
             // Kept as it failed, said in the language spoken now.
@@ -633,6 +635,10 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
             .color(theme::danger())
             .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
             .width(Fill),
+            row![retry]
+                .extend(settings.map(Element::from))
+                .spacing(2)
+                .align_y(iced::Center),
         ]
         .spacing(2);
         list = list.push(container(body).width(Fill).padding([6, 8]));
@@ -734,7 +740,10 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                             "This walkthrough records a debug run — debug the program again to record a new one"
                         )
                     } else if wt.scope.starts_with("@trace ") {
-                        tr!("Narrate the last run again with AI (one AI call)")
+                        // It takes the last run of the program, which may
+                        // not be the one this tour records: said, as it
+                        // replaces this one.
+                        tr!("Replace with the last run, narrated with AI (one AI call)")
                     } else {
                         tr!("Regenerate with AI (one AI call)")
                     },
@@ -2228,6 +2237,24 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
                     line: bm.line,
                 }),
             ));
+        // Each icon says what it does where the pointer rests: a pencil and
+        // a × said nothing, and × might only have hidden the row.
+        let pencil = super::toolbar::tip_at(
+            pencil,
+            if bm.note.is_some() {
+                tr!("Edit note")
+            } else {
+                tr!("Add a note")
+            },
+            None,
+            tooltip::Position::Bottom,
+        );
+        let close = super::toolbar::tip_at(
+            close,
+            tr!("Remove bookmark"),
+            None,
+            tooltip::Position::Bottom,
+        );
         rows.push(
             button(row![main, pencil, close].spacing(2).align_y(iced::Center))
                 .style(theme::list_row(false))
@@ -2249,14 +2276,31 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         );
     }
 
+    // Titled as the other lists are ("Reading trail", "History"): it was
+    // the one view whose rows began with no name over them.
+    let header = row![
+        text(tr!("Bookmarks")).size(ts::SMALL).color(theme::dim()),
+        space().width(Fill),
+        text(super::statusbar::thousands(app.proj.bookmarks.len()))
+            .size(ts::CAPTION)
+            .color(theme::dim()),
+    ]
+    .align_y(iced::Center)
+    .padding(Padding {
+        top: 4.0,
+        right: 8.0,
+        bottom: 2.0,
+        left: 8.0,
+    });
     column![
+        header,
         scrollable(Column::with_children(rows).width(Fill))
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
             .height(Fill)
     ]
     .padding(Padding {
-        top: 6.0,
+        top: 2.0,
         right: 0.0,
         bottom: 0.0,
         left: 0.0,
@@ -2439,6 +2483,31 @@ fn notes_list(app: &App) -> Element<'_, Message> {
                     symbol: n.symbol.clone(),
                 }),
             ));
+        // Each icon says what it does where the pointer rests: an empty
+        // circle beside "0/6 understood" was not seen to be a toggle, and
+        // the pencil and × said nothing.
+        let toggle = super::toolbar::tip_at(
+            toggle,
+            if n.understood {
+                tr!("Mark not understood")
+            } else {
+                tr!("Mark understood")
+            },
+            None,
+            tooltip::Position::Bottom,
+        );
+        let pencil = super::toolbar::tip_at(
+            pencil,
+            if n.text.is_empty() {
+                tr!("Add a note")
+            } else {
+                tr!("Edit note")
+            },
+            None,
+            tooltip::Position::Bottom,
+        );
+        let close =
+            super::toolbar::tip_at(close, tr!("Remove note"), None, tooltip::Position::Bottom);
         // The name area jumps; the toggle/pencil/✕ capture their own clicks.
         let jump = button(main)
             .style(theme::list_row(false))

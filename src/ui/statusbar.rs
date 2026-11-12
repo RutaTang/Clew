@@ -604,29 +604,6 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     // its Try again, Settings and × moved under the pointer, and a click
     // meant for Settings landed on words.
     let failure = app.failure_shown();
-    let mut used = 0.0;
-    if let Some(failure) = failure
-        && room >= least
-    {
-        let whole = words_of(&failure.shown());
-        let (controls, controls_w) = failure_controls(failure, room - least - STATUS_GAP);
-        // While the codes are up, what to do with them is said instead:
-        // after the failure's words it was cut to "Type the code on a…".
-        // Its controls stay, each with its code.
-        if app.jump.is_some() {
-            row = row.push(controls);
-            used += controls_w + STATUS_GAP;
-        } else {
-            let words = (room - controls_w - 2.0 * STATUS_GAP - SAID_MIN_W)
-                .max(least)
-                .min(width(&whole));
-            row = row.push(line_of(whole, words, Some(theme::danger())));
-            row = row.push(controls);
-            used += words + STATUS_GAP + controls_w + STATUS_GAP;
-        }
-    }
-    let room = (room - used).max(0.0);
-    let mut used = 0.0;
     let setup = setup_label(app);
     let explain = explain_label(app);
     let full_chips: f32 = setup.as_ref().map_or(0.0, |(l, _)| width(l) + CHIP_EXTRA_W)
@@ -641,6 +618,34 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             width(widest) + EXPLAIN_EXTRA_W - bar
         });
     let chips_n = usize::from(setup.is_some()) + usize::from(explain.is_some());
+    // What is under way now comes before an older failure: its chip keeps
+    // its words, and the failure's give way (whole where the pointer
+    // rests). Beside a run's failure, Explain's progress was squeezed to
+    // "✦ … ×".
+    let chips_w = full_chips + STATUS_GAP * chips_n as f32;
+    let mut used = 0.0;
+    if let Some(failure) = failure
+        && room >= least
+    {
+        let whole = words_of(&failure.shown());
+        let (controls, controls_w) = failure_controls(failure, room - least - STATUS_GAP);
+        // While the codes are up, what to do with them is said instead:
+        // after the failure's words it was cut to "Type the code on a…".
+        // Its controls stay, each with its code.
+        if app.jump.is_some() {
+            row = row.push(controls);
+            used += controls_w + STATUS_GAP;
+        } else {
+            let words = (room - controls_w - 2.0 * STATUS_GAP - SAID_MIN_W - chips_w)
+                .max(least)
+                .min(width(&whole));
+            row = row.push(line_of(whole, words, Some(theme::danger())));
+            row = row.push(controls);
+            used += words + STATUS_GAP + controls_w + STATUS_GAP;
+        }
+    }
+    let room = (room - used).max(0.0);
+    let mut used = 0.0;
     let short = full_chips + STATUS_GAP * chips_n as f32 + SAID_MIN_W > room;
     // A chip short of room even shortened is left out: laid out clipped to
     // nothing, it was a control no one saw that the keyboard's ring still

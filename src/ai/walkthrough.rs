@@ -479,7 +479,13 @@ pub fn from_trace(root: &Path, program: &str, stops: &[crate::TraceStop]) -> Opt
         };
         let frame = &stop.frames[at];
         let name = crate::short_frame_name(&frame.name);
-        if last.as_ref() == Some(&(rel.clone(), name.clone())) {
+        // Steps through one function are one visit: a step a line on in
+        // the function just shown says nothing a reader did not see there.
+        // A breakpoint hit is a stop the reader set, its own step even in
+        // the same function: total() for a second order, merged into the
+        // first, left "4 stops" over a tour of 3.
+        let stepped = stop.reason == "step";
+        if stepped && last.as_ref() == Some(&(rel.clone(), name.clone())) {
             continue;
         }
         if steps.len() >= MAX_TRACE_STEPS {
@@ -1303,10 +1309,11 @@ mod trace_tests {
         }
     }
 
-    /// A run's tour: one step per stretch of stops in a function, anchored
-    /// to the innermost frame IN the project (runtime frames skipped), in
-    /// the run's order, naming the reason and the caller; a stop nowhere in
-    /// the project makes no step; none at all makes no tour.
+    /// A run's tour: one step per stretch of steps through a function, and
+    /// one per breakpoint hit, anchored to the innermost frame IN the
+    /// project (runtime frames skipped), in the run's order, naming the
+    /// reason and the caller; a stop nowhere in the project makes no step;
+    /// none at all makes no tour.
     #[test]
     fn a_trace_becomes_one_step_per_visit_inside_the_project() {
         let root = Path::new("/p");
@@ -1346,6 +1353,7 @@ mod trace_tests {
             [
                 ("main", "src/main.rs", Some(3)),
                 ("run", "src/lib.rs", Some(10)),
+                ("run", "src/lib.rs", Some(12)),
                 ("main", "src/main.rs", Some(7)),
             ],
             "{steps:?}"
@@ -1368,7 +1376,12 @@ mod trace_tests {
             wt.steps[1].narration
         );
         assert!(
-            wt.steps[2].narration.contains("**Stop 6**"),
+            wt.steps[2].narration.contains("**Stop 4** (breakpoint)"),
+            "a breakpoint hit in the function just shown is its own step: {}",
+            wt.steps[2].narration
+        );
+        assert!(
+            wt.steps[3].narration.contains("**Stop 6**"),
             "the stop's number, not the step's"
         );
         assert!(from_trace(root, "app", &stops[4..5]).is_none());

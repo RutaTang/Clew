@@ -83,6 +83,18 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState, floor: f32) -> Element<'_, Me
 
 // ---------------------------------------------------------------- context menu
 
+/// Whether the line the code menu is open on has a breakpoint with a
+/// condition.
+fn menu_bp_condition(app: &App, menu: &crate::ContextMenu) -> bool {
+    app.proj
+        .panes
+        .get(menu.pane)
+        .and_then(Option::as_ref)
+        .and_then(|v| app.debug.breakpoints.get(&v.abs))
+        .and_then(|m| m.get(&(menu.line + 1)))
+        .is_some_and(|bp| bp.condition.is_some())
+}
+
 pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Element<'a, Message> {
     use crate::GotoKind;
 
@@ -269,8 +281,15 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
                     Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
                 )
             },
+            // A condition there already: said as what it opens, to edit
+            // it — named as a new one, it hid where an existing condition
+            // is read and changed.
             plain(
-                tr!("Conditional Breakpoint…"),
+                if menu_bp_condition(app, menu) {
+                    tr!("Edit Condition…")
+                } else {
+                    tr!("Conditional Breakpoint…")
+                },
                 Message::Debug(DebugMsg::ConditionalBreakpointFromMenu),
             ),
         ],

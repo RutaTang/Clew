@@ -435,7 +435,7 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel, clear: f32) -> Element<'_, Messag
         )),
         // In the whole file's scope, Story is not there: said where it is.
         if matches!(tt.scope, TimeScope::File) {
-            tr!("Follow only the function or class under the caret, and tell its story")
+            tr!("Follow only the function or class under the cursor, and tell its story")
         } else {
             tr!("Follow the whole file")
         },
@@ -459,7 +459,15 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel, clear: f32) -> Element<'_, Messag
             } else {
                 theme::accent()
             };
-            let b = button(text(label).size(ts::SMALL).color(color))
+            // What spends an AI call carries the sparkle, as What & why?
+            // does beside it: Story was plain words. (Hide story spends
+            // nothing.)
+            let words: Element<'_, Message> = if tt.story.is_some() {
+                text(label).size(ts::SMALL).color(color).into()
+            } else {
+                super::toolbar::ai_words(label, ts::SMALL, color)
+            };
+            let b = button(words)
                 .style(theme::toolbar_button)
                 .padding([2, 8])
                 .on_press(super::heard::said(
@@ -485,11 +493,14 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel, clear: f32) -> Element<'_, Messag
     // to the next moved the scope, the count and the arrows before it. Kept
     // in the whole file's scope too, empty: there, the slider grew by it
     // and the count jumped as the scope changed.
+    // Story's sparkle beside it: its mark and the gap to the words.
+    let sparkle = (ts::SMALL + 1.0).max(12.0) + 4.0;
     let widest = super::steady::widest(
-        &[tr!("Writing the story…"), tr!("Hide story"), tr!("Story")],
+        &[tr!("Writing the story…"), tr!("Hide story")],
         ts::SMALL,
         crate::fonts::UI,
-    );
+    )
+    .max(super::steady::width_of(tr!("Story"), ts::SMALL, crate::fonts::UI) + sparkle);
     let story: Element<'_, Message> = container(story).width(widest + 16.0).into();
 
     container(

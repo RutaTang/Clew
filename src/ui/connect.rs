@@ -86,7 +86,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         crate::app::state::ConnectionTest::Answered(model) => {
             Some(tr!("Connected: {model} answered.", model = model))
         }
-        crate::app::state::ConnectionTest::Failed(why) => Some(crate::i18n::message(why)),
+        crate::app::state::ConnectionTest::Failed(why) => Some(why.said()),
     };
     let testing = matches!(
         app.settings.connection_test,

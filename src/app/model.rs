@@ -829,6 +829,11 @@ pub struct BlameWhy {
     /// The setting its failure is about, where one is: the popup's way to
     /// it, beside Close.
     pub fix: Option<crate::app::state::LlmField>,
+    /// What was asked — the pane and its lines, 0-based inclusive — for a
+    /// failure's Try again.
+    pub asked: Option<(usize, usize, usize)>,
+    /// Its answer failed: the popup says why, with Try again.
+    pub failed: bool,
 }
 
 /// A time-travel session: scrub the active file (or one function's line range)

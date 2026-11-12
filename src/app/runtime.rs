@@ -204,6 +204,7 @@ impl App {
             status: tr!("Open a folder to start reading").to_string(),
             status_seen: tr!("Open a folder to start reading").to_string(),
             status_since: None,
+            status_lang: crate::i18n::current(),
             waiting_said: None,
             failure_notice: None,
             main_window: None,
@@ -529,6 +530,21 @@ impl App {
         if self.status != self.status_seen {
             self.status_seen.clone_from(&self.status);
             self.status_since = (!self.status.is_empty()).then(std::time::Instant::now);
+            self.status_lang = crate::i18n::current();
+        }
+    }
+
+    /// The language spoken changed (here, or in another window): a plain
+    /// notice on the status line, worded in the one spoken before, goes —
+    /// what tells of work still under way stays, to be said over by its
+    /// end. Failures are worded as they are drawn, and stay.
+    pub(crate) fn status_follows_language(&mut self) {
+        if crate::i18n::current() == self.status_lang || self.status != self.status_seen {
+            return;
+        }
+        if !self.status_stands() {
+            self.status.clear();
+            self.note_status();
         }
     }
 

@@ -917,9 +917,36 @@ pub enum ConnectionTest {
     Testing(u64),
     /// The model named answered.
     Answered(String),
-    /// Why it could not be reached, in English: said in the language spoken
-    /// when it is shown (`i18n::message`).
-    Failed(String),
+    /// Why it could not be reached: kept as what failed, said in the
+    /// language spoken when it is shown.
+    Failed(TestFailure),
+}
+
+/// Why Test connection failed, kept as what failed and not as its words:
+/// worded once, in the language spoken then, the tour's sheet kept its
+/// English "Couldn't reach 127.0.0.1:9 …" among French words until it was
+/// tested again.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TestFailure {
+    /// One of Clew's own sentences, in English (`i18n::message` says it).
+    Said(String),
+    /// The call failed: how, and the host it was made to.
+    Call {
+        failure: crate::app::tasks::ExplainFailure,
+        host: String,
+    },
+}
+
+impl TestFailure {
+    /// In the language spoken now.
+    pub fn said(&self) -> String {
+        match self {
+            TestFailure::Said(words) => crate::i18n::message(words),
+            TestFailure::Call { failure, host } => {
+                crate::app::settings::connection_failure_said(failure, host)
+            }
+        }
+    }
 }
 
 /// The file tree's right-click menu: the file or folder it is of
@@ -1690,6 +1717,10 @@ pub struct App {
     /// and for an empty line.
     pub status_seen: String,
     pub status_since: Option<std::time::Instant>,
+    /// The language the status line's words were last said in: a notice
+    /// said before the language changed stays in the old one ("调试器已停止"
+    /// on an English screen) — it goes when the language does.
+    pub status_lang: crate::i18n::Lang,
     /// An AI action that failed, as the status line says it: it stands, in
     /// a place of its own — in the danger colour, with a way to try again
     /// and a way to the settings — beside whatever else is said, until it

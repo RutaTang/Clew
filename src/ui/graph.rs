@@ -3226,7 +3226,10 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
         .into(),
         // Its line on how to read it, from clew-core: in the reader's
         // language where the catalog has it.
-        text(crate::i18n::lookup(&map.description).to_string())
+        // As a sentence, its first letter a capital: the extractors write
+        // it to follow a dash ("a node per table and view, …"), and alone
+        // under the title it read as cut from something.
+        text(sentence_start(crate::i18n::lookup(&map.description)))
             .size(ts::CAPTION)
             .color(theme::dim())
             .into(),
@@ -3633,6 +3636,15 @@ fn map_kind_label(kind: &str) -> &str {
         "step" => tr!("Build step"),
         "entry" => tr!("Entry point"),
         other => crate::i18n::lookup(other),
+    }
+}
+
+/// `words` with its first letter a capital (where its script has them).
+fn sentence_start(words: &str) -> String {
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 

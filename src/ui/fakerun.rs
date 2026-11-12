@@ -29,12 +29,14 @@ const FIELD_INPUT: [fn(String) -> Message; 8] = [
 /// A field's label and the hint in it when it is empty.
 fn field_words(field: &Field) -> (String, String) {
     match field {
+        // Its type, and that it may be put in words: the type alone
+        // ("Order") did not say whether to type a value or describe one.
         Field::Param { name, hint } => (
             name.clone(),
             if hint.is_empty() {
-                tr!("a value").to_string()
+                tr!("a value, or say it in words").to_string()
             } else {
-                hint.clone()
+                tr!("{type} — a value, or say it in words", type = hint)
             },
         ),
         Field::Inputs => (tr!("Inputs").to_string(), tr!("e.g. 2, 3").to_string()),
@@ -294,9 +296,9 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
             }
             let header = header.push(close());
             let rows = vec![
-                text(tr!(
-                    "The fake run failed: {why}",
-                    why = crate::app::tasks::ai_reason(why)
+                text(crate::app::fakerun::fake_failed(
+                    fake.last.as_ref().is_some_and(|s| s.debug),
+                    why,
                 ))
                 .size(ts::SMALL)
                 .color(theme::danger())

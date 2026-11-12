@@ -710,7 +710,7 @@ pub(crate) fn tour_prep_sheet<'a>(
         .to_string(),
         (true, ConnectionTest::Answered(_)) => tr!("All set.").to_string(),
         (true, ConnectionTest::Testing(_)) => tr!("Checking that it answers…").to_string(),
-        (true, ConnectionTest::Failed(why)) => crate::i18n::message(why),
+        (true, ConnectionTest::Failed(why)) => why.said(),
         (true, ConnectionTest::Untried) => {
             tr!("Key added. Check that it answers before the tour spends calls on it.")
                 .to_string()

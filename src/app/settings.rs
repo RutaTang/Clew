@@ -92,15 +92,17 @@ impl App {
             &mut self.settings.connection_test
         };
         if cfg.base_url.is_empty() || cfg.model.is_empty() {
-            *found = ConnectionTest::Failed(
+            *found = ConnectionTest::Failed(crate::app::state::TestFailure::Said(
                 tr_noop!("Name the model and its endpoint first.").to_string(),
-            );
+            ));
             return Task::none();
         }
         // No key, for a service that takes one: said as that, not as the
         // server's "no AI chat config". A custom endpoint may need none.
         if cfg.api_key.trim().is_empty() && cfg.provider != llm::Provider::Custom {
-            *found = ConnectionTest::Failed(tr_noop!("Enter the API key first.").to_string());
+            *found = ConnectionTest::Failed(crate::app::state::TestFailure::Said(
+                tr_noop!("Enter the API key first.").to_string(),
+            ));
             return Task::none();
         }
         *found = ConnectionTest::Testing(number);
@@ -553,7 +555,9 @@ impl App {
                 Task::none()
             }
             SettingsMsg::SetLanguage(pref) => {
-                if let Err(e) = crate::i18n::apply_and_save(pref) {
+                let saved = crate::i18n::apply_and_save(pref);
+                self.status_follows_language();
+                if let Err(e) = saved {
                     self.status = tr!("Could not save the language: {error}", error = e);
                 }
                 // Every window speaks it: the others are told to draw again
@@ -574,6 +578,7 @@ impl App {
             SettingsMsg::ThemeResynced => {
                 self.theme_pref = theme::current_pref();
                 self.restyle_svgs();
+                self.status_follows_language();
                 // It may have been the language another window chose: this
                 // window's server answers in it too.
                 self.send_ai_config();
@@ -779,19 +784,33 @@ impl App {
 /// It said only the connection's words ("request failed: Connection
 /// refused (os error 111)"), naming neither the address nor the field
 /// that holds it.
-fn connection_failure(err: &crate::app::rpc::CallError, cfg: &llm::Config) -> String {
+fn connection_failure(
+    err: &crate::app::rpc::CallError,
+    cfg: &llm::Config,
+) -> crate::app::state::TestFailure {
+    crate::app::state::TestFailure::Call {
+        failure: crate::app::tasks::ExplainFailure::of_call(err, &cfg.model),
+        host: host_of(&cfg.base_url).to_string(),
+    }
+}
+
+/// [`connection_failure`]'s failure in words, in the language spoken now.
+pub(crate) fn connection_failure_said(
+    failure: &crate::app::tasks::ExplainFailure,
+    host: &str,
+) -> String {
     use crate::app::tasks::{ExplainFailure, Rejection};
-    match ExplainFailure::of_call(err, &cfg.model) {
+    match failure.clone() {
         ExplainFailure::Unreached(detail) => tr!(
             "Couldn't reach {host} ({detail}). Check the base URL and your network.",
-            host = host_of(&cfg.base_url),
+            host = host,
             detail = crate::app::tasks::plain_detail(&detail)
         ),
         // Reached, then lost or timed out while it answered: the address
         // is right, so it is not the base URL to check.
         ExplainFailure::Network(detail) => tr!(
             "The connection to {host} was lost before it answered ({detail}). Try again in a moment.",
-            host = host_of(&cfg.base_url),
+            host = host,
             detail = crate::app::tasks::plain_detail(&detail)
         ),
         ExplainFailure::Rejected {
@@ -907,7 +926,7 @@ mod tests {
         let refused = CallError::Llm(llm::LlmError::Connect(
             "Connection refused (os error 111)".into(),
         ));
-        let said = connection_failure(&refused, &local);
+        let said = connection_failure(&refused, &local).said();
         assert!(said.contains("Couldn't reach 127.0.0.1:9"), "{said}");
         assert!(said.contains("nothing answered at that address"), "{said}");
         assert!(!said.contains("os error"), "{said}");
@@ -915,22 +934,33 @@ mod tests {
         let lost = CallError::Llm(llm::LlmError::Transport(
             "timed out reading response".into(),
         ));
-        let said = connection_failure(&lost, &local);
+        let said = connection_failure(&lost, &local).said();
         assert!(said.contains("was lost before it answered"), "{said}");
         assert!(!said.contains("base URL"), "{said}");
         let tls = CallError::Llm(llm::LlmError::Connect(
             "invalid peer certificate: UnknownIssuer".into(),
         ));
-        assert!(connection_failure(&tls, &local).contains("UnknownIssuer"));
+        assert!(
+            connection_failure(&tls, &local)
+                .said()
+                .contains("UnknownIssuer")
+        );
         let quota = CallError::Llm(llm::LlmError::Status {
             who: "OpenAI".into(),
             code: 429,
             kind: Some("insufficient_quota".into()),
             message: "You exceeded your current quota".into(),
         });
-        let said = connection_failure(&quota, &local);
+        let said = connection_failure(&quota, &local).said();
         assert!(said.contains("quota or credit"), "{said}");
         assert!(!said.contains("busy"), "{said}");
+        // Kept as what failed: said in the language spoken when it is
+        // shown, not the one spoken when it was tested — the tour's sheet
+        // kept its English sentence among French words.
+        let failed = connection_failure(&refused, &local);
+        let in_french = crate::i18n::with_lang(crate::i18n::Lang::Fr, || failed.said());
+        assert!(!in_french.contains("Couldn't reach"), "{in_french}");
+        assert!(in_french.contains("127.0.0.1:9"), "{in_french}");
         for (base, host) in [
             ("https://user:secret@llm.corp:8443/v1", "llm.corp:8443"),
             ("http://[::1]:8080/v1", "[::1]:8080"),

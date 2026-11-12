@@ -968,6 +968,36 @@ fn a_loading_line_said_before_a_language_switch_is_still_taken_back() {
     );
 }
 
+/// M16: a notice said before the language changed goes with it — "调试器已停止"
+/// stood on an English screen until something else was said. What tells
+/// of work under way stays, to be taken back by its end.
+#[test]
+fn a_notice_said_before_a_language_switch_goes_with_it() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = blank_app();
+    with_lang(Lang::Zh, || {
+        app.status = tr!("Debugger stopped").to_string();
+        app.note_status();
+    });
+    let said = app.status.clone();
+    // Said again in the language it was said in: it stays.
+    with_lang(Lang::Zh, || {
+        let _ = app.update(Message::Settings(SettingsMsg::ThemeResynced));
+    });
+    assert_eq!(app.status, said, "the language did not change");
+    let _ = app.update(Message::Settings(SettingsMsg::ThemeResynced));
+    assert_eq!(app.status, "", "{said}: still up in English");
+
+    // Work under way stays.
+    with_lang(Lang::Fr, || {
+        app.status = tr!("Loading history…").to_string();
+        app.note_status();
+    });
+    let loading = app.status.clone();
+    let _ = app.update(Message::Settings(SettingsMsg::ThemeResynced));
+    assert_eq!(app.status, loading);
+}
+
 /// The lines a close or a quit says as it waits for the host are known by
 /// the words they were said in: one said before the language changed is
 /// still counted down, and taken back as the wait ends; a "— retrying"
@@ -1062,6 +1092,53 @@ fn scan_synchronously(app: &mut App, root: PathBuf) {
         report: Default::default(),
     }));
     load_state_synchronously(app);
+}
+
+/// M7: reopened, a project goes back to the file and line its reading
+/// trail stands on — every session started on the overview, then "No file
+/// open". Only for a file still in the project: else the overview, as
+/// before.
+#[test]
+fn a_reopened_project_goes_back_where_it_was_read() {
+    use crate::history::{History, Loc};
+    let trail_at = |root: &std::path::Path, rel: &str| {
+        let mut trail = History::default();
+        trail.push(
+            Loc {
+                path: root.join(rel),
+                line: Some(3),
+            },
+            Some("origin".into()),
+        );
+        let text = crate::history::to_text(root, &trail).unwrap();
+        crate::history::save_text(root, Some(&text)).unwrap();
+    };
+    let root = fixture_project("back-where-read");
+    trail_at(&root, "src/lib.rs");
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.clone());
+    assert!(!app.proj.overview.showing, "still on the overview");
+    assert!(
+        app.proj.link.pane_pending[0].is_some(),
+        "the file not asked for"
+    );
+    land_active_load(&mut app, root.join("src/lib.rs"), Some(3));
+    let v = app.active_viewer().expect("the file read last");
+    assert_eq!(v.rel, "src/lib.rs");
+    assert_eq!(
+        app.proj.history.flatten().len(),
+        1,
+        "going back is no new visit"
+    );
+
+    // Its file gone since: the overview.
+    let root = fixture_project("back-where-read-gone");
+    trail_at(&root, "src/gone.rs");
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root);
+    assert!(app.proj.overview.showing);
+    assert!(app.active_viewer().is_none());
+    assert!(app.proj.link.pane_pending[0].is_none());
 }
 
 fn scanned_app(tag: &str) -> App {
@@ -9459,6 +9536,8 @@ fn an_answer_shown_clears_the_line_that_said_it_was_coming() {
         loading: true,
         prepared: Vec::new(),
         fix: None,
+        asked: None,
+        failed: false,
     });
     app.status = tr!("Explaining why…").into();
     let s = stamp();
@@ -13760,6 +13839,8 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         loading: true,
         prepared: Vec::new(),
         fix: None,
+        asked: None,
+        failed: false,
     });
     app.proj.context_menu = Some(ContextMenu {
         pane: 0,
@@ -15140,7 +15221,9 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
     );
     assert!(!t.why_loading && t.why_pending.is_empty());
 
-    // A failure clears the spinner too, and says why.
+    // A failure clears the spinner too, and says why — in its band, with
+    // Try again and Settings, while its commit is on screen: on the status
+    // bar as well, it was said twice.
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::Goto(1)));
     let _why = app.update(Message::TimeTravel(TimeTravelMsg::Why));
     assert!(tt(&app).0);
@@ -15151,9 +15234,26 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         result: Err("rate limited".into()),
     }));
     assert!(!tt(&app).0, "a failed summary left its spinner up");
+    assert!(app.failure_shown().is_none(), "said twice");
+    // Kept with its commit, to be said in its band and asked again.
+    assert_eq!(
+        app.proj.time_travel.as_ref().unwrap().why.get("bbbb2222"),
+        Some(&Err("rate limited".to_string()))
+    );
+    let _again = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    assert!(tt(&app).0, "a failed summary is asked again");
+
+    // Scrubbed away before it failed: nowhere on screen says so but the
+    // status bar, which stands with its Try again — said only as passing
+    // text it had no controls, and was cut short after an older one.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Goto(0)));
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
+        stamp: app.stamp(),
+        session,
+        sha: "bbbb2222".into(),
+        result: Err("rate limited".into()),
+    }));
     assert!(app.status.contains("rate limited"), "{}", app.status);
-    // The failure the status bar stands, with its Try again: said only as
-    // passing text it had no controls, and was cut short after an older one.
     let notice = app.failure_shown().expect("a standing failure");
     assert_eq!(notice.of, crate::app::state::FailureOf::Summary);
     assert!(
@@ -15169,37 +15269,6 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         notice.about, None,
         "nothing about the base URL in a rate limit"
     );
-    // Kept with its commit, to be said in its band and asked again.
-    assert_eq!(
-        app.proj.time_travel.as_ref().unwrap().why.get("bbbb2222"),
-        Some(&Err("rate limited".to_string()))
-    );
-    let _again = app.update(Message::TimeTravel(TimeTravelMsg::Why));
-    assert!(tt(&app).0, "a failed summary is asked again");
-    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
-        stamp: app.stamp(),
-        session,
-        sha: "bbbb2222".into(),
-        result: Err("rate limited".into()),
-    }));
-
-    // Its Try again asks about the commit that failed, shown again — not
-    // the one scrubbed to meanwhile, which it paid to summarize unasked.
-    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Goto(0)));
-    let retry = app
-        .failure_shown()
-        .and_then(|n| n.retry.clone())
-        .expect("its Try again");
-    let _ = app.update(retry);
-    let t = app.proj.time_travel.as_ref().unwrap();
-    assert_eq!(t.idx, 1, "the commit it failed on, on screen again");
-    assert!(t.why_pending.contains("bbbb2222"), "{:?}", t.why_pending);
-    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
-        stamp: app.stamp(),
-        session,
-        sha: "bbbb2222".into(),
-        result: Err("rate limited".into()),
-    }));
 
     // A reply from another session is not this one's.
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
@@ -15216,6 +15285,26 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         app.failure_shown().is_some(),
         "a stale reply took the failure away"
     );
+
+    // Its Try again asks about the commit that failed, shown again — not
+    // the one scrubbed to meanwhile, which it paid to summarize unasked.
+    let retry = app
+        .failure_shown()
+        .and_then(|n| n.retry.clone())
+        .expect("its Try again");
+    let _ = app.update(retry);
+    let t = app.proj.time_travel.as_ref().unwrap();
+    assert_eq!(t.idx, 1, "the commit it failed on, on screen again");
+    assert!(t.why_pending.contains("bbbb2222"), "{:?}", t.why_pending);
+    // Failed again with its band on screen: the band says it, and the
+    // status bar's notice goes.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
+        stamp: app.stamp(),
+        session,
+        sha: "bbbb2222".into(),
+        result: Err("rate limited".into()),
+    }));
+    assert!(app.failure_shown().is_none(), "said twice");
     // One summarized takes it away.
     let _again = app.update(Message::TimeTravel(TimeTravelMsg::Why));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
@@ -15224,10 +15313,11 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         sha: "bbbb2222".into(),
         result: Ok("so".into()),
     }));
-    assert!(
-        app.failure_shown().is_none(),
-        "a summary written left the failure up"
-    );
+    assert!(matches!(
+        app.proj.time_travel.as_ref().unwrap().why.get("bbbb2222"),
+        Some(Ok(_))
+    ));
+    assert!(app.failure_shown().is_none());
 
     // The story: a failure after a scrub clears its spinner; a success shows.
     let _story = app.update(Message::TimeTravel(TimeTravelMsg::Story));
@@ -15268,6 +15358,7 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
     // A summary's failure goes with its session: its Try again, standing
     // after Time Travel was left, had nothing to ask about.
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Goto(1)));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyDone {
         stamp: app.stamp(),
         session,
@@ -24235,6 +24326,8 @@ fn fill_project_session(app: &mut App) {
         loading: true,
         prepared: Vec::new(),
         fix: None,
+        asked: None,
+        failed: false,
     });
     p.overlay = Some(Overlay::ProjectImports);
     p.hover_gen = 9;
@@ -31292,6 +31385,8 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 loading: true,
                 prepared: Vec::new(),
                 fix: None,
+                asked: None,
+                failed: false,
             })
         }),
         Box::new(|a| {
@@ -36623,7 +36718,9 @@ fn test_connection_asks_the_fields_model_and_says_what_it_found() {
     assert!(test(&mut app).is_empty(), "nothing to ask was asked");
     assert_eq!(
         app.settings.connection_test,
-        ConnectionTest::Failed("Name the model and its endpoint first.".into())
+        ConnectionTest::Failed(crate::app::state::TestFailure::Said(
+            "Name the model and its endpoint first.".into()
+        ))
     );
     // A service that takes a key, with none: asked for, not tested — the
     // server answered "no AI chat config", which said nothing to do.
@@ -36635,7 +36732,9 @@ fn test_connection_asks_the_fields_model_and_says_what_it_found() {
         assert!(test(&mut app).is_empty(), "nothing to ask was asked");
         assert_eq!(
             app.settings.connection_test,
-            ConnectionTest::Failed("Enter the API key first.".into())
+            ConnectionTest::Failed(crate::app::state::TestFailure::Said(
+                "Enter the API key first.".into()
+            ))
         );
     }
     app.settings.provider = llm::Provider::Custom;
@@ -36684,7 +36783,7 @@ fn test_connection_asks_the_fields_model_and_says_what_it_found() {
         let _ = app.update(msg);
     }
     assert!(
-        matches!(&app.settings.connection_test, ConnectionTest::Failed(why) if !why.is_empty()),
+        matches!(&app.settings.connection_test, ConnectionTest::Failed(why) if !why.said().is_empty()),
         "{:?}",
         app.settings.connection_test
     );

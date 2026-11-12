@@ -578,12 +578,29 @@ impl App {
                 .iter()
                 .chain(&failures.calls)
                 .find_map(ExplainFailure::field);
-            self.say_failure_again(
-                move || pass_said(&said),
-                retry,
-                crate::app::state::FailureOf::Explain,
-            );
-            self.failure_about(about);
+            // A node asked for on its own says why on its card, with Try
+            // again and Settings: on the status bar too only where that card
+            // is not to be seen — both at once said the one failure twice.
+            let on_card = reexplained.as_ref().is_some_and(|node| {
+                self.proj
+                    .explain
+                    .node_failed
+                    .as_ref()
+                    .is_some_and(|(of, ..)| of == node)
+                    && self.proj.explain.view.as_ref() == Some(node)
+                    && self.margin_tab == crate::MarginTab::Notes
+                    && crate::ui::right_panel_shown(self)
+            });
+            if on_card {
+                self.forget_failure_of(crate::app::state::FailureOf::Explain);
+            } else {
+                self.say_failure_again(
+                    move || pass_said(&said),
+                    retry,
+                    crate::app::state::FailureOf::Explain,
+                );
+                self.failure_about(about);
+            }
         } else {
             // Done again, and done: the failure it stood for is past — once
             // the model answered. A pass that asked it nothing (every note

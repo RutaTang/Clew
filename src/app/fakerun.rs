@@ -160,6 +160,24 @@ impl App {
         Some(target)
     }
 
+    /// Whether Fake Run or Fake Debug has something to run where the reader
+    /// is — what [`Self::on_fake_at_caret`] would run — without building
+    /// it: the strip asks as it is drawn. With the cursor off any function
+    /// the strip's Fake Run looked ready, and pressed, only then said to
+    /// put it in one.
+    pub(crate) fn has_fake_target(&self) -> bool {
+        let Some(v) = self.active_viewer() else {
+            return false;
+        };
+        let line = v.current_line(self.line_height());
+        let mut runnable = v.symbols.iter().filter(|s| fr::runnable(&s.kind));
+        if v.caret.is_some() {
+            runnable.any(|s| s.line <= line && line <= s.end_line)
+        } else {
+            runnable.any(|s| s.line <= line && line <= s.end_line || s.line >= line)
+        }
+    }
+
     /// The first definition a fake run could run that starts at or below
     /// line `line1` of pane `pane`'s file.
     fn fake_target_below(&self, pane: usize, line1: usize) -> Option<Target> {
@@ -238,9 +256,9 @@ impl App {
             Some(target) => self.open_fake_sheet(target, debug),
             None => {
                 self.status = if debug {
-                    tr!("Put the caret in a function, class or struct to fake-debug it")
+                    tr!("Put the cursor in a function, class or struct to fake-debug it")
                 } else {
-                    tr!("Put the caret in a function, class or struct to fake-run it")
+                    tr!("Put the cursor in a function, class or struct to fake-run it")
                 }
                 .into();
                 Task::none()
@@ -506,17 +524,21 @@ impl App {
                 // and on the status bar with its Try again.
                 let about = crate::app::tasks::setting_to_fix(&why);
                 self.proj.fake.failed = Some(why.clone());
-                self.say_failure_again(
-                    move || {
-                        tr!(
-                            "The fake run failed: {why}",
-                            why = crate::app::tasks::ai_reason(&why)
-                        )
-                    },
-                    Some(Message::Fake(FakeMsg::EditInputs)),
-                    crate::app::state::FailureOf::FakeRun,
-                );
-                self.failure_about(about);
+                // Said on its panel, with Try again and Settings: on the
+                // status bar too, only where the panel is not to be seen —
+                // both at once said the one failure twice.
+                let shown = self.show_bottom
+                    && self.shown_run_tab()
+                        == Some(crate::app::state::RunTab::Fake(self.proj.fake.tab));
+                if !shown {
+                    let debug = working.debug;
+                    self.say_failure_again(
+                        move || fake_failed(debug, &why),
+                        Some(Message::Fake(FakeMsg::EditInputs)),
+                        crate::app::state::FailureOf::FakeRun,
+                    );
+                    self.failure_about(about);
+                }
                 Task::none()
             }
         }
@@ -987,6 +1009,17 @@ fn lines_on_disk(path: &std::path::Path) -> Option<usize> {
     let breaks = bytes.iter().filter(|b| **b == b'\n').count();
     let last_unended = bytes.last().is_some_and(|b| *b != b'\n');
     Some((breaks + usize::from(last_unended)).max(1))
+}
+
+/// Why a fake run (or, `debug`, a fake debug) brought no trace, in the
+/// language spoken now: a fake debug's failure said "The fake run failed".
+pub(crate) fn fake_failed(debug: bool, why: &str) -> String {
+    let why = crate::app::tasks::ai_reason(why);
+    if debug {
+        tr!("The fake debug failed: {why}", why = why)
+    } else {
+        tr!("The fake run failed: {why}", why = why)
+    }
 }
 
 #[cfg(test)]

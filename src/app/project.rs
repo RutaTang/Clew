@@ -747,6 +747,30 @@ impl App {
         }
     }
 
+    /// Back where the reader was: the file and line the reading trail
+    /// stands on, opened as the project opens on its overview — every
+    /// session started from the top, the overview, then "No file open".
+    /// Not where a file is open already (one clew was started with, one
+    /// opened meanwhile) or another page was gone to, nor for a file no
+    /// longer in the project. The overview stays a click away.
+    fn back_where_read(&mut self) -> Option<Task<Message>> {
+        if self.active_viewer().is_some()
+            || !self.proj.overview.showing
+            || self.pending_open.is_some()
+        {
+            return None;
+        }
+        let loc = self.proj.history.current_loc()?.clone();
+        let listed = self
+            .proj
+            .project
+            .as_ref()?
+            .files
+            .iter()
+            .any(|f| f.abs == loc.path);
+        listed.then(|| self.open_file(loc.path, loc.line, false))
+    }
+
     /// The project's persisted state arrived (`ProjectMsg::StateLoaded`). Adopt each
     /// store the user has not changed meanwhile, report any that could not be
     /// read (they are left untouched on disk), replay trail visits made while
@@ -780,6 +804,8 @@ impl App {
                     self.proj.trail_collapsed.clear();
                     if replayed {
                         tasks.push(self.save_history());
+                    } else if let Some(task) = self.back_where_read() {
+                        tasks.push(task);
                     }
                 }
                 Err(e) => problems.push(format!("history.json {e}")),

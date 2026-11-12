@@ -3384,7 +3384,16 @@ fn the_chrome_geometry_matches_what_is_drawn() {
     use super::StripTool;
     /// Whether a message is the one a tool sends.
     type Sends = fn(&Message) -> bool;
-    let app = reader_app();
+    let mut app = reader_app();
+    // A function in view, for Fake Run and Fake Debug to work out: with
+    // none they are drawn off and press nothing.
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "line_0".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 1,
+    }];
+    let app = app;
     let expected: [(StripTool, Sends); 14] = [
         (StripTool::Overview, |m| {
             matches!(m, Message::Overview(crate::OverviewMsg::Show))
@@ -4436,8 +4445,15 @@ fn an_empty_condition_says_it_sets_a_plain_breakpoint() {
 fn a_dimmed_fake_run_says_why_where_the_pointer_rests() {
     use crate::ui::StripTool;
     let mut app = reader_app();
-    let why = "Open a file and put the caret in a function, class or struct to fake-run it";
-    let hovered = |app: &App| {
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "line_3".into(),
+        kind: "function".into(),
+        line: 4,
+        end_line: 4,
+    }];
+    let why = "Open a file and put the cursor in a function, class or struct to fake-run it";
+    let off = "Put the cursor in a function, class or struct to fake-run it";
+    let hovered = |app: &App, why: &str| {
         let at = super::strip_tool_center(app, StripTool::FakeRun);
         super::tip::warm_now();
         let mut sim = sim_of(app);
@@ -4447,12 +4463,126 @@ fn a_dimmed_fake_run_says_why_where_the_pointer_rests() {
         })]);
         (shows(&mut sim, "Fake Run…"), shows(&mut sim, why))
     };
-    assert_eq!(hovered(&app), (true, false), "a file open: named only");
+    assert_eq!(
+        hovered(&app, off),
+        (true, false),
+        "a function in view: named only"
+    );
+    assert!(super::strip_tool_able(&app, StripTool::FakeRun));
+    // M18: the cursor off any function — it looked ready, and pressed,
+    // only then said to put the cursor in one.
+    app.proj.panes[0].as_mut().unwrap().caret = Some((9, 0));
+    assert!(!super::strip_tool_able(&app, StripTool::FakeRun));
+    assert!(!super::strip_tool_able(&app, StripTool::FakeDebug));
+    assert_eq!(
+        hovered(&app, off),
+        (true, true),
+        "the cursor off a function: and why"
+    );
+    app.proj.panes[0].as_mut().unwrap().caret = Some((3, 2));
+    assert!(super::strip_tool_able(&app, StripTool::FakeRun), "in one");
     for pane in app.proj.panes.iter_mut() {
         *pane = None;
     }
     assert!(app.active_viewer().is_none(), "precondition");
-    assert_eq!(hovered(&app), (true, true), "no file open: and why");
+    assert_eq!(hovered(&app, why), (true, true), "no file open: and why");
+}
+
+/// M4: the code menu says "Edit Condition…" on a line whose breakpoint has
+/// a condition — named as a new one, it hid where a condition is read and
+/// changed — and the condition dialog takes the breakpoint away, where it
+/// offered only to set one.
+#[test]
+fn a_breakpoints_condition_dialog_edits_and_removes_it() {
+    let mut app = reader_app();
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    let menu = |app: &mut App| {
+        app.proj.context_menu = Some(crate::ContextMenu {
+            pane: 0,
+            line: 2,
+            col: 0,
+            x: 40.0,
+            y: 40.0,
+            insight: None,
+            served: true,
+            by_pointer: true,
+        });
+    };
+    menu(&mut app);
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Conditional Breakpoint…"));
+        assert!(!shows(&mut sim, "Edit Condition…"));
+    }
+    let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
+    assert!(
+        !shows(&mut sim_of(&app), "Remove breakpoint"),
+        "no breakpoint there to remove"
+    );
+    let _ = app.update(Message::Debug(DebugMsg::BpConditionInput("i == 3".into())));
+    let _ = app.update(Message::Debug(DebugMsg::BpConditionSet));
+    assert!(
+        app.debug
+            .breakpoints
+            .get(&abs)
+            .and_then(|m| m.get(&3))
+            .is_some_and(|bp| bp.condition.as_deref() == Some("i == 3"))
+    );
+    menu(&mut app);
+    assert!(shows(&mut sim_of(&app), "Edit Condition…"));
+    let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
+    let sent = click(sim_of(&app), "Remove breakpoint");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::BpConditionRemove))),
+        "{sent:?}"
+    );
+    for m in sent {
+        let _ = app.update(m);
+    }
+    assert!(app.proj.bp_cond_edit.is_none(), "the dialog stayed");
+    assert!(
+        app.debug
+            .breakpoints
+            .get(&abs)
+            .is_none_or(|m| !m.contains_key(&3)),
+        "the breakpoint stayed"
+    );
+}
+
+/// M8: with no folder open, the ☰ menu's rows that read a project are
+/// drawn off and press nothing, as the strip's tools are — "Start
+/// Debugging" looked ready, and pressed, did nothing; and what works on
+/// the file in view waits for one.
+#[test]
+fn the_app_menu_draws_off_what_needs_a_project_or_a_file() {
+    use crate::keymap::Action;
+    let app = blank_app();
+    assert!(app.proj.project.is_none(), "precondition");
+    for action in [
+        Action::StartDebug,
+        Action::Run,
+        Action::CallGraph,
+        Action::ExplainAll,
+    ] {
+        assert!(!super::menu_action_able(&app, action), "{action:?}");
+    }
+    for action in [Action::FindInFile, Action::FakeRun, Action::ToggleBookmark] {
+        assert!(!super::menu_action_able(&app, action), "{action:?}");
+    }
+    for action in [Action::ZoomIn, Action::CommandPalette, Action::Tutorial] {
+        assert!(super::menu_action_able(&app, action), "{action:?}");
+    }
+    let sent = click(sim_elem(super::app_menu(&app)), "Start Debugging");
+    assert!(sent.is_empty(), "{sent:?}");
+    let app = reader_app();
+    for action in [
+        Action::StartDebug,
+        Action::FindInFile,
+        Action::ToggleBookmark,
+    ] {
+        assert!(super::menu_action_able(&app, action), "{action:?}");
+    }
 }
 
 /// In a window too short for the four ways to run, they fold into the bug,
@@ -4469,6 +4599,13 @@ fn in_a_short_window_the_bug_opens_a_menu_of_the_four_runs() {
         height: 540.0,
     };
     let mut app = reader_app();
+    // A function in view, for the fake runs to work out.
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "line_0".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 1,
+    }];
     app.window_height = short.height;
     assert!(!super::runs_on_strip(&app));
     let (.., open) = super::strip_tool(&app, StripTool::RunMenu);
@@ -4542,6 +4679,12 @@ fn in_a_short_window_the_bug_opens_a_menu_of_the_four_runs() {
 fn the_four_ways_to_run_are_buttons_on_the_strip() {
     use crate::ui::StripTool;
     let mut app = reader_app();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "line_0".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 1,
+    }];
     assert!(super::runs_on_strip(&app));
     assert!(super::strip_slot_center(&app, super::StripSlot::Tool(StripTool::RunMenu)).is_none());
     let _ = app.update(Message::Window(WindowMsg::ToggleRunMenu));
@@ -9485,7 +9628,9 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
     ]);
     let mut sim = sim_elem(super::project_maps_body(&app));
     assert!(shows(&mut sim, "Database schema, 2 nodes, 1 arrow"));
-    assert!(shows(&mut sim, "an arrow is a foreign key"));
+    // Said as a sentence, its first letter a capital (L15): the
+    // extractors write it lower case.
+    assert!(shows(&mut sim, "An arrow is a foreign key"));
     assert!(shows(&mut sim, "TABLE"));
     assert!(shows(&mut sim, "db/schema.sql:7"));
     assert!(shows(&mut sim, "user_id int → users"));
@@ -9710,6 +9855,26 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
     app.debug.session = Some(stopped);
     let mut sim = sim_elem(super::debug_panel(&app));
     assert!(shows(&mut sim, "CALL STACK"));
+    drop(sim);
+    // Narrow, a long path is cut from its start, so its file and line
+    // stay: cut at its end, "teashop/checkout.py:" lost the line, the one
+    // thing it is read for.
+    let mut deep = session(crate::DebugStatus::Terminated, None);
+    deep.frames = vec![crate::dap::StackFrame {
+        id: 1,
+        name: "total".into(),
+        path: Some(root.join("teashop/pricing/rules/discounts/checkout.py")),
+        line: 18,
+        column: 1,
+    }];
+    app.window_width = 1100.0;
+    app.debug.session = Some(deep);
+    let mut sim = sim_elem(super::debug_panel(&app));
+    let loc = text_at(&mut sim, |t| t.ends_with("checkout.py:18"), 0);
+    assert!(
+        loc.is_some() && !shows(&mut sim, "teashop/pricing/rules/discounts/checkout.py:18"),
+        "the line lost, or nothing cut"
+    );
 }
 
 /// A tour is named as the action that made it, in the language spoken
@@ -12662,7 +12827,7 @@ fn the_tour_sheet_says_all_set_only_of_a_model_that_answered() {
     assert_eq!(prep.current(&app), Some(crate::app::tutorial::Need::Model));
     assert!(!prep.ready(&app));
     app.model_check.result =
-        ConnectionTest::Failed("Couldn't reach 127.0.0.1:9 (nothing answered at that address). Check the base URL and your network.".into());
+        ConnectionTest::Failed(crate::app::state::TestFailure::Said("Couldn't reach 127.0.0.1:9 (nothing answered at that address). Check the base URL and your network.".into()));
     assert!(says(&app, "Couldn't reach 127.0.0.1:9"));
     assert!(!says(&app, "All set."));
     assert_eq!(prep.current(&app), Some(crate::app::tutorial::Need::Model));
@@ -15742,6 +15907,8 @@ fn the_why_popup_opens_at_the_line_it_is_about() {
         prepared: Vec::new(),
         anchor,
         fix: None,
+        asked: None,
+        failed: false,
     };
     let lh = app.line_height();
     app.proj.blame_why = Some(why(Some(400.0)));
@@ -15778,6 +15945,27 @@ fn the_why_popup_opens_at_the_line_it_is_about() {
         )),
         "the popup's Settings"
     );
+    // M1: failed, it is asked again from the popup — it offered only
+    // Settings and Close — of the lines it was asked about.
+    assert!(!shows(&mut sim_of(&app), "Try again"), "not failed: none");
+    app.proj.blame_why = Some(crate::app::model::BlameWhy {
+        loading: false,
+        failed: true,
+        asked: Some((0, 2, 2)),
+        ..why(None)
+    });
+    let again = click(sim_of(&app), "Try again");
+    assert!(
+        again
+            .iter()
+            .any(|m| matches!(m, Message::TimeTravel(crate::TimeTravelMsg::BlameWhyAgain))),
+        "{again:?}"
+    );
+    app.status.clear();
+    let _ = app.update(Message::TimeTravel(crate::TimeTravelMsg::BlameWhyAgain));
+    // Asked again of line 3, which holds code: as far as the key, which
+    // this window has none of.
+    assert_eq!(app.status, "Add an API key in Settings", "not asked again");
     app.proj.blame_why = None;
     app.proj.insight = Some(crate::Insight {
         anchor: Some(400.0),
@@ -17941,10 +18129,11 @@ fn ai_failures_are_said_where_the_action_was_taken() {
         assert!(shows(&mut sim, "Try again"));
     }
     {
-        // In a sidebar's width, why it failed runs across the row under
-        // its controls: beside them it was a column a word or two wide,
-        // five lines tall. And where it says to check the base URL, the
-        // way there is beside it.
+        // In a sidebar's width, its title and why it failed each run
+        // across the row, and its Try again comes under them: beside the
+        // controls the reason was a column a word or two wide, five lines
+        // tall, and the title a word a line. And where it says to check
+        // the base URL, the way there is beside Try again.
         crate::app::tests::isolated_data_dir();
         crate::fonts::load();
         let width = 260.0;
@@ -17955,11 +18144,18 @@ fn ai_failures_are_said_where_the_action_was_taken() {
         );
         let again = text_at(&mut sim, |t| t == "Try again", 0).expect("Try again");
         let why = text_at(&mut sim, |t| t.starts_with("Failed: "), 0).expect("why");
+        let title = text_at(&mut sim, |t| t.contains("checkout"), 0).expect("its title");
         assert!(
-            why.y >= again.y + again.height,
-            "under the controls: {why:?} {again:?}"
+            again.y >= why.y + why.height,
+            "the ways forward under why: {why:?} {again:?}"
         );
+        assert!(why.y >= title.y + title.height, "{title:?} {why:?}");
         assert!(why.width > width * 0.6, "across the row: {why:?}");
+        let settings = text_at(&mut sim, |t| t == "Settings", 0).expect("Settings");
+        assert!(
+            (settings.y - again.y).abs() < 2.0 && settings.x > again.x,
+            "beside Try again: {settings:?} {again:?}"
+        );
         drop(sim);
         let sent = click_nth(
             iced_test::Simulator::with_size(
@@ -18005,6 +18201,25 @@ fn ai_failures_are_said_where_the_action_was_taken() {
     app.proj.explain.pass_target = Some(node);
     let (said, _) = super::statusbar::explain_label_for_tests(&app).unwrap();
     assert_eq!(said, "Explaining helper()…");
+    // M17: beside an older failure, what is under way keeps its words, and
+    // the failure's give way: its progress was squeezed to "✦ … ×".
+    app.say_failure(
+        "Couldn't narrate the run with AI: couldn't reach the AI provider (nothing answered at that address) — showing its stops as recorded".into(),
+        None,
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    let size = Size::new(1100.0, 700.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    let mut sim = sim_sized(&app, size);
+    assert!(
+        shows(&mut sim, "Explaining helper()…"),
+        "the work under way, cut short beside an older failure"
+    );
+    assert!(
+        text_at(&mut sim, |t| t.starts_with("Couldn't narrate"), 0).is_some(),
+        "the failure stands, its words cut"
+    );
 }
 
 /// A right-click on a row of the file tree opens its menu where the
@@ -18667,6 +18882,61 @@ fn a_notes_failure_settings_can_fix_has_its_settings() {
     );
     // Narrow, it takes a line of its own, added to the card.
     assert!(super::panes::raised_card_h(&app, &node, 150.0, 2000.0) > plain);
+}
+
+/// A function's own Explain that fails says why on its card, with Try
+/// again and Settings: the status bar said it as well, the one failure
+/// twice. It says it there only while the card is not to be seen.
+#[test]
+fn a_failed_explain_is_said_on_its_card_or_else_on_the_status_bar() {
+    use crate::app::tasks::{ExplainFailure, PassFailures};
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 1,
+        end_line: 3,
+    }];
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    app.proj.explain.view = Some(node.clone());
+    let fail = |app: &mut App| {
+        app.proj.explain.running = true;
+        app.proj.explain.pass_target = Some(node.clone());
+        app.proj.explain.pass_target_new = true;
+        let _ = app.update(Message::Explain(ExplainMsg::Done {
+            stamp: app.stamp(),
+            generation: app.proj.explain.generation,
+            cache: crate::explain::Cache::new(),
+            failures: PassFailures {
+                failed: 1,
+                stopped: Some(ExplainFailure::Unreached(
+                    "request failed: Connection refused (os error 111)".into(),
+                )),
+                ..PassFailures::default()
+            },
+            tally: Default::default(),
+            written: Default::default(),
+        }));
+    };
+    fail(&mut app);
+    assert!(app.failure_shown().is_none(), "said twice");
+    assert!(shows(&mut sim_of(&app), "Try again"), "its card says it");
+    // The margin put away: only the status bar is left to say it.
+    app.show_right_panel = false;
+    fail(&mut app);
+    let notice = app.failure_shown().expect("said on the status bar");
+    assert_eq!(notice.of, crate::app::state::FailureOf::Explain);
+    assert!(notice.said.contains("couldn't reach"), "{}", notice.said);
+    // On its card again, failed again: the card says it, and only the card.
+    app.show_right_panel = true;
+    fail(&mut app);
+    assert!(app.failure_shown().is_none(), "said twice");
 }
 
 /// A failure's Settings link opens Settings with the keys in the field to

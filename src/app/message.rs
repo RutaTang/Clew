@@ -1731,6 +1731,8 @@ pub enum TimeTravelMsg {
     },
     /// Close the "why is this here?" popup.
     BlameWhyClose,
+    /// Ask the popup's question again, its answer having failed.
+    BlameWhyAgain,
     /// Enter git time travel for the active file; `symbol` scopes it to the
     /// function under the cursor.
     Start { symbol: bool },
@@ -1925,6 +1927,8 @@ pub enum DebugMsg {
     BpConditionSet,
     /// Close the condition editor.
     BpConditionCancel,
+    /// Remove the breakpoint the condition editor is open on, and close it.
+    BpConditionRemove,
     /// The add-watch input changed.
     WatchInput(String),
     /// Add the current input as a watch expression.
@@ -2185,7 +2189,7 @@ pub enum SettingsMsg {
     ConnectionTested {
         number: u64,
         saved: bool,
-        result: Result<String, String>,
+        result: Result<String, crate::app::state::TestFailure>,
     },
     /// LLM settings draft edits.
     ProviderPicked(llm::Provider),
@@ -3041,6 +3045,7 @@ impl TimeTravelMsg {
             TimeTravelMsg::WhyIsThisHere
             | TimeTravelMsg::StartAt { .. }
             | TimeTravelMsg::BlameWhyClose
+            | TimeTravelMsg::BlameWhyAgain
             | TimeTravelMsg::Start { .. }
             | TimeTravelMsg::Goto(..)
             | TimeTravelMsg::Scrolled(..)
@@ -3128,6 +3133,7 @@ impl DebugMsg {
             | DebugMsg::BpConditionInput(..)
             | DebugMsg::BpConditionSet
             | DebugMsg::BpConditionCancel
+            | DebugMsg::BpConditionRemove
             | DebugMsg::WatchInput(..)
             | DebugMsg::WatchAdd
             | DebugMsg::WatchRemoveExpr(..)
