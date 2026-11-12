@@ -64,6 +64,51 @@ impl App {
         )
     }
 
+    /// The pointer moved onto gutter line `line` of `pane` (or off the
+    /// gutter): its tip, if the line has a breakpoint or a bookmark, shows
+    /// once the pointer has rested there, as every tooltip does.
+    pub(crate) fn on_gutter_hover(
+        &mut self,
+        pane: usize,
+        line: Option<usize>,
+        x: f32,
+        y: f32,
+    ) -> Task<Message> {
+        let Some(line) = line else {
+            self.proj.gutter_tip = None;
+            return Task::none();
+        };
+        // In the window, as the peek is placed: the code reports the
+        // pointer in its scrolled space.
+        let (sx, sy) = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .map_or((0.0, 0.0), |v| (v.scroll_x, v.scroll_y));
+        self.proj.gutter_seq = self.proj.gutter_seq.wrapping_add(1);
+        let generation = self.proj.gutter_seq;
+        self.proj.gutter_tip = Some(crate::app::state::GutterTip {
+            pane,
+            line,
+            x: x - sx,
+            y: y - sy,
+            scroll: (sx, sy),
+            generation,
+            shown: false,
+        });
+        let stamp = self.stamp();
+        Task::perform(
+            async { tokio::time::sleep(GUTTER_TIP_DELAY).await },
+            move |_| {
+                Message::Hover(HoverMsg::GutterDue {
+                    stamp: stamp.clone(),
+                    generation,
+                })
+            },
+        )
+    }
+
     pub(crate) fn on_hover_dwell(
         &mut self,
         hover_gen: u64,
@@ -555,6 +600,18 @@ impl App {
                 Task::none()
             }
             HoverMsg::Cleared => self.on_hover_cleared(),
+            HoverMsg::Gutter { pane, line, x, y } => self.on_gutter_hover(pane, line, x, y),
+            HoverMsg::GutterDue { generation, .. } => {
+                if let Some(tip) = self
+                    .proj
+                    .gutter_tip
+                    .as_mut()
+                    .filter(|t| t.generation == generation)
+                {
+                    tip.shown = true;
+                }
+                Task::none()
+            }
             HoverMsg::Pin(inside) => {
                 self.proj.hover_pinned = inside;
                 if !inside {
@@ -567,3 +624,7 @@ impl App {
         }
     }
 }
+
+/// How long the pointer rests on a gutter line before its tip shows: as
+/// long as any tooltip's.
+pub(crate) const GUTTER_TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);

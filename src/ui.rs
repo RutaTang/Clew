@@ -610,17 +610,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Finder => finder_modal(app),
             Self::ContextMenu(menu) => context_menu(app, menu),
             Self::TreeMenu(menu) => overlays::tree_menu(app, menu),
-            // Over the code, not the panel under it nor the status bar.
-            Self::Hover(hover) => hover_tooltip(
-                hover,
-                app.window_height
-                    - STATUSBAR_H
-                    - if app.show_bottom {
-                        app.bottom_shown_height()
-                    } else {
-                        0.0
-                    },
-            ),
+            Self::Hover(hover) => hover_tooltip(hover, code_floor(app)),
         }
     }
 
@@ -676,6 +666,18 @@ impl<'a> ActiveOverlay<'a> {
             Self::Hover(_) => Message::Hover(HoverMsg::Pin(false)),
         }
     }
+}
+
+/// The lowest a peek or tip over the code reaches: over the code, not the
+/// panel under it nor the status bar.
+fn code_floor(app: &App) -> f32 {
+    app.window_height
+        - STATUSBAR_H
+        - if app.show_bottom {
+            app.bottom_shown_height()
+        } else {
+            0.0
+        }
 }
 
 /// What Escape does while an overlay is up: dismiss the topmost one. `None`
@@ -776,7 +778,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // Inside the frame Clew draws round its borderless window (none on macOS
     // or maximized: padding 0, the same tree), every layer, so all of them
     // share one origin; the resize grips at the window's very edge.
-    let framed = container(stack![base, ask, overlay, tutorial])
+    // A gutter line's tip, over the code and under all else: none while
+    // anything is layered over the window.
+    let gutter = if active_overlay(app).is_none() {
+        overlays::gutter_tip(app, code_floor(app))
+    } else {
+        None
+    }
+    .unwrap_or_else(slot);
+    let framed = container(stack![base, gutter, ask, overlay, tutorial])
         .padding(app.window_frame)
         .style(theme::window_frame(app.window_radius));
     // Whether a widget's own overlay is drawn over it all, and which

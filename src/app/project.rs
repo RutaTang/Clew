@@ -753,8 +753,17 @@ impl App {
     /// Not where a file is open already (one clew was started with, one
     /// opened meanwhile) or another page was gone to, nor for a file no
     /// longer in the project. The overview stays a click away.
-    fn back_where_read(&mut self) -> Option<Task<Message>> {
-        if self.active_viewer().is_some()
+    pub(crate) fn back_where_read(&mut self) -> Option<Task<Message>> {
+        // The tour's sample, opened for a tour: the tour sets out what is
+        // shown, and gives back the layout it found — a file opened here
+        // as it began left the reader, at its end, on the last file the
+        // tour showed, out of step with the trail.
+        let sample = self
+            .tour_sample
+            .as_ref()
+            .is_some_and(|s| self.proj.project.as_ref().is_some_and(|p| p.root == s.root));
+        if sample
+            || self.active_viewer().is_some()
             || !self.proj.overview.showing
             || self.pending_open.is_some()
         {

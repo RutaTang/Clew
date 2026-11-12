@@ -530,7 +530,11 @@ impl App {
                 let shown = self.show_bottom
                     && self.shown_run_tab()
                         == Some(crate::app::state::RunTab::Fake(self.proj.fake.tab));
-                if !shown {
+                // A run in a tab not on screen (`with_parked_fake`): the
+                // status bar says its tab says why. A notice raised here,
+                // worked out with the runs swapped, had a Try again that
+                // reopened the inputs of the run on screen.
+                if !shown && !self.debug_off_screen {
                     let debug = working.debug;
                     self.say_failure_again(
                         move || fake_failed(debug, &why),

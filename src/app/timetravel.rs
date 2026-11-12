@@ -1157,7 +1157,7 @@ impl App {
         tt.why_pending.remove(&sha);
         let failed = match result {
             Ok(text) => {
-                tt.why.insert(sha, Ok(text.trim().to_string()));
+                tt.why.insert(sha.clone(), Ok(text.trim().to_string()));
                 None
             }
             Err(e) => {
@@ -1165,24 +1165,24 @@ impl App {
                 // language spoken then, with a way to Settings when the
                 // base URL is to blame.
                 tt.why.insert(sha.clone(), Err(e.clone()));
-                Some((sha, e))
+                Some((sha.clone(), e))
             }
         };
         if let Some(tt) = self.proj.time_travel.as_mut() {
             tt.sync_why_loading();
         }
-        // The commit on screen: its failure is said in its banner, with Try
-        // again and Settings — on the status bar too, it was said twice.
+        // The commit on screen — the view drawn, scrubbed to it: its
+        // failure is said in its banner, with Try again and Settings — on
+        // the status bar too, it was said twice. Behind the overview, or
+        // in the pane not shown, the banner says it to no one.
         let on_screen = |app: &Self, sha: &str| {
-            app.proj
-                .time_travel
-                .as_ref()
+            crate::ui::time_travel_on_screen(app)
                 .and_then(|tt| tt.commits.get(tt.idx))
                 .is_some_and(|c| c.sha == sha)
         };
         match failed {
             Some((failed_sha, _)) if on_screen(self, &failed_sha) => {
-                self.forget_failure_of(crate::app::state::FailureOf::Summary);
+                self.forget_summary_failure_of(&failed_sha);
             }
             // Scrubbed away from it: the failure the status bar stands
             // for, with its Try again (and Settings) — said only as passing
@@ -1205,9 +1205,25 @@ impl App {
                 );
                 self.failure_about(about);
             }
-            None => self.forget_failure_of(crate::app::state::FailureOf::Summary),
+            None => self.forget_summary_failure_of(&sha),
         }
         Task::none()
+    }
+
+    /// Take away the standing summary failure of commit `sha`, and only
+    /// its: another commit's, asked about and failed while scrubbed away
+    /// from, went with any commit's answer, and was said nowhere until the
+    /// reader scrubbed back to it.
+    fn forget_summary_failure_of(&mut self, sha: &str) {
+        let its = self.failure_notice.as_ref().is_some_and(|f| {
+            matches!(
+                &f.retry,
+                Some(Message::TimeTravel(TimeTravelMsg::WhyOf { sha: of, .. })) if of == sha
+            )
+        });
+        if its {
+            self.forget_failure_of(crate::app::state::FailureOf::Summary);
+        }
     }
 
     pub(crate) fn on_time_travel_story(&mut self) -> Task<Message> {
@@ -1424,6 +1440,7 @@ impl App {
             .collect::<Vec<_>>()
             .join("\n");
         let rel = v.rel.clone();
+        let abs = v.abs.clone();
         let title = if l0 == l1 {
             tr!("Why line {line} exists", line = l0 + 1)
         } else {
@@ -1443,7 +1460,7 @@ impl App {
             prepared: Vec::new(),
             anchor,
             fix: None,
-            asked: Some((pane, l0, l1)),
+            asked: Some((abs, l0, l1)),
             failed: false,
         });
         // The answer is only meaningful for the project it was asked in: its
@@ -1548,7 +1565,7 @@ impl App {
         // Where the question was asked, the answer stays — and what was
         // asked, for its Try again.
         let anchor = self.proj.blame_why.as_ref().and_then(|b| b.anchor);
-        let asked = self.proj.blame_why.as_ref().and_then(|b| b.asked);
+        let asked = self.proj.blame_why.as_ref().and_then(|b| b.asked.clone());
         self.proj.blame_why = Some(BlameWhy {
             token,
             title,
@@ -1583,10 +1600,36 @@ impl App {
             }
             // Asked again, of the same lines, where it was asked.
             TimeTravelMsg::BlameWhyAgain => match self.proj.blame_why.as_ref() {
-                Some(bw) if !bw.loading => match bw.asked {
-                    Some((pane, l0, l1)) => {
+                Some(bw) if !bw.loading => match bw.asked.clone() {
+                    Some((abs, l0, l1)) => {
                         let anchor = bw.anchor;
-                        self.ask_why(pane, (l0, l1), anchor)
+                        // The pane showing the file asked about, the
+                        // active one first; none now: said, and the popup
+                        // put away — it stood with a Try again that did
+                        // nothing.
+                        let shows = |p: usize| {
+                            self.proj
+                                .panes
+                                .get(p)
+                                .and_then(Option::as_ref)
+                                .is_some_and(|v| v.abs == abs)
+                        };
+                        let active = self.proj.active;
+                        match [active, active ^ 1].into_iter().find(|&p| shows(p)) {
+                            Some(pane) => self.ask_why(pane, (l0, l1), anchor),
+                            None => {
+                                self.proj.blame_why = None;
+                                let file = abs
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                self.status = tr!(
+                                    "{file} is no longer open: open it to ask again",
+                                    file = file
+                                );
+                                Task::none()
+                            }
+                        }
                     }
                     None => Task::none(),
                 },
@@ -1645,10 +1688,10 @@ impl App {
                     }
                 }
                 // What failed in the scope left goes with it: a story's Try
-                // again did nothing in the whole file's scope, and a
-                // commit's, gone from the new history, nothing either.
+                // again did nothing in the whole file's scope. A commit's
+                // summary stays: the session and its answers are kept, and
+                // a commit gone from the new history says so when asked.
                 self.forget_failure_of(crate::app::state::FailureOf::Story);
-                self.forget_failure_of(crate::app::state::FailureOf::Summary);
                 Task::done(Message::TimeTravel(TimeTravelMsg::Start { symbol }))
             }
             TimeTravelMsg::Exit => {

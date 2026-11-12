@@ -1038,6 +1038,12 @@ impl App {
                     return Task::none();
                 }
                 self.adopt_remote_state_content(&root, &rel, text.as_deref());
+                // The trail as it was left, read for an open: back where it
+                // was read, as a local project's load goes — not on a
+                // reconnect's read, which keeps the reader where they are.
+                if first_trail_read && let Some(task) = self.back_where_read() {
+                    return task;
+                }
             }
             Event::ProjectSymbols {
                 root: snap_root,

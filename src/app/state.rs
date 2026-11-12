@@ -922,6 +922,25 @@ pub enum ConnectionTest {
     Failed(TestFailure),
 }
 
+/// The gutter line the pointer rests on (0-based, in pane `pane`), where
+/// in the window it is, and whether it has rested long enough for its tip
+/// (`shown`) — a breakpoint's condition, a bookmark's note: the dot and the
+/// bar said neither, a condition was read only by opening its dialog again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GutterTip {
+    pub pane: usize,
+    pub line: usize,
+    pub x: f32,
+    pub y: f32,
+    /// The pane's scroll (x, y) when the pointer came to rest: scrolled
+    /// since, another line is under it, and the tip is not shown.
+    pub scroll: (f32, f32),
+    /// Bumped as the pointer moves to another line: a dwell for an older
+    /// one shows nothing.
+    pub generation: u64,
+    pub shown: bool,
+}
+
 /// Why Test connection failed, kept as what failed and not as its words:
 /// worded once, in the language spoken then, the tour's sheet kept its
 /// English "Couldn't reach 127.0.0.1:9 …" among French words until it was
@@ -2246,6 +2265,12 @@ pub struct ProjectSession {
     /// The cursor is inside the hover tooltip — keep it open (so you can move into
     /// it and scroll it) and ignore code-view hover events until it leaves.
     pub hover_pinned: bool,
+    /// The gutter line the pointer rests on, and whether its tip is due:
+    /// what a breakpoint or a bookmark there says (`ui::gutter_tip`).
+    pub gutter_tip: Option<GutterTip>,
+    /// Counts the gutter lines rested on, for [`GutterTip::generation`]:
+    /// kept apart from the tip, which leaving the gutter takes away.
+    pub gutter_seq: u64,
     /// An open right-click navigation menu: (pane, line, col, window x, y).
     pub context_menu: Option<ContextMenu>,
     /// The file tree's right-click: the row it was on — said before where
@@ -2737,6 +2762,8 @@ impl Default for ProjectSession {
             hover: Default::default(),
             hover_gen: Default::default(),
             hover_pinned: Default::default(),
+            gutter_tip: None,
+            gutter_seq: 0,
             context_menu: Default::default(),
             tree_menu_for: None,
             tree_menu: None,

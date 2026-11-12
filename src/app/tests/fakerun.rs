@@ -456,6 +456,52 @@ fn fake_runs_run_side_by_side_each_in_its_own_tab() {
     assert!(app.proj.fake.sim.is_some());
 }
 
+/// R16-5: a fake run that fails in its own tab while another is on screen
+/// is said by the status bar's word that its tab says why — not by a
+/// standing notice whose Try again, worked out with the runs swapped,
+/// reopened the inputs of the run on screen.
+#[test]
+fn a_parked_fake_runs_failure_raises_no_notice_for_another_run() {
+    let mut app = fake_app("fake-parked-failure");
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: false }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let first_seq = app.proj.fake.working.as_ref().unwrap().seq;
+    // A real debug session opened since, in a tab after the first's.
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    });
+    app.debug.tab = app.next_run_tab();
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let second = app.proj.fake.tab;
+    let _ = app.update(Message::Fake(FakeMsg::Answered {
+        stamp: app.stamp(),
+        seq: first_seq,
+        result: Err("rate limited".into()),
+    }));
+    assert_eq!(app.proj.fake.tab, second, "the tab on screen stays");
+    assert!(app.status.contains("its tab says why"), "{}", app.status);
+    assert!(
+        app.failure_notice.is_none(),
+        "a notice for the run off screen: {:?}",
+        app.failure_notice
+    );
+}
+
 /// Suggested inputs fill the fields left empty, not what was typed; a
 /// suggestion asked before the newest is dropped.
 #[test]

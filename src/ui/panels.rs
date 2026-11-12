@@ -3087,10 +3087,6 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
 /// How deep the variables panel opens values into values.
 const MAX_VAR_DEPTH: usize = 12;
 
-/// `vars` as the panel's rows, `depth` levels in: `name = value`, a value
-/// with children opening and closing on a click, its children under it
-/// once read. A group with no value of its own (debugpy's "class
-/// variables") says only its name: it was drawn "class variables =".
 /// The names debug adapters give their scopes and groups ("Locals",
 /// debugpy's "special variables"), in the reader's language: in Chinese
 /// and French the Variables column still said "Locals", "Globals" and
@@ -3116,6 +3112,10 @@ fn adapter_name(name: &str) -> String {
     }
 }
 
+/// `vars` as the panel's rows, `depth` levels in: `name = value`, a value
+/// with children opening and closing on a click, its children under it
+/// once read. A group with no value of its own (debugpy's "class
+/// variables") says only its name: it was drawn "class variables =".
 fn push_var_rows<'a>(
     app: &'a App,
     vars: &'a [crate::dap::Variable],

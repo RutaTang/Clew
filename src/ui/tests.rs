@@ -4354,6 +4354,69 @@ fn a_hover_peek_stays_off_the_panel_under_the_code() {
     assert!(peek.y > panel_top - 30.0, "below the point: {peek:?}");
 }
 
+/// M4/M5: resting on a gutter line says what is there — a breakpoint's
+/// condition, why a hollow one won't stop, a bookmark's note — which the
+/// dot and the bar never said; not before the pointer has rested, not
+/// once the code has scrolled under it, not under a menu.
+#[test]
+fn a_gutter_line_rested_on_says_its_breakpoint_and_bookmark() {
+    let mut app = reader_app();
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    let bps = app.debug.breakpoints.entry(abs).or_default();
+    bps.insert(
+        3,
+        crate::Bp {
+            condition: Some("count > 3".into()),
+            ..Default::default()
+        },
+    );
+    bps.insert(
+        7,
+        crate::Bp {
+            verified: Some(false),
+            ..Default::default()
+        },
+    );
+    app.proj.bookmarks.push(crate::Bookmark {
+        rel: "src/lib.rs".into(),
+        line: 3,
+        preview: String::new(),
+        note: Some("where the total starts".into()),
+    });
+    let rest_on = |app: &mut App, line: usize, shown: bool| {
+        app.proj.gutter_tip = Some(crate::app::state::GutterTip {
+            pane: 0,
+            line,
+            x: 30.0,
+            y: 120.0,
+            scroll: (0.0, 0.0),
+            generation: 1,
+            shown,
+        });
+    };
+    rest_on(&mut app, 2, true);
+    let mut sim = sim_of(&app);
+    let said = text_at(&mut sim, |t| t.contains("count > 3"), 0).expect("the condition");
+    assert!(shows(&mut sim, "where the total starts"), "the note too");
+    assert!(said.y > 120.0, "below the pointer: {said:?}");
+    drop(sim);
+    rest_on(&mut app, 6, true);
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "won't stop here"), "the hollow dot said");
+    drop(sim);
+    // Not yet rested; a line with nothing on it; scrolled since; a menu.
+    rest_on(&mut app, 2, false);
+    assert!(!shows(&mut sim_of(&app), "count > 3"));
+    rest_on(&mut app, 4, true);
+    assert!(!shows(&mut sim_of(&app), "Breakpoint"));
+    rest_on(&mut app, 2, true);
+    app.proj.panes[0].as_mut().unwrap().scroll_y = 40.0;
+    assert!(!shows(&mut sim_of(&app), "count > 3"));
+    app.proj.panes[0].as_mut().unwrap().scroll_y = 0.0;
+    app.show_app_menu = true;
+    assert!(!shows(&mut sim_of(&app), "count > 3"));
+}
+
 /// L5: the code menu shows Toggle Breakpoint's key, F9, on its row, as it
 /// shows Toggle Bookmark's.
 #[test]
@@ -4575,14 +4638,57 @@ fn the_app_menu_draws_off_what_needs_a_project_or_a_file() {
     }
     let sent = click(sim_elem(super::app_menu(&app)), "Start Debugging");
     assert!(sent.is_empty(), "{sent:?}");
-    let app = reader_app();
+    // R16-4: Back and Forward as the top bar's arrows: nowhere to go.
+    assert!(!super::menu_action_able(&app, Action::GoBack));
+    assert!(!super::menu_action_able(&app, Action::GoForward));
+    assert_eq!(super::menu_action_why(&app, Action::GoBack), None);
+    // A greyed row says why where the pointer rests, as the strip does.
+    assert_eq!(
+        super::menu_action_why(&app, Action::StartDebug),
+        Some("Open a folder first")
+    );
+    let rested_on = |menu: Element<'_, Message>, row: &str, why: &str| {
+        super::tip::warm_now();
+        let mut sim = sim_elem(menu);
+        let at = text_at(&mut sim, |t| t == row, 0)
+            .expect("the row")
+            .center();
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        shows(&mut sim, why)
+    };
+    assert!(rested_on(
+        super::app_menu(&app),
+        "Start Debugging",
+        "Open a folder first"
+    ));
+    let mut app = reader_app();
     for action in [
         Action::StartDebug,
         Action::FindInFile,
         Action::ToggleBookmark,
     ] {
         assert!(super::menu_action_able(&app, action), "{action:?}");
+        assert_eq!(super::menu_action_why(&app, action), None);
     }
+    // The cursor off any function: Fake Run greyed in both menus, saying
+    // what it waits for — the strip alone said it.
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "line_3".into(),
+        kind: "function".into(),
+        line: 4,
+        end_line: 4,
+    }];
+    app.proj.panes[0].as_mut().unwrap().caret = Some((9, 0));
+    let why = "Put the cursor in a function, class or struct to fake-run it";
+    assert_eq!(super::menu_action_why(&app, Action::FakeRun), Some(why));
+    assert!(rested_on(super::app_menu(&app), "Fake Run…", why));
+    assert!(rested_on(super::run_menu(&app), "Fake Run…", why));
+    // In a function: no words, in either.
+    app.proj.panes[0].as_mut().unwrap().caret = Some((3, 2));
+    assert!(!rested_on(super::run_menu(&app), "Fake Run…", why));
 }
 
 /// In a window too short for the four ways to run, they fold into the bug,
@@ -9129,6 +9235,74 @@ fn a_call_row_wraps_its_place_in_a_narrow_margin() {
         "inside the margin: {place:?}"
     );
     assert!(place.y > name.y, "under the name: {name:?} {place:?}");
+}
+
+/// M10: a name longer than the margin is cut with an ellipsis beside its
+/// arrow, whole where the pointer rests: it wrapped under its arrow, left
+/// alone on the line above, and ran past the margin's edge unmarked.
+#[test]
+fn a_long_name_in_the_call_flow_is_cut_beside_its_arrow() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let long = "test_tax_is_on_the_discounted_amount_for_members";
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 12,
+            callers,
+            callees,
+        };
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![call("work", vec![1], vec![]), call(long, vec![], vec![0])],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    let node = crate::explain::Node::Function {
+        file: lib,
+        name: "work".into(),
+        ordinal: 0,
+    };
+    app.right_width = 220.0;
+    let rows = || -> Element<'_, Message> {
+        container(iced::widget::Column::with_children(super::call_flow_rows(
+            &app, &node,
+        )))
+        .width(app.right_width)
+        .into()
+    };
+    let mut sim = sim_elem(rows());
+    assert!(!shows(&mut sim, long), "whole, past the margin's edge");
+    let name = text_at(
+        &mut sim,
+        |t| t.starts_with("test_tax_is") && t.ends_with('…'),
+        0,
+    )
+    .expect("the name, cut");
+    let arrow = text_at(&mut sim, |t| t == "←", 0).expect("its arrow");
+    assert!(
+        (name.center_y() - arrow.center_y()).abs() < 3.0 && name.x > arrow.x,
+        "beside its arrow: {arrow:?} {name:?}"
+    );
+    assert!(
+        name.x + name.width <= app.right_width,
+        "inside the margin: {name:?}"
+    );
+    drop(sim);
+    // Whole where the pointer rests.
+    super::tip::warm_now();
+    let mut sim = sim_elem(rows());
+    sim.point_at(name.center());
+    let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: name.center(),
+    })]);
+    assert!(shows(&mut sim, long), "its whole name on hover");
 }
 
 /// A chain whose entry takes most of the margin's line has its steps on
@@ -15948,10 +16122,11 @@ fn the_why_popup_opens_at_the_line_it_is_about() {
     // M1: failed, it is asked again from the popup — it offered only
     // Settings and Close — of the lines it was asked about.
     assert!(!shows(&mut sim_of(&app), "Try again"), "not failed: none");
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
     app.proj.blame_why = Some(crate::app::model::BlameWhy {
         loading: false,
         failed: true,
-        asked: Some((0, 2, 2)),
+        asked: Some((abs, 2, 2)),
         ..why(None)
     });
     let again = click(sim_of(&app), "Try again");
@@ -15966,6 +16141,30 @@ fn the_why_popup_opens_at_the_line_it_is_about() {
     // Asked again of line 3, which holds code: as far as the key, which
     // this window has none of.
     assert_eq!(app.status, "Add an API key in Settings", "not asked again");
+    // R16-6: the file it asked about no longer shown — another in its
+    // pane: not asked of that one; said, and the popup put away.
+    let other = app.proj.panes[0]
+        .as_ref()
+        .unwrap()
+        .abs
+        .with_file_name("other.rs");
+    app.proj.blame_why = Some(crate::app::model::BlameWhy {
+        loading: false,
+        failed: true,
+        asked: Some((other, 2, 2)),
+        ..why(None)
+    });
+    app.status.clear();
+    let _ = app.update(Message::TimeTravel(crate::TimeTravelMsg::BlameWhyAgain));
+    assert!(
+        app.status.contains("other.rs is no longer open"),
+        "{}",
+        app.status
+    );
+    assert!(
+        app.proj.blame_why.is_none(),
+        "left with a Try again that does nothing"
+    );
     app.proj.blame_why = None;
     app.proj.insight = Some(crate::Insight {
         anchor: Some(400.0),

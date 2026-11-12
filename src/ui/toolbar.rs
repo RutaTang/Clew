@@ -286,7 +286,16 @@ pub(crate) fn tip_wrapped<'a>(
     words: String,
     side: tooltip::Position,
 ) -> Element<'a, Message> {
-    let bubble = container(
+    super::tip::tip(control, tip_bubble(words), side)
+        .gap(TIP_GAP)
+        .into()
+}
+
+/// A tooltip's bubble round `words`, wrapped no wider than [`TIP_WRAP_W`]:
+/// [`tip_wrapped`]'s, and the gutter's (`overlays::gutter_tip`), which
+/// is placed by Clew rather than by a control's tooltip.
+pub(crate) fn tip_bubble<'a>(words: String) -> Element<'a, Message> {
+    container(
         text(words)
             .size(TIP_SIZE)
             .font(crate::fonts::UI_MEDIUM)
@@ -300,8 +309,8 @@ pub(crate) fn tip_wrapped<'a>(
         bottom: 7.0,
         left: 11.0,
     })
-    .style(theme::tip);
-    super::tip::tip(control, bubble, side).gap(TIP_GAP).into()
+    .style(theme::tip)
+    .into()
 }
 
 /// The widest a [`tip_wrapped`] bubble grows before its words wrap.
@@ -1714,7 +1723,14 @@ pub(crate) fn run_menu(app: &App) -> Element<'_, Message> {
         }
         let (glyph, label, msg) = run_row(app, r);
         let keys = menu_chord(app, run_row_action(r));
-        items.push(menu_item(Some(glyph), label.to_string(), keys, msg));
+        let why = msg
+            .is_none()
+            .then(|| menu_action_why(app, run_row_action(r)))
+            .flatten();
+        items.push(said_why(
+            menu_item(Some(glyph), label.to_string(), keys, msg),
+            why,
+        ));
     }
     let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
         .width(run_menu_w(app))
@@ -2022,10 +2038,6 @@ pub(crate) fn closes_app_menu(message: &Message) -> bool {
     )
 }
 
-/// The app menu of Windows and Linux, from the top bar's ☰: what macOS keeps
-/// in its menu bar — opening a folder or a host, Settings, and every keymap
-/// action under the title the menu bar gives it (Edit, View, Tools, Go),
-/// each with its shortcut.
 /// Whether the ☰ menu's row for `action` can do anything now: what reads
 /// the project waits for one, and what works on the file in view for a
 /// file — drawn so, as the strip's tools are. With no folder open, "Start
@@ -2057,10 +2069,42 @@ pub(crate) fn menu_action_able(app: &App, action: Action) -> bool {
         | Action::WeakSpots
         | Action::Glossary
         | Action::SetUpProject => project,
+        // As the top bar's arrows: somewhere to go back or on to.
+        Action::GoBack => app.proj.history.can_back(),
+        Action::GoForward => app.proj.history.can_forward(),
         _ => true,
     }
 }
 
+/// Why the ☰ menu's (or the Run menu's) row for `action` can do nothing
+/// now, said on it as the strip's dimmed tools say it: greyed alone, a row
+/// left the reader to guess what it waited for. `None` while it can, and
+/// for Back and Forward, dimmed as the top bar's arrows are.
+pub(crate) fn menu_action_why(app: &App, action: Action) -> Option<&'static str> {
+    if menu_action_able(app, action) {
+        return None;
+    }
+    match action {
+        Action::FakeRun => strip_tool_why(app, StripTool::FakeRun),
+        Action::FakeDebug => strip_tool_why(app, StripTool::FakeDebug),
+        Action::GoBack | Action::GoForward => None,
+        _ if app.proj.project.is_none() => Some(tr!("Open a folder first")),
+        _ => Some(tr!("Open a file first")),
+    }
+}
+
+/// A menu row that can do nothing now, with why on its tooltip.
+fn said_why<'a>(row: Element<'a, Message>, why: Option<&'static str>) -> Element<'a, Message> {
+    match why {
+        Some(why) => tip_wrapped(row, why.to_string(), tooltip::Position::Bottom),
+        None => row,
+    }
+}
+
+/// The app menu of Windows and Linux, from the top bar's ☰: what macOS keeps
+/// in its menu bar — opening a folder or a host, Settings, and every keymap
+/// action under the title the menu bar gives it (Edit, View, Tools, Go),
+/// each with its shortcut.
 pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
     let mut items: Vec<Element<'_, Message>> = Vec::new();
     for (glyph, label, chord, msg) in app_menu_head(app) {
@@ -2091,11 +2135,14 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
             // What spends AI calls carries the sparkle here too: Explain
             // All and the fake runs looked like the free rows around them.
             let mark = crate::app::palette::spends_ai(&msg).then_some(Glyph::Sparkle);
-            items.push(menu_item(
-                mark,
-                crate::i18n::lookup(placed.title).to_string(),
-                menu_chord(app, action),
-                menu_action_able(app, action).then_some(msg),
+            items.push(said_why(
+                menu_item(
+                    mark,
+                    crate::i18n::lookup(placed.title).to_string(),
+                    menu_chord(app, action),
+                    menu_action_able(app, action).then_some(msg),
+                ),
+                menu_action_why(app, action),
             ));
         }
     }

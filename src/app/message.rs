@@ -626,6 +626,20 @@ pub enum HoverMsg {
     },
     /// The cursor left the code — clear any open peek.
     Cleared,
+    /// The pointer rests on gutter line `line` (0-based) of `pane`, at `x`,
+    /// `y` in the code's scrolled space — or has left the gutter (`None`).
+    Gutter {
+        pane: usize,
+        line: Option<usize>,
+        x: f32,
+        y: f32,
+    },
+    /// It rested there long enough: its tip shows, if the pointer is still
+    /// on the line `generation` was taken for.
+    GutterDue {
+        stamp: Stamp,
+        generation: u64,
+    },
     /// The cursor entered (true) or left (false) the hover tooltip itself.
     Pin(bool),
     /// The context menu's language action ([`crate::ContextMenu::insight`]),
@@ -2652,8 +2666,10 @@ impl HoverMsg {
         match self {
             HoverMsg::Dwell { stamp, .. }
             | HoverMsg::Answered { stamp, .. }
+            | HoverMsg::GutterDue { stamp, .. }
             | HoverMsg::InsightAnswered { stamp, .. } => Some(Origin::Stamped(stamp)),
-            HoverMsg::ContextMenuOpened { .. }
+            HoverMsg::Gutter { .. }
+            | HoverMsg::ContextMenuOpened { .. }
             | HoverMsg::ContextMenuClosed
             | HoverMsg::ContextGoto(..)
             | HoverMsg::Requested { .. }

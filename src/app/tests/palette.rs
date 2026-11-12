@@ -573,6 +573,16 @@ fn the_file_picker_keeps_its_symbols_for_a_question() {
     app.proj.finder.selected = at;
     let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
     assert!(!app.proj.finder.open);
+    // R16-9a: opened at the symbol's own line — closing the picker alone
+    // said nothing of what was opened.
+    assert!(
+        app.proj.link.pane_pending[app.proj.active].is_some(),
+        "nothing opened"
+    );
+    land_active_load(&mut app, lib.clone(), Some(3));
+    let v = app.active_viewer().expect("the file opened");
+    assert_eq!(v.rel, "src/lib.rs");
+    assert_eq!(v.caret.map(|(line, _)| line), Some(2), "not at the symbol");
 }
 
 /// A question from the command bar that cannot be asked — no key — is

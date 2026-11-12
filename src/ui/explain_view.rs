@@ -418,13 +418,27 @@ pub(crate) fn call_flow_rows<'a>(
             // live one.
             let is_live = to_call && live_parent.as_deref() == Some(n.name.as_str());
             let live = theme::success();
-            // Wrapped, the place under the name where the margin is narrow:
-            // cut at its edge, the two read as one clipped word.
+            // The arrow and the name are one unit, the name cut to the
+            // margin's room with an ellipsis (whole where the pointer
+            // rests): a long test name wrapped under its arrow, left alone
+            // on the line above, and ran past the margin's edge unmarked.
+            // The place, wrapped, goes under them where the margin is
+            // narrow: cut at its edge, the two read as one clipped word.
+            let shown_name =
+                super::steady::cut(&n.name, call_name_room(app), ts::BODY, crate::fonts::UI);
+            let name_cut = shown_name != n.name;
             let mut r = row![
-                text(arrow)
-                    .size(ts::SMALL)
-                    .color(if is_live { live } else { theme::dim() }),
-                text(n.name.clone()).size(ts::BODY).color(name_color),
+                row![
+                    text(arrow)
+                        .size(ts::SMALL)
+                        .color(if is_live { live } else { theme::dim() }),
+                    text(shown_name)
+                        .size(ts::BODY)
+                        .color(name_color)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
                 text(place).size(ts::CAPTION).color(theme::dim()),
             ]
             .spacing(6);
@@ -445,18 +459,29 @@ pub(crate) fn call_flow_rows<'a>(
             } else {
                 Message::Semantic(SemanticMsg::OpenNode(target))
             };
-            out.push(
-                button(col)
-                    .style(theme::list_row(false))
-                    .width(Fill)
-                    .padding([3, 6])
-                    .on_press(heard::said(&n.name, msg))
-                    .into(),
-            );
+            let row_button = button(col)
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding([3, 6])
+                .on_press(heard::said(&n.name, msg));
+            out.push(if name_cut {
+                super::toolbar::tip_at(row_button, n.name.clone(), None, tooltip::Position::Top)
+            } else {
+                row_button.into()
+            });
         }
     }
     out
 }
+
+/// The room a call-flow row's name has: the margin, less its padding, the
+/// row's own, the arrow and the gap after it, and the scroller's lane.
+fn call_name_room(app: &App) -> f32 {
+    (super::margin_w(app) - CALL_ROW_CHROME).max(48.0)
+}
+
+/// What of the margin's width a call-flow row's name does not get.
+const CALL_ROW_CHROME: f32 = 64.0;
 
 /// How many "reached from" chains the panel shows, and how many calls deep
 /// the walk looks for an entry point.

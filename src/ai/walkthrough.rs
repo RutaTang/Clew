@@ -446,8 +446,9 @@ pub fn is_guide(wt: &Walkthrough) -> bool {
 pub const MAX_TRACE_STEPS: usize = 60;
 
 /// A walkthrough of a debug run, from its trace and without a model: one
-/// step per stretch of stops inside one function (stepping through a
-/// function is one visit; leaving and coming back is another), anchored to
+/// step per breakpoint hit, and one per stretch of steps inside one
+/// function (stepping through a function is one visit; leaving and coming
+/// back is another), anchored to
 /// the innermost frame in the project, in the order the program ran them,
 /// each narrated with why the program stopped (numbered as the run's stop,
 /// which the debug panel counts) and who called the function. Frames outside
@@ -751,9 +752,6 @@ pub fn parse(response: &str) -> Result<Walkthrough, Failure> {
     Ok(wt)
 }
 
-/// A step's `line`, however the model wrote it: `42`, `42.0` or `"42"`.
-/// Anything else (a negative, text, an object) is no line at all rather than
-/// a failed parse of the whole tour.
 /// A step's `stop`, if it is one: anything else is none at all.
 fn lenient_stop<'de, D>(deserializer: D) -> Result<Option<StopFacts>, D::Error>
 where
@@ -763,6 +761,9 @@ where
     Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
+/// A step's `line`, however the model wrote it: `42`, `42.0` or `"42"`.
+/// Anything else (a negative, text, an object) is no line at all rather than
+/// a failed parse of the whole tour.
 fn lenient_line<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
 where
     D: serde::Deserializer<'de>,

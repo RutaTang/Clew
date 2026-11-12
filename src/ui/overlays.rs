@@ -81,6 +81,71 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState, floor: f32) -> Element<'_, Me
     .into()
 }
 
+/// What gutter line `line` (0-based) of `pane` says, if anything: a
+/// breakpoint, with its condition or why it won't stop there, and a
+/// bookmark, with its note. The dot and the bar said neither; a condition
+/// was read only by opening its dialog again.
+pub(crate) fn gutter_words(app: &App, pane: usize, line: usize) -> Option<String> {
+    let v = app.proj.panes.get(pane).and_then(Option::as_ref)?;
+    let mut said = Vec::new();
+    if let Some(bp) = app
+        .debug
+        .breakpoints
+        .get(&v.abs)
+        .and_then(|m| m.get(&(line + 1)))
+    {
+        said.push(match (&bp.condition, bp.verified) {
+            // The hollow dot: what it means said where it is.
+            (_, Some(false)) => {
+                tr!("The debugger couldn't set this breakpoint: it won't stop here").to_string()
+            }
+            (Some(condition), _) => {
+                tr!(
+                    "Breaks when {condition} — click to remove, right-click to edit",
+                    condition = condition
+                )
+            }
+            (None, _) => tr!("Breakpoint — click to remove").to_string(),
+        });
+    }
+    if let Some(bm) = app
+        .proj
+        .bookmarks
+        .iter()
+        .find(|b| b.rel == v.rel && b.line == line + 1)
+    {
+        said.push(
+            match bm.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                Some(note) => tr!("Bookmark: {note}", note = note),
+                None => tr!("Bookmark").to_string(),
+            },
+        );
+    }
+    (!said.is_empty()).then(|| said.join("\n"))
+}
+
+/// The gutter line's tip ([`gutter_words`]), once the pointer has rested
+/// there — below the pointer as the code's peek is, kept above `floor`.
+/// Nothing while the code has scrolled under the pointer since: the line
+/// it named is no longer the one there.
+pub(crate) fn gutter_tip(app: &App, floor: f32) -> Option<Element<'_, Message>> {
+    let tip = app.proj.gutter_tip.as_ref().filter(|t| t.shown)?;
+    let v = app.proj.panes.get(tip.pane).and_then(Option::as_ref)?;
+    if (v.scroll_x, v.scroll_y) != tip.scroll {
+        return None;
+    }
+    let words = gutter_words(app, tip.pane, tip.line)?;
+    Some(
+        Anchored::new(
+            super::toolbar::tip_bubble(words),
+            iced::Point::new(tip.x, tip.y),
+            Anchoring::Below { gap: PEEK_GAP },
+        )
+        .floor(floor)
+        .into(),
+    )
+}
+
 // ---------------------------------------------------------------- context menu
 
 /// Whether the line the code menu is open on has a breakpoint with a

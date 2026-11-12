@@ -1307,7 +1307,15 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
             y: at.y - frame,
         })
     })
-    .on_hover_end(|| Message::Hover(HoverMsg::Cleared));
+    .on_hover_end(|| Message::Hover(HoverMsg::Cleared))
+    .on_gutter(move |line, at| {
+        Message::Hover(HoverMsg::Gutter {
+            pane,
+            line,
+            x: at.x - frame,
+            y: at.y - frame,
+        })
+    });
     // The minimap is opt-in (toggle in the "More" menu); without the callback
     // the widget draws no minimap band at all.
     if app.show_minimap {

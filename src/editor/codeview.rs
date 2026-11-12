@@ -702,6 +702,10 @@ impl HlKind {
     }
 }
 
+/// What the gutter line the pointer rests on is reported as (see
+/// [`CodeView::on_gutter`]).
+type OnGutter<'a, Message> = Box<dyn Fn(Option<usize>, Point) -> Message + 'a>;
+
 pub struct CodeView<'a, Message> {
     lines: &'a [HlLine],
     max_cols: usize,
@@ -769,6 +773,10 @@ pub struct CodeView<'a, Message> {
     on_hover: Option<Box<dyn Fn(Hit, Point) -> Message + 'a>>,
     /// The cursor left the code area — clear any open peek.
     on_hover_end: Option<Box<dyn Fn() -> Message + 'a>>,
+    /// The gutter line the pointer rests on (0-based), or `None` as it
+    /// leaves the gutter, with where the pointer is: what a breakpoint or a
+    /// bookmark there says is shown beside it.
+    on_gutter: Option<OnGutter<'a, Message>>,
     /// Gutter fold-arrow click on a header line.
     on_fold: Option<Box<dyn Fn(usize) -> Message + 'a>>,
     /// Click in the line-number gutter margin: toggle a breakpoint on that
@@ -834,6 +842,7 @@ impl<'a, Message> CodeView<'a, Message> {
             on_context: Box::new(on_context),
             on_hover: None,
             on_hover_end: None,
+            on_gutter: None,
             on_fold: None,
             on_breakpoint: None,
             indent_guides: false,
@@ -885,6 +894,12 @@ impl<'a, Message> CodeView<'a, Message> {
 
     pub fn on_hover(mut self, f: impl Fn(Hit, Point) -> Message + 'a) -> Self {
         self.on_hover = Some(Box::new(f));
+        self
+    }
+
+    /// See [`CodeView::on_gutter`]'s field.
+    pub fn on_gutter(mut self, f: impl Fn(Option<usize>, Point) -> Message + 'a) -> Self {
+        self.on_gutter = Some(Box::new(f));
         self
     }
 
@@ -1614,6 +1629,8 @@ struct State<P> {
     /// The gutter row the pointer is over, where a click sets a breakpoint:
     /// redrawn as it moves, for the dot shown there before it is set.
     breakpoint_row: Option<usize>,
+    /// The gutter line last reported to `on_gutter` (0-based).
+    gutter_line: Option<usize>,
     /// True while dragging the minimap to scroll.
     minimap_drag: bool,
     cache: RefCell<LineCache<P>>,
@@ -1644,6 +1661,7 @@ impl<P> Default for State<P> {
             last_hover: None,
             hover_row: None,
             breakpoint_row: None,
+            gutter_line: None,
             minimap_drag: false,
             cache: RefCell::new(LineCache::default()),
             sticky_cache: RefCell::new(StickyCache::default()),
@@ -1891,7 +1909,25 @@ where
                     // before it actually shows). Clear it when the cursor leaves
                     // — or rests on the pinned sticky band, which is not the
                     // hidden row a hit test there would name.
-                    match cursor.position_in(bounds).filter(|_| !over_sticky) {
+                    // In the gutter: its line, reported as it changes —
+                    // not a word of the code to peek at (the hit there is
+                    // the line's first column).
+                    let gutter = cursor
+                        .position_in(bounds)
+                        .filter(|p| !over_sticky && p.x < FOLD_ARROW_COL as f32 * state.char_width)
+                        .and_then(|p| self.line_at_row((p.y / self.line_height) as usize));
+                    if let Some(on_gutter) = &self.on_gutter
+                        && state.gutter_line != gutter
+                    {
+                        state.gutter_line = gutter;
+                        let at = cursor.position().unwrap_or(Point::new(bounds.x, bounds.y));
+                        shell.publish(on_gutter(gutter, at));
+                    }
+                    let in_gutter = gutter.is_some() && self.on_gutter.is_some();
+                    match cursor
+                        .position_in(bounds)
+                        .filter(|_| !over_sticky && !in_gutter)
+                    {
                         Some(point) => {
                             if let Some(on_hover) = &self.on_hover {
                                 let hit = self.hit(state, point, Rounding::Under);
@@ -3965,6 +4001,8 @@ mod hit_tests {
         Drag(usize, usize),
         Context(usize, usize),
         Hover(usize, usize),
+        Gutter(Option<usize>),
+        HoverEnd,
     }
 
     fn view(lines: &[crate::highlight::HlLine]) -> CodeView<'_, Msg> {
@@ -4243,6 +4281,43 @@ mod hit_tests {
                 Msg::Hover(0, 10),
                 Msg::Hover(0, 11)
             ]
+        );
+    }
+
+    /// M4/M5: the gutter line the pointer rests on is reported once, as it
+    /// changes — and not as a word of the code to peek at — so what a
+    /// breakpoint or a bookmark there says can be shown; leaving the
+    /// gutter says so, and the code is peeked at again.
+    #[test]
+    fn the_gutter_line_under_the_pointer_is_reported_as_it_changes() {
+        let src = "let a = 1;\nlet b = 2;\nlet c = 3;\n";
+        let lines = plain_lines(src);
+        let view = view(&lines)
+            .on_gutter(|line, _| Msg::Gutter(line))
+            .on_hover_end(|| Msg::HoverEnd);
+        let mut sim = iced_test::simulator(view);
+        for p in [
+            Point::new(4.0, LH * 1.5),
+            Point::new(10.0, LH * 1.6),
+            Point::new(4.0, LH * 2.5),
+            Point::new(gutter() + 2.0, LH * 2.5),
+        ] {
+            sim.point_at(p);
+            let _ = sim.simulate([Event::Mouse(mouse::Event::CursorMoved { position: p })]);
+        }
+        let said: Vec<Msg> = sim
+            .into_messages()
+            .filter(|m| matches!(m, Msg::Gutter(..) | Msg::Hover(..)))
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                Msg::Gutter(Some(1)),
+                Msg::Gutter(Some(2)),
+                Msg::Gutter(None),
+                Msg::Hover(2, 0),
+            ],
+            "once per line, no peek in the gutter"
         );
     }
 

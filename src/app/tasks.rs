@@ -2519,13 +2519,20 @@ pub(crate) fn setting_to_fix(raw: &str) -> Option<crate::app::state::LlmField> {
 
 /// Whether `text` holds the status `code` as a number of its own: "HTTP
 /// 401", "(403)" — not inside another ("140123 tokens", "req_4031",
-/// "403ms"), where the key was blamed and Ask's answer from the index was
-/// not tried.
+/// "403ms", "130,401 tokens", "1.403 s"), where the key was blamed and
+/// Ask's answer from the index was not tried.
 fn has_code(text: &str, code: &str) -> bool {
     let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    // A ',' or '.' between digits joins them into one number.
+    let joined = |mark: Option<char>, beyond: Option<char>| {
+        matches!(mark, Some(',' | '.')) && beyond.is_some_and(|c| c.is_ascii_digit())
+    };
     text.match_indices(code).any(|(at, _)| {
-        !text[..at].chars().next_back().is_some_and(word)
-            && !text[at + code.len()..].chars().next().is_some_and(word)
+        let mut before = text[..at].chars().rev();
+        let mut after = text[at + code.len()..].chars();
+        let (b1, b2) = (before.next(), before.next());
+        let (a1, a2) = (after.next(), after.next());
+        !b1.is_some_and(word) && !a1.is_some_and(word) && !joined(b1, b2) && !joined(a1, a2)
     })
 }
 
@@ -4540,6 +4547,8 @@ mod pass_tests {
             "HTTP 401: invalid api key",
             "provider said (403) forbidden",
             "status: 401",
+            "status 403.",
+            "error 401, unauthorized",
         ] {
             assert_eq!(setting_to_fix(raw), Some(LlmField::Key), "{raw}");
         }
@@ -4547,6 +4556,9 @@ mod pass_tests {
             "this model's maximum context length is 128000 tokens; your messages resulted in 140123 tokens",
             "request req_4031 failed",
             "rate limited: retry after 403ms",
+            "you requested 130,401 tokens",
+            "retry after 1.403 s",
+            "used 401.5 credits",
         ] {
             assert_eq!(setting_to_fix(raw), None, "{raw}");
             assert!(!provider_refuses_all(raw), "{raw}");

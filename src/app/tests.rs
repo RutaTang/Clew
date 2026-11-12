@@ -987,6 +987,16 @@ fn a_notice_said_before_a_language_switch_goes_with_it() {
     assert_eq!(app.status, said, "the language did not change");
     let _ = app.update(Message::Settings(SettingsMsg::ThemeResynced));
     assert_eq!(app.status, "", "{said}: still up in English");
+    // R16-9b: the language chosen in this window, not only one followed
+    // from another: the line goes too.
+    with_lang(Lang::Zh, || {
+        app.status = tr!("Debugger stopped").to_string();
+        app.note_status();
+    });
+    let _ = app.update(Message::Settings(SettingsMsg::SetLanguage(
+        crate::i18n::LangPref::Chosen(Lang::En),
+    )));
+    assert_eq!(app.status, "", "still up after choosing English");
 
     // Work under way stays.
     with_lang(Lang::Fr, || {
@@ -1139,6 +1149,22 @@ fn a_reopened_project_goes_back_where_it_was_read() {
     assert!(app.proj.overview.showing);
     assert!(app.active_viewer().is_none());
     assert!(app.proj.link.pane_pending[0].is_none());
+
+    // R16-8: the tour's sample, opened for a tour, is set out by the
+    // tour: no file opened as it begins.
+    let root = fixture_project("back-where-read-sample");
+    trail_at(&root, "src/lib.rs");
+    let mut app = blank_app();
+    app.tour_sample = Some(crate::app::tour_sample::Placed {
+        root: root.clone(),
+        history: false,
+    });
+    scan_synchronously(&mut app, root);
+    assert!(app.proj.overview.showing);
+    assert!(
+        app.proj.link.pane_pending[0].is_none(),
+        "opened under the tour"
+    );
 }
 
 fn scanned_app(tag: &str) -> App {
@@ -10369,6 +10395,42 @@ fn a_visit_before_the_remote_trail_loads_is_added_to_it_not_written_over_it() {
     );
 }
 
+/// R16-3: a remote project reopened goes back where it was read, as a
+/// local one does — its trail comes over the link, not from the local
+/// load, and was never acted on; a reconnect's read of it opens nothing.
+#[test]
+fn a_reopened_remote_project_goes_back_where_it_was_read() {
+    use crate::history::{History, Loc};
+    let (mut app, root, _rx) = remote_app("remote-back-where-read");
+    let root_s = root.to_string_lossy().into_owned();
+    app.proj.overview.showing = true;
+    let mut stored = History::default();
+    stored.push(
+        Loc {
+            path: root.join("src/lib.rs"),
+            line: Some(3),
+        },
+        Some("lib".into()),
+    );
+    let stored = crate::history::to_text(&root, &stored).unwrap();
+    let read = |app: &mut App| {
+        let _ = app.handle_server_event(clew_protocol::Event::StateContent {
+            root: root_s.clone(),
+            rel: "history.json".into(),
+            text: Some(stored.clone()),
+        });
+    };
+    read(&mut app);
+    assert!(!app.proj.overview.showing, "still on the overview");
+    assert!(app.proj.link.pane_pending[0].is_some(), "nothing opened");
+    // A reconnect reads it again: the reader is left where they are.
+    app.proj.link.pane_pending[0] = None;
+    app.proj.overview.showing = true;
+    read(&mut app);
+    assert!(app.proj.link.pane_pending[0].is_none(), "opened again");
+    assert!(app.proj.overview.showing);
+}
+
 /// The remote twin of `a_generated_walkthrough_keeps_the_other_windows_tour`.
 ///
 /// What a remote merge replies with is the FILE's list in the FILE's order —
@@ -15161,6 +15223,86 @@ fn time_travel_failures_go_with_the_scope_they_were_of() {
     );
 }
 
+/// R16-1/2: a summary's failure is said in its band only while the band
+/// is drawn — behind the overview it went unsaid — and a commit's answer
+/// takes away its own failure's notice only, not another commit's; a
+/// re-scope keeps the session, and the notice with it.
+#[test]
+fn a_summary_failure_is_said_until_its_own_commit_answers() {
+    let mut app = scanned_app("tt-why-elsewhere");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let commit = |sha: &str| git::HistCommit {
+        sha: sha.into(),
+        author: "a".into(),
+        time: 0,
+        subject: format!("subject {sha}"),
+        path: "src/lib.rs".into(),
+    };
+    let asked = app.await_history(root.join("src/lib.rs"), app.proj.active, false, "");
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Ready {
+        stamp: app.stamp(),
+        generation: asked,
+        abs: root.join("src/lib.rs"),
+        rel: "src/lib.rs".into(),
+        lang: None,
+        scope: TimeScope::Symbol {
+            name: "origin".into(),
+            kind: "fn".into(),
+            start: 3,
+            end: 5,
+            ordinal: 0,
+        },
+        commits: Ok(vec![commit("aaaa1111"), commit("bbbb2222")]),
+    }));
+    let session = app.proj.time_travel.as_ref().expect("a session").session;
+    let done = |app: &App, sha: &str, result: Result<String, String>| {
+        Message::TimeTravel(TimeTravelMsg::WhyDone {
+            stamp: app.stamp(),
+            session,
+            sha: sha.into(),
+            result,
+        })
+    };
+    let retry_of = |app: &App| match app.failure_shown().map(|f| f.retry.clone()) {
+        Some(Some(Message::TimeTravel(TimeTravelMsg::WhyOf { sha, .. }))) => Some(sha),
+        _ => None,
+    };
+
+    // Asked, then the overview over the file: its band is drawn nowhere.
+    let _why = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    let _ = app.update(Message::Overview(OverviewMsg::Show));
+    assert!(crate::ui::time_travel_on_screen(&app).is_none());
+    let _ = app.update(done(&app, "aaaa1111", Err("rate limited".into())));
+    assert_eq!(
+        retry_of(&app).as_deref(),
+        Some("aaaa1111"),
+        "said nowhere behind the overview"
+    );
+
+    // Back on the file, another commit asked: its answer, failed in its
+    // band or come, leaves the first one's notice be.
+    let _ = app.update(Message::Overview(OverviewMsg::Close));
+    assert!(crate::ui::time_travel_on_screen(&app).is_some());
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Goto(1)));
+    let _why = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    let _ = app.update(done(&app, "bbbb2222", Err("rate limited".into())));
+    assert_eq!(retry_of(&app).as_deref(), Some("aaaa1111"));
+    let _why = app.update(Message::TimeTravel(TimeTravelMsg::Why));
+    let _ = app.update(done(&app, "bbbb2222", Ok("so".into())));
+    assert_eq!(retry_of(&app).as_deref(), Some("aaaa1111"));
+
+    // A re-scope keeps the session: the notice stands, and its Try again
+    // still asks about its commit.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::ToggleScope));
+    assert_eq!(retry_of(&app).as_deref(), Some("aaaa1111"));
+
+    // Its own commit answered: it goes.
+    let _ = app.update(done(&app, "aaaa1111", Ok("because".into())));
+    assert!(app.failure_shown().is_none());
+}
+
 /// D1-3: a "what & why" summary and the story belong to the time-travel SESSION
 /// they were asked in. Scrubbing moves the per-step generation, and keying on
 /// it dropped the reply and left its spinner up for good; a failure must clear
@@ -15168,6 +15310,8 @@ fn time_travel_failures_go_with_the_scope_they_were_of() {
 #[test]
 fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner() {
     let mut app = scanned_app("tt-why-session");
+    // The file read, its session drawn: its band is on screen.
+    open_synchronously(&mut app, "src/lib.rs", None);
     let root = app.proj.project.as_ref().unwrap().root.clone();
     app.llm_config_cache = Some(Some(unreachable_llm()));
     let commit = |sha: &str| git::HistCommit {
@@ -23677,6 +23821,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             token: app.insight_seq,
             result: Err("stale".into()),
+        }),
+        Message::Hover(HoverMsg::GutterDue {
+            stamp: s(),
+            generation: app.proj.gutter_seq,
         }),
         Message::Nav(NavMsg::DefinitionResult {
             stamp: s(),
@@ -34775,6 +34923,46 @@ fn the_peek_and_the_menu_open_at_the_pointer_of_a_scrolled_pane() {
     }));
     let peek = app.proj.hover.as_ref().unwrap();
     assert_eq!((peek.x, peek.y), (140.0, 210.0));
+}
+
+/// M4/M5: a gutter line's tip shows once the pointer has rested on it —
+/// not for a line it has moved off since — placed in window space as the
+/// peek is; leaving the gutter puts it away.
+#[test]
+fn a_gutter_tip_waits_for_the_pointer_to_rest_on_its_line() {
+    let mut app = scanned_app("gutter-tip");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let v = app.proj.panes[0].as_mut().unwrap();
+    v.scroll_x = 0.0;
+    v.scroll_y = 200.0;
+    let gutter = |line: Option<usize>, y: f32| {
+        Message::Hover(HoverMsg::Gutter {
+            pane: 0,
+            line,
+            x: 12.0,
+            y,
+        })
+    };
+    let _ = app.update(gutter(Some(2), 260.0));
+    let first = app.proj.gutter_tip.as_ref().unwrap().generation;
+    let _ = app.update(gutter(Some(3), 280.0));
+    let due = |app: &App, generation| {
+        Message::Hover(HoverMsg::GutterDue {
+            stamp: app.stamp(),
+            generation,
+        })
+    };
+    let _ = app.update(due(&app, first));
+    let tip = app.proj.gutter_tip.clone().unwrap();
+    assert!(!tip.shown, "a rest on the line left showed: {tip:?}");
+    let _ = app.update(due(&app, tip.generation));
+    let tip = app.proj.gutter_tip.clone().unwrap();
+    assert!(tip.shown);
+    assert_eq!(tip.line, 3);
+    assert_eq!((tip.x, tip.y), (12.0, 80.0), "in window space");
+    assert_eq!(tip.scroll, (0.0, 200.0));
+    let _ = app.update(gutter(None, 0.0));
+    assert!(app.proj.gutter_tip.is_none(), "left the gutter");
 }
 
 /// The Glossary page (⋯ menu → Glossary) covers the code like the overview
