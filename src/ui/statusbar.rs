@@ -648,9 +648,13 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             // pointer rests.
             let free = room - controls_w - 2.0 * STATUS_GAP - chips_w;
             let kept = (free / 2.0).clamp(SAID_MIN_W, SAID_KEPT_MAX_W);
-            let head = whole
-                .split_once(": ")
-                .map_or(whole.as_str(), |(head, _)| head);
+            // Before the reason: ": ", or the full-width "：" Chinese and
+            // Japanese write.
+            let head = [": ", "："]
+                .iter()
+                .filter_map(|sep| whole.find(sep))
+                .min()
+                .map_or(whole.as_str(), |at| &whole[..at]);
             let floor = (width(head) + width("…")).min(free - SAID_MIN_W);
             let words = (free - kept).max(floor).max(least).min(width(&whole));
             row = row.push(line_of(whole, words, Some(theme::danger())));
@@ -684,7 +688,14 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     // own place, and what is said after it (a file copied, a search done)
     // goes beside it rather than over it — said over it, the red Explain
     // failure was gone at the next word, its Try again with it.
-    let said = if !app.status.is_empty() && failure.is_none_or(|f| f.said != app.status) {
+    // The failure's own words are not said again: not beside it, nor in grey
+    // while it is not shown here (an Ask answer's, with Ask open, said in
+    // the conversation).
+    let own_words = app
+        .failure_notice
+        .as_ref()
+        .is_some_and(|f| f.said == app.status);
+    let said = if !app.status.is_empty() && !own_words {
         Some(words_of(&app.status))
     } else if failure.is_some() {
         None
@@ -757,6 +768,8 @@ fn failure_controls(
         failure.retry,
         Some(Message::Project(crate::ProjectMsg::SetupShow(_)))
             | Some(Message::Settings(crate::SettingsMsg::NeedKey))
+            // A fake run's: its inputs, to look at before it runs again.
+            | Some(Message::Fake(crate::FakeMsg::EditInputs))
     );
     let again = if asks {
         tr!("Try again…")

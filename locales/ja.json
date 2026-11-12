@@ -523,6 +523,7 @@
  "Couldn't compute the diff of {file}: {error}": "{file} の差分を計算できませんでした: {error}",
  "Couldn't explain why: {error}": "理由を解説できませんでした: {error}",
  "Couldn't explain {name}: {reasons}": "{name} を説明できませんでした: {reasons}",
+ "Couldn't finish: {error}": "回答を完了できませんでした: {error}",
  "Couldn't follow the value: {error}": "値をトレースできませんでした: {error}",
  "Couldn't lay out the graph: {error}": "グラフをレイアウトできませんでした: {error}",
  "Couldn't load the git history: {error}": "Git の履歴を読み込めませんでした: {error}",

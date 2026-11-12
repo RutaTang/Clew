@@ -523,6 +523,7 @@
  "Couldn't compute the diff of {file}: {error}": "Impossible de calculer le diff de {file} : {error}",
  "Couldn't explain why: {error}": "Impossible d’expliquer pourquoi : {error}",
  "Couldn't explain {name}: {reasons}": "Impossible d’expliquer {name} : {reasons}",
+ "Couldn't finish: {error}": "Impossible de terminer : {error}",
  "Couldn't follow the value: {error}": "Impossible de suivre la valeur : {error}",
  "Couldn't lay out the graph: {error}": "Impossible de calculer la disposition du graphe : {error}",
  "Couldn't load the git history: {error}": "Impossible de charger l’historique git : {error}",

@@ -1575,6 +1575,10 @@ pub struct App {
     /// Folders opened on this machine before, newest first: offered on the
     /// welcome screen (`crate::app::recent`).
     pub(crate) recent_folders: Vec<PathBuf>,
+    /// Where they are kept: clew's data directory, none for a test's app
+    /// (one sets its own) — every test's data directory is the same, and
+    /// hundreds of them opening folders at once wrote over each other's.
+    pub(crate) recent_store: Option<PathBuf>,
     /// What the step on screen shows once the file it opened has loaded.
     pub(crate) tour_then: Option<(PathBuf, Message)>,
     /// The status-bar `#[cfg]` target dropdown is open.
@@ -2556,6 +2560,11 @@ pub struct ProjectSession {
     /// Why the last question could not be asked, said in the card where it
     /// was (and on the status line): cleared by the next.
     pub ask_notice: Option<String>,
+    /// That notice is that no embeddings can be made: the card has Settings
+    /// beside it, to the Embeddings page. Known when it is said — worked
+    /// out in the view, the config was read on every redraw, and compared
+    /// with words in the language spoken then.
+    pub ask_notice_embeddings: bool,
     /// The model's questions for "Try asking", by where they were written
     /// for (`app::suggest`): a reply for a place the reader has left is
     /// kept for it, not put in place of the questions for where they are.
@@ -2864,6 +2873,7 @@ impl Default for ProjectSession {
             ask_spoken: false,
             ask_unread: false,
             ask_notice: None,
+            ask_notice_embeddings: false,
             suggestions: Default::default(),
             suggest_asked: None,
             suggest_draw: 0,

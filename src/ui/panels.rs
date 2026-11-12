@@ -811,12 +811,20 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 
     // The note on what ran, on a line of its own where the header's row
     // had no room for it whole.
+    // Kept clear of the Ask card as the header is: it comes here when the
+    // header is short of room, the card open as often as not.
     let note_line: Option<Element<'_, Message>> = ran_note.filter(|_| !note_inline).map(|said| {
-        text(said)
-            .size(ts::SMALL)
-            .color(theme::dim())
-            .wrapping(Wrapping::WordOrGlyph)
-            .into()
+        container(
+            text(said)
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+        .padding(Padding {
+            right: reach,
+            ..Padding::ZERO
+        })
+        .into()
     });
     container(
         column![header]
@@ -1221,7 +1229,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 tr!("Open Folder…"),
                 Message::Project(ProjectMsg::OpenFolderPressed),
             ))
-        } else if *why == crate::app::embedding::why_no_embeddings() {
+        } else if app.proj.ask_notice_embeddings {
             Some((
                 tr!("Settings"),
                 Message::Settings(SettingsMsg::OpenAt(
@@ -1429,8 +1437,13 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         }
         // What grounded the answer, under it once it is whole: they stood
         // under half an answer, the reader's eye drawn from the words. None
-        // for an answer that never came.
-        if !turn.sources.is_empty() && !turn.streaming && !turn.extras.failed {
+        // for an answer that never came; under one that failed part-way,
+        // what grounded the part that came.
+        let never_came = matches!(
+            turn.extras.ended,
+            Some((crate::app::model::TurnEnd::Failed { .. }, _))
+        );
+        if !turn.sources.is_empty() && !turn.streaming && !never_came {
             convo.push(
                 text(tr!("Sources"))
                     .size(ts::CAPTION)

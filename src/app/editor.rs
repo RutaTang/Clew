@@ -503,6 +503,7 @@ impl App {
         // (and an answer still on its way for it is too), as on every other
         // way a pane is replaced.
         self.invalidate_hover();
+        self.forget_gutter_tip(Some(pane));
         // Seed the content hash so the watcher can tell real edits from noise
         // — for a file of the project: one outside it (a dependency, the
         // standard library, gone to by a definition) is in no index, and
@@ -816,6 +817,7 @@ impl App {
         // The pane's document is being replaced: any hover in flight is
         // about the file that was there.
         self.invalidate_hover();
+        self.forget_gutter_tip(Some(pane));
         self.proj.panes[pane] = Some(v);
         // Seed the content hash so the watcher can tell real edits from noise.
         // Local projects only: a remote project's versions come from the index
@@ -987,6 +989,9 @@ impl App {
         // The pane's document is being replaced: any hover in flight is
         // about the file that was there.
         self.invalidate_hover();
+        for &pane in panes {
+            self.forget_gutter_tip(Some(pane));
+        }
         let mut active_mounted = false;
         for &pane in panes {
             // Each pane keeps ITS own scroll and expanded outputs across a
@@ -1464,6 +1469,9 @@ impl App {
     pub(crate) fn on_toggle_split(&mut self) -> Task<Message> {
         // Panes are about to move or close under the cursor.
         self.invalidate_hover();
+        // And a gutter's tip with them: the pane closed could not put it
+        // away, and the one opened, at the same scroll, drew it again.
+        self.forget_gutter_tip(None);
         if self.proj.split {
             self.proj.split = false;
             self.proj.panes[1] = None;
@@ -2137,7 +2145,10 @@ impl App {
             EditorMsg::Scrolled(pane, viewport) => {
                 let line_height = self.line_height();
                 if let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) {
-                    let was = v.viewport_h;
+                    // The height last measured, not `viewport_h`: a resize
+                    // raises that to the window's height, a guess, and the
+                    // real one after it read as the view shrinking.
+                    let was = v.bounds_h;
                     v.scroll_y = viewport.absolute_offset().y;
                     v.scroll_x = viewport.absolute_offset().x;
                     v.viewport_h = viewport.bounds().height;
@@ -2158,7 +2169,8 @@ impl App {
             EditorMsg::ViewMeasured { pane, height } => {
                 let line_height = self.line_height();
                 if let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) {
-                    let was = v.viewport_h;
+                    // As for a scroll: the height last measured.
+                    let was = v.bounds_h;
                     v.viewport_h = height;
                     v.viewport_measured = true;
                     if let Some(y) = v
@@ -2393,9 +2405,12 @@ fn untracked_diff(source: &str) -> Vec<git::DiffLine> {
 /// cursor's line, seen before, in sight, with a couple of lines under it.
 /// The bottom panel opening for a fake run hid the very function it was
 /// run on, and the margin's card with it.
+///
+/// `was` is the height measured before (`Viewer::bounds_h`), none before
+/// the first measure: nothing was seen in a view never measured.
 fn kept_in_sight(v: &Viewer, was: f32, line_height: f32) -> Option<f32> {
     let now = v.viewport_h;
-    if now >= was {
+    if was <= 0.0 || now >= was {
         return None;
     }
     let (line, _) = v.caret?;

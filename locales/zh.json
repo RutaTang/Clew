@@ -523,6 +523,7 @@
  "Couldn't compute the diff of {file}: {error}": "无法计算 {file} 的差异：{error}",
  "Couldn't explain why: {error}": "无法解释原因：{error}",
  "Couldn't explain {name}: {reasons}": "无法解释 {name}：{reasons}",
+ "Couldn't finish: {error}": "无法答完：{error}",
  "Couldn't follow the value: {error}": "无法追踪该值：{error}",
  "Couldn't lay out the graph: {error}": "无法完成图的布局：{error}",
  "Couldn't load the git history: {error}": "无法加载 git 历史：{error}",

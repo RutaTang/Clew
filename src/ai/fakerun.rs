@@ -764,6 +764,26 @@ mod tests {
             .collect()
     }
 
+    /// A parameter's type and its default are kept apart: with a default,
+    /// the type was dropped, and the field read "3" as what x is.
+    #[test]
+    fn a_parameters_type_and_default_are_kept_apart() {
+        let triple = |n: &str, t: &str, d: &str| (n.to_string(), t.to_string(), d.to_string());
+        assert_eq!(
+            param_parts("def f(x: int = 3, y = 'a', z: str, w):", "f", "python"),
+            Some(vec![
+                triple("x", "int", "3"),
+                triple("y", "", "'a'"),
+                triple("z", "str", ""),
+                triple("w", "", ""),
+            ])
+        );
+        assert_eq!(
+            param_parts("function f(a: number = 1, b) {", "f", "typescript"),
+            Some(vec![triple("a", "number", "1"), triple("b", "", "")])
+        );
+    }
+
     /// Each language's way of writing parameters gives their names, with
     /// the type or default as the hint; receivers are not inputs.
     #[test]

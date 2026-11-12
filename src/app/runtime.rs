@@ -49,7 +49,8 @@ impl App {
         // draw on both.
         app.refresh_usage_model();
         let ledger = app.read_ledger();
-        (app, Task::batch([open_task, check, ledger]))
+        let recent = app.read_recent_folders();
+        (app, Task::batch([open_task, check, ledger, recent]))
     }
 
     /// The transport this window starts on. `CLEW_SSH` selects a remote host
@@ -212,12 +213,12 @@ impl App {
             tutorial_layout: None,
             tour_prep: None,
             tour_sample: None,
-            // Read where clew starts; a test's app starts with none, its
-            // data directory shared with every other test's.
-            recent_folders: if cfg!(test) {
-                Vec::new()
+            // Read as the window opens (`App::new`), off this thread.
+            recent_folders: Vec::new(),
+            recent_store: if cfg!(test) {
+                None
             } else {
-                crate::app::recent::load()
+                crate::app::recent::store()
             },
             tour_then: None,
             window_width: 1280.0,

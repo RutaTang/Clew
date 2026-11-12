@@ -490,7 +490,15 @@ pub struct TurnExtras {
 pub enum TurnEnd {
     Stopped,
     StoppedHere,
-    Failed { raw: String, own: bool },
+    Failed {
+        raw: String,
+        own: bool,
+    },
+    /// Failed part-way, after some of the answer came.
+    FailedHere {
+        raw: String,
+        own: bool,
+    },
 }
 
 /// What an approval card answers.

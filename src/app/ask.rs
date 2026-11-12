@@ -382,6 +382,7 @@ impl App {
         // What the card said of the last question that could not be asked
         // is said again only if this one cannot be either.
         self.proj.ask_notice = None;
+        self.proj.ask_notice_embeddings = false;
         // No folder open: nothing to ask about, said so with the way to
         // one. It went on to say an embedding endpoint was missing, which
         // was not what stood in the way.
@@ -501,6 +502,7 @@ impl App {
             };
             // Said in the card too, where the question was asked.
             self.proj.ask_notice = Some(self.status.clone());
+            self.proj.ask_notice_embeddings = ecfg.is_none();
             return Task::none();
         }
         if self.proj.project.is_none() {
@@ -924,7 +926,7 @@ impl App {
                 return self.on_ask_stream_ended(
                     stream_id,
                     clew_protocol::StreamOutcome::Failed(
-                        tr!("the question could not be sent to clew-server").into(),
+                        tr_noop!("the question could not be sent to clew-server").into(),
                     ),
                 );
             }
@@ -1121,7 +1123,7 @@ impl App {
             return self.on_ask_stream_ended(
                 stream_id,
                 clew_protocol::StreamOutcome::Failed(
-                    tr!("the question could not be sent to clew-server").into(),
+                    tr_noop!("the question could not be sent to clew-server").into(),
                 ),
             );
         }
@@ -1370,7 +1372,11 @@ impl App {
         // stopped, whatever layer it came from (the server's stream, its
         // agent turn, or the provider call on this machine).
         let end = match &outcome {
-            StreamOutcome::Done => None,
+            // Answered: a failure standing from before is not the latest.
+            StreamOutcome::Done => {
+                self.forget_failure_of(crate::app::state::FailureOf::Ask);
+                None
+            }
             StreamOutcome::Stopped => {
                 self.status = tr!("Answer stopped").into();
                 Some(TurnEnd::Stopped)
@@ -1389,14 +1395,7 @@ impl App {
                 if self.ask_view == AskView::Hidden {
                     let (raw, about) = (e.clone(), self.proj.ask_turns[idx].extras.fix);
                     self.say_failure_again(
-                        move || {
-                            let said = if own {
-                                crate::app::tasks::ai_reason(&raw)
-                            } else {
-                                crate::app::tasks::plain_detail(&raw)
-                            };
-                            tr!("Couldn't answer: {error}", error = said)
-                        },
+                        move || tr!("Couldn't answer: {error}", error = failure_said(&raw, own)),
                         Some(Message::Ask(AskMsg::AskAgain(idx))),
                         crate::app::state::FailureOf::Ask,
                     );
@@ -1424,17 +1423,29 @@ impl App {
                 turn.answer_md = reason;
                 turn.answer.clear();
                 turn.settled = 0;
-            } else if matches!(outcome, StreamOutcome::Stopped) {
-                // Stopped part-way: said so where it stops — it ended mid-
-                // sentence, or mid-heading, with nothing to tell it from an
-                // answer that was whole. A code block it stopped in is
+            } else if let Some(here) = match &end {
+                Some(TurnEnd::Stopped) => Some(TurnEnd::StoppedHere),
+                Some(TurnEnd::Failed { raw, own }) => Some(TurnEnd::FailedHere {
+                    raw: raw.clone(),
+                    own: *own,
+                }),
+                _ => None,
+            } {
+                // Stopped or failed part-way: said so where it stops — it
+                // ended mid-sentence, or mid-heading, with nothing to tell
+                // it from an answer that was whole (a failure said nothing
+                // at all with Ask open, and its Try again on the status bar
+                // asked nothing again). A code block it stopped in is
                 // closed first, or the mark would be read as code.
                 if turn.answer_md.matches("```").count() % 2 == 1 {
                     turn.answer_md.push_str("\n```");
                 }
-                let here = turn_end_words(&TurnEnd::StoppedHere);
-                turn.answer_md.push_str(&here);
-                turn.extras.ended = Some((TurnEnd::StoppedHere, here));
+                // A failed one may be asked again, as one that failed
+                // before any of it came.
+                turn.extras.failed = matches!(here, TurnEnd::FailedHere { .. });
+                let words = turn_end_words(&here);
+                turn.answer_md.push_str(&words);
+                turn.extras.ended = Some((here, words));
             }
             turn.answer_md.clone()
         };
@@ -1542,14 +1553,16 @@ impl App {
                 );
                 return fallback;
             }
-            // It could not (no index to answer from): the turn was removed
-            // anyway, so the question vanished and the status named the
-            // index instead of what failed. Close it with the agent's own
-            // failure, and say both.
+            // It could not (no index to answer from): close the turn with
+            // the agent's own failure. With Ask open that is said in the
+            // conversation, and the status line says why the index could
+            // not answer (as the card's notice does); with Ask put away the
+            // status line stands the failure itself, with Try again, and
+            // the card's notice keeps why the index could not.
             let why_not = std::mem::take(&mut self.status);
             let closed = self.on_ask_stream_ended(stream, outcome);
-            if !why_not.is_empty() {
-                self.status = format!("{} — {why_not}", self.status);
+            if self.status.is_empty() {
+                self.status = why_not;
             }
             return Task::batch([fallback, closed]);
         }
@@ -2003,6 +2016,9 @@ impl App {
                 self.proj.ask_queue.clear();
                 self.proj.ask_queue_held = false;
                 self.proj.ask_turns.clear();
+                // Its failure on the status bar, with a Try again naming a
+                // turn cleared, goes with the conversation.
+                self.forget_failure_of(crate::app::state::FailureOf::Ask);
                 self.proj.ask_pins.clear();
                 // Cleared, the session goes from the menu too.
                 if let Some(id) = self.proj.ask_session.take() {
@@ -2079,13 +2095,25 @@ pub(crate) fn turn_end_words(end: &TurnEnd) -> String {
         TurnEnd::Stopped => format!("*{}*", tr!("Stopped before any answer was written.")),
         TurnEnd::StoppedHere => format!("\n\n*{}*", tr!("Stopped here.")),
         TurnEnd::Failed { raw, own } => {
-            let said = if *own {
-                crate::app::tasks::ai_reason(raw)
-            } else {
-                crate::app::tasks::plain_detail(raw)
-            };
-            format!("*{}*", tr!("Couldn't answer: {error}", error = said))
+            format!(
+                "*{}*",
+                tr!("Couldn't answer: {error}", error = failure_said(raw, *own))
+            )
         }
+        TurnEnd::FailedHere { raw, own } => format!(
+            "\n\n*{}*",
+            tr!("Couldn't finish: {error}", error = failure_said(raw, *own))
+        ),
+    }
+}
+
+/// Why an answer failed, as said: plainly where an ACP agent, not Clew's
+/// own model, failed (`own` false).
+fn failure_said(raw: &str, own: bool) -> String {
+    if own {
+        crate::app::tasks::ai_reason(raw)
+    } else {
+        crate::app::tasks::plain_detail(raw)
     }
 }
 

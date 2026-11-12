@@ -6,7 +6,8 @@
 //! Only folders on this machine: a remote host's are its own, reached by
 //! connecting to it. Kept in clew's own data directory (`recent.json`),
 //! never in a project; a file this build cannot read is left as it is and
-//! read as no folders.
+//! read as no folders. Each function takes the file's path (the app's
+//! `recent_store`), so a test keeps its own and none is shared.
 
 use std::path::{Path, PathBuf};
 
@@ -24,51 +25,94 @@ struct RecentFile {
     folders: Vec<PathBuf>,
 }
 
-fn path() -> Option<PathBuf> {
+/// Where the folders are kept: `recent.json` in clew's data directory.
+pub(crate) fn store() -> Option<PathBuf> {
     Some(clew_core::lsp::store::data_root()?.join(FILE))
 }
 
-/// The folders opened here before, newest first — those still there.
-pub(crate) fn load() -> Vec<PathBuf> {
-    let Some(path) = path() else {
+/// The folders opened here before, newest first — those still there. Off
+/// the UI thread: each is looked at on disk, and one on a network share no
+/// longer reachable waits for its timeout. Those no longer there are taken
+/// out of the file, or they kept places the welcome screen could offer.
+pub(crate) fn load_from(store: &Path) -> Vec<PathBuf> {
+    let Some(text) = clew_core::statefile::read_capped(store, MAX_BYTES) else {
         return Vec::new();
     };
-    let Some(text) = clew_core::statefile::read_capped(&path, MAX_BYTES) else {
+    let Ok(file) = serde_json::from_str::<RecentFile>(&text) else {
         return Vec::new();
     };
-    serde_json::from_str::<RecentFile>(&text)
-        .map(|f| f.folders)
-        .unwrap_or_default()
+    let (live, gone): (Vec<PathBuf>, Vec<PathBuf>) = file
+        .folders
         .into_iter()
-        .filter(|p| p.is_absolute() && p.is_dir())
-        .take(KEPT)
-        .collect()
+        .partition(|p| p.is_absolute() && p.is_dir());
+    if !gone.is_empty() {
+        edit(store, |folders| folders.retain(|p| !gone.contains(p)));
+    }
+    live.into_iter().take(KEPT).collect()
+}
+
+impl crate::App {
+    /// Read the folders opened here before, for the welcome screen.
+    pub(crate) fn read_recent_folders(&self) -> iced::Task<crate::Message> {
+        let Some(store) = self.recent_store.clone() else {
+            return iced::Task::none();
+        };
+        iced::Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || load_from(&store))
+                    .await
+                    .unwrap_or_default()
+            },
+            |read| crate::Message::Project(crate::ProjectMsg::RecentRead(read)),
+        )
+    }
 }
 
 /// `root` opened: first among the recent folders, once. Best effort — a
 /// folder not remembered costs a dialog, never the open.
-pub(crate) fn remember(root: &Path) {
-    let Some(path) = path() else {
+pub(crate) fn remember_in(store: &Path, root: &Path) {
+    edit(store, |folders| {
+        folders.retain(|p| p != root);
+        folders.insert(0, root.to_path_buf());
+        folders.truncate(KEPT);
+    });
+}
+
+/// `root` asked for and not there: no longer offered.
+pub(crate) fn forget_in(store: &Path, root: &Path) {
+    edit(store, |folders| folders.retain(|p| p != root));
+}
+
+/// Read, change and write the list, under the file's lock: two windows,
+/// or two clews, opening folders at once each keep theirs. Written over
+/// only where it reads as this build's, or is not there.
+fn edit(store: &Path, change: impl FnOnce(&mut Vec<PathBuf>)) {
+    // The data directory holds the API keys' config too: made private, as
+    // everything else that makes it does.
+    if let Some(dir) = store.parent()
+        && clew_core::derived::ensure_private_dir(dir).is_err()
+    {
+        return;
+    }
+    let Ok(_lock) = clew_core::statefile::lock(store) else {
         return;
     };
-    // Written over only where it reads as this build's, or is not there.
-    let existing = match clew_core::statefile::read_capped(&path, MAX_BYTES) {
+    let mut folders = match clew_core::statefile::read_capped(store, MAX_BYTES) {
         Some(text) => match serde_json::from_str::<RecentFile>(&text) {
             Ok(f) => f.folders,
             Err(_) => return,
         },
-        None if path.exists() => return,
+        None if store.exists() => return,
         None => Vec::new(),
     };
-    let mut folders = vec![root.to_path_buf()];
-    folders.extend(existing.into_iter().filter(|p| p != root).take(KEPT - 1));
-    let Ok(bytes) = serde_json::to_vec_pretty(&RecentFile { folders }) else {
+    let before = folders.clone();
+    change(&mut folders);
+    if folders == before {
         return;
-    };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
     }
-    let _ = clew_core::statefile::write_atomic(&path, &bytes);
+    if let Ok(bytes) = serde_json::to_vec_pretty(&RecentFile { folders }) {
+        let _ = clew_core::statefile::write_atomic(store, &bytes);
+    }
 }
 
 /// What a recent folder is called on the welcome screen: its name, and
@@ -94,12 +138,13 @@ pub(crate) fn said(folder: &Path) -> (String, String) {
 mod tests {
     use super::*;
 
-    /// Opened folders come back newest first, each once, as many as kept,
-    /// and one no longer there is not offered.
+    /// Opened folders come back newest first, each once, as many as kept;
+    /// one no longer there is not offered, and leaves the file; one asked
+    /// for and not found is forgotten.
     #[test]
     fn opened_folders_come_back_newest_first() {
         let data = clew_core::testutil::TempDir::new("recent-data");
-        let _data = crate::app::tests::data_dir_override(data.path());
+        let store = data.path().join("state").join(FILE);
         let dirs: Vec<PathBuf> = (0..7)
             .map(|i| {
                 let d = data.path().join(format!("p{i}"));
@@ -107,30 +152,48 @@ mod tests {
                 d
             })
             .collect();
-        assert!(load().is_empty());
+        assert!(load_from(&store).is_empty());
         for d in &dirs[..3] {
-            remember(d);
+            remember_in(&store, d);
         }
-        remember(&dirs[0]);
+        remember_in(&store, &dirs[0]);
         assert_eq!(
-            load(),
+            load_from(&store),
             vec![dirs[0].clone(), dirs[2].clone(), dirs[1].clone()]
         );
         for d in &dirs[3..] {
-            remember(d);
+            remember_in(&store, d);
         }
-        let kept = load();
+        let kept = load_from(&store);
         assert_eq!(kept.len(), KEPT);
         assert_eq!(kept[0], dirs[6]);
         std::fs::remove_dir(&dirs[6]).unwrap();
-        assert_eq!(load()[0], dirs[5], "a folder gone is not offered");
-        // A file it cannot read is left as it is.
-        std::fs::write(data.path().join(FILE), "not json").unwrap();
-        remember(&dirs[1]);
         assert_eq!(
-            std::fs::read_to_string(data.path().join(FILE)).unwrap(),
-            "not json"
+            load_from(&store)[0],
+            dirs[5],
+            "a folder gone is not offered"
         );
-        assert!(load().is_empty());
+        let text = std::fs::read_to_string(&store).unwrap();
+        assert!(
+            !text.contains("p6"),
+            "a folder gone stays in the file: {text}"
+        );
+        forget_in(&store, &dirs[5]);
+        assert_eq!(load_from(&store)[0], dirs[4], "forgotten");
+        // The directory it makes is private: it holds the keys' config.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(store.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0, "{mode:o}");
+        }
+        // A file it cannot read is left as it is.
+        std::fs::write(&store, "not json").unwrap();
+        remember_in(&store, &dirs[1]);
+        assert_eq!(std::fs::read_to_string(&store).unwrap(), "not json");
+        assert!(load_from(&store).is_empty());
     }
 }

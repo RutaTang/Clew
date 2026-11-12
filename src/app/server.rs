@@ -544,7 +544,9 @@ impl App {
         let closed = Task::batch(cut.into_iter().map(|stream| {
             self.on_ask_stream_ended(
                 stream,
-                clew_protocol::StreamOutcome::Failed(tr!("server disconnected").into()),
+                // In English, said in the language spoken where it is shown
+                // (`tasks::plain_detail`): it was kept in the one spoken then.
+                clew_protocol::StreamOutcome::Failed(tr_noop!("server disconnected").into()),
             )
         }));
         self.proj.asking = false;

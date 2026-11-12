@@ -138,12 +138,12 @@ impl<Message> Widget<Message, Theme, Renderer> for Tip<'_, Message> {
             let state = tree.state.downcast_mut::<State>();
             let now = Instant::now();
             let moved = matches!(event, Event::Mouse(mouse::Event::CursorMoved { .. }));
-            let over = rests(
-                *state,
-                cursor.position_over(layout.bounds()).is_some(),
-                moved,
-            );
-            let pressed = matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
+            let on = cursor.position_over(layout.bounds()).is_some();
+            let over = rests(*state, on, moved);
+            // A press on it puts its tip away whether or not the pointer
+            // rested there first: a control come up under a still pointer,
+            // clicked, showed its tip at the first nudge after the click.
+            let pressed = on && matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
             let next = step(*state, over, pressed, now);
             if next != *state {
                 // Shown or put away: the overlay comes or goes.
@@ -262,9 +262,9 @@ fn rests(state: State, over: bool, moved: bool) -> bool {
 }
 
 /// Where a tooltip goes from `state`, the pointer `over` what it names or
-/// not, a button `pressed`, at `now`.
+/// not (resting there, `rests`), a button `pressed` on it, at `now`.
 fn step(state: State, over: bool, pressed: bool, now: Instant) -> State {
-    if over && pressed {
+    if pressed {
         return State::PutAway;
     }
     match (state, over) {
@@ -425,5 +425,13 @@ mod tests {
         assert_eq!(s, State::PutAway);
         assert_eq!(step(s, true, false, t0 + DELAY * 4), State::PutAway);
         assert_eq!(step(s, false, false, t0 + DELAY * 4), State::Idle);
+        // Pressed on a control come up under a still pointer, not rested on
+        // (`rests` is false): put away all the same, and the next nudge
+        // shows nothing.
+        assert!(!rests(State::Idle, true, false));
+        let s = step(State::Idle, false, true, t0);
+        assert_eq!(s, State::PutAway);
+        assert!(rests(s, true, true));
+        assert_eq!(step(s, true, false, t0 + DELAY * 4), State::PutAway);
     }
 }

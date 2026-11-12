@@ -2448,7 +2448,10 @@ pub(crate) fn plain_detail(raw: &str) -> String {
     ]) {
         tr!("the connection was cut").to_string()
     } else {
-        said.to_string()
+        // In the language spoken now, where it is one Clew says (kept in
+        // English, said where shown): a reason made in French stayed
+        // French after the language changed.
+        crate::i18n::message(said)
     }
 }
 

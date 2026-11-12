@@ -275,6 +275,20 @@ impl App {
         Task::none()
     }
 
+    /// A gutter's tip put away: its pane's file replaced, or the pane gone
+    /// (`None`: any pane's). Only the gutter itself put it away, as the
+    /// pointer left it, and a pane gone has no gutter to.
+    pub(crate) fn forget_gutter_tip(&mut self, pane: Option<usize>) {
+        if self
+            .proj
+            .gutter_tip
+            .as_ref()
+            .is_some_and(|tip| pane.is_none_or(|p| p == tip.pane))
+        {
+            self.proj.gutter_tip = None;
+        }
+    }
+
     /// The document under the cursor changed, so every hover in flight is
     /// about a file that is no longer there. Drops the peek and bumps the
     /// generation so a late `HoverMsg::Answered` is recognized as stale.

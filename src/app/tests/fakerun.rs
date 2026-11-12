@@ -413,6 +413,31 @@ fn a_fake_run_closed_while_it_works_is_no_longer_said_to_work() {
     assert!(!app.status.contains("Working out"), "{}", app.status);
 }
 
+/// A fake run set aside in its tab, closed while it works, leaves the run
+/// on screen said to work: both work out the same function, and the closed
+/// one's "Working out what … does…" taken off the status line took the
+/// shown one's, which was still working.
+#[test]
+fn closing_a_set_aside_fake_run_leaves_the_shown_one_said_to_work() {
+    use crate::app::state::RunTab;
+    let mut app = fake_app("fake-close-parked-working");
+    let _rx = attach_server(&mut app);
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: false }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    let first = app.proj.fake.tab;
+    menu_at(&mut app, 3);
+    let _ = app.update(Message::Fake(FakeMsg::FromMenu { debug: true }));
+    let _ = app.update(Message::Fake(FakeMsg::Run));
+    assert_ne!(app.proj.fake.tab, first);
+    let said = app.status.clone();
+    assert!(said.contains("Working out"), "{said}");
+    let _ = app.update(Message::Debug(DebugMsg::CloseTab(RunTab::Fake(first))));
+    assert_eq!(app.run_tabs().len(), 1);
+    assert!(app.proj.fake.working.is_some(), "the shown one still works");
+    assert_eq!(app.status, said, "said no longer to work");
+}
+
 /// Fake runs run side by side, each in its own tab: a second does not stop
 /// the first; the first's answer, come while the second is on screen, is
 /// taken in its own tab and shows nothing; Edit inputs runs again in the

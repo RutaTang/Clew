@@ -440,8 +440,6 @@ impl App {
         Some((stream_id, Task::run(stream, |m| m)))
     }
 
-    /// Stop the run being worked out, if one is: its turn is cancelled on
-    /// the server, and its answer no longer waited for.
     /// Take "Working out what `name` does…" off the status line, if it is
     /// still what the line says.
     fn settle_fake_status(&mut self, name: &str) {
@@ -449,6 +447,8 @@ impl App {
         self.settle_status(&[&working]);
     }
 
+    /// Stop the run being worked out, if one is: its turn is cancelled on
+    /// the server, and its answer no longer waited for.
     pub(crate) fn stop_fake_work(&mut self) -> Task<Message> {
         let Some(working) = self.proj.fake.working.take() else {
             return Task::none();

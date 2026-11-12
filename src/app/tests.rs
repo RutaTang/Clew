@@ -1176,16 +1176,45 @@ fn scanned_app(tag: &str) -> App {
 }
 
 /// A folder opened on this machine is offered again on the welcome screen:
-/// first, once, and kept for the next run of clew.
+/// first, once, and kept for the next run of clew — read again as a window
+/// opens, after any opened meanwhile. One asked for from the list and gone
+/// since is no longer offered.
 #[test]
 fn an_opened_folder_is_remembered_for_the_welcome_screen() {
-    let app = scanned_app("recent-remembered");
+    let data = clew_core::testutil::TempDir::new("recent-store");
+    let store = data.path().join("recent.json");
+    let root = fixture_project("recent-remembered");
+    let mut app = blank_app();
+    app.recent_store = Some(store.clone());
+    scan_synchronously(&mut app, root.clone());
     let root = app.proj.project.as_ref().unwrap().root.clone();
     assert_eq!(app.recent_folders.first(), Some(&root));
-    assert!(
-        crate::app::recent::load().contains(&root),
+    assert_eq!(
+        crate::app::recent::load_from(&store),
+        vec![root.clone()],
         "kept for the next run"
     );
+    // The next window: what was read comes after what was opened meanwhile.
+    let mut next = blank_app();
+    let other = data.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    next.recent_folders = vec![other.clone()];
+    let _ = next.update(Message::Project(ProjectMsg::RecentRead(vec![
+        root.clone(),
+        other.clone(),
+    ])));
+    assert_eq!(next.recent_folders, vec![other.clone(), root.clone()]);
+    // Gone since: asked for, it is said not there, and no longer offered.
+    next.recent_store = Some(store.clone());
+    crate::app::recent::remember_in(&store, &other);
+    std::fs::remove_dir(&other).unwrap();
+    let _ = next.update(Message::Project(ProjectMsg::FolderPicked(Some(
+        other.clone(),
+    ))));
+    assert!(next.status.contains("No folder"), "{}", next.status);
+    assert_eq!(next.recent_folders, vec![root.clone()]);
+    let text = std::fs::read_to_string(&store).unwrap();
+    assert!(!text.contains("other"), "{text}");
 }
 
 /// Build the message the off-thread rehash sends back for `events`: stamped
@@ -8306,6 +8335,23 @@ fn stop_keeps_the_tab_and_again_runs_it_in_it() {
     // L16: the last run closed, the panel goes with it — it stayed saying
     // "Nothing is running", the code and the margin short of its room.
     assert!(!app.show_bottom, "the empty panel stays");
+    // But a proof being walked, which the panel shows once no run is
+    // there, stays in view: it went, with nothing to bring it back.
+    let _ = app.start_run();
+    let tab = app.debug.tab;
+    app.proj.proof = Some(crate::app::proof::ProofWalk {
+        abs: root.join("app.py"),
+        name: "thm".into(),
+        steps: Vec::new(),
+        goals: None,
+        failed: None,
+        at: 0,
+        token: 0,
+    });
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+    let _ = app.update(Message::Debug(DebugMsg::CloseTab(RunTab::Real(tab))));
+    assert!(app.run_tabs().is_empty());
+    assert!(app.show_bottom, "the proof walk was hidden");
 }
 
 /// Stopping during `Launching` — before the adapter handed back a client —
@@ -14884,38 +14930,58 @@ fn stop_aborts_a_local_provider_stream_and_closes_its_turn() {
 /// An agent turn that fails before doing anything falls back to retrieval —
 /// and when there is no index to retrieve from, the question stays in the
 /// conversation with the agent's own failure. It used to be removed first,
-/// so it vanished, and the status blamed the missing index alone.
+/// so it vanished, and the status blamed the missing index alone. Each is
+/// said once, where it is seen: with Ask open the failure in the
+/// conversation and why the index could not on the status line (it read
+/// " — <why>", a dash with nothing before it); with Ask put away the
+/// failure on the status line, with Try again (it was said there twice
+/// over, the notice and the status differing), why the index could not on
+/// the card's notice.
 #[test]
 fn an_agent_failure_with_nothing_to_fall_back_to_keeps_the_question() {
     // A service set up, and no index built with it yet.
     let _env = embeddings_at("ask-agent-fallback-data", "http://127.0.0.1:1/v1");
-    let mut app = scanned_app("ask-agent-fallback");
-    let stream = app.mint_request_id();
-    app.proj.ask_turns.push(AskTurn {
-        stream,
-        question: "where is auth?".into(),
-        spoken: false,
-        answer_md: String::new(),
-        answer: Vec::new(),
-        settled: 0,
-        draft_from: None,
-        sources: Vec::new(),
-        steps: Vec::new(),
-        streaming: true,
-        extras: Default::default(),
-    });
-    app.proj.link.agent_stream = Some(stream);
-    let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
-        stamp: app.stamp(),
-        stream,
-        outcome: clew_protocol::StreamOutcome::Failed("the model is overloaded".into()),
-    }));
-    let turn = app.proj.ask_turns.last().expect("the question is kept");
-    assert_eq!(turn.question, "where is auth?");
-    assert!(!turn.streaming);
-    assert!(turn.answer_md.contains("overloaded"), "{}", turn.answer_md);
-    assert!(app.status.contains("overloaded"), "{}", app.status);
-    assert!(app.status.contains("semantic index"), "{}", app.status);
+    for view in [AskView::Hidden, AskView::Compact] {
+        let mut app = scanned_app("ask-agent-fallback");
+        app.ask_view = view;
+        let stream = app.mint_request_id();
+        app.proj.ask_turns.push(AskTurn {
+            stream,
+            question: "where is auth?".into(),
+            spoken: false,
+            answer_md: String::new(),
+            answer: Vec::new(),
+            settled: 0,
+            draft_from: None,
+            sources: Vec::new(),
+            steps: Vec::new(),
+            streaming: true,
+            extras: Default::default(),
+        });
+        app.proj.link.agent_stream = Some(stream);
+        let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
+            stamp: app.stamp(),
+            stream,
+            outcome: clew_protocol::StreamOutcome::Failed("the model is overloaded".into()),
+        }));
+        let turn = app.proj.ask_turns.last().expect("the question is kept");
+        assert_eq!(turn.question, "where is auth?");
+        assert!(!turn.streaming);
+        assert!(turn.answer_md.contains("overloaded"), "{}", turn.answer_md);
+        let notice = app.proj.ask_notice.clone().unwrap_or_default();
+        assert!(notice.contains("semantic index"), "{view:?}: {notice}");
+        assert!(!app.status.starts_with(" —"), "{view:?}: {}", app.status);
+        if view == AskView::Hidden {
+            assert!(app.status.contains("overloaded"), "{}", app.status);
+            let shown = app.failure_shown().expect("the failure stands");
+            assert_eq!(shown.said, app.status, "said once");
+            assert!(shown.retry.is_some(), "with Try again");
+        } else {
+            assert!(app.status.contains("semantic index"), "{}", app.status);
+            assert!(!app.status.contains("overloaded"), "{}", app.status);
+            assert!(app.failure_shown().is_none());
+        }
+    }
 }
 
 /// An agent turn failed because the provider could not be reached, or
@@ -28085,6 +28151,46 @@ fn an_answers_ending_is_said_again_in_the_language_chosen() {
         .map(|t| t.answer_md.clone())
         .collect();
     assert_eq!(again, french);
+
+    // Through Display language itself, and the reason with it: a failure
+    // said in French — the server gone, part-way or before a word — reads
+    // in English once English is chosen, its reason too ("serveur
+    // déconnecté" stayed, made in French where it was raised).
+    let mut app = scanned_app("ask-ending-language-chosen");
+    app.ask_view = AskView::Compact;
+    for (stream, part) in [(7, ""), (8, "Half of it")] {
+        app.proj.ask_turns.push(AskTurn {
+            stream,
+            question: "why?".into(),
+            answer_md: part.into(),
+            streaming: true,
+            ..Default::default()
+        });
+        with_lang(Lang::Fr, || {
+            let _ = app.update(Message::Ask(AskMsg::StreamEnded {
+                stamp: app.stamp(),
+                stream,
+                outcome: StreamOutcome::Failed("server disconnected".into()),
+            }));
+        });
+    }
+    for turn in &app.proj.ask_turns {
+        assert!(
+            turn.answer_md.contains("serveur déconnecté"),
+            "{}",
+            turn.answer_md
+        );
+    }
+    let _ = app.update(Message::Settings(SettingsMsg::SetLanguage(
+        crate::i18n::LangPref::Chosen(Lang::En),
+    )));
+    for turn in &app.proj.ask_turns {
+        assert!(
+            turn.answer_md.contains("server disconnected") && !turn.answer_md.contains("serveur"),
+            "{}",
+            turn.answer_md
+        );
+    }
 }
 
 /// CP#2: a Stop the server reports arrives TYPED (`StreamOutcome::Stopped`)
@@ -30194,6 +30300,32 @@ fn a_viewport_change() -> iced::widget::scrollable::Viewport {
     sim.into_messages()
         .last()
         .expect("the scrollable reported no viewport")
+}
+
+/// A scrollable's viewport `height` tall, at its top, as its `on_scroll`
+/// reports one.
+fn a_viewport_at_top(height: f32) -> iced::widget::scrollable::Viewport {
+    use iced::widget::{scrollable, space};
+    let tall: iced::Element<'_, scrollable::Viewport> =
+        scrollable(space().width(iced::Fill).height(8000))
+            .on_scroll(|viewport| viewport)
+            .width(200)
+            .height(height)
+            .into();
+    let mut sim = iced_test::simulator(tall);
+    sim.point_at(iced::Point::new(10.0, 10.0));
+    for y in [-40.0, 40.0] {
+        let _ = sim.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+            delta: iced::mouse::ScrollDelta::Pixels { x: 0.0, y },
+        })]);
+    }
+    let viewport = sim
+        .into_messages()
+        .last()
+        .expect("the scrollable reported no viewport");
+    assert_eq!(viewport.absolute_offset().y, 0.0);
+    assert_eq!(viewport.bounds().height, height);
+    viewport
 }
 
 /// The reader's own move in the step's file wins the same way. A click, a
@@ -35119,6 +35251,23 @@ fn a_gutter_tip_waits_for_the_pointer_to_rest_on_its_line() {
     assert_eq!(tip.scroll, (0.0, 200.0));
     let _ = app.update(gutter(None, 0.0));
     assert!(app.proj.gutter_tip.is_none(), "left the gutter");
+    // A tip on the second pane's gutter, that pane closed under the
+    // pointer: no gutter is left to put it away, and it came back drawn
+    // at its old place once the split was opened again.
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    assert!(app.proj.split);
+    let _ = app.update(Message::Hover(HoverMsg::Gutter {
+        pane: 1,
+        line: Some(2),
+        x: 12.0,
+        y: 60.0,
+    }));
+    let generation = app.proj.gutter_tip.as_ref().unwrap().generation;
+    let _ = app.update(due(&app, generation));
+    assert!(app.proj.gutter_tip.as_ref().unwrap().shown);
+    let _ = app.update(Message::Editor(EditorMsg::ToggleSplit));
+    assert!(!app.proj.split);
+    assert!(app.proj.gutter_tip.is_none(), "outlived its pane");
 }
 
 /// M8: the code seen made shorter — the bottom panel opened for a fake
@@ -35135,6 +35284,7 @@ fn a_shorter_code_view_keeps_the_cursor_line_in_sight() {
         let v = app.active_viewer_mut().unwrap();
         v.viewport_measured = true;
         v.viewport_h = h;
+        v.bounds_h = h;
         v.scroll_y = scroll;
         v.caret = Some((caret, 0));
     };
@@ -35155,6 +35305,22 @@ fn a_shorter_code_view_keeps_the_cursor_line_in_sight() {
     // Taller: nothing moves.
     set(&mut app, 5, 0.0, 10.0 * lh);
     assert_eq!(measured(&mut app, 30.0 * lh), 0.0);
+    // The window made taller: the view's height is guessed at the window's
+    // first, then measured, taller than it was but shorter than the guess.
+    // That is no view shrinking, and the line just under its foot, never
+    // seen, stays where it is (the code jumped down to it).
+    set(&mut app, 12, 0.0, 10.0 * lh);
+    let _ = app.on_window_resized(iced::Size::new(1200.0, 40.0 * lh));
+    assert!(app.active_viewer().unwrap().viewport_h >= 40.0 * lh);
+    assert_eq!(measured(&mut app, 11.0 * lh), 0.0, "scrolled on a resize");
+    // And the same through a scroll's report of the height.
+    set(&mut app, 12, 0.0, 10.0 * lh);
+    let _ = app.on_window_resized(iced::Size::new(1200.0, 40.0 * lh));
+    let _ = app.update(Message::Editor(EditorMsg::Scrolled(
+        pane,
+        a_viewport_at_top(11.0 * lh),
+    )));
+    assert_eq!(app.active_viewer().unwrap().scroll_y, 0.0);
 }
 
 /// The Glossary page (⋯ menu → Glossary) covers the code like the overview
@@ -38045,6 +38211,108 @@ fn asking_again_keeps_the_draft_being_typed() {
     );
     assert!(app.proj.asking, "asked again");
     assert_eq!(app.proj.ask_input, "my draft");
+}
+
+/// An answer that fails part-way says so where it stops, and can be asked
+/// again. It ended mid-sentence with nothing said: with Ask open the
+/// reader took the half for the whole, and with Ask put away the status
+/// line's Try again asked nothing (only a turn with no answer at all
+/// counted as failed). A code block it stopped in is closed first.
+#[test]
+fn an_answer_that_fails_part_way_says_so_and_is_asked_again() {
+    for view in [AskView::Compact, AskView::Hidden] {
+        let mut app = scanned_app("ask-failed-part-way");
+        app.ask_view = view;
+        app.proj.ask_turns.push(AskTurn {
+            stream: 5,
+            question: "where is the total?".into(),
+            streaming: true,
+            ..Default::default()
+        });
+        let _ = app.update(Message::Ask(AskMsg::Delta {
+            stamp: app.stamp(),
+            stream: 5,
+            text: "The cart total is computed in\n\n```py\ntotal =".into(),
+        }));
+        let _ = app.update(Message::Ask(AskMsg::StreamEnded {
+            stamp: app.stamp(),
+            stream: 5,
+            outcome: clew_protocol::StreamOutcome::Failed("server disconnected".into()),
+        }));
+        let turn = &app.proj.ask_turns[0];
+        assert!(!turn.streaming);
+        assert!(turn.answer_md.starts_with("The cart total is computed in"));
+        assert!(
+            turn.answer_md.contains("Couldn't finish") && turn.answer_md.contains("disconnected"),
+            "{view:?}: {}",
+            turn.answer_md
+        );
+        assert_eq!(
+            turn.answer_md.matches("```").count() % 2,
+            0,
+            "{}",
+            turn.answer_md
+        );
+        assert!(turn.extras.failed, "{view:?}: not to be asked again");
+        if view == AskView::Hidden {
+            assert!(app.failure_shown().is_some());
+            // Its Try again asks it again, in its place.
+            app.llm_config_cache = Some(Some(unreachable_llm()));
+            open_synchronously(&mut app, "src/lib.rs", None);
+            let _ = app.update(Message::Window(WindowMsg::RetryFailure));
+            assert!(app.proj.asking, "asked nothing again");
+            assert!(app.failure_shown().is_none());
+            assert!(
+                !app.proj.ask_turns.iter().any(|t| t.stream == 5),
+                "the failed turn stayed"
+            );
+        }
+    }
+}
+
+/// A failure on the status bar, of an answer asked with Ask put away, goes
+/// with its conversation — cleared, left for a new one or another, or
+/// deleted — and once a later answer comes: it came back each time Ask was
+/// put away, and its Try again named a turn of a conversation gone.
+#[test]
+fn an_ask_failure_goes_with_its_conversation() {
+    let failed = |app: &mut App| {
+        app.ask_view = AskView::Hidden;
+        let stream = app.mint_request_id();
+        app.proj.ask_turns.push(AskTurn {
+            stream,
+            question: "why?".into(),
+            streaming: true,
+            ..Default::default()
+        });
+        let _ = app.update(Message::Ask(AskMsg::StreamEnded {
+            stamp: app.stamp(),
+            stream,
+            outcome: clew_protocol::StreamOutcome::Failed("boom".into()),
+        }));
+        assert!(app.failure_shown().is_some());
+    };
+    let mut app = scanned_app("ask-failure-conversation");
+    failed(&mut app);
+    let _ = app.update(Message::Ask(AskMsg::Clear));
+    assert!(app.failure_notice.is_none(), "kept past Clear");
+    failed(&mut app);
+    let _ = app.new_ask_session();
+    assert!(app.failure_notice.is_none(), "kept past a new conversation");
+    failed(&mut app);
+    let stream = app.mint_request_id();
+    app.proj.ask_turns.push(AskTurn {
+        stream,
+        question: "and now?".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    let _ = app.update(Message::Ask(AskMsg::StreamEnded {
+        stamp: app.stamp(),
+        stream,
+        outcome: clew_protocol::StreamOutcome::Done,
+    }));
+    assert!(app.failure_notice.is_none(), "kept past a later answer");
 }
 
 /// A stop made by a jump to a line in another file keeps its function's

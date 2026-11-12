@@ -370,6 +370,9 @@ impl App {
         }
         self.keep_ask_session();
         self.proj.ask_turns.clear();
+        // A failure standing on the status bar was of that conversation:
+        // its Try again named a turn of it.
+        self.forget_failure_of(crate::app::state::FailureOf::Ask);
         // What was queued was for that conversation.
         self.proj.ask_queue.clear();
         self.proj.ask_queue_held = false;
@@ -452,6 +455,7 @@ impl App {
             self.stop_speaking();
             let stop = self.stop_ask_streams();
             self.proj.ask_turns.clear();
+            self.forget_failure_of(crate::app::state::FailureOf::Ask);
             self.proj.ask_queue.clear();
             self.proj.ask_queue_held = false;
             self.proj.ask_pins.clear();

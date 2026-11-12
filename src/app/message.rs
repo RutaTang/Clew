@@ -290,6 +290,9 @@ pub enum ProjectMsg {
     SetupExplain(bool),
     /// The sheet's Apply (or Explain).
     SetupApply,
+    /// The folders opened here before, read as the window opened (see
+    /// `crate::app::recent`).
+    RecentRead(Vec<PathBuf>),
     /// The working tree's changes read, for the Files view's marks (see
     /// `App::sync_git_status`).
     GitStatusRead {
@@ -2577,6 +2580,7 @@ impl ProjectMsg {
             | ProjectMsg::HeadRead { stamp, .. } => Some(Origin::Stamped(stamp)),
             ProjectMsg::OpenFolderPressed
             | ProjectMsg::FolderPicked(..)
+            | ProjectMsg::RecentRead(..)
             | ProjectMsg::ConsentAllowed(..)
             | ProjectMsg::OpenWithoutSetup(..)
             | ProjectMsg::ConsentDenied(..)

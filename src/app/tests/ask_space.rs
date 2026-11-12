@@ -384,6 +384,7 @@ fn a_question_with_nothing_else_is_answered_from_the_open_file() {
     let _ = app.update(Message::Ask(AskMsg::Submit));
     assert!(!app.proj.asking);
     assert!(app.proj.ask_notice.is_some(), "{}", app.status);
+    assert!(!app.proj.ask_notice_embeddings, "embeddings can be made");
     assert_eq!(app.proj.ask_input, "what is Point?");
     // The next question clears what was said of the last.
     let _ = app.update(Message::Ask(AskMsg::Submit));

@@ -515,7 +515,12 @@ impl App {
                 };
                 let mut p = self.proj.fake.parked.remove(i);
                 self.swap_fake(&mut p);
+                // The status line is the run on screen's: stopping this
+                // one settled its "Working out…" by name, the same words
+                // as the shown run's still working.
+                let status = self.status.clone();
                 let ended = self.stop_fake_work();
+                self.status = status;
                 self.swap_fake(&mut p);
                 ended
             }
@@ -534,9 +539,10 @@ impl App {
             // The last one closed: the panel goes with it, and the code and
             // the margin have their room back — it stayed, saying "Nothing
             // is running" over the four ways to run, once Close was pressed
-            // on the one run there was.
+            // on the one run there was. A proof being walked is what the
+            // panel shows then, and stays.
             None => {
-                self.show_bottom = false;
+                self.show_bottom = self.proj.proof.is_some();
                 ended
             }
         }

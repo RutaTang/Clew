@@ -10137,10 +10137,21 @@ fn a_call_stack_frames_line_number_fits_its_column() {
     let mut app = reader_app();
     let root = app.proj.project.as_ref().unwrap().root.clone();
     crate::fonts::load();
-    for (width, rel, line) in [
-        (1100.0, "teashop/pricing.py", 20),
-        (1440.0, "teashop/pricing/rules/discounts/runpy.py", 203),
-    ] {
+    // Paths of every length about the column's: one a pixel or two short
+    // of its room is shown whole, and must fit.
+    let mut cases: Vec<(f32, String, usize)> = vec![
+        (1100.0, "teashop/pricing.py".into(), 20),
+        (
+            1440.0,
+            "teashop/pricing/rules/discounts/runpy.py".into(),
+            203,
+        ),
+    ];
+    for k in 0..36 {
+        cases.push((1100.0, format!("{}/pricing.py", "d".repeat(k)), 20));
+    }
+    for (width, rel, line) in cases {
+        let rel = rel.as_str();
         app.debug.session = Some(crate::DebugSession {
             client: None,
             status: crate::DebugStatus::Stopped,
@@ -10168,7 +10179,19 @@ fn a_call_stack_frames_line_number_fits_its_column() {
         app.window_height = size.height;
         let mut sim = sim_sized(&app, size);
         let tail = format!("{}:{line}", rel.rsplit('/').next().unwrap());
-        let loc = text_at(&mut sim, |t| t.ends_with(&tail), 0).expect("the frame's place");
+        // Its whole extent as laid out, not what its column lets show: cut
+        // at the column's edge, what shows ends inside the column whatever
+        // the text runs on to.
+        let (mut loc, shown) = sim
+            .find(|c: iced_test::selector::Candidate<'_>| match c {
+                iced_test::selector::Candidate::Text {
+                    content, bounds, ..
+                } if content.ends_with(&tail) => Some((bounds, content.to_string())),
+                _ => None,
+            })
+            .ok()
+            .expect("the frame's place");
+        loc.width = super::steady::width_of(&shown, super::ts::CAPTION, crate::fonts::UI);
         let vars = text_at(&mut sim, |t| t == "VARIABLES", 0).expect("the next column");
         // The variables' heading is its column's padding (6) in; the gap
         // (6), the stack column's padding (6) and its row's (6) before it.
@@ -12612,6 +12635,7 @@ fn an_empty_ask_shows_questions_not_instructions() {
     // page of Settings, a click away.
     let mut app = reader_app();
     app.proj.ask_notice = Some(crate::app::embedding::why_no_embeddings());
+    app.proj.ask_notice_embeddings = true;
     let sent = click(sim_elem(super::ask_panel(&app, 560.0)), "Settings");
     assert!(
         sent.iter().any(|m| matches!(
@@ -13331,6 +13355,43 @@ fn what_is_under_way_is_said_whole_beside_an_older_failure() {
         );
         assert!(text_at(&mut sim, |t| t == "Try again", 0).is_some());
     }
+    // Said in Chinese, with the full-width colon: what failed is told from
+    // its reason by that, and the room kept for what is said now is kept
+    // (the whole failure counted as what failed, and took it again).
+    let mut app = reader_app();
+    app.say_failure(
+        "无法解释 lib.rs：无法连接到 AI 服务商（该地址无人应答）— 请在设置中检查基础 URL，或者检查网络连接是否正常".into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    let now = "正在弄清 discounts 的作用…";
+    app.status = now.into();
+    let mut sim = sim_sized(&app, Size::new(1100.0, 800.0));
+    assert!(
+        text_at(&mut sim, |t| t == now, 0).is_some(),
+        "cut in Chinese"
+    );
+    assert!(text_at(&mut sim, |t| t.starts_with("无法解释 lib.rs"), 0).is_some());
+}
+
+/// An Ask answer's failure, raised with Ask put away, is said in the
+/// conversation once Ask is open — and not on the status bar in grey as
+/// well, for as long as the status line kept its words.
+#[test]
+fn an_ask_failure_is_not_said_in_grey_once_ask_is_open() {
+    let mut app = reader_app();
+    app.say_failure(
+        "Couldn't answer: boom".into(),
+        Some(Message::Ask(AskMsg::AskAgain(0))),
+        crate::app::state::FailureOf::Ask,
+    );
+    let shown = |app: &App| {
+        let mut sim = sim_elem(super::statusbar::statusbar(app));
+        text_at(&mut sim, |t| t.starts_with("Couldn't answer"), 0).is_some()
+    };
+    assert!(shown(&app), "not said with Ask put away");
+    app.ask_view = crate::AskView::Compact;
+    assert!(!shown(&app), "said again on the status bar");
 }
 
 /// A failure standing on the status line is said in the language spoken
@@ -16560,6 +16621,8 @@ fn a_failed_fake_run_or_summary_shows_the_way_to_settings_when_unreached() {
     let mut sim = sim_elem(super::fakerun::fake_panel(&app));
     assert!(shows(&mut sim, "rate limited"));
     assert!(!shows(&mut sim, "Settings"));
+    // Its Try again opens the inputs first: said with "…".
+    assert!(shows(&mut sim, "Try again…"));
 
     let commit = clew_protocol::HistCommit {
         sha: "aaaa1111".into(),
@@ -16721,6 +16784,16 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
         "list[Discount] — leave empty for ALL, or give a value"
     );
     assert_eq!(hint(2), "leave empty for None, or give a value");
+    // Neither a type nor a default: what may be given, said alone.
+    let bare = Field::Param {
+        name: "x".into(),
+        hint: String::new(),
+        default: String::new(),
+    };
+    assert_eq!(
+        super::fakerun::field_words(&bare).1,
+        "a value, or say it in words"
+    );
     assert!(shows(&mut sim, "Anything else it depends on"));
     assert!(shows(&mut sim, "Suggest inputs"));
     let run = click(sim_of(&app), "Run");
@@ -19559,6 +19632,15 @@ fn a_retry_that_asks_first_says_so() {
     );
     let mut sim = sim_elem(super::statusbar::statusbar(&app));
     assert!(text_at(&mut sim, |t| t == "Try again", 0).is_some());
+    drop(sim);
+    // A fake run's opens its inputs first.
+    app.say_failure(
+        "Fake run failed: no".into(),
+        Some(Message::Fake(crate::FakeMsg::EditInputs)),
+        crate::app::state::FailureOf::FakeRun,
+    );
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(text_at(&mut sim, |t| t == "Try again…", 0).is_some());
 }
 
 /// A function's own Explain that fails says why on its card, with Try
@@ -19796,6 +19878,22 @@ fn the_debug_columns_keep_clear_of_the_ask_card() {
             "{heading} under the card: {at:?} {card:?}"
         );
     }
+    drop(sim);
+    // And the note on what ran, on its own line for want of room in the
+    // header: it wrapped at the panel's full width, under the card.
+    let file = "the_rules_for_prices_discounts_and_taxes_in_every_country.py";
+    app.debug.ran_for = Some(file.into());
+    app.debug.trace = vec![crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: Vec::new(),
+    }];
+    app.debug.trace_rev += 1;
+    let mut sim = sim_sized(&app, size);
+    let note = text_at(&mut sim, move |t| t.contains(file), 0).expect("the note");
+    assert!(
+        note.x + note.width <= card.x,
+        "the note under the card: {note:?} {card:?}"
+    );
 }
 
 /// M6: a run's steps made without a model are told apart by their stop —

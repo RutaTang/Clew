@@ -294,7 +294,9 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
                 container(lead(name, tr!("failed").to_string()))
                     .width(Fill)
                     .clip(true),
-                control(tr!("Try again"), Message::Fake(FakeMsg::EditInputs), true),
+                // Its inputs first, to change or run as they were: asked,
+                // so said with "…".
+                control(tr!("Try again…"), Message::Fake(FakeMsg::EditInputs), true),
             ]
             .spacing(4)
             .align_y(iced::Center);

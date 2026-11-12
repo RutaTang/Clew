@@ -458,7 +458,9 @@ impl App {
             .as_ref()
             .is_some_and(|s| s.root == result.root);
         if local_state && !sample {
-            crate::app::recent::remember(&result.root);
+            if let Some(store) = &self.recent_store {
+                crate::app::recent::remember_in(store, &result.root);
+            }
             self.recent_folders.retain(|r| *r != result.root);
             self.recent_folders.insert(0, result.root.clone());
             self.recent_folders.truncate(crate::app::recent::KEPT);
@@ -1301,6 +1303,25 @@ impl App {
             // in a folder that does not exist.
             ProjectMsg::FolderPicked(Some(root)) if !root.is_dir() => {
                 self.status = tr!("No folder at {path}", path = root.display());
+                // A recent folder gone since: no longer offered.
+                if self.recent_folders.contains(&root) {
+                    self.recent_folders.retain(|r| *r != root);
+                    if let Some(store) = &self.recent_store {
+                        crate::app::recent::forget_in(store, &root);
+                    }
+                }
+                Task::none()
+            }
+            ProjectMsg::RecentRead(read) => {
+                // After those opened meanwhile, which are newer.
+                let mut folders = std::mem::take(&mut self.recent_folders);
+                for r in read {
+                    if !folders.contains(&r) {
+                        folders.push(r);
+                    }
+                }
+                folders.truncate(crate::app::recent::KEPT);
+                self.recent_folders = folders;
                 Task::none()
             }
             ProjectMsg::FolderPicked(Some(root)) => {
