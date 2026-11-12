@@ -898,7 +898,9 @@ pub(crate) fn tea_shop_line(
         tr!("Its language server is ready.").to_string()
     } else {
         tr!(
-            "Set up as the tour starts: {servers}.",
+            // Its own parentheses: "Set up as the tour starts: pyright:
+            // already installed. About 45 AI calls: …" ran three colons.
+            "Set up when the tour starts ({servers}).",
             servers = crate::app::setup::servers_line(&census.servers)
         )
     };

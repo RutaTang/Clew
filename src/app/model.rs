@@ -472,6 +472,10 @@ pub struct TurnExtras {
     /// a way to ask again, and lists no sources for an answer that never
     /// came.
     pub failed: bool,
+    /// The setting the failure is about, where one is: the card's way to
+    /// it, beside Try again — its words said "check the base URL in
+    /// Settings", and nothing led there.
+    pub fix: Option<crate::app::state::LlmField>,
 }
 
 /// What an approval card answers.
@@ -822,6 +826,9 @@ pub struct BlameWhy {
     /// asked from no point, near the top. Pinned near the top, it opened
     /// far from the line it was about.
     pub anchor: Option<f32>,
+    /// The setting its failure is about, where one is: the popup's way to
+    /// it, beside Close.
+    pub fix: Option<crate::app::state::LlmField>,
 }
 
 /// A time-travel session: scrub the active file (or one function's line range)

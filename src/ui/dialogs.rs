@@ -47,7 +47,13 @@ pub(crate) fn bp_condition_modal<'a>(
         input_id: bp_condition_input_id(),
         on_input: |v| Message::Debug(DebugMsg::BpConditionInput(v)),
         submit: Message::Debug(DebugMsg::BpConditionSet),
-        submit_label: tr!("Set"),
+        // With no condition, what it does: "Set" silently made a plain
+        // breakpoint of an empty condition.
+        submit_label: if draft.trim().is_empty() {
+            tr!("Set without condition")
+        } else {
+            tr!("Set")
+        },
         cancel: Message::Debug(DebugMsg::BpConditionCancel),
     })
 }
@@ -145,16 +151,23 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
                 .style(theme::overlay_scrollbar)
                 .height(Length::Shrink),
         )
-        .push(row![
-            space().width(Fill),
-            button(text(tr!("Close")).size(ts::BODY))
-                .style(theme::toolbar_button)
-                .padding([4, 12])
-                .on_press(super::heard::said(
-                    tr!("Close"),
-                    Message::TimeTravel(TimeTravelMsg::BlameWhyClose),
-                )),
-        ]);
+        .push(
+            row![space().width(Fill)]
+                // Failed for what Settings puts right: the way there, as
+                // every such failure has.
+                .extend(bw.fix.map(super::panes::settings_fix_button))
+                .push(
+                    button(text(tr!("Close")).size(ts::BODY))
+                        .style(theme::toolbar_button)
+                        .padding([4, 12])
+                        .on_press(super::heard::said(
+                            tr!("Close"),
+                            Message::TimeTravel(TimeTravelMsg::BlameWhyClose),
+                        )),
+                )
+                .spacing(6)
+                .align_y(iced::Center),
+        );
 
     let panel = container(col)
         .width(WHY_W)

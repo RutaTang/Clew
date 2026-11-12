@@ -513,6 +513,12 @@ impl App {
                 let about = crate::app::tasks::unreached(&raw)
                     .then_some(crate::app::state::LlmField::BaseUrl);
                 self.proj.walk.failed = Some((scope.clone(), raw.clone()));
+                // Said there, in the walkthroughs' own row, with its Try
+                // again: on the status line too, it said the same thing
+                // twice, side by side.
+                if self.show_left_sidebar && self.sidebar == crate::SidebarTab::Walk {
+                    return Task::none();
+                }
                 self.say_failure_again(
                     move || {
                         tr!(
@@ -662,6 +668,26 @@ impl App {
         self.walkthrough_goto(i)
     }
 
+    /// The open tour's step said again in the language spoken now: a run's
+    /// stop is said from its facts (`walkthrough::Step::said`), and what
+    /// was prepared of it to show was in the language before.
+    pub(crate) fn respeak_walk_step(&mut self) -> Task<Message> {
+        let said = match self
+            .proj
+            .walk
+            .open_tour()
+            .and_then(|w| w.steps.get(self.proj.walk.step))
+        {
+            Some(step) if step.stop.is_some() && !self.proj.walk.prepared.is_empty() => {
+                step.said().into_owned()
+            }
+            _ => return Task::none(),
+        };
+        let (prepared, task) = self.prepare_segments(&said);
+        self.proj.walk.prepared = prepared;
+        task
+    }
+
     /// Navigate to walkthrough step `i`: open its file and jump to the step's
     /// symbol, or its own line when the symbol is not there.
     ///
@@ -695,7 +721,7 @@ impl App {
         self.proj.walk.anchor_note = None;
         self.proj.walk.pending_anchor = None;
         // Prepare the narration (markdown + any mermaid/math → SVG).
-        let (prepared, render) = self.prepare_segments(&step.narration);
+        let (prepared, render) = self.prepare_segments(&step.said());
         self.proj.walk.prepared = prepared;
         let Some(abs) = self.resolve_walk_file(&step.file) else {
             self.set_walk_anchor_note(Some(tr!(

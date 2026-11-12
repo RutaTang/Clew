@@ -474,7 +474,8 @@ impl App {
                     .and_then(|w| w.steps.get(self.proj.walk.step))
                 {
                     Some(step) if self.proj.walk.prepared.is_empty() => {
-                        let (prepared, task) = self.prepare_segments(&step.narration.clone());
+                        let said = step.said().into_owned();
+                        let (prepared, task) = self.prepare_segments(&said);
                         self.proj.walk.prepared = prepared;
                         task
                     }

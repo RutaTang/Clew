@@ -284,7 +284,7 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
         ),
         // What it reviews is what its tour is then called: a branch's
         // changes, or the last commit where the branch has none — said
-        // "Review branch changes", it made "Change review (last commit)".
+        // "Review branch changes", it made "Review changes (last commit)".
         walk_action(
             Glyph::Diff,
             tr!("Review changes").to_string(),
@@ -379,14 +379,16 @@ pub(crate) fn scope_label(scope: &str) -> String {
         match rest.trim() {
             // The review on its way, before its branch is known: titled
             // "Change review (changes)", it said "changes" twice.
-            _ if scope == crate::app::DIFF_SCOPE_PENDING => tr!("Change review").to_string(),
-            "" => tr!("Change review").to_string(),
+            // Named as the button that makes it: "Change review" under
+            // "Review changes" read as another thing.
+            _ if scope == crate::app::DIFF_SCOPE_PENDING => tr!("Review changes").to_string(),
+            "" => tr!("Review changes").to_string(),
             // What it was against, as git's side wrote it in English:
             // said in the language spoken now.
-            "last commit" => tr!("Change review (last commit)").to_string(),
+            "last commit" => tr!("Review changes (last commit)").to_string(),
             label => match label.strip_prefix("vs ") {
-                Some(base) => tr!("Change review (vs {base})", base = base),
-                None => tr!("Change review ({label})", label = label),
+                Some(base) => tr!("Review changes (vs {base})", base = base),
+                None => tr!("Review changes ({label})", label = label),
             },
         }
     } else {
@@ -595,18 +597,32 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                 &label,
                 Message::Walk(WalkMsg::ForgetFailure),
             ));
+        // Where it says to check the base URL, the way there: beside Try
+        // again and as it is, not plain words on a line of their own.
+        let settings = crate::app::tasks::unreached(why).then(|| {
+            button(text(tr!("Settings")).size(ts::SMALL).color(theme::accent()))
+                .style(theme::toolbar_button)
+                .padding([4, 8])
+                .on_press(super::heard::said(
+                    tr!("Settings"),
+                    Message::Settings(crate::SettingsMsg::Fix(
+                        crate::app::state::LlmField::BaseUrl,
+                    )),
+                ))
+        });
         // Its controls on its title's line, and why it failed under them
         // across the whole row: beside them, the reason was squeezed into
         // a column a word or two wide ("Failed: couldn't reach / the AI /
         // provider …") five lines tall.
-        let mut body = column![
+        let body = column![
             row![
                 container(text(label).size(ts::BASE).color(theme::fg()))
                     .width(Fill)
                     .clip(true),
                 retry,
-                forget,
             ]
+            .extend(settings.map(Element::from))
+            .push(forget)
             .spacing(2)
             .align_y(iced::Center),
             // Kept as it failed, said in the language spoken now.
@@ -620,12 +636,6 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
             .width(Fill),
         ]
         .spacing(2);
-        // Where it says to check the base URL, the way there.
-        if crate::app::tasks::unreached(why) {
-            body = body.push(super::panes::settings_fix_button(
-                crate::app::state::LlmField::BaseUrl,
-            ));
-        }
         list = list.push(container(body).width(Fill).padding([6, 8]));
     }
 
@@ -836,13 +846,19 @@ pub(crate) fn walk_narration<'a>(
             .size(ts::CAPTION)
             .color(theme::accent()),
         space().width(Fill),
-        button(text("‹").size(ts::EMPHASIS))
-            .style(theme::toolbar_button)
-            .padding([1, 8])
-            .on_press(super::heard::said(
-                tr!("Previous step"),
-                Message::Walk(WalkMsg::Step(-1))
-            )),
+        // Named where the pointer rests, and nothing to press at either
+        // end: at "1/1" both stayed lit, and did nothing.
+        super::toolbar::tip_at(
+            button(text("‹").size(ts::EMPHASIS))
+                .style(theme::toolbar_button)
+                .padding([1, 8])
+                .on_press_maybe((cur > 0).then(|| {
+                    super::heard::said(tr!("Previous step"), Message::Walk(WalkMsg::Step(-1)))
+                })),
+            tr!("Previous step"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        ),
         // As wide as it reads at the last step: the ‹ before it moved as
         // the count gained a digit, under the pointer stepping through.
         {
@@ -854,13 +870,35 @@ pub(crate) fn walk_narration<'a>(
                 ts::SMALL,
             )
         },
-        button(text("›").size(ts::EMPHASIS))
+        super::toolbar::tip_at(
+            button(text("›").size(ts::EMPHASIS))
+                .style(theme::toolbar_button)
+                .padding([1, 8])
+                .on_press_maybe((cur + 1 < n).then(|| {
+                    super::heard::said(tr!("Next step"), Message::Walk(WalkMsg::Step(1)))
+                })),
+            tr!("Next step"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        ),
+        // The tour put away, back to the list of them: only a second
+        // click on its row in the list did that.
+        super::toolbar::tip_at(
+            button(crate::glyph::icon(
+                crate::glyph::Glyph::Close,
+                theme::fg_muted(),
+                10.0
+            ))
             .style(theme::toolbar_button)
-            .padding([1, 8])
+            .padding([4, 6])
             .on_press(super::heard::said(
-                tr!("Next step"),
-                Message::Walk(WalkMsg::Step(1))
+                tr!("Close"),
+                Message::Walk(WalkMsg::Back)
             )),
+            tr!("Close"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        ),
     ]
     .spacing(6)
     .align_y(iced::Center)
@@ -883,7 +921,7 @@ pub(crate) fn walk_narration<'a>(
     };
 
     let body: Element<'_, Message> = if app.proj.walk.prepared.is_empty() {
-        text(step.narration.clone())
+        text(step.said().into_owned())
             .size(ts::BODY)
             .color(theme::fg())
             .width(Fill)
@@ -921,6 +959,20 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
         // welcome hero, so the sidebar just states what's going on.
         return if app.scanning {
             empty_state(Glyph::Search, tr!("Scanning…"), "", None)
+        } else if let Some(root) = &app.pending_consent {
+            // The first-open sheet is up for it: "No folder open / Open a
+            // folder to start reading" behind "Open teashop" said the
+            // opposite of the sheet.
+            let name = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.display().to_string());
+            empty_state(
+                Glyph::Folder,
+                &tr!("Opening {name}…", name = name),
+                "",
+                None,
+            )
         } else if app.connection.is_remote() {
             empty_state(
                 Glyph::Remote,
@@ -1184,6 +1236,13 @@ pub(crate) fn filtered_files<'a>(
         .take(FILTER_LIMIT)
 }
 
+/// Whether the file tree's menu is open on the row for `rel`: that row is
+/// ringed while it is, as the keys' row is — lit, the open file's row read
+/// as the one the menu was for.
+fn menu_on(app: &App, rel: &str) -> bool {
+    app.proj.tree_menu.as_ref().is_some_and(|m| m.rel == rel)
+}
+
 /// The Files view narrowed by its filter: every file whose path holds it
 /// (any case), as its name with its folder beside it.
 fn filtered_file_rows<'a>(
@@ -1223,7 +1282,10 @@ fn filtered_file_rows<'a>(
                     .spacing(6)
                     .align_y(iced::Center),
                 )
-                .style(theme::tree_row(is_current, cursor == Some(f.rel.as_str())))
+                .style(theme::tree_row(
+                    is_current,
+                    cursor == Some(f.rel.as_str()) || menu_on(app, &f.rel),
+                ))
                 .width(Fill)
                 .height(Length::Fixed(TREE_ROW_H))
                 .padding([0, 8])
@@ -1309,7 +1371,10 @@ pub(crate) fn append_tree_rows<'a>(
         rows.push(
             mouse_area(
                 button(content)
-                    .style(theme::tree_row(false, cursor == Some(rel.as_str())))
+                    .style(theme::tree_row(
+                        false,
+                        cursor == Some(rel.as_str()) || menu_on(app, &rel),
+                    ))
                     .width(Fill)
                     .height(Length::Fixed(TREE_ROW_H))
                     .padding(pad)
@@ -1377,7 +1442,10 @@ pub(crate) fn append_tree_rows<'a>(
         .spacing(6)
         .height(Fill)
         .align_y(iced::Center);
-        let style = theme::tree_row(is_current, cursor == Some(rel.as_str()));
+        let style = theme::tree_row(
+            is_current,
+            cursor == Some(rel.as_str()) || menu_on(app, &rel),
+        );
         let menu = Message::Project(ProjectMsg::TreeMenuFor {
             rel: rel.clone(),
             dir: false,
@@ -1448,9 +1516,9 @@ pub(crate) fn tree_icon(glyph: char, color: iced::Color) -> Element<'static, Mes
 /// and an optional action button — so every "nothing here yet" screen matches.
 pub(crate) fn empty_state<'a>(
     g: Glyph,
-    title: &'a str,
-    subtitle: &'a str,
-    action: Option<(&'a str, Message)>,
+    title: &str,
+    subtitle: &str,
+    action: Option<(&str, Message)>,
 ) -> Element<'a, Message> {
     empty_state_saying(g, title, subtitle, action.map(|(l, m)| (l.to_string(), m)))
 }
@@ -1459,8 +1527,8 @@ pub(crate) fn empty_state<'a>(
 /// total()").
 pub(crate) fn empty_state_saying<'a>(
     g: Glyph,
-    title: &'a str,
-    subtitle: &'a str,
+    title: &str,
+    subtitle: &str,
     action: Option<(String, Message)>,
 ) -> Element<'a, Message> {
     let mut col = column![

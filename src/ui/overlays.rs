@@ -7,7 +7,9 @@ const PEEK_GAP: f32 = 10.0;
 /// Width of the right-click menu as designed: wider where a row needs it.
 const MENU_W: f32 = 210.0;
 
-pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
+/// The code's hover peek, kept above `floor` where it fits there (see
+/// [`Anchored::floor`]).
+pub(crate) fn hover_tooltip(h: &crate::HoverState, floor: f32) -> Element<'_, Message> {
     // Nothing to say (no summary, no LSP text, no diagnostic): show nothing
     // rather than an empty box — an empty peek reads as "hover is broken".
     if h.diagnostic.is_none() && h.summary.is_none() && h.text.is_none() {
@@ -75,6 +77,7 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
         iced::Point::new(h.x, h.y),
         Anchoring::Below { gap: PEEK_GAP },
     )
+    .floor(floor)
     .into()
 }
 
@@ -257,10 +260,15 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             ]
         },
         vec![
-            plain(
-                tr!("Toggle Breakpoint"),
-                Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
-            ),
+            // Its key, as Settings lists it: the menu showed Ctrl+D on
+            // Toggle Bookmark and nothing on this one.
+            Row {
+                keys: keys("F9"),
+                ..plain(
+                    tr!("Toggle Breakpoint"),
+                    Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
+                )
+            },
             plain(
                 tr!("Conditional Breakpoint…"),
                 Message::Debug(DebugMsg::ConditionalBreakpointFromMenu),

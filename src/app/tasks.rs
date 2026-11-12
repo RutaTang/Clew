@@ -2491,19 +2491,30 @@ pub(crate) fn unreached(raw: &str) -> bool {
 /// call — Ask's answer from the index after its tools failed — only fails
 /// again, as long after.
 pub(crate) fn provider_refuses_all(raw: &str) -> bool {
+    setting_to_fix(raw).is_some()
+}
+
+/// The Language model setting a failed AI call's `raw` words point at, if
+/// they point at one: the base URL where nothing could be reached, the key
+/// where the provider refused it — what a failure's Settings opens at.
+pub(crate) fn setting_to_fix(raw: &str) -> Option<crate::app::state::LlmField> {
+    use crate::app::state::LlmField;
+    if unreached(raw) {
+        return Some(LlmField::BaseUrl);
+    }
     let lower = raw.to_lowercase();
-    unreached(raw)
-        || [
-            "401",
-            "403",
-            "unauthorized",
-            "invalid api key",
-            "invalid_api_key",
-            "incorrect api key",
-            "authentication",
-        ]
-        .iter()
-        .any(|w| lower.contains(w))
+    [
+        "401",
+        "403",
+        "unauthorized",
+        "invalid api key",
+        "invalid_api_key",
+        "incorrect api key",
+        "authentication",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
+    .then_some(LlmField::Key)
 }
 
 /// How a refused connection is worded: by Linux and macOS ("Connection

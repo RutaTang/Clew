@@ -2158,6 +2158,17 @@ impl App {
         if self.debug.no_debug && self.debug.session.is_some() {
             return Task::none();
         }
+        // Nor to a run that has ended: it is kept for the next one. Sent,
+        // the adapter that had gone answered "Server[pid=…] disconnected
+        // unexpectedly", said as a breakpoint that failed.
+        if self
+            .debug
+            .session
+            .as_ref()
+            .is_some_and(|s| s.status == crate::DebugStatus::Terminated)
+        {
+            return Task::none();
+        }
         // A configuration being sent now is a snapshot of before this change
         // (see `DebugState::bp_rev`).
         self.debug.bp_rev += 1;
@@ -2275,12 +2286,22 @@ impl App {
                 Err(e) => {
                     // The request failed or timed out. `let _ =` used to hide
                     // this too: every breakpoint in the file stays "unknown",
-                    // so say so instead of leaving a silently dead gutter.
-                    self.status = tr!(
-                        "Could not set breakpoints in {file}: {error}",
-                        file = self.rel_of(&path),
-                        error = e
-                    );
+                    // so say so instead of leaving a silently dead gutter —
+                    // and that they are kept, for the next run. A run that
+                    // ended while it was asked has nothing to say: they are
+                    // for the next run all the same.
+                    let ended = self
+                        .debug
+                        .session
+                        .as_ref()
+                        .is_none_or(|s| s.status == crate::DebugStatus::Terminated);
+                    if !ended {
+                        self.status = tr!(
+                            "The debugger didn't take the breakpoints in {file} ({why}); they are kept for the next run",
+                            file = self.rel_of(&path),
+                            why = super::tasks::plain_detail(&e)
+                        );
+                    }
                     continue;
                 }
             };

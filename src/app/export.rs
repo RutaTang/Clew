@@ -168,7 +168,7 @@ pub(crate) fn render(x: &Export<'_>) -> String {
                 .map(|sym| format!(" (`{}`)", code(sym)))
                 .unwrap_or_default();
             out.push_str(&format!("{}. **{}** — `{at}`{symbol}\n", i + 1, md(title)));
-            for line in s.narration.lines() {
+            for line in s.said().lines() {
                 out.push_str(&format!("   {}\n", line.trim_end()));
             }
             out.push('\n');
@@ -420,6 +420,7 @@ mod export_tests {
                 line: Some(1),
                 narration: "Where it starts.\nTwo lines.".into(),
                 depth: 0,
+                stop: None,
             }],
         }];
         let mut glossary_files = vec![clew_protocol::DocFile {
@@ -542,6 +543,7 @@ _Scope: boot_
                 line: Some(1),
                 narration: String::new(),
                 depth: 0,
+                stop: None,
             }],
         }];
         let glossary = Glossary::default();

@@ -1348,7 +1348,10 @@ impl App {
                 // An ACP agent brings its own model: Clew's base URL has
                 // nothing to do with its failure, so its words are said
                 // plainly, not "check the base URL in Settings".
-                let e = if self.proj.ask_turns[idx].extras.agent.is_some() {
+                let own = self.proj.ask_turns[idx].extras.agent.is_none();
+                self.proj.ask_turns[idx].extras.fix =
+                    own.then(|| crate::app::tasks::setting_to_fix(e)).flatten();
+                let e = if !own {
                     crate::app::tasks::plain_detail(e)
                 } else {
                     crate::app::tasks::ai_reason(e)

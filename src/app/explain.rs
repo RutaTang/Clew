@@ -1459,7 +1459,11 @@ fn pass_said(said: &PassSaid) -> String {
     let failures = &said.failures;
     let reexplained = &said.target;
     let mut status = if let Some(stopped) = &failures.stopped {
-        tr!("Explain stopped: {reason}", reason = stopped.describe())
+        // Not "stopped": it read as the reader having stopped it.
+        tr!(
+            "Explain couldn't continue: {reason}",
+            reason = stopped.describe()
+        )
     } else if let Some(target) = reexplained
         .as_ref()
         .filter(|_| failures.failed > 0 && !said.target_written)

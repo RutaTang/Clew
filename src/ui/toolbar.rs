@@ -196,6 +196,19 @@ pub(crate) fn tip_at<'a>(
     shortcut: Option<String>,
     side: tooltip::Position,
 ) -> Element<'a, Message> {
+    tip_at_why(control, name, shortcut, None, side)
+}
+
+/// [`tip_at`] for a control that can do nothing now, with `why` under its
+/// name where it says why: a dimmed tool that named only itself was
+/// inert with nothing said.
+pub(crate) fn tip_at_why<'a>(
+    control: impl Into<Element<'a, Message>>,
+    name: impl iced::widget::text::IntoFragment<'a>,
+    shortcut: Option<String>,
+    why: Option<&'a str>,
+    side: tooltip::Position,
+) -> Element<'a, Message> {
     // Its words centred on its keys' row, as the design's flex row sets
     // them; with no keys, on a line of their own.
     let line = if shortcut.is_some() {
@@ -216,6 +229,19 @@ pub(crate) fn tip_at<'a>(
     if let Some(sc) = shortcut {
         body = body.push(tip_keys(&sc));
     }
+    let body: Element<'a, Message> = match why {
+        Some(why) => iced::widget::column![
+            body,
+            text(why)
+                .size(TIP_SIZE)
+                .color(theme::dim())
+                .wrapping(iced::widget::text::Wrapping::Word),
+        ]
+        .spacing(4)
+        .max_width(TIP_WRAP_W)
+        .into(),
+        None => body.into(),
+    };
     // The design's padding, inside the border drawn over the bubble's edge.
     let bubble = container(body)
         .padding(Padding {
@@ -1060,6 +1086,23 @@ pub(crate) fn strip_tool_able(app: &App, tool: StripTool) -> bool {
     }
 }
 
+/// Why a tool of the strip can do nothing now ([`strip_tool_able`]), said
+/// where the pointer rests on it.
+pub(crate) fn strip_tool_why(app: &App, tool: StripTool) -> Option<&'static str> {
+    if strip_tool_able(app, tool) {
+        return None;
+    }
+    Some(match tool {
+        StripTool::FakeRun => {
+            tr!("Open a file and put the caret in a function, class or struct to fake-run it")
+        }
+        StripTool::FakeDebug => {
+            tr!("Open a file and put the caret in a function, class or struct to fake-debug it")
+        }
+        _ => tr!("Open a folder first"),
+    })
+}
+
 /// The tool strip: the project's tools down the window's right edge, each
 /// naming itself (and its shortcut) to the left on hover.
 pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
@@ -1072,11 +1115,12 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
             || (tool == StripTool::RunMenu && app.show_run_menu);
         let tint = if on { theme::fg() } else { theme::fg_muted() };
         let able = strip_tool_able(app, tool);
-        tip_at(
+        tip_at_why(
             strip_button(glyph, tint, on, able)
                 .on_press_maybe(able.then(|| super::heard::said(label, msg))),
             label,
             shortcut,
+            strip_tool_why(app, tool),
             tooltip::Position::Left,
         )
     };

@@ -610,7 +610,17 @@ impl<'a> ActiveOverlay<'a> {
             Self::Finder => finder_modal(app),
             Self::ContextMenu(menu) => context_menu(app, menu),
             Self::TreeMenu(menu) => overlays::tree_menu(app, menu),
-            Self::Hover(hover) => hover_tooltip(hover),
+            // Over the code, not the panel under it nor the status bar.
+            Self::Hover(hover) => hover_tooltip(
+                hover,
+                app.window_height
+                    - STATUSBAR_H
+                    - if app.show_bottom {
+                        app.bottom_shown_height()
+                    } else {
+                        0.0
+                    },
+            ),
         }
     }
 

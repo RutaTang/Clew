@@ -432,8 +432,9 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel, clear: f32) -> Element<'_, Messag
             tr!("Change scope"),
             Message::TimeTravel(TimeTravelMsg::ToggleScope),
         )),
+        // In the whole file's scope, Story is not there: said where it is.
         if matches!(tt.scope, TimeScope::File) {
-            tr!("Follow only the function or class under the caret")
+            tr!("Follow only the function or class under the caret, and tell its story")
         } else {
             tr!("Follow the whole file")
         },

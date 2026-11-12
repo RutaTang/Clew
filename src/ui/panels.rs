@@ -314,6 +314,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     };
     let stopped = session.status == DebugStatus::Stopped;
     let ended = session.status == DebugStatus::Terminated;
+    let status_w = super::steady::width_of(&status_txt, ts::SMALL, crate::fonts::UI);
 
     let ctrl = |label: &'static str, msg: Message, enabled: bool| {
         let mut b = button(text(label).size(ts::BODY).wrapping(Wrapping::None))
@@ -459,19 +460,36 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                     // What gives way where the panel is narrow, cut short
                     // with an ellipsis: kept whole, it squeezed the trace's
                     // count to a word a line ("Tra / 1 / sto") and pushed
-                    // "Walk this run" out of the panel.
+                    // "Walk this run" out of the panel. Cut, the whole of
+                    // it is said where the pointer rests; with too little
+                    // room to say anything ("pricin…", or "…" alone in
+                    // Chinese), it is not shown at all.
                     Element::from(
                         container(iced::widget::responsive(move |room| {
-                            text(super::steady::elide_end(
+                            let cut = super::steady::elide_end(
                                 &said,
                                 ts::SMALL,
                                 crate::fonts::UI,
                                 room.width,
-                            ))
-                            .size(ts::SMALL)
-                            .color(theme::dim())
-                            .wrapping(Wrapping::None)
-                            .into()
+                            );
+                            if cut == said {
+                                return text(cut)
+                                    .size(ts::SMALL)
+                                    .color(theme::dim())
+                                    .wrapping(Wrapping::None)
+                                    .into();
+                            }
+                            if room.width < RAN_NOTE_MIN_W {
+                                return space().into();
+                            }
+                            super::toolbar::tip_wrapped(
+                                text(cut)
+                                    .size(ts::SMALL)
+                                    .color(theme::dim())
+                                    .wrapping(Wrapping::None),
+                                said.clone(),
+                                iced::widget::tooltip::Position::Top,
+                            )
                         }))
                         .width(Fill)
                         .height(Length::Fixed((ts::SMALL * 1.3).ceil())),
@@ -509,11 +527,57 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         app.window_width - super::toolbar::STRIP_W,
         panel_top + 44.0,
     );
-    let header =
-        container(row![said, rule, controls].spacing(10).align_y(iced::Center)).padding(Padding {
+    // What the controls take, and what is said before them at the least
+    // (the run, its state, the trace and Walk this run): where the panel
+    // left of the card holds less, the controls go under it, on a row of
+    // their own. Clipped to fit, everything said before them went — "Walk
+    // this run" with it — whenever the Ask card was open at a laptop's
+    // width.
+    let w = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
+    let controls_w = if output_only {
+        stop_w + 2.0
+    } else {
+        [tr!("▶ Continue"), tr!("⤼ Over"), tr!("⤓ In"), tr!("⤒ Out")]
+            .iter()
+            .map(|label| w(label, ts::BODY) + 16.0)
+            .sum::<f32>()
+            + stop_w
+            + 2.0
+            + 4.0 * 4.0
+    };
+    let said_w = w(if plain { tr!("Run") } else { tr!("Debug") }, ts::BASE)
+        + 8.0
+        + status_w
+        + 8.0
+        + if plain { 0.0 } else { trace_control_w(app) };
+    let sidebar = if app.show_left_sidebar {
+        app.sidebar_width
+    } else {
+        0.0
+    };
+    let panel_w = app.window_width - super::toolbar::STRIP_W - super::sheet::SHEET_GAP - sidebar;
+    let stacked = panel_w - reach < said_w + 21.0 + controls_w;
+    let header: Element<'_, Message> = if stacked {
+        container(
+            column![
+                said,
+                row![space().width(Fill), controls].align_y(iced::Center),
+            ]
+            .spacing(4),
+        )
+        .padding(Padding {
             right: reach,
             ..Padding::ZERO
-        });
+        })
+        .into()
+    } else {
+        container(row![said, rule, controls].spacing(10).align_y(iced::Center))
+            .padding(Padding {
+                right: reach,
+                ..Padding::ZERO
+            })
+            .into()
+    };
 
     // Call stack — click a frame to jump to its source.
     let mut stack_rows: Vec<Element<'_, Message>> = vec![
@@ -670,13 +734,15 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     // The pill floats over the panel's foot at its right, where the output
     // is: the output's column ends above it, so no line runs under it —
     // scrolled to its end alone, the lines on their way there did.
-    let output: Element<'_, Message> = if app.ask_view == crate::AskView::Hidden {
-        column![debug_col(out_rows), super::askfloat::pill_foot()]
-            .height(Fill)
-            .into()
+    // The same column either way, its foot empty while Ask is open: as
+    // one thing or the other, the output's scroll was a new widget's when
+    // Ask closed, back at its top.
+    let foot: Element<'_, Message> = if app.ask_view == crate::AskView::Hidden {
+        super::askfloat::pill_foot()
     } else {
-        debug_col(out_rows)
+        space().height(0).into()
     };
+    let output: Element<'_, Message> = column![debug_col(out_rows), foot].height(Fill).into();
     let panels = if output_only {
         row![output]
     } else {
@@ -695,6 +761,30 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         .height(Fill)
         .style(theme::on_sheet)
         .into()
+}
+
+/// The least room the debug header's note on what ran is cut to: with
+/// less, what is left of it says nothing ("pricin…") and it is not shown.
+const RAN_NOTE_MIN_W: f32 = 120.0;
+
+/// How wide [`trace_control`] is: its count, and Walk this run with its
+/// spark.
+fn trace_control_w(app: &App) -> f32 {
+    let w = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
+    let n = app.debug.trace.len();
+    if n == 0 {
+        return w(tr!("Trace: no stops yet"), ts::CAPTION);
+    }
+    let count = if app.debug.trace_cut {
+        trn!(
+            "Trace: 1 stop (cut short)",
+            "Trace: {n} stops (cut short)",
+            n
+        )
+    } else {
+        trn!("Trace: 1 stop", "Trace: {n} stops", n)
+    };
+    w(&count, ts::CAPTION) + 6.0 + w(tr!("Walk this run"), ts::SMALL) + 16.0 + 18.0
 }
 
 /// The run's trace so far — how many stops it holds — and the button that
@@ -1196,7 +1286,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         // Failed: a way to ask the same again, where it failed — the reason
         // stood alone, and the question had to be typed again.
         if turn.extras.failed && !turn.streaming {
-            convo.push(super::toolbar::tip_at(
+            let again = super::toolbar::tip_at(
                 button(super::toolbar::ai_words(
                     tr!("Try again"),
                     ts::SMALL,
@@ -1211,7 +1301,16 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 tr!("Ask the same question again"),
                 None,
                 iced::widget::tooltip::Position::Top,
-            ));
+            );
+            // And the way to the setting it is about, where it is about
+            // one: its words said "check the base URL in Settings".
+            convo.push(match turn.extras.fix {
+                Some(field) => row![again, super::panes::settings_fix_button(field)]
+                    .spacing(6)
+                    .align_y(iced::Center)
+                    .into(),
+                None => again,
+            });
         }
         // What grounded the answer, under it once it is whole: they stood
         // under half an answer, the reader's eye drawn from the words. None

@@ -90,6 +90,7 @@ impl App {
         self.proj.docs.page = None;
         if self.proj.time_travel.take().is_some() {
             self.forget_failure_of(crate::app::state::FailureOf::Summary);
+            self.forget_failure_of(crate::app::state::FailureOf::Story);
         }
         // (A revision still loading goes with the session: its load answers
         // to the session's own request.) A history still loading is given up

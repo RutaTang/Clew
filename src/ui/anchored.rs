@@ -75,6 +75,8 @@ pub(crate) struct Anchored<'a> {
     anchor: Point,
     anchoring: Anchoring,
     margin: f32,
+    /// The lowest a popup reaches where it can help it ([`Anchored::floor`]).
+    floor: Option<f32>,
 }
 
 impl<'a> Anchored<'a> {
@@ -88,7 +90,17 @@ impl<'a> Anchored<'a> {
             anchor,
             anchoring,
             margin: 8.0,
+            floor: None,
         }
+    }
+
+    /// Placed as though the window ended at `y`: flipped above its anchor
+    /// rather than run past it, where it fits above — the code's hover
+    /// peek kept off the panel under the code, whose Continue and Walk
+    /// this run it covered.
+    pub(crate) fn floor(mut self, y: f32) -> Self {
+        self.floor = Some(y);
+        self
     }
 }
 
@@ -121,13 +133,28 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Anchored<'_> {
             renderer,
             &layout::Limits::new(Size::ZERO, room),
         );
-        let at = place_popup(
+        let placed_in = match self.floor {
+            Some(floor) => Size::new(window.width, window.height.min(floor)),
+            None => window,
+        };
+        let mut at = place_popup(
             self.anchor,
             child.size(),
-            window,
+            placed_in,
             self.anchoring,
             self.margin,
         );
+        // Too tall for either side of the anchor above the floor: as in
+        // the whole window, rather than pinned over the anchor.
+        if placed_in != window && at.y + child.size().height > placed_in.height {
+            at = place_popup(
+                self.anchor,
+                child.size(),
+                window,
+                self.anchoring,
+                self.margin,
+            );
+        }
         layout::Node::with_children(window, vec![child.move_to(at)])
     }
 

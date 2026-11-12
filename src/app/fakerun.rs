@@ -784,10 +784,21 @@ impl App {
                         }
                     }
                     Err(why) => {
-                        self.status = tr!(
-                            "No inputs suggested: {why}",
-                            why = crate::app::tasks::ai_reason(&why)
+                        // A failure standing on the status bar, with its
+                        // Try again (and Settings): a grey line at its far
+                        // end, cut short, was the only sign.
+                        let about = crate::app::tasks::setting_to_fix(&why);
+                        self.say_failure_again(
+                            move || {
+                                tr!(
+                                    "No inputs suggested: {why}",
+                                    why = crate::app::tasks::ai_reason(&why)
+                                )
+                            },
+                            Some(Message::Fake(FakeMsg::Suggest)),
+                            crate::app::state::FailureOf::FakeRun,
                         );
+                        self.failure_about(about);
                     }
                 }
                 Task::none()

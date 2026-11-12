@@ -830,6 +830,10 @@ fn python_with(
         "python": [python.to_string_lossy()],
         "stopOnEntry": false,
         "justMyCode": false,
+        // A run to read the code by leaves no trace in it: Python's
+        // bytecode cache wrote `__pycache__/*.pyc` beside every module run,
+        // listed as uncommitted changes in the reader's own repository.
+        "env": { "PYTHONDONTWRITEBYTECODE": "1" },
     });
     // A module of a package (`teashop/pricing.py`) run as a script could
     // not import its own package — "No module named 'teashop'": the folder
@@ -843,7 +847,7 @@ fn python_with(
                 .map_or_else(Vec::new, |p| std::env::split_paths(&p).collect::<Vec<_>>()),
         );
         if let Ok(joined) = std::env::join_paths(path) {
-            launch["env"] = json!({ "PYTHONPATH": joined.to_string_lossy() });
+            launch["env"]["PYTHONPATH"] = json!(joined.to_string_lossy());
         }
         if package.relative_imports
             && let Some(launch) = launch.as_object_mut()
@@ -1713,7 +1717,12 @@ mod tests {
         assert_eq!(relative["module"], "teashop.sub.deep");
         let lone = launch("main.py");
         assert_eq!(lone["program"], "main.py");
-        assert!(lone.get("env").is_none() && lone.get("module").is_none());
+        assert!(lone.get("module").is_none());
+        assert!(lone["env"].get("PYTHONPATH").is_none(), "{lone}");
+        // No run of Clew's leaves `__pycache__` in the reader's repository.
+        for launch in [&absolute, &relative, &lone] {
+            assert_eq!(launch["env"]["PYTHONDONTWRITEBYTECODE"], "1", "{launch}");
+        }
         assert_eq!(python_package(&root.join("teashop/__init__.py")), None);
     }
 

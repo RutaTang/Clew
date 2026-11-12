@@ -9382,6 +9382,7 @@ fn a_generated_walkthrough_keeps_the_other_windows_tour() {
             line: Some(1),
             narration: "n".into(),
             depth: 0,
+            stop: None,
         }],
     };
     walkthrough::save_library(&root, &[theirs]).unwrap();
@@ -9397,6 +9398,7 @@ fn a_generated_walkthrough_keeps_the_other_windows_tour() {
             line: Some(1),
             narration: "n".into(),
             depth: 0,
+            stop: None,
         }],
     };
     // (The generation this window is waiting for.)
@@ -9456,6 +9458,7 @@ fn an_answer_shown_clears_the_line_that_said_it_was_coming() {
         commits: vec![("abc1234".into(), "Add it".into())],
         loading: true,
         prepared: Vec::new(),
+        fix: None,
     });
     app.status = tr!("Explaining why…").into();
     let s = stamp();
@@ -9482,6 +9485,7 @@ fn an_answer_shown_clears_the_line_that_said_it_was_coming() {
             line: Some(1),
             narration: "n".into(),
             depth: 0,
+            stop: None,
         }],
     };
     let s = stamp();
@@ -9941,6 +9945,26 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
     let why = app.proj.blame_why.as_ref().unwrap();
     assert!(!why.loading, "the answer came in");
     assert_eq!(why.anchor, Some(321.0), "the answer stays where asked");
+    assert_eq!(why.fix, None);
+    // Failed for want of the provider: the popup's way to Settings, at
+    // the base URL — and the status line does not say it over again.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyIsThisHere));
+    let why = app.proj.blame_why.as_ref().expect("asked again");
+    let (token, title, commits) = (why.token, why.title.clone(), why.commits.clone());
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::BlameWhyDone {
+        stamp: app.stamp(),
+        token,
+        title,
+        commits,
+        result: Err("request failed: Connection refused (os error 111)".into()),
+    }));
+    let why = app.proj.blame_why.as_ref().unwrap();
+    assert_eq!(why.fix, Some(crate::app::state::LlmField::BaseUrl));
+    assert!(
+        !app.status.starts_with("Couldn't explain"),
+        "{}",
+        app.status
+    );
 
     app.proj.context_menu = Some(menu(Some(crate::InsightKind::ExpandMacro)));
     let _ = app.update(Message::Hover(HoverMsg::Insight));
@@ -10303,6 +10327,7 @@ fn an_adopted_remote_walkthrough_library_keeps_the_open_tour_by_scope() {
             line: Some(1),
             narration: "n".into(),
             depth: 0,
+            stop: None,
         }],
     };
     assert!(app.save_walkthrough_scope("mine", Some(&mine)));
@@ -13734,6 +13759,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         commits: Vec::new(),
         loading: true,
         prepared: Vec::new(),
+        fix: None,
     });
     app.proj.context_menu = Some(ContextMenu {
         pane: 0,
@@ -15158,6 +15184,14 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         "{}",
         app.status
     );
+    // It stands on the status bar with its Try again, as every AI
+    // failure does: it was the raw error, grey, with nothing to do.
+    let notice = app.failure_shown().expect("a standing failure");
+    assert_eq!(notice.of, crate::app::state::FailureOf::Story);
+    assert!(matches!(
+        notice.retry,
+        Some(Message::TimeTravel(TimeTravelMsg::Story))
+    ));
     let _story = app.update(Message::TimeTravel(TimeTravelMsg::Story));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::StoryDone {
         stamp: app.stamp(),
@@ -15166,6 +15200,10 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
     }));
     let t = app.proj.time_travel.as_ref().unwrap();
     assert!(!t.story_loading && t.story.is_some());
+    assert!(
+        app.failure_shown().is_none(),
+        "a story written left the failure up"
+    );
 
     // A summary's failure goes with its session: its Try again, standing
     // after Time Travel was left, had nothing to ask about.
@@ -21542,6 +21580,7 @@ fn a_superseded_walkthrough_is_kept_but_not_opened_and_leaves_the_busy_row() {
             line: Some(1),
             narration: "n".into(),
             depth: 0,
+            stop: None,
         }],
     };
     app.proj.walk.seq += 1;
@@ -24098,6 +24137,7 @@ fn fill_project_session(app: &mut App) {
         commits: Vec::new(),
         loading: true,
         prepared: Vec::new(),
+        fix: None,
     });
     p.overlay = Some(Overlay::ProjectImports);
     p.hover_gen = 9;
@@ -26075,7 +26115,7 @@ fn a_pass_that_could_not_read_the_project_changes_nothing() {
     assert_eq!(explain::load(&store, &root), before, "on disk");
     assert_eq!(
         app.status,
-        "Explain stopped: Clew failed internally (while reading the project) — try again, \
+        "Explain couldn't continue: Clew failed internally (while reading the project) — try again, \
          and report it if it happens again"
     );
 }
@@ -26100,7 +26140,7 @@ fn a_pass_over_a_project_folder_that_is_gone_changes_nothing() {
     assert_eq!(explain::load(&store, &root), before, "on disk");
     assert!(
         app.status
-            .starts_with("Explain stopped: the project folder could not be read (")
+            .starts_with("Explain couldn't continue: the project folder could not be read (")
             && app
                 .status
                 .ends_with("— nothing was changed; check that it is still there"),
@@ -26582,7 +26622,7 @@ fn a_request_the_provider_refused_is_said_to_be_refused() {
     assert_eq!(provider.calls() - before, 1, "{}", app.status);
     assert!(
         app.status.starts_with(
-            "Explain stopped: the provider has no model `test-model` at this endpoint ("
+            "Explain couldn't continue: the provider has no model `test-model` at this endpoint ("
         ) && app.status.contains("404")
             && app
                 .status
@@ -26599,7 +26639,7 @@ fn a_request_the_provider_refused_is_said_to_be_refused() {
     drive(&mut app, refresh, explain_and_save);
     assert!(
         app.status
-            .starts_with("Explain stopped: the provider rejected the API key (")
+            .starts_with("Explain couldn't continue: the provider rejected the API key (")
             && app.status.contains("401")
             && app.status.ends_with("— check it in Settings"),
         "{}",
@@ -26844,7 +26884,7 @@ fn a_pass_whose_calls_were_cancelled_says_so() {
     let _ = run_task(app.update(done));
     assert_eq!(
         app.status,
-        "Explain stopped: its requests were cancelled — run it again to finish"
+        "Explain couldn't continue: its requests were cancelled — run it again to finish"
     );
     assert_eq!(*app.proj.explain.cache, before);
 }
@@ -28193,6 +28233,55 @@ fn breakpoints_changed_during_configuration_are_sent_again() {
     assert_eq!(lines, Some(serde_json::json!(4)));
 }
 
+/// M8: a breakpoint set after the run has ended is kept for the next run,
+/// not sent to the adapter that has gone — whose "Server[pid=…]
+/// disconnected unexpectedly" was said as a breakpoint that failed. A
+/// live adapter that fails to answer is said so, with the breakpoints
+/// kept; one that ended while it was asked says nothing.
+#[test]
+fn a_breakpoint_set_after_the_run_ended_is_kept_for_the_next_one() {
+    let mut app = scanned_app("debug-bp-after-end");
+    let (_rt, _events, seen) = paused_session_with_fake_adapter(&mut app);
+    let file = PathBuf::from("/p/prog.rs");
+    let set_breakpoints = |seen: &DapSeen| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, _)| c == "setBreakpoints")
+            .count()
+    };
+    let failed = |app: &mut App| {
+        app.status.clear();
+        let _ = app.update(Message::Debug(DebugMsg::DapBreakpointsAnswered {
+            stamp: app.debug_stamp(),
+            run: app.debug_run,
+            session: crate::app::state::OWN_SESSION,
+            answers: vec![(file.clone(), Err("debug adapter closed".into()))],
+        }));
+        app.status.clone()
+    };
+    // Live: the failure is said, and that the breakpoints are kept.
+    let said = failed(&mut app);
+    assert!(
+        said.contains("didn't take") && said.contains("kept for the next run"),
+        "{said}"
+    );
+    app.debug.session.as_mut().unwrap().status = DebugStatus::Terminated;
+    let _ = run_task(app.on_breakpoint_toggle(file.clone(), 4));
+    assert_eq!(
+        set_breakpoints(&seen),
+        0,
+        "not sent to a run that has ended"
+    );
+    assert!(
+        app.debug.breakpoints[&file].contains_key(&4),
+        "kept for the next run"
+    );
+    assert!(!app.status.contains("Could not"), "{}", app.status);
+    // An answer that comes after the run ended says nothing.
+    assert_eq!(failed(&mut app), "");
+}
+
 /// A run without the debugger stops at nothing: no breakpoint goes to its
 /// adapter — not those set before, when it asks to be configured, nor one
 /// toggled while it runs — and it is still started (`configurationDone`).
@@ -29466,6 +29555,7 @@ fn a_walkthrough_step_the_reader_left_never_moves_the_cursor_later() {
             line: None,
             narration: "n".into(),
             depth: 0,
+            stop: None,
         }],
     }];
     let _ = app.update(Message::Walk(WalkMsg::Open("tour".into())));
@@ -29500,6 +29590,7 @@ fn a_jump_within_the_steps_file_supersedes_the_step() {
             line: None,
             narration: "n".into(),
             depth: 0,
+            stop: None,
         }],
     }];
     let _ = app.update(Message::Walk(WalkMsg::Open("tour".into())));
@@ -29545,6 +29636,7 @@ fn walk_tour(symbol: &str, line: Option<usize>) -> Vec<walkthrough::Walkthrough>
             line,
             narration: "n".into(),
             depth: 0,
+            stop: None,
         }],
     }]
 }
@@ -29902,6 +29994,7 @@ fn markdown_step_landed(tag: &str) -> (App, Task<Message>) {
             line: None,
             narration: "n".into(),
             depth: 0,
+            stop: None,
         }],
     }];
     let _ = app.update(Message::Walk(WalkMsg::Open("tour".into())));
@@ -31100,6 +31193,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 commits: Vec::new(),
                 loading: true,
                 prepared: Vec::new(),
+                fix: None,
             })
         }),
         Box::new(|a| {
@@ -32445,6 +32539,7 @@ fn a_walkthrough_step_whose_symbol_is_missing_says_so_once_its_file_lands() {
         line,
         narration: "n".into(),
         depth: 0,
+        stop: None,
     };
     app.proj.walk.library = vec![walkthrough::Walkthrough {
         title: "Tour".into(),
@@ -36793,6 +36888,7 @@ fn the_reading_guide_is_written_kept_and_regenerated_as_a_guide() {
         line: None,
         narration: "n".into(),
         depth,
+        stop: None,
     };
     let guide = walkthrough::Walkthrough {
         title: "Where to start".into(),

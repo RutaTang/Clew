@@ -902,6 +902,9 @@ pub enum FailureOf {
     Summary,
     /// A fake run: one that runs takes it away.
     FakeRun,
+    /// Time Travel's story: one written, or the session left, takes it
+    /// away.
+    Story,
 }
 
 /// they stood when it was asked.

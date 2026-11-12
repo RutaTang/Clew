@@ -614,6 +614,7 @@ impl App {
         // re-scoped is the same session, its commits kept.)
         if new_session {
             self.forget_failure_of(crate::app::state::FailureOf::Summary);
+            self.forget_failure_of(crate::app::state::FailureOf::Story);
         }
         self.proj.time_travel = Some(tt);
         // A drag begun in the view this replaced ends with it.
@@ -1299,9 +1300,26 @@ impl App {
         };
         tt.story_loading = false;
         let md = match result {
-            Ok(md) => md,
+            Ok(md) => {
+                self.forget_failure_of(crate::app::state::FailureOf::Story);
+                md
+            }
             Err(e) => {
-                self.status = tr!("Couldn't write the story: {error}", error = e);
+                // The failure the status bar stands for, in plain words,
+                // with its Try again (and Settings): it said the raw error,
+                // grey, with nothing to do about it.
+                let about = crate::app::tasks::setting_to_fix(&e);
+                self.say_failure_again(
+                    move || {
+                        tr!(
+                            "Couldn't write the story: {error}",
+                            error = crate::app::tasks::ai_reason(&e)
+                        )
+                    },
+                    Some(Message::TimeTravel(TimeTravelMsg::Story)),
+                    crate::app::state::FailureOf::Story,
+                );
+                self.failure_about(about);
                 return Task::none();
             }
         };
@@ -1401,6 +1419,7 @@ impl App {
             loading: true,
             prepared: Vec::new(),
             anchor,
+            fix: None,
         });
         // The answer is only meaningful for the project it was asked in: its
         // stamp is checked on arrival, so a reply that outlives a project
@@ -1483,14 +1502,19 @@ impl App {
         if self.proj.blame_why.as_ref().map(|b| b.token) != Some(token) {
             return Task::none();
         }
+        let mut fix = None;
         let md = match result {
             Ok(m) => {
                 self.settle_status(&[tr!("Explaining why…")]);
                 m
             }
             Err(e) => {
+                fix = crate::app::tasks::setting_to_fix(&e);
                 let e = crate::app::tasks::ai_reason(&e);
-                self.status = tr!("Couldn't explain: {error}", error = e);
+                // Said in the popup, with its way to Settings: the status
+                // line said it again, grey, "Couldn't explain: …", of
+                // nothing it named.
+                self.settle_status(&[tr!("Explaining why…")]);
                 format!("*{}*", tr!("Couldn't explain why: {error}", error = e))
             }
         };
@@ -1504,6 +1528,7 @@ impl App {
             loading: false,
             prepared,
             anchor,
+            fix,
         });
         task
     }
@@ -1600,6 +1625,7 @@ impl App {
                 // A summary's failure goes with its session: its Try again
                 // had nothing left to ask about.
                 self.forget_failure_of(crate::app::state::FailureOf::Summary);
+                self.forget_failure_of(crate::app::state::FailureOf::Story);
                 // Restore the live pane to where the reader was before entering
                 // — both offsets (its scrollable remounts at the top otherwise).
                 let restored = self.restore_code_scroll(self.proj.active);

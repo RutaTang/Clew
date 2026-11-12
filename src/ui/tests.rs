@@ -4302,6 +4302,159 @@ fn the_panel_has_a_tab_for_each_run() {
     );
 }
 
+/// L19: behind the first-open sheet, the Files view says the folder is
+/// being opened — "No folder open / Open a folder to start reading" said
+/// the opposite of the sheet's "Open teashop".
+#[test]
+fn behind_the_first_open_sheet_the_files_view_says_it_is_opening() {
+    let mut app = blank_app();
+    let mut sim = sim_elem(super::sidebar::files_tab(&app));
+    assert!(shows(&mut sim, "No folder open"));
+    drop(sim);
+    app.pending_consent = Some(std::path::PathBuf::from("/somewhere/teashop"));
+    let mut sim = sim_elem(super::sidebar::files_tab(&app));
+    assert!(shows(&mut sim, "Opening teashop…"));
+    assert!(!shows(&mut sim, "No folder open"));
+}
+
+/// L15: a hover peek near the code's foot opens above the point, not over
+/// the panel under the code — "class Decimal(…)" sat over its Continue and
+/// Walk this run.
+#[test]
+fn a_hover_peek_stays_off_the_panel_under_the_code() {
+    let mut app = reader_app();
+    app.show_bottom = true;
+    let panel_top = app.window_height - super::STATUSBAR_H - app.bottom_shown_height();
+    let doc = "class Decimal(value='0', context=None)\n".repeat(6);
+    app.proj.hover = Some(crate::HoverState {
+        text: Some(doc),
+        ..hover_at(300.0, panel_top - 30.0)
+    });
+    let mut sim = sim_of(&app);
+    let peek = text_at(&mut sim, |t| t.starts_with("class Decimal"), 0).expect("the peek");
+    assert!(
+        peek.y + peek.height <= panel_top,
+        "over the panel at {panel_top}: {peek:?}"
+    );
+    assert!(peek.y < panel_top - 30.0, "above the point");
+    drop(sim);
+    // With no panel, it opens below the point as it did.
+    app.show_bottom = false;
+    let mut sim = sim_of(&app);
+    let peek = text_at(&mut sim, |t| t.starts_with("class Decimal"), 0).expect("the peek");
+    assert!(peek.y > panel_top - 30.0, "below the point: {peek:?}");
+}
+
+/// L5: the code menu shows Toggle Breakpoint's key, F9, on its row, as it
+/// shows Toggle Bookmark's.
+#[test]
+fn the_code_menu_shows_the_breakpoints_key() {
+    let mut app = reader_app();
+    app.proj.context_menu = Some(crate::ContextMenu {
+        pane: 0,
+        line: 1,
+        col: 1,
+        x: 20.0,
+        y: 20.0,
+        insight: None,
+        served: true,
+        by_pointer: true,
+    });
+    let mut sim = sim_of(&app);
+    let row = text_at(&mut sim, |t| t == "Toggle Breakpoint", 0).expect("the row");
+    let key = text_at(&mut sim, |t| t == "F9", 0).expect("its key");
+    assert!((key.center_y() - row.center_y()).abs() < 2.0, "on its row");
+    assert!(key.x > row.x + row.width, "after its words");
+}
+
+/// L11: the walkthrough player's ‹ and › do nothing at the ends — at
+/// "1/1" both stayed lit — and its × puts the tour away.
+#[test]
+fn the_walkthrough_player_stops_at_its_ends_and_closes() {
+    let mut app = reader_app();
+    let step = |n: usize| crate::walkthrough::Step {
+        title: format!("step {n}"),
+        file: "src/lib.rs".into(),
+        symbol: None,
+        line: Some(n),
+        narration: format!("narration {n}"),
+        depth: 0,
+        stop: None,
+    };
+    let tour = |n: usize| crate::walkthrough::Walkthrough {
+        title: "tour".into(),
+        scope: "t".into(),
+        steps: (1..=n).map(step).collect(),
+    };
+    let sent = |app: &App, n: usize, label: &str| {
+        let tour = tour(n);
+        click(sim_elem(super::sidebar::walk_narration(app, &tour)), label)
+    };
+    let stepped = |m: &Message, by: i32| matches!(m, Message::Walk(WalkMsg::Step(d)) if *d == by);
+    app.proj.walk.step = 0;
+    assert!(!sent(&app, 1, "‹").iter().any(|m| stepped(m, -1)));
+    assert!(!sent(&app, 1, "›").iter().any(|m| stepped(m, 1)));
+    assert!(sent(&app, 2, "›").iter().any(|m| stepped(m, 1)));
+    app.proj.walk.step = 1;
+    assert!(sent(&app, 2, "‹").iter().any(|m| stepped(m, -1)));
+    assert!(!sent(&app, 2, "›").iter().any(|m| stepped(m, 1)));
+    let tour = tour(1);
+    let closed = click_right_of(
+        || sim_elem(super::sidebar::walk_narration(&app, &tour)),
+        "›",
+        |m| matches!(m, Message::Walk(WalkMsg::Back)),
+    );
+    assert!(!closed.is_empty(), "the × after › puts the tour away");
+}
+
+/// L12: with no condition typed, the dialog's button says what it does —
+/// "Set" silently made a plain breakpoint.
+#[test]
+fn an_empty_condition_says_it_sets_a_plain_breakpoint() {
+    let app = reader_app();
+    let at = |draft: &str| {
+        let edit = (
+            std::path::PathBuf::from("/p/pricing.py"),
+            27usize,
+            draft.to_string(),
+        );
+        let mut sim = sim_elem(super::dialogs::bp_condition_modal(&app, &edit));
+        (
+            shows(&mut sim, "Set without condition"),
+            text_at(&mut sim, |t| t == "Set", 0).is_some(),
+        )
+    };
+    assert_eq!(at(""), (true, false));
+    assert_eq!(at("  "), (true, false));
+    assert_eq!(at("i == 3"), (false, true));
+}
+
+/// M9: Fake Run and Fake Debug, dimmed with no file open, say why where
+/// the pointer rests — named only, clicked, they did nothing and said
+/// nothing; only the shortcut explained.
+#[test]
+fn a_dimmed_fake_run_says_why_where_the_pointer_rests() {
+    use crate::ui::StripTool;
+    let mut app = reader_app();
+    let why = "Open a file and put the caret in a function, class or struct to fake-run it";
+    let hovered = |app: &App| {
+        let at = super::strip_tool_center(app, StripTool::FakeRun);
+        super::tip::warm_now();
+        let mut sim = sim_of(app);
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        (shows(&mut sim, "Fake Run…"), shows(&mut sim, why))
+    };
+    assert_eq!(hovered(&app), (true, false), "a file open: named only");
+    for pane in app.proj.panes.iter_mut() {
+        *pane = None;
+    }
+    assert!(app.active_viewer().is_none(), "precondition");
+    assert_eq!(hovered(&app), (true, true), "no file open: and why");
+}
+
 /// In a window too short for the four ways to run, they fold into the bug,
 /// whose Run menu opens beside the strip, level with it: Run and Debug,
 /// then Fake Run and Fake Debug, each named as the menu bar names it, with
@@ -4606,6 +4759,7 @@ fn reading_panels_are_drawn_fresh_for_what_they_show() {
         line: Some(n),
         narration: format!("narration {n}"),
         depth: 0,
+        stop: None,
     };
     let tour = crate::walkthrough::Walkthrough {
         title: "tour".into(),
@@ -8834,6 +8988,92 @@ fn a_call_row_wraps_its_place_in_a_narrow_margin() {
     assert!(place.y > name.y, "under the name: {name:?} {place:?}");
 }
 
+/// A chain whose entry takes most of the margin's line has its steps on
+/// the line under it, set in: beside it, a step wider than the room left
+/// was cut at the margin's edge ("total(").
+#[test]
+fn a_long_entry_puts_its_chain_under_it() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    // As the reviewer saw it: "test_member_pays_less() [test] › total(".
+    let long_entry = "test_member_pays_less";
+    let step = "total";
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            callers,
+            callees,
+        };
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call(long_entry, vec![], vec![1]),
+                    call(step, vec![0], vec![2]),
+                    call("work", vec![1], vec![]),
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    let symbol = |name: &str, line: usize, entry: Option<crate::index::EntryKind>| {
+        crate::index::SymbolEntry {
+            name: name.into(),
+            kind: "function".into(),
+            rel: "src/lib.rs".into(),
+            abs: lib.clone(),
+            line,
+            is_test: false,
+            entry,
+        }
+    };
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(vec![
+            symbol(long_entry, 1, Some(crate::index::EntryKind::Main)),
+            symbol(step, 2, None),
+            symbol("work", 3, None),
+        ]),
+    );
+    app.proj.symbol_index_rev += 1;
+    crate::fonts::load();
+    let width = super::panes::margin_w(&app) - 24.0;
+    let node = crate::explain::Node::Function {
+        file: lib.clone(),
+        name: "work".into(),
+        ordinal: 0,
+    };
+    let mut sim = iced_test::Simulator::with_size(
+        Default::default(),
+        Size::new(width, 600.0),
+        Element::from(iced::widget::Column::with_children(super::call_flow_rows(
+            &app, &node,
+        ))),
+    );
+    let entry = text_at(&mut sim, move |t| t.starts_with(long_entry), 0).expect("the entry");
+    let next = text_at(&mut sim, move |t| t.starts_with(step), 0).expect("the step after it");
+    assert!(
+        next.y > entry.y + entry.height / 2.0,
+        "under the entry: {entry:?} {next:?}"
+    );
+    // Set in under the entry, not run on past it: beside it, the room
+    // left was too little for the step, which was cut.
+    assert!(
+        next.x > entry.x && next.x < entry.x + 40.0,
+        "set in: {entry:?} {next:?}"
+    );
+    let whole = super::steady::width_of(&format!("{step}()"), super::ts::SMALL, crate::fonts::UI);
+    assert!(
+        next.width >= whole * 0.9,
+        "whole, not cut: {next:?} of {whole}"
+    );
+}
+
 /// The REACHED FROM section: the chain from an entry point down to the
 /// explained function, entry first, each step a button; an entry point says
 /// so instead; a function no entry reaches says that; and a project without
@@ -9476,7 +9716,8 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
 /// now: "Review changes" makes a change review of the branch, or of the
 /// last commit; "Where to start reading" makes one named so; a run's plain
 /// tour, made in English, is said in French once French is spoken. They
-/// said "Review branch changes" over "Change review (last commit)",
+/// said "Review branch changes" over "Change review (last commit)" (and
+/// "Change review" under the button "Review changes"),
 /// "Reading guide", and "Run: main.py" among French words.
 #[test]
 fn walkthroughs_are_named_as_their_actions_in_the_language_spoken_now() {
@@ -9491,11 +9732,11 @@ fn walkthroughs_are_named_as_their_actions_in_the_language_spoken_now() {
     assert_eq!(super::scope_label(GUIDE_SCOPE), "Where to start reading");
     assert_eq!(
         super::scope_label("@diff last commit"),
-        "Change review (last commit)"
+        "Review changes (last commit)"
     );
     assert_eq!(
         super::scope_label("@diff vs main"),
-        "Change review (vs main)"
+        "Review changes (vs main)"
     );
     let run = Walkthrough {
         title: crate::walkthrough::plain_run_title("main.py"),
@@ -9507,11 +9748,11 @@ fn walkthroughs_are_named_as_their_actions_in_the_language_spoken_now() {
         assert_eq!(super::walk_title(&run), "Exécution\u{a0}: main.py");
         assert_eq!(
             super::scope_label("@diff last commit"),
-            "Revue des modifications (dernier commit)"
+            "Relire les modifications (dernier commit)"
         );
         assert_eq!(
             super::scope_label("@diff vs main"),
-            "Revue des modifications (par rapport à main)"
+            "Relire les modifications (par rapport à main)"
         );
     });
     // A title the model wrote is its own.
@@ -9956,6 +10197,7 @@ fn tour(scope: &str) -> crate::walkthrough::Walkthrough {
                 line: Some(1),
                 narration: "n".into(),
                 depth: 0,
+                stop: None,
             },
             crate::walkthrough::Step {
                 title: format!("{scope} two"),
@@ -9964,6 +10206,7 @@ fn tour(scope: &str) -> crate::walkthrough::Walkthrough {
                 line: Some(2),
                 narration: "n".into(),
                 depth: 0,
+                stop: None,
             },
         ],
     }
@@ -15498,6 +15741,7 @@ fn the_why_popup_opens_at_the_line_it_is_about() {
         loading: true,
         prepared: Vec::new(),
         anchor,
+        fix: None,
     };
     let lh = app.line_height();
     app.proj.blame_why = Some(why(Some(400.0)));
@@ -15518,6 +15762,22 @@ fn the_why_popup_opens_at_the_line_it_is_about() {
     // Asked from no point (the palette): near the top, as before.
     app.proj.blame_why = Some(why(None));
     assert!(at(&app, "Why line 8 exists").y < 200.0);
+    // Failed for what Settings puts right: the way there, beside Close.
+    assert!(!shows(&mut sim_of(&app), "Settings"));
+    app.proj.blame_why = Some(crate::app::model::BlameWhy {
+        loading: false,
+        fix: Some(crate::app::state::LlmField::BaseUrl),
+        ..why(None)
+    });
+    assert!(
+        click(sim_of(&app), "Settings").iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::Fix(
+                crate::app::state::LlmField::BaseUrl
+            ))
+        )),
+        "the popup's Settings"
+    );
     app.proj.blame_why = None;
     app.proj.insight = Some(crate::Insight {
         anchor: Some(400.0),
@@ -15771,6 +16031,7 @@ fn the_reading_guide_is_a_tree_in_the_walkthroughs_view() {
         line: Some(1),
         narration: "n".into(),
         depth,
+        stop: None,
     };
     app.proj.walk.library = vec![Walkthrough {
         title: "Where to start".into(),
@@ -16922,6 +17183,11 @@ fn the_usage_page_says_what_the_key_spent() {
         crate::SettingsPage::Usage,
     )));
     assert!(shows(&mut sim_of(&app), "Loading…"));
+    // Nothing called yet: the chart says so, not a row of empty stubs.
+    let _ = app.update(Message::Usage(crate::UsageMsg::Read(Vec::new())));
+    let mut page = sim_tall(super::usage::usage_page(&app));
+    assert!(shows(&mut page, "No AI calls in these 30 days yet."));
+    drop(page);
     let now = crate::app::usage::now_secs();
     let call = |purpose: &str, input: u64, output: u64| Entry {
         at: now,
@@ -16957,6 +17223,7 @@ fn the_usage_page_says_what_the_key_spent() {
     for said in ["Cost per day", "Today, "] {
         assert!(shows(&mut page, said), "{said:?}");
     }
+    assert!(!shows(&mut page, "No AI calls in these 30 days yet."));
     drop(page);
     // Prices Clew knows are said in a line, not three boxes to fill in;
     // Edit shows the boxes.
@@ -17025,6 +17292,34 @@ fn an_empty_call_hierarchy_offers_the_carets_function() {
         click(sim_elem(super::panels::calls_tab(&app)), "Show for total()").as_slice(),
         [Message::Calls(CallsMsg::OfFunction)]
     ));
+}
+
+/// A balance that could not be checked for what Settings puts right has
+/// the way there on the page, not "check the base URL in Settings" said
+/// in Settings, with nothing to press.
+#[test]
+fn a_balance_check_that_failed_leads_to_its_setting() {
+    let mut app = reader_app();
+    app.llm_available = true;
+    app.usage.tells_balance = true;
+    app.usage.balance = crate::app::usage::Balance::Failed(
+        "request failed: Connection refused (os error 111)".into(),
+    );
+    let mut page = sim_tall(super::usage::usage_page(&app));
+    assert!(shows(&mut page, "nothing answered at that address"));
+    assert!(!shows(&mut page, "in Settings"));
+    drop(page);
+    assert!(
+        click(sim_tall(super::usage::usage_page(&app)), "Settings")
+            .iter()
+            .any(|m| matches!(
+                m,
+                Message::Settings(crate::SettingsMsg::Fix(
+                    crate::app::state::LlmField::BaseUrl
+                ))
+            )),
+        "its Settings"
+    );
 }
 
 /// The balance says what is left: an empty currency beside one with money
@@ -18186,6 +18481,44 @@ fn a_raised_cards_wrapped_rows_add_to_its_height() {
     assert!((h(150.0) - h(600.0) - (26.0 + 2.0)).abs() < 0.01);
 }
 
+/// An answer that failed for what Settings puts right — nothing answered
+/// at the address — has Settings beside Try again: its words said "check
+/// the base URL in Settings", and nothing led there. Another failure has
+/// Try again alone.
+#[test]
+fn a_failed_answer_settings_can_fix_has_its_settings() {
+    use crate::app::model::AskTurn;
+    use crate::app::state::LlmField;
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Compact;
+    let mut turn = AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: false,
+        answer_md: "*Couldn't answer: it failed*".into(),
+        ..AskTurn::default()
+    };
+    turn.extras.failed = true;
+    app.proj.ask_turns.push(turn);
+    fn panel(app: &App) -> Sim<'_> {
+        iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(800.0, 400.0),
+            super::panels::ask_panel(app, 400.0),
+        )
+    }
+    assert!(shows(&mut panel(&app), "Try again"));
+    assert!(!shows(&mut panel(&app), "Settings"), "no setting to fix");
+    app.proj.ask_turns[0].extras.fix = Some(LlmField::BaseUrl);
+    assert!(
+        click(panel(&app), "Settings").iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::Fix(LlmField::BaseUrl))
+        )),
+        "Settings opens at the base URL"
+    );
+}
+
 /// A note whose Explain failed for what Settings puts right — nothing
 /// answered at the address — has Settings beside Try again, and the card
 /// counts it in its rows; any other failure has no Settings. On a narrow
@@ -18247,6 +18580,176 @@ fn a_failures_settings_link_puts_the_keys_in_the_field_to_fix() {
         window.deliver(&mut app, Message::Settings(crate::SettingsMsg::Fix(field)));
         assert_eq!(window.focused(&app), Some(id), "{field:?}");
     }
+}
+
+/// With the Ask card open at a laptop's width, the debug header keeps what
+/// it says — the trace and Walk this run — and puts its stepping controls
+/// on a row under it: clipped to fit the room left of the card, all it
+/// said went, and only the controls were left.
+#[test]
+fn the_debug_header_keeps_walk_this_run_beside_the_ask_card() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Terminated,
+        exit_code: Some(0),
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.trace = vec![crate::TraceStop {
+        reason: "breakpoint".into(),
+        frames: Vec::new(),
+    }];
+    app.debug.trace_rev += 1;
+    app.show_bottom = true;
+    crate::fonts::load();
+    let size = Size::new(1100.0, 700.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    app.ask_view = crate::AskView::Compact;
+    assert!(
+        super::askfloat::card_reach(
+            &app,
+            size.width - super::toolbar::STRIP_W,
+            size.height - 120.0
+        ) > 0.0,
+        "the card is beside the panel"
+    );
+    let mut sim = sim_sized(&app, size);
+    let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
+    assert!(walk.width > 20.0, "drawn whole: {walk:?}");
+    assert!(
+        text_at(&mut sim, |t| t == "Trace: 1 stop", 0).is_some(),
+        "the trace"
+    );
+    assert!(
+        text_at(&mut sim, |t| t.contains("Debug Again"), 0).is_some(),
+        "the controls"
+    );
+}
+
+/// M10: an open run's tour made without a model, its step shown, is said
+/// again in the language chosen: "Stop 1 (breakpoint) in discounts…"
+/// stayed English in a French window.
+#[test]
+fn an_open_runs_step_is_said_again_in_the_language_chosen() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let stop = |name: &str, line: usize| crate::TraceFrame {
+        name: name.into(),
+        path: Some(root.join("src/lib.rs")),
+        line,
+    };
+    let tour = crate::walkthrough::from_trace(
+        &root,
+        "main.py",
+        &[crate::TraceStop {
+            reason: "breakpoint".into(),
+            frames: vec![stop("discounts", 9), stop("total", 32)],
+        }],
+    )
+    .expect("a tour");
+    app.proj.walk.library = vec![crate::walkthrough::Walkthrough {
+        scope: "@trace main.py".into(),
+        ..tour
+    }];
+    app.proj.walk.open = Some("@trace main.py".into());
+    let said = app.proj.walk.library[0].steps[0].said().into_owned();
+    let (prepared, _) = app.prepare_segments(&said);
+    app.proj.walk.prepared = prepared;
+    let narration = |app: &App| {
+        let said = format!("{:?}", app.proj.walk.prepared);
+        (said.contains("Stop 1"), said.contains("Arrêt 1"))
+    };
+    assert_eq!(narration(&app), (true, false));
+    with_lang(Lang::Fr, || {
+        let _ = app.respeak_walk_step();
+        assert_eq!(narration(&app), (false, true));
+    });
+}
+
+/// L2: the debug header's note on what ran, cut short, says the whole of
+/// it where the pointer rests; with too little room to say anything it is
+/// not shown — "pricin…" (or "…" alone, in Chinese) said nothing.
+#[test]
+fn the_debug_notes_cut_sentence_is_whole_in_its_tip_and_gone_when_it_says_nothing() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.ran_for = Some("pricing.py".into());
+    crate::app::tests::isolated_data_dir();
+    crate::fonts::load();
+    let whole = "pricing.py does not run on its own, so main.py ran";
+    let panel = |width: f32| {
+        iced_test::Simulator::with_size(
+            Default::default(),
+            Size::new(width, 260.0),
+            super::debug_panel(&app),
+        )
+    };
+    let (mut cut, mut gone) = (None, false);
+    let mut width = 1400.0;
+    while width >= 500.0 {
+        let mut sim = panel(width);
+        match text_at(&mut sim, |t| t.starts_with("pric") || t == "…", 0) {
+            Some(_) if text_at(&mut sim, |t| t == whole, 0).is_some() => {}
+            Some(_) => {
+                let shown = text_at(&mut sim, |t| t.ends_with('…'), 0).expect("cut short");
+                assert!(
+                    text_at(
+                        &mut sim,
+                        |t| t.starts_with("pricing.py d") && t.ends_with('…'),
+                        0
+                    )
+                    .is_some(),
+                    "{width}: cut to a stub that says nothing"
+                );
+                cut.get_or_insert((width, shown));
+            }
+            None => gone = true,
+        }
+        width -= 10.0;
+    }
+    assert!(gone, "where there is no room, the note gives way");
+    let (width, shown) = cut.expect("cut short at some width");
+    assert!(
+        !shows(&mut panel(width), whole),
+        "said whole before the pointer rests"
+    );
+    super::tip::warm_now();
+    let mut sim = panel(width);
+    sim.point_at(shown.center());
+    let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: shown.center(),
+    })]);
+    assert!(
+        shows(&mut sim, whole),
+        "{width}: the whole of it where the pointer rests"
+    );
 }
 
 /// At a laptop's width, the debug panel's header keeps its trace whole —

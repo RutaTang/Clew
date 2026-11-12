@@ -56,6 +56,69 @@ pub struct Step {
     /// one before it. 0 throughout for a tour, which is a path.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub depth: usize,
+    /// For a step of a run's tour made without a model ([`from_trace`]):
+    /// the stop it is, which its narration is said from where it is read
+    /// ([`Step::said`]). Kept as a sentence, it stayed in the language
+    /// spoken when the run was walked ("Stop 1 (breakpoint) in discounts…"
+    /// in a French window).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<StopFacts>,
+}
+
+/// What a run's stop was ([`Step::stop`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopFacts {
+    /// The run's stop it is, counted as the debug panel counts them.
+    pub ordinal: usize,
+    /// Why the program stopped, as the adapter said it ("breakpoint");
+    /// empty where it did not say.
+    #[serde(default)]
+    pub reason: String,
+    /// The function in the project that called it, its file and the line
+    /// of the call; none where no project code called it.
+    #[serde(default)]
+    pub caller: Option<(String, String, usize)>,
+}
+
+impl Step {
+    /// What the step says: its narration — or, for a run's stop, the
+    /// stop said now, in the language spoken now.
+    pub fn said(&self) -> std::borrow::Cow<'_, str> {
+        match &self.stop {
+            Some(stop) => std::borrow::Cow::Owned(stop_sentence(
+                self.symbol.as_deref().unwrap_or(&self.title),
+                stop,
+            )),
+            None => std::borrow::Cow::Borrowed(&self.narration),
+        }
+    }
+}
+
+/// A run's stop in a sentence, in the language spoken now: in `name`.
+fn stop_sentence(name: &str, stop: &StopFacts) -> String {
+    let reason = if stop.reason.is_empty() {
+        tr!("stopped")
+    } else {
+        crate::i18n::lookup(&stop.reason)
+    };
+    match &stop.caller {
+        Some((caller, caller_file, line)) => tr!(
+            "**Stop {ordinal}** ({reason}) in `{name}`, called from `{caller}` \
+             (`{caller_file}:{line}`).",
+            ordinal = stop.ordinal,
+            reason = reason,
+            name = name,
+            caller = caller,
+            caller_file = caller_file,
+            line = line
+        ),
+        None => tr!(
+            "**Stop {ordinal}** ({reason}) in `{name}`, not called from project code.",
+            ordinal = stop.ordinal,
+            reason = reason,
+            name = name
+        ),
+    }
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -418,36 +481,19 @@ pub fn from_trace(root: &Path, program: &str, stops: &[crate::TraceStop]) -> Opt
         let caller = stop.frames[at + 1..]
             .iter()
             .find_map(|f| in_project(f).map(|rel| (crate::short_frame_name(&f.name), rel, f.line)));
-        let reason = if stop.reason.is_empty() {
-            tr!("stopped")
-        } else {
-            crate::i18n::lookup(&stop.reason)
-        };
-        let narration = match caller {
-            Some((caller, caller_rel, line)) => tr!(
-                "**Stop {ordinal}** ({reason}) in `{name}`, called from `{caller}` \
-                 (`{caller_file}:{line}`).",
-                ordinal = ordinal,
-                reason = reason,
-                name = name,
-                caller = caller,
-                caller_file = caller_rel,
-                line = line
-            ),
-            None => tr!(
-                "**Stop {ordinal}** ({reason}) in `{name}`, not called from project code.",
-                ordinal = ordinal,
-                reason = reason,
-                name = name
-            ),
+        let facts = StopFacts {
+            ordinal,
+            reason: stop.reason.clone(),
+            caller,
         };
         steps.push(Step {
             title: name.clone(),
             file: rel.clone(),
             symbol: Some(name.clone()),
             line: Some(frame.line),
-            narration,
+            narration: stop_sentence(&name, &facts),
             depth: 0,
+            stop: Some(facts),
         });
         last = Some((rel, name));
     }
@@ -670,6 +716,9 @@ pub fn parse(response: &str) -> Result<Walkthrough, Failure> {
     // Paths are project-relative; `./src/x.rs` names `src/x.rs`. Anything that
     // could escape the root (absolute, `..`) is dropped here, as on load.
     wt.steps.retain_mut(|s| {
+        // A model's step is its narration: a run's stop facts are Clew's
+        // own, made only by `from_trace`.
+        s.stop = None;
         s.file = s.file.trim().trim_start_matches("./").to_string();
         !s.file.is_empty() && clew_core::statefile::safe_rel(&s.file)
     });
@@ -963,6 +1012,7 @@ mod tests {
                 line: None,
                 narration: "n".into(),
                 depth: 0,
+                stop: None,
             }],
         };
         let json = serde_json::to_string(&wt).unwrap();
@@ -982,6 +1032,7 @@ mod tests {
                 line: Some(1),
                 narration: "n".into(),
                 depth: 0,
+                stop: None,
             }],
         }
     }
@@ -1103,6 +1154,7 @@ mod tests {
             line,
             narration: String::new(),
             depth: 0,
+            stop: None,
         }
     }
 
@@ -1327,6 +1379,53 @@ mod trace_tests {
         assert!(TRACE_SYSTEM.contains("Keep EVERY step"));
     }
 
+    /// M10: a run's tour made without a model says each stop in the
+    /// language spoken where it is read, not the one spoken when the run
+    /// was walked — kept, then read in French and Chinese. A model's
+    /// narration is its own words, and keeps no stop of Clew's.
+    #[test]
+    fn a_runs_stops_are_said_in_the_language_spoken_when_read() {
+        use crate::i18n::{Lang, with_lang};
+        let wt = from_trace(
+            Path::new("/p"),
+            "app",
+            &[stop(
+                "breakpoint",
+                &[
+                    ("discounts", Some("/p/pricing.py"), 9),
+                    ("total", Some("/p/pricing.py"), 32),
+                ],
+            )],
+        )
+        .unwrap();
+        let kept: Vec<Walkthrough> =
+            serde_json::from_str(&serde_json::to_string(&vec![wt]).unwrap()).unwrap();
+        let step = &kept[0].steps[0];
+        assert!(
+            step.said()
+                .starts_with("**Stop 1** (breakpoint) in `discounts`, called from `total`"),
+            "{}",
+            step.said()
+        );
+        with_lang(Lang::Fr, || {
+            let said = step.said();
+            assert!(said.starts_with("**Arrêt 1**"), "{said}");
+            assert!(
+                said.contains("`total`") && said.contains("pricing.py:32"),
+                "{said}"
+            );
+        });
+        with_lang(Lang::Zh, || {
+            assert!(step.said().contains("第 1 次暂停"), "{}", step.said());
+        });
+        let narrated = parse(
+            r#"{"title":"t","steps":[{"title":"x","file":"pricing.py","narration":"Mine.",
+                "stop":{"ordinal":1,"reason":"breakpoint"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(narrated.steps[0].said(), "Mine.");
+    }
+
     /// A guide's depths are made a tree: it starts at 0, no step is more
     /// than one deeper than the one before it, none past the deepest.
     #[test]
@@ -1343,6 +1442,7 @@ mod trace_tests {
                     line: None,
                     narration: String::new(),
                     depth,
+                    stop: None,
                 })
                 .collect(),
         };

@@ -175,14 +175,29 @@ fn balance_group(app: &App) -> Element<'_, Message> {
                 .spacing(8)
                 .align_y(iced::Center),
             ),
-            Balance::Failed(e) => form::item(
-                tr!("Balance"),
-                Some(tr!(
-                    "Couldn't check it: {error}",
-                    error = crate::app::tasks::ai_reason(e)
-                )),
-                refresh(false),
-            ),
+            // Here, in Settings, its way to the setting it is about is a
+            // button: "check the base URL in Settings" said it of the page
+            // it was on, with no link to the Language model page.
+            Balance::Failed(e) => match crate::app::tasks::setting_to_fix(e) {
+                Some(field) => form::item(
+                    tr!("Balance"),
+                    Some(tr!(
+                        "Couldn't check it: {error}",
+                        error = crate::app::tasks::plain_detail(e)
+                    )),
+                    row![super::panes::settings_fix_button(field), refresh(false)]
+                        .spacing(8)
+                        .align_y(iced::Center),
+                ),
+                None => form::item(
+                    tr!("Balance"),
+                    Some(tr!(
+                        "Couldn't check it: {error}",
+                        error = crate::app::tasks::ai_reason(e)
+                    )),
+                    refresh(false),
+                ),
+            },
             Balance::Reading | Balance::Unread | Balance::NotTold => form::item(
                 tr!("Balance"),
                 Some(told),
@@ -254,6 +269,9 @@ fn spent_group<'a>(s: &usage::Summary) -> Element<'a, Message> {
         if priced { d.cost } else { d.tokens() as f64 }
     };
     let top = s.days.iter().map(measure).fold(0.0_f64, f64::max);
+    // Nothing called in all those days: said, where the bars would be a
+    // row of empty stubs that read as a chart not drawn.
+    let none = s.days.iter().all(|d| d.calls == 0);
     let now = usage::now_secs() as i64;
     let last = s.days.len().saturating_sub(1);
     let bars = iced::widget::Row::with_children(s.days.iter().enumerate().map(|(i, d)| {
@@ -308,6 +326,15 @@ fn spent_group<'a>(s: &usage::Summary) -> Element<'a, Message> {
     .width(Fill);
     // What a bar measures, said as its heading; when it runs, under it.
     let caption = |words: &str| text(words.to_string()).size(ts::SMALL).color(theme::dim());
+    let bars: Element<'a, Message> = if none {
+        container(caption(tr!("No AI calls in these 30 days yet.")))
+            .height(CHART_H)
+            .width(Fill)
+            .center_y(CHART_H)
+            .into()
+    } else {
+        bars.into()
+    };
     rows.push(form::row_of(
         column![
             caption(if priced {

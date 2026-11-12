@@ -548,8 +548,12 @@ fn reached_from_rows<'a>(
         out.push(caption(tr!("No entry point reaches this").into()));
         return out;
     }
+    // The room a chain has: the margin's, less its padding.
+    let room = super::panes::margin_w(app) - 24.0;
     for chain in chains {
         let mut steps: Vec<Element<'a, Message>> = Vec::new();
+        // How wide its entry is, with the arrow after it.
+        let mut entry_w = 0.0;
         let last = chain.len().saturating_sub(1);
         for (i, &step) in chain.iter().enumerate() {
             let n = g.node(step);
@@ -571,6 +575,14 @@ fn reached_from_rows<'a>(
                     .entry_kind_of(&n.file, &n.name)
                     .map(|k| crate::i18n::lookup(k.label()))
                     .unwrap_or(tr!("test"));
+                let w = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
+                entry_w = w(&format!("{}()", n.name), ts::SMALL)
+                    + 4.0
+                    + w(kind, ts::CAPTION)
+                    + 10.0
+                    + 8.0
+                    + 4.0
+                    + w("›", ts::SMALL);
                 // Its kind as a tag, set apart from its name: side by
                 // side in one face, "main main" read as the name twice.
                 row![
@@ -615,19 +627,26 @@ fn reached_from_rows<'a>(
         }
         // Its entry first, the rest wrapping beside it: a line the chain
         // ran on to began flush left, under the entry ("discounts()" alone
-        // at the start of a line), and read as a chain of its own.
+        // at the start of a line), and read as a chain of its own. An entry
+        // that takes most of the line has the rest under it, set in: beside
+        // it, a step wider than the room left was cut at the margin's edge
+        // ("total(").
         let mut steps = steps.into_iter();
+        let rest = |steps: Vec<Element<'a, Message>>| {
+            iced::widget::Row::with_children(steps)
+                .spacing(4)
+                .width(Fill)
+                .wrap()
+                .vertical_spacing(2)
+        };
         let line: Element<'a, Message> = match steps.next() {
-            Some(entry) => row![
+            Some(entry) if entry_w > room * 0.45 => column![
                 entry,
-                iced::widget::Row::with_children(steps.collect::<Vec<_>>())
-                    .spacing(4)
-                    .width(Fill)
-                    .wrap()
-                    .vertical_spacing(2),
+                container(rest(steps.collect())).padding(iced::padding::left(14)),
             ]
-            .spacing(4)
+            .spacing(2)
             .into(),
+            Some(entry) => row![entry, rest(steps.collect())].spacing(4).into(),
             None => space().height(0).into(),
         };
         out.push(container(line).padding([1, 6]).into());
