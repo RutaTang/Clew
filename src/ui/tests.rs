@@ -17378,6 +17378,19 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
     );
     assert!(shows(&mut sim, "Anything else it depends on"));
     assert!(shows(&mut sim, "Suggest inputs"));
+    // L7: an empty parameter with no default says it is made up — the run
+    // started with nothing said of it; one with a default, or given, not.
+    assert!(shows(
+        &mut sim,
+        "Left empty, a typical cart is assumed, and said in the run."
+    ));
+    assert!(!shows(&mut sim, "a typical rules is assumed"));
+    drop(sim);
+    app.proj.fake.sheet.as_mut().unwrap().values[0] = "Cart(items=[])".into();
+    let mut sim = sim_of(&app);
+    assert!(!shows(&mut sim, "a typical cart is assumed"));
+    drop(sim);
+    let sim = sim_of(&app);
     let run = click(sim_of(&app), "Run");
     assert!(
         run.iter()

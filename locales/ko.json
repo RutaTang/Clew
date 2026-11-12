@@ -968,6 +968,7 @@
  "Later": "나중에",
  "Latest calls": "최근 호출",
  "Laying out the graph…": "그래프를 배치하는 중…",
+ "Left empty, a typical {name} is assumed, and said in the run.": "비워 두면 일반적인 {name} 값을 가정하고 실행 중에 알려 줍니다.",
  "Let the language server build this project?": "언어 서버가 이 프로젝트를 빌드하도록 허용할까요?",
  "Let this project configure its language server?": "이 프로젝트가 언어 서버를 구성하도록 허용할까요?",
  "Lets Clew on that computer call your AI provider, so Ask and Explain run there. The keys go over the SSH connection and are kept in memory only, never written to disk.": "그 컴퓨터의 Clew가 AI 제공자를 호출해 질문과 설명을 그곳에서 실행하게 합니다. 키는 SSH 연결로 전송되며 메모리에만 보관되고 디스크에는 기록되지 않습니다.",

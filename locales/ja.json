@@ -968,6 +968,7 @@
  "Later": "後で",
  "Latest calls": "最近の呼び出し",
  "Laying out the graph…": "グラフをレイアウト中…",
+ "Left empty, a typical {name} is assumed, and said in the run.": "空欄のままなら、典型的な {name} を仮定し、実行の中で示します。",
  "Let the language server build this project?": "言語サーバーにこのプロジェクトのビルドを許可しますか？",
  "Let this project configure its language server?": "このプロジェクトによる言語サーバーの設定を許可しますか？",
  "Lets Clew on that computer call your AI provider, so Ask and Explain run there. The keys go over the SSH connection and are kept in memory only, never written to disk.": "そのコンピューター上の Clew が AI プロバイダーを呼び出せるようにし、質問と解説をそこで実行します。キーは SSH 接続で送られ、メモリーにだけ保持され、ディスクには書き込まれません。",

@@ -968,6 +968,7 @@
  "Later": "稍后",
  "Latest calls": "最近的调用",
  "Laying out the graph…": "正在布局图…",
+ "Left empty, a typical {name} is assumed, and said in the run.": "留空时会假定一个典型的 {name}，并在运行中说明。",
  "Let the language server build this project?": "允许语言服务器构建此项目吗？",
  "Let this project configure its language server?": "允许此项目配置它的语言服务器吗？",
  "Lets Clew on that computer call your AI provider, so Ask and Explain run there. The keys go over the SSH connection and are kept in memory only, never written to disk.": "让那台计算机上的 Clew 调用你的 AI 服务商，在那里运行提问和解释。密钥经 SSH 连接传送，只保存在内存中，不会写入磁盘。",

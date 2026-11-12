@@ -100,7 +100,22 @@ pub(crate) fn fake_sheet<'a>(sheet: &'a Sheet) -> Element<'a, Message> {
         if matches!(field, Field::Param { .. }) {
             input = input.font(crate::fonts::CODE);
         }
-        fields.push(column![label, input].spacing(4).into());
+        // A parameter left empty, with no default, is made up: said under
+        // it — the run started with nothing said of an input not given.
+        let assumed: Element<'a, Message> = match field {
+            Field::Param { name, default, .. } if default.is_empty() && value.trim().is_empty() => {
+                text(tr!(
+                    "Left empty, a typical {name} is assumed, and said in the run.",
+                    name = name
+                ))
+                .size(ts::CAPTION)
+                .color(theme::dim())
+                .wrapping(Wrapping::WordOrGlyph)
+                .into()
+            }
+            _ => space().height(0).into(),
+        };
+        fields.push(column![label, input, assumed].spacing(4).into());
     }
     let suggest_label = if sheet.suggesting.is_some() {
         tr!("Suggesting…")

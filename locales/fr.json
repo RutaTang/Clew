@@ -968,6 +968,7 @@
  "Later": "Plus tard",
  "Latest calls": "Derniers appels",
  "Laying out the graph…": "Disposition du graphe…",
+ "Left empty, a typical {name} is assumed, and said in the run.": "Laissé vide, une valeur typique de {name} est supposée, et indiquée dans l’exécution.",
  "Let the language server build this project?": "Autoriser le serveur de langage à compiler ce projet ?",
  "Let this project configure its language server?": "Autoriser ce projet à configurer son serveur de langage ?",
  "Lets Clew on that computer call your AI provider, so Ask and Explain run there. The keys go over the SSH connection and are kept in memory only, never written to disk.": "Permet à Clew, sur cet ordinateur, d’appeler votre fournisseur d’IA, pour que les questions et les explications s’y fassent. Les clés passent par la connexion SSH et restent en mémoire, sans jamais être écrites sur le disque.",
