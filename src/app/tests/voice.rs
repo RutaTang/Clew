@@ -3004,7 +3004,8 @@ fn one_window_waits_at_a_time() {
 /// A phrase the spotter hears but listening would not — said softer than
 /// listening hears speech, the spotter bringing it up — does not start
 /// listening: what was said next would not be heard either. Waiting goes
-/// on, afresh; said as loud as listening hears, it is called.
+/// on, afresh; said as loud as listening hears, it is called — told of
+/// late, too.
 #[test]
 fn a_call_too_soft_to_listen_to_is_no_call() {
     let (_turn, mut app, script, _, spots) = wake_app("wake-soft", "open settings", 2);
@@ -3017,10 +3018,22 @@ fn a_call_too_soft_to_listen_to_is_no_call() {
     assert!(!app.voice.mic_on);
     assert!(!wait_step(&mut app));
     assert_eq!(*spots.resets.lock().unwrap(), resets + 1, "afresh");
+    // Said as loud as listening hears, and told of a step late — the
+    // spotter behind, what came after the phrase soft — it is called: the
+    // phrase is among what was heard last, two seconds back.
     script.lock().unwrap().soft = false;
-    *spots.call.lock().unwrap() = spots.pieces.lock().unwrap().len() + 1;
+    *spots.call.lock().unwrap() = spots.pieces.lock().unwrap().len() + 2;
+    assert!(!wait_step(&mut app), "heard, not yet told");
+    script.lock().unwrap().soft = true;
     assert!(wait_step(&mut app));
     assert!(app.voice.mic_on && app.voice.is_listening());
+    // What is kept to be worked out with what is said next is no more
+    // than was said in one breath with the phrase.
+    let lead = app.voice.wake.lead.as_ref().map(|l| l.samples.len());
+    assert_eq!(
+        lead,
+        Some((16_000.0 * crate::app::wake::LEAD_SECONDS) as usize)
+    );
 }
 
 /// A waiting that fails — the microphone, or the spotter not loading —

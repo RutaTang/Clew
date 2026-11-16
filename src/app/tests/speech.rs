@@ -799,10 +799,11 @@ fn what_cannot_be_said_says_why() {
 }
 
 /// A voice missing is said of the answer it kept from being heard, while
-/// that answer is the last: not over a typed one Clew does not read, nor in
-/// a new session, nor of one stopped before a word was said. Asked again,
-/// it stays — not taken away and put back under the reader's eyes — until
-/// the new answer's first sentence says whether it is kept too.
+/// that answer is the last and one read aloud: not of the next until it
+/// too is not heard — it may be — nor over a typed one Clew does not read,
+/// nor once typed ones are no longer read, nor in a new session, nor of one
+/// stopped before a word was said, nor on the status line as though no
+/// answer were heard.
 #[test]
 fn a_voice_missing_is_said_of_its_answer() {
     let (mut app, _voice, _) = speech_app("speech-missing-of-answer");
@@ -816,12 +817,16 @@ fn a_voice_missing_is_said_of_its_answer() {
     asked(&mut app, 1, true);
     delta(&mut app, 1, "总数是所有价格的和。然后");
     assert_eq!(shown(&app), Some(1));
-    // Asked again by voice: still said while the answer begins …
+    assert_eq!(
+        app.status, "Qwen3-TTS is needed to read this answer aloud",
+        "not that no answer is heard: English ones are"
+    );
+    // Asked again by voice: not said of the new answer, which may be heard …
     ended(&mut app, 1, StreamOutcome::Done);
     asked(&mut app, 2, true);
     delta(&mut app, 2, "总数");
-    assert_eq!(shown(&app), Some(1), "not taken away");
-    // … and of it once its first sentence is no more heard.
+    assert_eq!(shown(&app), None, "not said of an answer not yet heard");
+    // … and said of it once its first sentence is not.
     delta(&mut app, 2, "是所有价格的和。然后");
     assert_eq!(shown(&app), Some(2));
     // A typed question's answer, not read aloud: nothing said over it.
@@ -843,6 +848,13 @@ fn a_voice_missing_is_said_of_its_answer() {
     assert_eq!(shown(&app), Some(6));
     let _ = app.update(Message::Ask(AskMsg::NewSession));
     assert_eq!(shown(&app), None, "a new session");
+    // Every answer read: a typed one's said of; no longer, and it is not.
+    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Always)));
+    asked(&mut app, 7, false);
+    delta(&mut app, 7, "总数是所有价格的和。然后");
+    assert_eq!(shown(&app), Some(7));
+    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Spoken)));
+    assert_eq!(shown(&app), None, "typed answers no longer read");
 }
 
 /// The Ask card speaks of answers only: Settings' Try failing is said on

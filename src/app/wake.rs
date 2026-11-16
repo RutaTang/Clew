@@ -32,6 +32,11 @@ use crate::*;
 /// said in one breath with it: the phrase itself, and the moment the
 /// spotter takes to be sure of it.
 pub(crate) const LEAD_SECONDS: f32 = 2.0;
+/// How far back a phrase heard is looked for as speech listening hears
+/// ([`Wait::heard_as_speech`]): more than [`LEAD_SECONDS`] — the spotter
+/// may say it heard the phrase as late as the pieces queued for it, more
+/// than a second on a busy computer, and the phrase must still be in it.
+const HEARD_SECONDS: f32 = 4.0;
 /// Listening this long with nothing said, Clew quiet and nothing on its
 /// way, it waits for its name again.
 pub(crate) const IDLE: Duration = Duration::from_secs(180);
@@ -106,7 +111,7 @@ impl Drop for WaitClaim {
 pub(crate) struct Hearing {
     mic: Option<Box<dyn Listening>>,
     feed: Feed,
-    /// The last [`LEAD_SECONDS`] heard, at the microphone's rate.
+    /// The last [`HEARD_SECONDS`] heard, at the microphone's rate.
     recent: VecDeque<f32>,
     rate: u32,
     /// The phrase heard, or the waiting failed, and the window told:
@@ -191,7 +196,7 @@ impl Wait {
                 hearing.rate = heard.rate;
             }
             hearing.recent.extend(&heard.samples);
-            let keep = (heard.rate as f32 * LEAD_SECONDS) as usize;
+            let keep = (heard.rate as f32 * HEARD_SECONDS) as usize;
             let over = hearing.recent.len().saturating_sub(keep);
             hearing.recent.drain(..over);
             (
@@ -256,7 +261,7 @@ impl Wait {
         step
     }
 
-    /// Whether what was heard last ([`LEAD_SECONDS`], the phrase among it)
+    /// Whether what was heard last ([`HEARD_SECONDS`], the phrase among it)
     /// holds speech as listening hears it.
     fn heard_as_speech(&self) -> bool {
         let (samples, rate) = {
@@ -330,8 +335,16 @@ impl Waiting {
     fn into_mic(self) -> Option<(Box<dyn Listening>, Recording)> {
         let mut hearing = self.wait.hearing();
         let mic = hearing.mic.take()?;
+        // The last [`LEAD_SECONDS`] of it: what was said in one breath
+        // with the phrase, not what was said before it.
+        let recent = std::mem::take(&mut hearing.recent);
+        let lead = (hearing.rate as f32 * LEAD_SECONDS) as usize;
         let lead = Recording {
-            samples: std::mem::take(&mut hearing.recent).into(),
+            samples: recent
+                .iter()
+                .skip(recent.len().saturating_sub(lead))
+                .copied()
+                .collect(),
             rate: hearing.rate,
         };
         Some((mic, lead))
