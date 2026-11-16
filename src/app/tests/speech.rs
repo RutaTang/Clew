@@ -753,18 +753,25 @@ fn what_cannot_be_said_says_why() {
     assert!(voice.texts().is_empty());
     assert!(app.status.contains("Qwen3-TTS"), "{}", app.status);
     assert!(!app.voice.speech.is_speaking());
-    let missing = Some(Blocked::Missing {
-        model: "qwen3-tts",
-        lang: "en",
-    });
-    assert_eq!(app.voice.speech.blocked, missing);
+    let missing = |stream| {
+        Some(Blocked::Missing {
+            model: "qwen3-tts",
+            lang: "en",
+            stream,
+        })
+    };
+    assert_eq!(app.voice.speech.blocked, missing(1));
     // Reading aloud turned off: nothing is said to be missing.
     let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Never)));
     assert_eq!(app.voice.speech.blocked, None);
     let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Spoken)));
     asked(&mut app, 2, true);
     delta(&mut app, 2, "This is. Second");
-    assert_eq!(app.voice.speech.blocked, missing, "said again of this one");
+    assert_eq!(
+        app.voice.speech.blocked,
+        missing(2),
+        "said again of this one"
+    );
     // Put away, it is not said again in this window: a reader who does not
     // want the voice is not asked at every answer.
     let _ = app.update(Message::Voice(VoiceMsg::DismissBlocked));
@@ -780,7 +787,7 @@ fn what_cannot_be_said_says_why() {
     }));
     asked(&mut app, 4, true);
     delta(&mut app, 4, "This is. Second");
-    assert_eq!(app.voice.speech.blocked, missing);
+    assert_eq!(app.voice.speech.blocked, missing(4));
     // Another voice that reads English downloaded instead — the smaller
     // one: nothing keeps English answers from being heard.
     let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("supertonic-3")));
@@ -789,6 +796,53 @@ fn what_cannot_be_said_says_why() {
         result: Ok(()),
     }));
     assert_eq!(app.voice.speech.blocked, None);
+}
+
+/// A voice missing is said of the answer it kept from being heard, while
+/// that answer is the last: not over a typed one Clew does not read, nor in
+/// a new session, nor of one stopped before a word was said. Asked again,
+/// it stays — not taken away and put back under the reader's eyes — until
+/// the new answer's first sentence says whether it is kept too.
+#[test]
+fn a_voice_missing_is_said_of_its_answer() {
+    let (mut app, _voice, _) = speech_app("speech-missing-of-answer");
+    let store = app.voice.store.clone().unwrap();
+    speech::remove(&store, speech::find("qwen3-tts").unwrap()).unwrap();
+    install(&app, speech::find("supertonic-3").unwrap());
+    let shown = |app: &App| match app.blocked_now() {
+        Some((Blocked::Missing { stream, .. }, true)) => Some(*stream),
+        _ => None,
+    };
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "总数是所有价格的和。然后");
+    assert_eq!(shown(&app), Some(1));
+    // Asked again by voice: still said while the answer begins …
+    ended(&mut app, 1, StreamOutcome::Done);
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "总数");
+    assert_eq!(shown(&app), Some(1), "not taken away");
+    // … and of it once its first sentence is no more heard.
+    delta(&mut app, 2, "是所有价格的和。然后");
+    assert_eq!(shown(&app), Some(2));
+    // A typed question's answer, not read aloud: nothing said over it.
+    ended(&mut app, 2, StreamOutcome::Done);
+    asked(&mut app, 3, false);
+    delta(&mut app, 3, "The total adds every price. Then");
+    assert_eq!(shown(&app), None);
+    // Nor once the answer it was said of is stopped before a word.
+    asked(&mut app, 4, true);
+    delta(&mut app, 4, "总数是所有价格的和。然后");
+    assert_eq!(shown(&app), Some(4));
+    asked(&mut app, 5, true);
+    delta(&mut app, 5, "总数");
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    assert_eq!(shown(&app), None, "stopped");
+    // Nor in a new session.
+    asked(&mut app, 6, true);
+    delta(&mut app, 6, "总数是所有价格的和。然后");
+    assert_eq!(shown(&app), Some(6));
+    let _ = app.update(Message::Ask(AskMsg::NewSession));
+    assert_eq!(shown(&app), None, "a new session");
 }
 
 /// The Ask card speaks of answers only: Settings' Try failing is said on
@@ -807,6 +861,14 @@ fn the_ask_card_speaks_only_of_answers() {
     *voice.fail.lock().unwrap() = Some(ended());
     asked(&mut app, 1, true);
     delta(&mut app, 1, "This is. Second");
+    assert!(
+        matches!(app.voice.speech.blocked, Some(Blocked::Failed(_))),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    // Try heard — perhaps another voice — does not say the answer's works.
+    let task = app.update(Message::Voice(VoiceMsg::TrySpeech("qwen3-tts")));
+    settle(&mut app, task);
     assert!(
         matches!(app.voice.speech.blocked, Some(Blocked::Failed(_))),
         "{:?}",
@@ -836,7 +898,12 @@ fn an_answer_heard_while_its_voice_downloads_says_so() {
         Some(Blocked::Missing {
             model: "qwen3-tts",
             lang: "en",
+            stream: 1,
         })
+    );
+    assert!(
+        app.blocked_now().is_some(),
+        "said, with how far it has come"
     );
     let _ = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
         id: "qwen3-tts",
@@ -878,6 +945,7 @@ fn the_best_voice_here_reads_each_sentence() {
         Some(Blocked::Missing {
             model: "qwen3-tts",
             lang: "zh",
+            stream: 2,
         })
     );
     // An answer in English after it is heard, and what kept the Chinese one

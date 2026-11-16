@@ -49,7 +49,7 @@ pub(crate) const SPEECH_MODELS: &[&str] = &[
     tr_noop!("Native to each language"),
     tr_noop!("Supertonic 3"),
     tr_noop!(
-        "A smaller download for 31 languages, including English, French, Korean, Japanese, Dutch and Arabic, but not Chinese. If Qwen3-TTS is downloaded too, it reads the languages they share."
+        "A smaller download for 31 languages, including English, French, Korean, Japanese, Dutch and Arabic, but not Chinese. Qwen3-TTS, if downloaded too, reads the languages they share."
     ),
     // The wake phrase's model (`wake::MODEL`).
     tr_noop!("Keyword Spotter"),

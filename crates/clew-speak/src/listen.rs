@@ -106,7 +106,10 @@ impl Level {
     /// as though it had just been heard.
     fn apply_at(&mut self, samples: &[f32], now: Instant) -> Vec<f32> {
         if let Some(at) = self.heard_at.replace(now) {
-            let unheard = now.saturating_duration_since(at);
+            // Less what this piece holds: one late, and longer for it, was
+            // heard over that time.
+            let held = Duration::from_secs_f32(samples.len() as f32 / RATE as f32);
+            let unheard = now.saturating_duration_since(at).saturating_sub(held);
             if unheard > Self::UNHEARD {
                 self.rest(unheard.as_secs_f32());
             }

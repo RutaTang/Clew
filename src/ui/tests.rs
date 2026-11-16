@@ -1610,13 +1610,21 @@ fn the_ask_card_says_what_keeps_answers_from_being_heard() {
     let store = clew_voice::models::Store::new(dir);
     app.voice.store = Some(store.clone());
     let qwen = speech::find("qwen3-tts").unwrap();
+    // Said of the last answer.
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 1,
+        question: "what does total do?".into(),
+        spoken: true,
+        ..Default::default()
+    });
     let missing = |lang| Blocked::Missing {
         model: "qwen3-tts",
         lang,
+        stream: 1,
     };
     // No voice here: no answer is heard.
     app.voice.speech.blocked = Some(missing("en"));
-    let needed = "Qwen3-TTS is needed to read answers aloud";
+    let needed = "To hear answers read aloud, download Qwen3-TTS";
     assert!(shows(&mut sim_of(&app), needed));
     let download = format!("Download ({} MB)", qwen.size_mb());
     let sent = click(sim_of(&app), &download);
@@ -1633,6 +1641,23 @@ fn the_ask_card_says_what_keeps_answers_from_being_heard() {
         |m| matches!(m, Message::Voice(crate::VoiceMsg::DismissBlocked)),
     );
     assert!(!sent.is_empty(), "its ✕ puts it away");
+    // Downloading: how far it has come, and Cancel, where Download was.
+    let _ = app.update(Message::Voice(crate::VoiceMsg::DownloadSpeech("qwen3-tts")));
+    assert!(shows(&mut sim_of(&app), "0%"));
+    assert!(!shows(&mut sim_of(&app), &download));
+    let sent = click(sim_of(&app), "Cancel");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Voice(crate::VoiceMsg::CancelSpeechDownload(
+                "qwen3-tts"
+            ))]
+        ),
+        "{sent:?}"
+    );
+    let _ = app.update(Message::Voice(crate::VoiceMsg::CancelSpeechDownload(
+        "qwen3-tts",
+    )));
     // Its download failed: why, under it.
     app.voice
         .speech

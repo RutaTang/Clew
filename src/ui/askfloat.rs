@@ -1282,6 +1282,7 @@ fn heard_line(app: &App) -> Option<Element<'_, Message>> {
 fn blocked_line(app: &App) -> Option<Element<'_, Message>> {
     use crate::app::speech::Blocked;
     use clew_voice::speech;
+    let (blocked, voice_here) = app.blocked_now()?;
     let said = |line: String, color| {
         text(line)
             .size(ts::SMALL)
@@ -1297,34 +1298,20 @@ fn blocked_line(app: &App) -> Option<Element<'_, Message>> {
             Message::Voice(VoiceMsg::DismissBlocked),
         ));
     let dismiss = tip_at(dismiss, tr!("Dismiss"), None, tooltip::Position::Top);
-    match app.voice.speech.blocked.as_ref()? {
-        Blocked::Missing { model, lang } => {
+    match blocked {
+        Blocked::Missing { model, .. } => {
             let model = speech::find(model)?;
-            // A voice here reads it now — downloaded meanwhile, here or in
-            // another window: nothing keeps it from being heard.
-            if speech::for_language_among(lang, |m| app.speech_installed(m)).is_some() {
-                return None;
-            }
-            // Being got in another window, or let go of: no Download here —
-            // it would only say so.
-            let getting_here = app.voice.speech.downloads.get(model.id);
-            if getting_here.is_none()
-                && app
-                    .voice
-                    .store
-                    .as_ref()
-                    .is_some_and(|store| crate::app::voice::downloading(&speech::dir(store, model)))
-            {
-                return None;
-            }
             let name = crate::i18n::lookup(model.name);
-            // With no voice here, no answer is heard; with one, this answer
-            // — or the part of it in a language that voice does not speak.
-            let line = if speech::VOICE_MODELS.iter().any(|m| app.speech_installed(m)) {
+            // With a voice here, this answer — or the part of it in a
+            // language that voice does not speak — needs this one. With
+            // none, any voice that speaks the language would do: this one
+            // is the best of them.
+            let line = if voice_here {
                 tr!("{model} is needed to read this answer aloud", model = name)
             } else {
-                tr!("{model} is needed to read answers aloud", model = name)
+                tr!("To hear answers read aloud, download {model}", model = name)
             };
+            let getting_here = app.voice.speech.downloads.get(model.id);
             let getting: Element<'_, Message> = match getting_here {
                 Some(d) => super::voice::getting(
                     d.done,

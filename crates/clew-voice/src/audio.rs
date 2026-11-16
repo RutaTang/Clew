@@ -380,6 +380,21 @@ mod tests {
             .collect()
     }
 
+    /// Speech is told by listening's own measure at the microphone's rate:
+    /// a voice at about −23 dBFS heard at 48 kHz is speech; at −63 dBFS,
+    /// under what listening hears, it is not.
+    #[test]
+    fn speech_is_held_at_any_rate() {
+        let rate = 48_000;
+        let said = |amp: f32| {
+            let mut heard = vec![0.0; rate as usize];
+            heard.extend(tone(180.0, rate, 1.0, amp));
+            heard
+        };
+        assert!(holds_speech(&said(0.1), rate));
+        assert!(!holds_speech(&said(0.001), rate));
+    }
+
     /// The amplitude of `freq` in `x` (sampled at `rate`), by correlation
     /// with a sine and a cosine over whole samples (Goertzel's measure).
     fn amplitude_at(x: &[f32], freq: f32, rate: u32) -> f32 {

@@ -307,8 +307,8 @@ pub const VOICE_MODELS: &[VoiceModel] = &[
         voices: SUPERTONIC_VOICES,
         default_voice: 0,
         about: "A smaller download for 31 languages, including English, French, Korean, \
-                Japanese, Dutch and Arabic, but not Chinese. If Qwen3-TTS is downloaded too, it \
-                reads the languages they share.",
+                Japanese, Dutch and Arabic, but not Chinese. Qwen3-TTS, if downloaded too, reads \
+                the languages they share.",
         license: "OpenRAIL-M",
     },
 ];

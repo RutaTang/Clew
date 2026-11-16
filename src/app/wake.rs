@@ -225,7 +225,7 @@ impl Wait {
             }
             Ok(Some(true)) => Step::Called,
             Ok(Some(false)) => Step::Nothing,
-            // Not loaded — the first step, or `clew-speak` gone since: it
+            // Not loaded — the first step, or the one after it failed: it
             // loads now, and hears from the next piece. Not for a waiting
             // over meanwhile, nor a model being removed (in any window).
             Ok(None) if !self.waits() => Step::Nothing,
@@ -501,10 +501,7 @@ impl App {
     pub(crate) fn adopt_voice_prefs(&mut self, prefs: crate::app::voice::VoicePrefs) {
         let reopen = prefs.talk_over != self.voice.prefs.talk_over;
         self.voice.prefs = prefs;
-        // No answer read aloud: nothing keeps one from being heard.
-        if self.voice.prefs.read_aloud == crate::app::voice::ReadAloud::Never {
-            self.voice.speech.blocked = None;
-        }
+        self.voice.speech.answers_read(self.voice.prefs.read_aloud);
         let waiting = self.voice.wake.is_waiting();
         if !self.voice.prefs.wake || reopen {
             self.stop_waiting();
@@ -558,7 +555,10 @@ impl App {
             return Task::none();
         }
         self.stop_waiting();
-        self.status = tr!("Stopped waiting for “Hey, Clew”: {error}", error = error);
+        self.status = tr!(
+            "Stopped waiting for “Hey, Clew”: {error}",
+            error = crate::i18n::message(&error)
+        );
         self.voice.wake.error = Some(error);
         self.voice.wake.failed = true;
         Task::none()

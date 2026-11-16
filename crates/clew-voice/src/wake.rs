@@ -439,12 +439,13 @@ impl Spotter {
     /// `line` queued for its stdin, never waited on: a spotter that has not
     /// taken what came before has fallen behind.
     fn send(&self, line: String) -> Result<(), String> {
-        self.lines.try_send(line).map_err(|e| match e {
-            mpsc::TrySendError::Full(_) => "the keyword spotter fell behind".to_string(),
-            mpsc::TrySendError::Disconnected(_) => {
-                "the keyword spotter stopped taking audio".to_string()
+        match self.lines.try_send(line) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => Err("the keyword spotter fell behind".into()),
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                Err("the keyword spotter stopped taking audio".into())
             }
-        })
+        }
     }
 }
 
