@@ -3029,11 +3029,15 @@ fn a_call_too_soft_to_listen_to_is_no_call() {
     assert!(app.voice.mic_on && app.voice.is_listening());
     // What is kept to be worked out with what is said next is no more
     // than was said in one breath with the phrase.
-    let lead = app.voice.wake.lead.as_ref().map(|l| l.samples.len());
+    let lead = app.voice.wake.lead.as_ref().expect("the lead");
     assert_eq!(
-        lead,
-        Some((16_000.0 * crate::app::wake::LEAD_SECONDS) as usize)
+        lead.samples.len(),
+        (16_000.0 * crate::app::wake::LEAD_SECONDS) as usize
     );
+    // The newest of it: what came after the phrase, said softly — not the
+    // phrase said aloud two seconds before.
+    let loudest = lead.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(loudest < 0.01, "{loudest}");
 }
 
 /// A waiting that fails — the microphone, or the spotter not loading —

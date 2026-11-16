@@ -801,9 +801,9 @@ fn what_cannot_be_said_says_why() {
 /// A voice missing is said of the answer it kept from being heard, while
 /// that answer is the last and one read aloud: not of the next until it
 /// too is not heard — it may be — nor over a typed one Clew does not read,
-/// nor once typed ones are no longer read, nor in a new session, nor of one
-/// stopped before a word was said, nor on the status line as though no
-/// answer were heard.
+/// nor once typed ones are no longer read, nor in a new session, nor on the
+/// status line as though no answer were heard. Stopped, that answer was
+/// still not heard: it is still said.
 #[test]
 fn a_voice_missing_is_said_of_its_answer() {
     let (mut app, _voice, _) = speech_app("speech-missing-of-answer");
@@ -834,15 +834,13 @@ fn a_voice_missing_is_said_of_its_answer() {
     asked(&mut app, 3, false);
     delta(&mut app, 3, "The total adds every price. Then");
     assert_eq!(shown(&app), None);
-    // Nor once the answer it was said of is stopped before a word.
+    // Stopped, the answer it is said of was still not heard.
     asked(&mut app, 4, true);
     delta(&mut app, 4, "总数是所有价格的和。然后");
     assert_eq!(shown(&app), Some(4));
-    asked(&mut app, 5, true);
-    delta(&mut app, 5, "总数");
     let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
-    assert_eq!(shown(&app), None, "stopped");
-    // Nor in a new session.
+    assert_eq!(shown(&app), Some(4), "still so, stopped");
+    // Not in a new session.
     asked(&mut app, 6, true);
     delta(&mut app, 6, "总数是所有价格的和。然后");
     assert_eq!(shown(&app), Some(6));

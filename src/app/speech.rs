@@ -285,7 +285,7 @@ impl std::fmt::Debug for Audio {
 pub(crate) enum Blocked {
     /// No voice here speaks `lang`, which the answer on `stream` is in, or
     /// part of it: `model` would read it. Said while that answer is the
-    /// last ([`App::blocked_now`]).
+    /// last, and one read aloud ([`App::blocked_now`]).
     Missing {
         model: &'static str,
         lang: &'static str,
@@ -986,7 +986,7 @@ impl App {
                         let name = crate::i18n::lookup(wanted.name);
                         // With a voice here, answers are heard but for this
                         // language: said of this answer, as the card says it.
-                        let voice_here = speech::VOICE_MODELS.iter().any(|m| here(m));
+                        let voice_here = speech::VOICE_MODELS.iter().any(&here);
                         self.status = if voice_here {
                             tr!("{model} is needed to read this answer aloud", model = name)
                         } else {
