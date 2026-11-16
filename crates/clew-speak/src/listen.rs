@@ -36,11 +36,88 @@ pub const TOKENS: &str = "tokens.txt";
 /// The rate it hears at.
 pub const RATE: i32 = 16_000;
 
-/// The spotter, and the stream of what it has heard.
+/// The spotter, and the streams of what it has heard.
+///
+/// The model hears a phrase less well at some places in its stream than at
+/// others: said in a stretch of about 0.4 s that comes round every 1.6 s
+/// or so, "Hey, Clew" was heard half the time or less, and elsewhere
+/// nineteen times in twenty — so whether it was heard came down to when it
+/// was said. What is heard goes to two streams, the second
+/// [`STAGGER_SECONDS`] further on in its own time, so that the phrase is
+/// never in such a stretch in both; it is heard when either hears it.
 pub struct Spotter {
     spotter: sherpa_onnx::KeywordSpotter,
-    stream: sherpa_onnx::OnlineStream,
+    streams: [sherpa_onnx::OnlineStream; 2],
+    /// What is heard, brought up to the level the model knows speech at.
+    level: Level,
 }
+
+/// What the microphone hears, brought up to the level speech is said at
+/// close by: the model hears "Hey, Clew" said softly, or across the room,
+/// far less often than said aloud — at −53 dBFS one time in six in a
+/// quiet room, and with a little noise one in three — and as often as
+/// aloud once it is brought up. The gain follows the loudest of what was
+/// said lately: down at once, for what is loud; up slowly, a few dB a
+/// second, so that the pauses between words are not raised with it; never
+/// below 1 nor above [`Level::MAX_GAIN`].
+#[derive(Debug, Clone)]
+pub struct Level {
+    /// The loudest 10 ms heard lately, as RMS: what fell back since.
+    peak: f32,
+    gain: f32,
+}
+
+impl Level {
+    /// The level the loudest 10 ms of speech is brought to, as RMS: about
+    /// −20 dBFS.
+    const TARGET: f32 = 0.1;
+    /// The most it is brought up by: +24 dB.
+    const MAX_GAIN: f32 = 16.0;
+    /// How long the loudest of what was heard takes to fall back by half.
+    const HALF_LIFE_SECONDS: f32 = 4.0;
+    /// How fast the gain rises, in dB a second.
+    const RISE_DB: f32 = 6.0;
+    /// The length it is measured in: 10 ms at [`RATE`].
+    const FRAME: usize = RATE as usize / 100;
+
+    pub fn new() -> Level {
+        Level {
+            peak: Self::TARGET / Self::MAX_GAIN,
+            gain: 1.0,
+        }
+    }
+
+    /// `samples` (at [`RATE`]), brought up: 10 ms at a time.
+    pub fn apply(&mut self, samples: &[f32]) -> Vec<f32> {
+        let frame_seconds = Self::FRAME as f32 / RATE as f32;
+        let fall = 0.5f32.powf(frame_seconds / Self::HALF_LIFE_SECONDS);
+        let rise = 10f32.powf(Self::RISE_DB * frame_seconds / 20.0);
+        let mut out = Vec::with_capacity(samples.len());
+        for frame in samples.chunks(Self::FRAME) {
+            let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+            self.peak = rms.max(self.peak * fall);
+            let wanted =
+                (Self::TARGET / self.peak.max(f32::MIN_POSITIVE)).clamp(1.0, Self::MAX_GAIN);
+            self.gain = if wanted < self.gain {
+                wanted
+            } else {
+                wanted.min(self.gain * rise)
+            };
+            out.extend(frame.iter().map(|s| (s * self.gain).clamp(-1.0, 1.0)));
+        }
+        out
+    }
+}
+
+impl Default for Level {
+    fn default() -> Self {
+        Level::new()
+    }
+}
+
+/// How much further on the second stream is than the first: half the
+/// distance between the stretches where the phrase is heard less well.
+pub const STAGGER_SECONDS: f32 = 0.8;
 
 impl Spotter {
     /// Load the model in `dir`, to listen for `keywords` (one per line, as
@@ -71,32 +148,51 @@ impl Spotter {
         let spotter = KeywordSpotter::create(&config).ok_or_else(|| {
             "the model could not be loaded, or a phrase is not in its sounds".to_string()
         })?;
-        let stream = spotter.create_stream();
-        Ok(Spotter { spotter, stream })
+        let streams = streams(&spotter);
+        Ok(Spotter {
+            spotter,
+            streams,
+            level: Level::new(),
+        })
     }
 
     /// Hear `samples` (16 kHz) after what was heard before: the name of the
-    /// phrase they end, if one was said.
+    /// phrase they end, if one was said. Heard, both streams begin afresh:
+    /// the other, which may hear it a moment later, does not say it again.
     pub fn hear(&mut self, samples: &[f32]) -> Option<String> {
-        self.stream.accept_waveform(RATE, samples);
+        let samples = self.level.apply(samples);
         let mut heard = None;
-        while self.spotter.is_ready(&self.stream) {
-            self.spotter.decode(&self.stream);
-            if let Some(result) = self.spotter.get_result(&self.stream)
-                && !result.keyword.is_empty()
-            {
-                heard = Some(result.keyword);
-                // Heard once: what comes next is listened to afresh.
-                self.spotter.reset(&self.stream);
+        for stream in &self.streams {
+            stream.accept_waveform(RATE, &samples);
+            while self.spotter.is_ready(stream) {
+                self.spotter.decode(stream);
+                if let Some(result) = self.spotter.get_result(stream)
+                    && !result.keyword.is_empty()
+                {
+                    heard.get_or_insert(result.keyword);
+                    self.spotter.reset(stream);
+                }
             }
+        }
+        if heard.is_some() {
+            self.reset();
         }
         heard
     }
 
-    /// Let go of what was heard so far.
+    /// Let go of what was heard so far — not of how loud the room is.
     pub fn reset(&mut self) {
-        self.stream = self.spotter.create_stream();
+        self.streams = streams(&self.spotter);
     }
+}
+
+/// Two fresh streams, the second [`STAGGER_SECONDS`] further on: it has
+/// heard that much silence before what both hear next.
+fn streams(spotter: &sherpa_onnx::KeywordSpotter) -> [sherpa_onnx::OnlineStream; 2] {
+    let first = spotter.create_stream();
+    let second = spotter.create_stream();
+    second.accept_waveform(RATE, &vec![0.0; (RATE as f32 * STAGGER_SECONDS) as usize]);
+    [first, second]
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,4 +274,75 @@ fn send(out: &mut impl Write, answer: &Answer) -> std::io::Result<()> {
     let line = serde_json::to_string(answer).map_err(std::io::Error::other)?;
     writeln!(out, "{line}")?;
     out.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rms(samples: &[f32]) -> f32 {
+        (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    /// A voice-like tone, `seconds` long, as loud as `amp`.
+    fn voice(seconds: f32, amp: f32) -> Vec<f32> {
+        (0..(RATE as f32 * seconds) as usize)
+            .map(|i| amp * (i as f32 * 220.0 * std::f32::consts::TAU / RATE as f32).sin())
+            .collect()
+    }
+
+    /// Speech said softly is brought up, a few dB a second, to the level
+    /// speech is said at close by — no further.
+    #[test]
+    fn soft_speech_is_brought_up_slowly() {
+        let mut level = Level::new();
+        // −53 dBFS: after a second, raised some; after six, as far as it goes.
+        let soft = voice(1.0, 0.0032);
+        let first = level.apply(&soft);
+        let gain = rms(&first[first.len() - 160..]) / rms(&soft[soft.len() - 160..]);
+        assert!((1.5..2.5).contains(&gain), "{gain}");
+        for _ in 0..5 {
+            level.apply(&soft);
+        }
+        let later = level.apply(&soft);
+        let gain = rms(&later) / rms(&soft);
+        assert!(
+            (Level::MAX_GAIN - 0.5..=Level::MAX_GAIN).contains(&gain),
+            "{gain}"
+        );
+    }
+
+    /// Loud speech after soft is taken down at once — not a frame let
+    /// through raised — and never below how it was said.
+    #[test]
+    fn loud_speech_is_taken_down_at_once_and_never_below_itself() {
+        let mut level = Level::new();
+        for _ in 0..6 {
+            level.apply(&voice(1.0, 0.0032));
+        }
+        let loud = voice(0.5, 0.5);
+        let out = level.apply(&loud);
+        let worst = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(worst <= 0.5 + 1e-6, "{worst}");
+        assert!((rms(&out) - rms(&loud)).abs() < 1e-4, "as it was said");
+    }
+
+    /// Between words, what is heard is not raised past where the words
+    /// were: the gain follows the loudest of what was said lately.
+    #[test]
+    fn a_pause_is_not_raised_with_the_words() {
+        let mut level = Level::new();
+        let mut said = voice(1.0, 0.02);
+        said.extend(vec![0.0005; RATE as usize]);
+        for _ in 0..6 {
+            level.apply(&said);
+        }
+        let out = level.apply(&said);
+        let second = RATE as usize;
+        let words = rms(&out[..second]) / rms(&said[..second]);
+        let pause = rms(&out[second..]) / rms(&said[second..]);
+        // Up a little as the words are left behind, not to the most it goes.
+        assert!(pause < words * 1.3, "pause {pause}, words {words}");
+        assert!(pause < Level::MAX_GAIN * 0.6, "{pause}");
+    }
 }

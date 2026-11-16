@@ -566,12 +566,25 @@ impl Spotters {
 }
 
 /// What the microphone hears, made into pieces for the spotter: at its
-/// [`RATE`], each [`FEED_SECONDS`] long — a piece resampled whole, not a
-/// tick's worth at a time, so its edges are few.
-#[derive(Debug, Default)]
+/// [`RATE`], each [`FEED_SECONDS`] long — resampled as one stream, so the
+/// pieces join as if they were never cut: each piece resampled on its own
+/// was faded at both ends, a dip in what the spotter heard five times a
+/// second.
+#[derive(Default)]
 pub struct Feed {
+    /// What is made at the spotter's rate, not yet handed over.
     pending: Vec<f32>,
     rate: u32,
+    resampler: Option<crate::audio::Resampler>,
+}
+
+impl std::fmt::Debug for Feed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Feed")
+            .field("pending", &self.pending.len())
+            .field("rate", &self.rate)
+            .finish()
+    }
 }
 
 /// How long each piece handed to the spotter is.
@@ -579,19 +592,24 @@ pub const FEED_SECONDS: f32 = 0.2;
 
 impl Feed {
     /// `samples`, heard at `rate`, after what came before: a piece for the
-    /// spotter once there is one.
+    /// spotter once there is one. Another rate — another microphone —
+    /// starts afresh.
     pub fn push(&mut self, samples: &[f32], rate: u32) -> Option<Vec<f32>> {
-        if rate != self.rate {
+        if rate != self.rate || self.resampler.is_none() {
             self.pending.clear();
             self.rate = rate;
+            self.resampler = Some(crate::audio::Resampler::new(rate, RATE));
         }
-        self.pending.extend_from_slice(samples);
-        let piece = (rate as f32 * FEED_SECONDS) as usize;
-        if rate == 0 || self.pending.len() < piece.max(1) {
+        if rate == 0 {
             return None;
         }
-        let heard = std::mem::take(&mut self.pending);
-        Some(crate::audio::resample(&heard, rate, RATE))
+        let resampler = self.resampler.as_mut()?;
+        self.pending.extend(resampler.push(samples));
+        let piece = (RATE as f32 * FEED_SECONDS) as usize;
+        if self.pending.len() < piece {
+            return None;
+        }
+        Some(std::mem::take(&mut self.pending))
     }
 }
 
@@ -821,9 +839,10 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(feed.push(&[0.1; 2_880], 48_000), None);
         }
-        // A fourth: 240 ms, made into 16 kHz.
+        // A fourth: 240 ms, made into 16 kHz — less the few samples the
+        // resampler's filter still waits for.
         let piece = feed.push(&[0.1; 2_880], 48_000).expect("a piece");
-        assert_eq!(piece.len(), 3_840);
+        assert!((3_780..=3_840).contains(&piece.len()), "{}", piece.len());
         assert_eq!(
             feed.push(&[0.1; 1_600], 16_000),
             None,
@@ -833,6 +852,36 @@ mod tests {
             feed.push(&[0.1; 1_600], 16_000).map(|p| p.len()),
             Some(3_200)
         );
+    }
+
+    /// The pieces join as if the microphone's sound had been resampled
+    /// whole: a steady tone stays steady across their joins, where each
+    /// piece resampled on its own dipped at both ends.
+    #[test]
+    fn the_pieces_join_without_a_seam() {
+        let rate = 48_000;
+        let tone: Vec<f32> = (0..rate)
+            .map(|i| 0.5 * (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin())
+            .collect();
+        let mut feed = Feed::default();
+        let mut heard = Vec::new();
+        // A tick's worth at a time, as the window hands it over.
+        for tick in tone.chunks(1_024) {
+            if let Some(piece) = feed.push(tick, rate) {
+                heard.extend(piece);
+            }
+        }
+        let whole = crate::audio::resample(&tone, rate, RATE);
+        // Past the filter's start, sample for sample as resampled whole.
+        let worst = heard
+            .iter()
+            .zip(&whole)
+            .skip(64)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-4, "{worst}");
+        // All but the last piece, still being gathered.
+        assert!(heard.len() > 12_000, "{}", heard.len());
     }
 
     /// The archive is fetched from k2-fsa's release, held to its size and
@@ -897,24 +946,32 @@ mod tests {
             .collect();
         names.sort();
         // One spotter, let go of what it heard before each recording, as a
-        // waiting begins afresh.
+        // waiting begins afresh — each recording said at several moments
+        // after: the model hears a phrase less well at some places in its
+        // stream than at others, 1.1 s and 2.7 s among them.
         let mut spotter = Spotter::start(Path::new(&program), Path::new(&model)).unwrap();
         for path in names {
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            spotter.reset().unwrap();
-            let mut samples = vec![0.0; RATE as usize / 2];
-            samples.extend(read(&path));
-            samples.extend(vec![0.0; RATE as usize]);
-            let mut heard = false;
-            for piece in samples.chunks(1_600) {
-                heard |= spotter.hear(piece).unwrap();
-            }
-            std::thread::sleep(Duration::from_millis(300));
-            heard |= spotter.hear(&[]).unwrap();
-            if name.starts_with("hey") {
-                hits = (hits.0 + usize::from(heard), hits.1 + 1);
-            } else if name.starts_with("other") {
-                false_wakes = (false_wakes.0 + usize::from(heard), false_wakes.1 + 1);
+            for after in [0.5, 1.1, 2.7] {
+                spotter.reset().unwrap();
+                let mut samples = vec![0.0; (RATE as f32 * after) as usize];
+                samples.extend(read(&path));
+                samples.extend(vec![0.0; RATE as usize]);
+                let mut heard = false;
+                // A fifth of a second at a time, as the window hands it over —
+                // many times faster than it is said, but not faster than the
+                // spotter keeps up with: one that falls behind says so.
+                for piece in samples.chunks(3_200) {
+                    heard |= spotter.hear(piece).unwrap();
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                heard |= spotter.hear(&[]).unwrap();
+                if name.starts_with("hey") {
+                    hits = (hits.0 + usize::from(heard), hits.1 + 1);
+                } else if name.starts_with("other") {
+                    false_wakes = (false_wakes.0 + usize::from(heard), false_wakes.1 + 1);
+                }
             }
         }
         eprintln!(

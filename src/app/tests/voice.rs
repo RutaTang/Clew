@@ -3026,6 +3026,18 @@ fn a_waiting_that_fails_says_why() {
     assert!(app.voice.wake.is_waiting());
     assert!(app.voice.wake.error.is_none());
     assert!(!wait_step(&mut app), "loaded this time");
+    // The spotter failing once — fallen behind while the computer was busy
+    // — is a moment's trouble: it is started again, and waiting goes on.
+    *spots.broken.lock().unwrap() = Some("the keyword spotter fell behind".into());
+    assert!(!wait_step(&mut app));
+    assert!(app.voice.wake.is_waiting());
+    assert!(!wait_step(&mut app), "heard again");
+    // Failing again and again, it ends the waiting, saying why.
+    for _ in 1..crate::app::wake::FAILURES {
+        *spots.broken.lock().unwrap() = Some("the keyword spotter ended".into());
+        assert!(!wait_step(&mut app));
+        assert!(app.voice.wake.is_waiting());
+    }
     *spots.broken.lock().unwrap() = Some("the keyword spotter ended".into());
     assert!(wait_step(&mut app));
     assert!(!app.voice.wake.is_waiting());
