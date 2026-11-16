@@ -2114,3 +2114,55 @@ fn what_is_said_over_clew_is_told_from_its_echo() {
     assert!(!said_over("每个价格加起来", &chinese));
     assert!(said_over("打开购物车文件", &chinese));
 }
+
+/// The app reading an answer aloud as it does on the reader's computer —
+/// neither a test's voice nor its speaker: `clew-speak` found as Clew finds
+/// it (beside it, or on PATH), Supertonic 3 where `CLEW_SPEECH_MODEL` says,
+/// and the system's default audio output. An answer to a question said
+/// aloud is read through to its end, nothing said to keep it from being
+/// heard; what the output played is for whatever listens to it to hear — a
+/// person, or a recording of the output.
+#[cfg(unix)]
+#[test]
+#[ignore = "needs clew-speak on PATH, CLEW_SPEECH_MODEL and an audio output"]
+fn a_real_answer_is_read_aloud() {
+    let from = std::path::PathBuf::from(std::env::var("CLEW_SPEECH_MODEL").unwrap());
+    let mut app = scanned_app("speech-real");
+    let dir = test_dir("speech-real-models");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = clew_voice::models::Store::new(dir.clone());
+    app.voice.store = Some(store.clone());
+    app.voice.prefs = VoicePrefs::default();
+    let model = speech::find("supertonic-3").unwrap();
+    for file in model.files {
+        let to = speech::path(&store, model, file);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        // A file, as a download leaves it: a link is not taken for one.
+        let real = from.join(file.path).canonicalize().unwrap();
+        if std::fs::hard_link(&real, &to).is_err() {
+            std::fs::copy(&real, &to).unwrap();
+        }
+    }
+    asked(&mut app, 1, true);
+    delta(
+        &mut app,
+        1,
+        "The total adds every price. Then it rounds the sum to whole cents.",
+    );
+    ended(&mut app, 1, StreamOutcome::Done);
+    let started = std::time::Instant::now();
+    let mut spoke = false;
+    while started.elapsed() < std::time::Duration::from_secs(60) {
+        spoke |= app.voice.speech.is_speaking();
+        if spoke && !app.voice.speech.is_speaking() {
+            break;
+        }
+        let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
+        settle(&mut app, task);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(spoke, "{}", app.status);
+    assert!(!app.voice.speech.is_speaking(), "read through");
+    assert_eq!(app.voice.speech.blocked, None, "{}", app.status);
+    let _ = std::fs::remove_dir_all(&dir);
+}
