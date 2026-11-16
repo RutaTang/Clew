@@ -9,7 +9,7 @@
 //! computer.
 //!
 //! Which answers are read is the reader's to say
-//! ([`ReadAloud`](crate::app::voice::ReadAloud)): those to questions said
+//! ([`ReadAloud`]): those to questions said
 //! aloud, every one, or none.
 //!
 //! It stops at Esc, at the voice key — which then listens, so the reader
@@ -688,7 +688,7 @@ impl App {
 
     /// The answer on stream `stream` grew — or, `done`, is over: what of it
     /// is ready to be said is said, when such answers are read aloud
-    /// ([`ReadAloud`](crate::app::voice::ReadAloud)).
+    /// ([`ReadAloud`]).
     pub(crate) fn read_answer(&mut self, stream: u64, done: bool) -> Task<Message> {
         if self.voice.speech.hushed.contains(&stream) {
             return Task::none();
