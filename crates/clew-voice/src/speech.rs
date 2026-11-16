@@ -4,16 +4,19 @@
 //! published with ([`crate::models::Install`]) — and spoken by the
 //! `clew-speak` program beside Clew.
 //!
-//! Two families, each language spoken by one:
+//! Two families; a language is read by the first of them here that speaks
+//! it ([`for_language_among`]):
 //!
 //! - **Qwen3-TTS** (Qwen, Apache-2.0), the 0.6B model with voices of its
 //!   own: speech as a person says it — English, Chinese, Japanese, Korean,
 //!   German, French, Spanish, Portuguese, Italian and Russian — streamed,
 //!   heard while the rest of the sentence is still being made. As Quick
 //!   Inference publishes it in ONNX, its weights quantized.
-//! - **Supertonic 3** (Supertone, OpenRAIL-M), for the twenty-two other
-//!   languages it speaks — Dutch, Polish, Turkish, Arabic, Hindi and more —
-//!   read from their characters; as sherpa-onnx packs it, int8.
+//! - **Supertonic 3** (Supertone, OpenRAIL-M), a smaller download for the
+//!   thirty-one languages it speaks — English, Korean and Japanese among
+//!   them, and Dutch, Polish, Turkish, Arabic, Hindi and more — read from
+//!   their characters; as sherpa-onnx packs it, int8. Where Qwen3-TTS is
+//!   here too, the languages both speak are Qwen3-TTS's.
 
 use std::fs;
 use std::io;
@@ -297,12 +300,14 @@ pub const VOICE_MODELS: &[VoiceModel] = &[
             },
         ],
         languages: &[
-            "ar", "bg", "cs", "da", "el", "et", "fi", "hi", "hr", "hu", "id", "lt", "lv", "nl",
-            "pl", "ro", "sk", "sl", "sv", "tr", "uk", "vi",
+            "en", "ko", "ja", "ar", "bg", "cs", "da", "de", "el", "es", "et", "fi", "fr", "hi",
+            "hr", "hu", "id", "it", "lt", "lv", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv",
+            "tr", "uk", "vi",
         ],
         voices: SUPERTONIC_VOICES,
         default_voice: 0,
-        about: "Twenty-two more languages, Dutch, Polish, Turkish, Arabic and Hindi among them.",
+        about: "A smaller download for 31 languages, English, Dutch, Polish, Turkish and Hindi \
+                among them. Qwen3-TTS, once downloaded, reads the ten it speaks.",
         license: "OpenRAIL-M",
     },
 ];
@@ -312,9 +317,20 @@ pub fn find(id: &str) -> Option<&'static VoiceModel> {
     VOICE_MODELS.iter().find(|m| m.id == id)
 }
 
-/// The model that speaks `lang`, if any.
+/// The model that reads `lang` best, if any speaks it: the one to get for
+/// it.
 pub fn for_language(lang: &str) -> Option<&'static VoiceModel> {
     VOICE_MODELS.iter().find(|m| m.speaks(lang))
+}
+
+/// The model that reads `lang` of those `here` says can be used: the best
+/// of them that speaks it — Qwen3-TTS before Supertonic 3, which speaks
+/// most of its languages too.
+pub fn for_language_among(
+    lang: &str,
+    here: impl Fn(&VoiceModel) -> bool,
+) -> Option<&'static VoiceModel> {
+    VOICE_MODELS.iter().find(|m| m.speaks(lang) && here(m))
 }
 
 /// Where `model`'s files are kept in `store`.
@@ -434,10 +450,14 @@ mod tests {
         }
     }
 
-    /// Each language is one model's, and Clew's own five are spoken by the
-    /// voice that streams.
+    /// A language is read by the best voice that speaks it: Clew's own five
+    /// by the one that streams; English, Korean and Japanese by Supertonic
+    /// too, when it is the one here — as before Qwen3-TTS came; the rest by
+    /// Supertonic alone.
     #[test]
-    fn a_language_is_spoken_by_one_model() {
+    fn a_language_is_read_by_the_best_voice_here() {
+        let qwen = find("qwen3-tts").unwrap();
+        let supertonic = find("supertonic-3").unwrap();
         for lang in [
             "en", "zh", "ja", "ko", "fr-CA", "zh-TW", "de", "es", "pt", "it", "ru",
         ] {
@@ -446,16 +466,31 @@ mod tests {
                 Some("qwen3-tts"),
                 "{lang}"
             );
+            assert_eq!(
+                for_language_among(lang, |_| true).map(|m| m.id),
+                Some("qwen3-tts"),
+                "{lang}"
+            );
         }
+        // Only Supertonic here: it reads what it speaks; Chinese, nothing.
+        let only_supertonic = |m: &VoiceModel| m.id == "supertonic-3";
+        for lang in ["en", "en-GB", "ko", "ja", "fr", "de", "ru", "nl", "tr"] {
+            assert_eq!(
+                for_language_among(lang, only_supertonic).map(|m| m.id),
+                Some("supertonic-3"),
+                "{lang}"
+            );
+        }
+        assert_eq!(for_language_among("zh", only_supertonic), None);
+        assert_eq!(for_language_among("en", |_| false), None);
+        // The rest are Supertonic's alone.
         assert_eq!(for_language("nl").map(|m| m.id), Some("supertonic-3"));
         assert_eq!(for_language("tr").map(|m| m.id), Some("supertonic-3"));
         assert_eq!(for_language("xx"), None);
-        for lang in VOICE_MODELS.iter().flat_map(|m| m.languages) {
-            assert_eq!(
-                VOICE_MODELS.iter().filter(|m| m.speaks(lang)).count(),
-                1,
-                "{lang}"
-            );
+        // Every language Qwen3-TTS speaks but Chinese, Supertonic speaks too:
+        // a reader with Supertonic alone hears all but Chinese.
+        for lang in qwen.languages.iter().filter(|l| **l != "zh") {
+            assert!(supertonic.speaks(lang), "{lang}");
         }
     }
 

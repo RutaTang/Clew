@@ -807,6 +807,8 @@ pub enum VoiceMsg {
     SpeakTick,
     /// Stop speaking.
     StopSpeaking,
+    /// Put away what the Ask card says keeps answers from being heard.
+    DismissUnheard,
     /// Which answers are read aloud.
     SetSpeak(ReadAloud),
     /// How fast Clew speaks.
@@ -1075,6 +1077,7 @@ impl App {
             message @ (VoiceMsg::Spoken { .. }
             | VoiceMsg::SpeakTick
             | VoiceMsg::StopSpeaking
+            | VoiceMsg::DismissUnheard
             | VoiceMsg::SetSpeak(_)
             | VoiceMsg::SetSpeed(_)
             | VoiceMsg::PickSpeechVoice { .. }

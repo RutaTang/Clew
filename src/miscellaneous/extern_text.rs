@@ -48,7 +48,9 @@ pub(crate) const SPEECH_MODELS: &[&str] = &[
     ),
     tr_noop!("Native to each language"),
     tr_noop!("Supertonic 3"),
-    tr_noop!("Twenty-two more languages, Dutch, Polish, Turkish, Arabic and Hindi among them."),
+    tr_noop!(
+        "A smaller download for 31 languages, English, Dutch, Polish, Turkish and Hindi among them. Qwen3-TTS, once downloaded, reads the ten it speaks."
+    ),
     // The wake phrase's model (`wake::MODEL`).
     tr_noop!("Keyword Spotter"),
 ];

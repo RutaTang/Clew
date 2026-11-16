@@ -1228,36 +1228,102 @@ pub(crate) fn voice_strip(app: &App) -> Option<Element<'_, Message>> {
     if app.voice.confirm.is_some() || app.voice.speech.is_speaking() {
         return None;
     }
-    let line: Element<'_, Message> = {
-        {
-            let heard = app.voice.heard.as_ref()?;
-            let (said, color) = match &heard.outcome {
-                HeardOutcome::Ran(title) => (
-                    format!("→ {}", crate::i18n::lookup(title)),
-                    theme::fg_muted(),
-                ),
-                HeardOutcome::Confirm(title) => (
-                    format!(
-                        "→ {}",
-                        tr!("{command}?", command = crate::i18n::lookup(title))
-                    ),
-                    theme::fg_muted(),
-                ),
-                HeardOutcome::Asked => (format!("→ {}", tr!("asked")), theme::fg_muted()),
-                HeardOutcome::Failed(e) => (crate::i18n::message(e), theme::warn()),
-            };
-            let mut line = row![].spacing(6).align_y(iced::Center);
-            if !heard.text.is_empty() {
-                line = line.push(
-                    text(format!("“{}”", heard.text))
-                        .size(ts::SMALL)
-                        .color(theme::fg()),
-                );
-            }
-            line.push(text(said).size(ts::SMALL).color(color)).into()
-        }
+    let lines: Vec<Element<'_, Message>> = heard_line(app)
+        .into_iter()
+        .chain(unheard_line(app))
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(
+        container(column(lines).spacing(6))
+            .padding([6, 12])
+            .width(Fill)
+            .into(),
+    )
+}
+
+/// What was last heard, and what came of it.
+fn heard_line(app: &App) -> Option<Element<'_, Message>> {
+    let heard = app.voice.heard.as_ref()?;
+    let (said, color) = match &heard.outcome {
+        HeardOutcome::Ran(title) => (
+            format!("→ {}", crate::i18n::lookup(title)),
+            theme::fg_muted(),
+        ),
+        HeardOutcome::Confirm(title) => (
+            format!(
+                "→ {}",
+                tr!("{command}?", command = crate::i18n::lookup(title))
+            ),
+            theme::fg_muted(),
+        ),
+        HeardOutcome::Asked => (format!("→ {}", tr!("asked")), theme::fg_muted()),
+        HeardOutcome::Failed(e) => (crate::i18n::message(e), theme::warn()),
     };
-    Some(container(line).padding([6, 12]).width(Fill).into())
+    let mut line = row![].spacing(6).align_y(iced::Center);
+    if !heard.text.is_empty() {
+        line = line.push(
+            text(format!("“{}”", heard.text))
+                .size(ts::SMALL)
+                .color(theme::fg()),
+        );
+    }
+    Some(line.push(text(said).size(ts::SMALL).color(color)).into())
+}
+
+/// What keeps answers from being heard — no voice here for their language,
+/// with its download; or the voice failing, and why — until it is put
+/// right or put away. Said where the answer is, not only on the status
+/// line, which is soon said over.
+fn unheard_line(app: &App) -> Option<Element<'_, Message>> {
+    use crate::app::speech::Unheard;
+    let dismiss = header_button(
+        Glyph::Close,
+        tr!("Dismiss"),
+        Message::Voice(VoiceMsg::DismissUnheard),
+    );
+    let line = match app.voice.speech.unheard.as_ref()? {
+        Unheard::Missing(id) => {
+            let model = clew_voice::speech::find(id)?;
+            if app.speech_installed(model) {
+                return None;
+            }
+            let getting: Element<'_, Message> = match app.voice.speech.downloads.get(model.id) {
+                Some(d) => super::voice::getting(
+                    d.done,
+                    d.total.unwrap_or(model.bytes()),
+                    Message::Voice(VoiceMsg::CancelSpeechDownload(model.id)),
+                ),
+                None => form::primary(
+                    &tr!("Download ({size} MB)", size = model.size_mb()),
+                    Some(Message::Voice(VoiceMsg::DownloadSpeech(model.id))),
+                )
+                .into(),
+            };
+            row![
+                text(tr!(
+                    "Answers aren't read aloud: {model} isn't downloaded",
+                    model = crate::i18n::lookup(model.name)
+                ))
+                .size(ts::SMALL)
+                .color(theme::fg_muted())
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Fill),
+                getting,
+                dismiss,
+            ]
+        }
+        Unheard::Failed(why) => row![
+            text(why.clone())
+                .size(ts::SMALL)
+                .color(theme::warn())
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Fill),
+            dismiss,
+        ],
+    };
+    Some(line.spacing(8).align_y(iced::Center).into())
 }
 
 #[cfg(test)]

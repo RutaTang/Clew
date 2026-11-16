@@ -5,7 +5,7 @@
 //! settings and models.
 
 use super::*;
-use crate::app::speech::{Playing, Synthesizer};
+use crate::app::speech::{Playing, Synthesizer, Unheard};
 use crate::app::voice::{Claim, ClaimedFor, ReadAloud, VoicePhase, VoicePrefs};
 use clew_protocol::StreamOutcome;
 use clew_voice::speaker::SayError;
@@ -729,7 +729,22 @@ fn what_cannot_be_said_says_why() {
         "{}",
         app.status
     );
-    // Without the voice downloaded: nothing said, and where to get it.
+    // The voice failing is said on the Ask card too, until what is said
+    // next is heard.
+    let (mut app, voice, _) = speech_app("speech-failed-said");
+    *voice.fail.lock().unwrap() = Some(SayError::Voice("the voice ended unexpectedly".into()));
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "This is. Second");
+    assert!(
+        matches!(&app.voice.speech.unheard, Some(Unheard::Failed(e)) if e.contains("ended unexpectedly")),
+        "{:?}",
+        app.voice.speech.unheard
+    );
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "This is. Second");
+    assert_eq!(app.voice.speech.unheard, None, "heard again");
+    // Without the voice downloaded: nothing said, and where to get it — on
+    // the status line, and on the Ask card until it is put away.
     let (mut app, voice, _) = speech_app("speech-none");
     let store = app.voice.store.clone().unwrap();
     speech::remove(&store, speech::find("qwen3-tts").unwrap()).unwrap();
@@ -738,6 +753,61 @@ fn what_cannot_be_said_says_why() {
     assert!(voice.texts().is_empty());
     assert!(app.status.contains("Qwen3-TTS"), "{}", app.status);
     assert!(!app.voice.speech.is_speaking());
+    assert_eq!(
+        app.voice.speech.unheard,
+        Some(Unheard::Missing("qwen3-tts"))
+    );
+    let _ = app.update(Message::Voice(VoiceMsg::DismissUnheard));
+    assert_eq!(app.voice.speech.unheard, None);
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "This is. Second");
+    assert_eq!(
+        app.voice.speech.unheard,
+        Some(Unheard::Missing("qwen3-tts"))
+    );
+    // Reading aloud turned off: nothing is said to be missing.
+    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Never)));
+    assert_eq!(app.voice.speech.unheard, None);
+}
+
+/// A reader with Supertonic alone — the voice that read their answers in
+/// English before Qwen3-TTS came — hears them still: each sentence is read
+/// by the best voice here that speaks its language. Chinese, which only
+/// Qwen3-TTS speaks, is not heard, and Qwen3-TTS is what is said to get;
+/// once it is here, it reads all it speaks.
+#[test]
+fn the_best_voice_here_reads_each_sentence() {
+    let (mut app, voice, _) = speech_app("speech-best-here");
+    let store = app.voice.store.clone().unwrap();
+    speech::remove(&store, speech::find("qwen3-tts").unwrap()).unwrap();
+    install(&app, speech::find("supertonic-3").unwrap());
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "The total adds every price. Then");
+    let said = voice.said.lock().unwrap().clone();
+    assert_eq!(
+        said.iter()
+            .map(|s| (s.model, s.lang.as_str()))
+            .collect::<Vec<_>>(),
+        [("supertonic-3", "en")]
+    );
+    assert_eq!(app.voice.speech.unheard, None);
+    ended(&mut app, 1, StreamOutcome::Done);
+    let said = voice.said.lock().unwrap().len();
+    // Chinese: no voice here speaks it.
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "总数是所有价格的和。然后");
+    assert_eq!(voice.said.lock().unwrap().len(), said, "nothing more said");
+    assert_eq!(
+        app.voice.speech.unheard,
+        Some(Unheard::Missing("qwen3-tts"))
+    );
+    // Qwen3-TTS here: it reads English as well as Chinese.
+    install(&app, speech::find("qwen3-tts").unwrap());
+    asked(&mut app, 3, true);
+    delta(&mut app, 3, "The total adds every price. Then");
+    let said = voice.said.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((said.model, said.lang.as_str()), ("qwen3-tts", "en"));
 }
 
 /// Try says a sentence in the interface's language with the model asked
@@ -764,8 +834,8 @@ fn try_says_a_sample_in_the_readers_language() {
         said.text,
         "This is how Clew sounds when it reads an answer aloud."
     );
-    // In Chinese, Qwen3-TTS says it in Chinese; Supertonic, which speaks
-    // none of the interface's languages, in one it does.
+    // In Chinese, Qwen3-TTS says it in Chinese; Supertonic, which does not
+    // speak Chinese, in English.
     install(&app, speech::find("supertonic-3").unwrap());
     with_lang(Lang::Zh, || {
         let task = app.update(Message::Voice(VoiceMsg::TrySpeech("qwen3-tts")));
@@ -775,7 +845,14 @@ fn try_says_a_sample_in_the_readers_language() {
         let task = app.update(Message::Voice(VoiceMsg::TrySpeech("supertonic-3")));
         settle(&mut app, task);
         let said = voice.said.lock().unwrap().last().cloned().unwrap();
-        assert_eq!((said.model, said.lang.as_str()), ("supertonic-3", "nl"));
+        assert_eq!((said.model, said.lang.as_str()), ("supertonic-3", "en"));
+    });
+    // In Korean, Supertonic says it in Korean.
+    with_lang(Lang::Ko, || {
+        let task = app.update(Message::Voice(VoiceMsg::TrySpeech("supertonic-3")));
+        settle(&mut app, task);
+        let said = voice.said.lock().unwrap().last().cloned().unwrap();
+        assert_eq!((said.model, said.lang.as_str()), ("supertonic-3", "ko"));
     });
     // A voice the model does not have is not taken.
     let before = app.voice.prefs.voices.clone();
@@ -1399,6 +1476,7 @@ fn nothing_is_said_with_a_model_being_removed() {
     delta(&mut app, 1, "This is. That is. Third");
     assert!(voice.texts().is_empty());
     assert!(!app.status.contains("download"), "{}", app.status);
+    assert_eq!(app.voice.speech.unheard, None, "no Download for it either");
     drop(claim);
     // Removing a model being downloaded is refused, saying so.
     let claim = Claim::take(speech::dir(&store, model), ClaimedFor::Download).unwrap();

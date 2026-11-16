@@ -190,8 +190,8 @@ fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a
     } else {
         let label = tr!("Download ({size} MB)", size = model.size_mb());
         let msg = Some(Message::Voice(VoiceMsg::DownloadSpeech(model.id)));
-        // The voice of every language but one: the first to get.
-        if model.speaks("en") {
+        // The voice that reads English best: the first to get.
+        if clew_voice::speech::for_language("en").is_some_and(|m| m.id == model.id) {
             form::primary(&label, msg).into()
         } else {
             form::action(&label, msg).into()

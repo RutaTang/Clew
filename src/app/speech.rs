@@ -277,6 +277,18 @@ impl std::fmt::Debug for Audio {
     }
 }
 
+/// Why answers are not being heard, said where they are asked — the Ask
+/// card's voice line — until it is put right or put away: the status line
+/// alone was missed, and a reader who had heard answers before heard
+/// nothing, and saw no reason why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Unheard {
+    /// No voice here speaks an answer's language: this one would.
+    Missing(&'static str),
+    /// The voice could not go on, saying why.
+    Failed(String),
+}
+
 /// Speech's state in a window.
 pub(crate) struct Speech {
     /// The answer being read, by its stream, and how far.
@@ -328,6 +340,8 @@ pub(crate) struct Speech {
     /// The last sentences made to be said: what the microphone may still
     /// hear of Clew's own voice, its echo not all taken out.
     said_lately: VecDeque<String>,
+    /// Why answers are not being heard, while that is so.
+    pub(crate) unheard: Option<Unheard>,
 }
 
 /// How many of the sentences last made [`Speech::said_lately`] keeps.
@@ -361,6 +375,7 @@ impl Speech {
             synthesizer: SYSTEM.clone(),
             barged: None,
             said_lately: VecDeque::new(),
+            unheard: None,
         }
     }
 
@@ -455,26 +470,19 @@ impl Speech {
 }
 
 /// What Settings' Try says with `model`: a sentence in the interface's
-/// language when the model speaks it, else in one it does.
+/// language when the model speaks it, else in English — which every voice
+/// Clew offers speaks.
 fn sample(model: &VoiceModel) -> Sentence {
-    // Its own words in a language Supertonic speaks here, which none of the
-    // interface's are.
-    const DUTCH: &str = "Zo klinkt Clew wanneer het een antwoord voorleest.";
     let ui = crate::i18n::current().code();
     if model.speaks(ui) {
         Sentence {
             text: tr!("This is how Clew sounds when it reads an answer aloud.").to_string(),
             lang: clew_voice::say::known_language(ui).unwrap_or("en"),
         }
-    } else if model.speaks("en") {
+    } else {
         Sentence {
             text: "This is how Clew sounds when it reads an answer aloud.".into(),
             lang: "en",
-        }
-    } else {
-        Sentence {
-            text: DUTCH.into(),
-            lang: "nl",
         }
     }
 }
@@ -490,6 +498,10 @@ impl App {
                 last,
             } => self.on_spoken(round, result, opened, last),
             VoiceMsg::SpeakTick => self.on_speak_tick(),
+            VoiceMsg::DismissUnheard => {
+                self.voice.speech.unheard = None;
+                Task::none()
+            }
             VoiceMsg::StopSpeaking => {
                 if self.stop_speaking() {
                     self.status = tr!("Stopped speaking").into();
@@ -498,6 +510,9 @@ impl App {
             }
             VoiceMsg::SetSpeak(read_aloud) => {
                 self.voice.prefs.read_aloud = read_aloud;
+                if read_aloud == crate::app::voice::ReadAloud::Never {
+                    self.voice.speech.unheard = None;
+                }
                 // What is being read stops when such answers are read no
                 // more; with Always, what was not read is not begun midway.
                 let reads = self
@@ -556,6 +571,9 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.voice.speech.download_errors.remove(id);
+                        if self.voice.speech.unheard == Some(Unheard::Missing(id)) {
+                            self.voice.speech.unheard = None;
+                        }
                         self.voice
                             .downloaded_at
                             .insert(id, std::time::Instant::now());
@@ -784,6 +802,8 @@ impl App {
     /// the microphone on, it opens as it would have once all was said.
     fn give_up_speaking(&mut self, why: String) -> Task<Message> {
         self.voice.speech.hush();
+        // Said on the Ask card too: the status line is soon said over.
+        self.voice.speech.unheard = Some(Unheard::Failed(why.clone()));
         self.status = why;
         self.resume_listening();
         Task::none()
@@ -836,32 +856,44 @@ impl App {
                 app.show_unheard(stream);
             }
         };
+        // A voice to speak with: downloaded, and neither being downloaded nor
+        // removed — in any window: as good as not here.
+        let here = |model: &VoiceModel| {
+            speech::installed(&store, model)
+                && !crate::app::voice::downloading(&speech::dir(&store, model))
+        };
         while let Some(sentence) = self.voice.speech.queue.pop_front() {
-            let Some(model) = only.or_else(|| speech::for_language(sentence.lang)) else {
-                unheard(self);
-                continue;
+            // The best voice here that speaks the sentence's language: Qwen3-TTS,
+            // or Supertonic where it is the one here — a reader who heard
+            // answers in English with Supertonic hears them still.
+            let model = match only {
+                Some(model) => here(model).then_some(model),
+                None => speech::for_language_among(sentence.lang, here),
             };
-            // Being downloaded or removed, in any window: as good as not here.
-            let changing = crate::app::voice::downloading(&speech::dir(&store, model));
-            if changing {
+            let Some(model) = model else {
                 unheard(self);
-                continue;
-            }
-            if !speech::installed(&store, model) {
-                unheard(self);
-                // Said once a window — the status line is not a nag — and
-                // not at all while it downloads.
-                let speech = &mut self.voice.speech;
-                if !speech.downloads.contains_key(model.id) && speech.told.insert(model.id) {
-                    self.status = tr!(
-                        "To hear answers read aloud, download {model} ({size} MB) in \
-                         Settings → Voice",
-                        model = crate::i18n::lookup(model.name),
-                        size = model.size_mb()
-                    );
+                // An answer's: the voice that would read it is said — once a
+                // window on the status line, which is not a nag, and on the
+                // Ask card's voice line until it is here, with its download.
+                if only.is_none()
+                    && let Some(wanted) = speech::for_language(sentence.lang)
+                    // Being downloaded or removed, in any window: no word of
+                    // getting what is already being got, or let go.
+                    && !crate::app::voice::downloading(&speech::dir(&store, wanted))
+                {
+                    let speech = &mut self.voice.speech;
+                    speech.unheard = Some(Unheard::Missing(wanted.id));
+                    if !speech.downloads.contains_key(wanted.id) && speech.told.insert(wanted.id) {
+                        self.status = tr!(
+                            "To hear answers read aloud, download {model} ({size} MB) in \
+                             Settings → Voice",
+                            model = crate::i18n::lookup(wanted.name),
+                            size = wanted.size_mb()
+                        );
+                    }
                 }
                 continue;
-            }
+            };
             let dir = speech::dir(&store, model);
             let lately = &mut self.voice.speech.said_lately;
             lately.push_back(sentence.text.clone());
@@ -1020,6 +1052,12 @@ impl App {
                             ));
                         }
                     }
+                }
+                // Heard: whatever stopped it before is over.
+                if !audio.samples.is_empty()
+                    && matches!(self.voice.speech.unheard, Some(Unheard::Failed(_)))
+                {
+                    self.voice.speech.unheard = None;
                 }
                 if let Some(output) = &self.voice.speech.output {
                     // Given this after playing all it had, how long it plays
