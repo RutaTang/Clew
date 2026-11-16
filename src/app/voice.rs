@@ -807,8 +807,10 @@ pub enum VoiceMsg {
     SpeakTick,
     /// Stop speaking.
     StopSpeaking,
-    /// Put away what the Ask card says keeps answers from being heard.
-    DismissBlocked,
+    /// Put away what the Ask card says keeps answers from being heard —
+    /// this, the notice its ✕ was on: one said since is not put away
+    /// unseen.
+    DismissBlocked(crate::app::speech::Blocked),
     /// Which answers are read aloud.
     SetSpeak(ReadAloud),
     /// How fast Clew speaks.
@@ -1077,7 +1079,7 @@ impl App {
             message @ (VoiceMsg::Spoken { .. }
             | VoiceMsg::SpeakTick
             | VoiceMsg::StopSpeaking
-            | VoiceMsg::DismissBlocked
+            | VoiceMsg::DismissBlocked(_)
             | VoiceMsg::SetSpeak(_)
             | VoiceMsg::SetSpeed(_)
             | VoiceMsg::PickSpeechVoice { .. }
@@ -1346,6 +1348,25 @@ impl App {
             .is_some_and(|l| l.silence_after_speech().is_some());
         if !hearing {
             self.close_mic();
+        }
+    }
+
+    /// The voice settings another window changed, taken as this one's: what
+    /// the Ask card says of answers not heard follows which are read
+    /// ([`Speech::answers_read`](crate::app::speech::Speech::answers_read)),
+    /// and waiting follows them — stopped, or opened anew for talking over
+    /// Clew or not. Begun only where the shell has it begin: in the window
+    /// in front.
+    pub(crate) fn adopt_voice_prefs(&mut self, prefs: VoicePrefs) {
+        let reopen = prefs.talk_over != self.voice.prefs.talk_over;
+        self.voice.prefs = prefs;
+        self.voice.speech.answers_read(self.voice.prefs.read_aloud);
+        let waiting = self.voice.wake.is_waiting();
+        if !self.voice.prefs.wake || reopen {
+            self.stop_waiting();
+        }
+        if waiting && reopen && self.voice.prefs.wake {
+            self.resume_waiting();
         }
     }
 

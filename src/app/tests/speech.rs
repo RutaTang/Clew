@@ -777,7 +777,14 @@ fn what_cannot_be_said_says_why() {
     );
     // Put away, it is not said again in this window: a reader who does not
     // want the voice is not asked at every answer.
-    let _ = app.update(Message::Voice(VoiceMsg::DismissBlocked));
+    // The ✕ of a notice said over since puts nothing away unseen.
+    let _ = app.update(Message::Voice(VoiceMsg::DismissBlocked(
+        missing(1).unwrap(),
+    )));
+    assert_eq!(app.voice.speech.blocked, missing(2));
+    let _ = app.update(Message::Voice(VoiceMsg::DismissBlocked(
+        missing(2).unwrap(),
+    )));
     assert_eq!(app.voice.speech.blocked, None);
     asked(&mut app, 3, true);
     delta(&mut app, 3, "This is. Second");
@@ -843,9 +850,31 @@ fn a_voice_missing_is_said_of_its_answer() {
     assert_eq!(shown(&app), Some(4));
     let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
     assert_eq!(shown(&app), Some(4), "still so, stopped");
+    // The next stopped before its first word: nothing of it read, and what
+    // is said of the last is not said of it.
+    asked(&mut app, 5, true);
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    delta(&mut app, 5, "The total adds every price. Then");
+    assert!(
+        matches!(
+            app.voice.speech.blocked,
+            Some(Blocked::Missing { stream: 4, .. })
+        ),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    assert_eq!(shown(&app), None, "not of this answer");
     // Not in a new session.
     asked(&mut app, 6, true);
     delta(&mut app, 6, "总数是所有价格的和。然后");
+    assert_eq!(shown(&app), Some(6));
+    // Got in another window: there is no Download to offer.
+    let qwen = speech::find("qwen3-tts").unwrap();
+    let Ok(claim) = Claim::take(speech::dir(&store, qwen), ClaimedFor::Download) else {
+        panic!("the voice's folder claimed");
+    };
+    assert_eq!(shown(&app), None, "got in another window");
+    drop(claim);
     assert_eq!(shown(&app), Some(6));
     let _ = app.update(Message::Ask(AskMsg::NewSession));
     assert_eq!(shown(&app), None, "a new session");
@@ -964,6 +993,20 @@ fn the_ask_card_speaks_only_of_answers() {
     settle(&mut app, task);
     assert!(
         matches!(app.voice.speech.blocked, Some(Blocked::Failed { .. })),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    // An answer asked while Try is heard stops it, and is an answer: its
+    // voice failing is said on the card.
+    assert!(app.voice.speech.is_speaking(), "Try still heard");
+    *voice.fail.lock().unwrap() = Some(ended());
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "This is. Second");
+    assert!(
+        matches!(
+            app.voice.speech.blocked,
+            Some(Blocked::Failed { stream: 2, .. })
+        ),
         "{:?}",
         app.voice.speech.blocked
     );
@@ -2198,25 +2241,85 @@ fn what_is_said_over_clew_is_told_from_its_echo() {
     assert!(said_over("打开购物车文件", &chinese));
 }
 
+/// What the system's output was given to play: how many seconds, and
+/// how loud.
+#[derive(Default)]
+struct Heard {
+    seconds: f64,
+    squares: f64,
+    samples: u64,
+}
+
+/// The system's output, passed through, counting what it is given.
+struct Counted(Box<dyn Playing>, Arc<Mutex<Heard>>);
+
+impl Playing for Counted {
+    fn play(&self, samples: &[f32], rate: u32) {
+        {
+            let mut heard = self.1.lock().unwrap();
+            heard.seconds += samples.len() as f64 / f64::from(rate.max(1));
+            heard.squares += samples.iter().map(|s| f64::from(s * s)).sum::<f64>();
+            heard.samples += samples.len() as u64;
+        }
+        self.0.play(samples, rate);
+    }
+    fn rate(&self) -> u32 {
+        self.0.rate()
+    }
+    fn queued_seconds(&self) -> f32 {
+        self.0.queued_seconds()
+    }
+    fn played(&self) -> u64 {
+        self.0.played()
+    }
+    fn take_rest(&self) -> (Vec<f32>, u32) {
+        self.0.take_rest()
+    }
+    fn idle(&self) -> bool {
+        self.0.idle()
+    }
+    fn level(&self) -> f32 {
+        self.0.level()
+    }
+    fn error(&self) -> Option<String> {
+        self.0.error()
+    }
+    fn pause(&self) {
+        self.0.pause();
+    }
+    fn resume(&self) {
+        self.0.resume();
+    }
+}
+
 /// The app reading an answer aloud as it does on the reader's computer —
 /// neither a test's voice nor its speaker: `clew-speak` found as Clew finds
-/// it (beside it, or on PATH), Supertonic 3 where `CLEW_SPEECH_MODEL` says,
-/// and the system's default audio output. An answer to a question said
-/// aloud is read through to its end, nothing said to keep it from being
-/// heard; what the output played is for whatever listens to it to hear — a
-/// person, or a recording of the output.
+/// it (beside it, or on PATH), the voice in `CLEW_SPEAK_MODEL` — Qwen3-TTS,
+/// or the one `CLEW_SPEAK_VOICE` names, as clew-voice's own test takes
+/// them — and the system's default audio output. An answer to a question
+/// said aloud is read through to its end — both its sentences given to the
+/// output, as speech, not silence — and nothing is said to keep it from
+/// being heard; what the output played is for whatever listens to it to
+/// hear — a person, or a recording of the output. Without
+/// `CLEW_SPEAK_MODEL`, it says so and passes.
 #[cfg(unix)]
 #[test]
-#[ignore = "needs clew-speak on PATH, CLEW_SPEECH_MODEL and an audio output"]
+#[ignore = "needs clew-speak on PATH, CLEW_SPEAK_MODEL and an audio output"]
 fn a_real_answer_is_read_aloud() {
-    let from = std::path::PathBuf::from(std::env::var("CLEW_SPEECH_MODEL").unwrap());
+    let Some(from) = std::env::var_os("CLEW_SPEAK_MODEL") else {
+        eprintln!("skipped: CLEW_SPEAK_MODEL names no voice's folder");
+        return;
+    };
+    let from = std::path::PathBuf::from(from);
     let mut app = scanned_app("speech-real");
     let dir = test_dir("speech-real-models");
     let _ = std::fs::remove_dir_all(&dir);
     let store = clew_voice::models::Store::new(dir.clone());
     app.voice.store = Some(store.clone());
     app.voice.prefs = VoicePrefs::default();
-    let model = speech::find("supertonic-3").unwrap();
+    let model = std::env::var("CLEW_SPEAK_VOICE").map_or(&speech::VOICE_MODELS[0], |id| {
+        speech::find(&id).expect("CLEW_SPEAK_VOICE names a voice")
+    });
     for file in model.files {
         let to = speech::path(&store, model, file);
         std::fs::create_dir_all(to.parent().unwrap()).unwrap();
@@ -2226,6 +2329,12 @@ fn a_real_answer_is_read_aloud() {
             std::fs::copy(&real, &to).unwrap();
         }
     }
+    let heard = Arc::new(Mutex::new(Heard::default()));
+    let system = app.voice.speech.open_output.clone();
+    app.voice.speech.open_output = Arc::new({
+        let heard = heard.clone();
+        move || system().map(|out| Box::new(Counted(out, heard.clone())) as Box<dyn Playing>)
+    });
     asked(&mut app, 1, true);
     delta(
         &mut app,
@@ -2237,15 +2346,21 @@ fn a_real_answer_is_read_aloud() {
     let mut spoke = false;
     while started.elapsed() < std::time::Duration::from_secs(60) {
         spoke |= app.voice.speech.is_speaking();
-        if spoke && !app.voice.speech.is_speaking() {
+        // Done — or kept from being heard, which will not change.
+        if (spoke && !app.voice.speech.is_speaking()) || app.voice.speech.blocked.is_some() {
             break;
         }
         let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
         settle(&mut app, task);
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    assert_eq!(app.voice.speech.blocked, None, "{}", app.status);
     assert!(spoke, "{}", app.status);
     assert!(!app.voice.speech.is_speaking(), "read through");
-    assert_eq!(app.voice.speech.blocked, None, "{}", app.status);
+    let heard = heard.lock().unwrap();
+    let rms = (heard.squares / heard.samples.max(1) as f64).sqrt();
+    // Fourteen words: some seconds of them, not a sentence left out.
+    assert!(heard.seconds > 2.5, "{:.2} s played", heard.seconds);
+    assert!(rms > 0.01, "speech, not silence: rms {rms:.4}");
     let _ = std::fs::remove_dir_all(&dir);
 }

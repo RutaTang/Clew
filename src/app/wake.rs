@@ -510,23 +510,6 @@ impl App {
         Some(mic)
     }
 
-    /// The voice settings another window changed, taken as this one's: its
-    /// waiting follows them — stopped, or opened anew for talking over Clew
-    /// or not. Begun only where the shell has it begin: in the window in
-    /// front.
-    pub(crate) fn adopt_voice_prefs(&mut self, prefs: crate::app::voice::VoicePrefs) {
-        let reopen = prefs.talk_over != self.voice.prefs.talk_over;
-        self.voice.prefs = prefs;
-        self.voice.speech.answers_read(self.voice.prefs.read_aloud);
-        let waiting = self.voice.wake.is_waiting();
-        if !self.voice.prefs.wake || reopen {
-            self.stop_waiting();
-        }
-        if waiting && reopen && self.voice.prefs.wake {
-            self.resume_waiting();
-        }
-    }
-
     /// The microphone that waited, to listen with: what it heard just
     /// before kept, as the lead of what is worked out next.
     pub(crate) fn take_waiting_mic(&mut self) -> Option<Box<dyn Listening>> {

@@ -533,12 +533,19 @@ mod tests {
 
     /// A real `clew-speak` and a real model, when the test is pointed at
     /// them — Qwen3-TTS, or the voice `CLEW_SPEAK_VOICE` names: what it
-    /// says is as long as speech of it is.
+    /// says is as long as speech of it is. Not pointed at them, it says so
+    /// and passes.
     #[test]
     #[ignore = "needs CLEW_SPEAK and CLEW_SPEAK_MODEL"]
     fn a_real_speaker_speaks() {
-        let program = PathBuf::from(std::env::var("CLEW_SPEAK").unwrap());
-        let dir = PathBuf::from(std::env::var("CLEW_SPEAK_MODEL").unwrap());
+        let (Some(program), Some(dir)) = (
+            std::env::var_os("CLEW_SPEAK"),
+            std::env::var_os("CLEW_SPEAK_MODEL"),
+        ) else {
+            eprintln!("skipped: CLEW_SPEAK and CLEW_SPEAK_MODEL are not set");
+            return;
+        };
+        let (program, dir) = (PathBuf::from(program), PathBuf::from(dir));
         let speakers = Speakers::new(program);
         let model = std::env::var("CLEW_SPEAK_VOICE")
             .map_or(&crate::speech::VOICE_MODELS[0], |id| {

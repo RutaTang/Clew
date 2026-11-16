@@ -1298,7 +1298,7 @@ fn blocked_line(app: &App) -> Option<Element<'_, Message>> {
         .padding([5, 7])
         .on_press(super::heard::said(
             hide,
-            Message::Voice(VoiceMsg::DismissBlocked),
+            Message::Voice(VoiceMsg::DismissBlocked(blocked.clone())),
         ));
     // Under it, as the header's buttons have theirs: over them, it hid
     // the card's Close.

@@ -305,6 +305,12 @@ impl Blocked {
     }
 }
 
+/// Whether `model` can be said with: downloaded, and neither being
+/// downloaded nor removed — in any window: as good as not here.
+fn usable(store: &clew_voice::models::Store, model: &VoiceModel) -> bool {
+    speech::installed(store, model) && !crate::app::voice::downloading(&speech::dir(store, model))
+}
+
 /// Speech's state in a window.
 pub(crate) struct Speech {
     /// The answer being read, by its stream, and how far.
@@ -360,10 +366,11 @@ pub(crate) struct Speech {
     /// The last sentences made to be said: what the microphone may still
     /// hear of Clew's own voice, its echo not all taken out.
     said_lately: VecDeque<String>,
-    /// Why answers are not being heard, while that is so.
+    /// Why an answer was not heard: said on the Ask card while it is so of
+    /// the answer there ([`App::blocked_now`]).
     pub(crate) blocked: Option<Blocked>,
-    /// What is being said is Settings' Try, not an answer: its failing is
-    /// said there, not on the Ask card.
+    /// What is being said is Settings' Try, not an answer, until it is all
+    /// said: its failing is said there, not on the Ask card.
     trying: bool,
 }
 
@@ -532,10 +539,13 @@ impl App {
                 last,
             } => self.on_spoken(round, result, opened, last),
             VoiceMsg::SpeakTick => self.on_speak_tick(),
-            VoiceMsg::DismissBlocked => {
+            VoiceMsg::DismissBlocked(said) => {
                 let speech = &mut self.voice.speech;
-                if let Some(Blocked::Missing { model, .. }) = speech.blocked.take() {
-                    speech.put_away.insert(model);
+                if speech.blocked.as_ref() == Some(&said) {
+                    speech.blocked = None;
+                    if let Blocked::Missing { model, .. } = said {
+                        speech.put_away.insert(model);
+                    }
                 }
                 Task::none()
             }
@@ -732,10 +742,10 @@ impl App {
             return None;
         }
         // Each voice's files looked at once: this is asked at every frame
-        // the card is drawn.
+        // the card is drawn. Here as the reader finds a voice to read with.
         let here: Vec<&VoiceModel> = speech::VOICE_MODELS
             .iter()
-            .filter(|m| self.speech_installed(m))
+            .filter(|m| self.voice.store.as_ref().is_some_and(|s| usable(s, m)))
             .collect();
         let Blocked::Missing { model, lang, .. } = blocked else {
             return Some((blocked, !here.is_empty()));
@@ -943,8 +953,9 @@ impl App {
         speech.hushed.insert(stream);
     }
 
-    /// Clew could not go on speaking, saying `why` on the status line: with
-    /// the microphone on, it opens as it would have once all was said.
+    /// Clew could not go on speaking, saying `why` on the status line — and
+    /// on the Ask card, of the answer it was reading: with the microphone
+    /// on, it opens as it would have once all was said.
     fn give_up_speaking(&mut self, why: String) -> Task<Message> {
         // An answer's voice failing is said on the Ask card too, where the
         // answer is — shown: the rest of it will not be heard, and the
@@ -1015,12 +1026,7 @@ impl App {
                 app.show_unheard(stream);
             }
         };
-        // A voice to speak with: downloaded, and neither being downloaded nor
-        // removed — in any window: as good as not here.
-        let here = |model: &VoiceModel| {
-            speech::installed(&store, model)
-                && !crate::app::voice::downloading(&speech::dir(&store, model))
-        };
+        let here = |model: &VoiceModel| usable(&store, model);
         // The answer being read: the last — none is read but the newest.
         let answer = only
             .is_none()
@@ -1330,6 +1336,7 @@ impl App {
         if let Some(output) = speech.output.take() {
             close_later(output);
         }
+        speech.trying = false;
         speech.made_with.clear();
         speech.quiet_since = None;
         speech.level = 0.0;

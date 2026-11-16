@@ -3207,9 +3207,10 @@ fn the_keyword_spotter_downloads_verified_and_is_removed() {
 /// microphone nor its spotter: the system's default audio input, and
 /// `clew-speak` found as Clew finds it, with the Keyword Spotter where
 /// `CLEW_WAKE_MODEL` says. "Hey, Clew" said to the input within
-/// `CLEW_WAKE_WITHIN` seconds (30 unless set) — by a person, or played into
-/// it — starts listening, on the microphone that waited. With
-/// `CLEW_WAKE_NOT` set, what is said is not the phrase, and waiting goes on.
+/// `CLEW_WAKE_WITHIN` seconds (30 unless set) of "waiting" being printed —
+/// by a person, or played into it — starts listening. With `CLEW_WAKE_NOT`
+/// set, what is said is not the phrase, and waiting goes on. Without
+/// `CLEW_WAKE_MODEL`, it says so and passes.
 #[cfg(unix)]
 #[test]
 #[ignore = "needs clew-speak on PATH, CLEW_WAKE_MODEL and “Hey, Clew” said to the audio input"]
@@ -3217,7 +3218,11 @@ fn a_real_microphone_wakes_clew() {
     let _turn = crate::app::wake::TEST_TURN
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let from = PathBuf::from(std::env::var("CLEW_WAKE_MODEL").unwrap());
+    let Some(from) = std::env::var_os("CLEW_WAKE_MODEL") else {
+        eprintln!("skipped: CLEW_WAKE_MODEL names no Keyword Spotter folder");
+        return;
+    };
+    let from = PathBuf::from(from);
     let within: u64 = std::env::var("CLEW_WAKE_WITHIN")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -3242,12 +3247,18 @@ fn a_real_microphone_wakes_clew() {
     );
     let _ = app.update(Message::Voice(VoiceMsg::SetWake(true)));
     assert!(app.voice.wake.is_waiting(), "{}", app.status);
+    // Its first step loads the spotter — some seconds: what is said before
+    // it hears is not heard.
+    wait_step(&mut app);
+    assert!(app.voice.wake.is_waiting(), "{:?}", app.voice.wake.failed);
     eprintln!("waiting for “Hey, Clew”");
     let started = std::time::Instant::now();
     while app.voice.wake.is_waiting() && started.elapsed().as_secs() < within {
         std::thread::sleep(crate::app::wake::STEP);
         wait_step(&mut app);
     }
+    // Waiting that failed is not taken for woken, nor for waiting on.
+    assert_eq!(app.voice.wake.failed, None, "{}", app.status);
     if not {
         assert!(app.voice.wake.is_waiting(), "woken: {}", app.status);
         assert!(!app.voice.mic_on);
@@ -3263,5 +3274,7 @@ fn a_real_microphone_wakes_clew() {
         started.elapsed().as_secs_f32(),
         app.status
     );
+    // The spotter, which outlives a waiting, let go of.
+    let _ = app.update(Message::Voice(VoiceMsg::SetWake(false)));
     let _ = std::fs::remove_dir_all(store.dir());
 }

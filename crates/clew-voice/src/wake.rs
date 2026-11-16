@@ -405,6 +405,8 @@ impl Spotter {
                 Ok(Ok(Answer::Ready { .. } | Answer::Reset {})) => {}
                 Ok(Ok(Answer::Error(e))) | Ok(Err(e)) => return Err(e),
                 Err(mpsc::TryRecvError::Empty) => return Ok(heard),
+                // What it heard before it ended is heard still.
+                Err(mpsc::TryRecvError::Disconnected) if heard => return Ok(true),
                 Err(mpsc::TryRecvError::Disconnected) => {
                     return Err("the keyword spotter ended".into());
                 }
@@ -429,6 +431,16 @@ impl Spotter {
                 }
             }
         }
+    }
+
+    /// Ended, whether it heard the phrase in what it said last — read to
+    /// its end, which comes at once.
+    fn heard_last(&mut self) -> bool {
+        let mut heard = false;
+        while let Ok(answer) = self.answers.recv_timeout(Duration::from_millis(200)) {
+            heard |= matches!(answer, Ok(Answer::Heard { .. }));
+        }
+        heard
     }
 
     /// Whether it has ended.
@@ -533,8 +545,14 @@ impl Spotters {
             return Ok(None);
         }
         if spotter.ended() {
+            // The phrase it heard just before it ended is not lost with it.
+            let heard = spotter.heard_last();
             *running = None;
-            return Err("the keyword spotter ended".into());
+            return if heard {
+                Ok(Some(true))
+            } else {
+                Err("the keyword spotter ended".into())
+            };
         }
         let result = spotter.hear(samples);
         if result.is_err() {
@@ -783,24 +801,47 @@ mod tests {
         assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(None));
     }
 
+    /// Wait, a while at most, for the spotter running to have ended.
+    #[cfg(unix)]
+    fn until_ended(spotters: &Spotters) {
+        let started = std::time::Instant::now();
+        while !spotters
+            .running()
+            .as_mut()
+            .is_some_and(|(spotter, _)| spotter.ended())
+        {
+            assert!(started.elapsed() < Duration::from_secs(10), "never ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// A spotter that ended by itself is a failure, said as one — the one
-    /// waiting counts it — and let go of: the next asked loads anew.
+    /// waiting counts it — and let go of: the next asked loads anew. What
+    /// it heard just before it ended is heard.
     #[cfg(unix)]
     #[test]
     fn a_spotter_that_ended_says_so() {
         use std::os::unix::fs::PermissionsExt;
         let dir = temp_dir("stand-in-ended");
         let program = dir.join("clew-speak");
-        std::fs::write(&program, "#!/bin/sh\necho '{\"ready\":{\"keywords\":1}}'\n").unwrap();
+        let ready = "echo '{\"ready\":{\"keywords\":1}}'\n";
+        std::fs::write(&program, format!("#!/bin/sh\n{ready}")).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let spotters = Spotters::new(program);
+        let spotters = Spotters::new(program.clone());
         spotters.warm(&dir).unwrap();
-        std::thread::sleep(Duration::from_millis(300));
+        until_ended(&spotters);
         let heard = spotters.hear(&dir, &[0.0; 160]);
         assert!(
             heard.as_ref().is_err_and(|e| e.contains("ended")),
             "{heard:?}"
         );
+        assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(None), "let go of");
+        // The phrase, then its end.
+        let heard = "echo '{\"heard\":{\"keyword\":\"hey_clew\"}}'\n";
+        std::fs::write(&program, format!("#!/bin/sh\n{ready}{heard}")).unwrap();
+        spotters.warm(&dir).unwrap();
+        until_ended(&spotters);
+        assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(Some(true)));
         assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(None), "let go of");
     }
 

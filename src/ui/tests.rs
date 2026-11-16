@@ -1640,7 +1640,7 @@ fn the_ask_card_says_what_keeps_answers_from_being_heard() {
     let sent = click_right_of(
         || sim_of(&app),
         needed,
-        |m| matches!(m, Message::Voice(crate::VoiceMsg::DismissBlocked)),
+        |m| matches!(m, Message::Voice(crate::VoiceMsg::DismissBlocked(_))),
     );
     assert!(!sent.is_empty(), "its ✕ puts it away");
     // Downloading: that it is, how far it has come, and Cancel, where
