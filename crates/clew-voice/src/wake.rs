@@ -781,6 +781,27 @@ mod tests {
         assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(None));
     }
 
+    /// A spotter that ended by itself is a failure, said as one — the one
+    /// waiting counts it — and let go of: the next asked loads anew.
+    #[cfg(unix)]
+    #[test]
+    fn a_spotter_that_ended_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("stand-in-ended");
+        let program = dir.join("clew-speak");
+        std::fs::write(&program, "#!/bin/sh\necho '{\"ready\":{\"keywords\":1}}'\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spotters = Spotters::new(program);
+        spotters.warm(&dir).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let heard = spotters.hear(&dir, &[0.0; 160]);
+        assert!(
+            heard.as_ref().is_err_and(|e| e.contains("ended")),
+            "{heard:?}"
+        );
+        assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(None), "let go of");
+    }
+
     /// A spotter that takes no more audio (stuck) is never waited on: what
     /// is handed to it is queued, and once too much is, it has fallen
     /// behind and is let go; stopping it while it is in use waits for
