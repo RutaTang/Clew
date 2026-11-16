@@ -461,6 +461,10 @@ impl App {
     pub(crate) fn adopt_voice_prefs(&mut self, prefs: crate::app::voice::VoicePrefs) {
         let reopen = prefs.talk_over != self.voice.prefs.talk_over;
         self.voice.prefs = prefs;
+        // No answer read aloud: nothing keeps one from being heard.
+        if self.voice.prefs.read_aloud == crate::app::voice::ReadAloud::Never {
+            self.voice.speech.blocked = None;
+        }
         let waiting = self.voice.wake.is_waiting();
         if !self.voice.prefs.wake || reopen {
             self.stop_waiting();

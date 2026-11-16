@@ -1595,6 +1595,72 @@ fn a_download_in_progress_is_cancelled_from_its_banner() {
     );
 }
 
+/// What keeps answers from being heard is said on the Ask card, with what
+/// puts it right: the voice to download — Download sends for it, the ✕
+/// puts the notice away — and why its download failed; or why the voice
+/// failed. Nothing once a voice here reads the answer's language.
+#[test]
+fn the_ask_card_says_what_keeps_answers_from_being_heard() {
+    use crate::app::speech::Blocked;
+    use clew_voice::speech;
+    let mut app = blank_app();
+    app.ask_view = crate::AskView::Compact;
+    let dir = crate::app::tests::test_dir("ui-blocked-models");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = clew_voice::models::Store::new(dir);
+    app.voice.store = Some(store.clone());
+    let qwen = speech::find("qwen3-tts").unwrap();
+    let missing = |lang| Blocked::Missing {
+        model: "qwen3-tts",
+        lang,
+    };
+    // No voice here: no answer is heard.
+    app.voice.speech.blocked = Some(missing("en"));
+    let needed = "Qwen3-TTS is needed to read answers aloud";
+    assert!(shows(&mut sim_of(&app), needed));
+    let download = format!("Download ({} MB)", qwen.size_mb());
+    let sent = click(sim_of(&app), &download);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Voice(crate::VoiceMsg::DownloadSpeech("qwen3-tts"))]
+        ),
+        "{sent:?}"
+    );
+    let sent = click_right_of(
+        || sim_of(&app),
+        needed,
+        |m| matches!(m, Message::Voice(crate::VoiceMsg::DismissBlocked)),
+    );
+    assert!(!sent.is_empty(), "its ✕ puts it away");
+    // Its download failed: why, under it.
+    app.voice
+        .speech
+        .download_errors
+        .insert("qwen3-tts", "the connection was reset".into());
+    assert!(shows(&mut sim_of(&app), "the connection was reset"));
+    // Supertonic here: a Chinese answer — this one — needs Qwen3-TTS; an
+    // English one is read, and nothing is said.
+    let supertonic = speech::find("supertonic-3").unwrap();
+    for file in supertonic.files {
+        let path = speech::path(&store, supertonic, file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+    app.voice.speech.blocked = Some(missing("zh"));
+    assert!(shows(
+        &mut sim_of(&app),
+        "Qwen3-TTS is needed to read this answer aloud"
+    ));
+    app.voice.speech.blocked = Some(missing("en"));
+    assert!(!shows(&mut sim_of(&app), "is needed to read"));
+    // The voice failing: why, in its own words.
+    app.voice.speech.blocked = Some(Blocked::Failed(
+        "Could not speak: the voice ended unexpectedly".into(),
+    ));
+    assert!(shows(&mut sim_of(&app), "the voice ended unexpectedly"));
+}
+
 /// The Files view marks what the working tree changes: a file by git's
 /// letter for it, a folder holding a change by a dot; an unchanged one by
 /// nothing.

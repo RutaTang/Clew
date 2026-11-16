@@ -5,7 +5,7 @@
 //! settings and models.
 
 use super::*;
-use crate::app::speech::{Playing, Synthesizer, Unheard};
+use crate::app::speech::{Blocked, Playing, Synthesizer};
 use crate::app::voice::{Claim, ClaimedFor, ReadAloud, VoicePhase, VoicePrefs};
 use clew_protocol::StreamOutcome;
 use clew_voice::speaker::SayError;
@@ -736,13 +736,13 @@ fn what_cannot_be_said_says_why() {
     asked(&mut app, 1, true);
     delta(&mut app, 1, "This is. Second");
     assert!(
-        matches!(&app.voice.speech.unheard, Some(Unheard::Failed(e)) if e.contains("ended unexpectedly")),
+        matches!(&app.voice.speech.blocked, Some(Blocked::Failed(e)) if e.contains("ended unexpectedly")),
         "{:?}",
-        app.voice.speech.unheard
+        app.voice.speech.blocked
     );
     asked(&mut app, 2, true);
     delta(&mut app, 2, "This is. Second");
-    assert_eq!(app.voice.speech.unheard, None, "heard again");
+    assert_eq!(app.voice.speech.blocked, None, "heard again");
     // Without the voice downloaded: nothing said, and where to get it — on
     // the status line, and on the Ask card until it is put away.
     let (mut app, voice, _) = speech_app("speech-none");
@@ -753,21 +753,96 @@ fn what_cannot_be_said_says_why() {
     assert!(voice.texts().is_empty());
     assert!(app.status.contains("Qwen3-TTS"), "{}", app.status);
     assert!(!app.voice.speech.is_speaking());
-    assert_eq!(
-        app.voice.speech.unheard,
-        Some(Unheard::Missing("qwen3-tts"))
-    );
-    let _ = app.update(Message::Voice(VoiceMsg::DismissUnheard));
-    assert_eq!(app.voice.speech.unheard, None);
-    asked(&mut app, 2, true);
-    delta(&mut app, 2, "This is. Second");
-    assert_eq!(
-        app.voice.speech.unheard,
-        Some(Unheard::Missing("qwen3-tts"))
-    );
+    let missing = Some(Blocked::Missing {
+        model: "qwen3-tts",
+        lang: "en",
+    });
+    assert_eq!(app.voice.speech.blocked, missing);
     // Reading aloud turned off: nothing is said to be missing.
     let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Never)));
-    assert_eq!(app.voice.speech.unheard, None);
+    assert_eq!(app.voice.speech.blocked, None);
+    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Spoken)));
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "This is. Second");
+    assert_eq!(app.voice.speech.blocked, missing, "said again of this one");
+    // Put away, it is not said again in this window: a reader who does not
+    // want the voice is not asked at every answer.
+    let _ = app.update(Message::Voice(VoiceMsg::DismissBlocked));
+    assert_eq!(app.voice.speech.blocked, None);
+    asked(&mut app, 3, true);
+    delta(&mut app, 3, "This is. Second");
+    assert_eq!(app.voice.speech.blocked, None, "put away for the window");
+    // Downloaded — and since let go of — it may be said of again.
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+    let _ = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+        id: "qwen3-tts",
+        result: Ok(()),
+    }));
+    asked(&mut app, 4, true);
+    delta(&mut app, 4, "This is. Second");
+    assert_eq!(app.voice.speech.blocked, missing);
+    // Another voice that reads English downloaded instead — the smaller
+    // one: nothing keeps English answers from being heard.
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("supertonic-3")));
+    let _ = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+        id: "supertonic-3",
+        result: Ok(()),
+    }));
+    assert_eq!(app.voice.speech.blocked, None);
+}
+
+/// The Ask card speaks of answers only: Settings' Try failing is said on
+/// the status line, where Try was pressed, not on the card; and reading
+/// aloud turned off in another window puts the card's notice away in this
+/// one too.
+#[test]
+fn the_ask_card_speaks_only_of_answers() {
+    let (mut app, voice, _) = speech_app("speech-try-fails");
+    let ended = || SayError::Voice("the voice ended unexpectedly".into());
+    *voice.fail.lock().unwrap() = Some(ended());
+    let task = app.update(Message::Voice(VoiceMsg::TrySpeech("qwen3-tts")));
+    settle(&mut app, task);
+    assert!(app.status.contains("ended unexpectedly"), "{}", app.status);
+    assert_eq!(app.voice.speech.blocked, None);
+    *voice.fail.lock().unwrap() = Some(ended());
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "This is. Second");
+    assert!(
+        matches!(app.voice.speech.blocked, Some(Blocked::Failed(_))),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    let mut prefs = app.voice.prefs.clone();
+    prefs.read_aloud = ReadAloud::Never;
+    app.adopt_voice_prefs(prefs);
+    assert_eq!(app.voice.speech.blocked, None);
+}
+
+/// Asked by voice while the voice that would read the answer downloads in
+/// this window, the Ask card says so, with how far it has come — not
+/// nothing; and the download finished, the notice goes.
+#[test]
+fn an_answer_heard_while_its_voice_downloads_says_so() {
+    let (mut app, voice, _) = speech_app("speech-while-downloading");
+    let store = app.voice.store.clone().unwrap();
+    speech::remove(&store, speech::find("qwen3-tts").unwrap()).unwrap();
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+    assert!(app.voice.speech.downloads.contains_key("qwen3-tts"));
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "This is. Second");
+    assert!(voice.texts().is_empty());
+    assert_eq!(
+        app.voice.speech.blocked,
+        Some(Blocked::Missing {
+            model: "qwen3-tts",
+            lang: "en",
+        })
+    );
+    let _ = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+        id: "qwen3-tts",
+        result: Ok(()),
+    }));
+    assert_eq!(app.voice.speech.blocked, None);
 }
 
 /// A reader with Supertonic alone — the voice that read their answers in
@@ -790,7 +865,7 @@ fn the_best_voice_here_reads_each_sentence() {
             .collect::<Vec<_>>(),
         [("supertonic-3", "en")]
     );
-    assert_eq!(app.voice.speech.unheard, None);
+    assert_eq!(app.voice.speech.blocked, None);
     ended(&mut app, 1, StreamOutcome::Done);
     let said = voice.said.lock().unwrap().len();
     // Chinese: no voice here speaks it.
@@ -799,13 +874,25 @@ fn the_best_voice_here_reads_each_sentence() {
     delta(&mut app, 2, "总数是所有价格的和。然后");
     assert_eq!(voice.said.lock().unwrap().len(), said, "nothing more said");
     assert_eq!(
-        app.voice.speech.unheard,
-        Some(Unheard::Missing("qwen3-tts"))
+        app.voice.speech.blocked,
+        Some(Blocked::Missing {
+            model: "qwen3-tts",
+            lang: "zh",
+        })
     );
-    // Qwen3-TTS here: it reads English as well as Chinese.
-    install(&app, speech::find("qwen3-tts").unwrap());
+    // An answer in English after it is heard, and what kept the Chinese one
+    // from being heard is not said of it.
+    ended(&mut app, 2, StreamOutcome::Done);
     asked(&mut app, 3, true);
     delta(&mut app, 3, "The total adds every price. Then");
+    let said = voice.said.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((said.model, said.lang.as_str()), ("supertonic-3", "en"));
+    assert_eq!(app.voice.speech.blocked, None);
+    // Qwen3-TTS here: it reads English as well as Chinese.
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    install(&app, speech::find("qwen3-tts").unwrap());
+    asked(&mut app, 4, true);
+    delta(&mut app, 4, "The total adds every price. Then");
     let said = voice.said.lock().unwrap().last().cloned().unwrap();
     assert_eq!((said.model, said.lang.as_str()), ("qwen3-tts", "en"));
 }
@@ -1476,7 +1563,7 @@ fn nothing_is_said_with_a_model_being_removed() {
     delta(&mut app, 1, "This is. That is. Third");
     assert!(voice.texts().is_empty());
     assert!(!app.status.contains("download"), "{}", app.status);
-    assert_eq!(app.voice.speech.unheard, None, "no Download for it either");
+    assert_eq!(app.voice.speech.blocked, None, "no Download for it either");
     drop(claim);
     // Removing a model being downloaded is refused, saying so.
     let claim = Claim::take(speech::dir(&store, model), ClaimedFor::Download).unwrap();

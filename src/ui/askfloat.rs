@@ -1221,8 +1221,9 @@ pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, M
 }
 
 /// Voice on the card, under its header: what was last heard and what came
-/// of it, as the microphone listens on. A command waiting for a yes is over
-/// the composer ([`voice_confirm`]), and Clew speaking beside it
+/// of it, as the microphone listens on; and what keeps answers from being
+/// heard ([`blocked_line`]). A command waiting for a yes is over the
+/// composer ([`voice_confirm`]), and Clew speaking beside it
 /// ([`voice_meter`]). `None` when there is nothing to say.
 pub(crate) fn voice_strip(app: &App) -> Option<Element<'_, Message>> {
     if app.voice.confirm.is_some() || app.voice.speech.is_speaking() {
@@ -1230,7 +1231,7 @@ pub(crate) fn voice_strip(app: &App) -> Option<Element<'_, Message>> {
     }
     let lines: Vec<Element<'_, Message>> = heard_line(app)
         .into_iter()
-        .chain(unheard_line(app))
+        .chain(blocked_line(app))
         .collect();
     if lines.is_empty() {
         return None;
@@ -1275,55 +1276,89 @@ fn heard_line(app: &App) -> Option<Element<'_, Message>> {
 /// What keeps answers from being heard — no voice here for their language,
 /// with its download; or the voice failing, and why — until it is put
 /// right or put away. Said where the answer is, not only on the status
-/// line, which is soon said over.
-fn unheard_line(app: &App) -> Option<Element<'_, Message>> {
-    use crate::app::speech::Unheard;
-    let dismiss = header_button(
-        Glyph::Close,
-        tr!("Dismiss"),
-        Message::Voice(VoiceMsg::DismissUnheard),
-    );
-    let line = match app.voice.speech.unheard.as_ref()? {
-        Unheard::Missing(id) => {
-            let model = clew_voice::speech::find(id)?;
-            if app.speech_installed(model) {
+/// line, which is soon said over: what is wrong and a small ✕ to put it
+/// away on one line — not the header's Close a few lines up, which it is
+/// not — and what puts it right under it.
+fn blocked_line(app: &App) -> Option<Element<'_, Message>> {
+    use crate::app::speech::Blocked;
+    use clew_voice::speech;
+    let said = |line: String, color| {
+        text(line)
+            .size(ts::SMALL)
+            .color(color)
+            .wrapping(Wrapping::WordOrGlyph)
+            .width(Fill)
+    };
+    let dismiss = button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
+        .style(theme::icon_button(false))
+        .padding([5, 7])
+        .on_press(super::heard::said(
+            tr!("Dismiss"),
+            Message::Voice(VoiceMsg::DismissBlocked),
+        ));
+    let dismiss = tip_at(dismiss, tr!("Dismiss"), None, tooltip::Position::Top);
+    match app.voice.speech.blocked.as_ref()? {
+        Blocked::Missing { model, lang } => {
+            let model = speech::find(model)?;
+            // A voice here reads it now — downloaded meanwhile, here or in
+            // another window: nothing keeps it from being heard.
+            if speech::for_language_among(lang, |m| app.speech_installed(m)).is_some() {
                 return None;
             }
-            let getting: Element<'_, Message> = match app.voice.speech.downloads.get(model.id) {
+            // Being got in another window, or let go of: no Download here —
+            // it would only say so.
+            let getting_here = app.voice.speech.downloads.get(model.id);
+            if getting_here.is_none()
+                && app
+                    .voice
+                    .store
+                    .as_ref()
+                    .is_some_and(|store| crate::app::voice::downloading(&speech::dir(store, model)))
+            {
+                return None;
+            }
+            let name = crate::i18n::lookup(model.name);
+            // With no voice here, no answer is heard; with one, this answer
+            // — or the part of it in a language that voice does not speak.
+            let line = if speech::VOICE_MODELS.iter().any(|m| app.speech_installed(m)) {
+                tr!("{model} is needed to read this answer aloud", model = name)
+            } else {
+                tr!("{model} is needed to read answers aloud", model = name)
+            };
+            let getting: Element<'_, Message> = match getting_here {
                 Some(d) => super::voice::getting(
                     d.done,
                     d.total.unwrap_or(model.bytes()),
                     Message::Voice(VoiceMsg::CancelSpeechDownload(model.id)),
                 ),
-                None => form::primary(
+                None => form::action(
                     &tr!("Download ({size} MB)", size = model.size_mb()),
                     Some(Message::Voice(VoiceMsg::DownloadSpeech(model.id))),
                 )
                 .into(),
             };
-            row![
-                text(tr!(
-                    "Answers aren't read aloud: {model} isn't downloaded",
-                    model = crate::i18n::lookup(model.name)
-                ))
-                .size(ts::SMALL)
-                .color(theme::fg_muted())
-                .wrapping(Wrapping::WordOrGlyph)
-                .width(Fill),
+            let mut lines = column![
+                row![said(line, theme::fg_muted()), dismiss]
+                    .spacing(8)
+                    .align_y(iced::Center),
                 getting,
-                dismiss,
             ]
+            .spacing(4);
+            // Its download failed: why, where it was asked for.
+            if getting_here.is_none()
+                && let Some(e) = app.voice.speech.download_errors.get(model.id)
+            {
+                lines = lines.push(said(crate::i18n::message(e), theme::warn()));
+            }
+            Some(lines.into())
         }
-        Unheard::Failed(why) => row![
-            text(why.clone())
-                .size(ts::SMALL)
-                .color(theme::warn())
-                .wrapping(Wrapping::WordOrGlyph)
-                .width(Fill),
-            dismiss,
-        ],
-    };
-    Some(line.spacing(8).align_y(iced::Center).into())
+        Blocked::Failed(why) => Some(
+            row![said(why.clone(), theme::warn()), dismiss]
+                .spacing(8)
+                .align_y(iced::Center)
+                .into(),
+        ),
+    }
 }
 
 #[cfg(test)]
