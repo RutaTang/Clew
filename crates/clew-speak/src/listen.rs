@@ -22,6 +22,7 @@
 
 use std::io::{BufRead, Write};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,8 @@ pub struct Level {
     /// The loudest 10 ms heard lately, as RMS: what fell back since.
     peak: f32,
     gain: f32,
+    /// When something was last heard.
+    heard_at: Option<Instant>,
 }
 
 impl Level {
@@ -79,16 +82,35 @@ impl Level {
     const RISE_DB: f32 = 6.0;
     /// The length it is measured in: 10 ms at [`RATE`].
     const FRAME: usize = RATE as usize / 100;
+    /// Longer than this with nothing heard — waiting off while Clew
+    /// listened, or spoke — is taken for as long a quiet: pieces come a
+    /// fifth of a second apart while it waits.
+    const UNHEARD: Duration = Duration::from_secs(1);
 
     pub fn new() -> Level {
         Level {
             peak: Self::TARGET / Self::MAX_GAIN,
             gain: 1.0,
+            heard_at: None,
         }
     }
 
     /// `samples` (at [`RATE`]), brought up: 10 ms at a time.
     pub fn apply(&mut self, samples: &[f32]) -> Vec<f32> {
+        self.apply_at(samples, Instant::now())
+    }
+
+    /// `samples`, heard at `now`, brought up. A while with nothing heard
+    /// before them counts as quiet: a loud "Hey, Clew" — or a door shut —
+    /// before Clew listened does not hold the level down minutes later,
+    /// as though it had just been heard.
+    fn apply_at(&mut self, samples: &[f32], now: Instant) -> Vec<f32> {
+        if let Some(at) = self.heard_at.replace(now) {
+            let unheard = now.saturating_duration_since(at);
+            if unheard > Self::UNHEARD {
+                self.rest(unheard.as_secs_f32());
+            }
+        }
         let frame_seconds = Self::FRAME as f32 / RATE as f32;
         let fall = 0.5f32.powf(frame_seconds / Self::HALF_LIFE_SECONDS);
         let rise = 10f32.powf(Self::RISE_DB * frame_seconds / 20.0);
@@ -106,6 +128,15 @@ impl Level {
             out.extend(frame.iter().map(|s| (s * self.gain).clamp(-1.0, 1.0)));
         }
         out
+    }
+
+    /// `seconds` of quiet: the loudest heard falls back, and the gain rises
+    /// toward what that wants, as heard 10 ms at a time.
+    fn rest(&mut self, seconds: f32) {
+        self.peak *= 0.5f32.powf(seconds / Self::HALF_LIFE_SECONDS);
+        let wanted = (Self::TARGET / self.peak.max(f32::MIN_POSITIVE)).clamp(1.0, Self::MAX_GAIN);
+        let rise = 10f32.powf(Self::RISE_DB * seconds / 20.0);
+        self.gain = wanted.min(self.gain * rise);
     }
 }
 
@@ -325,6 +356,22 @@ mod tests {
         let worst = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         assert!(worst <= 0.5 + 1e-6, "{worst}");
         assert!((rms(&out) - rms(&loud)).abs() < 1e-4, "as it was said");
+    }
+
+    /// A while with nothing heard is taken for quiet: a loud sound just
+    /// before still holds soft speech down, one a minute before does not.
+    #[test]
+    fn a_while_unheard_is_taken_for_quiet() {
+        let soft = voice(0.2, 0.0032);
+        let start = Instant::now();
+        let mut level = Level::new();
+        level.apply_at(&voice(0.5, 0.3), start);
+        let mut soon = level.clone();
+        let out = soon.apply_at(&soft, start + Duration::from_millis(700));
+        assert!(rms(&out) / rms(&soft) < 1.5, "{}", rms(&out) / rms(&soft));
+        let out = level.apply_at(&soft, start + Duration::from_secs(60));
+        let gain = rms(&out) / rms(&soft);
+        assert!(gain > Level::MAX_GAIN - 0.5, "{gain}");
     }
 
     /// Between words, what is heard is not raised past where the words

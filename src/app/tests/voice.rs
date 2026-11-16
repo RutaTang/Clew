@@ -26,6 +26,8 @@ struct MicScript {
     rate: u32,
     /// How many microphones were opened on it.
     opened: usize,
+    /// What it hears is said softly: −63 dBFS, too soft for listening.
+    soft: bool,
 }
 
 struct FakeMic(Arc<Mutex<MicScript>>);
@@ -59,8 +61,9 @@ impl Listening for FakeMic {
     fn take(&mut self) -> Recording {
         let mut script = script(&self.0);
         script.taken += 1;
+        let gain = if script.soft { 0.01 } else { 1.0 };
         Recording {
-            samples: spoken(),
+            samples: spoken().into_iter().map(|s| s * gain).collect(),
             rate: if script.rate == 0 {
                 16_000
             } else {
@@ -2479,7 +2482,10 @@ impl crate::app::wake::Waking for Spots {
         if !self.loaded.load(Relaxed) {
             return Ok(None);
         }
+        // Let go of as it fails, as `Spotters` lets go of one: started
+        // again at the next step.
         if let Some(e) = self.broken.lock().unwrap().take() {
+            self.loaded.store(false, Relaxed);
             return Err(e);
         }
         let mut pieces = self.pieces.lock().unwrap();
@@ -2995,6 +3001,28 @@ fn one_window_waits_at_a_time() {
     assert!(first.voice.wake.is_waiting(), "let go of with its window");
 }
 
+/// A phrase the spotter hears but listening would not — said softer than
+/// listening hears speech, the spotter bringing it up — does not start
+/// listening: what was said next would not be heard either. Waiting goes
+/// on, afresh; said as loud as listening hears, it is called.
+#[test]
+fn a_call_too_soft_to_listen_to_is_no_call() {
+    let (_turn, mut app, script, _, spots) = wake_app("wake-soft", "open settings", 2);
+    script.lock().unwrap().soft = true;
+    assert!(!wait_step(&mut app), "loading");
+    assert!(!wait_step(&mut app), "the first piece is not the phrase");
+    let resets = *spots.resets.lock().unwrap();
+    assert!(!wait_step(&mut app), "the second is, too soft to listen to");
+    assert!(app.voice.wake.is_waiting());
+    assert!(!app.voice.mic_on);
+    assert!(!wait_step(&mut app));
+    assert_eq!(*spots.resets.lock().unwrap(), resets + 1, "afresh");
+    script.lock().unwrap().soft = false;
+    *spots.call.lock().unwrap() = spots.pieces.lock().unwrap().len() + 1;
+    assert!(wait_step(&mut app));
+    assert!(app.voice.mic_on && app.voice.is_listening());
+}
+
 /// A waiting that fails — the microphone, or the spotter not loading —
 /// ends, saying why; what an earlier waiting says is nobody's.
 #[test]
@@ -3026,17 +3054,26 @@ fn a_waiting_that_fails_says_why() {
     assert!(app.voice.wake.is_waiting());
     assert!(app.voice.wake.error.is_none());
     assert!(!wait_step(&mut app), "loaded this time");
-    // The spotter failing once — fallen behind while the computer was busy
-    // — is a moment's trouble: it is started again, and waiting goes on.
+    // The spotter failing — fallen behind while the computer was busy — is
+    // a moment's trouble: it is started again, and waiting goes on.
     *spots.broken.lock().unwrap() = Some("the keyword spotter fell behind".into());
+    let warmed = *spots.warmed.lock().unwrap();
     assert!(!wait_step(&mut app));
     assert!(app.voice.wake.is_waiting());
+    assert!(!wait_step(&mut app), "started again");
+    assert_eq!(*spots.warmed.lock().unwrap(), warmed + 1);
     assert!(!wait_step(&mut app), "heard again");
-    // Failing again and again, it ends the waiting, saying why.
+    // A failure a while ago is forgotten …
+    let wait = app.voice.wake.wait().cloned().unwrap();
+    wait.age_failures(crate::app::wake::FAILING_WITHIN);
+    // … but failing again and again ends the waiting, saying why — though
+    // started again each time, it heard its first pieces between.
     for _ in 1..crate::app::wake::FAILURES {
         *spots.broken.lock().unwrap() = Some("the keyword spotter ended".into());
         assert!(!wait_step(&mut app));
         assert!(app.voice.wake.is_waiting());
+        assert!(!wait_step(&mut app), "started again");
+        assert!(!wait_step(&mut app), "heard again");
     }
     *spots.broken.lock().unwrap() = Some("the keyword spotter ended".into());
     assert!(wait_step(&mut app));

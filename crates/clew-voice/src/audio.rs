@@ -283,6 +283,13 @@ pub fn speech(samples: &[f32]) -> Option<Range<usize>> {
     Some(first.saturating_sub(PAD_BEFORE)..(last + PAD_AFTER).min(samples.len()))
 }
 
+/// Whether `samples`, heard at `rate`, hold speech as listening hears it
+/// ([`speech`]): what waiting asks of the phrase it heard, so that it does
+/// not start listening that would hear nothing said at that level.
+pub fn holds_speech(samples: &[f32], rate: u32) -> bool {
+    speech(&resample(samples, rate, WHISPER_RATE)).is_some()
+}
+
 /// Length of a level frame, in seconds: what [`speech`] and
 /// [`trailing_silence`] read, at any rate.
 pub const FRAME_SECONDS: f32 = FRAME as f32 / WHISPER_RATE as f32;

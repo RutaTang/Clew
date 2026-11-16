@@ -116,15 +116,23 @@ pub(crate) struct Hearing {
     /// What the spotter heard before is let go of at the next step: a
     /// waiting begins afresh, and goes on afresh after a call it was not.
     fresh: bool,
-    /// The spotter's failures in a row while it heard: it is started again
-    /// for each — one that fell behind while the computer was busy, or
-    /// ended, hears again — until [`FAILURES`] say it will not.
-    failures: u32,
+    /// When the spotter failed lately: it is started again after each —
+    /// one that fell behind while the computer was busy, or ended, hears
+    /// again — until [`FAILURES`] within [`FAILING_WITHIN`] say it will not.
+    /// Counted by time, not in a row: a spotter started again always hears
+    /// its first pieces, so one that fails again and again never failed
+    /// twice in a row.
+    failures: VecDeque<Instant>,
 }
 
-/// The spotter's failures in a row that end the waiting: fewer are taken
-/// for a moment's trouble, and it is started again.
-pub(crate) const FAILURES: u32 = 3;
+/// The spotter's failures, within [`FAILING_WITHIN`] of each other, that end
+/// the waiting: fewer are taken for a moment's trouble, and it is started
+/// again.
+pub(crate) const FAILURES: usize = 3;
+
+/// How close together [`FAILURES`] are to end the waiting: a computer too
+/// slow for the spotter makes it fall behind every few seconds.
+pub(crate) const FAILING_WITHIN: Duration = Duration::from_secs(60);
 
 /// What a step of waiting came to.
 #[derive(Debug, PartialEq)]
@@ -198,12 +206,23 @@ impl Wait {
             return Step::Nothing;
         };
         let heard = self.spotters.hear(&self.dir, &piece);
-        match &heard {
-            Ok(Some(_)) => self.hearing().failures = 0,
-            Err(_) => self.hearing().failures += 1,
-            Ok(None) => {}
-        }
+        let failing = heard.is_err() && {
+            let mut hearing = self.hearing();
+            let now = Instant::now();
+            hearing
+                .failures
+                .retain(|at| now.duration_since(*at) < FAILING_WITHIN);
+            hearing.failures.push_back(now);
+            hearing.failures.len() >= FAILURES
+        };
         let step = match heard {
+            // Too soft for listening to hear — the spotter brings what it
+            // hears up, listening does not: what was said next would not
+            // be heard. As a call it was not: waiting goes on, afresh.
+            Ok(Some(true)) if !self.heard_as_speech() => {
+                self.hearing().fresh = true;
+                Step::Nothing
+            }
             Ok(Some(true)) => Step::Called,
             Ok(Some(false)) => Step::Nothing,
             // Not loaded — the first step, or `clew-speak` gone since: it
@@ -228,13 +247,34 @@ impl Wait {
             // next step: a moment's trouble — the computer too busy for it
             // to keep up — does not end the waiting. Failing again and
             // again, it does.
-            Err(e) if self.hearing().failures >= FAILURES => Step::Failed(e),
+            Err(e) if failing => Step::Failed(e),
             Err(_) => Step::Nothing,
         };
         if step != Step::Nothing {
             self.hearing().told = true;
         }
         step
+    }
+
+    /// Whether what was heard last ([`LEAD_SECONDS`], the phrase among it)
+    /// holds speech as listening hears it.
+    fn heard_as_speech(&self) -> bool {
+        let (samples, rate) = {
+            let hearing = self.hearing();
+            (
+                hearing.recent.iter().copied().collect::<Vec<f32>>(),
+                hearing.rate,
+            )
+        };
+        clew_voice::audio::holds_speech(&samples, rate)
+    }
+
+    /// The spotter's failures, as if each were `ago` earlier.
+    #[cfg(test)]
+    pub(crate) fn age_failures(&self, ago: Duration) {
+        for at in self.hearing().failures.iter_mut() {
+            *at = at.checked_sub(ago).unwrap_or(*at);
+        }
     }
 }
 

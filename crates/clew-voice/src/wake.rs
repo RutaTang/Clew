@@ -515,6 +515,7 @@ impl Spotters {
     /// Hand `samples` ([`RATE`]) to the spotter with the model in `dir`, and
     /// whether the phrase was heard — `None` while none is running with it,
     /// or one is loading: never waited for ([`Spotters::warm`] starts one).
+    /// One that failed, or ended by itself, is let go of, saying why.
     pub fn hear(&self, dir: &Path, samples: &[f32]) -> Result<Option<bool>, String> {
         let mut running = match self.running.try_lock() {
             Ok(running) => running,
@@ -524,9 +525,13 @@ impl Spotters {
         let Some((spotter, at)) = running.as_mut() else {
             return Ok(None);
         };
-        if at != dir || spotter.ended() {
+        if at != dir {
             *running = None;
             return Ok(None);
+        }
+        if spotter.ended() {
+            *running = None;
+            return Err("the keyword spotter ended".into());
         }
         let result = spotter.hear(samples);
         if result.is_err() {
