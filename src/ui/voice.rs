@@ -378,7 +378,25 @@ fn wake_model_rows(app: &App) -> Vec<Element<'_, Message>> {
         ));
     }
     if let Some(e) = &app.voice.wake.error {
-        rows.push(warning(crate::i18n::message(e)));
+        // Waiting ended by failing, its switch still on: begun again from
+        // here — the switch, on, said nothing of it, and only off and on
+        // again began it.
+        if app.voice.wake.failed && app.voice.prefs.wake {
+            let said = text(crate::i18n::message(e))
+                .size(ts::SMALL)
+                .color(theme::warn())
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Fill);
+            let again = form::action(
+                tr!("Try again"),
+                Some(Message::Voice(VoiceMsg::SetWake(true))),
+            );
+            rows.push(form::plain(
+                row![said, again].spacing(8).align_y(iced::Center),
+            ));
+        } else {
+            rows.push(warning(crate::i18n::message(e)));
+        }
     }
     rows
 }

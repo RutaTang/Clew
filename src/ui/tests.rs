@@ -14088,6 +14088,21 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
     let mut sim = sim_elem(super::voice_section(&app));
     assert!(shows(&mut sim, "the microphone was unplugged"));
     assert!(!shows(&mut sim, "Download (33 MB)"));
+    assert!(!shows(&mut sim, "Try again"), "tried again by itself");
+    drop(sim);
+    // Waiting ended by failing, its switch still on: Try again begins it.
+    app.voice.prefs.wake = true;
+    app.voice.wake.failed = true;
+    app.voice.wake.error = Some("the keyword spotter fell behind".into());
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(&mut sim, "the keyword spotter fell behind"));
+    assert!(matches!(
+        click(sim, "Try again").as_slice(),
+        [Message::Voice(VoiceMsg::SetWake(true))]
+    ));
+    app.voice.prefs.wake = false;
+    app.voice.wake.failed = false;
+    let sim = sim_elem(super::voice_section(&app));
     assert!(matches!(
         click(sim, "Remove").as_slice(),
         [Message::Voice(VoiceMsg::RemoveWake)]

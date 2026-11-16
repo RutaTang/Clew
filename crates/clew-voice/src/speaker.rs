@@ -532,14 +532,18 @@ mod tests {
     }
 
     /// A real `clew-speak` and a real model, when the test is pointed at
-    /// them: what it says is as long as speech of it is.
+    /// them — Qwen3-TTS, or the voice `CLEW_SPEAK_VOICE` names: what it
+    /// says is as long as speech of it is.
     #[test]
     #[ignore = "needs CLEW_SPEAK and CLEW_SPEAK_MODEL"]
     fn a_real_speaker_speaks() {
         let program = PathBuf::from(std::env::var("CLEW_SPEAK").unwrap());
         let dir = PathBuf::from(std::env::var("CLEW_SPEAK_MODEL").unwrap());
         let speakers = Speakers::new(program);
-        let model = &crate::speech::VOICE_MODELS[0];
+        let model = std::env::var("CLEW_SPEAK_VOICE")
+            .map_or(&crate::speech::VOICE_MODELS[0], |id| {
+                crate::speech::find(&id).unwrap()
+            });
         let (samples, rate) = said(
             &speakers,
             model,
@@ -552,6 +556,9 @@ mod tests {
         .unwrap();
         let seconds = samples.len() as f32 / rate as f32;
         assert!((1.0..6.0).contains(&seconds), "{seconds}");
+        // Heard: speech, not silence as long as speech.
+        let loudness = crate::audio::rms(&samples);
+        assert!(loudness > 0.01, "{loudness}");
         // Again, with the model kept: and in Korean.
         let (samples, _) = said(&speakers, model, &dir, "안녕하세요.", "ko", 3, 1.0).unwrap();
         assert!(!samples.is_empty());
