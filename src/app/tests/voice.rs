@@ -3055,9 +3055,10 @@ fn a_waiting_that_fails_says_why() {
     assert!(wait_step(&mut app));
     assert!(!app.voice.wake.is_waiting());
     assert_eq!(
-        app.voice.wake.error.as_deref(),
+        app.voice.wake.failed.as_deref(),
         Some("the model could not be loaded")
     );
+    assert_eq!(app.voice.wake.error, None, "no download's or removal's");
     assert!(
         app.status.contains("the model could not be loaded"),
         "{}",
@@ -3069,11 +3070,11 @@ fn a_waiting_that_fails_says_why() {
     assert!(!app.resume_waiting());
     let _ = app.update(Message::Voice(VoiceMsg::SetWake(true)));
     assert!(app.voice.wake.is_waiting());
-    assert!(app.voice.wake.error.is_none());
+    assert!(app.voice.wake.failed.is_none());
     assert!(!wait_step(&mut app), "loaded this time");
     // The spotter failing — fallen behind while the computer was busy — is
     // a moment's trouble: it is started again, and waiting goes on.
-    *spots.broken.lock().unwrap() = Some("the keyword spotter fell behind".into());
+    *spots.broken.lock().unwrap() = Some("the keyword spotter could not keep up".into());
     let warmed = *spots.warmed.lock().unwrap();
     assert!(!wait_step(&mut app));
     assert!(app.voice.wake.is_waiting());
@@ -3096,7 +3097,7 @@ fn a_waiting_that_fails_says_why() {
     assert!(wait_step(&mut app));
     assert!(!app.voice.wake.is_waiting());
     assert_eq!(
-        app.voice.wake.error.as_deref(),
+        app.voice.wake.failed.as_deref(),
         Some("the keyword spotter ended")
     );
     let _ = app.update(Message::Voice(VoiceMsg::SetWake(true)));
@@ -3119,6 +3120,10 @@ fn a_waiting_that_fails_says_why() {
     assert!(wait_step(&mut app));
     assert!(!app.voice.wake.is_waiting());
     assert!(app.status.contains("unplugged"), "{}", app.status);
+    // The model removed: what failed with it is gone too.
+    assert!(app.voice.wake.failed.is_some());
+    let _ = app.update(Message::Voice(VoiceMsg::WakeRemoved(Ok(()))));
+    assert_eq!(app.voice.wake.failed, None);
 }
 
 /// The microphone opened anew for talking over Clew, or not: so is the
@@ -3189,7 +3194,7 @@ fn the_keyword_spotter_downloads_verified_and_is_removed() {
     assert!(!clew_voice::wake::installed(&store));
     assert!(!app.voice.wake.is_waiting());
     // Downloaded: it waits at once — whatever failed before.
-    app.voice.wake.failed = true;
+    app.voice.wake.failed = Some("the model could not be loaded".into());
     let _ = app.update(Message::Voice(VoiceMsg::DownloadWake));
     install_wake(&store);
     let _ = app.update(Message::Voice(VoiceMsg::WakeDownloaded(Ok(()))));

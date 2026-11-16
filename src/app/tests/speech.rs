@@ -736,7 +736,10 @@ fn what_cannot_be_said_says_why() {
     asked(&mut app, 1, true);
     delta(&mut app, 1, "This is. Second");
     assert!(
-        matches!(&app.voice.speech.blocked, Some(Blocked::Failed(e)) if e.contains("ended unexpectedly")),
+        matches!(
+            &app.voice.speech.blocked,
+            Some(Blocked::Failed { why, stream: 1 }) if why.contains("ended unexpectedly")
+        ),
         "{:?}",
         app.voice.speech.blocked
     );
@@ -855,6 +858,86 @@ fn a_voice_missing_is_said_of_its_answer() {
     assert_eq!(shown(&app), None, "typed answers no longer read");
 }
 
+/// The voice failing partway through an answer is said of that answer —
+/// shown, as the rest of it will not be heard: a question said is answered
+/// without the card — while it is the last and one read aloud: not over a
+/// typed one Clew does not read, nor in a new session.
+#[test]
+fn a_voice_failing_is_said_of_its_answer() {
+    let (mut app, voice, _) = speech_app("speech-failed-of-answer");
+    let shown = |app: &App| match app.blocked_now() {
+        Some((Blocked::Failed { stream, .. }, _)) => Some(*stream),
+        _ => None,
+    };
+    assert!(!app.ask_view.is_open());
+    *voice.fail.lock().unwrap() = Some(SayError::Voice("the voice ended unexpectedly".into()));
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "This is. Second");
+    assert_eq!(shown(&app), Some(1));
+    assert!(app.ask_view.is_open(), "the answer shown, not heard");
+    // A typed question's answer, not read aloud: nothing said over it.
+    ended(&mut app, 1, StreamOutcome::Done);
+    asked(&mut app, 2, false);
+    delta(&mut app, 2, "This is. Second");
+    assert_eq!(shown(&app), None);
+    // Not in a new session.
+    *voice.fail.lock().unwrap() = Some(SayError::Voice("the voice ended unexpectedly".into()));
+    asked(&mut app, 3, true);
+    delta(&mut app, 3, "This is. Second");
+    assert_eq!(shown(&app), Some(3));
+    let _ = app.update(Message::Ask(AskMsg::NewSession));
+    assert_eq!(shown(&app), None, "a new session");
+}
+
+/// An answer the Ask card said needs a voice is read once that voice is
+/// downloaded — what its Download was pressed for — while it is still the
+/// answer on the card; not once another has been asked, nor with the card
+/// closed, nor over what Clew is saying.
+#[test]
+fn an_answer_is_read_once_its_voice_comes() {
+    let (mut app, voice, _) = speech_app("speech-read-once-here");
+    let store = app.voice.store.clone().unwrap();
+    let qwen = speech::find("qwen3-tts").unwrap();
+    let unheard = |app: &mut App, stream| {
+        speech::remove(&store, qwen).unwrap();
+        asked(app, stream, true);
+        delta(app, stream, "This is. Second");
+        ended(app, stream, StreamOutcome::Done);
+        assert!(
+            matches!(app.voice.speech.blocked, Some(Blocked::Missing { stream: s, .. }) if s == stream),
+            "{:?}",
+            app.voice.speech.blocked
+        );
+    };
+    let downloaded = |app: &mut App| {
+        let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+        install(app, qwen);
+        let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+            id: "qwen3-tts",
+            result: Ok(()),
+        }));
+        settle(app, task);
+    };
+    unheard(&mut app, 1);
+    assert!(app.ask_view.is_open(), "shown, not heard");
+    assert!(voice.texts().is_empty());
+    downloaded(&mut app);
+    assert_eq!(app.voice.speech.blocked, None);
+    assert_eq!(voice.texts(), ["This is.", "Second"], "read now");
+    // Another asked since: that one is not read over it.
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    let said = voice.texts().len();
+    unheard(&mut app, 2);
+    asked(&mut app, 3, false);
+    downloaded(&mut app);
+    assert_eq!(voice.texts().len(), said, "not the last answer");
+    // The card closed: nothing read out of nowhere.
+    unheard(&mut app, 4);
+    app.hide_ask();
+    downloaded(&mut app);
+    assert_eq!(voice.texts().len(), said, "the card closed");
+}
+
 /// The Ask card speaks of answers only: Settings' Try failing is said on
 /// the status line, where Try was pressed, not on the card; and reading
 /// aloud turned off in another window puts the card's notice away in this
@@ -872,7 +955,7 @@ fn the_ask_card_speaks_only_of_answers() {
     asked(&mut app, 1, true);
     delta(&mut app, 1, "This is. Second");
     assert!(
-        matches!(app.voice.speech.blocked, Some(Blocked::Failed(_))),
+        matches!(app.voice.speech.blocked, Some(Blocked::Failed { .. })),
         "{:?}",
         app.voice.speech.blocked
     );
@@ -880,7 +963,7 @@ fn the_ask_card_speaks_only_of_answers() {
     let task = app.update(Message::Voice(VoiceMsg::TrySpeech("qwen3-tts")));
     settle(&mut app, task);
     assert!(
-        matches!(app.voice.speech.blocked, Some(Blocked::Failed(_))),
+        matches!(app.voice.speech.blocked, Some(Blocked::Failed { .. })),
         "{:?}",
         app.voice.speech.blocked
     );

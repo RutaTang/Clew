@@ -441,9 +441,11 @@ impl Spotter {
     fn send(&self, line: String) -> Result<(), String> {
         match self.lines.try_send(line) {
             Ok(()) => Ok(()),
-            Err(mpsc::TrySendError::Full(_)) => Err("the keyword spotter fell behind".into()),
+            Err(mpsc::TrySendError::Full(_)) => {
+                Err("the keyword spotter could not keep up — this computer may be too busy".into())
+            }
             Err(mpsc::TrySendError::Disconnected(_)) => {
-                Err("the keyword spotter stopped taking audio".into())
+                Err("the keyword spotter stopped accepting audio".into())
             }
         }
     }
@@ -836,7 +838,7 @@ mod tests {
         assert!(
             fell_behind
                 .as_deref()
-                .is_some_and(|e| e.contains("fell behind")),
+                .is_some_and(|e| e.contains("could not keep up")),
             "{fell_behind:?}"
         );
         assert!(

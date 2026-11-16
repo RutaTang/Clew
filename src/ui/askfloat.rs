@@ -1221,15 +1221,16 @@ pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, M
 }
 
 /// Voice on the card, under its header: what was last heard and what came
-/// of it, as the microphone listens on; and what keeps answers from being
-/// heard ([`blocked_line`]). A command waiting for a yes is over the
-/// composer ([`voice_confirm`]), and Clew speaking beside it
-/// ([`voice_meter`]). `None` when there is nothing to say.
+/// of it, as the microphone listens on — not while a command waits for a
+/// yes, over the composer ([`voice_confirm`]), nor while Clew speaks,
+/// beside it ([`voice_meter`]); and what keeps answers from being heard
+/// ([`blocked_line`]) — whatever is said meanwhile: an answer read but for
+/// its sentences in another language, it came and went with each of them,
+/// the answer under it jumping. `None` when there is nothing to say.
 pub(crate) fn voice_strip(app: &App) -> Option<Element<'_, Message>> {
-    if app.voice.confirm.is_some() || app.voice.speech.is_speaking() {
-        return None;
-    }
+    let quiet = app.voice.confirm.is_none() && !app.voice.speech.is_speaking();
     let lines: Vec<Element<'_, Message>> = heard_line(app)
+        .filter(|_| quiet)
         .into_iter()
         .chain(blocked_line(app))
         .collect();
@@ -1274,11 +1275,12 @@ fn heard_line(app: &App) -> Option<Element<'_, Message>> {
 }
 
 /// What keeps answers from being heard — no voice here for their language,
-/// with its download; or the voice failing, and why — until it is put
-/// right or put away. Said where the answer is, not only on the status
-/// line, which is soon said over: what is wrong and a small ✕ to put it
-/// away on one line — not the header's Close a few lines up, which it is
-/// not — and what puts it right under it.
+/// with its download; or the voice failing, why, and Settings, where
+/// voices are tried — until it is put right or put away. Said where the
+/// answer is, not only on the status line, which is soon said over: what
+/// is wrong and a small ✕ to hide it on one line — not the header's Close
+/// a few lines up, which it is not, nor named as it is — and what puts it
+/// right under it.
 fn blocked_line(app: &App) -> Option<Element<'_, Message>> {
     use crate::app::speech::Blocked;
     use clew_voice::speech;
@@ -1290,29 +1292,40 @@ fn blocked_line(app: &App) -> Option<Element<'_, Message>> {
             .wrapping(Wrapping::WordOrGlyph)
             .width(Fill)
     };
+    let hide = tr!("Hide this notice");
     let dismiss = button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
         .style(theme::icon_button(false))
         .padding([5, 7])
         .on_press(super::heard::said(
-            tr!("Dismiss"),
+            hide,
             Message::Voice(VoiceMsg::DismissBlocked),
         ));
-    let dismiss = tip_at(dismiss, tr!("Dismiss"), None, tooltip::Position::Top);
+    // Under it, as the header's buttons have theirs: over them, it hid
+    // the card's Close.
+    let dismiss = tip_at(dismiss, hide, None, tooltip::Position::Bottom);
     match blocked {
         Blocked::Missing { model, .. } => {
             let model = speech::find(model)?;
             let name = crate::i18n::lookup(model.name);
+            let getting_here = app.voice.speech.downloads.get(model.id);
             // With a voice here, this answer — or the part of it in a
             // language that voice does not speak — needs this one. With
             // none, any voice that speaks the language would do: this one
-            // is the best of them.
+            // is the best of them — and once it is being got, that is
+            // what is said, not to get it.
             let line = if voice_here {
                 tr!("{model} is needed to read this answer aloud", model = name)
+            } else if getting_here.is_some() {
+                tr!(
+                    "Downloading {model} ({size} MB)…",
+                    model = name,
+                    size = model.size_mb()
+                )
             } else {
                 tr!("To hear answers read aloud, download {model}", model = name)
             };
-            let getting_here = app.voice.speech.downloads.get(model.id);
-            let getting: Element<'_, Message> = match getting_here {
+            // Its buttons named by the model they get, as Settings' are.
+            let getting: Element<'_, Message> = super::heard::about(name, || match getting_here {
                 Some(d) => super::voice::getting(
                     d.done,
                     d.total.unwrap_or(model.bytes()),
@@ -1323,7 +1336,7 @@ fn blocked_line(app: &App) -> Option<Element<'_, Message>> {
                     Some(Message::Voice(VoiceMsg::DownloadSpeech(model.id))),
                 )
                 .into(),
-            };
+            });
             let mut lines = column![
                 row![said(line, theme::fg_muted()), dismiss]
                     .spacing(8)
@@ -1339,11 +1352,20 @@ fn blocked_line(app: &App) -> Option<Element<'_, Message>> {
             }
             Some(lines.into())
         }
-        Blocked::Failed(why) => Some(
-            row![said(why.clone(), theme::warn()), dismiss]
-                .spacing(8)
-                .align_y(iced::Center)
-                .into(),
+        Blocked::Failed { why, .. } => Some(
+            column![
+                row![said(why.clone(), theme::warn()), dismiss]
+                    .spacing(8)
+                    .align_y(iced::Center),
+                form::action(
+                    tr!("Settings"),
+                    Some(Message::Settings(crate::SettingsMsg::OpenAt(
+                        crate::SettingsPage::Voice
+                    ))),
+                ),
+            ]
+            .spacing(4)
+            .into(),
         ),
     }
 }

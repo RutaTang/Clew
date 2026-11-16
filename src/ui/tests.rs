@@ -1597,8 +1597,10 @@ fn a_download_in_progress_is_cancelled_from_its_banner() {
 
 /// What keeps answers from being heard is said on the Ask card, with what
 /// puts it right: the voice to download — Download sends for it, the ✕
-/// puts the notice away — and why its download failed; or why the voice
-/// failed. Nothing once a voice here reads the answer's language.
+/// hides the notice — that it is downloading, once it is, and why its
+/// download failed; or why the voice failed, with Settings, where voices
+/// are tried. Nothing once a voice here reads the answer's language. Said
+/// while Clew speaks too: a sentence another voice reads took it away.
 #[test]
 fn the_ask_card_says_what_keeps_answers_from_being_heard() {
     use crate::app::speech::Blocked;
@@ -1641,9 +1643,15 @@ fn the_ask_card_says_what_keeps_answers_from_being_heard() {
         |m| matches!(m, Message::Voice(crate::VoiceMsg::DismissBlocked)),
     );
     assert!(!sent.is_empty(), "its ✕ puts it away");
-    // Downloading: how far it has come, and Cancel, where Download was.
+    // Downloading: that it is, how far it has come, and Cancel, where
+    // Download was — not still to download it.
     let _ = app.update(Message::Voice(crate::VoiceMsg::DownloadSpeech("qwen3-tts")));
     assert!(shows(&mut sim_of(&app), "0%"));
+    assert!(shows(
+        &mut sim_of(&app),
+        &format!("Downloading Qwen3-TTS ({} MB)…", qwen.size_mb())
+    ));
+    assert!(!shows(&mut sim_of(&app), needed));
     assert!(!shows(&mut sim_of(&app), &download));
     let sent = click(sim_of(&app), "Cancel");
     assert!(
@@ -1677,13 +1685,31 @@ fn the_ask_card_says_what_keeps_answers_from_being_heard() {
         &mut sim_of(&app),
         "Qwen3-TTS is needed to read this answer aloud"
     ));
+    // Supertonic reading the answer's English sentences: still said.
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.5);
+    assert!(app.voice.speech.is_speaking());
+    assert!(shows(
+        &mut sim_of(&app),
+        "Qwen3-TTS is needed to read this answer aloud"
+    ));
     app.voice.speech.blocked = Some(missing("en"));
     assert!(!shows(&mut sim_of(&app), "is needed to read"));
-    // The voice failing: why, in its own words.
-    app.voice.speech.blocked = Some(Blocked::Failed(
-        "Could not speak: the voice ended unexpectedly".into(),
-    ));
+    // The voice failing: why, in its own words, and Settings.
+    app.voice.speech.blocked = Some(Blocked::Failed {
+        why: "Could not speak: the voice ended unexpectedly".into(),
+        stream: 1,
+    });
     assert!(shows(&mut sim_of(&app), "the voice ended unexpectedly"));
+    let sent = click(sim_of(&app), "Settings");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Settings(crate::SettingsMsg::OpenAt(
+                crate::SettingsPage::Voice
+            ))]
+        ),
+        "{sent:?}"
+    );
 }
 
 /// The Files view marks what the working tree changes: a file by git's
@@ -14090,18 +14116,32 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
     assert!(!shows(&mut sim, "Download (33 MB)"));
     assert!(!shows(&mut sim, "Try again"), "tried again by itself");
     drop(sim);
-    // Waiting ended by failing, its switch still on: Try again begins it.
+    // Waiting ended by failing, its switch still on: that it stopped, and
+    // why — and Try again begins it.
+    app.voice.wake.error = None;
     app.voice.prefs.wake = true;
-    app.voice.wake.failed = true;
-    app.voice.wake.error = Some("the keyword spotter fell behind".into());
+    app.voice.wake.failed = Some("the keyword spotter could not keep up".into());
     let mut sim = sim_elem(super::voice_section(&app));
-    assert!(shows(&mut sim, "the keyword spotter fell behind"));
+    assert!(shows(
+        &mut sim,
+        "Stopped waiting for “Hey, Clew”: the keyword spotter could not keep up"
+    ));
     assert!(matches!(
         click(sim, "Try again").as_slice(),
         [Message::Voice(VoiceMsg::SetWake(true))]
     ));
+    // A download's failure after it is said as such, not with Try again,
+    // which would not try the download.
+    app.voice.wake.error = Some("the connection was reset".into());
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(&mut sim, "the connection was reset"));
+    let again = text_at(&mut sim, |t| t == "Try again", 0).expect("Try again");
+    let error = text_at(&mut sim, |t| t == "the connection was reset", 0).unwrap();
+    assert!(again.y > error.y, "beside the waiting's failure, under it");
+    drop(sim);
+    app.voice.wake.error = None;
     app.voice.prefs.wake = false;
-    app.voice.wake.failed = false;
+    app.voice.wake.failed = None;
     let sim = sim_elem(super::voice_section(&app));
     assert!(matches!(
         click(sim, "Remove").as_slice(),
@@ -14444,38 +14484,41 @@ fn voice_failures_are_said_in_the_readers_language() {
     });
 }
 
+/// An output Clew is speaking on: playing, half loud.
+struct Playing;
+
+impl crate::app::speech::Playing for Playing {
+    fn play(&self, _: &[f32], _: u32) {}
+    fn rate(&self) -> u32 {
+        48_000
+    }
+    fn queued_seconds(&self) -> f32 {
+        1.0
+    }
+    fn played(&self) -> u64 {
+        0
+    }
+    fn take_rest(&self) -> (Vec<f32>, u32) {
+        (Vec::new(), 1)
+    }
+    fn idle(&self) -> bool {
+        false
+    }
+    fn level(&self) -> f32 {
+        0.5
+    }
+    fn error(&self) -> Option<String> {
+        None
+    }
+    fn pause(&self) {}
+    fn resume(&self) {}
+}
+
 /// Clew speaking shows as listening does: on the pill, even with Ask put
 /// away, and in the card's composer — the speaker, how loud, and the
 /// button lit to stop it.
 #[test]
 fn speaking_shows_with_a_stop() {
-    struct Playing;
-    impl crate::app::speech::Playing for Playing {
-        fn play(&self, _: &[f32], _: u32) {}
-        fn rate(&self) -> u32 {
-            48_000
-        }
-        fn queued_seconds(&self) -> f32 {
-            1.0
-        }
-        fn played(&self) -> u64 {
-            0
-        }
-        fn take_rest(&self) -> (Vec<f32>, u32) {
-            (Vec::new(), 1)
-        }
-        fn idle(&self) -> bool {
-            false
-        }
-        fn level(&self) -> f32 {
-            0.5
-        }
-        fn error(&self) -> Option<String> {
-            None
-        }
-        fn pause(&self) {}
-        fn resume(&self) {}
-    }
     let mut app = reader_app();
     app.ask_view = crate::AskView::Hidden;
     app.voice.speech.speak_for_test(Box::new(Playing), 0.5);

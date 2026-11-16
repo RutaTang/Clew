@@ -367,7 +367,8 @@ pub(crate) struct WakeState {
     /// What hears the phrase; `None` when `clew-speak` is not beside Clew.
     pub(crate) spotters: Option<Arc<dyn Waking>>,
     pub(crate) download: Option<ModelDownload>,
-    /// The last download's, removal's or waiting's failure.
+    /// The last download's or removal's failure, or the microphone not
+    /// opening for waiting.
     pub(crate) error: Option<String>,
     /// The microphone, while it waits.
     waiting: Option<Waiting>,
@@ -380,10 +381,12 @@ pub(crate) struct WakeState {
     /// Listening began with "Hey, Clew", not the voice key: a while with
     /// nothing said has it wait for its name again.
     pub(crate) called: bool,
-    /// Waiting failed, and is not tried again by itself — only once the
+    /// Why waiting failed: it is not tried again by itself — only once the
     /// reader turns it on again, or downloads the model: what failed (an
-    /// old `clew-speak`, a model that does not load) fails again.
-    pub(crate) failed: bool,
+    /// old `clew-speak`, a model that does not load) fails again. Kept
+    /// apart from [`WakeState::error`]: Settings' Try again, beside it,
+    /// begins waiting again, not a download.
+    pub(crate) failed: Option<String>,
 }
 
 impl WakeState {
@@ -396,7 +399,7 @@ impl WakeState {
             lead: None,
             last_said: Instant::now(),
             called: false,
-            failed: false,
+            failed: None,
         }
     }
 
@@ -427,7 +430,7 @@ impl App {
     pub(crate) fn can_wait(&self) -> bool {
         self.voice.prefs.wake
             && !self.voice.mic_on
-            && !self.voice.wake.failed
+            && self.voice.wake.failed.is_none()
             // What is said once it is called needs a model to be heard with.
             && self.voice.installed(self.voice.prefs.model())
             && self.wake_model().is_some()
@@ -572,8 +575,7 @@ impl App {
             "Stopped waiting for “Hey, Clew”: {error}",
             error = crate::i18n::message(&error)
         );
-        self.voice.wake.error = Some(error);
-        self.voice.wake.failed = true;
+        self.voice.wake.failed = Some(error);
         Task::none()
     }
 
@@ -582,7 +584,7 @@ impl App {
         self.voice.prefs.wake = on;
         self.save_voice_pref(Pref::Wake);
         self.voice.wake.error = None;
-        self.voice.wake.failed = false;
+        self.voice.wake.failed = None;
         if !on {
             self.stop_waiting();
             if let Some(spotters) = &self.voice.wake.spotters {
@@ -648,7 +650,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.voice.wake.error = None;
-                        self.voice.wake.failed = false;
+                        self.voice.wake.failed = None;
                         self.status = if self.resume_waiting() {
                             tr!("Waiting for “Hey, Clew”").into()
                         } else {
@@ -670,7 +672,9 @@ impl App {
             VoiceMsg::WakeRemoved(result) => {
                 match result {
                     Ok(()) => {
+                        // What failed with it is gone too.
                         self.voice.wake.error = None;
+                        self.voice.wake.failed = None;
                         self.status = tr!("{model} removed", model = name);
                     }
                     Err(e) => {

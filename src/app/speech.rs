@@ -284,15 +284,25 @@ impl std::fmt::Debug for Audio {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Blocked {
     /// No voice here speaks `lang`, which the answer on `stream` is in, or
-    /// part of it: `model` would read it. Said while that answer is the
-    /// last, and one read aloud ([`App::blocked_now`]).
+    /// part of it: `model` would read it.
     Missing {
         model: &'static str,
         lang: &'static str,
         stream: u64,
     },
-    /// The voice could not go on, saying why.
-    Failed(String),
+    /// The voice could not go on reading the answer on `stream`, saying
+    /// why.
+    Failed { why: String, stream: u64 },
+}
+
+impl Blocked {
+    /// The answer it keeps from being heard: it is said while that answer
+    /// is the last, and one read aloud ([`App::blocked_now`]).
+    pub(crate) fn stream(&self) -> u64 {
+        match self {
+            Self::Missing { stream, .. } | Self::Failed { stream, .. } => *stream,
+        }
+    }
 }
 
 /// Speech's state in a window.
@@ -592,23 +602,39 @@ impl App {
                 if self.voice.speech.downloads.remove(id).is_none() {
                     return Task::none();
                 }
-                let name = crate::i18n::lookup(speech::find(id).map_or(id, |m| m.name));
+                let found = speech::find(id);
+                let name = crate::i18n::lookup(found.map_or(id, |m| m.name));
                 match result {
                     Ok(()) => {
                         self.voice.speech.download_errors.remove(id);
-                        // What it reads is heard from now on.
-                        if let Some(Blocked::Missing { lang, .. }) = self.voice.speech.blocked
-                            && speech::find(id).is_some_and(|m| m.speaks(lang))
+                        // What it reads is heard from now on — and the
+                        // answer said to need it, read now.
+                        let mut unheard = None;
+                        if let Some(Blocked::Missing { lang, stream, .. }) =
+                            self.voice.speech.blocked
+                            && found.is_some_and(|m| m.speaks(lang))
                         {
                             self.voice.speech.blocked = None;
+                            unheard = Some(stream);
                         }
                         self.voice
                             .downloaded_at
                             .insert(id, std::time::Instant::now());
                         self.voice.speech.told.remove(id);
                         self.voice.speech.put_away.remove(id);
-                        // Which answers it reads, as Read answers aloud says.
+                        // Which answers it reads, as Read answers aloud says
+                        // — not answers in the language spoken, if it does
+                        // not speak it: Supertonic 3 and Chinese.
+                        let usual = self
+                            .voice
+                            .prefs
+                            .language
+                            .clone()
+                            .unwrap_or_else(|| crate::i18n::current().code().to_string());
                         self.status = match self.voice.prefs.read_aloud {
+                            _ if !found.is_some_and(|m| m.speaks(&usual)) => {
+                                tr!("{model} is ready", model = name)
+                            }
                             ReadAloud::Spoken => tr!(
                                 "{model} is ready — answers to what you ask by voice are read aloud",
                                 model = name
@@ -618,6 +644,12 @@ impl App {
                             }
                             ReadAloud::Never => tr!("{model} is ready", model = name),
                         };
+                        if let Some(stream) = unheard {
+                            return Task::batch([
+                                self.read_now_heard(stream),
+                                crate::app::embedding::redraw_once_just_downloaded(),
+                            ]);
+                        }
                     }
                     Err(e) => {
                         self.status = tr!(
@@ -687,32 +719,27 @@ impl App {
     }
 
     /// What keeps answers from being heard, as the Ask card says it now,
-    /// and whether some voice is here at all. A voice missing is said of
-    /// the last answer, while it is one read aloud — not once another is
-    /// asked, which may be heard: said of it only once it is not — and not
-    /// once a voice here reads its language, nor while the one that would
-    /// is got in another window or let go of: there is no Download to
-    /// offer. A voice failing is said whatever the answer.
+    /// and whether some voice is here at all. Said of the last answer,
+    /// while it is one read aloud — not once another is asked, which may
+    /// be heard: said of it only once it is not; nor in a new session. A
+    /// voice missing is not said once a voice here reads its language, nor
+    /// while the one that would is got in another window or let go of:
+    /// there is no Download to offer.
     pub(crate) fn blocked_now(&self) -> Option<(&Blocked, bool)> {
         let blocked = self.voice.speech.blocked.as_ref()?;
+        let last = self.proj.ask_turns.last()?;
+        if blocked.stream() != last.stream || !self.voice.prefs.read_aloud.reads(last.spoken) {
+            return None;
+        }
         // Each voice's files looked at once: this is asked at every frame
         // the card is drawn.
         let here: Vec<&VoiceModel> = speech::VOICE_MODELS
             .iter()
             .filter(|m| self.speech_installed(m))
             .collect();
-        let Blocked::Missing {
-            model,
-            lang,
-            stream,
-        } = blocked
-        else {
+        let Blocked::Missing { model, lang, .. } = blocked else {
             return Some((blocked, !here.is_empty()));
         };
-        let last = self.proj.ask_turns.last()?;
-        if *stream != last.stream || !self.voice.prefs.read_aloud.reads(last.spoken) {
-            return None;
-        }
         if here.iter().any(|m| m.speaks(lang)) {
             return None;
         }
@@ -723,6 +750,39 @@ impl App {
                     crate::app::voice::downloading(&speech::dir(store, model))
                 });
         (!elsewhere).then_some((blocked, !here.is_empty()))
+    }
+
+    /// The answer on `stream`, which the Ask card said a voice was needed
+    /// to read, read now that the voice is here — what its Download was
+    /// pressed for — while it is still the last answer, on the card, and
+    /// nothing is being said, nor anyone heard saying something. Not one
+    /// still coming: it is being read, the voice heard from its next
+    /// sentence.
+    fn read_now_heard(&mut self, stream: u64) -> Task<Message> {
+        let read_aloud = self.voice.prefs.read_aloud;
+        let Some(done) = self
+            .proj
+            .ask_turns
+            .last()
+            .filter(|t| t.stream == stream && read_aloud.reads(t.spoken))
+            .map(|t| !t.streaming)
+        else {
+            return Task::none();
+        };
+        let speech = &self.voice.speech;
+        let hearing = self
+            .voice
+            .listening_now()
+            .is_some_and(|l| l.silence_after_speech().is_some());
+        if !done
+            || !self.ask_view.is_open()
+            || speech.reading.is_some()
+            || speech.is_speaking()
+            || hearing
+        {
+            return Task::none();
+        }
+        self.read_answer(stream, true)
     }
 
     /// Whether `model` is downloaded.
@@ -777,7 +837,11 @@ impl App {
             speech.reading = Some((stream, Reader::new(Some(&usual))));
             // What kept an earlier answer from being heard is not said of
             // this one: only if it keeps this one too.
-            if matches!(speech.blocked, Some(Blocked::Missing { stream: of, .. }) if of != stream) {
+            if speech
+                .blocked
+                .as_ref()
+                .is_some_and(|b| b.stream() != stream)
+            {
                 speech.blocked = None;
             }
         }
@@ -882,10 +946,20 @@ impl App {
     /// Clew could not go on speaking, saying `why` on the status line: with
     /// the microphone on, it opens as it would have once all was said.
     fn give_up_speaking(&mut self, why: String) -> Task<Message> {
-        // An answer's voice failing is said on the Ask card too: the status
-        // line is soon said over. Try's is said where Try was pressed.
-        if !self.voice.speech.trying {
-            self.voice.speech.blocked = Some(Blocked::Failed(why.clone()));
+        // An answer's voice failing is said on the Ask card too, where the
+        // answer is — shown: the rest of it will not be heard, and the
+        // status line is soon said over. Try's is said where Try was
+        // pressed. The answer said is the last: none is read but the
+        // newest.
+        let answer = self.proj.ask_turns.last().map(|t| t.stream);
+        if !self.voice.speech.trying
+            && let Some(stream) = answer
+        {
+            self.voice.speech.blocked = Some(Blocked::Failed {
+                why: why.clone(),
+                stream,
+            });
+            self.show_unheard(stream);
         }
         self.voice.speech.hush();
         self.status = why;
@@ -1164,7 +1238,7 @@ impl App {
                 // not Try's, which may be another voice.
                 if !audio.samples.is_empty()
                     && !self.voice.speech.trying
-                    && matches!(self.voice.speech.blocked, Some(Blocked::Failed(_)))
+                    && matches!(self.voice.speech.blocked, Some(Blocked::Failed { .. }))
                 {
                     self.voice.speech.blocked = None;
                 }
