@@ -466,6 +466,19 @@ pub(crate) fn run_task(task: Task<Message>) -> Vec<Message> {
     })
 }
 
+/// Run `task`, hand the window every message it gives, and every one
+/// those give, until none are left.
+pub(crate) fn settle(app: &mut App, task: Task<Message>) {
+    let mut pending = run_task(task);
+    while !pending.is_empty() {
+        let mut next = Vec::new();
+        for message in pending {
+            next.extend(run_task(app.update(message)));
+        }
+        pending = next;
+    }
+}
+
 /// [`run_task`] for a test that already runs on a tokio runtime.
 pub(crate) async fn run_task_async(task: Task<Message>) -> Vec<Message> {
     use iced::futures::StreamExt;
@@ -29364,7 +29377,7 @@ fn dap_stopped(thread: i64) -> crate::dap::DapEvent {
 }
 
 /// Run `msg` and everything it sends back, to the end.
-fn settle(app: &mut App, msg: Message) {
+fn settle_message(app: &mut App, msg: Message) {
     let mut queue = vec![msg];
     while let Some(msg) = queue.pop() {
         let task = app.update(msg);
@@ -29509,7 +29522,7 @@ fn a_paused_js_debug_session_stays_on_screen_until_it_is_driven() {
             event,
         })
     };
-    let control = |app: &mut App, cmd| settle(app, Message::Debug(DebugMsg::Control(cmd)));
+    let control = |app: &mut App, cmd| settle_message(app, Message::Debug(DebugMsg::Control(cmd)));
     let thread = |app: &App| app.debug.session.as_ref().and_then(|s| s.thread_id);
     let status = |app: &App| app.debug.session.as_ref().map(|s| s.status);
     let count =
@@ -29522,12 +29535,12 @@ fn a_paused_js_debug_session_stays_on_screen_until_it_is_driven() {
             .find(|(c, _)| c == "continue")
             .map(|(_, args)| args["threadId"].clone())
     };
-    settle(&mut app, started(1, first));
+    settle_message(&mut app, started(1, first));
 
     // The program stops; a worker's session starts while it is paused.
-    settle(&mut app, event(1, dap_stopped(11)));
+    settle_message(&mut app, event(1, dap_stopped(11)));
     let (second, second_seen) = fake_js_session(&rt);
-    settle(&mut app, started(2, second));
+    settle_message(&mut app, started(2, second));
     assert_eq!(status(&app), Some(DebugStatus::Stopped));
     assert_eq!(thread(&app), Some(11));
     control(&mut app, DebugCmd::Continue);
@@ -29540,8 +29553,8 @@ fn a_paused_js_debug_session_stays_on_screen_until_it_is_driven() {
 
     // Both stop; the last stop is on screen, and continuing it brings back
     // the other — shown again, not recorded as a stop of its own.
-    settle(&mut app, event(1, dap_stopped(11)));
-    settle(&mut app, event(2, dap_stopped(22)));
+    settle_message(&mut app, event(1, dap_stopped(11)));
+    settle_message(&mut app, event(2, dap_stopped(22)));
     assert_eq!(thread(&app), Some(22));
     let stops = app.debug.trace.len();
     let asked = count(&first_seen, "stackTrace");
@@ -29560,8 +29573,8 @@ fn a_paused_js_debug_session_stays_on_screen_until_it_is_driven() {
     assert_eq!(status(&app), Some(DebugStatus::Running));
 
     // A step stops again where it lands: the other session stays put.
-    settle(&mut app, event(2, dap_stopped(22)));
-    settle(&mut app, event(1, dap_stopped(11)));
+    settle_message(&mut app, event(2, dap_stopped(22)));
+    settle_message(&mut app, event(1, dap_stopped(11)));
     control(&mut app, DebugCmd::StepOver);
     assert_eq!(count(&second_seen, "next"), 0);
     assert_eq!(status(&app), Some(DebugStatus::Running));
@@ -29569,7 +29582,7 @@ fn a_paused_js_debug_session_stays_on_screen_until_it_is_driven() {
 
     // The session on screen ends: the paused one comes back, and the ended
     // one is disconnected.
-    settle(&mut app, event(1, crate::dap::DapEvent::Terminated));
+    settle_message(&mut app, event(1, crate::dap::DapEvent::Terminated));
     assert_eq!(count(&first_seen, "disconnect"), 1);
     assert_eq!(status(&app), Some(DebugStatus::Stopped));
     assert_eq!(thread(&app), Some(22));
@@ -29579,10 +29592,10 @@ fn a_paused_js_debug_session_stays_on_screen_until_it_is_driven() {
     app.debug.children.last_id += 1;
     let third = app.debug.children.last_id;
     app.debug.children.starting.push(third);
-    settle(&mut app, event(2, crate::dap::DapEvent::Terminated));
+    settle_message(&mut app, event(2, crate::dap::DapEvent::Terminated));
     assert_eq!(count(&second_seen, "disconnect"), 1);
     assert_eq!(status(&app), Some(DebugStatus::Running));
-    settle(
+    settle_message(
         &mut app,
         Message::Debug(DebugMsg::BreakpointToggle {
             path: PathBuf::from("/p/prog.js"),
@@ -29595,16 +29608,16 @@ fn a_paused_js_debug_session_stays_on_screen_until_it_is_driven() {
         "a breakpoint went to an ended child"
     );
     let (third_client, third_seen) = fake_js_session(&rt);
-    settle(&mut app, started(third, third_client));
-    settle(&mut app, event(third, dap_stopped(33)));
+    settle_message(&mut app, started(third, third_client));
+    settle_message(&mut app, event(third, dap_stopped(33)));
     assert_eq!(thread(&app), Some(33));
     assert_eq!(count(&third_seen, "stackTrace"), 1);
     app.debug.children.last_id += 1;
     let fourth = app.debug.children.last_id;
     app.debug.children.starting.push(fourth);
-    settle(&mut app, event(third, crate::dap::DapEvent::Terminated));
+    settle_message(&mut app, event(third, crate::dap::DapEvent::Terminated));
     assert_eq!(status(&app), Some(DebugStatus::Running));
-    settle(
+    settle_message(
         &mut app,
         Message::Debug(DebugMsg::ChildFailed {
             stamp: stamp.clone(),
@@ -29654,9 +29667,9 @@ fn switching_js_debug_sessions_keeps_every_paused_one() {
     let status = |app: &App| app.debug.session.as_ref().map(|s| s.status);
     let (first, _) = fake_js_session_refusing(&rt, Some("continue"));
     let (second, _) = fake_js_session(&rt);
-    settle(&mut app, started(1, first));
-    settle(&mut app, started(2, second));
-    settle(&mut app, event(1, dap_stopped(11)));
+    settle_message(&mut app, started(1, first));
+    settle_message(&mut app, started(2, second));
+    settle_message(&mut app, event(1, dap_stopped(11)));
     assert!(!app.debug.session.as_ref().unwrap().frames.is_empty());
 
     // Continue on the first, refused — but the second stops before the
@@ -29677,7 +29690,7 @@ fn switching_js_debug_sessions_keeps_every_paused_one() {
     }
     assert_eq!(thread(&app), Some(22));
     // Continuing the second brings the first back, still paused.
-    settle(
+    settle_message(
         &mut app,
         Message::Debug(DebugMsg::Control(DebugCmd::Continue)),
     );
@@ -29690,10 +29703,10 @@ fn switching_js_debug_sessions_keeps_every_paused_one() {
     let task = app.update(Message::Debug(DebugMsg::Control(DebugCmd::Continue)));
     let refusal = run_task(task);
     let (third, _) = fake_js_session(&rt);
-    settle(&mut app, started(3, third));
+    settle_message(&mut app, started(3, third));
     assert_eq!(app.debug.children.active, 3);
     for msg in refusal {
-        settle(&mut app, msg);
+        settle_message(&mut app, msg);
     }
     assert_eq!(app.debug.children.active, 1);
     assert_eq!(status(&app), Some(DebugStatus::Stopped));
@@ -29704,12 +29717,12 @@ fn switching_js_debug_sessions_keeps_every_paused_one() {
     );
 
     // All end; then a forked child connects: the run goes on.
-    settle(&mut app, event(3, crate::dap::DapEvent::Terminated));
-    settle(&mut app, event(2, crate::dap::DapEvent::Terminated));
-    settle(&mut app, event(1, crate::dap::DapEvent::Terminated));
+    settle_message(&mut app, event(3, crate::dap::DapEvent::Terminated));
+    settle_message(&mut app, event(2, crate::dap::DapEvent::Terminated));
+    settle_message(&mut app, event(1, crate::dap::DapEvent::Terminated));
     assert_eq!(status(&app), Some(DebugStatus::Terminated));
     let (fourth, _) = fake_js_session(&rt);
-    settle(&mut app, started(4, fourth));
+    settle_message(&mut app, started(4, fourth));
     assert_eq!(status(&app), Some(DebugStatus::Running));
 }
 
@@ -29736,7 +29749,7 @@ fn the_gutter_shows_the_breakpoint_answers_of_the_session_on_screen() {
     for child in [1, 2] {
         let (client, _) = fake_js_session(&rt);
         let stamp = app.stamp();
-        settle(
+        settle_message(
             &mut app,
             Message::Debug(DebugMsg::DapChildStarted {
                 stamp,
@@ -29749,7 +29762,7 @@ fn the_gutter_shows_the_breakpoint_answers_of_the_session_on_screen() {
     }
     let answer = |app: &mut App, session, verified, id| {
         let stamp = app.stamp();
-        settle(
+        settle_message(
             app,
             Message::Debug(DebugMsg::DapBreakpointsAnswered {
                 stamp,
@@ -29786,7 +29799,7 @@ fn the_gutter_shows_the_breakpoint_answers_of_the_session_on_screen() {
     answer(&mut app, 2, true, 9);
     assert_eq!(gutter(&app), (Some(true), Some(9)));
     // The program binds it later, while the worker is on screen.
-    settle(
+    settle_message(
         &mut app,
         event(
             1,
@@ -29800,10 +29813,10 @@ fn the_gutter_shows_the_breakpoint_answers_of_the_session_on_screen() {
     );
     assert_eq!(gutter(&app), (Some(true), Some(9)));
     // The program stops: its own answer, as revised, is drawn.
-    settle(&mut app, event(1, dap_stopped(11)));
+    settle_message(&mut app, event(1, dap_stopped(11)));
     assert_eq!(gutter(&app), (Some(true), Some(1)));
     // The worker unbinds it: not the program's line.
-    settle(
+    settle_message(
         &mut app,
         event(
             2,
@@ -29816,7 +29829,7 @@ fn the_gutter_shows_the_breakpoint_answers_of_the_session_on_screen() {
         ),
     );
     assert_eq!(gutter(&app), (Some(true), Some(1)));
-    settle(&mut app, event(2, dap_stopped(22)));
+    settle_message(&mut app, event(2, dap_stopped(22)));
     assert_eq!(gutter(&app), (Some(false), Some(9)));
 }
 

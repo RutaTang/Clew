@@ -281,9 +281,9 @@ pub(crate) fn after_name(said: &str) -> &str {
 /// What follows Clew's name in `said`, if Clew is called by it there —
 /// the name a word of its own, or in a run of Chinese, Japanese or Korean
 /// ("clueless" holds no "clue"), said as a call is: after a word Clew is
-/// called with ("hey", "嘿"), or first with a mark after it. "No clue why"
-/// calls no one — nor "no Clew why", as whisper, told the name, may write
-/// it.
+/// called with ("hey", "嘿"), or first — "Clew" as it is, another spelling
+/// with a mark after it ("Clue, …", not "Clue me in"). "No clue why" calls
+/// no one — nor "no Clew why", as whisper, told the name, may write it.
 pub(crate) fn named_in(said: &str) -> Option<&str> {
     let names = every(NAME);
     let calls = every(CALLED);
@@ -294,13 +294,17 @@ pub(crate) fn named_in(said: &str) -> Option<&str> {
         if !at_word {
             continue;
         }
-        let Some(end) = names.iter().find_map(|n| begins(&said[i..], n)) else {
+        let Some((name, end)) = names
+            .iter()
+            .find_map(|n| begins(&said[i..], n).map(|end| (n, end)))
+        else {
             continue;
         };
         let rest = &said[i + end..];
         let before = said[..i].trim_end_matches(|c: char| c.is_whitespace() || mark(c));
-        let called = (before.is_empty() && rest.trim_start().chars().next().is_none_or(mark))
-            || calls.iter().any(|call| ends_with_word(before, call));
+        let first = before.is_empty()
+            && (name == "clew" || rest.trim_start().chars().next().is_none_or(mark));
+        let called = first || calls.iter().any(|call| ends_with_word(before, call));
         if called {
             return Some(unmarked(rest));
         }
@@ -980,6 +984,8 @@ mod tests {
         assert_eq!(named_in("Hey, Clew."), Some(""));
         assert_eq!(named_in("Hey clue."), Some(""));
         assert_eq!(named_in("Clue, open settings"), Some("open settings"));
+        // "Clew", as whisper writes it, first, no mark after it.
+        assert_eq!(named_in("Clew open settings"), Some("open settings"));
         // What was said before the call was not said to Clew.
         assert_eq!(
             named_in("and then I said hey Clew, open settings"),
@@ -1008,6 +1014,10 @@ mod tests {
                 assert_eq!(named_in("헤이 크루, 설정 열어"), Some("설정 열어"));
                 assert_eq!(named_in("ねえ、クルー、設定を開いて"), Some("設定を開いて"));
                 assert_eq!(named_in("这条线索是克鲁斯给的"), None, "{lang:?}");
+                // The call word as each language writes "hey", the name
+                // as whisper was told it.
+                assert_eq!(named_in("ヘイ、Clew、設定を開いて"), Some("設定を開いて"));
+                assert_eq!(named_in("嗨，克鲁，打开设置"), Some("打开设置"));
             });
         }
     }

@@ -2724,6 +2724,25 @@ fn a_call_without_the_name_is_no_call() {
     let _ = app.update(Message::Voice(VoiceMsg::Tick));
     settle(&mut app, task);
     assert!(app.settings.open, "{}", app.status);
+    assert!(
+        app.voice.mic_on && app.voice.is_listening(),
+        "listening again, for the call"
+    );
+    drop(app);
+    drop(turn);
+    // Waiting not begun again — it failed: the status says why.
+    let (turn, mut app, script, _, _) =
+        wake_app("wake-not-named-failed", "Hey cool, it works now.", 1);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    app.voice.wake.failed = Some("the spotter could not load".into());
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert_eq!(
+        app.status,
+        "Stopped waiting for “Hey, Clew”: the spotter could not load"
+    );
     drop(app);
     drop(turn);
     // A call proven: what was said after it, waiting to be worked out
@@ -2765,19 +2784,6 @@ fn a_call_without_the_name_is_no_call() {
     );
     drop(app);
     drop(turn);
-}
-
-/// Every message a task gives, and every one those give, handed to the
-/// window.
-fn settle(app: &mut App, task: iced::Task<Message>) {
-    let mut pending = run_task(task);
-    while !pending.is_empty() {
-        let mut next = Vec::new();
-        for message in pending {
-            next.extend(run_task(app.update(message)));
-        }
-        pending = next;
-    }
 }
 
 /// The call heard, then nothing for a while: what was heard with it is
@@ -3109,15 +3115,14 @@ fn a_call_ends_only_its_own_hold() {
     assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app));
     app.stop_speaking();
+    // Clew speaks again, and words said over it hold it: no call either,
+    // they let it go on.
     app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
-    app.voice.speech.hold();
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(app.voice.speech.held(), "held for the words said over it");
     settle(&mut app, task);
-    assert!(
-        app.voice.speech.held(),
-        "held still, for the words said over it"
-    );
+    assert!(!app.voice.speech.held() && app.voice.speech.is_speaking());
     drop(app);
     drop(turn);
 }
@@ -3151,6 +3156,36 @@ fn the_voice_key_takes_a_call_over() {
         app.status
     );
     assert!(!app.status.starts_with("Didn't hear"), "{}", app.status);
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    drop(app);
+    // Pressed while someone is still being heard: what they are saying is
+    // the call's — no call, it is not asked — and what follows is said to
+    // Clew.
+    let (mut app, script, _) = voice_app("wake-key-midway", "");
+    install_wake(app.voice.store.as_ref().unwrap());
+    app.voice.wake.spotters = Some(Arc::new(Spots {
+        call: Mutex::new(1),
+        ..Spots::default()
+    }));
+    let _ = app.update(Message::Voice(VoiceMsg::SetWake(true)));
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        ["Hey cool, so the build passes.", "Open settings."]
+            .map(String::from)
+            .into(),
+    )));
+    app.voice.prefs.talk_over = true;
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(0.2);
+    app.voice.forget_last_press();
+    let task = app.update(Message::Voice(VoiceMsg::Toggle));
+    settle(&mut app, task);
+    assert!(app.proj.ask_turns.is_empty() && app.proj.ask_input.is_empty());
+    assert!(app.voice.mic_on && app.voice.is_listening());
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
     settle(&mut app, task);
@@ -3235,7 +3270,7 @@ fn a_call_holds_an_answer_on_its_way_to_being_read() {
         drop(turn);
     }
     // Nothing said after it: what was heard as it was called is worked out
-    // on its own, the microphone waiting for Clew meanwhile.
+    // on its own, the microphone listening on meanwhile.
     let (_turn, mut app, _, hears, _) = wake_app("wake-answer-quiet", "Hey, cool!", 1);
     app.voice.prefs.talk_over = false;
     app.proj.ask_turns.push(crate::app::model::AskTurn {
@@ -3251,6 +3286,10 @@ fn a_call_holds_an_answer_on_its_way_to_being_read() {
         *since -= std::time::Duration::from_secs_f32(crate::app::wake::CALL_QUIET + 0.1);
     }
     let task = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(
+        app.voice.is_listening(),
+        "listening on meanwhile, Clew held"
+    );
     settle(&mut app, task);
     assert_eq!(hears.hints.lock().unwrap().len(), 1, "worked out");
     assert!(!app.voice.speech.held() && app.answer_read_aloud_coming());

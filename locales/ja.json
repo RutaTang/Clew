@@ -2441,7 +2441,7 @@
  "header `{name}`'s value holds a line break": "ヘッダー `{name}` の値に改行が含まれています",
  "here": "現在地",
  "hey Clew, wake word, wake phrase, listen when called": "hey Clew, ウェイクワード, 呼びかけ, 呼ばれたら聞き取る",
- "hey, hi, hello, ok, okay": "ねえ, やあ, こんにちは",
+ "hey, hi, hello, ok, okay": "ねえ, やあ, こんにちは, ヘイ",
  "hidden while split": "分割中は非表示",
  "hidden: window too narrow": "非表示: ウィンドウが狭すぎます",
  "hovering does not run methods — evaluate the expression instead": "ホバーではメソッドを実行しません。代わりに式を評価してください",

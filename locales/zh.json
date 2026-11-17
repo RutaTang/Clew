@@ -2441,7 +2441,7 @@
  "header `{name}`'s value holds a line break": "请求头 `{name}` 的值中含有换行符",
  "here": "当前位置",
  "hey Clew, wake word, wake phrase, listen when called": "hey Clew, 唤醒词, 唤醒短语, 叫到时聆听",
- "hey, hi, hello, ok, okay": "嘿, 你好, 喂, 哈喽",
+ "hey, hi, hello, ok, okay": "嘿, 你好, 喂, 哈喽, 嗨",
  "hidden while split": "分屏时隐藏",
  "hidden: window too narrow": "已隐藏：窗口太窄",
  "hovering does not run methods — evaluate the expression instead": "悬停不会运行方法，请改为对表达式求值",

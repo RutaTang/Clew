@@ -734,6 +734,10 @@ pub(crate) struct Said {
     /// its words prove the call, or none of it is done
     /// ([`App::prove_call`]).
     call: Option<u64>,
+    /// Said over Clew, which it held — the hold, by
+    /// [`Speech::held_since`](crate::app::speech::Speech::held_since):
+    /// found to be no call, it was not said to Clew, and Clew goes on.
+    over: Option<Instant>,
 }
 
 /// Voice's messages.
@@ -1317,13 +1321,13 @@ impl App {
         if self.voice.speech.is_speaking() {
             // Pressed as a call that held Clew is heard out, the listening
             // is the reader's.
-            self.call_taken_over();
+            let task = self.call_taken_over();
             // With the microphone on, it opens as Clew stops.
             self.stop_speaking();
             if self.voice.mic_on {
-                return Task::none();
+                return task;
             }
-            return self.start_listening();
+            return Task::batch([task, self.start_listening()]);
         }
         if self.voice.mic_on {
             return self.mic_off();
@@ -1611,9 +1615,19 @@ impl App {
         let quiet_for = since.elapsed().as_secs_f32();
         // Nothing said for a moment after a call: what was heard as Clew
         // was called is worked out on its own — its words prove the call,
-        // or it was none — as what is said is once a pause ends it.
-        if self.voice.wake.lead.is_some() && quiet_for >= crate::app::wake::CALL_QUIET {
-            return self.end_utterance();
+        // or it was none — and the microphone listens on as it is: what is
+        // just beginning to be said is heard whole, after it.
+        if quiet_for >= crate::app::wake::CALL_QUIET
+            && let Some(model) = self.voice.listening.as_ref().map(|(_, model)| *model)
+            && let Some(lead) = self.voice.wake.lead.take()
+        {
+            let said = Said {
+                lead: true,
+                call: self.voice.wake.unproven,
+                over: None,
+            };
+            self.voice.unheard.push_back((lead, model, said));
+            return self.transcribe_next();
         }
         if quiet_for >= NO_SPEECH_TIMEOUT {
             // Nothing said for a while: the quiet is let go, and the
@@ -1633,9 +1647,11 @@ impl App {
     /// call: whether it begins with it, and the call it proves, if one is
     /// waiting to be.
     fn said_from(&mut self, recording: &mut Recording) -> Said {
+        let mut over = None;
         if let Some(from) = self.voice.over_from.take() {
             let cut = ((from - OVER_LEAD).max(0.0) * recording.rate as f32) as usize;
             recording.samples.drain(..cut.min(recording.samples.len()));
+            over = self.voice.speech.held_since();
         }
         let lead = match self.voice.wake.lead.take() {
             Some(lead) if lead.rate == recording.rate => {
@@ -1647,6 +1663,7 @@ impl App {
         Said {
             lead,
             call: self.voice.wake.unproven,
+            over,
         }
     }
 
@@ -1679,7 +1696,7 @@ impl App {
     /// What is being said has ended — a pause, Smart Turn, the most that
     /// is kept: it is worked out out of sight, after what was said before
     /// it, while the microphone listens on for what is said next.
-    fn end_utterance(&mut self) -> Task<Message> {
+    pub(crate) fn end_utterance(&mut self) -> Task<Message> {
         let model = self.voice.listening.as_ref().map(|(_, model)| *model);
         if let (Some((recording, said)), Some(model)) = (self.listen_on_afresh(), model) {
             self.voice.unheard.push_back((recording, model, said));
@@ -1809,6 +1826,11 @@ impl App {
         if let Some(call) = said.call
             && !self.prove_call(call, &result)
         {
+            // Said over Clew, which it held, and no call: not said to Clew
+            // either — Clew goes on.
+            if said.over.is_some() && said.over == self.voice.speech.held_since() {
+                self.voice.speech.go_on();
+            }
             return self.transcribe_next();
         }
         // Said over Clew, which was held while it was heard: words — not
