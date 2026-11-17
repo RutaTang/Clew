@@ -1333,6 +1333,24 @@ impl App {
         task
     }
 
+    /// Woken by what was not its name: listening ends, and what it heard
+    /// since is let go of, not worked out — it was not said to Clew — and
+    /// the microphone waits for the name again.
+    fn not_called(&mut self) -> Task<Message> {
+        self.voice.unheard.clear();
+        self.voice.heard = None;
+        self.voice.mic_on = false;
+        let mic = self.voice.listening.take().map(|(mic, _)| mic);
+        self.close_mic();
+        self.wait_with(mic);
+        self.status = if self.resume_waiting() {
+            tr!("Waiting for “Hey, Clew”").into()
+        } else {
+            tr!("Stopped listening").into()
+        };
+        Task::none()
+    }
+
     /// Clew is about to speak — an answer it reads aloud is coming, Settings'
     /// Try: the microphone, on, waits until all is said
     /// ([`App::resume_listening`]), or it would hear Clew. Someone being
@@ -1783,6 +1801,16 @@ impl App {
                 return Task::none();
             }
         };
+        // Woken, what was heard with the call holds Clew's name: whisper,
+        // told the name, writes it — "Hey, Clew." 20 times in 20 in the
+        // recordings of it. Not in it, what the spotter took for the call
+        // was something like it, said to someone else — "Hey, cool, it
+        // works now": nothing of it is done, nor of what was heard since,
+        // and Clew waits for its name again. Nothing written down is no
+        // sign either way.
+        if called && !text.is_empty() && crate::app::spoken::named_in(&text).is_none() {
+            return self.not_called();
+        }
         // Clew called by its name before what is said to it: what is said
         // is what follows ("Hey, Clew, open Settings").
         let named = if called {

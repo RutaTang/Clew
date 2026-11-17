@@ -2654,6 +2654,40 @@ fn hey_clew_starts_listening_with_the_microphone_that_waited() {
     );
 }
 
+/// What only sounds like the phrase — "Hey, cool" — may wake the spotter;
+/// what is then heard with it holds no "Clew", and was not said to Clew:
+/// nothing of it is asked or run, and the microphone waits for the name
+/// again. Nothing written down at all is no sign either way: it listens on.
+#[test]
+fn a_call_without_the_name_is_no_call() {
+    let (turn, mut app, script, _, _) = wake_app("wake-not-named", "Hey cool, it works now.", 2);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app), "the spotter took it for the call");
+    assert!(app.voice.is_listening());
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(app.proj.ask_input.is_empty(), "{:?}", app.proj.ask_input);
+    assert!(app.proj.ask_turns.is_empty());
+    assert!(app.voice.heard.is_none());
+    assert!(!app.voice.mic_on && !app.voice.is_listening());
+    assert!(app.voice.wake.is_waiting(), "{}", app.status);
+    assert_eq!(app.status, "Waiting for “Hey, Clew”");
+    drop((turn, app));
+    // Nothing written down: listening goes on.
+    let (_turn, mut app, script, _, _) = wake_app("wake-not-written", "", 2);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(app.voice.is_listening());
+}
+
 /// Clew called by its name and nothing else, while listening: nothing is
 /// asked.
 #[test]

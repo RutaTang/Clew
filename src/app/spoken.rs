@@ -268,17 +268,23 @@ pub(crate) fn without_name(said: &str) -> &str {
 /// what was heard just before the call is not what was asked; `said` as
 /// [`without_name`] leaves it when the name is not in it.
 pub(crate) fn after_name(said: &str) -> &str {
+    named_in(said).unwrap_or_else(|| without_name(said))
+}
+
+/// What follows Clew's name in `said`, if its name is in it at all — as a
+/// word of its own, or in a run of Chinese or Japanese: "clueless" holds
+/// no "clue".
+pub(crate) fn named_in(said: &str) -> Option<&str> {
     let names = phrases(NAME);
     let mut last: Option<char> = None;
     for (i, c) in said.char_indices() {
-        // A name begins a word, or is in a run of Chinese or Japanese.
         let at_word = last.is_none_or(|l| !l.is_alphanumeric() || cjk(l) || cjk(c));
         if at_word && let Some(end) = names.iter().find_map(|n| begins(&said[i..], n)) {
-            return unmarked(&said[i + end..]);
+            return Some(unmarked(&said[i + end..]));
         }
         last = Some(c);
     }
-    without_name(said)
+    None
 }
 
 /// The phrases said with a value, in the order they are tried — after the
@@ -920,6 +926,28 @@ mod tests {
         );
         assert_eq!(after_name("Clew, next"), "next");
         assert_eq!(after_name("Maclew, next"), "Maclew, next", "not in a word");
+    }
+
+    /// Whether Clew's name was heard at all — what the spotter took for the
+    /// call was it, or only something like it ("Hey, cool").
+    #[test]
+    fn the_name_is_heard_or_not() {
+        assert_eq!(
+            named_in("Hey, Clew, open Settings."),
+            Some("open Settings.")
+        );
+        assert_eq!(named_in("Hey, Clew."), Some(""));
+        assert_eq!(named_in("Hey clue."), Some(""));
+        for said in [
+            "Hey cool it works now.",
+            "Hey Kyle, look at this.",
+            "Open the clueless file",
+        ] {
+            assert_eq!(named_in(said), None, "{said:?}");
+        }
+        with_lang(Lang::Zh, || {
+            assert_eq!(named_in("嘿，克鲁，打开设置"), Some("打开设置"))
+        });
     }
 
     /// A question on screen is answered only by what is all a yes or all
