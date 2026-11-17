@@ -582,7 +582,12 @@ impl App {
             self.voice.speech.hold();
             self.voice.wake.held = self.voice.speech.held_since().map(|since| (call, since));
         }
-        self.listen_now(Some(call))
+        let task = self.listen_now(Some(call));
+        // The microphone would not open: nothing will prove the call.
+        if !self.voice.mic_on {
+            self.call_unheard();
+        }
+        task
     }
 
     /// What the words heard after `call` make of it — Clew called by its

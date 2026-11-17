@@ -3519,6 +3519,8 @@ fn a_real_microphone_wakes_clew() {
     }
     let listening = app.voice.mic_on;
     let heard = app.voice.heard.clone();
+    let waits_again = app.voice.wake.is_waiting();
+    let status = app.status.clone();
     // The spotter, which outlives a waiting, let go of — whatever came of
     // it.
     let _ = app.update(Message::Voice(VoiceMsg::SetWake(false)));
@@ -3526,7 +3528,15 @@ fn a_real_microphone_wakes_clew() {
     // Waiting that failed is not taken for woken, nor for waiting on.
     assert_eq!(failed, None);
     if not {
-        assert!(waiting && !woke, "woken");
+        // Never woken — or woken, and what was heard with it found to hold
+        // no "Clew": nothing done, and waiting again, saying so.
+        let no_call = woke
+            && whisper.is_some()
+            && !listening
+            && waits_again
+            && heard.is_none()
+            && status == "Didn't hear “Clew” — waiting for “Hey, Clew”";
+        assert!((waiting && !woke) || no_call, "woken: {status}");
         return;
     }
     assert!(woke, "not woken");
