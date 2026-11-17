@@ -2759,6 +2759,10 @@ fn a_call_without_the_name_is_no_call() {
     let task = app.update(Message::Voice(VoiceMsg::Tick));
     settle(&mut app, task);
     assert!(app.settings.open, "{}", app.status);
+    assert_eq!(
+        app.voice.heard.as_ref().map(|h| h.text.as_str()),
+        Some("open settings.")
+    );
     drop(app);
     drop(turn);
 }
@@ -3087,13 +3091,14 @@ fn a_call_ends_only_its_own_hold() {
     app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
     assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app));
+    // What was said with the call ends, and is worked out meanwhile.
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
     app.voice
         .speech
         .hold_since_for_test(std::time::Duration::from_secs(13));
     let _ = app.update(Message::Voice(VoiceMsg::SpeakTick));
     assert!(!app.voice.speech.held() && app.voice.speech.is_speaking());
-    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
-    let task = app.update(Message::Voice(VoiceMsg::Tick));
     settle(&mut app, task);
     assert!(!app.voice.speech.is_speaking(), "stopped for the call");
     drop(app);
