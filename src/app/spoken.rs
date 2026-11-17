@@ -133,11 +133,14 @@ const NAMES: &[&str] = &[
     "クリュー",
 ];
 /// Clew's name as whisper writes it in Latin letters when it is said in
-/// a sentence of Japanese or Chinese — "Crew 設定を": Japanese says "crew"
-/// as it says "Clew", "クルー". Taken for the name only before more of
-/// such a sentence: "Hey crew, let's go", said to a team, is no call, nor
-/// is Korean, which tells "크루" (crew) from "클루".
-const NAMES_BEFORE_JAPANESE_OR_CHINESE: &[&str] = &["crew"];
+/// a Japanese sentence — "Crew 設定を": Japanese says "crew" as it says
+/// "Clew", "クルー". Taken for the name only before such a sentence
+/// ([`japanese_follows`]): "Hey crew, let's go", said to a team, is no
+/// call, nor is Korean, which tells "크루" (crew) from "클루".
+const NAMES_BEFORE_JAPANESE: &[&str] = &["crew"];
+/// What Japanese writes straight after a name it says something of —
+/// "Clewのグラフ", "Clewが落ちた": not a call.
+const JAPANESE_PARTICLES: &str = "のがはをにへとでもや";
 /// The "Hey" of "Hey, Clew", as whisper writes it.
 const HEY: &[&str] = &["hey", "hi", "hé", "嘿", "嗨", "헤이", "ヘイ"];
 /// The "Hey" of "Hey, Clew" as whisper writes it when it hears another
@@ -166,9 +169,46 @@ fn cjk(c: char) -> bool {
     matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF)
 }
 
-/// Whether `c` is Korean: Hangul syllables.
-fn hangul(c: char) -> bool {
-    matches!(c as u32, 0xAC00..=0xD7AF)
+/// Whether `c` is Japanese kana: hiragana or katakana.
+fn kana(c: char) -> bool {
+    matches!(c as u32, 0x3040..=0x30FF)
+}
+
+/// Whether `rest`, what follows a name, is a Japanese sentence: kana in
+/// it before it ends, past the marks and spaces at its start.
+fn japanese_follows(rest: &str) -> bool {
+    unmarked(rest)
+        .split(sentence_end)
+        .next()
+        .is_some_and(|sentence| sentence.chars().any(kana))
+}
+
+/// Where Clew's name ends, said from the start of `at` ([`name_at`]) —
+/// or written "crew" before a Japanese sentence
+/// ([`NAMES_BEFORE_JAPANESE`]).
+fn called_name_at(at: &str) -> Option<usize> {
+    name_at(at).or_else(|| {
+        let end = NAMES_BEFORE_JAPANESE
+            .iter()
+            .find_map(|name| begins(at, name))?;
+        japanese_follows(&at[end..]).then_some(end)
+    })
+}
+
+/// Whether Clew's name, `name` as written, is set apart from `rest`, what
+/// follows it, as a call sets it: by a mark ("Clew, …") or nothing at all
+/// — or, written in Latin letters, by a pause and then a Japanese sentence
+/// ("Crew 設定を"), not one that goes on from the name ("Clewのグラフ",
+/// "Clew のグラフ"). Not by a pause alone before Chinese or Korean, where
+/// it may as well be said of Clew ("Clew 又卡住了"): a call there is
+/// written with a mark or a "Hey".
+fn set_apart(name: &str, rest: &str) -> bool {
+    let next = rest.trim_start().chars().next();
+    next.is_none_or(mark)
+        || (!name.chars().any(cjk)
+            && rest.starts_with(char::is_whitespace)
+            && next.is_some_and(|c| cjk(c) && !JAPANESE_PARTICLES.contains(c))
+            && japanese_follows(rest))
 }
 
 /// What sets one part of what was said from the next.
@@ -269,7 +309,10 @@ pub(crate) fn stops_listening(said: &str) -> bool {
             .filter(|c| c.is_alphanumeric())
             .flat_map(char::to_lowercase)
             .collect();
-        for name in NAMES {
+        // "Bye, Crew" too, as whisper may write it said by a Japanese
+        // speaker ([`NAMES_BEFORE_JAPANESE`]): said to a team, it only
+        // ends listening.
+        for name in NAMES.iter().chain(NAMES_BEFORE_JAPANESE) {
             text = text.replace(name, "clew");
         }
         text
@@ -354,7 +397,7 @@ pub(crate) fn says_stop_listening(said: &str) -> bool {
 pub(crate) fn without_name(said: &str) -> &str {
     let start = said.trim_start();
     fn named(at: &str) -> Option<&str> {
-        name_at(at).map(|end| &at[end..])
+        called_name_at(at).map(|end| &at[end..])
     }
     // Called, then named — the "Hey" as whisper may have heard it too
     // ("Et Clew, ouvre…").
@@ -365,9 +408,9 @@ pub(crate) fn without_name(said: &str) -> &str {
             return unmarked(rest);
         }
     }
-    // Named alone, a mark after it.
+    // Named alone, set apart from what follows.
     if let Some(rest) = named(start)
-        && rest.trim_start().chars().next().is_none_or(mark)
+        && set_apart(&start[..start.len() - rest.len()], rest)
     {
         return unmarked(rest);
     }
@@ -385,11 +428,10 @@ pub(crate) fn after_name(said: &str) -> &str {
 /// the name a word of its own ([`name_at`]: "clueless" holds no "clue",
 /// nor "クルーズ" "クルー"), said as a call is: after the "Hey" of "Hey,
 /// Clew" in its sentence ("hey", "嘿"), or first in its sentence with a
-/// mark after it ("Clew, …", not "Clew keeps crashing") — or, written in
-/// Latin letters, with the rest of the sentence in Chinese, Japanese or
-/// Korean after it ("Clew 设置", "Crew 設定を",
-/// [`NAMES_BEFORE_JAPANESE_OR_CHINESE`]); else first in a sentence after
-/// a "Hey" whisper wrote as another word ("Et Clew, ouvre…" for "Hey,
+/// mark after it ("Clew, …", not "Clew keeps crashing"), or as a Japanese
+/// sentence may write it ([`set_apart`], [`called_name_at`]: "Crew
+/// 設定を"); else first in a sentence after a "Hey" whisper wrote as
+/// another word ("Et Clew, ouvre…" for "Hey,
 /// Clew" said in French, "ネークルー") — a call the first way, later in
 /// `said`, wins over one heard this way ("Et clou. Hey, Clew, run it").
 /// Not after other words: "the clue is", "this is Clew's graph", "a
@@ -404,25 +446,11 @@ pub(crate) fn named_in(said: &str) -> Option<&str> {
         if !at_word {
             continue;
         }
-        let (end, crew) = match name_at(&said[i..]) {
-            Some(end) => (end, false),
-            None => match NAMES_BEFORE_JAPANESE_OR_CHINESE
-                .iter()
-                .find_map(|name| begins(&said[i..], name))
-            {
-                Some(end) => (end, true),
-                None => continue,
-            },
+        let Some(end) = called_name_at(&said[i..]) else {
+            continue;
         };
         let rest = &said[i + end..];
-        let next = rest.trim_start().chars().next();
-        if crew && !next.is_some_and(|c| cjk(c) && !hangul(c)) {
-            continue;
-        }
-        // Written in Latin letters, the rest of its sentence in another
-        // script: set apart by that, as by a mark.
-        let apart =
-            next.is_none_or(mark) || (next.is_some_and(cjk) && !said[i..i + end].chars().any(cjk));
+        let apart = set_apart(&said[i..i + end], rest);
         // What was said before it in its sentence: a sentence ended just
         // before it is not its call — "I said hi. Clew crashed" — unless
         // the call was all that sentence said ("Hey. Clew, …").
@@ -1092,6 +1120,7 @@ mod tests {
                     "バイバイ、クルー。",
                     "バイ、Clew。",
                     "바이 클루.",
+                    "Bye, Crew.",
                 ] {
                     assert!(stops_listening(said), "{lang:?}: {said}");
                 }
@@ -1128,6 +1157,11 @@ mod tests {
         );
         assert_eq!(without_name("Hay Clew, open settings"), "open settings");
         assert_eq!(without_name("Paul et Clew"), "Paul et Clew");
+        // Set apart as a call to it is, in a Japanese sentence too.
+        assert_eq!(without_name("Crew 設定を開いて"), "設定を開いて");
+        assert_eq!(without_name("Clew、設定を開いて"), "設定を開いて");
+        assert_eq!(without_name("Clewのグラフが遅い"), "Clewのグラフが遅い");
+        assert_eq!(without_name("Clew 又卡住了"), "Clew 又卡住了");
         // Not called: left as it is.
         assert_eq!(without_name("Hey, look at this"), "Hey, look at this");
         assert_eq!(without_name("Open the clew file"), "Open the clew file");
@@ -1190,25 +1224,35 @@ mod tests {
             Some("呼び出しグラフを開いて")
         );
         assert_eq!(named_in("So that's it. Hay Clew, run it"), Some("run it"));
-        // Written in Latin letters, the rest of the sentence in Chinese,
-        // Japanese or Korean after it — and "crew", as Japanese says
-        // "Clew", only so, and not before Korean.
+        // Written in Latin letters, a pause, then a Japanese sentence —
+        // and "crew", as Japanese says "Clew", only before one.
         assert_eq!(named_in("Crew 設定を"), Some("設定を"));
-        assert_eq!(named_in("Crew設定を開いて"), Some("設定を開いて"));
+        assert_eq!(named_in("Clew 設定を開いて"), Some("設定を開いて"));
         assert_eq!(named_in("ヘイ、Crew 設定を開いて"), Some("設定を開いて"));
-        assert_eq!(named_in("Crew 打开设置"), Some("打开设置"));
-        assert_eq!(named_in("Clew 打开设置"), Some("打开设置"));
-        assert_eq!(named_in("Clew 설정 열어줘"), Some("설정 열어줘"));
+        assert_eq!(named_in("ヘイ、Crew、設定を開いて"), Some("設定を開いて"));
+        assert_eq!(named_in("Crew、設定を開いて"), Some("設定を開いて"));
         for said in [
             "Crew, get ready.",
             "Crew members are here",
             "Hey Crew 가자",
             "Crew 설정 열어줘",
+            "Crew 打开设置",
             "The crew 設定を",
-            "The Clew 设置",
+            // Said of Clew in Japanese, Chinese or Korean: the name goes
+            // on into its sentence — or, before Chinese or Korean, only a
+            // pause sets it apart, which a call is not written with.
+            "Clewのグラフが遅い",
+            "Clewが落ちた",
+            "Clew設定が開かない",
+            "Clew のグラフが遅い",
+            "Clew 的图很慢",
+            "Clew 又卡住了",
+            "Clew가 또 멈췄어",
+            "Clew 설정 열어줘",
             // Written in its own script, the name is set apart only by a
             // mark: "crew, everyone gather".
             "クルー 全員集合",
+            "クルー 全員集まって",
         ] {
             assert_eq!(named_in(said), None, "{said:?}");
         }
