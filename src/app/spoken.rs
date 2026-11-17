@@ -206,25 +206,41 @@ fn hiragana(c: char) -> bool {
 /// it before it ends, past the marks and spaces at its start
 /// ("Crew、設定を開いて", not "Clew 又卡住了。ちょっと見て").
 fn japanese_follows(rest: &str) -> bool {
-    unmarked(rest)
-        .split(sentence_end)
-        .next()
-        .is_some_and(|sentence| sentence.chars().any(kana))
+    first_sentence(unmarked(rest)).chars().any(kana)
+}
+
+/// The first sentence of `said`, up to its end — not a dot in a name
+/// ("main.rs を開いて", "v1.2").
+fn first_sentence(said: &str) -> &str {
+    let mut chars = said.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let in_name = c == '.'
+            && chars
+                .peek()
+                .is_some_and(|&(_, next)| next.is_alphanumeric());
+        if sentence_end(c) && !in_name {
+            return &said[..i];
+        }
+    }
+    said
 }
 
 /// Whether a name said after `before` and before `rest` is said in a
 /// Japanese sentence — one with kana, Japanese's own letters, in it:
 /// before the name ("ヘイ、Crew 設定"), or after it, past the marks and
 /// spaces after it but not past a sentence's end in Latin letters ("Crew
-/// 設定を", not "Hey crew! 準備はいい？"). One in Chinese characters
+/// 設定を", not "Hey crew! 準備はいい？"); or Chinese characters after a
+/// Japanese comma ("Hey Crew、設定"). Chinese characters after a space
 /// alone ("Hey Crew 続行") may as well be Chinese ("Hey crew 开会了"),
-/// which does not write Clew so: it is not taken.
+/// which does not write Clew so: they are not taken.
 fn in_japanese(before: &str, rest: &str) -> bool {
     if last_sentence(before).chars().any(kana) {
         return true;
     }
     let after = unmarked(rest);
-    !rest[..rest.len() - after.len()].contains(['.', '!', '?']) && japanese_follows(after)
+    let between = &rest[..rest.len() - after.len()];
+    !between.contains(['.', '!', '?'])
+        && (japanese_follows(after) || (between.contains('、') && after.starts_with(cjk)))
 }
 
 /// Where Clew's name ends, said from the start of `at`, after `before`
@@ -265,17 +281,18 @@ fn set_apart(name: &str, rest: &str) -> bool {
     !particle && (after.starts_with(cjk) || japanese_request(after))
 }
 
-/// Whether the sentence `said` begins with is a Japanese request: "…を開いて",
-/// "…移動して", "…ください".
+/// Whether the sentence `said` begins with is a Japanese request —
+/// "…を開いて", "…移動して", "…ください" — or one of the phrases Clew is
+/// told a value with, as the window says them ("{text}を検索",
+/// [`PHRASES`]).
 fn japanese_request(said: &str) -> bool {
-    let sentence = said
-        .split(sentence_end)
-        .next()
-        .unwrap_or("")
-        .trim_end_matches(|c: char| c.is_whitespace() || mark(c));
+    let sentence = first_sentence(said).trim_end_matches(|c: char| c.is_whitespace() || mark(c));
     JAPANESE_REQUEST_ENDS
         .iter()
         .any(|end| sentence.ends_with(end))
+        || PHRASES
+            .iter()
+            .any(|&(_, phrase)| value_in(crate::i18n::lookup(phrase), sentence).is_some())
 }
 
 /// What sets one part of what was said from the next.
@@ -1313,6 +1330,31 @@ mod tests {
         // A Japanese sentence beginning with numbers or Latin letters.
         assert_eq!(named_in("Crew 30行目に移動して"), Some("30行目に移動して"));
         assert_eq!(named_in("Crew README を開いて"), Some("README を開いて"));
+        assert_eq!(named_in("Crew README を読んで"), Some("README を読んで"));
+        assert_eq!(
+            named_in("Crew README を開いてください"),
+            Some("README を開いてください")
+        );
+        assert_eq!(
+            named_in("Crew README を開いて下さい"),
+            Some("README を開いて下さい")
+        );
+        assert_eq!(named_in("Crew README を開いて…"), Some("README を開いて…"));
+        // A dot in a name ends no sentence.
+        assert_eq!(
+            named_in("Hey Crew main.rs を開いて"),
+            Some("main.rs を開いて")
+        );
+        // A Japanese comma after it.
+        assert_eq!(named_in("Hey Crew、設定"), Some("設定"));
+        // Or as Clew's own Japanese phrases say a value, shown in Japanese.
+        with_lang(Lang::Ja, || {
+            assert_eq!(named_in("Clew 30行目へ移動"), Some("30行目へ移動"));
+            assert_eq!(named_in("Clew README を開く"), Some("README を開く"));
+            assert_eq!(named_in("Clew TODO を検索"), Some("TODO を検索"));
+            assert_eq!(without_name("Clew TODO を検索"), "TODO を検索");
+            assert_eq!(named_in("Clew VS Code より速い？"), None);
+        });
         for said in [
             "Crew, get ready.",
             "Crew members are here",
@@ -1342,6 +1384,7 @@ mod tests {
             "Clew も落ちた",
             "Clew と比べて遅い",
             "Clew や VS Code みたいなツール",
+            "Clew もバグってる",
             // Latin letters or numbers after the pause: only a request.
             "Clew VS Code より速い？",
             "Clew 2 回落ちたけど、なぜ？",
