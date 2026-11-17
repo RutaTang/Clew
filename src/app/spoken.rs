@@ -210,14 +210,15 @@ fn japanese_follows(rest: &str) -> bool {
 }
 
 /// The first sentence of `said`, up to its end — not a dot in a name
-/// ("main.rs を開いて", "v1.2").
+/// ("main.rs を開いて", "v1.2"), one a Latin letter or a number follows
+/// straight after.
 fn first_sentence(said: &str) -> &str {
     let mut chars = said.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
         let in_name = c == '.'
             && chars
                 .peek()
-                .is_some_and(|&(_, next)| next.is_alphanumeric());
+                .is_some_and(|&(_, next)| next.is_ascii_alphanumeric());
         if sentence_end(c) && !in_name {
             return &said[..i];
         }
@@ -284,15 +285,17 @@ fn set_apart(name: &str, rest: &str) -> bool {
 /// Whether the sentence `said` begins with is a Japanese request —
 /// "…を開いて", "…移動して", "…ください" — or one of the phrases Clew is
 /// told a value with, as the window says them ("{text}を検索",
-/// [`PHRASES`]).
+/// [`PHRASES`]), the value a name or a number, not a Japanese clause
+/// ("2 回同じファイルを開く", "go to definition が効かない").
 fn japanese_request(said: &str) -> bool {
     let sentence = first_sentence(said).trim_end_matches(|c: char| c.is_whitespace() || mark(c));
     JAPANESE_REQUEST_ENDS
         .iter()
         .any(|end| sentence.ends_with(end))
-        || PHRASES
-            .iter()
-            .any(|&(_, phrase)| value_in(crate::i18n::lookup(phrase), sentence).is_some())
+        || PHRASES.iter().any(|&(_, phrase)| {
+            value_in(crate::i18n::lookup(phrase), sentence)
+                .is_some_and(|value| !value.chars().any(kana))
+        })
 }
 
 /// What sets one part of what was said from the next.
@@ -1354,7 +1357,14 @@ mod tests {
             assert_eq!(named_in("Clew TODO を検索"), Some("TODO を検索"));
             assert_eq!(without_name("Clew TODO を検索"), "TODO を検索");
             assert_eq!(named_in("Clew VS Code より速い？"), None);
+            // Said of Clew, ending as a phrase of its own would.
+            assert_eq!(named_in("Clew 2 回同じファイルを開く"), None);
+            assert_eq!(named_in("Clew 2 回落ちた件を検索"), None);
         });
+        assert_eq!(named_in("Clew go to definition が効かない"), None);
+        assert_eq!(named_in("Clew crashed. ちょっと見て"), None);
+        assert_eq!(named_in("Clew crashed.ちょっと見て"), None);
+        assert_eq!(named_in("Hey crew、let's go"), None);
         for said in [
             "Crew, get ready.",
             "Crew members are here",
