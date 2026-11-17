@@ -278,7 +278,7 @@ impl App {
                     Ok(()) => {
                         self.voice.turn.error = None;
                         self.status = tr!(
-                            "{model} is ready — Clew now hears when you have finished speaking",
+                            "{model} is ready — Clew can now tell when you have finished speaking",
                             model = MODEL.name
                         );
                     }

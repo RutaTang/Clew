@@ -1374,7 +1374,7 @@ impl App {
 
     /// What was said in `listening`, waiting to be worked out — after a
     /// "Bye, Clew" said in it — let go of: Clew, held for any of it, goes
-    /// on ([`App::words_let_go`]).
+    /// on, unless a call holds it too ([`App::words_let_go`]).
     fn drop_said_in(&mut self, listening: u64) {
         let held = self.voice.speech.held_since();
         let mut freed = false;
@@ -1400,12 +1400,13 @@ impl App {
         self.voice.speech.go_on();
     }
 
-    /// Whether words said over Clew, held `since`, are still to be heard
-    /// out or worked out: what they turn out to be decides whether it goes
-    /// on, not a call that holds it too.
+    /// Whether words said over Clew, holding it `since`, are still to be
+    /// worked out: what they turn out to be decides whether it goes on,
+    /// not a call that holds it too. Words still being heard never share a
+    /// hold with a call: a call is heard only while the microphone waits,
+    /// nothing being heard, and words said once it holds Clew hold nothing.
     pub(crate) fn words_hold(&self, since: Instant) -> bool {
-        self.voice.over_from.is_some()
-            || self.voice.run_said.over == Some(since)
+        self.voice.run_said.over == Some(since)
             || self
                 .voice
                 .unheard
@@ -1497,7 +1498,8 @@ impl App {
             drop(listening.stop());
         }
         // Words said over Clew, let go of with what the microphone heard,
-        // will not be heard out: Clew, held for them, goes on.
+        // will not be heard out: Clew, held for them, goes on — unless a
+        // call holds it too.
         if self.voice.over_from.take().is_some() && self.voice.speech.held() {
             self.words_let_go();
         }
@@ -1930,7 +1932,7 @@ impl App {
             && !self.prove_call(call, &result)
         {
             // Said over Clew, which it held, and no call: not said to Clew
-            // either — Clew goes on.
+            // either — Clew goes on, unless a call holds it too.
             if said.over.is_some() && said.over == self.voice.speech.held_since() {
                 self.words_let_go();
             }
@@ -1940,7 +1942,8 @@ impl App {
         // said before the name is not what was asked.
         let call = said.lead || said.call.is_some();
         // Said over Clew: Clew's own words, heard back, are dropped — and
-        // Clew, if those words still hold it, goes on where it was. Words
+        // Clew, if those words still hold it, goes on where it was, unless
+        // a call holds it too ([`App::words_let_go`]). Words
         // to Clew stop it, if they hold it, and are read as any are — but
         // "Bye, Clew", which ends listening, not what Clew says. Only the
         // words that hold it decide: Clew held since by other words, or

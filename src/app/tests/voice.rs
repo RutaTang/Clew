@@ -3519,9 +3519,11 @@ fn a_call_ends_only_its_own_hold() {
 
 /// Words said over Clew in a listening ended since — a call given up on —
 /// still to be worked out, and a call heard after them: both hold Clew by
-/// the one hold. Clew is held for words said over it as it is first called
-/// by its name meanwhile; the call heard (`calls` pieces of waiting in);
-/// what is left to be worked out, a task.
+/// the one hold. `words` are what is worked out, in turn: what was heard
+/// with someone's "Hey cool", then — `bye_first` — what was said before
+/// Clew began reading, then what was said over it. Returned: the window,
+/// listening for the second call, and the task working out what was said
+/// after the first.
 fn held_by_words_then_called(tag: &str, words: &[&str], bye_first: bool) -> SharedHold {
     let (turn, mut app, script, _, spots) = wake_app(tag, "", 1);
     app.voice.transcriber = Arc::new(InTurn(Mutex::new(
