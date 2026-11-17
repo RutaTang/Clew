@@ -338,8 +338,9 @@ const NAME_GOES_ON_IN_CHINESE: &str = "斯兹泽格尼姆";
 /// Where Clew's name ends, said from the start of `at`, if it is said
 /// there as a word of its own: not the start of a longer word — "clueless",
 /// Japanese "クルーズ" (cruise), Korean "클로이" (Chloe), Chinese "克鲁斯"
-/// (Cruz). Korean may call it with "야" or "아" after it ("클루야"): the
-/// name, called so, ends after it. Whisper writes a call with a mark or a
+/// (Cruz). Korean may call it with "야" or "아" after it ("클루야", or
+/// "Clew야" as whisper may write it, told the name): the name, called
+/// so, ends after it. Whisper writes a call with a mark or a
 /// space after the name ("ネークルー、", "嘿，克鲁，", "헤이클루 호출"):
 /// one run straight on into more of its script is taken for a longer word
 /// — the cost, a call written "嘿克鲁格式化…", is missed, and said again.
@@ -349,7 +350,7 @@ fn name_at(at: &str) -> Option<usize> {
         let last = name.chars().last()?;
         let next = at[end..].chars().next();
         if let Some(called @ ('야' | '아')) = next
-            && matches!(last as u32, 0xAC00..=0xD7AF)
+            && (matches!(last as u32, 0xAC00..=0xD7AF) || last.is_ascii_alphabetic())
         {
             return Some(end + called.len_utf8());
         }
@@ -1380,6 +1381,13 @@ mod tests {
         assert_eq!(named_in("클루야 설정 열어줘"), Some("설정 열어줘"));
         assert_eq!(without_name("클루야 설정 열어줘"), "설정 열어줘");
         assert_eq!(named_in("클루야말로 최고야"), None);
+        // The name in Latin letters, as whisper may write it.
+        assert_eq!(named_in("Clew야 설정 열어줘"), Some("설정 열어줘"));
+        assert_eq!(named_in("Clew야, 설정 열어줘"), Some("설정 열어줘"));
+        assert_eq!(named_in("헤이 Clew야 설정 열어줘"), Some("설정 열어줘"));
+        assert_eq!(without_name("헤이 Clew야 설정 열어줘"), "설정 열어줘");
+        assert_eq!(named_in("Clew야말로 최고야"), None);
+        assert_eq!(named_in("그게 Clew야 맞아"), None);
         assert_eq!(named_in("Clew go to definition が効かない"), None);
         assert_eq!(named_in("Clew crashed. ちょっと見て"), None);
         assert_eq!(named_in("Clew crashed.ちょっと見て"), None);
