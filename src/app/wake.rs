@@ -672,7 +672,7 @@ impl App {
             && !self.voice.mic_on
             && self.voice.installed(self.voice.prefs.model())
         {
-            if self.voice.speech.is_speaking() || self.answer_read_aloud_coming() {
+            if !goes_on && (self.voice.speech.is_speaking() || self.answer_read_aloud_coming()) {
                 self.stop_speaking();
             }
             // With the model to hear with here, it opens no Settings.

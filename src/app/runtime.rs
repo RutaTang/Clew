@@ -320,8 +320,10 @@ impl App {
         }
         // The level meter and the pause that ends listening, read only while
         // the microphone is open — and the moment the pill says what was
-        // heard, so it goes when the moment is over.
-        if self.voice.is_listening() || self.voice.heard_fresh() {
+        // heard, so it goes when the moment is over; and what went unsaid
+        // of an answer, waiting for Clew to be free to say it.
+        if self.voice.is_listening() || self.voice.heard_fresh() || self.voice.speech.has_put_off()
+        {
             subs.push(
                 iced::time::every(crate::app::voice::LISTEN_TICK)
                     .map(|_| Message::Voice(crate::VoiceMsg::Tick)),

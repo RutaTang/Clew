@@ -3188,17 +3188,51 @@ fn clew_goes_on_after_what_was_no_call() {
 fn what_is_said_after_bye_clew_is_not_done() {
     let (mut app, script, _) = voice_app("voice-bye-then", "");
     app.voice.transcriber = Arc::new(InTurn(Mutex::new(
-        ["Bye, Clew.", "Open settings."].map(String::from).into(),
+        ["Bye, Clew.", "Open settings.", "Open the call graph."]
+            .map(String::from)
+            .into(),
     )));
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
     assert!(app.voice.is_listening());
+    // The goodbye, then words waiting to be worked out, then words still
+    // being said.
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
     let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    script.lock().unwrap().silence = Some(0.2);
     settle(&mut app, task);
     assert!(!app.voice.mic_on);
     assert!(!app.settings.open, "{}", app.status);
+    assert_ne!(
+        app.proj.overlay,
+        Some(Overlay::ProjectCalls),
+        "{}",
+        app.status
+    );
     assert_eq!(app.voice.queued(), 0);
+}
+
+/// "Bye, Clew" worked out once its listening had ended and another begun
+/// — the key pressed off and on meanwhile — ends nothing of the new one.
+#[test]
+fn a_late_bye_clew_ends_nothing_of_a_new_listening() {
+    let (mut app, script, _) = voice_app("voice-bye-late", "Bye, Clew.");
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    script.lock().unwrap().silence = None;
+    app.voice.forget_last_press();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(!app.voice.mic_on);
+    app.voice.forget_last_press();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.mic_on && app.voice.is_listening());
+    settle(&mut app, task);
+    assert!(
+        app.voice.mic_on && app.voice.is_listening(),
+        "{}",
+        app.status
+    );
 }
 
 /// The voice key pressed with nothing being heard, as a call holds an

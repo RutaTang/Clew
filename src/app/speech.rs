@@ -495,6 +495,12 @@ impl Speech {
         self.said_lately.iter().cloned().collect()
     }
 
+    /// Whether what went unsaid of an answer waits for Clew to be free to
+    /// say it ([`App::read_put_off`]).
+    pub(crate) fn has_put_off(&self) -> bool {
+        self.put_off.is_some()
+    }
+
     /// Whether Clew is speaking: something is being said, made, or waits to
     /// be — the output open, between sentences too.
     pub(crate) fn is_speaking(&self) -> bool {
@@ -858,7 +864,9 @@ impl App {
     }
 
     /// What went unsaid of an answer whose voice came while Clew could not
-    /// begin to say it ([`Speech::put_off`]): said now, if Clew may.
+    /// begin to say it ([`Speech::put_off`]): said now, if Clew may. Tried
+    /// at every voice tick — the window ticks while there is one
+    /// ([`Speech::has_put_off`]) — and as Try ends.
     pub(crate) fn read_put_off(&mut self) -> Task<Message> {
         match self.voice.speech.put_off {
             Some(stream) => self.read_now_heard(stream),
@@ -999,14 +1007,17 @@ impl App {
             .map(|t| t.stream);
         let speech = &mut self.voice.speech;
         let was = speech.is_speaking();
+        // An answer being said — not Settings' Try.
+        let answer = was && !speech.trying;
         speech.hush();
         if let Some(stream) = coming {
             speech.hushed.insert(stream);
         }
         // What went unsaid of what was stopped — being said, or coming —
-        // is not said once its voice comes either. Nothing being said, it
-        // stays: Settings' Try, a question typed, stop nothing of it.
-        if (was || coming.is_some())
+        // is not said once its voice comes either. Nothing of it being
+        // said, it stays: Settings' Try, a question typed, stop nothing of
+        // it.
+        if (answer || coming.is_some())
             && let Some((stream, _)) = speech.unsaid.take()
         {
             speech.hushed.insert(stream);
@@ -1433,9 +1444,11 @@ impl App {
         speech.made_with.clear();
         speech.quiet_since = None;
         speech.level = 0.0;
+        // What waited for Try to end — before the microphone opens again,
+        // as it would only to close for it.
+        let put_off = self.read_put_off();
         self.resume_listening();
-        // What waited for Try to end.
-        self.read_put_off()
+        put_off
     }
 
     /// The output stopped playing, saying why (`error`) or not: opened

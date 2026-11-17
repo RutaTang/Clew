@@ -1150,7 +1150,8 @@ fn what_went_unsaid_is_said_in_its_place() {
 /// said once Try is over, or they are heard out.
 #[test]
 fn what_went_unsaid_waits_for_clew_to_be_free_to_say_it() {
-    for tried in [true, false] {
+    // Try speaking; Try stopped by the reader; someone heard.
+    for case in ["tried", "stopped", "heard"] {
         let (mut app, voice, output) = speech_app("speech-unsaid-put-off");
         let model = app.voice.prefs.model();
         let store = app.voice.store.clone().unwrap();
@@ -1169,11 +1170,11 @@ fn what_went_unsaid_waits_for_clew_to_be_free_to_say_it() {
         delta(&mut app, 1, "总数是所有价格的和。");
         ended(&mut app, 1, StreamOutcome::Done);
         assert!(voice.texts().is_empty());
-        if tried {
+        if case == "heard" {
+            TALK.with(|t| t.set(Some(0.1)));
+        } else {
             let task = app.update(Message::Voice(VoiceMsg::TrySpeech("supertonic-3")));
             settle(&mut app, task);
-        } else {
-            TALK.with(|t| t.set(Some(0.1)));
         }
         let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
         install(&app, qwen);
@@ -1185,24 +1186,35 @@ fn what_went_unsaid_waits_for_clew_to_be_free_to_say_it() {
         let chinese = |voice: &Voice| voice.texts().contains(&"总数是所有价格的和。".to_string());
         assert!(
             !chinese(&voice),
-            "{tried}: not over Try, nor over the reader"
+            "{case}: not over Try, nor over the reader"
         );
-        if tried {
-            for _ in 0..4 {
-                if app.voice.speech.is_speaking() {
-                    all_played(&mut app, &output);
+        assert!(app.voice.speech.has_put_off(), "{case}: put off");
+        match case {
+            "tried" => {
+                for _ in 0..4 {
+                    if app.voice.speech.is_speaking() {
+                        all_played(&mut app, &output);
+                    }
                 }
             }
-        } else {
-            TALK.with(|t| t.set(None));
-            let task = app.update(Message::Voice(VoiceMsg::Tick));
-            settle(&mut app, task);
+            "stopped" => {
+                // Stopping Try stops nothing of the answer.
+                let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+                let task = app.update(Message::Voice(VoiceMsg::Tick));
+                settle(&mut app, task);
+            }
+            _ => {
+                TALK.with(|t| t.set(None));
+                let task = app.update(Message::Voice(VoiceMsg::Tick));
+                settle(&mut app, task);
+            }
         }
         assert!(
             chinese(&voice),
-            "{tried}: said once Clew may {:?}",
+            "{case}: said once Clew may {:?}",
             voice.texts()
         );
+        assert!(!app.voice.speech.has_put_off());
         let _ = app.update(Message::Voice(VoiceMsg::Toggle));
     }
 }

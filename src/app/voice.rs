@@ -577,6 +577,9 @@ pub(crate) struct VoiceState {
     unheard: VecDeque<(Recording, &'static Model, Said)>,
     /// What the utterance being worked out holds of Clew being called.
     run_said: Said,
+    /// How many times listening has begun: what was said in one that has
+    /// ended since is not taken to end the one now ([`App::said_bye`]).
+    listenings: u64,
     /// Where, in what the microphone is hearing, speech said over Clew
     /// began, in seconds: what is heard before it — what was left of Clew's
     /// voice — is not worked out with it.
@@ -638,6 +641,7 @@ impl VoiceState {
             mic_on: false,
             unheard: VecDeque::new(),
             run_said: Said::default(),
+            listenings: 0,
             over_from: None,
             transcribing: None,
             token: 0,
@@ -738,6 +742,8 @@ pub(crate) struct Said {
     /// [`Speech::held_since`](crate::app::speech::Speech::held_since):
     /// found to be no call, it was not said to Clew, and Clew goes on.
     over: Option<Instant>,
+    /// The listening it was heard in ([`VoiceState::listenings`]).
+    listening: u64,
 }
 
 /// Voice's messages.
@@ -1344,6 +1350,26 @@ impl App {
         self.start_listening()
     }
 
+    /// "Bye, Clew": listening ends — and what was said after it in that
+    /// listening, being heard or waiting to be worked out, said to someone
+    /// else in the room, is let go of, not done; Clew, held for any of it,
+    /// goes on.
+    fn said_bye(&mut self) -> Task<Message> {
+        self.voice.mic_on = false;
+        self.status = tr!("Stopped listening").into();
+        self.voice.unheard.clear();
+        self.call_unheard();
+        if self.voice.speech.held() {
+            self.voice.speech.go_on();
+        }
+        self.wait_again();
+        self.voice.wake.listening_ended();
+        if self.resume_waiting() {
+            self.status = tr!("Stopped listening — say “Hey, Clew” to start again").into();
+        }
+        Task::none()
+    }
+
     /// The microphone turned off. What it is hearing someone say is kept —
     /// the press ends it, as a pause would — and what was said before is
     /// still worked out and acted on; a listen that has heard nothing yet
@@ -1351,22 +1377,6 @@ impl App {
     ///
     /// Called by its name ([`VoicePrefs::wake`]), it waits for it again —
     /// with the microphone that listened, if it is still open.
-    /// "Bye, Clew": listening ends — and what was said after it, being
-    /// heard or waiting to be worked out, said to someone else in the room,
-    /// is let go of, not done.
-    fn said_bye(&mut self) -> Task<Message> {
-        self.voice.mic_on = false;
-        self.voice.unheard.clear();
-        self.wait_again();
-        self.voice.wake.listening_ended();
-        self.status = if self.resume_waiting() {
-            tr!("Stopped listening — say “Hey, Clew” to start again").into()
-        } else {
-            tr!("Stopped listening").into()
-        };
-        Task::none()
-    }
-
     fn mic_off(&mut self) -> Task<Message> {
         self.voice.mic_on = false;
         self.status = tr!("Stopped listening").into();
@@ -1514,6 +1524,7 @@ impl App {
         // what is said now.
         let waiting = self.voice.wake.is_waiting();
         self.voice.mic_on = true;
+        self.voice.listenings += 1;
         self.voice.wake.listening_began(call);
         self.voice.heard = None;
         self.open_mic();
@@ -1657,6 +1668,7 @@ impl App {
                 lead: true,
                 call: self.voice.wake.unproven,
                 over: None,
+                listening: self.voice.listenings,
             };
             self.voice.unheard.push_back((lead, model, said));
             return self.transcribe_next();
@@ -1696,6 +1708,7 @@ impl App {
             lead,
             call: self.voice.wake.unproven,
             over,
+            listening: self.voice.listenings,
         }
     }
 
@@ -1895,6 +1908,15 @@ impl App {
                     self.stop_speaking();
                 }
             }
+        }
+        // "Bye, Clew" said in a listening that has ended since — turned
+        // off, and begun again, or called anew — ends nothing of this one.
+        if said.listening != self.voice.listenings
+            && result
+                .as_ref()
+                .is_ok_and(|text| crate::app::spoken::says_bye(text, call))
+        {
+            return self.transcribe_next();
         }
         let task = self.on_words(result, call);
         Task::batch([task, self.transcribe_next()])

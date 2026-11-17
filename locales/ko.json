@@ -991,7 +991,7 @@
  "Listed the window's commands": "창의 명령 목록을 가져왔습니다",
  "Listening": "듣기",
  "Listening…": "듣는 중…",
- "Listening… say a command or question — “Bye, Clew” stops listening": "듣는 중… 명령이나 질문을 말하세요 — 듣기를 멈추려면 “Bye, Clew”",
+ "Listening… say a command or question — “Bye, Clew” stops listening": "듣는 중… 명령이나 질문을 말하세요 — “Bye, Clew”로 듣기 중지",
  "Listening… say yes to run {command}, or no": "듣는 중… “네”라고 하면 “{command}” 명령을 실행하고, “아니요”라고 하면 취소합니다",
  "Loading history…": "기록을 불러오는 중…",
  "Loading revision…": "리비전을 불러오는 중…",
