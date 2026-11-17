@@ -221,7 +221,6 @@ fn asked(app: &mut App, stream: u64, spoken: bool) {
     });
 }
 
-/// Feed `task`'s messages back, and theirs, until there are none.
 fn delta(app: &mut App, stream: u64, text: &str) {
     let task = app.on_ask_delta(stream, text.into());
     settle(app, task);

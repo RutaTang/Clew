@@ -1349,6 +1349,7 @@ impl App {
     /// with the microphone that listened, if it is still open.
     fn mic_off(&mut self) -> Task<Message> {
         self.voice.mic_on = false;
+        self.voice.wake.given_up = None;
         self.status = tr!("Stopped listening").into();
         let hearing = self
             .voice
@@ -1419,6 +1420,11 @@ impl App {
         if let Some((listening, _)) = self.voice.listening.take() {
             drop(listening.stop());
         }
+        // Words said over Clew, let go of with what the microphone heard,
+        // will not be heard out: Clew, held for them, goes on.
+        if self.voice.over_from.take().is_some() && self.voice.speech.held() {
+            self.voice.speech.go_on();
+        }
         if self.voice.wake.lead.take().is_some() {
             self.call_unheard();
         }
@@ -1487,6 +1493,7 @@ impl App {
         self.voice.mic_on = true;
         self.voice.wake.called = call.is_some();
         self.voice.wake.unproven = call;
+        self.voice.wake.given_up = None;
         self.voice.heard = None;
         self.open_mic();
         if waiting && call.is_none() {
@@ -1833,10 +1840,12 @@ impl App {
             }
             return self.transcribe_next();
         }
-        // Said over Clew, which was held while it was heard: words — not
+        // Said over Clew, which it held while it was heard: words — not
         // Clew's own, heard back — stop it, and are read as any are;
-        // nothing, or Clew's own words, and it goes on where it was.
-        if self.voice.speech.held() {
+        // nothing, or Clew's own words, and it goes on where it was. Only
+        // the words that held it decide: what was said before them is not
+        // why Clew is held.
+        if said.over.is_some() && said.over == self.voice.speech.held_since() {
             let said_over = result
                 .as_ref()
                 .is_ok_and(|text| said_over(text, &self.voice.speech.said_lately()));

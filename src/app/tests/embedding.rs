@@ -8,7 +8,6 @@ use clew_core::embed::local::{self, MODEL};
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 
-/// Feed `task`'s messages back, and theirs, until there are none.
 /// A private data directory for one test.
 fn data(tag: &str) -> (PathBuf, DataDirOverride) {
     let dir = test_dir(tag);

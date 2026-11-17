@@ -395,10 +395,10 @@ pub(crate) struct WakeState {
     /// The call listening began with, by its number, while Clew's name has
     /// not been heard in what was said since ([`App::prove_call`]).
     pub(crate) unproven: Option<u64>,
-    /// The call last found to be none, the microphone waiting since
-    /// ([`App::not_called`]): named after all in what was said after it,
-    /// listening begins again.
-    given_up: Option<u64>,
+    /// The call last found to be none, which ended the listening it began
+    /// ([`App::not_called`]) — nothing listened since: named after all in
+    /// what was said after it, listening begins again.
+    pub(crate) given_up: Option<u64>,
     /// Clew, held for a call as it spoke: it stops once the call is
     /// proven, and goes on if it was no call.
     pub(crate) held: Option<CallHold>,
@@ -647,12 +647,14 @@ impl App {
         // Given up on — what was heard first was no call — and named after
         // all in what was said next, the spotter not listening meanwhile:
         // a call, and listening begins again for it, Clew stopped.
-        if self.voice.wake.given_up.take() == Some(call) && !self.voice.mic_on {
+        if self.voice.wake.given_up.take() == Some(call)
+            && !self.voice.mic_on
+            && self.voice.installed(self.voice.prefs.model())
+        {
             if self.voice.speech.is_speaking() || self.answer_read_aloud_coming() {
                 self.stop_speaking();
             }
-            // What is said is worked out with the model here: it opens no
-            // Settings.
+            // With the model to hear with here, it opens no Settings.
             let _ = self.listen_now(None);
             self.voice.wake.called = true;
         }
@@ -692,11 +694,11 @@ impl App {
             return;
         }
         self.voice.wake.unproven = None;
-        self.voice.wake.given_up = Some(call);
         self.voice.heard = None;
         if self.voice.mic_on {
             self.voice.mic_on = false;
             self.wait_again();
+            self.voice.wake.given_up = Some(call);
         }
         self.status = if self.resume_waiting() {
             tr!("Didn't hear “Clew” — waiting for “Hey, Clew”").into()
@@ -712,9 +714,9 @@ impl App {
 
     /// The voice key, pressed as a call is heard out: the listening is the
     /// reader's — what is said next is said to Clew, whatever the call
-    /// turns out to have been. What is being said as it is pressed is the
-    /// call's, heard out with it and proving it or not; what was heard as
-    /// it was called, nothing said since, is let go of.
+    /// turns out to have been. What is being said as it is pressed is cut
+    /// there and checked as the call's, proving it or not; what was heard
+    /// as it was called, nothing said since, is let go of.
     pub(crate) fn call_taken_over(&mut self) -> Task<Message> {
         if self.voice.wake.unproven.is_none() {
             return Task::none();
@@ -730,7 +732,6 @@ impl App {
         };
         self.voice.wake.unproven = None;
         self.voice.wake.lead = None;
-        self.voice.wake.held = None;
         task
     }
 
@@ -758,6 +759,7 @@ impl App {
         self.save_voice_pref(Pref::Wake);
         self.voice.wake.failed = None;
         if !on {
+            self.voice.wake.given_up = None;
             self.stop_waiting();
             if let Some(spotters) = &self.voice.wake.spotters {
                 spotters.stop();
