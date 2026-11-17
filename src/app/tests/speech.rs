@@ -980,6 +980,47 @@ fn an_answer_is_read_once_its_voice_comes() {
     assert_eq!(voice.texts().len(), said, "stopped");
 }
 
+/// An answer read in part — its English by Supertonic, its Chinese, which
+/// only Qwen3-TTS speaks, not — is read on from what went unsaid once
+/// Qwen3-TTS is downloaded: not again from its start.
+#[test]
+fn only_what_went_unsaid_is_read_once_its_voice_comes() {
+    let (mut app, voice, output) = speech_app("speech-read-unsaid");
+    let store = app.voice.store.clone().unwrap();
+    let qwen = speech::find("qwen3-tts").unwrap();
+    speech::remove(&store, qwen).unwrap();
+    install(&app, speech::find("supertonic-3").unwrap());
+    asked(&mut app, 1, true);
+    delta(
+        &mut app,
+        1,
+        "The total adds every price. 总数是所有价格的和。",
+    );
+    ended(&mut app, 1, StreamOutcome::Done);
+    all_played(&mut app, &output);
+    assert_eq!(voice.texts(), ["The total adds every price."]);
+    assert!(
+        matches!(
+            app.voice.speech.blocked,
+            Some(Blocked::Missing { stream: 1, .. })
+        ),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+    install(&app, qwen);
+    let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+        id: "qwen3-tts",
+        result: Ok(()),
+    }));
+    settle(&mut app, task);
+    assert_eq!(
+        voice.texts(),
+        ["The total adds every price.", "总数是所有价格的和。"],
+        "the Chinese alone, read now"
+    );
+}
+
 /// A voice downloaded says which answers it reads — none of those in the
 /// language spoken, when it does not speak it: Supertonic 3, to a reader
 /// who speaks Chinese, is only ready.

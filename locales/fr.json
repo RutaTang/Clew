@@ -1614,6 +1614,7 @@
  "Stop explaining (what is explained so far is kept)": "Arrêter l’explication (ce qui est déjà expliqué est conservé)",
  "Stop generating it": "Arrêter de la générer",
  "Stop listening": "Arrêter l’écoute",
+ "Stop listening — or say “Bye, Clew”": "Arrêter l’écoute — ou dites « Bye, Clew »",
  "Stop speaking": "Arrêter la lecture",
  "Stop spinning": "Arrêter la rotation",
  "Stop {n}: {name}": "Arrêt {n} : {name}",

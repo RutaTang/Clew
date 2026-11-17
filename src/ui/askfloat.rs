@@ -277,7 +277,7 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
             Message::Voice(VoiceMsg::Toggle),
         )),
         if listening {
-            tr!("Stop listening")
+            stop_listening_tip()
         } else {
             talk_tip(app)
         },
@@ -1188,6 +1188,12 @@ pub(crate) fn talk_tip(app: &App) -> &'static str {
     }
 }
 
+/// The microphone's tip while it listens: "Bye, Clew" turns it off too —
+/// or, called by its name, has it wait for it again.
+pub(crate) fn stop_listening_tip() -> &'static str {
+    tr!("Stop listening — or say “Bye, Clew”")
+}
+
 /// The voice key's round button, `side` across, lit in the accent while
 /// the microphone is on — the microphone, which turns it off — or Clew
 /// speaks — a stop. `None` otherwise: the microphone as it is at rest.
@@ -1200,7 +1206,7 @@ pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, M
             true,
         )
     } else if app.voice.mic_on {
-        (Glyph::Mic, VoiceMsg::Toggle, tr!("Stop listening"), true)
+        (Glyph::Mic, VoiceMsg::Toggle, stop_listening_tip(), true)
     } else {
         return None;
     };
@@ -1216,7 +1222,7 @@ pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, M
         .width(Length::Fixed(side))
         .height(Length::Fixed(side))
         .on_press(if matches!(message, VoiceMsg::Toggle) {
-            super::heard::named_only(tip, Message::Voice(message))
+            super::heard::named_only(tr!("Stop listening"), Message::Voice(message))
         } else {
             super::heard::said(tip, Message::Voice(message))
         });

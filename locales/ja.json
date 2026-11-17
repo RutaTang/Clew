@@ -1614,6 +1614,7 @@
  "Stop explaining (what is explained so far is kept)": "説明を止める（ここまでの説明は残ります）",
  "Stop generating it": "生成を中止",
  "Stop listening": "聞き取りを停止",
+ "Stop listening — or say “Bye, Clew”": "聞き取りを停止 — または「Bye, Clew」と言う",
  "Stop speaking": "読み上げを停止",
  "Stop spinning": "回転を停止",
  "Stop {n}: {name}": "停止 {n}: {name}",

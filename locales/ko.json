@@ -1614,6 +1614,7 @@
  "Stop explaining (what is explained so far is kept)": "설명 중지(지금까지 설명한 내용은 유지됩니다)",
  "Stop generating it": "생성 중지",
  "Stop listening": "듣기 중지",
+ "Stop listening — or say “Bye, Clew”": "듣기 중지 — 또는 “Bye, Clew”라고 말하기",
  "Stop speaking": "읽기 중지",
  "Stop spinning": "회전 멈추기",
  "Stop {n}: {name}": "정지 {n}: {name}",

@@ -14171,6 +14171,10 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
     assert!(app.resume_waiting());
     assert_eq!(super::askfloat::talk_tip(&app), "Talk — or say “Hey, Clew”");
     assert_eq!(
+        super::askfloat::stop_listening_tip(),
+        "Stop listening — or say “Bye, Clew”"
+    );
+    assert_eq!(
         super::askfloat::talk_tint(&app, rest),
         crate::theme::accent()
     );
