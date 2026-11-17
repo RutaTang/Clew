@@ -398,7 +398,8 @@ pub(crate) struct WakeState {
     pub(crate) unproven: Option<u64>,
     /// The call last found to be none, which ended the listening it began
     /// ([`App::not_called`]) — nothing listened since: named after all in
-    /// what was said after it, listening begins again.
+    /// what was said after it, that listening begins again
+    /// ([`App::listen_again`]).
     pub(crate) given_up: Option<u64>,
     /// Clew, held for a call as it spoke: it stops once the call is
     /// proven, and goes on if it was no call.
@@ -682,12 +683,7 @@ impl App {
                 self.stop_for_the_reader();
             }
             // With the model to hear with here, it opens no Settings.
-            // The microphone off since, no listening has begun since the
-            // one the call had: what is still to be worked out of it is of
-            // the listening begun now.
-            let given_up_in = self.listenings();
-            let _ = self.listen_now(None);
-            self.listening_resumed(given_up_in);
+            let _ = self.listen_again();
             self.voice.wake.called = true;
         }
         true

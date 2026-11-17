@@ -577,8 +577,10 @@ pub(crate) struct VoiceState {
     unheard: VecDeque<(Recording, &'static Model, Said)>,
     /// What the utterance being worked out holds of Clew being called.
     run_said: Said,
-    /// How many times listening has begun: what was said in one that has
-    /// ended since is not taken to end the one now ([`App::said_bye`]).
+    /// How many listenings have begun — one begun again for a call given up
+    /// on is the same listening ([`App::listen_again`]): what was said in
+    /// one that has ended since is not taken to end the one now
+    /// ([`App::said_bye`]).
     listenings: u64,
     /// Where, in what the microphone is hearing, speech said over Clew
     /// began, in seconds: what is heard before it — what was left of Clew's
@@ -1411,23 +1413,6 @@ impl App {
                 .any(|(_, _, said)| said.over == Some(since))
     }
 
-    /// How many times listening has begun ([`VoiceState::listenings`]).
-    pub(crate) fn listenings(&self) -> u64 {
-        self.voice.listenings
-    }
-
-    /// Listening begun again for a call given up on, named after all
-    /// ([`App::prove_call`]): what was said since in the listening it had
-    /// — waiting to be worked out — is of this one.
-    pub(crate) fn listening_resumed(&mut self, from: u64) {
-        let now = self.voice.listenings;
-        for (_, _, said) in self.voice.unheard.iter_mut() {
-            if said.listening == from {
-                said.listening = now;
-            }
-        }
-    }
-
     /// The microphone turned off. What it is hearing someone say is kept —
     /// the press ends it, as a pause would — and what was said before is
     /// still worked out and acted on; a listen that has heard nothing yet
@@ -1557,6 +1542,20 @@ impl App {
     /// as the lead of what is said next, and what is said proving the call
     /// ([`App::prove_call`]).
     pub(crate) fn listen_now(&mut self, call: Option<u64>) -> Task<Message> {
+        self.listen(call, false)
+    }
+
+    /// Listening begun again for a call given up on, named after all
+    /// ([`App::prove_call`]): the listening the call had, none begun since
+    /// — a call is given up on only until one begins
+    /// ([`WakeState::listening_began`](crate::app::wake::WakeState::listening_began)).
+    /// What was said in it, still to be worked out, is of this one.
+    pub(crate) fn listen_again(&mut self) -> Task<Message> {
+        self.listen(None, true)
+    }
+
+    /// Listening begins: a new listening, or — `again` — the last one.
+    fn listen(&mut self, call: Option<u64>, again: bool) -> Task<Message> {
         let model = self.voice.prefs.model();
         if !self.voice.installed(model) {
             // Another one here: it is not that there is none.
@@ -1582,7 +1581,9 @@ impl App {
         // what is said now.
         let waiting = self.voice.wake.is_waiting();
         self.voice.mic_on = true;
-        self.voice.listenings += 1;
+        if !again {
+            self.voice.listenings += 1;
+        }
         self.voice.wake.listening_began(call);
         self.voice.heard = None;
         self.open_mic();
