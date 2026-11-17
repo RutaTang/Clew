@@ -2390,6 +2390,44 @@ fn a_new_answer_takes_over_what_was_left_to_say() {
     );
 }
 
+/// "Bye, Clew" said with Clew quiet, worked out only once Clew has begun
+/// reading and been talked over: what was said over it, dropped with the
+/// goodbye, holds it no more — it goes on.
+#[test]
+fn bye_clew_lets_go_of_what_it_drops_holding_clew() {
+    let (mut app, _voice, _output) = speech_app("speech-bye-drops-hold");
+    let model = app.voice.prefs.model();
+    let store = app.voice.store.clone().unwrap();
+    std::fs::create_dir_all(store.dir()).unwrap();
+    std::fs::write(store.path(model), b"a model").unwrap();
+    app.voice.open_mic = talking_mic;
+    app.voice.transcriber = Arc::new(Hears("Bye, Clew.".into()));
+    app.ask_view = AskView::Compact;
+    TALK.with(|t| t.set(None));
+    OVER.with(|o| o.set(None));
+    GONE.with(|g| g.set(false));
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    // "Bye, Clew", said with Clew quiet: worked out meanwhile.
+    TALK.with(|t| t.set(Some(crate::app::voice::END_SILENCE + 0.1)));
+    let bye = app.update(Message::Voice(VoiceMsg::Tick));
+    TALK.with(|t| t.set(None));
+    // An answer is read, and talked over: held for what is said over it,
+    // which ends, and waits to be worked out.
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "The total adds every price. Then it rounds.");
+    assert!(app.voice.speech.is_speaking());
+    talk(Some(0.1));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.held(), "held for what is said over it");
+    TALK.with(|t| t.set(Some(crate::app::voice::END_SILENCE + 0.1)));
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    // The goodbye worked out: what was said after it is let go of.
+    settle(&mut app, bye);
+    assert!(!app.voice.mic_on, "{}", app.status);
+    assert!(!app.voice.speech.held(), "not held for what was let go of");
+    assert!(app.voice.speech.is_speaking());
+}
+
 /// What is left of Clew's own voice once its echo is taken out — bursts
 /// the looser test takes for speech, but no unbroken run — neither holds
 /// Clew nor ends anything, however long it lasts: nothing is worked out of

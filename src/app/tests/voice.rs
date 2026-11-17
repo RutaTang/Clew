@@ -3212,6 +3212,29 @@ fn what_is_said_after_bye_clew_is_not_done() {
     assert_eq!(app.voice.queued(), 0);
 }
 
+/// A call given up on, then proven by "Hey, Clew, stop listening" said
+/// next: listening begins again for it — and Clew, reading, goes on, as
+/// that only gets the hint.
+#[test]
+fn stop_listening_after_a_given_up_call_lets_clew_go_on() {
+    let (_turn, mut app, script, _, _) = wake_app("wake-given-up-label", "", 1);
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        ["Hey cool, it works now.", "Hey, Clew, stop listening."]
+            .map(String::from)
+            .into(),
+    )));
+    app.voice.prefs.talk_over = true;
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.voice.speech.is_speaking(), "{}", app.status);
+    assert!(app.voice.mic_on && app.voice.is_listening());
+}
+
 /// "Bye, Clew" worked out once its listening had ended and another begun
 /// — the key pressed off and on meanwhile — ends nothing of the new one.
 #[test]
