@@ -3549,6 +3549,11 @@
  "… {n} more characters not shown — decline if you cannot tell what this does": "… 还有 {n} 个字符未显示。如果无法判断它的作用，请拒绝",
  "… {n} more frames not shown": "… 还有 {n} 个栈帧未显示",
  "… {n} more lines": "… 还有 {n} 行",
+ "↑ Out": "↑ 单步跳出",
+ "↓ In": "↓ 单步进入",
+ "↪ Over": "↪ 单步跳过",
+ "↺ Restart": "↺ 从头开始",
+ "↺ Start": "↺ 开头",
  "↻ Debug Again": "↻ 再次调试",
  "↻ Run Again": "↻ 再次运行",
  "⇥ End": "⇥ 结尾",
@@ -3559,10 +3564,5 @@
  "● LSP-precise": "● LSP 精确",
  "● LSP-precise: {languages}": "● LSP 精确：{languages}",
  "● live": "● 运行中",
- "⚠ internal error — restart this language server": "⚠ 内部错误，请重启此语言服务器",
- "↺ Restart": "↺ 从头开始",
- "↺ Start": "↺ 开头",
- "↑ Out": "↑ 单步跳出",
- "↓ In": "↓ 单步进入",
- "↪ Over": "↪ 单步跳过"
+ "⚠ internal error — restart this language server": "⚠ 内部错误，请重启此语言服务器"
 }

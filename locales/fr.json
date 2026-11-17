@@ -3549,6 +3549,11 @@
  "… {n} more characters not shown — decline if you cannot tell what this does": "… {n} caractères de plus non affichés — refusez si vous ne savez pas ce que cela fait",
  "… {n} more frames not shown": "… {n} frames de plus non affichées",
  "… {n} more lines": "… {n} lignes de plus",
+ "↑ Out": "↑ Pas sortant",
+ "↓ In": "↓ Pas détaillé",
+ "↪ Over": "↪ Pas principal",
+ "↺ Restart": "↺ Recommencer",
+ "↺ Start": "↺ Début",
  "↻ Debug Again": "↻ Déboguer à nouveau",
  "↻ Run Again": "↻ Exécuter à nouveau",
  "⇥ End": "⇥ Fin",
@@ -3559,10 +3564,5 @@
  "● LSP-precise": "● Précision LSP",
  "● LSP-precise: {languages}": "● Précision LSP : {languages}",
  "● live": "● en direct",
- "⚠ internal error — restart this language server": "⚠ erreur interne — redémarrez ce serveur de langage",
- "↺ Restart": "↺ Recommencer",
- "↺ Start": "↺ Début",
- "↑ Out": "↑ Pas sortant",
- "↓ In": "↓ Pas détaillé",
- "↪ Over": "↪ Pas principal"
+ "⚠ internal error — restart this language server": "⚠ erreur interne — redémarrez ce serveur de langage"
 }

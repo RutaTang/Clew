@@ -3549,6 +3549,11 @@
  "… {n} more characters not shown — decline if you cannot tell what this does": "… {n}자 더 생략됨 — 무슨 작업인지 알 수 없다면 거부하세요",
  "… {n} more frames not shown": "… 프레임 {n}개 더 생략됨",
  "… {n} more lines": "… {n}줄 더 있음",
+ "↑ Out": "↑ 나가기",
+ "↓ In": "↓ 들어가기",
+ "↪ Over": "↪ 건너뛰기",
+ "↺ Restart": "↺ 처음부터",
+ "↺ Start": "↺ 처음",
  "↻ Debug Again": "↻ 다시 디버그",
  "↻ Run Again": "↻ 다시 실행",
  "⇥ End": "⇥ 끝",
@@ -3559,10 +3564,5 @@
  "● LSP-precise": "● LSP 정밀화됨",
  "● LSP-precise: {languages}": "● LSP 정밀화됨: {languages}",
  "● live": "● 실시간",
- "⚠ internal error — restart this language server": "⚠ 내부 오류 — 이 언어 서버를 다시 시작하세요",
- "↺ Restart": "↺ 처음부터",
- "↺ Start": "↺ 처음",
- "↑ Out": "↑ 나가기",
- "↓ In": "↓ 들어가기",
- "↪ Over": "↪ 건너뛰기"
+ "⚠ internal error — restart this language server": "⚠ 내부 오류 — 이 언어 서버를 다시 시작하세요"
 }

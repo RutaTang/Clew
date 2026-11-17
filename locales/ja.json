@@ -3549,6 +3549,11 @@
  "… {n} more characters not shown — decline if you cannot tell what this does": "… ほか {n} 文字を省略しています。内容がわからない場合は拒否してください",
  "… {n} more frames not shown": "… ほか {n} フレームを省略",
  "… {n} more lines": "… ほか {n} 行",
+ "↑ Out": "↑ 呼び出し元へ",
+ "↓ In": "↓ 関数の中へ",
+ "↪ Over": "↪ 次の行へ",
+ "↺ Restart": "↺ 最初から",
+ "↺ Start": "↺ 最初へ",
  "↻ Debug Again": "↻ もう一度デバッグ",
  "↻ Run Again": "↻ もう一度実行",
  "⇥ End": "⇥ 最後へ",
@@ -3559,10 +3564,5 @@
  "● LSP-precise": "● LSP で精密化済み",
  "● LSP-precise: {languages}": "● LSP で精密化済み: {languages}",
  "● live": "● 実行中",
- "⚠ internal error — restart this language server": "⚠ 内部エラー。この言語サーバーを再起動してください",
- "↺ Restart": "↺ 最初から",
- "↺ Start": "↺ 最初へ",
- "↑ Out": "↑ 呼び出し元へ",
- "↓ In": "↓ 関数の中へ",
- "↪ Over": "↪ 次の行へ"
+ "⚠ internal error — restart this language server": "⚠ 内部エラー。この言語サーバーを再起動してください"
 }
