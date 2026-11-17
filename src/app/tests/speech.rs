@@ -789,6 +789,7 @@ fn what_cannot_be_said_says_why() {
     // Another voice that reads English downloaded instead — the smaller
     // one: nothing keeps English answers from being heard.
     let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("supertonic-3")));
+    install(&app, speech::find("supertonic-3").unwrap());
     let _ = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
         id: "supertonic-3",
         result: Ok(()),
@@ -1021,6 +1022,61 @@ fn only_what_went_unsaid_is_read_once_its_voice_comes() {
     );
 }
 
+/// Its voice downloaded while Clew still says what it could of the
+/// answer, what went unsaid is said after that — not lost; and of an
+/// answer the reader stopped, nothing is said once its voice comes.
+#[test]
+fn what_went_unsaid_waits_for_what_is_being_said() {
+    let (mut app, voice, output) = speech_app("speech-unsaid-speaking");
+    let store = app.voice.store.clone().unwrap();
+    let qwen = speech::find("qwen3-tts").unwrap();
+    let unsaid = |app: &mut App, stream| {
+        speech::remove(&store, qwen).unwrap();
+        asked(app, stream, true);
+        delta(
+            app,
+            stream,
+            "总数是所有价格的和。The total adds every price. Then it rounds.",
+        );
+        ended(app, stream, StreamOutcome::Done);
+        assert!(app.voice.speech.is_speaking());
+    };
+    let downloaded = |app: &mut App| {
+        let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+        install(app, qwen);
+        let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+            id: "qwen3-tts",
+            result: Ok(()),
+        }));
+        settle(app, task);
+    };
+    install(&app, speech::find("supertonic-3").unwrap());
+    unsaid(&mut app, 1);
+    downloaded(&mut app);
+    all_played(&mut app, &output);
+    all_played(&mut app, &output);
+    assert_eq!(
+        voice.texts(),
+        [
+            "The total adds every price.",
+            "Then it rounds.",
+            "总数是所有价格的和。"
+        ]
+    );
+    // Stopped by the reader as its last sentences were said: what went
+    // unsaid of it is not said either.
+    unsaid(&mut app, 2);
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    downloaded(&mut app);
+    all_played(&mut app, &output);
+    let chinese = voice
+        .texts()
+        .iter()
+        .filter(|t| t.as_str() == "总数是所有价格的和。")
+        .count();
+    assert_eq!(chinese, 1, "{:?}", voice.texts());
+}
+
 /// A voice downloaded says which answers it reads — none of those in the
 /// language spoken, when it does not speak it: Supertonic 3, to a reader
 /// who speaks Chinese, is only ready.
@@ -1137,11 +1193,15 @@ fn an_answer_heard_while_its_voice_downloads_says_so() {
         app.blocked_now().is_some(),
         "said, with how far it has come"
     );
-    let _ = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+    install(&app, speech::find("qwen3-tts").unwrap());
+    let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
         id: "qwen3-tts",
         result: Ok(()),
     }));
+    settle(&mut app, task);
     assert_eq!(app.voice.speech.blocked, None);
+    // What went unsaid of it is read now, the rest still coming.
+    assert_eq!(voice.texts(), ["This is."]);
 }
 
 /// A reader with Supertonic alone — the voice that read their answers in
@@ -2128,6 +2188,23 @@ fn talking_over_clew_holds_it_then_stops_it() {
     voice_tick(&mut app);
     assert!(!app.voice.speech.is_speaking(), "{}", app.status);
     assert!(!app.voice.speech.held());
+}
+
+/// "Bye, Clew" said over Clew is said to it, but ends listening, not what
+/// Clew says: held for it, Clew goes on, and the microphone is off.
+#[test]
+fn bye_clew_said_over_clew_lets_it_go_on() {
+    let (mut app, output) = talked_over("speech-talk-bye", "Bye, Clew.");
+    talk(Some(0.1));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.held());
+    talk(Some(crate::app::voice::END_SILENCE + 0.1));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.is_speaking(), "it goes on");
+    assert!(!app.voice.speech.held());
+    assert!(!output.lock().unwrap().paused, "faded back in");
+    assert!(!app.voice.mic_on, "{}", app.status);
+    assert_eq!(app.proj.ask_turns.len(), 1, "nothing asked");
 }
 
 /// What is left of Clew's own voice once its echo is taken out — bursts

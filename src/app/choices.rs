@@ -283,7 +283,7 @@ impl App {
         ));
         out.push(switch(
             tr_noop!("Start listening when you say “Hey, Clew”"),
-            tr_noop!("hey Clew, wake word, wake phrase, listen when called"),
+            tr_noop!("hey Clew, bye Clew, wake word, wake phrase, listen when called"),
             |on| Message::Voice(VoiceMsg::SetWake(on)),
         ));
 

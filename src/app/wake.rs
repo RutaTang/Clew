@@ -431,6 +431,22 @@ impl WakeState {
         }
     }
 
+    /// Listening begins: for `call`, which its words are to prove — or
+    /// for the reader, with none.
+    pub(crate) fn listening_began(&mut self, call: Option<u64>) {
+        self.called = call.is_some();
+        self.unproven = call;
+        self.given_up = None;
+    }
+
+    /// Listening ended — by the reader, or "Bye, Clew": no call it began
+    /// waits to be proven, nor is one given up on. What was said in one is
+    /// still worked out, and done if it named Clew.
+    pub(crate) fn listening_ended(&mut self) {
+        self.unproven = None;
+        self.given_up = None;
+    }
+
     /// A number for a call just heard.
     fn next_call(&mut self) -> u64 {
         self.calls += 1;
@@ -632,7 +648,7 @@ impl App {
         // ends listening, not what Clew says. Heard while Clew spoke, its
         // own words heard back are no call.
         let held = self.voice.wake.held.is_some_and(|h| h.call == call);
-        let stops = crate::app::spoken::stops_listening(text);
+        let stops = crate::app::spoken::says_bye(text, true);
         let to_clew = crate::app::spoken::named_in(text).is_some() || stops;
         let named = to_clew
             && (!held || crate::app::voice::said_over(text, &self.voice.speech.said_lately()));
@@ -648,8 +664,10 @@ impl App {
         self.end_hold(call, !stops);
         // Given up on — what was heard first was no call — and named after
         // all in what was said next, the spotter not listening meanwhile:
-        // a call, and listening begins again for it, Clew stopped.
+        // a call, and listening begins again for it, Clew stopped. Not for
+        // a "Bye, Clew": it ends listening, which has ended.
         if self.voice.wake.given_up.take() == Some(call)
+            && !stops
             && !self.voice.mic_on
             && self.voice.installed(self.voice.prefs.model())
         {
@@ -734,6 +752,9 @@ impl App {
         };
         self.voice.wake.unproven = None;
         self.voice.wake.lead = None;
+        // The reader's listening: it does not go back to waiting after a
+        // while with nothing said, as listening begun by a call does.
+        self.voice.wake.called = false;
         task
     }
 

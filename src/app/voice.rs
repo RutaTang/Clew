@@ -1349,7 +1349,7 @@ impl App {
     /// with the microphone that listened, if it is still open.
     fn mic_off(&mut self) -> Task<Message> {
         self.voice.mic_on = false;
-        self.voice.wake.given_up = None;
+        self.voice.wake.listening_ended();
         self.status = tr!("Stopped listening").into();
         let hearing = self
             .voice
@@ -1491,9 +1491,7 @@ impl App {
         // what is said now.
         let waiting = self.voice.wake.is_waiting();
         self.voice.mic_on = true;
-        self.voice.wake.called = call.is_some();
-        self.voice.wake.unproven = call;
-        self.voice.wake.given_up = None;
+        self.voice.wake.listening_began(call);
         self.voice.heard = None;
         self.open_mic();
         if waiting && call.is_none() {
@@ -1839,27 +1837,39 @@ impl App {
             }
             return self.transcribe_next();
         }
-        // Said over Clew, which it held while it was heard: words — not
-        // Clew's own, heard back — stop it, and are read as any are;
-        // nothing, or Clew's own words, and it goes on where it was. Only
-        // the words that held it decide: what was said before them is not
-        // why Clew is held.
-        if said.over.is_some() && said.over == self.voice.speech.held_since() {
-            let said_over = result
-                .as_ref()
-                .is_ok_and(|text| said_over(text, &self.voice.speech.said_lately()));
-            if said_over {
-                self.stop_speaking();
-            } else {
-                self.voice.speech.go_on();
+        // What proved a call — the call itself, or said after it: what was
+        // said before the name is not what was asked.
+        let call = said.lead || said.call.is_some();
+        // Said over Clew: Clew's own words, heard back, are dropped — and
+        // Clew, if those words still hold it, goes on where it was. Words
+        // to Clew stop it, if they hold it, and are read as any are — but
+        // "Bye, Clew", which ends listening, not what Clew says. Only the
+        // words that hold it decide: Clew held since by other words, or
+        // gone on, is theirs.
+        if said.over.is_some() {
+            let holds = said.over == self.voice.speech.held_since();
+            let (to_clew, bye) = result.as_ref().map_or((false, false), |text| {
+                (
+                    said_over(text, &self.voice.speech.said_lately()),
+                    crate::app::spoken::says_bye(text, call),
+                )
+            });
+            if !to_clew {
+                if holds {
+                    self.voice.speech.go_on();
+                }
                 if result.is_ok() {
                     return self.transcribe_next();
                 }
+            } else if holds {
+                if bye {
+                    self.voice.speech.go_on();
+                } else {
+                    self.stop_speaking();
+                }
             }
         }
-        // What proved a call — the call itself, or said after it: what was
-        // said before the name is not what was asked.
-        let task = self.on_words(result, said.lead || said.call.is_some());
+        let task = self.on_words(result, call);
         Task::batch([task, self.transcribe_next()])
     }
 
@@ -1882,22 +1892,29 @@ impl App {
         };
         // Clew called by its name before what is said to it: what is said
         // is what follows ("Hey, Clew, open Settings").
-        let named = if call {
-            crate::app::spoken::after_name(&text)
-        } else {
-            crate::app::spoken::without_name(&text)
-        };
+        let named = crate::app::spoken::what_is_said(&text, call);
         // "Bye, Clew" — after the name or not: the microphone turned off —
-        // or, called by its name, waiting for it again. A command waiting for a yes is put away, as by anything
-        // else said.
-        if crate::app::spoken::stops_listening(&text) || crate::app::spoken::stops_listening(named)
-        {
+        // or, called by its name, waiting for it again. A command waiting
+        // for a yes is put away, as by anything else said.
+        if crate::app::spoken::says_bye(&text, call) {
             self.voice.confirm = None;
             self.voice.hear(Heard {
                 text,
                 outcome: HeardOutcome::Ran(tr_noop!("Stop listening").into()),
             });
             return self.mic_off();
+        }
+        // The microphone's label said instead: not a question for Ask —
+        // what stops listening is said.
+        if crate::app::spoken::says_stop_listening(named) {
+            let say = tr_noop!("Say “Bye, Clew” to stop listening");
+            self.voice.confirm = None;
+            self.status = crate::i18n::lookup(say).into();
+            self.voice.hear(Heard {
+                text,
+                outcome: HeardOutcome::Failed(say.into()),
+            });
+            return Task::none();
         }
         let text = named.to_string();
         if text.is_empty() {
@@ -1967,16 +1984,25 @@ impl App {
     /// palette command; a setting's choice; a button, a choice or a list's
     /// row on screen; a phrase with a value. `None` leaves it to Ask.
     fn heard_command(&mut self, text: &str) -> Option<Task<Message>> {
+        // Not the voice key's own "Talk", wherever it is offered — the
+        // command bar lists it: the microphone is let go of by "Bye, Clew"
+        // alone.
+        let (talk, commands): (Vec<_>, Vec<_>) = self
+            .palette_commands()
+            .into_iter()
+            .partition(|c| c.is_the_voice_key());
+        let turns_the_microphone = |message: &Message| match message {
+            Message::Voice(VoiceMsg::Toggle) => true,
+            Message::Nav(NavMsg::PaletteRun(title)) => talk.iter().any(|c| c.title == *title),
+            _ => false,
+        };
         // What is on screen, as it is drawn now.
-        let targets = crate::ui::heard::gather(self);
+        let mut targets = crate::ui::heard::gather(self);
+        targets.retain(|t| !turns_the_microphone(&t.message));
         // A dialog takes the voice before anything, as it takes the pointer.
         if let Some(task) = self.heard_on_screen(text, &targets, true) {
             return Some(task);
         }
-        // Not the voice key's own "Talk": the microphone is let go of by
-        // "Bye, Clew" alone.
-        let mut commands = self.palette_commands();
-        commands.retain(|c| !c.is_the_voice_key());
         // Said in English, or as the palette shows it in the reader's
         // language.
         let found = crate::app::palette::command_said(text, &commands).or_else(|| {

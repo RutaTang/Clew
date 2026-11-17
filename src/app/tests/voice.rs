@@ -2739,6 +2739,34 @@ fn a_call_without_the_name_is_no_call() {
     assert!(!app.voice.speech.is_speaking(), "Clew stopped for the call");
     drop(app);
     drop(turn);
+    // "Bye, Clew" said after it: listening, already ended, is not begun
+    // again — nor Clew stopped.
+    let (turn, mut app, script, _, _) = wake_app("wake-bye-after", "", 1);
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        ["Hey cool, it works now.", "Bye, Clew."]
+            .map(String::from)
+            .into(),
+    )));
+    app.voice.prefs.talk_over = true;
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(
+        !app.voice.mic_on && app.voice.wake.is_waiting(),
+        "{}",
+        app.status
+    );
+    assert!(app.voice.speech.is_speaking(), "Clew goes on");
+    assert_eq!(
+        app.status,
+        "Stopped listening — say “Hey, Clew” to start again"
+    );
+    drop(app);
+    drop(turn);
     // Waiting not begun again — it failed: the status says why.
     let (turn, mut app, script, _, _) =
         wake_app("wake-not-named-failed", "Hey cool, it works now.", 1);
@@ -2930,23 +2958,51 @@ fn bye_clew_waits_for_its_name_again() {
     assert!(!app.voice.wake.is_waiting());
     assert!(script.lock().unwrap().stopped, "closed");
     drop(app);
-    // Nor the voice key's "Talk", or its button's labels.
-    for (tag, said) in [
-        ("wake-stop-listening", "Stop listening."),
-        ("wake-talk", "Talk."),
-    ] {
-        let (mut app, script, _) = voice_app(tag, said);
+    // Nor the button's label: it says what does, and asks nothing.
+    let (mut app, script, _) = voice_app("wake-stop-listening", "Stop listening.");
+    say(&mut app, &script);
+    assert!(app.voice.mic_on && !script.lock().unwrap().stopped);
+    assert_eq!(app.status, "Say “Bye, Clew” to stop listening");
+    assert_eq!(
+        app.voice.heard.as_ref().map(|h| &h.outcome),
+        Some(&HeardOutcome::Failed(
+            "Say “Bye, Clew” to stop listening".into()
+        ))
+    );
+    assert!(app.proj.ask_turns.is_empty(), "nothing asked");
+    drop(app);
+    // Nor the voice key's "Talk" — not where the command bar lists it
+    // either.
+    for listed in [false, true] {
+        let (mut app, script, _) = voice_app("wake-talk", "Talk.");
+        if listed {
+            let _ = app.update(key_press(
+                keyboard::Key::Character("p".into()),
+                keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT,
+            ));
+            let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged(">talk".into())));
+            assert!(
+                crate::ui::heard::gather(&app)
+                    .iter()
+                    .any(|t| matches!(&t.message, Message::Nav(NavMsg::PaletteRun(title)) if title == "Talk")),
+                "the bar lists it"
+            );
+        }
         say(&mut app, &script);
-        assert!(app.voice.mic_on, "{said} {:?}", app.voice.heard);
-        assert!(!script.lock().unwrap().stopped, "{said}");
-        assert!(
-            !matches!(
-                app.voice.heard.as_ref().map(|h| &h.outcome),
-                Some(HeardOutcome::Ran(_))
-            ),
-            "{said} {:?}",
-            app.voice.heard
-        );
+        assert!(app.voice.mic_on, "{listed} {:?}", app.voice.heard);
+        assert!(!script.lock().unwrap().stopped, "{listed}");
+        // The bar open, it is typed into its field, as any word that is
+        // none of what it lists.
+        let outcome = app.voice.heard.as_ref().map(|h| &h.outcome);
+        if listed {
+            assert_eq!(outcome, Some(&HeardOutcome::Ran("Typed".into())));
+            assert_eq!(app.proj.finder.query, ">talk Talk");
+        } else {
+            assert!(
+                !matches!(outcome, Some(HeardOutcome::Ran(_))),
+                "{outcome:?}"
+            );
+        }
     }
 }
 
@@ -3122,7 +3178,13 @@ fn clew_goes_on_after_what_was_no_call() {
 /// again.
 #[test]
 fn bye_clew_over_clew_lets_it_go_on() {
-    let (turn, mut app, script, _, _) = wake_app("wake-bye-over", "Bye, Clew.", 1);
+    for said in ["Bye, Clew.", "Hey, Clew. Bye, Clew."] {
+        bye_over_clew(said);
+    }
+}
+
+fn bye_over_clew(said: &str) {
+    let (turn, mut app, script, _, _) = wake_app("wake-bye-over", said, 1);
     app.voice.prefs.talk_over = true;
     app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
     assert!(!wait_step(&mut app));
@@ -3133,9 +3195,9 @@ fn bye_clew_over_clew_lets_it_go_on() {
     for message in run_task(task) {
         let _ = app.update(message);
     }
-    assert!(!app.voice.speech.held());
-    assert!(app.voice.speech.is_speaking(), "goes on reading");
-    assert!(!app.voice.mic_on && app.voice.wake.is_waiting());
+    assert!(!app.voice.speech.held(), "{said}");
+    assert!(app.voice.speech.is_speaking(), "{said}: goes on reading");
+    assert!(!app.voice.mic_on && app.voice.wake.is_waiting(), "{said}");
     assert_eq!(
         app.voice.heard.as_ref().map(|h| &h.outcome),
         Some(&HeardOutcome::Ran("Stop listening".into()))
@@ -3247,6 +3309,7 @@ fn a_call_named_late_leaves_the_microphone_off() {
     app.voice.forget_last_press();
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
     assert!(!app.voice.mic_on);
+    assert_eq!(app.voice.wake.unproven, None, "listening ended");
     settle(&mut app, task);
     assert!(app.settings.open, "{}", app.status);
     assert!(!app.voice.mic_on, "turned off, it stays off");
@@ -3274,6 +3337,10 @@ fn the_voice_key_takes_a_call_over() {
     app.voice.forget_last_press();
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
     assert!(!app.voice.speech.is_speaking());
+    assert!(
+        !app.voice.wake.called,
+        "the reader's: no going back to wait"
+    );
     settle(&mut app, task);
     assert!(
         app.voice.mic_on && app.voice.is_listening(),

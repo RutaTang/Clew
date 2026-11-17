@@ -515,6 +515,11 @@ impl Speech {
         if let Some((stream, _)) = self.reading.take() {
             self.hushed.insert(stream);
         }
+        // What went unsaid of it is not said once a voice comes either: it
+        // was stopped — read through, or not.
+        if let Some((stream, _)) = self.unsaid.take() {
+            self.hushed.insert(stream);
+        }
         self.queue.clear();
         self.making = false;
         self.round += 1;
@@ -796,10 +801,10 @@ impl App {
     /// What of the answer on `stream` the Ask card said a voice was needed
     /// to read, read now that the voice is here — what its Download was
     /// pressed for: the sentences no voice could say, not those heard
-    /// already — while it is still the last answer, on the card, not
-    /// stopped, and nothing is being said, nor anyone heard saying
-    /// something. Not one still coming: it is being read, the voice heard
-    /// from its next sentence.
+    /// already — while it is still the last answer, on the card, and not
+    /// stopped. Still being read — more of it coming, or its last sentences
+    /// being said — they are said after what is; else at once, unless
+    /// someone is heard saying something.
     fn read_now_heard(&mut self, stream: u64) -> Task<Message> {
         let read_aloud = self.voice.prefs.read_aloud;
         let Some(done) = self
@@ -811,28 +816,35 @@ impl App {
         else {
             return Task::none();
         };
-        let speech = &self.voice.speech;
         let hearing = self
             .voice
             .listening_now()
             .is_some_and(|l| l.silence_after_speech().is_some());
-        if !done
-            || !self.ask_view.is_open()
-            || speech.reading.is_some()
-            || speech.is_speaking()
-            || speech.hushed.contains(&stream)
-            || hearing
-        {
+        let speech = &mut self.voice.speech;
+        if !self.ask_view.is_open() || speech.hushed.contains(&stream) || speech.trying {
             return Task::none();
         }
-        let speech = &mut self.voice.speech;
+        let reading = speech.reading.is_some() || speech.is_speaking();
+        if hearing && !reading {
+            return Task::none();
+        }
         match speech.unsaid.take() {
             Some((s, unsaid)) if s == stream => {
+                let speaking = speech.is_speaking();
                 speech.queue.extend(unsaid);
+                if speaking || hearing {
+                    return Task::none();
+                }
                 self.hold_mic_for_clew();
                 self.speak_next()
             }
-            _ => self.read_answer(stream, true),
+            other => {
+                speech.unsaid = other;
+                if reading || !done {
+                    return Task::none();
+                }
+                self.read_answer(stream, true)
+            }
         }
     }
 
@@ -881,8 +893,10 @@ impl App {
         let speech = &mut self.voice.speech;
         if speech.reading.as_ref().is_none_or(|(s, _)| *s != stream) {
             // Another answer: what was being said of the last one — or a
-            // voice tried in Settings — ends.
-            if speech.reading.is_some() || speech.trying {
+            // voice tried in Settings — ends. What waits to be said is only
+            // ever of the answer being read: a sentence no voice can say is
+            // kept for that answer ([`Speech::unsaid`]).
+            if speech.reading.is_some() || speech.trying || speech.is_speaking() {
                 speech.hush();
             }
             speech.reading = Some((stream, Reader::new(Some(&usual))));

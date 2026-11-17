@@ -209,18 +209,18 @@ impl PaletteCommand {
         let (PaletteAction::Send(message) | PaletteAction::AtCaret(message)) = &self.action else {
             return false;
         };
-        matches!(
-            message,
-            Message::Voice(
-                VoiceMsg::SetSendQuestions(_)
-                    | VoiceMsg::SetRunCommands(_)
-                    | VoiceMsg::SetTalkOver(_)
-                    | VoiceMsg::SetWake(_)
-                    | VoiceMsg::PickModel(_)
-            ) | Message::Editor(EditorMsg::RunAction(crate::keymap::Action::Voice))
-                | Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
-                | Message::Updater(UpdaterMsg::SetAuto(_))
-        )
+        self.is_the_voice_key()
+            || matches!(
+                message,
+                Message::Voice(
+                    VoiceMsg::SetSendQuestions(_)
+                        | VoiceMsg::SetRunCommands(_)
+                        | VoiceMsg::SetTalkOver(_)
+                        | VoiceMsg::SetWake(_)
+                        | VoiceMsg::PickModel(_)
+                ) | Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
+                    | Message::Updater(UpdaterMsg::SetAuto(_))
+            )
     }
 
     /// Whether the reader, saying it, is asked first: what [`Self::costly`]
