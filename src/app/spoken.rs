@@ -139,12 +139,31 @@ const NAMES: &[&str] = &[
 /// nor is Korean, which tells "크루" (crew) from "클루".
 const NAMES_BEFORE_JAPANESE: &[&str] = &["crew"];
 /// What Japanese says straight after a name it says something of —
-/// "Clewのグラフ", "Clew って何", "Clew だよ": not a call. Not "も", "や"
-/// or "と", which begin as many words said to Clew ("もう一回", "やめて",
-/// "とめて").
+/// "Clewのグラフ", "Clew って何", "Clew だよ", "Clew とは": not a call.
 const JAPANESE_PARTICLES: &[&str] = &[
-    "の", "が", "は", "を", "に", "へ", "で", "って", "から", "まで", "より", "だ", "じゃ",
+    "の",
+    "が",
+    "は",
+    "を",
+    "に",
+    "へ",
+    "で",
+    "って",
+    "から",
+    "まで",
+    "より",
+    "だ",
+    "じゃ",
+    "とは",
+    "とか",
+    "として",
 ];
+/// Particles that begin as many words said to Clew ("もう一回", "やめて",
+/// "とめて"): particles only with no hiragana after them ("Clew も落ちた",
+/// "Clew と比べて", "Clew や VS Code").
+const JAPANESE_SHORT_PARTICLES: &[char] = &['と', 'も', 'や'];
+/// How a Japanese request ends: "開いて", "移動して", "ください".
+const JAPANESE_REQUEST_ENDS: &[&str] = &["て", "で", "ください", "下さい"];
 /// The "Hey" of "Hey, Clew", as whisper writes it.
 const HEY: &[&str] = &["hey", "hi", "hé", "嘿", "嗨", "헤이", "ヘイ"];
 /// The "Hey" of "Hey, Clew" as whisper writes it when it hears another
@@ -178,9 +197,9 @@ fn kana(c: char) -> bool {
     matches!(c as u32, 0x3040..=0x30FF)
 }
 
-/// Whether `c` is Korean: Hangul syllables.
-fn hangul(c: char) -> bool {
-    matches!(c as u32, 0xAC00..=0xD7AF)
+/// Whether `c` is hiragana.
+fn hiragana(c: char) -> bool {
+    matches!(c as u32, 0x3041..=0x309F)
 }
 
 /// Whether `rest`, what follows a name, is a Japanese sentence: kana in
@@ -194,17 +213,18 @@ fn japanese_follows(rest: &str) -> bool {
 }
 
 /// Whether a name said after `before` and before `rest` is said in a
-/// Japanese sentence: one with kana before it ("ヘイ、Crew 設定") — or,
-/// past the marks and spaces after it but not past a sentence's end in
-/// Latin letters ("Hey crew! 準備はいい？"), one in Japanese or in
-/// Chinese characters, which Japanese writes too ("Crew 続行").
+/// Japanese sentence — one with kana, Japanese's own letters, in it:
+/// before the name ("ヘイ、Crew 設定"), or after it, past the marks and
+/// spaces after it but not past a sentence's end in Latin letters ("Crew
+/// 設定を", not "Hey crew! 準備はいい？"). One in Chinese characters
+/// alone ("Hey Crew 続行") may as well be Chinese ("Hey crew 开会了"),
+/// which does not write Clew so: it is not taken.
 fn in_japanese(before: &str, rest: &str) -> bool {
     if last_sentence(before).chars().any(kana) {
         return true;
     }
     let after = unmarked(rest);
-    !rest[..rest.len() - after.len()].contains(['.', '!', '?'])
-        && (japanese_follows(after) || after.chars().next().is_some_and(|c| cjk(c) && !hangul(c)))
+    !rest[..rest.len() - after.len()].contains(['.', '!', '?']) && japanese_follows(after)
 }
 
 /// Where Clew's name ends, said from the start of `at`, after `before`
@@ -222,20 +242,40 @@ fn called_name_at(at: &str, before: &str) -> Option<usize> {
 /// Whether Clew's name, `name` as written, is set apart from `rest`, what
 /// follows it, as a call sets it: by a mark ("Clew, …") or nothing at all
 /// — or, written in Latin letters, by a pause and then a Japanese
-/// sentence ("Crew 設定を", "Crew README を開いて"), not one that goes on
-/// from the name ("Clewのグラフ", "Clew のグラフ", "Clew だよ"). Not by a
-/// pause alone before Chinese or Korean, where it may as well be said of
-/// Clew ("Clew 又卡住了"): a call there is written with a mark or a
-/// "Hey". A pause is no sure sign: "Crew 全員集まって" ("crew, everyone
-/// gather"), said to others, is taken for a call too — no words tell it
-/// from one.
+/// sentence ("Crew 設定を", "Crew もう一回"), not one that goes on from the
+/// name ("Clewのグラフ", "Clew のグラフ", "Clew だよ", "Clew も落ちた"); one
+/// that begins in Latin letters or numbers, only as a request ("Crew
+/// README を開いて", not "Clew VS Code より速い？"). Not by a pause alone
+/// before Chinese or Korean, where it may as well be said of Clew ("Clew
+/// 又卡住了"): a call there is written with a mark or a "Hey". A pause is
+/// no sure sign: "Crew 全員集まって" ("crew, everyone gather"), said to
+/// others, is taken for a call too — no words tell it from one.
 fn set_apart(name: &str, rest: &str) -> bool {
     let after = rest.trim_start();
-    after.chars().next().is_none_or(mark)
-        || (!name.chars().any(cjk)
-            && rest.starts_with(char::is_whitespace)
-            && !JAPANESE_PARTICLES.iter().any(|p| after.starts_with(p))
-            && japanese_follows(rest))
+    if after.chars().next().is_none_or(mark) {
+        return true;
+    }
+    if name.chars().any(cjk) || !rest.starts_with(char::is_whitespace) || !japanese_follows(rest) {
+        return false;
+    }
+    let particle = JAPANESE_PARTICLES.iter().any(|p| after.starts_with(p))
+        || after
+            .strip_prefix(JAPANESE_SHORT_PARTICLES)
+            .is_some_and(|word| !word.starts_with(hiragana));
+    !particle && (after.starts_with(cjk) || japanese_request(after))
+}
+
+/// Whether the sentence `said` begins with is a Japanese request: "…を開いて",
+/// "…移動して", "…ください".
+fn japanese_request(said: &str) -> bool {
+    let sentence = said
+        .split(sentence_end)
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(|c: char| c.is_whitespace() || mark(c));
+    JAPANESE_REQUEST_ENDS
+        .iter()
+        .any(|end| sentence.ends_with(end))
 }
 
 /// What sets one part of what was said from the next.
@@ -1190,6 +1230,7 @@ mod tests {
         assert_eq!(without_name("Clew 又卡住了"), "Clew 又卡住了");
         assert_eq!(without_name("ヘイ、Crew 設定"), "設定");
         assert_eq!(without_name("ヘイ、Crew。"), "");
+        assert_eq!(without_name("Clew とは何ですか？"), "Clew とは何ですか？");
         assert_eq!(without_name("Hey crew, let's go"), "Hey crew, let's go");
         // Not called: left as it is.
         assert_eq!(without_name("Hey, look at this"), "Hey, look at this");
@@ -1263,7 +1304,6 @@ mod tests {
         // A Japanese sentence before it, or Chinese characters after it.
         assert_eq!(named_in("ヘイ、Crew 設定"), Some("設定"));
         assert_eq!(named_in("ヘイ、Crew、検索"), Some("検索"));
-        assert_eq!(named_in("Hey Crew 続行"), Some("続行"));
         assert_eq!(named_in("ヘイ、Crew。"), Some(""));
         assert_eq!(named_in("ヘイ、Crew。設定を開いて"), Some("設定を開いて"));
         // Words that begin as particles do.
@@ -1290,6 +1330,22 @@ mod tests {
             "Clew だよ",
             "Clew 又卡住了。ちょっと見て",
             "Hey crew! 準備はいい？",
+            "準備できた？ Hey crew, let's go",
+            // "crew" before Chinese, which does not write Clew so.
+            "Hey crew 打开设置",
+            "嘿 crew 开会了",
+            "Crew，大家过来一下",
+            // Particles, and words that go on from the name.
+            "Clew とは何ですか",
+            "Clew とか使ってる？",
+            "Clew として使う",
+            "Clew も落ちた",
+            "Clew と比べて遅い",
+            "Clew や VS Code みたいなツール",
+            // Latin letters or numbers after the pause: only a request.
+            "Clew VS Code より速い？",
+            "Clew 2 回落ちたけど、なぜ？",
+            "Clew 2 回落ちた。直して",
             "Clew のグラフが遅い",
             "Clew 的图很慢",
             "Clew 又卡住了",
