@@ -282,7 +282,7 @@ impl std::fmt::Debug for Audio {
 /// alone was missed, and a reader who had heard answers before heard
 /// nothing, and saw no reason why.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Blocked {
+pub enum Blocked {
     /// No voice here speaks `lang`, which the answer on `stream` is in, or
     /// part of it: `model` would read it.
     Missing {
