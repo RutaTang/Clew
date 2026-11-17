@@ -231,8 +231,9 @@ fn first_sentence(said: &str) -> &str {
 /// before the name ("ヘイ、Crew 設定"), or after it, past the marks and
 /// spaces after it but not past a sentence's end in Latin letters ("Crew
 /// 設定を", not "Hey crew! 準備はいい？"); or Chinese characters after a
-/// Japanese comma ("Hey Crew、設定"). Chinese characters after a space
-/// alone ("Hey Crew 続行") may as well be Chinese ("Hey crew 开会了"),
+/// Japanese comma ("Hey Crew、設定"), or after a space with the window
+/// shown in Japanese ("Hey Crew 続行"). Shown in another language, Chinese
+/// characters after a space may as well be Chinese ("Hey crew 开会了"),
 /// which does not write Clew so: they are not taken.
 fn in_japanese(before: &str, rest: &str) -> bool {
     if last_sentence(before).chars().any(kana) {
@@ -240,8 +241,10 @@ fn in_japanese(before: &str, rest: &str) -> bool {
     }
     let after = unmarked(rest);
     let between = &rest[..rest.len() - after.len()];
+    let japanese_window = crate::i18n::current() == crate::i18n::Lang::Ja;
     !between.contains(['.', '!', '?'])
-        && (japanese_follows(after) || (between.contains('、') && after.starts_with(cjk)))
+        && (japanese_follows(after)
+            || ((between.contains('、') || japanese_window) && after.starts_with(cjk)))
 }
 
 /// Where Clew's name ends, said from the start of `at`, after `before`
@@ -1372,6 +1375,10 @@ mod tests {
             // Said of Clew, ending as a phrase of its own would.
             assert_eq!(named_in("Clew 2 回同じファイルを開く"), None);
             assert_eq!(named_in("Clew 2 回落ちた件を検索"), None);
+            // Shown in Japanese, Chinese characters after "crew" are
+            // Japanese: a command's name alone.
+            assert_eq!(named_in("Hey Crew 続行"), Some("続行"));
+            assert_eq!(named_in("Hey Crew 設定"), Some("設定"));
             // Names with katakana in them are names.
             assert_eq!(
                 named_in("Clew READMEファイルを開く"),
@@ -1415,8 +1422,10 @@ mod tests {
             "Clew 又卡住了。ちょっと見て",
             "Hey crew! 準備はいい？",
             "準備できた？ Hey crew, let's go",
-            // "crew" before Chinese, which does not write Clew so.
+            // "crew" before Chinese, which does not write Clew so — nor,
+            // shown in another language than Japanese, Japanese kanji alone.
             "Hey crew 打开设置",
+            "Hey Crew 続行",
             "嘿 crew 开会了",
             "Crew，大家过来一下",
             // Particles, and words that go on from the name.
