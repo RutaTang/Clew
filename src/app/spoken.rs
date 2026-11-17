@@ -279,11 +279,11 @@ pub(crate) fn after_name(said: &str) -> &str {
 }
 
 /// What follows Clew's name in `said`, if Clew is called by it there —
-/// the name a word of its own, or in a run of Chinese, Japanese or Korean:
-/// "clueless" holds no "clue". "Clew", as whisper writes it, told it, is
-/// a call wherever it is; a name written another way ("clue", "克鲁") only
-/// as a call is said — after a word Clew is called with ("hey", "嘿"), or
-/// first with a mark after it: "no clue why" calls no one.
+/// the name a word of its own, or in a run of Chinese, Japanese or Korean
+/// ("clueless" holds no "clue"), said as a call is: after a word Clew is
+/// called with ("hey", "嘿"), or first with a mark after it. "No clue why"
+/// calls no one — nor "no Clew why", as whisper, told the name, may write
+/// it.
 pub(crate) fn named_in(said: &str) -> Option<&str> {
     let names = every(NAME);
     let calls = every(CALLED);
@@ -294,16 +294,12 @@ pub(crate) fn named_in(said: &str) -> Option<&str> {
         if !at_word {
             continue;
         }
-        let Some((name, end)) = names
-            .iter()
-            .find_map(|n| begins(&said[i..], n).map(|end| (n, end)))
-        else {
+        let Some(end) = names.iter().find_map(|n| begins(&said[i..], n)) else {
             continue;
         };
         let rest = &said[i + end..];
         let before = said[..i].trim_end_matches(|c: char| c.is_whitespace() || mark(c));
-        let called = name == "clew"
-            || (before.is_empty() && rest.trim_start().chars().next().is_none_or(mark))
+        let called = (before.is_empty() && rest.trim_start().chars().next().is_none_or(mark))
             || calls.iter().any(|call| ends_with_word(before, call));
         if called {
             return Some(unmarked(rest));
@@ -984,10 +980,9 @@ mod tests {
         assert_eq!(named_in("Hey, Clew."), Some(""));
         assert_eq!(named_in("Hey clue."), Some(""));
         assert_eq!(named_in("Clue, open settings"), Some("open settings"));
-        // "Clew", as whisper writes it, wherever it is — what was said
-        // before it was not said to Clew.
+        // What was said before the call was not said to Clew.
         assert_eq!(
-            named_in("and then I said Clew, open settings"),
+            named_in("and then I said hey Clew, open settings"),
             Some("open settings")
         );
         assert_eq!(named_in("No clue why. Hey Clew, run it"), Some("run it"));
@@ -996,6 +991,8 @@ mod tests {
             "Hey Kyle, look at this.",
             "Open the clueless file",
             "Hey, cool — no clue why it broke",
+            "Hey, cool — no Clew why it broke",
+            "and then I said Clew, open settings",
             "Clue me in",
         ] {
             assert_eq!(named_in(said), None, "{said:?}");

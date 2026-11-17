@@ -2668,17 +2668,12 @@ fn a_call_without_the_name_is_no_call() {
     assert!(app.voice.is_listening());
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
-    // More said meanwhile, waiting to be worked out: let go of with it.
+    // More said meanwhile, waiting to be worked out: worked out on its
+    // own — no call either.
     let _ = app.update(Message::Voice(VoiceMsg::Tick));
-    assert!(app.voice.transcribing());
-    for message in run_task(task) {
-        let _ = app.update(message);
-    }
-    assert_eq!(
-        hears.hints.lock().unwrap().len(),
-        1,
-        "nothing more worked out"
-    );
+    assert_eq!(app.voice.queued(), 1);
+    settle(&mut app, task);
+    assert_eq!(hears.hints.lock().unwrap().len(), 2);
     assert!(!app.voice.transcribing());
     assert!(app.proj.ask_input.is_empty(), "{:?}", app.proj.ask_input);
     assert!(app.proj.ask_turns.is_empty());
@@ -2714,6 +2709,71 @@ fn a_call_without_the_name_is_no_call() {
     assert!(app.voice.wake.is_waiting(), "{}", app.status);
     drop(app);
     drop(turn);
+    // What was said after a call that was none — the spotter not listening
+    // meanwhile — is a call still, its name in it.
+    let (turn, mut app, script, _, _) = wake_app("wake-called-after", "", 1);
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        ["Hey cool, it works now.", "Hey, Clew, open settings."]
+            .map(String::from)
+            .into(),
+    )));
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    drop(app);
+    drop(turn);
+    // A call proven: what was said after it, waiting to be worked out
+    // meanwhile, is said to Clew — its name not needed.
+    let (turn, mut app, script, _, _) = wake_app("wake-proven-queue", "", 1);
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        ["Hey, Clew.", "Open settings."].map(String::from).into(),
+    )));
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert_eq!(app.voice.queued(), 1);
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    assert!(app.voice.mic_on);
+    drop(app);
+    drop(turn);
+    // Proven by what was said after the call, what was said before its
+    // name there is not what was asked.
+    let (turn, mut app, script, _, _) = wake_app("wake-proven-later", "", 1);
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        ["", "Sorry. Hey Clew, open settings."]
+            .map(String::from)
+            .into(),
+    )));
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    drop(app);
+    drop(turn);
+}
+
+/// Every message a task gives, and every one those give, handed to the
+/// window.
+fn settle(app: &mut App, task: iced::Task<Message>) {
+    let mut pending = run_task(task);
+    while !pending.is_empty() {
+        let mut next = Vec::new();
+        for message in pending {
+            next.extend(run_task(app.update(message)));
+        }
+        pending = next;
+    }
 }
 
 /// The call heard, then nothing for a while: what was heard with it is
@@ -2722,9 +2782,10 @@ fn a_call_without_the_name_is_no_call() {
 /// is said later is.
 #[test]
 fn a_call_alone_is_proven_by_itself() {
+    // A moment: far less than the while after which the quiet is let go.
     let quiet = |app: &mut App| {
         if let VoicePhase::Listening { since, .. } = &mut app.voice.phase {
-            *since -= std::time::Duration::from_secs_f32(NO_SPEECH_TIMEOUT + 1.0);
+            *since -= std::time::Duration::from_secs_f32(crate::app::wake::CALL_QUIET + 0.1);
         }
         let task = app.update(Message::Voice(VoiceMsg::Tick));
         for message in run_task(task) {
@@ -3016,6 +3077,81 @@ fn clew_goes_on_after_what_was_no_call() {
     }
 }
 
+/// Held for a call longer than it takes to hear — Clew went on — the call
+/// proven still stops it; stopped and held again since, by words said over
+/// it, what was no call does not let it go on: those words decide.
+#[test]
+fn a_call_ends_only_its_own_hold() {
+    let (turn, mut app, script, _, _) = wake_app("wake-held-long", "Hey, Clew, open settings.", 1);
+    app.voice.prefs.talk_over = true;
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    app.voice
+        .speech
+        .hold_since_for_test(std::time::Duration::from_secs(13));
+    let _ = app.update(Message::Voice(VoiceMsg::SpeakTick));
+    assert!(!app.voice.speech.held() && app.voice.speech.is_speaking());
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(!app.voice.speech.is_speaking(), "stopped for the call");
+    drop(app);
+    drop(turn);
+    let (turn, mut app, script, _, _) = wake_app("wake-held-again", "Hey cool, it works now.", 1);
+    app.voice.prefs.talk_over = true;
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    app.stop_speaking();
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    app.voice.speech.hold();
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(
+        app.voice.speech.held(),
+        "held still, for the words said over it"
+    );
+    drop(app);
+    drop(turn);
+}
+
+/// The voice key pressed as a call that held Clew is heard out: Clew
+/// stops, and the listening is the reader's — the call's words, found to
+/// be no call, end nothing of it, and what is said next is said to Clew.
+#[test]
+fn the_voice_key_takes_a_call_over() {
+    let (_turn, mut app, script, _, _) = wake_app("wake-key-over", "", 1);
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        ["Hey cool, it works now.", "Open settings."]
+            .map(String::from)
+            .into(),
+    )));
+    app.voice.prefs.talk_over = true;
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    assert!(app.voice.speech.held());
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    script.lock().unwrap().silence = None;
+    app.voice.forget_last_press();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(!app.voice.speech.is_speaking());
+    settle(&mut app, task);
+    assert!(
+        app.voice.mic_on && app.voice.is_listening(),
+        "{}",
+        app.status
+    );
+    assert!(!app.status.starts_with("Didn't hear"), "{}", app.status);
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+}
+
 /// "Goodbye, Clew" said once called, the call before it: it waits again —
 /// not asked as a question.
 #[test]
@@ -3093,6 +3229,27 @@ fn a_call_holds_an_answer_on_its_way_to_being_read() {
         drop(app);
         drop(turn);
     }
+    // Nothing said after it: what was heard as it was called is worked out
+    // on its own, the microphone waiting for Clew meanwhile.
+    let (_turn, mut app, _, hears, _) = wake_app("wake-answer-quiet", "Hey, cool!", 1);
+    app.voice.prefs.talk_over = false;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 7,
+        question: "what does total do?".into(),
+        spoken: true,
+        streaming: true,
+        ..Default::default()
+    });
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    if let VoicePhase::Listening { since, .. } = &mut app.voice.phase {
+        *since -= std::time::Duration::from_secs_f32(crate::app::wake::CALL_QUIET + 0.1);
+    }
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert_eq!(hears.hints.lock().unwrap().len(), 1, "worked out");
+    assert!(!app.voice.speech.held() && app.answer_read_aloud_coming());
+    assert!(app.voice.wake.is_waiting(), "{}", app.status);
 }
 
 /// What was heard at another rate before the one the microphone hears at
@@ -3256,7 +3413,7 @@ fn a_call_too_soft_to_listen_to_is_no_call() {
     let lead = app.voice.wake.lead.as_ref().expect("the lead");
     assert_eq!(
         lead.samples.len(),
-        (16_000.0 * crate::app::wake::LEAD_SECONDS) as usize
+        (16_000.0 * crate::app::wake::HEARD_SECONDS) as usize
     );
     // The phrase among it, said aloud two seconds before, however late the
     // spotter told of it: the name in it proves the call.

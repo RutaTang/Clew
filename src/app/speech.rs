@@ -359,9 +359,10 @@ pub(crate) struct Speech {
     pub download_errors: HashMap<&'static str, String>,
     pub(crate) open_output: OpenOutput,
     pub(crate) synthesizer: Arc<dyn Synthesizer>,
-    /// Since when Clew is held while the reader talks over it — until what
-    /// they said is heard, and told from Clew's own voice
-    /// ([`said_over`](crate::app::voice::said_over)).
+    /// Since when Clew is held while the reader is heard — talking over it,
+    /// or calling it — until what they said is heard: told from Clew's own
+    /// voice ([`said_over`](crate::app::voice::said_over)), or found to
+    /// call it or not ([`App::prove_call`]).
     barged: Option<Instant>,
     /// The last sentences made to be said: what the microphone may still
     /// hear of Clew's own voice, its echo not all taken out.
@@ -377,8 +378,8 @@ pub(crate) struct Speech {
 /// How many of the sentences last made [`Speech::said_lately`] keeps.
 const SAID_LATELY: usize = 6;
 
-/// How long Clew is held for words said over it at most, before it goes
-/// on: what was said is heard by then.
+/// How long Clew is held for the reader at most, before it goes on: what
+/// was said is heard by then.
 const HELD_AT_MOST: Duration = Duration::from_secs(12);
 
 impl Speech {
@@ -421,6 +422,11 @@ impl Speech {
         self.barged
     }
 
+    /// What is being said, by its number: another once Clew is stopped.
+    pub(crate) fn round(&self) -> u64 {
+        self.round
+    }
+
     /// The reader talks over Clew, or calls it: what is being said is held
     /// — faded out, kept to go on from — while what they say is heard. Held
     /// before anything plays — the first sentence still being made, or the
@@ -460,7 +466,7 @@ impl Speech {
         }
     }
 
-    /// Held longer than words said over it take to be heard.
+    /// Held longer than what the reader says takes to be heard.
     pub(crate) fn held_too_long(&self) -> bool {
         self.barged
             .is_some_and(|since| since.elapsed() >= HELD_AT_MOST)

@@ -1019,6 +1019,21 @@ fn a_voice_downloaded_says_what_it_reads() {
     assert_eq!(downloaded(&mut app, "zh"), "Supertonic 3 is ready");
 }
 
+/// Held before anything plays — called as an answer is on its way: what
+/// comes opens held, and plays once Clew goes on.
+#[test]
+fn what_comes_while_clew_is_held_waits() {
+    let (mut app, _, output) = speech_app("speech-held-first");
+    asked(&mut app, 1, true);
+    app.voice.speech.hold();
+    assert!(app.voice.speech.held() && !app.voice.speech.is_speaking());
+    delta(&mut app, 1, "The total adds every price. Then");
+    assert_eq!(output.lock().unwrap().opened, 1);
+    assert!(output.lock().unwrap().paused, "opened held");
+    app.voice.speech.go_on();
+    assert!(!output.lock().unwrap().paused);
+}
+
 /// The Ask card speaks of answers only: Settings' Try failing is said on
 /// the status line, where Try was pressed, not on the card; and reading
 /// aloud turned off in another window puts the card's notice away in this
