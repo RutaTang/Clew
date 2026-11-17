@@ -264,12 +264,17 @@ fn called_name_at(at: &str, before: &str) -> Option<usize> {
 /// that begins in Latin letters or numbers, only as a request ("Crew
 /// README を開いて", not "Clew VS Code より速い？"). Not by a pause alone
 /// before Chinese or Korean, where it may as well be said of Clew ("Clew
-/// 又卡住了"): a call there is written with a mark or a "Hey". A pause is
-/// no sure sign: "Crew 全員集まって" ("crew, everyone gather"), said to
-/// others, is taken for a call too — no words tell it from one.
+/// 又卡住了"): a call there is written with a mark or a "Hey" — or in
+/// Korean, "야" or "아" after the name, which a pause after it sets apart
+/// ("클루야 설정 열어줘"). A pause is no sure sign: "Crew 全員集まって"
+/// ("crew, everyone gather"), said to others, is taken for a call too —
+/// no words tell it from one.
 fn set_apart(name: &str, rest: &str) -> bool {
     let after = rest.trim_start();
-    if after.chars().next().is_none_or(mark) {
+    // Korean calls with "야" or "아" after the name ([`name_at`]): a pause
+    // after it sets it apart ("클루야 설정 열어줘").
+    let called = name.ends_with(['야', '아']) && rest.starts_with(char::is_whitespace);
+    if called || after.chars().next().is_none_or(mark) {
         return true;
     }
     if name.chars().any(cjk) || !rest.starts_with(char::is_whitespace) || !japanese_follows(rest) {
@@ -285,7 +290,8 @@ fn set_apart(name: &str, rest: &str) -> bool {
 /// Whether the sentence `said` begins with is a Japanese request —
 /// "…を開いて", "…移動して", "…ください" — or one of the phrases Clew is
 /// told a value with, as the window says them ("{text}を検索",
-/// [`PHRASES`]), the value a name or a number, not a Japanese clause
+/// [`PHRASES`]), the value a name or a number — katakana in it too
+/// ("READMEファイル") — not a Japanese clause, which hiragana tell
 /// ("2 回同じファイルを開く", "go to definition が効かない").
 fn japanese_request(said: &str) -> bool {
     let sentence = first_sentence(said).trim_end_matches(|c: char| c.is_whitespace() || mark(c));
@@ -294,7 +300,7 @@ fn japanese_request(said: &str) -> bool {
         .any(|end| sentence.ends_with(end))
         || PHRASES.iter().any(|&(_, phrase)| {
             value_in(crate::i18n::lookup(phrase), sentence)
-                .is_some_and(|value| !value.chars().any(kana))
+                .is_some_and(|value| !value.chars().any(hiragana))
         })
 }
 
@@ -1360,7 +1366,20 @@ mod tests {
             // Said of Clew, ending as a phrase of its own would.
             assert_eq!(named_in("Clew 2 回同じファイルを開く"), None);
             assert_eq!(named_in("Clew 2 回落ちた件を検索"), None);
+            // Names with katakana in them are names.
+            assert_eq!(
+                named_in("Clew READMEファイルを開く"),
+                Some("READMEファイルを開く")
+            );
+            assert_eq!(
+                named_in("Clew TODOコメントを検索"),
+                Some("TODOコメントを検索")
+            );
         });
+        // Korean's calling "야", then a pause.
+        assert_eq!(named_in("클루야 설정 열어줘"), Some("설정 열어줘"));
+        assert_eq!(without_name("클루야 설정 열어줘"), "설정 열어줘");
+        assert_eq!(named_in("클루야말로 최고야"), None);
         assert_eq!(named_in("Clew go to definition が効かない"), None);
         assert_eq!(named_in("Clew crashed. ちょっと見て"), None);
         assert_eq!(named_in("Clew crashed.ちょっと見て"), None);
