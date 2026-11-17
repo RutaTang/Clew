@@ -298,7 +298,7 @@ fn turn_rows_of(app: &App) -> Vec<Element<'_, Message>> {
         .into()
     };
     let about = tr!(
-        "Tells when you have finished speaking: a finished sentence is acted on at once, and a pause to think is waited through."
+        "Knows when you have finished speaking: a finished sentence is acted on at once, and a pause to think is waited through."
     );
     let mut rows = vec![form::item(MODEL.name, Some(about.to_string()), state)];
     let warning = |said: String| {
