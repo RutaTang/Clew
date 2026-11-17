@@ -1151,9 +1151,9 @@ fn what_went_unsaid_is_said_in_its_place() {
 #[test]
 fn what_went_unsaid_waits_for_clew_to_be_free_to_say_it() {
     // Try speaking; Try stopped by the reader; someone heard; the voice
-    // key pressed over Try — the reader taking the floor, which lets go of
-    // it.
-    for case in ["tried", "stopped", "heard", "keyed"] {
+    // key pressed over Try, or words to Clew said over it — the reader
+    // taking the floor, which lets go of it.
+    for case in ["tried", "stopped", "heard", "keyed", "talked"] {
         let (mut app, voice, output) = speech_app("speech-unsaid-put-off");
         let model = app.voice.prefs.model();
         let store = app.voice.store.clone().unwrap();
@@ -1211,6 +1211,22 @@ fn what_went_unsaid_waits_for_clew_to_be_free_to_say_it() {
                 settle(&mut app, task);
                 let task = app.update(Message::Voice(VoiceMsg::Tick));
                 settle(&mut app, task);
+                assert!(!chinese(&voice), "the reader has the floor");
+                assert!(!app.voice.speech.has_put_off());
+                assert!(app.voice.mic_on);
+                continue;
+            }
+            "talked" => {
+                talk(Some(0.1));
+                voice_tick(&mut app);
+                assert!(app.voice.speech.held(), "Try held for the words");
+                TALK.with(|t| t.set(Some(crate::app::voice::END_SILENCE + 0.1)));
+                let task = app.update(Message::Voice(VoiceMsg::Tick));
+                TALK.with(|t| t.set(None));
+                settle(&mut app, task);
+                let task = app.update(Message::Voice(VoiceMsg::Tick));
+                settle(&mut app, task);
+                assert!(!app.voice.speech.trying(), "Try stopped");
                 assert!(!chinese(&voice), "the reader has the floor");
                 assert!(!app.voice.speech.has_put_off());
                 assert!(app.voice.mic_on);

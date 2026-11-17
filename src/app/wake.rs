@@ -447,6 +447,12 @@ impl WakeState {
         self.given_up = None;
     }
 
+    /// Whether a call holds Clew, by the hold `since`
+    /// ([`Speech::held_since`](crate::app::speech::Speech::held_since)).
+    pub(crate) fn call_holds(&self, since: Instant) -> bool {
+        self.held.is_some_and(|h| h.since == since)
+    }
+
     /// A number for a call just heard.
     fn next_call(&mut self) -> u64 {
         self.calls += 1;
@@ -601,7 +607,7 @@ impl App {
         if !self.voice.installed(self.voice.prefs.model()) {
             self.stop_waiting();
             if speaking {
-                self.stop_speaking();
+                self.stop_for_the_reader();
             }
             return self.listen_now(None);
         }
@@ -673,7 +679,7 @@ impl App {
             && self.voice.installed(self.voice.prefs.model())
         {
             if !goes_on && (self.voice.speech.is_speaking() || self.answer_read_aloud_coming()) {
-                self.stop_speaking();
+                self.stop_for_the_reader();
             }
             // With the model to hear with here, it opens no Settings.
             // The microphone off since, no listening has begun since the
@@ -690,8 +696,10 @@ impl App {
     /// Clew, held for `call`: stopped — the call was one — or going on
     /// where it was. Stopped since — by the voice key, Esc, a question —
     /// it is left so; held again since, by words said over it, those words
-    /// decide whether it goes on. Gone on by itself, held too long, it is
-    /// still stopped for a call.
+    /// decide whether it goes on — as do words said over it before the
+    /// call, which held it first and are still to be worked out
+    /// ([`App::words_hold`]). Gone on by itself, held too long, it is still
+    /// stopped for a call.
     fn end_hold(&mut self, call: u64, stop: bool) {
         let Some(hold) = self.voice.wake.held.filter(|h| h.call == call) else {
             return;
@@ -699,9 +707,10 @@ impl App {
         self.voice.wake.held = None;
         if stop {
             if self.voice.speech.round() == hold.round {
-                self.stop_speaking();
+                self.stop_for_the_reader();
             }
-        } else if self.voice.speech.held_since() == Some(hold.since) {
+        } else if self.voice.speech.held_since() == Some(hold.since) && !self.words_hold(hold.since)
+        {
             self.voice.speech.go_on();
         }
     }

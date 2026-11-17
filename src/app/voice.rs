@@ -1332,11 +1332,8 @@ impl App {
             // Pressed as a call that held Clew is heard out, the listening
             // is the reader's.
             let task = self.call_taken_over();
-            // With the microphone on, it opens as Clew stops — and what of
-            // an answer waited for Try to end waits no more: the reader
-            // takes the floor.
-            self.stop_speaking();
-            self.voice.speech.let_go_of_put_off();
+            // With the microphone on, it opens as Clew stops.
+            self.stop_for_the_reader();
             if self.voice.mic_on {
                 return task;
             }
@@ -1375,7 +1372,7 @@ impl App {
 
     /// What was said in `listening`, waiting to be worked out — after a
     /// "Bye, Clew" said in it — let go of: Clew, held for any of it, goes
-    /// on.
+    /// on ([`App::words_let_go`]).
     fn drop_said_in(&mut self, listening: u64) {
         let held = self.voice.speech.held_since();
         let mut freed = false;
@@ -1385,8 +1382,33 @@ impl App {
             !dropped
         });
         if freed {
-            self.voice.speech.go_on();
+            self.words_let_go();
         }
+    }
+
+    /// Clew, held for words said over it that do not stop it: goes on —
+    /// unless a call heard since holds it too, the same hold
+    /// ([`CallHold`](crate::app::wake::CallHold)), whose words decide.
+    pub(crate) fn words_let_go(&mut self) {
+        if let Some(since) = self.voice.speech.held_since()
+            && self.voice.wake.call_holds(since)
+        {
+            return;
+        }
+        self.voice.speech.go_on();
+    }
+
+    /// Whether words said over Clew, held `since`, are still to be heard
+    /// out or worked out: what they turn out to be decides whether it goes
+    /// on, not a call that holds it too.
+    pub(crate) fn words_hold(&self, since: Instant) -> bool {
+        self.voice.over_from.is_some()
+            || self.voice.run_said.over == Some(since)
+            || self
+                .voice
+                .unheard
+                .iter()
+                .any(|(_, _, said)| said.over == Some(since))
     }
 
     /// How many times listening has begun ([`VoiceState::listenings`]).
@@ -1492,7 +1514,7 @@ impl App {
         // Words said over Clew, let go of with what the microphone heard,
         // will not be heard out: Clew, held for them, goes on.
         if self.voice.over_from.take().is_some() && self.voice.speech.held() {
-            self.voice.speech.go_on();
+            self.words_let_go();
         }
         if self.voice.wake.lead.take().is_some() {
             self.call_unheard();
@@ -1909,7 +1931,7 @@ impl App {
             // Said over Clew, which it held, and no call: not said to Clew
             // either — Clew goes on.
             if said.over.is_some() && said.over == self.voice.speech.held_since() {
-                self.voice.speech.go_on();
+                self.words_let_go();
             }
             return self.transcribe_next();
         }
@@ -1932,16 +1954,16 @@ impl App {
             });
             if !to_clew {
                 if holds {
-                    self.voice.speech.go_on();
+                    self.words_let_go();
                 }
                 if result.is_ok() {
                     return self.transcribe_next();
                 }
             } else if holds {
                 if bye {
-                    self.voice.speech.go_on();
+                    self.words_let_go();
                 } else {
-                    self.stop_speaking();
+                    self.stop_for_the_reader();
                 }
             }
         }

@@ -506,6 +506,14 @@ impl Speech {
         }
     }
 
+    /// Settings' Try being said, and what went unsaid of the answer on
+    /// `stream` waiting for it to end.
+    #[cfg(test)]
+    pub(crate) fn put_off_for_test(&mut self, stream: u64) {
+        self.trying = true;
+        self.put_off = Some(stream);
+    }
+
     /// Whether what went unsaid of an answer waits for Clew to be free to
     /// say it ([`App::read_put_off`]).
     pub(crate) fn has_put_off(&self) -> bool {
@@ -1034,6 +1042,16 @@ impl App {
             speech.hushed.insert(stream);
         }
         self.resume_listening();
+        was
+    }
+
+    /// Clew stopped for the reader, who takes the floor — by the voice
+    /// key, a call, or words said over it to Clew: what is said is stopped
+    /// as [`App::stop_speaking`] stops it, and what went unsaid of an
+    /// answer, waiting for Settings' Try to end, waits no more.
+    pub(crate) fn stop_for_the_reader(&mut self) -> bool {
+        let was = self.stop_speaking();
+        self.voice.speech.let_go_of_put_off();
         was
     }
 

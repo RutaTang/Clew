@@ -3517,6 +3517,170 @@ fn a_call_ends_only_its_own_hold() {
     drop(turn);
 }
 
+/// Words said over Clew in a listening ended since — a call given up on —
+/// still to be worked out, and a call heard after them: both hold Clew by
+/// the one hold. Clew is held for words said over it as it is first called
+/// by its name meanwhile; the call heard (`calls` pieces of waiting in);
+/// what is left to be worked out, a task.
+fn held_by_words_then_called(tag: &str, words: &[&str], bye_first: bool) -> SharedHold {
+    let (turn, mut app, script, _, spots) = wake_app(tag, "", 1);
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        words.iter().map(|w| w.to_string()).collect(),
+    )));
+    app.voice.prefs.talk_over = true;
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    // Someone's "Hey cool": listening, Clew quiet — then, maybe, "Bye,
+    // Clew".
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let first = app.update(Message::Voice(VoiceMsg::Tick));
+    if bye_first {
+        let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    }
+    // Clew reads, and is talked over: held, the words waiting.
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(app.voice.speech.held(), "held for the words said over it");
+    script.lock().unwrap().silence = None;
+    // The first call worked out: none — listening ends, the words still
+    // waiting, Clew still held for them.
+    let mut rest = Vec::new();
+    for message in run_task(first) {
+        rest.push(app.update(message));
+    }
+    assert!(
+        !app.voice.mic_on && app.voice.wake.is_waiting(),
+        "{}",
+        app.status
+    );
+    assert!(app.voice.speech.held(), "still held for the words");
+    // "Hey, Clew", said for real.
+    let heard = spots.pieces.lock().unwrap().len();
+    *spots.call.lock().unwrap() = heard + 1;
+    for _ in 0..3 {
+        if app.voice.mic_on {
+            break;
+        }
+        wait_step(&mut app);
+    }
+    assert!(app.voice.mic_on, "{}", app.status);
+    assert!(app.voice.speech.held(), "held for the call too");
+    (turn, app, script, Task::batch(rest))
+}
+
+type SharedHold = (
+    std::sync::MutexGuard<'static, ()>,
+    App,
+    Arc<Mutex<MicScript>>,
+    Task<Message>,
+);
+
+/// A late "Bye, Clew" lets go of the words said over Clew after it — but
+/// not of Clew, held by the same hold for a call heard since: the call's
+/// words decide, and stop it.
+#[test]
+fn a_late_bye_clew_leaves_clew_held_for_a_call_since() {
+    let (turn, mut app, script, rest) = held_by_words_then_called(
+        "wake-shared-bye",
+        // What was said over Clew is let go of before it is worked out.
+        &[
+            "Hey cool, it works now.",
+            "Bye, Clew.",
+            "Hey, Clew, open settings.",
+        ],
+        true,
+    );
+    // The goodbye, worked out: what followed it in its listening let go.
+    for message in run_task(rest) {
+        let _ = app.update(message);
+    }
+    assert!(app.voice.mic_on, "the call's listening goes on");
+    assert!(app.voice.speech.held(), "held for the call still");
+    // The call's own words: it was one.
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    script.lock().unwrap().silence = None;
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    assert!(!app.voice.speech.is_speaking(), "stopped for the call");
+    drop(app);
+    drop(turn);
+}
+
+/// A call heard after words said over Clew, let go of unheard — the
+/// microphone failing — leaves Clew held for those words, still to be
+/// worked out: said to Clew, they stop it.
+#[test]
+fn a_call_let_go_of_leaves_clew_held_for_words_before_it() {
+    let (turn, mut app, script, rest) = held_by_words_then_called(
+        "wake-shared-unheard",
+        &["Hey cool, it works now.", "Hey, Clew, open settings."],
+        false,
+    );
+    script.lock().unwrap().error = Some("unplugged".into());
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(!app.voice.mic_on, "{}", app.status);
+    assert!(app.voice.speech.held(), "held for the words still");
+    script.lock().unwrap().error = None;
+    settle(&mut app, rest);
+    assert!(app.settings.open, "{}", app.status);
+    assert!(!app.voice.speech.is_speaking(), "stopped by the words");
+    drop(app);
+    drop(turn);
+}
+
+/// Words said over Clew after a "Bye, Clew", and a call heard since, let
+/// go of unheard — the microphone failing: Clew, held for those words
+/// still, goes on once the late goodbye lets go of them.
+#[test]
+fn a_late_bye_clew_lets_clew_go_on_once_nothing_holds_it() {
+    let (turn, mut app, script, rest) = held_by_words_then_called(
+        "wake-shared-bye-unheard",
+        &["Hey cool, it works now.", "Bye, Clew."],
+        true,
+    );
+    script.lock().unwrap().error = Some("unplugged".into());
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(app.voice.speech.held(), "held for the words still");
+    script.lock().unwrap().error = None;
+    settle(&mut app, rest);
+    assert!(!app.voice.speech.held(), "nothing holds it");
+    assert!(app.voice.speech.is_speaking(), "goes on");
+    drop(app);
+    drop(turn);
+}
+
+/// Called by its name over Clew — Settings' Try, an answer waiting for it
+/// to end — the reader takes the floor, as with the voice key: Clew stops,
+/// and the answer waits no more.
+#[test]
+fn a_call_over_clew_lets_go_of_what_waits_to_be_said() {
+    let (turn, mut app, script, _, _) =
+        wake_app("wake-call-put-off", "Hey, Clew, open settings.", 1);
+    app.voice.prefs.talk_over = true;
+    app.ask_view = AskView::Compact;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 7,
+        question: "what does total do?".into(),
+        spoken: true,
+        ..Default::default()
+    });
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    app.voice.speech.put_off_for_test(7);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    script.lock().unwrap().silence = None;
+    assert!(app.voice.speech.has_put_off(), "waits while Try is said");
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    assert!(!app.voice.speech.is_speaking(), "stopped for the call");
+    assert!(!app.voice.speech.has_put_off(), "the reader has the floor");
+    drop(app);
+    drop(turn);
+}
+
 /// The microphone turned off while what was said after a call is worked
 /// out: a call named in it after all runs what was asked, but listening
 /// does not begin again — it was turned off.

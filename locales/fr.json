@@ -3314,7 +3314,7 @@
  "{model} is ready — Find by meaning now runs on this computer": "{model} est prêt — la recherche par le sens fonctionne désormais sur cet ordinateur",
  "{model} is ready — answers are read aloud": "{model} est prêt — les réponses sont lues à voix haute",
  "{model} is ready — answers to what you ask by voice are read aloud": "{model} est prêt — les réponses à ce que vous demandez à voix haute sont lues",
- "{model} is ready — listening now ends when you have finished": "{model} est prêt — l’écoute s’arrête désormais quand vous avez fini",
+ "{model} is ready — Clew now hears when you have finished speaking": "{model} est prêt — Clew entend désormais quand vous avez fini de parler",
  "{model} removed": "{model} supprimé",
  "{module} did not compile — see the output": "la compilation du module {module} a échoué — consultez la sortie",
  "{month} {day}": "{day} {month}",

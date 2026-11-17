@@ -3314,7 +3314,7 @@
  "{model} is ready — Find by meaning now runs on this computer": "{model} 已就绪，“按含义查找”现在会在这台电脑上运行",
  "{model} is ready — answers are read aloud": "{model} 已就绪，回答会朗读出来",
  "{model} is ready — answers to what you ask by voice are read aloud": "{model} 已就绪，语音提问的回答会朗读出来",
- "{model} is ready — listening now ends when you have finished": "{model} 已就绪，现在会在你说完后结束聆听",
+ "{model} is ready — Clew now hears when you have finished speaking": "{model} 已就绪，现在能听出你何时说完",
  "{model} removed": "已删除 {model}",
  "{module} did not compile — see the output": "{module} 编译失败，请查看输出",
  "{month} {day}": "{month}{day}日",
