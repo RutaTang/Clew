@@ -411,21 +411,41 @@ impl Speech {
         }
     }
 
-    /// Whether Clew is held while the reader talks over it.
+    /// Whether Clew is held while the reader is heard.
     pub(crate) fn held(&self) -> bool {
         self.barged.is_some()
     }
 
-    /// The reader talks over Clew: what is being said is held — faded out,
-    /// kept to go on from — while what they say is heard. Nothing playing,
-    /// nothing is held.
+    /// Since when Clew is held: which hold it is.
+    pub(crate) fn held_since(&self) -> Option<Instant> {
+        self.barged
+    }
+
+    /// The reader talks over Clew, or calls it: what is being said is held
+    /// — faded out, kept to go on from — while what they say is heard. Held
+    /// before anything plays — the first sentence still being made, or the
+    /// answer still coming — what comes waits too: the output opens held.
     pub(crate) fn hold(&mut self) {
-        if self.barged.is_none()
-            && let Some(output) = &self.output
-        {
-            output.pause();
+        if self.barged.is_none() {
+            if let Some(output) = &self.output {
+                output.pause();
+            }
             self.barged = Some(Instant::now());
         }
+    }
+
+    /// `output`, opened to speak with — held, if Clew is.
+    fn opened(&mut self, output: Box<dyn Playing>) {
+        if self.barged.is_some() {
+            output.pause();
+        }
+        self.output = Some(output);
+    }
+
+    /// Whether Settings' Try is being said.
+    #[cfg(test)]
+    pub(crate) fn trying(&self) -> bool {
+        self.trying
     }
 
     /// Go on with what was held, where it was.
@@ -1216,7 +1236,7 @@ impl App {
         match opened {
             Some(Ok(output)) => match self.voice.speech.output {
                 Some(_) => close_later(output),
-                None => self.voice.speech.output = Some(output),
+                None => self.voice.speech.opened(output),
             },
             Some(Err(e)) => {
                 return self.give_up_speaking(tr!(
@@ -1233,7 +1253,7 @@ impl App {
                 // a sentence's end with nothing left in it.
                 if self.voice.speech.output.is_none() && !audio.samples.is_empty() {
                     match (self.voice.speech.open_output)() {
-                        Ok(output) => self.voice.speech.output = Some(output),
+                        Ok(output) => self.voice.speech.opened(output),
                         Err(e) => {
                             return self.give_up_speaking(tr!(
                                 "Can't speak: {error}",
@@ -1290,8 +1310,8 @@ impl App {
         // stop only once it plays nothing more — a device's hiccup is played
         // through.
         let played = output.played();
-        // Held while the reader talks over Clew: it plays nothing on
-        // purpose. Held too long — what was said was not heard — it goes on.
+        // Held while the reader is heard: it plays nothing on purpose. Held
+        // too long — what was said was not heard — it goes on.
         if speech.barged.is_some() {
             if speech.held_too_long() {
                 speech.go_on();
@@ -1362,7 +1382,7 @@ impl App {
             close_later(stopped);
             if let Ok(output) = (speech.open_output)() {
                 output.play(&rest, rate);
-                speech.output = Some(output);
+                speech.opened(output);
                 return self.speak_next();
             }
         }

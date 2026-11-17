@@ -2624,10 +2624,11 @@ fn hey_clew_starts_listening_with_the_microphone_that_waited() {
         "not on the window's thread"
     );
     assert!(app.status.starts_with("Listening"), "{}", app.status);
-    // The last moment waited through, before what is said next.
+    // The last moments waited through — as far back as the phrase is
+    // looked for — before what is said next.
     let lead = app.voice.wake.lead.clone().unwrap();
     assert_eq!(lead.rate, 16_000);
-    assert_eq!(lead.samples, spoken());
+    assert_eq!(lead.samples, spoken().repeat(2));
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
     for message in run_task(task) {
@@ -2660,24 +2661,43 @@ fn hey_clew_starts_listening_with_the_microphone_that_waited() {
 /// again. Nothing written down at all is no sign either way: it listens on.
 #[test]
 fn a_call_without_the_name_is_no_call() {
-    let (turn, mut app, script, _, _) = wake_app("wake-not-named", "Hey cool, it works now.", 1);
+    let (turn, mut app, script, hears, _) =
+        wake_app("wake-not-named", "Hey cool, it works now.", 1);
     assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app), "the spotter took it for the call");
     assert!(app.voice.is_listening());
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
+    // More said meanwhile, waiting to be worked out: let go of with it.
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(app.voice.transcribing());
     for message in run_task(task) {
         let _ = app.update(message);
     }
+    assert_eq!(
+        hears.hints.lock().unwrap().len(),
+        1,
+        "nothing more worked out"
+    );
+    assert!(!app.voice.transcribing());
     assert!(app.proj.ask_input.is_empty(), "{:?}", app.proj.ask_input);
     assert!(app.proj.ask_turns.is_empty());
     assert!(app.voice.heard.is_none());
     assert!(!app.voice.mic_on && !app.voice.is_listening());
     assert!(app.voice.wake.is_waiting(), "{}", app.status);
-    assert_eq!(app.status, "Waiting for “Hey, Clew”");
-    drop((turn, app));
-    // Nothing written down: listening goes on.
-    let (_turn, mut app, script, _, _) = wake_app("wake-not-written", "", 1);
+    assert!(
+        !script.lock().unwrap().stopped,
+        "the microphone kept to wait"
+    );
+    assert_eq!(app.status, "Didn't hear “Clew” — waiting for “Hey, Clew”");
+    drop(app);
+    drop(turn);
+    // Nothing written down: listening goes on — and what is said next
+    // decides.
+    let (turn, mut app, script, _, _) = wake_app("wake-not-written", "", 1);
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        ["", "Open settings."].map(String::from).into(),
+    )));
     assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app));
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
@@ -2686,6 +2706,94 @@ fn a_call_without_the_name_is_no_call() {
         let _ = app.update(message);
     }
     assert!(app.voice.is_listening());
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(!app.settings.open, "no call: nothing done");
+    assert!(app.voice.wake.is_waiting(), "{}", app.status);
+    drop(app);
+    drop(turn);
+}
+
+/// The call heard, then nothing for a while: what was heard with it is
+/// worked out on its own — not let go of with the quiet after it — and
+/// proves it or not. No call: nothing said later is done. A call: what
+/// is said later is.
+#[test]
+fn a_call_alone_is_proven_by_itself() {
+    let quiet = |app: &mut App| {
+        if let VoicePhase::Listening { since, .. } = &mut app.voice.phase {
+            *since -= std::time::Duration::from_secs_f32(NO_SPEECH_TIMEOUT + 1.0);
+        }
+        let task = app.update(Message::Voice(VoiceMsg::Tick));
+        for message in run_task(task) {
+            let _ = app.update(message);
+        }
+    };
+    let (turn, mut app, _, hears, _) = wake_app("wake-alone-not", "Hey, cool!", 1);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    quiet(&mut app);
+    assert_eq!(
+        hears.hints.lock().unwrap().len(),
+        1,
+        "worked out on its own"
+    );
+    assert!(
+        !app.voice.mic_on && app.voice.wake.is_waiting(),
+        "{}",
+        app.status
+    );
+    drop(app);
+    drop(turn);
+    let (turn, mut app, script, _, _) = wake_app("wake-alone-called", "", 1);
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        ["Hey, Clew.", "Open settings."].map(String::from).into(),
+    )));
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    quiet(&mut app);
+    assert!(app.voice.is_listening(), "{}", app.status);
+    assert_eq!(app.voice.wake.unproven, None, "proven");
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(app.settings.open, "said to Clew");
+    drop(app);
+    drop(turn);
+}
+
+/// A call's words worked out once listening began anew — the voice key
+/// pressed meanwhile: what they let go of is only what was said after the
+/// call, not the listening begun since.
+#[test]
+fn a_late_no_call_leaves_listening_begun_since() {
+    let (_turn, mut app, script, _, _) = wake_app("wake-late-no", "Hey cool, it works now.", 1);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    script.lock().unwrap().silence = None;
+    app.voice.forget_last_press();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(!app.voice.mic_on);
+    app.voice.forget_last_press();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.mic_on && app.voice.is_listening());
+    let status = app.status.clone();
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(
+        app.voice.mic_on && app.voice.is_listening(),
+        "{}",
+        app.status
+    );
+    assert_eq!(app.status, status);
+    assert!(app.proj.ask_turns.is_empty(), "the call's words not done");
 }
 
 /// Clew called by its name and nothing else, while listening: nothing is
@@ -2866,13 +2974,46 @@ fn a_call_over_clew_is_one_only_with_its_voice_taken_out() {
     app.voice.prefs.talk_over = true;
     *spots.call.lock().unwrap() = 4;
     assert!(wait_step(&mut app));
-    assert!(!app.voice.speech.is_speaking(), "Clew stopped");
+    assert!(app.voice.speech.held(), "Clew held");
     assert!(app.voice.mic_on && app.voice.is_listening());
-    // The microphone closed, what was heard before the call goes with it.
+    // The microphone closed, what was heard before the call goes with it
+    // — and with it what would prove the call: Clew goes on, the
+    // microphone waiting for it, as it does once Clew is not talked over.
     assert!(app.voice.wake.lead.is_some());
     let _ = app.update(Message::Voice(VoiceMsg::SetTalkOver(false)));
-    assert!(app.voice.is_listening());
     assert!(app.voice.wake.lead.is_none());
+    assert!(!app.voice.speech.held() && app.voice.speech.is_speaking());
+    assert!(app.voice.mic_on && !app.voice.is_listening());
+}
+
+/// A call heard while Clew speaks holds it, until what was said with the
+/// call is heard: its name in it, Clew stops; not — another's words —
+/// Clew goes on where it was.
+#[test]
+fn clew_goes_on_after_what_was_no_call() {
+    for (words, call) in [
+        ("Hey, cool, it works now.", false),
+        ("Hey, Clew, open settings.", true),
+    ] {
+        let (turn, mut app, script, _, _) = wake_app("wake-hold", words, 1);
+        app.voice.prefs.talk_over = true;
+        app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+        assert!(!wait_step(&mut app));
+        assert!(wait_step(&mut app));
+        assert!(app.voice.speech.held(), "held, not stopped");
+        assert!(app.voice.speech.is_speaking());
+        script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+        let task = app.update(Message::Voice(VoiceMsg::Tick));
+        for message in run_task(task) {
+            let _ = app.update(message);
+        }
+        assert!(!app.voice.speech.held(), "{words}");
+        assert_eq!(app.voice.speech.is_speaking(), !call, "{words}");
+        assert_eq!(app.settings.open, call, "{words}");
+        assert_eq!(app.voice.mic_on, call, "{words}");
+        drop(app);
+        drop(turn);
+    }
 }
 
 /// "Goodbye, Clew" said once called, the call before it: it waits again —
@@ -2916,25 +3057,42 @@ fn what_was_said_before_the_call_is_not_asked() {
     );
 }
 
-/// Called while an answer to be read aloud is still on its way: it is not
-/// read, and the microphone listens, as it does for the voice key.
+/// Called while an answer to be read aloud is still on its way: it is held
+/// while the call is heard, the microphone listening — not left waiting
+/// for it — even with Clew's voice not taken out of what it hears. The
+/// call proven, the answer is not read; no call, it is.
 #[test]
-fn a_call_stops_an_answer_on_its_way_to_being_read() {
-    let (_turn, mut app, _, _, _) = wake_app("wake-answer-coming", "open settings", 1);
-    app.voice.prefs.talk_over = false;
-    app.proj.ask_turns.push(crate::app::model::AskTurn {
-        stream: 7,
-        question: "what does total do?".into(),
-        spoken: true,
-        streaming: true,
-        ..Default::default()
-    });
-    assert!(app.answer_read_aloud_coming());
-    assert!(!wait_step(&mut app));
-    assert!(wait_step(&mut app));
-    assert!(!app.answer_read_aloud_coming(), "not read");
-    let _ = app.update(Message::Voice(VoiceMsg::Tick));
-    assert!(app.voice.is_listening(), "not left waiting for it");
+fn a_call_holds_an_answer_on_its_way_to_being_read() {
+    for (words, call) in [
+        ("Hey, Clew, open settings.", true),
+        ("Hey, cool, it works now.", false),
+    ] {
+        let (turn, mut app, script, _, _) = wake_app("wake-answer-coming", words, 1);
+        app.voice.prefs.talk_over = false;
+        app.proj.ask_turns.push(crate::app::model::AskTurn {
+            stream: 7,
+            question: "what does total do?".into(),
+            spoken: true,
+            streaming: true,
+            ..Default::default()
+        });
+        assert!(app.answer_read_aloud_coming());
+        assert!(!wait_step(&mut app));
+        assert!(wait_step(&mut app));
+        assert!(app.voice.speech.held());
+        let _ = app.update(Message::Voice(VoiceMsg::Tick));
+        assert!(app.voice.is_listening(), "not left waiting for it");
+        script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+        let task = app.update(Message::Voice(VoiceMsg::Tick));
+        for message in run_task(task) {
+            let _ = app.update(message);
+        }
+        assert!(!app.voice.speech.held(), "{words}");
+        assert_eq!(app.answer_read_aloud_coming(), !call, "{words}");
+        assert_eq!(app.settings.open, call, "{words}");
+        drop(app);
+        drop(turn);
+    }
 }
 
 /// What was heard at another rate before the one the microphone hears at
@@ -2961,6 +3119,32 @@ fn what_was_heard_at_another_rate_is_let_go() {
     assert_eq!(*hears.heard_audio.lock().unwrap(), alone);
 }
 
+/// A microphone that will not open to wait: waiting stops, saying why —
+/// Settings has its Try again — and is not tried again by itself; nor is
+/// it taken for a download's failure.
+#[test]
+fn a_microphone_that_will_not_open_stops_waiting() {
+    let _turn = crate::app::wake::TEST_TURN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut app, _, _) = voice_app("wake-no-mic", "open settings");
+    install_wake(app.voice.store.as_ref().unwrap());
+    app.voice.wake.spotters = Some(Arc::new(Spots::default()));
+    MIC.with(|m| *m.borrow_mut() = None);
+    let _ = app.update(Message::Voice(VoiceMsg::SetWake(true)));
+    assert!(!app.voice.wake.is_waiting());
+    assert_eq!(
+        app.voice.wake.failed.as_deref(),
+        Some("no microphone is available")
+    );
+    assert_eq!(app.voice.wake.error, None);
+    assert_eq!(
+        app.status,
+        "Stopped waiting for “Hey, Clew”: no microphone is available"
+    );
+    assert!(!app.resume_waiting(), "not tried again by itself");
+}
+
 /// Waiting needs the keyword spotter, a model to hear what is said with,
 /// and to be turned on; and is turned off with the microphone closed and
 /// the spotter let go of. Without its model, turning it on says where to
@@ -2979,7 +3163,12 @@ fn waiting_needs_its_model_and_is_turned_off() {
     assert!(!app.resume_waiting(), "not turned on");
     app.voice.wake.error = Some("long ago".into());
     let _ = app.update(Message::Voice(VoiceMsg::SetWake(true)));
-    assert!(app.voice.wake.error.is_none(), "turned on afresh");
+    assert_eq!(
+        app.voice.wake.error.as_deref(),
+        Some("long ago"),
+        "a download's failure, not waiting's"
+    );
+    app.voice.wake.error = None;
     assert!(VoicePrefs::load().wake, "kept");
     assert!(!app.voice.wake.is_waiting());
     assert!(
@@ -3062,17 +3251,17 @@ fn a_call_too_soft_to_listen_to_is_no_call() {
     script.lock().unwrap().soft = true;
     assert!(wait_step(&mut app));
     assert!(app.voice.mic_on && app.voice.is_listening());
-    // What is kept to be worked out with what is said next is no more
-    // than was said in one breath with the phrase.
+    // What is kept to be worked out with what is said next reaches as far
+    // back as the phrase is looked for, no further.
     let lead = app.voice.wake.lead.as_ref().expect("the lead");
     assert_eq!(
         lead.samples.len(),
         (16_000.0 * crate::app::wake::LEAD_SECONDS) as usize
     );
-    // The newest of it: what came after the phrase, said softly — not the
-    // phrase said aloud two seconds before.
+    // The phrase among it, said aloud two seconds before, however late the
+    // spotter told of it: the name in it proves the call.
     let loudest = lead.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-    assert!(loudest < 0.01, "{loudest}");
+    assert!(loudest > 0.05, "{loudest}");
 }
 
 /// A waiting that fails — the microphone, or the spotter not loading —

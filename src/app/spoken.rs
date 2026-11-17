@@ -115,26 +115,33 @@ pub(crate) fn only_yes_or_no(said: &str) -> Option<bool> {
     }
 }
 
-/// What says to stop listening, Clew waiting again for its name: the
-/// English words, and the reader's. "Bye, Clew" with its name: a "bye" said
-/// to someone else in the room is not for Clew.
+/// What says to stop listening, Clew waiting again for its name, in every
+/// language Clew is shown in ([`every`]). "Bye, Clew" with its name: a
+/// "bye" said to someone else in the room is not for Clew.
 const STOP_LISTENING: &str =
     tr_noop!("stop listening, bye clew, bye bye clew, goodbye clew, good bye clew");
-/// What Clew is called by, before what is said to it: the English words,
-/// and the reader's.
+/// What Clew is called by, before what is said to it, in every language
+/// Clew is shown in ([`every`]).
 const CALLED: &str = tr_noop!("hey, hi, hello, ok, okay");
-/// Clew's name, as it is heard: the English spellings, and the reader's.
+/// Clew's name, as it is heard, in every language Clew is shown in
+/// ([`every`]).
 const NAME: &str = tr_noop!("clew, clue");
 
-/// The phrases of a list, lower-cased: the English list's, and the
-/// reader's.
-fn phrases(list: &'static str) -> Vec<String> {
-    [list, crate::i18n::lookup(list)]
-        .into_iter()
-        .flat_map(|l| l.split([',', '，', '、']))
-        .map(|p| p.trim().to_lowercase())
-        .filter(|p| !p.is_empty())
-        .collect()
+/// The phrases of a list in every language Clew is shown in, lower-cased:
+/// what is said to call Clew, or to let it go, is written in the language
+/// it is said in — "嘿，克鲁" with Clew shown in English — not the one
+/// Clew is shown in.
+fn every(list: &'static str) -> Vec<String> {
+    let mut all: Vec<String> = Vec::new();
+    for lang in crate::i18n::Lang::ALL {
+        for phrase in crate::i18n::lookup_in(lang, list).split([',', '，', '、']) {
+            let phrase = phrase.trim().to_lowercase();
+            if !phrase.is_empty() && !all.contains(&phrase) {
+                all.push(phrase);
+            }
+        }
+    }
+    all
 }
 
 /// Whether `c` is of a script written without spaces between its words —
@@ -195,7 +202,7 @@ fn begins(said: &str, phrase: &str) -> Option<usize> {
 /// its spaces and marks left out, so that Chinese and Japanese, written
 /// without them, are heard too ("再见克鲁").
 pub(crate) fn stops_listening(said: &str) -> bool {
-    let names = phrases(NAME);
+    let names = every(NAME);
     let compact = |text: &str| {
         let mut text: String = text
             .chars()
@@ -214,7 +221,7 @@ pub(crate) fn stops_listening(said: &str) -> bool {
     if said.is_empty() {
         return false;
     }
-    let phrases: Vec<Vec<char>> = phrases(STOP_LISTENING)
+    let phrases: Vec<Vec<char>> = every(STOP_LISTENING)
         .iter()
         .map(|p| compact(p).chars().collect::<Vec<_>>())
         .filter(|p| !p.is_empty())
@@ -240,7 +247,7 @@ pub(crate) fn stops_listening(said: &str) -> bool {
 /// name alone is a call only with a mark after it, as one is written: "Clue
 /// me in" is not one.
 pub(crate) fn without_name(said: &str) -> &str {
-    let names = phrases(NAME);
+    let names = every(NAME);
     let start = said.trim_start();
     fn named<'a>(names: &[String], at: &'a str) -> Option<&'a str> {
         names
@@ -248,7 +255,7 @@ pub(crate) fn without_name(said: &str) -> &str {
             .find_map(|n| begins(at, n).map(|end| &at[end..]))
     }
     // Called, then named.
-    for call in phrases(CALLED) {
+    for call in every(CALLED) {
         if let Some(end) = begins(start, &call)
             && let Some(rest) = named(&names, unmarked(&start[end..]))
         {
@@ -271,20 +278,55 @@ pub(crate) fn after_name(said: &str) -> &str {
     named_in(said).unwrap_or_else(|| without_name(said))
 }
 
-/// What follows Clew's name in `said`, if its name is in it at all — as a
-/// word of its own, or in a run of Chinese or Japanese: "clueless" holds
-/// no "clue".
+/// What follows Clew's name in `said`, if Clew is called by it there —
+/// the name a word of its own, or in a run of Chinese, Japanese or Korean:
+/// "clueless" holds no "clue". "Clew", as whisper writes it, told it, is
+/// a call wherever it is; a name written another way ("clue", "克鲁") only
+/// as a call is said — after a word Clew is called with ("hey", "嘿"), or
+/// first with a mark after it: "no clue why" calls no one.
 pub(crate) fn named_in(said: &str) -> Option<&str> {
-    let names = phrases(NAME);
+    let names = every(NAME);
+    let calls = every(CALLED);
     let mut last: Option<char> = None;
     for (i, c) in said.char_indices() {
         let at_word = last.is_none_or(|l| !l.is_alphanumeric() || cjk(l) || cjk(c));
-        if at_word && let Some(end) = names.iter().find_map(|n| begins(&said[i..], n)) {
-            return Some(unmarked(&said[i + end..]));
-        }
         last = Some(c);
+        if !at_word {
+            continue;
+        }
+        let Some((name, end)) = names
+            .iter()
+            .find_map(|n| begins(&said[i..], n).map(|end| (n, end)))
+        else {
+            continue;
+        };
+        let rest = &said[i + end..];
+        let before = said[..i].trim_end_matches(|c: char| c.is_whitespace() || mark(c));
+        let called = name == "clew"
+            || (before.is_empty() && rest.trim_start().chars().next().is_none_or(mark))
+            || calls.iter().any(|call| ends_with_word(before, call));
+        if called {
+            return Some(unmarked(rest));
+        }
     }
     None
+}
+
+/// Whether `text` ends with `word` (lower-cased), case aside, as a word of
+/// its own.
+fn ends_with_word(text: &str, word: &str) -> bool {
+    let text = text.to_lowercase();
+    let Some(start) = text.len().checked_sub(word.len()) else {
+        return false;
+    };
+    if !text.is_char_boundary(start) || text[start..] != *word {
+        return false;
+    }
+    let first = word.chars().next().is_some_and(cjk);
+    text[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|c| first || cjk(c) || !c.is_alphanumeric())
 }
 
 /// The phrases said with a value, in the order they are tried — after the
@@ -917,7 +959,9 @@ mod tests {
             after_name("So anyway. Hey, Clew, open Settings."),
             "open Settings."
         );
-        assert_eq!(after_name("A clue, go to line 30"), "go to line 30");
+        assert_eq!(after_name("Okay clue, go to line 30"), "go to line 30");
+        // "Clue" said as anything but a call is no call.
+        assert_eq!(after_name("A clue, go to line 30"), "A clue, go to line 30");
         assert_eq!(after_name("Hey Clew"), "");
         // Not in a word, and nothing to cut without it.
         assert_eq!(
@@ -939,16 +983,36 @@ mod tests {
         );
         assert_eq!(named_in("Hey, Clew."), Some(""));
         assert_eq!(named_in("Hey clue."), Some(""));
+        assert_eq!(named_in("Clue, open settings"), Some("open settings"));
+        // "Clew", as whisper writes it, wherever it is — what was said
+        // before it was not said to Clew.
+        assert_eq!(
+            named_in("and then I said Clew, open settings"),
+            Some("open settings")
+        );
+        assert_eq!(named_in("No clue why. Hey Clew, run it"), Some("run it"));
         for said in [
             "Hey cool it works now.",
             "Hey Kyle, look at this.",
             "Open the clueless file",
+            "Hey, cool — no clue why it broke",
+            "Clue me in",
         ] {
             assert_eq!(named_in(said), None, "{said:?}");
         }
-        with_lang(Lang::Zh, || {
-            assert_eq!(named_in("嘿，克鲁，打开设置"), Some("打开设置"))
-        });
+        // In the language it is said in, whichever Clew is shown in.
+        for lang in Lang::ALL {
+            with_lang(lang, || {
+                assert_eq!(named_in("嘿，克鲁，打开设置"), Some("打开设置"));
+                assert_eq!(
+                    named_in("Hé, Clou, ouvre les paramètres"),
+                    Some("ouvre les paramètres")
+                );
+                assert_eq!(named_in("헤이 크루, 설정 열어"), Some("설정 열어"));
+                assert_eq!(named_in("ねえ、クルー、設定を開いて"), Some("設定を開いて"));
+                assert_eq!(named_in("这条线索是克鲁斯给的"), None, "{lang:?}");
+            });
+        }
     }
 
     /// A question on screen is answered only by what is all a yes or all

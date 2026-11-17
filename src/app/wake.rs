@@ -29,13 +29,15 @@ use crate::app::voice::{
 use crate::*;
 
 /// What was heard just before the phrase was found, kept for what was
-/// said in one breath with it: the phrase itself, and the moment the
-/// spotter takes to be sure of it.
-pub(crate) const LEAD_SECONDS: f32 = 2.0;
+/// said in one breath with it — and for the name in it, which proves the
+/// call ([`App::prove_call`]): as far back as the phrase is looked for
+/// ([`HEARD_SECONDS`]), however late the spotter said it heard it. What
+/// was said before the name is let go of.
+pub(crate) const LEAD_SECONDS: f32 = HEARD_SECONDS;
 /// How far back a phrase heard is looked for as speech listening hears
-/// ([`Wait::heard_as_speech`]): more than [`LEAD_SECONDS`] — the spotter
-/// may say it heard the phrase as late as the pieces queued for it, more
-/// than a second on a busy computer, and the phrase must still be in it.
+/// ([`Wait::heard_as_speech`]): the spotter may say it heard the phrase as
+/// late as the pieces queued for it, more than a second on a busy
+/// computer, and the phrase must still be in it.
 const HEARD_SECONDS: f32 = 4.0;
 /// Listening this long with nothing said, Clew quiet and nothing on its
 /// way, it waits for its name again.
@@ -367,8 +369,7 @@ pub(crate) struct WakeState {
     /// What hears the phrase; `None` when `clew-speak` is not beside Clew.
     pub(crate) spotters: Option<Arc<dyn Waking>>,
     pub(crate) download: Option<ModelDownload>,
-    /// The last download's or removal's failure, or the microphone not
-    /// opening for waiting.
+    /// The last download's or removal's failure.
     pub(crate) error: Option<String>,
     /// The microphone, while it waits.
     waiting: Option<Waiting>,
@@ -381,6 +382,15 @@ pub(crate) struct WakeState {
     /// Listening began with "Hey, Clew", not the voice key: a while with
     /// nothing said has it wait for its name again.
     pub(crate) called: bool,
+    /// The call listening began with, by its number, while Clew's name has
+    /// not been heard in what was said since ([`App::prove_call`]).
+    pub(crate) unproven: Option<u64>,
+    /// The call Clew was held for, while it spoke — and which hold it is
+    /// ([`Speech::held_since`](crate::app::speech::Speech::held_since)):
+    /// it stops once the call is proven, and goes on if it was no call.
+    pub(crate) held: Option<(u64, Instant)>,
+    /// The last call's number.
+    calls: u64,
     /// Why waiting failed: it is not tried again by itself — only once the
     /// reader turns it on again, or downloads the model: what failed (an
     /// old `clew-speak`, a model that does not load) fails again. Kept
@@ -399,8 +409,17 @@ impl WakeState {
             lead: None,
             last_said: Instant::now(),
             called: false,
+            unproven: None,
+            held: None,
+            calls: 0,
             failed: None,
         }
+    }
+
+    /// A number for a call just heard.
+    fn next_call(&mut self) -> u64 {
+        self.calls += 1;
+        self.calls
     }
 
     /// Whether the microphone waits for the phrase.
@@ -488,14 +507,23 @@ impl App {
                     },
                     _claim: claim,
                 });
-                self.voice.wake.error = None;
                 true
             }
             Err(e) => {
-                self.voice.wake.error = Some(e);
+                self.wait_failed(e);
                 false
             }
         }
+    }
+
+    /// Waiting failed, saying why: it is not tried again by itself — only
+    /// once the reader turns it on again ([`WakeState::failed`]).
+    fn wait_failed(&mut self, error: String) {
+        self.status = tr!(
+            "Stopped waiting for “Hey, Clew”: {error}",
+            error = crate::i18n::message(&error)
+        );
+        self.voice.wake.failed = Some(error);
     }
 
     /// The microphone stops waiting.
@@ -519,7 +547,7 @@ impl App {
     }
 
     /// The phrase, heard by waiting `wait`: listening, as the voice key
-    /// starts it — Clew stops speaking for it.
+    /// starts it — Clew held, while it is heard whether it was a call.
     fn on_called(&mut self, wait: u64) -> Task<Message> {
         let Some(waiting) = &self.voice.wake.waiting else {
             return Task::none();
@@ -535,17 +563,91 @@ impl App {
             hearing.fresh = true;
             return Task::none();
         }
-        // The model listened with, removed meanwhile: nothing to hear with —
-        // said as the voice key says it.
+        let speaking = self.voice.speech.is_speaking() || self.answer_read_aloud_coming();
+        // The model listened with, removed meanwhile: nothing to hear with,
+        // nor to hear whether it was a call — said as the voice key says
+        // it, and Clew stopped as the voice key stops it.
         if !self.voice.installed(self.voice.prefs.model()) {
             self.stop_waiting();
+            if speaking {
+                self.stop_speaking();
+            }
+            return self.listen_now(None);
         }
-        // As the voice key: Clew stops — and an answer on its way to being
-        // read aloud is not read.
-        if self.voice.speech.is_speaking() || self.answer_read_aloud_coming() {
+        let call = self.voice.wake.next_call();
+        // Clew held, not stopped — an answer still on its way to being read
+        // aloud held too, once it plays: if what is heard with the call
+        // holds no "Clew", it was no call, and Clew goes on where it was.
+        if speaking {
+            self.voice.speech.hold();
+            self.voice.wake.held = self.voice.speech.held_since().map(|since| (call, since));
+        }
+        self.listen_now(Some(call))
+    }
+
+    /// What the words heard after `call` make of it — Clew called by its
+    /// name or not — once they are worked out (`result`): whether they are
+    /// taken as said to Clew.
+    ///
+    /// Its name in them — whisper, told it, writes it: "Hey, Clew." 20
+    /// times in 20 in recordings of the call, with Tiny in English — it was
+    /// a call: Clew, held for it, stops, and what is heard since is said to
+    /// Clew. Words without it — something like the call said to someone
+    /// else ("Hey, cool, it works now"), which woke the spotter — it was
+    /// not: Clew goes on, and none of it is done ([`App::not_called`]).
+    /// Nothing written down, or nothing worked out, is no sign either way:
+    /// Clew goes on, and what is said next decides.
+    pub(crate) fn prove_call(&mut self, call: u64, result: &Result<String, String>) -> bool {
+        let text = result.as_deref().map_or("", str::trim);
+        if text.is_empty() {
+            self.end_hold(call, false);
+            return true;
+        }
+        // Heard while Clew spoke: its own words, heard back, are no call
+        // either.
+        let held = self.voice.wake.held.is_some_and(|(c, _)| c == call);
+        let named = crate::app::spoken::named_in(text).is_some()
+            && (!held || crate::app::voice::said_over(text, &self.voice.speech.said_lately()));
+        if !named {
+            self.end_hold(call, false);
+            self.not_called(call);
+            return false;
+        }
+        if self.voice.wake.unproven == Some(call) {
+            self.voice.wake.unproven = None;
+        }
+        self.voice.proven(call);
+        self.end_hold(call, true);
+        true
+    }
+
+    /// Clew, held for `call`: stopped — the call was one — or going on
+    /// where it was. Left as it is if it was stopped or held again since
+    /// — by the voice key, Esc, words said over it.
+    fn end_hold(&mut self, call: u64, stop: bool) {
+        let Some((held_for, since)) = self.voice.wake.held else {
+            return;
+        };
+        if held_for != call {
+            return;
+        }
+        self.voice.wake.held = None;
+        if self.voice.speech.held_since() != Some(since) {
+            return;
+        }
+        if stop {
             self.stop_speaking();
+        } else {
+            self.voice.speech.go_on();
         }
-        self.listen_now(true)
+    }
+
+    /// What the call Clew is listening for will not be proven by: the
+    /// moment heard with it let go of unheard. Clew, held for it, goes on.
+    pub(crate) fn call_unheard(&mut self) {
+        if let Some(call) = self.voice.wake.unproven {
+            self.end_hold(call, false);
+        }
     }
 
     /// Waiting `wait` failed: it ends, saying why.
@@ -554,11 +656,7 @@ impl App {
             return Task::none();
         }
         self.stop_waiting();
-        self.status = tr!(
-            "Stopped waiting for “Hey, Clew”: {error}",
-            error = crate::i18n::message(&error)
-        );
-        self.voice.wake.failed = Some(error);
+        self.wait_failed(error);
         Task::none()
     }
 
@@ -566,7 +664,6 @@ impl App {
     fn set_wake(&mut self, on: bool) {
         self.voice.prefs.wake = on;
         self.save_voice_pref(Pref::Wake);
-        self.voice.wake.error = None;
         self.voice.wake.failed = None;
         if !on {
             self.stop_waiting();

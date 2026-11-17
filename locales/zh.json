@@ -1954,6 +1954,7 @@
  "Waiting for the {names} servers to load the project before refining the call graph": "正在等待 {names} 服务器加载项目，之后再精确化调用图",
  "Waiting for your answer…": "等待你的答复…",
  "Waiting for “Hey, Clew”": "正在等待“Hey, Clew”",
+ "Didn't hear “Clew” — waiting for “Hey, Clew”": "没有听到“Clew”——正在等待“Hey, Clew”",
  "Waiting {what}": "正在{what}",
  "Walk the last run": "回顾上次运行",
  "Walk the last run (1 stop)": "为上次运行生成导览（1 次暂停）",

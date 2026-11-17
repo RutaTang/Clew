@@ -1158,12 +1158,16 @@ fn the_best_voice_here_reads_each_sentence() {
 #[test]
 fn try_says_a_sample_in_the_readers_language() {
     use crate::i18n::{Lang, with_lang};
-    let (mut app, voice, _) = speech_app("speech-try");
+    let (mut app, voice, output) = speech_app("speech-try");
     let task = app.update(Message::Voice(VoiceMsg::TrySpeech("qwen3-tts")));
     settle(&mut app, task);
     let said = voice.said.lock().unwrap().last().cloned().unwrap();
     assert_eq!(said.lang, "en");
     assert!(said.text.contains("Clew"), "{}", said.text);
+    // Tried, until all is said.
+    assert!(app.voice.speech.trying());
+    all_played(&mut app, &output);
+    assert!(!app.voice.speech.trying());
     with_lang(Lang::Fr, || {
         let task = app.update(Message::Voice(VoiceMsg::PickSpeechVoice {
             model: "qwen3-tts",

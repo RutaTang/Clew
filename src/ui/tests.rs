@@ -14119,9 +14119,9 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
             .set_len(file.bytes)
             .unwrap();
     }
-    app.voice.wake.error = Some("the microphone was unplugged".into());
+    app.voice.wake.error = Some("the folder could not be removed".into());
     let mut sim = sim_elem(super::voice_section(&app));
-    assert!(shows(&mut sim, "the microphone was unplugged"));
+    assert!(shows(&mut sim, "the folder could not be removed"));
     assert!(!shows(&mut sim, "Download (33 MB)"));
     assert!(!shows(&mut sim, "Try again"), "tried again by itself");
     drop(sim);
