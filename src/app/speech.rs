@@ -504,6 +504,12 @@ impl Speech {
 
     /// Speaking, onto `output`, as loud as `level`: as when a sentence has
     /// just been played.
+    /// A sentence Clew said a moment ago, for its words to be heard back.
+    #[cfg(test)]
+    pub(crate) fn said_for_test(&mut self, sentence: &str) {
+        self.said_lately.push_back(sentence.to_string());
+    }
+
     #[cfg(test)]
     pub(crate) fn speak_for_test(&mut self, output: Box<dyn Playing>, level: f32) {
         self.output = Some(output);
@@ -513,11 +519,6 @@ impl Speech {
     /// Stop: nothing more is said of what was being said.
     fn hush(&mut self) {
         if let Some((stream, _)) = self.reading.take() {
-            self.hushed.insert(stream);
-        }
-        // What went unsaid of it is not said once a voice comes either: it
-        // was stopped — read through, or not.
-        if let Some((stream, _)) = self.unsaid.take() {
             self.hushed.insert(stream);
         }
         self.queue.clear();
@@ -803,8 +804,8 @@ impl App {
     /// pressed for: the sentences no voice could say, not those heard
     /// already — while it is still the last answer, on the card, and not
     /// stopped. Still being read — more of it coming, or its last sentences
-    /// being said — they are said after what is; else at once, unless
-    /// someone is heard saying something.
+    /// being said — they are said next, after the sentence being said; else
+    /// at once, unless someone is heard saying something.
     fn read_now_heard(&mut self, stream: u64) -> Task<Message> {
         let read_aloud = self.voice.prefs.read_aloud;
         let Some(done) = self
@@ -825,14 +826,20 @@ impl App {
             return Task::none();
         }
         let reading = speech.reading.is_some() || speech.is_speaking();
-        if hearing && !reading {
+        // Someone heard saying something, and Clew not speaking: it does
+        // not begin to.
+        if hearing && !speech.is_speaking() {
             return Task::none();
         }
         match speech.unsaid.take() {
             Some((s, unsaid)) if s == stream => {
+                // Next, in their place: each came before all still to be
+                // said of the answer.
                 let speaking = speech.is_speaking();
-                speech.queue.extend(unsaid);
-                if speaking || hearing {
+                for sentence in unsaid.into_iter().rev() {
+                    speech.queue.push_front(sentence);
+                }
+                if speaking {
                     return Task::none();
                 }
                 self.hold_mic_for_clew();
@@ -983,6 +990,14 @@ impl App {
         let was = speech.is_speaking();
         speech.hush();
         if let Some(stream) = coming {
+            speech.hushed.insert(stream);
+        }
+        // What went unsaid of what was stopped — being said, or coming —
+        // is not said once its voice comes either. Nothing being said, it
+        // stays: Settings' Try, a question typed, stop nothing of it.
+        if (was || coming.is_some())
+            && let Some((stream, _)) = speech.unsaid.take()
+        {
             speech.hushed.insert(stream);
         }
         self.resume_listening();

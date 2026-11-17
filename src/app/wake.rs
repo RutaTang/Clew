@@ -440,8 +440,8 @@ impl WakeState {
     }
 
     /// Listening ended — by the reader, or "Bye, Clew": no call it began
-    /// waits to be proven, nor is one given up on. What was said in one is
-    /// still worked out, and done if it named Clew.
+    /// waits to be proven, nor is one given up on. What was being heard is
+    /// cut before ([`App::mic_off`]), and proves its call or not.
     pub(crate) fn listening_ended(&mut self) {
         self.unproven = None;
         self.given_up = None;

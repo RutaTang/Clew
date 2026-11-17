@@ -1063,18 +1063,43 @@ fn what_went_unsaid_waits_for_what_is_being_said() {
             "总数是所有价格的和。"
         ]
     );
+    // Settings' Try, nothing being said: what went unsaid stays, and is
+    // read once its voice comes.
+    let said = voice.texts().len();
+    unsaid(&mut app, 3);
+    for _ in 0..5 {
+        if app.voice.speech.is_speaking() {
+            all_played(&mut app, &output);
+        }
+    }
+    assert!(!app.voice.speech.is_speaking(), "all said that could be");
+    let task = app.update(Message::Voice(VoiceMsg::TrySpeech("supertonic-3")));
+    settle(&mut app, task);
+    for _ in 0..5 {
+        if app.voice.speech.is_speaking() {
+            all_played(&mut app, &output);
+        }
+    }
+    downloaded(&mut app);
+    all_played(&mut app, &output);
+    assert_eq!(
+        voice.texts()[said..].last().map(String::as_str),
+        Some("总数是所有价格的和。"),
+        "{:?}",
+        voice.texts()
+    );
     // Stopped by the reader as its last sentences were said: what went
     // unsaid of it is not said either.
+    let before = voice.texts().len();
     unsaid(&mut app, 2);
     let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
     downloaded(&mut app);
     all_played(&mut app, &output);
-    let chinese = voice
-        .texts()
-        .iter()
-        .filter(|t| t.as_str() == "总数是所有价格的和。")
-        .count();
-    assert_eq!(chinese, 1, "{:?}", voice.texts());
+    assert!(
+        !voice.texts()[before..].contains(&"总数是所有价格的和。".to_string()),
+        "{:?}",
+        voice.texts()
+    );
 }
 
 /// A voice downloaded says which answers it reads — none of those in the
@@ -2205,6 +2230,47 @@ fn bye_clew_said_over_clew_lets_it_go_on() {
     assert!(!output.lock().unwrap().paused, "faded back in");
     assert!(!app.voice.mic_on, "{}", app.status);
     assert_eq!(app.proj.ask_turns.len(), 1, "nothing asked");
+}
+
+/// "Stop listening" said over Clew only says what does stop listening: Clew
+/// goes on, and the microphone listens on.
+#[test]
+fn the_microphones_label_said_over_clew_lets_it_go_on() {
+    let (mut app, _output) = talked_over("speech-talk-label", "Stop listening.");
+    talk(Some(0.1));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.held());
+    talk(Some(crate::app::voice::END_SILENCE + 0.1));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.is_speaking(), "it goes on");
+    assert!(app.voice.mic_on);
+    assert_eq!(app.status, "Say “Bye, Clew” to stop listening");
+}
+
+/// A new answer read aloud while the last is still being said: what is
+/// left of the last is not said — what waits to be said is only ever of
+/// the newest.
+#[test]
+fn a_new_answer_takes_over_what_was_left_to_say() {
+    let (mut app, voice, output) = speech_app("speech-newest");
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "One. Two. Three. Four. Five. Six.");
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert!(app.voice.speech.is_speaking());
+    let opened = output.lock().unwrap().opened;
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "Other.");
+    ended(&mut app, 2, StreamOutcome::Done);
+    assert!(
+        output.lock().unwrap().opened > opened,
+        "what was left of the last stopped, the new one heard afresh"
+    );
+    assert_eq!(
+        voice.texts().last().map(String::as_str),
+        Some("Other."),
+        "{:?}",
+        voice.texts()
+    );
 }
 
 /// What is left of Clew's own voice once its echo is taken out — bursts

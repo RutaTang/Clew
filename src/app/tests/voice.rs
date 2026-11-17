@@ -394,7 +394,10 @@ fn the_microphone_listens_until_it_is_turned_off() {
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
     assert!(app.voice.mic_on);
     assert!(app.voice.is_listening(), "{}", app.status);
-    assert_eq!(app.status, "Listening… say a command or a question");
+    assert_eq!(
+        app.status,
+        "Listening… say a command or a question — or “Bye, Clew” to stop"
+    );
     // Nothing said for long: listened past, quietly, afresh.
     if let VoicePhase::Listening { since, .. } = &mut app.voice.phase {
         *since -= std::time::Duration::from_secs_f32(NO_SPEECH_TIMEOUT + 1.0);
@@ -406,7 +409,10 @@ fn the_microphone_listens_until_it_is_turned_off() {
         "{:?}",
         app.voice.phase
     );
-    assert_eq!(app.status, "Listening… say a command or a question");
+    assert_eq!(
+        app.status,
+        "Listening… say a command or a question — or “Bye, Clew” to stop"
+    );
     assert!(app.voice.heard.is_none(), "nothing said, nothing shown");
     // Esc, with no question waiting and Clew quiet, is not the
     // microphone's: it listens on.
@@ -554,7 +560,10 @@ fn silence_is_let_go_and_a_lost_microphone_says_so() {
     say(&mut app, &script);
     assert!(app.voice.is_listening());
     assert_eq!(app.voice.heard, None);
-    assert_eq!(app.status, "Listening… say a command or a question");
+    assert_eq!(
+        app.status,
+        "Listening… say a command or a question — or “Bye, Clew” to stop"
+    );
     assert!(app.proj.ask_input.is_empty());
     assert!(!app.ask_view.is_open(), "nothing heard opens no card");
     // A repeat of the key, ignored.
@@ -3171,6 +3180,45 @@ fn clew_goes_on_after_what_was_no_call() {
         drop(app);
         drop(turn);
     }
+}
+
+/// The microphone turned off while what came with a call is still being
+/// said: it is cut, and is still the call's — no name in it, none of it is
+/// done.
+#[test]
+fn turned_off_mid_call_its_words_still_prove_it() {
+    let (_turn, mut app, script, _, _) =
+        wake_app("wake-off-midway", "Hey cool, can you open the settings", 1);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(0.2);
+    app.voice.forget_last_press();
+    let task = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(!app.voice.mic_on);
+    settle(&mut app, task);
+    assert!(!app.settings.open, "no call: nothing done");
+    assert!(app.proj.ask_turns.is_empty() && app.proj.ask_input.is_empty());
+    assert_eq!(app.voice.wake.unproven, None);
+}
+
+/// Clew's own words, heard back as it speaks them, name it — "say “Hey,
+/// Clew”" — but are no call: it goes on, and none of them is done.
+#[test]
+fn clews_own_words_naming_it_are_no_call() {
+    let said = "Say Hey Clew, open settings, and it opens them for you.";
+    let (_turn, mut app, script, _, _) = wake_app("wake-own-words", said, 1);
+    app.voice.prefs.talk_over = true;
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    app.voice.speech.said_for_test(said);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    assert!(app.voice.speech.held());
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.voice.speech.is_speaking(), "it goes on");
+    assert!(!app.voice.speech.held());
+    assert!(!app.settings.open, "none of it done");
 }
 
 /// "Bye, Clew" said over Clew is said to it, but ends listening, not what

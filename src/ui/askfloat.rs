@@ -382,6 +382,13 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
     if let Some(bar) = voice_confirm(app) {
         return Some(inset(bar));
     }
+    // Heard while Clew speaks on — "Bye, Clew" — it says what came of it a
+    // moment before it says Clew is speaking again.
+    if app.voice.speech.is_speaking()
+        && let Some(line) = pill_heard(app)
+    {
+        return Some(opens_ask(line));
+    }
     if let Some(line) = speaking_line(app) {
         return Some(opens_ask(line));
     }

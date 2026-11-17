@@ -187,15 +187,22 @@ fn sentence_end(c: char) -> bool {
     matches!(c, '.' | '!' | '?' | '。' | '！' | '？')
 }
 
-/// Sounds a Chinese transliteration goes on with after 克鲁: "克鲁斯"
-/// (Cruz), "克鲁格" (Kruger), "克鲁尼" (Clooney) — another name.
-const NAME_GOES_ON_IN_CHINESE: &str = "斯兹泽格姆尼赛德普索奇伊恩夫特顿森";
+/// Sounds a Chinese transliteration goes on with after 克鲁 — "克鲁斯"
+/// (Cruz), "克鲁兹", "克鲁尼" (Clooney) — another name; none begins a word
+/// said to Clew, as 格 (格式化) or 索 (索引) would.
+const NAME_GOES_ON_IN_CHINESE: &str = "斯兹泽尼姆";
+/// Katakana that make クルー or クリュー another word: "クルーズ"
+/// (cruise), "クルーザー", "クリューガー" (Krüger) — not a word written
+/// straight after the name ("ヘイクルーファイルを開いて").
+const NAME_GOES_ON_IN_KATAKANA: &str = "ズザジガ";
 
 /// Where Clew's name ends, said from the start of `at`, if it is said
 /// there as a word of its own: not the start of a longer word — "clueless",
 /// Japanese "クルーズ" (cruise), Korean "클로이" (Chloe), Chinese "克鲁斯"
 /// (Cruz). Korean may call it with "야" or "아" after it ("클루야"): the
-/// name, called so, ends after it.
+/// name, called so, ends after it. Chinese and Japanese go on with what
+/// is said to Clew unspaced ("嘿克鲁格式化这个文件"): only the sounds of
+/// a longer name are taken for one.
 fn name_at(at: &str) -> Option<usize> {
     NAMES.iter().find_map(|name| {
         let end = begins(at, name)?;
@@ -207,8 +214,7 @@ fn name_at(at: &str) -> Option<usize> {
             return Some(end + called.len_utf8());
         }
         let goes_on = next.is_some_and(|c| match last as u32 {
-            // Katakana, and its long vowel mark.
-            0x30A1..=0x30FC => matches!(c as u32, 0x30A1..=0x30FA | 0x30FC),
+            0x30A1..=0x30FC => NAME_GOES_ON_IN_KATAKANA.contains(c),
             0xAC00..=0xD7AF => matches!(c as u32, 0xAC00..=0xD7AF),
             0x4E00..=0x9FFF => NAME_GOES_ON_IN_CHINESE.contains(c),
             _ => false,
@@ -309,7 +315,15 @@ const STOP_LISTENING: &str = tr_noop!("Stop listening");
 /// listens — "Stop listening", in English or as the window shows it —
 /// which is not how listening is stopped: "Bye, Clew" is.
 pub(crate) fn says_stop_listening(said: &str) -> bool {
+    // Its name said after it too: "Stop listening, Clew."
     let said = plain(said);
+    let said = NAMES
+        .iter()
+        .find_map(|name| {
+            said.strip_suffix(name)
+                .filter(|rest| rest.ends_with(' ') || rest.chars().last().is_some_and(cjk))
+        })
+        .map_or(said.as_str(), str::trim_end);
     !said.is_empty()
         && [STOP_LISTENING, crate::i18n::lookup(STOP_LISTENING)]
             .iter()
@@ -1018,6 +1032,8 @@ mod tests {
         use crate::i18n::{Lang, with_lang};
         assert!(says_stop_listening("Stop listening."));
         assert!(says_stop_listening("stop listening"));
+        assert!(says_stop_listening("Stop listening, Clew."));
+        assert!(!says_stop_listening("Clew"));
         assert!(!says_stop_listening("Stop listening to the test output"));
         assert!(!says_stop_listening("Bye, Clew"));
         assert!(!says_stop_listening(""));
@@ -1201,6 +1217,12 @@ mod tests {
                 assert_eq!(named_in("헤이 클루, 설정 열어"), Some("설정 열어"));
                 assert_eq!(named_in("클루야, 설정 열어"), Some("설정 열어"));
                 assert_eq!(named_in("ヘイ・クルー、設定を開いて"), Some("設定を開いて"));
+                assert_eq!(named_in("嘿克鲁格式化这个文件"), Some("格式化这个文件"));
+                assert_eq!(named_in("嘿，克鲁，索引一下"), Some("索引一下"));
+                assert_eq!(
+                    named_in("ヘイクルーファイルを開いて"),
+                    Some("ファイルを開いて")
+                );
                 assert_eq!(named_in("헤이클로 설정 열어"), Some("설정 열어"));
                 assert_eq!(named_in("ヘイ、クルー、設定を開いて"), Some("設定を開いて"));
                 assert_eq!(named_in("这条线索是克鲁斯给的"), None, "{lang:?}");

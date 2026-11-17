@@ -1349,18 +1349,21 @@ impl App {
     /// with the microphone that listened, if it is still open.
     fn mic_off(&mut self) -> Task<Message> {
         self.voice.mic_on = false;
-        self.voice.wake.listening_ended();
         self.status = tr!("Stopped listening").into();
         let hearing = self
             .voice
             .listening_now()
             .is_some_and(|l| l.silence_after_speech().is_some());
+        // What is being heard is cut first — still the call's, to prove it
+        // or not, Clew's hold for it let go of with it — and only then is
+        // the call over.
         let task = if hearing {
             self.end_utterance_now()
         } else {
             self.wait_again();
             Task::none()
         };
+        self.voice.wake.listening_ended();
         if self.resume_waiting() {
             self.status = tr!("Stopped listening — say “Hey, Clew” to start again").into();
         }
@@ -1512,7 +1515,7 @@ impl App {
                 "Listening… say yes to run {command}, or no",
                 command = waiting.said()
             ),
-            None => tr!("Listening… say a command or a question").into(),
+            None => tr!("Listening… say a command or a question — or “Bye, Clew” to stop").into(),
         };
     }
 
@@ -1602,7 +1605,9 @@ impl App {
                 Some(from) => {
                     self.voice.speech.hold();
                     self.voice.over_from = Some(from);
-                    self.status = tr!("Listening… say a command or a question").into();
+                    self.status =
+                        tr!("Listening… say a command or a question — or “Bye, Clew” to stop")
+                            .into();
                 }
                 None => quiet = None,
             }
@@ -1848,10 +1853,15 @@ impl App {
         // gone on, is theirs.
         if said.over.is_some() {
             let holds = said.over == self.voice.speech.held_since();
+            // "Bye, Clew" — or the microphone's label, which only says
+            // what does stop listening — leaves what Clew says be.
             let (to_clew, bye) = result.as_ref().map_or((false, false), |text| {
                 (
                     said_over(text, &self.voice.speech.said_lately()),
-                    crate::app::spoken::says_bye(text, call),
+                    crate::app::spoken::says_bye(text, call)
+                        || crate::app::spoken::says_stop_listening(
+                            crate::app::spoken::what_is_said(text, call),
+                        ),
                 )
             });
             if !to_clew {
