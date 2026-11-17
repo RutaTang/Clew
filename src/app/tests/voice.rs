@@ -3244,8 +3244,12 @@ fn the_keyword_spotter_downloads_verified_and_is_removed() {
 /// `CLEW_WAKE_MODEL` says. "Hey, Clew" said to the input within
 /// `CLEW_WAKE_WITHIN` seconds (30 unless set) of "waiting" being printed —
 /// by a person, or played into it — starts listening. With `CLEW_WAKE_NOT`
-/// set, what is said is not the phrase, and waiting goes on. Without
-/// `CLEW_WAKE_MODEL`, it says so and passes.
+/// set, what is said is not the phrase, and waiting goes on. With
+/// `CLEW_WAKE_WHISPER` — whisper.cpp's `ggml-tiny.en.bin` — what is said
+/// with the call ("Hey, Clew, open Settings") is then listened to and
+/// worked out, as it is there: its name heard in it, the call stands, and
+/// what followed the name is what is done. Without `CLEW_WAKE_MODEL`, it
+/// says so and passes.
 #[cfg(unix)]
 #[test]
 #[ignore = "needs clew-speak on PATH, CLEW_WAKE_MODEL and “Hey, Clew” said to the audio input"]
@@ -3263,53 +3267,86 @@ fn a_real_microphone_wakes_clew() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
     let not = std::env::var_os("CLEW_WAKE_NOT").is_some();
+    let whisper = std::env::var_os("CLEW_WAKE_WHISPER").map(PathBuf::from);
     let mut app = scanned_app("wake-real");
     let store = own_store(&mut app, "wake-real");
     std::fs::create_dir_all(store.dir()).unwrap();
-    std::fs::write(store.path(app.voice.prefs.model()), b"a model").unwrap();
+    // A file, as a download leaves it: a link is not taken for one.
+    let place = |real: &std::path::Path, to: &std::path::Path| {
+        let real = real.canonicalize().unwrap();
+        if std::fs::hard_link(&real, to).is_err() {
+            std::fs::copy(&real, to).unwrap();
+        }
+    };
+    match &whisper {
+        Some(model) => {
+            app.voice.prefs.model = "tiny.en".into();
+            place(model, &store.path(app.voice.prefs.model()));
+        }
+        None => std::fs::write(store.path(app.voice.prefs.model()), b"a model").unwrap(),
+    }
     let dir = clew_voice::wake::dir(&store);
     std::fs::create_dir_all(&dir).unwrap();
     for file in clew_voice::wake::MODEL.files {
-        // A file, as a download leaves it: a link is not taken for one.
-        let real = from.join(file.name).canonicalize().unwrap();
-        if std::fs::hard_link(&real, dir.join(file.name)).is_err() {
-            std::fs::copy(&real, dir.join(file.name)).unwrap();
-        }
+        place(&from.join(file.name), &dir.join(file.name));
     }
-    assert!(
-        app.voice.wake.spotters.is_some(),
-        "clew-speak is not on PATH"
-    );
+    let spotters = app
+        .voice
+        .wake
+        .spotters
+        .clone()
+        .expect("clew-speak is not on PATH");
+    // Loaded first — some seconds — so that what is said once "waiting" is
+    // printed is heard.
+    spotters.warm(&dir).unwrap();
     let _ = app.update(Message::Voice(VoiceMsg::SetWake(true)));
     assert!(app.voice.wake.is_waiting(), "{}", app.status);
-    // Its first step loads the spotter — some seconds: what is said before
-    // it hears is not heard.
-    wait_step(&mut app);
-    assert!(app.voice.wake.is_waiting(), "{:?}", app.voice.wake.failed);
     eprintln!("waiting for “Hey, Clew”");
     let started = std::time::Instant::now();
     while app.voice.wake.is_waiting() && started.elapsed().as_secs() < within {
         std::thread::sleep(crate::app::wake::STEP);
         wait_step(&mut app);
     }
-    // Waiting that failed is not taken for woken, nor for waiting on.
-    assert_eq!(app.voice.wake.failed, None, "{}", app.status);
-    if not {
-        assert!(app.voice.wake.is_waiting(), "woken: {}", app.status);
-        assert!(!app.voice.mic_on);
-    } else {
-        assert!(
-            app.voice.mic_on && app.voice.is_listening(),
-            "{}",
-            app.status
-        );
-    }
+    let waiting = app.voice.wake.is_waiting();
+    let woke = app.voice.mic_on && app.voice.is_listening();
+    let failed = app.voice.wake.failed.clone();
     eprintln!(
         "after {:.1} s: {}",
         started.elapsed().as_secs_f32(),
         app.status
     );
-    // The spotter, which outlives a waiting, let go of.
+    // What was said with the call, listened to until it ends, and worked
+    // out.
+    if woke && whisper.is_some() {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.voice.mic_on && app.voice.heard.is_none() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let task = app.update(Message::Voice(VoiceMsg::Tick));
+            for message in run_task(task) {
+                let _ = app.update(message);
+            }
+        }
+        eprintln!("then: {:?} — {}", app.voice.heard, app.status);
+    }
+    let listening = app.voice.mic_on;
+    let heard = app.voice.heard.clone();
+    // The spotter, which outlives a waiting, let go of — whatever came of
+    // it.
     let _ = app.update(Message::Voice(VoiceMsg::SetWake(false)));
     let _ = std::fs::remove_dir_all(store.dir());
+    // Waiting that failed is not taken for woken, nor for waiting on.
+    assert_eq!(failed, None);
+    if not {
+        assert!(waiting && !woke, "woken");
+        return;
+    }
+    assert!(woke, "not woken");
+    if whisper.is_some() {
+        // The call stood: its name was heard, and what followed it is
+        // what was done — the name not part of it.
+        assert!(listening, "the call was taken for no call");
+        let heard = heard.expect("what was said after the call was heard");
+        assert!(!heard.text.is_empty());
+        assert!(!heard.text.to_lowercase().contains("clew"), "{heard:?}");
+    }
 }

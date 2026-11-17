@@ -801,6 +801,28 @@ mod tests {
         assert_eq!(spotters.hear(&dir, &[0.0; 160]), Ok(None));
     }
 
+    /// What a spotter said before its answers ended is heard: the phrase,
+    /// then the end of what it says, is the phrase — not its end.
+    #[cfg(unix)]
+    #[test]
+    fn the_phrase_said_before_its_end_is_heard() {
+        let child = Command::new("true").spawn().unwrap();
+        let (lines, _queued) = mpsc::sync_channel(QUEUED);
+        let (said, answers) = mpsc::channel();
+        let mut spotter = Spotter {
+            child,
+            lines,
+            answers,
+        };
+        said.send(Ok(Answer::Heard {
+            keyword: "hey_clew".into(),
+        }))
+        .unwrap();
+        drop(said);
+        assert_eq!(spotter.hear(&[]), Ok(true));
+        assert!(spotter.hear(&[]).is_err_and(|e| e.contains("ended")));
+    }
+
     /// Wait, a while at most, for the spotter running to have ended.
     #[cfg(unix)]
     fn until_ended(spotters: &Spotters) {

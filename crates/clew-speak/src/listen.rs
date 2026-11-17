@@ -45,7 +45,9 @@ pub const RATE: i32 = 16_000;
 /// nineteen times in twenty — so whether it was heard came down to when it
 /// was said. What is heard goes to two streams, the second
 /// [`STAGGER_SECONDS`] further on in its own time, so that the phrase is
-/// never in such a stretch in both; it is heard when either hears it.
+/// never in such a stretch in both; it is heard when either hears it. Both
+/// together hear a minute of audio in two and a half seconds on one core —
+/// a computer ten times slower keeps up with them.
 pub struct Spotter {
     spotter: sherpa_onnx::KeywordSpotter,
     streams: [sherpa_onnx::OnlineStream; 2],

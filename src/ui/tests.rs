@@ -1640,7 +1640,16 @@ fn the_ask_card_says_what_keeps_answers_from_being_heard() {
     let sent = click_right_of(
         || sim_of(&app),
         needed,
-        |m| matches!(m, Message::Voice(crate::VoiceMsg::DismissBlocked(_))),
+        |m| {
+            matches!(
+                m,
+                Message::Voice(crate::VoiceMsg::DismissBlocked(Blocked::Missing {
+                    model: "qwen3-tts",
+                    lang: "en",
+                    stream: 1
+                }))
+            )
+        },
     );
     assert!(!sent.is_empty(), "its ✕ puts it away");
     // Downloading: that it is, how far it has come, and Cancel, where
@@ -14557,6 +14566,13 @@ fn speaking_shows_with_a_stop() {
     // left to type in, Esc left to the pill.
     app.ask_view = crate::AskView::Compact;
     assert!(!shows(&mut sim_of(&app), "Esc"));
+    // What was heard stays under the card's header as Clew reads the
+    // answer: the answer under it does not jump as Clew begins and ends.
+    app.voice.heard = Some(crate::app::voice::Heard {
+        text: "what does total do".into(),
+        outcome: crate::app::voice::HeardOutcome::Asked,
+    });
+    assert!(shows(&mut sim_of(&app), "“what does total do”"));
     let lit = super::askfloat::voice_lit(&app, super::ROUND_BUTTON, 15.0).expect("lit");
     let mut sim = sim_elem(lit);
     sim.point_at(Point::new(

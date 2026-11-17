@@ -921,10 +921,10 @@ fn a_voice_failing_is_said_of_its_answer() {
 /// An answer the Ask card said needs a voice is read once that voice is
 /// downloaded — what its Download was pressed for — while it is still the
 /// answer on the card; not once another has been asked, nor with the card
-/// closed, nor over what Clew is saying.
+/// closed, nor over what Clew is saying, nor once the reader stopped it.
 #[test]
 fn an_answer_is_read_once_its_voice_comes() {
-    let (mut app, voice, _) = speech_app("speech-read-once-here");
+    let (mut app, voice, output) = speech_app("speech-read-once-here");
     let store = app.voice.store.clone().unwrap();
     let qwen = speech::find("qwen3-tts").unwrap();
     let unheard = |app: &mut App, stream| {
@@ -965,6 +965,58 @@ fn an_answer_is_read_once_its_voice_comes() {
     app.hide_ask();
     downloaded(&mut app);
     assert_eq!(voice.texts().len(), said, "the card closed");
+    // Clew saying something else: not said over it.
+    unheard(&mut app, 5);
+    assert!(app.ask_view.is_open());
+    app.voice
+        .speech
+        .speak_for_test(Box::new(Output(output.clone())), 0.3);
+    downloaded(&mut app);
+    assert_eq!(voice.texts().len(), said, "said over Clew");
+    app.stop_speaking();
+    // Stopped by the reader as it came: not read after all.
+    speech::remove(&store, qwen).unwrap();
+    asked(&mut app, 6, true);
+    delta(&mut app, 6, "This is. Second");
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    ended(&mut app, 6, StreamOutcome::Done);
+    assert!(
+        matches!(
+            app.voice.speech.blocked,
+            Some(Blocked::Missing { stream: 6, .. })
+        ),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    downloaded(&mut app);
+    assert_eq!(voice.texts().len(), said, "stopped");
+}
+
+/// A voice downloaded says which answers it reads — none of those in the
+/// language spoken, when it does not speak it: Supertonic 3, to a reader
+/// who speaks Chinese, is only ready.
+#[test]
+fn a_voice_downloaded_says_what_it_reads() {
+    let (mut app, _voice, _) = speech_app("speech-ready-says");
+    let supertonic = speech::find("supertonic-3").unwrap();
+    let store = app.voice.store.clone().unwrap();
+    let downloaded = |app: &mut App, language: &str| {
+        app.voice.prefs.language = Some(language.into());
+        let _ = speech::remove(&store, supertonic);
+        let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("supertonic-3")));
+        install(app, supertonic);
+        let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+            id: "supertonic-3",
+            result: Ok(()),
+        }));
+        settle(app, task);
+        app.status.clone()
+    };
+    assert_eq!(
+        downloaded(&mut app, "en"),
+        "Supertonic 3 is ready — answers to what you ask by voice are read aloud"
+    );
+    assert_eq!(downloaded(&mut app, "zh"), "Supertonic 3 is ready");
 }
 
 /// The Ask card speaks of answers only: Settings' Try failing is said on
@@ -2357,9 +2409,20 @@ fn a_real_answer_is_read_aloud() {
     assert_eq!(app.voice.speech.blocked, None, "{}", app.status);
     assert!(spoke, "{}", app.status);
     assert!(!app.voice.speech.is_speaking(), "read through");
+    // Both sentences made, and played: thirteen words, some seconds of
+    // them, as speech.
+    let made = app.voice.speech.said_lately();
+    for sentence in [
+        "The total adds every price.",
+        "Then it rounds the sum to whole cents.",
+    ] {
+        assert!(
+            made.iter().any(|m| m == sentence),
+            "{sentence:?} in {made:?}"
+        );
+    }
     let heard = heard.lock().unwrap();
     let rms = (heard.squares / heard.samples.max(1) as f64).sqrt();
-    // Fourteen words: some seconds of them, not a sentence left out.
     assert!(heard.seconds > 2.5, "{:.2} s played", heard.seconds);
     assert!(rms > 0.01, "speech, not silence: rms {rms:.4}");
     let _ = std::fs::remove_dir_all(&dir);

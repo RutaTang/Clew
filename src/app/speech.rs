@@ -982,7 +982,9 @@ impl App {
     /// stops.
     fn try_speech(&mut self, model: &'static VoiceModel) -> Task<Message> {
         self.stop_speaking();
-        if !self.speech_installed(model) {
+        // As the reader finds a voice: one being got or let go of in any
+        // window is not tried — it would say nothing, and leave Try said.
+        if !self.voice.store.as_ref().is_some_and(|s| usable(s, model)) {
             return Task::none();
         }
         self.hold_mic_for_clew();

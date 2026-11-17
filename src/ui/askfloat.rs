@@ -1222,15 +1222,15 @@ pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, M
 
 /// Voice on the card, under its header: what was last heard and what came
 /// of it, as the microphone listens on — not while a command waits for a
-/// yes, over the composer ([`voice_confirm`]), nor while Clew speaks,
-/// beside it ([`voice_meter`]); and what keeps answers from being heard
-/// ([`blocked_line`]) — whatever is said meanwhile: an answer read but for
-/// its sentences in another language, it came and went with each of them,
-/// the answer under it jumping. `None` when there is nothing to say.
+/// yes, which says it over the composer ([`voice_confirm`]); and what keeps
+/// answers from being heard ([`blocked_line`]). Both stay while Clew speaks
+/// ([`voice_meter`], beside the composer): taken away as it began and put
+/// back as it ended, they made the answer under them jump twice an answer
+/// — and once a sentence, where only some of an answer's sentences are
+/// read. `None` when there is nothing to say.
 pub(crate) fn voice_strip(app: &App) -> Option<Element<'_, Message>> {
-    let quiet = app.voice.confirm.is_none() && !app.voice.speech.is_speaking();
     let lines: Vec<Element<'_, Message>> = heard_line(app)
-        .filter(|_| quiet)
+        .filter(|_| app.voice.confirm.is_none())
         .into_iter()
         .chain(blocked_line(app))
         .collect();

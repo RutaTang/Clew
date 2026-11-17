@@ -581,12 +581,18 @@ mod tests {
     /// A real `clew-speak` and a real model, removed while a sentence
     /// waited for it: that sentence is passed over, not taken for a voice
     /// that failed. The model is not touched: what is removed are links to
-    /// its files.
+    /// its files. Not pointed at them, it says so and passes.
     #[test]
     #[ignore = "needs CLEW_SPEAK and CLEW_SPEAK_MODEL"]
     fn a_real_model_removed_meanwhile_passes_the_sentence_over() {
-        let program = PathBuf::from(std::env::var("CLEW_SPEAK").unwrap());
-        let model_dir = PathBuf::from(std::env::var("CLEW_SPEAK_MODEL").unwrap());
+        let (Some(program), Some(model_dir)) = (
+            std::env::var_os("CLEW_SPEAK"),
+            std::env::var_os("CLEW_SPEAK_MODEL"),
+        ) else {
+            eprintln!("skipped: CLEW_SPEAK and CLEW_SPEAK_MODEL are not set");
+            return;
+        };
+        let (program, model_dir) = (PathBuf::from(program), PathBuf::from(model_dir));
         let model = &crate::speech::VOICE_MODELS[0];
         let dir = std::env::temp_dir().join(format!("clew-speaker-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
