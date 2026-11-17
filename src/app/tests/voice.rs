@@ -2660,7 +2660,7 @@ fn hey_clew_starts_listening_with_the_microphone_that_waited() {
 /// again. Nothing written down at all is no sign either way: it listens on.
 #[test]
 fn a_call_without_the_name_is_no_call() {
-    let (turn, mut app, script, _, _) = wake_app("wake-not-named", "Hey cool, it works now.", 2);
+    let (turn, mut app, script, _, _) = wake_app("wake-not-named", "Hey cool, it works now.", 1);
     assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app), "the spotter took it for the call");
     assert!(app.voice.is_listening());
@@ -2677,7 +2677,7 @@ fn a_call_without_the_name_is_no_call() {
     assert_eq!(app.status, "Waiting for “Hey, Clew”");
     drop((turn, app));
     // Nothing written down: listening goes on.
-    let (_turn, mut app, script, _, _) = wake_app("wake-not-written", "", 2);
+    let (_turn, mut app, script, _, _) = wake_app("wake-not-written", "", 1);
     assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app));
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
@@ -2767,7 +2767,8 @@ fn the_voice_key_while_waiting_listens_with_that_microphone() {
 fn listening_with_nothing_said_waits_for_the_name_again() {
     use crate::app::wake::IDLE;
     let long_ago = || std::time::Instant::now() - IDLE - std::time::Duration::from_secs(1);
-    let (_turn, mut app, script, _, _) = wake_app("wake-idle", "open settings", 1);
+    // What is heard with a call holds the name, as listening hears it.
+    let (_turn, mut app, script, _, _) = wake_app("wake-idle", "Hey, Clew, open settings", 1);
     assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app));
     let _ = app.update(Message::Voice(VoiceMsg::Tick));

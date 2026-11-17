@@ -932,6 +932,7 @@ mod tests {
     /// call was it, or only something like it ("Hey, cool").
     #[test]
     fn the_name_is_heard_or_not() {
+        use crate::i18n::{Lang, with_lang};
         assert_eq!(
             named_in("Hey, Clew, open Settings."),
             Some("open Settings.")
