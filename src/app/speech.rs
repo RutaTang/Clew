@@ -495,6 +495,17 @@ impl Speech {
         self.said_lately.iter().cloned().collect()
     }
 
+    /// What went unsaid of an answer, waiting for Clew to be free to say it
+    /// ([`App::read_put_off`]), let go of: the reader has taken the floor.
+    pub(crate) fn let_go_of_put_off(&mut self) {
+        if let Some(stream) = self.put_off.take() {
+            self.hushed.insert(stream);
+            if self.unsaid.as_ref().is_some_and(|(s, _)| *s == stream) {
+                self.unsaid = None;
+            }
+        }
+    }
+
     /// Whether what went unsaid of an answer waits for Clew to be free to
     /// say it ([`App::read_put_off`]).
     pub(crate) fn has_put_off(&self) -> bool {

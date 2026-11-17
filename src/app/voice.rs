@@ -1332,8 +1332,11 @@ impl App {
             // Pressed as a call that held Clew is heard out, the listening
             // is the reader's.
             let task = self.call_taken_over();
-            // With the microphone on, it opens as Clew stops.
+            // With the microphone on, it opens as Clew stops — and what of
+            // an answer waited for Try to end waits no more: the reader
+            // takes the floor.
             self.stop_speaking();
+            self.voice.speech.let_go_of_put_off();
             if self.voice.mic_on {
                 return task;
             }
@@ -1357,7 +1360,7 @@ impl App {
     fn said_bye(&mut self) -> Task<Message> {
         self.voice.mic_on = false;
         self.status = tr!("Stopped listening").into();
-        self.voice.unheard.clear();
+        self.drop_said_in(self.voice.listenings);
         self.call_unheard();
         if self.voice.speech.held() {
             self.voice.speech.go_on();
@@ -1368,6 +1371,39 @@ impl App {
             self.status = tr!("Stopped listening — say “Hey, Clew” to start again").into();
         }
         Task::none()
+    }
+
+    /// What was said in `listening`, waiting to be worked out — after a
+    /// "Bye, Clew" said in it — let go of: Clew, held for any of it, goes
+    /// on.
+    fn drop_said_in(&mut self, listening: u64) {
+        let held = self.voice.speech.held_since();
+        let mut freed = false;
+        self.voice.unheard.retain(|(_, _, said)| {
+            let dropped = said.listening == listening;
+            freed |= dropped && said.over.is_some() && said.over == held;
+            !dropped
+        });
+        if freed {
+            self.voice.speech.go_on();
+        }
+    }
+
+    /// How many times listening has begun ([`VoiceState::listenings`]).
+    pub(crate) fn listenings(&self) -> u64 {
+        self.voice.listenings
+    }
+
+    /// Listening begun again for a call given up on, named after all
+    /// ([`App::prove_call`]): what was said since in the listening it had
+    /// — waiting to be worked out — is of this one.
+    pub(crate) fn listening_resumed(&mut self, from: u64) {
+        let now = self.voice.listenings;
+        for (_, _, said) in self.voice.unheard.iter_mut() {
+            if said.listening == from {
+                said.listening = now;
+            }
+        }
     }
 
     /// The microphone turned off. What it is hearing someone say is kept —
@@ -1910,12 +1946,14 @@ impl App {
             }
         }
         // "Bye, Clew" said in a listening that has ended since — turned
-        // off, and begun again, or called anew — ends nothing of this one.
+        // off, and begun again, or called anew — ends nothing of this one;
+        // what was said after it in its own is let go of all the same.
         if said.listening != self.voice.listenings
             && result
                 .as_ref()
                 .is_ok_and(|text| crate::app::spoken::says_bye(text, call))
         {
+            self.drop_said_in(said.listening);
             return self.transcribe_next();
         }
         let task = self.on_words(result, call);

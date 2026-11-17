@@ -3235,6 +3235,67 @@ fn stop_listening_after_a_given_up_call_lets_clew_go_on() {
     assert!(app.voice.mic_on && app.voice.is_listening());
 }
 
+/// A call given up on, named after all, then "Bye, Clew" — all said
+/// before any of it was worked out: listening begun again for the call is
+/// the one the goodbye ends.
+#[test]
+fn bye_clew_ends_the_listening_a_given_up_call_began_again() {
+    let (_turn, mut app, script, _, _) = wake_app("wake-given-up-bye", "", 1);
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        [
+            "Hey cool, it works now.",
+            "Hey, Clew, open settings.",
+            "Bye, Clew.",
+        ]
+        .map(String::from)
+        .into(),
+    )));
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    assert!(
+        !app.voice.mic_on && app.voice.wake.is_waiting(),
+        "{}",
+        app.status
+    );
+}
+
+/// "Bye, Clew" worked out late — its listening turned off, and another
+/// begun — lets go of what was said after it in its own all the same.
+#[test]
+fn a_late_bye_clew_lets_go_of_what_followed_it() {
+    let (mut app, script, _) = voice_app("voice-bye-late-rest", "");
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        ["Bye, Clew.", "Open settings."].map(String::from).into(),
+    )));
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    // Said after it, still being heard as the key turns it off: cut, and
+    // waiting to be worked out.
+    script.lock().unwrap().silence = Some(0.2);
+    app.voice.forget_last_press();
+    let off = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(!app.voice.mic_on);
+    script.lock().unwrap().silence = None;
+    app.voice.forget_last_press();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.mic_on);
+    settle(&mut app, task);
+    settle(&mut app, off);
+    assert!(!app.settings.open, "{}", app.status);
+    assert!(
+        app.voice.mic_on && app.voice.is_listening(),
+        "{}",
+        app.status
+    );
+}
+
 /// "Bye, Clew" worked out once its listening had ended and another begun
 /// — the key pressed off and on meanwhile — ends nothing of the new one.
 #[test]

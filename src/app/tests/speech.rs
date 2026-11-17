@@ -1150,8 +1150,10 @@ fn what_went_unsaid_is_said_in_its_place() {
 /// said once Try is over, or they are heard out.
 #[test]
 fn what_went_unsaid_waits_for_clew_to_be_free_to_say_it() {
-    // Try speaking; Try stopped by the reader; someone heard.
-    for case in ["tried", "stopped", "heard"] {
+    // Try speaking; Try stopped by the reader; someone heard; the voice
+    // key pressed over Try — the reader taking the floor, which lets go of
+    // it.
+    for case in ["tried", "stopped", "heard", "keyed"] {
         let (mut app, voice, output) = speech_app("speech-unsaid-put-off");
         let model = app.voice.prefs.model();
         let store = app.voice.store.clone().unwrap();
@@ -1202,6 +1204,17 @@ fn what_went_unsaid_waits_for_clew_to_be_free_to_say_it() {
                 let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
                 let task = app.update(Message::Voice(VoiceMsg::Tick));
                 settle(&mut app, task);
+            }
+            "keyed" => {
+                app.voice.forget_last_press();
+                let task = app.update(Message::Voice(VoiceMsg::Toggle));
+                settle(&mut app, task);
+                let task = app.update(Message::Voice(VoiceMsg::Tick));
+                settle(&mut app, task);
+                assert!(!chinese(&voice), "the reader has the floor");
+                assert!(!app.voice.speech.has_put_off());
+                assert!(app.voice.mic_on);
+                continue;
             }
             _ => {
                 TALK.with(|t| t.set(None));

@@ -676,7 +676,12 @@ impl App {
                 self.stop_speaking();
             }
             // With the model to hear with here, it opens no Settings.
+            // The microphone off since, no listening has begun since the
+            // one the call had: what is still to be worked out of it is of
+            // the listening begun now.
+            let given_up_in = self.listenings();
             let _ = self.listen_now(None);
+            self.listening_resumed(given_up_in);
             self.voice.wake.called = true;
         }
         true
