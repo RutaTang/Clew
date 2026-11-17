@@ -1818,7 +1818,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     let talk = super::toolbar::tip_at(
         round(Glyph::Mic, super::askfloat::talk_tint(app, theme::fg()))
             .style(theme::round_button(false))
-            .on_press(super::heard::said(
+            .on_press(super::heard::named_only(
                 tr!("Talk"),
                 Message::Voice(crate::VoiceMsg::Toggle),
             )),

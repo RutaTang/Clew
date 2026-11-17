@@ -328,7 +328,7 @@ fn wake_rows(app: &App) -> Vec<Element<'_, Message>> {
         tr!("Start listening when you say “Hey, Clew”"),
         Some(
             tr!(
-                "Say “Bye, Clew” or “Stop listening” to stop listening. While Clew waits, the microphone stays on, but what it hears goes only to a small model on this computer."
+                "Say “Bye, Clew” to stop listening. While Clew waits, the microphone stays on, but what it hears goes only to a small model on this computer."
             )
             .into(),
         ),

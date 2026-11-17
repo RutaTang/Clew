@@ -184,6 +184,15 @@ pub(crate) fn said(shown: &str, message: Message) -> Message {
     message
 }
 
+/// `message`, named `shown` for the keyboard's jump badges but not offered
+/// to be said: the microphone's own button, which while it listens could
+/// only stop listening — said "Bye, Clew" in every language, not its label
+/// ("Stop listening", "Talk").
+pub(crate) fn named_only(shown: &str, message: Message) -> Message {
+    note(shown, &message);
+    message
+}
+
 /// [`said`], for a label made to be said (`shown`, a path and a line, a
 /// question without its marks): made only while gathering, never for a
 /// frame that is only drawn.

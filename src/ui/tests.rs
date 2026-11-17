@@ -18609,17 +18609,24 @@ fn base_clone(_base: &App) -> App {
 /// Every button a click presses offers itself to voice and to the
 /// command bar too (`heard`): in every state audited, each press a button
 /// marks for jump mode is one voice can make by a word. A button built
-/// without a word for it fails here.
+/// without a word for it fails here. All but the microphone's own: what it
+/// does is said "Hey, Clew" and "Bye, Clew" ([`crate::ui::heard::named_only`]),
+/// not its label.
 #[test]
 fn every_button_a_click_presses_a_word_presses_too() {
     let mut unsaid = Vec::new();
+    let microphone = format!("{:?}", Message::Voice(crate::VoiceMsg::Toggle));
     for (name, app) in audited_states() {
         let (targets, marks) = crate::ui::heard::gather_all(&app);
         assert!(!marks.is_empty(), "{name}: nothing marked");
         let offered: std::collections::HashSet<String> =
             targets.iter().map(|t| format!("{:?}", t.message)).collect();
+        assert!(
+            !offered.contains(&microphone),
+            "{name}: the microphone's button offered to be said"
+        );
         for (mark, _) in marks {
-            if !offered.contains(&mark) {
+            if mark != microphone && !offered.contains(&mark) {
                 unsaid.push(format!("{name}: {mark}"));
             }
         }

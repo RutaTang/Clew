@@ -268,7 +268,7 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
         .padding(0)
         .width(Length::Fixed(26.0))
         .height(Length::Fixed(26.0))
-        .on_press(super::heard::said(
+        .on_press(super::heard::named_only(
             if listening {
                 tr!("Stop listening")
             } else {
@@ -1215,7 +1215,11 @@ pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, M
         .padding(0)
         .width(Length::Fixed(side))
         .height(Length::Fixed(side))
-        .on_press(super::heard::said(tip, Message::Voice(message)));
+        .on_press(if matches!(message, VoiceMsg::Toggle) {
+            super::heard::named_only(tip, Message::Voice(message))
+        } else {
+            super::heard::said(tip, Message::Voice(message))
+        });
 
     Some(tip_at(lit, tip, chord, tooltip::Position::Top))
 }

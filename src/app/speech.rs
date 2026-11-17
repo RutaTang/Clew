@@ -319,6 +319,10 @@ pub(crate) struct Speech {
     hushed: HashSet<u64>,
     /// Sentences waiting to be made into speech, in order.
     queue: VecDeque<Sentence>,
+    /// The sentences of the answer on its stream that no voice here could
+    /// say, in order: what is read of it once one can
+    /// ([`App::read_now_heard`]) — not what was heard of it already.
+    unsaid: Option<(u64, Vec<Sentence>)>,
     /// A sentence is being made.
     making: bool,
     /// Bumped by every stop: what was being made before it is dropped when
@@ -388,6 +392,7 @@ impl Speech {
             reading: None,
             hushed: HashSet::new(),
             queue: VecDeque::new(),
+            unsaid: None,
             making: false,
             round: 0,
             current: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -788,12 +793,13 @@ impl App {
         (!elsewhere).then_some((blocked, !here.is_empty()))
     }
 
-    /// The answer on `stream`, which the Ask card said a voice was needed
+    /// What of the answer on `stream` the Ask card said a voice was needed
     /// to read, read now that the voice is here — what its Download was
-    /// pressed for — while it is still the last answer, on the card, and
-    /// nothing is being said, nor anyone heard saying something. Not one
-    /// still coming: it is being read, the voice heard from its next
-    /// sentence.
+    /// pressed for: the sentences no voice could say, not those heard
+    /// already — while it is still the last answer, on the card, not
+    /// stopped, and nothing is being said, nor anyone heard saying
+    /// something. Not one still coming: it is being read, the voice heard
+    /// from its next sentence.
     fn read_now_heard(&mut self, stream: u64) -> Task<Message> {
         let read_aloud = self.voice.prefs.read_aloud;
         let Some(done) = self
@@ -814,11 +820,20 @@ impl App {
             || !self.ask_view.is_open()
             || speech.reading.is_some()
             || speech.is_speaking()
+            || speech.hushed.contains(&stream)
             || hearing
         {
             return Task::none();
         }
-        self.read_answer(stream, true)
+        let speech = &mut self.voice.speech;
+        match speech.unsaid.take() {
+            Some((s, unsaid)) if s == stream => {
+                speech.queue.extend(unsaid);
+                self.hold_mic_for_clew();
+                self.speak_next()
+            }
+            _ => self.read_answer(stream, true),
+        }
     }
 
     /// Whether `model` is downloaded.
@@ -871,6 +886,9 @@ impl App {
                 speech.hush();
             }
             speech.reading = Some((stream, Reader::new(Some(&usual))));
+            if speech.unsaid.as_ref().is_some_and(|(s, _)| *s != stream) {
+                speech.unsaid = None;
+            }
             // What kept an earlier answer from being heard is not said of
             // this one: only if it keeps this one too.
             if speech
@@ -1070,6 +1088,13 @@ impl App {
             };
             let Some(model) = model else {
                 unheard(self);
+                if let Some(stream) = answer {
+                    let speech = &mut self.voice.speech;
+                    match &mut speech.unsaid {
+                        Some((s, unsaid)) if *s == stream => unsaid.push(sentence.clone()),
+                        _ => speech.unsaid = Some((stream, vec![sentence.clone()])),
+                    }
+                }
                 // An answer's: the voice that would read it is said — once a
                 // window on the status line, which is not a nag, and on the
                 // Ask card's voice line, with its download or how far that

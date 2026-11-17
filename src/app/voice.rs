@@ -1744,42 +1744,7 @@ impl App {
         let Some(path) = self.voice.store.as_ref().map(|s| s.path(model)) else {
             return self.on_transcribed(token, Err(tr!("no data directory for the model").into()));
         };
-        // The window's command names, so whisper spells them as they are
-        // spelled here — and only those: the longer the hint, the likelier
-        // whisper is to hear it in what was not clearly said. The phrases
-        // said with a value ("go to line 30") use the titles' words.
-        //
-        // Not the settings' choices ("Voice language: Portuguese", "Speed:
-        // 1.25×", the only commands shown in parts, `shown_as`): listed
-        // last, four times the length of the rest, they were all whisper
-        // kept of the hint (`whisper::hint` keeps its end), and "open the
-        // call graph" was heard as "open the call draft". Their values are
-        // everyday words whisper spells unaided. And the rest backwards:
-        // the palette lists the window's own commands first — the graphs,
-        // Explain, Time Travel — and those are the ones to keep.
-        let mut seen = std::collections::HashSet::new();
-        let words: Vec<String> = self
-            .palette_commands()
-            .iter()
-            .rev()
-            .filter(|c| c.shown_as.is_none())
-            // Not the voice key's own "Talk": nobody says it, and whisper
-            // would hear it for "start".
-            .filter(|c| {
-                !matches!(
-                    c.action,
-                    crate::app::palette::PaletteAction::Send(Message::Editor(
-                        EditorMsg::RunAction(crate::keymap::Action::Voice)
-                    ))
-                )
-            })
-            .map(|c| hint_case(c.shown().trim_end_matches('…')))
-            // Clew's own name, as it is called by — not "clue".
-            .chain(["Clew".to_string()])
-            .filter(|w| seen.insert(w.clone()))
-            .collect();
-        // Ended as a sentence is: what is said after it starts as one.
-        let hint = format!("{}.", words.join(", "));
+        let hint = self.whisper_hint();
         let options = Options {
             language: self.voice.prefs.language.clone(),
             hint,
@@ -1806,6 +1771,40 @@ impl App {
             },
             move |result| Message::Voice(VoiceMsg::Transcribed { token, result }),
         )
+    }
+
+    /// What whisper is told to expect, as it works out what was said in
+    /// this window.
+    pub(crate) fn whisper_hint(&self) -> String {
+        // The window's command names, so whisper spells them as they are
+        // spelled here — and only those: the longer the hint, the likelier
+        // whisper is to hear it in what was not clearly said. The phrases
+        // said with a value ("go to line 30") use the titles' words.
+        //
+        // Not the settings' choices ("Voice language: Portuguese", "Speed:
+        // 1.25×", the only commands shown in parts, `shown_as`): listed
+        // last, four times the length of the rest, they were all whisper
+        // kept of the hint (`whisper::hint` keeps its end), and "open the
+        // call graph" was heard as "open the call draft". Their values are
+        // everyday words whisper spells unaided. And the rest backwards:
+        // the palette lists the window's own commands first — the graphs,
+        // Explain, Time Travel — and those are the ones to keep.
+        let mut seen = std::collections::HashSet::new();
+        let words: Vec<String> = self
+            .palette_commands()
+            .iter()
+            .rev()
+            .filter(|c| c.shown_as.is_none())
+            // Not the voice key's own "Talk": it is never what is said
+            // ([`heard_command`]), and whisper would hear it for "start".
+            .filter(|c| !c.is_the_voice_key())
+            .map(|c| hint_case(c.shown().trim_end_matches('…')))
+            // Clew's own name, as it is called by — not "clue".
+            .chain(["Clew".to_string()])
+            .filter(|w| seen.insert(w.clone()))
+            .collect();
+        // Ended as a sentence is: what is said after it starts as one.
+        format!("{}.", words.join(", "))
     }
 
     /// Esc, or the Cancel of a command waiting for a yes: no to that
@@ -1888,9 +1887,8 @@ impl App {
         } else {
             crate::app::spoken::without_name(&text)
         };
-        // "Bye, Clew", "Stop listening" — after the name or not: the
-        // microphone turned off — or, called by its name, waiting for it
-        // again. A command waiting for a yes is put away, as by anything
+        // "Bye, Clew" — after the name or not: the microphone turned off —
+        // or, called by its name, waiting for it again. A command waiting for a yes is put away, as by anything
         // else said.
         if crate::app::spoken::stops_listening(&text) || crate::app::spoken::stops_listening(named)
         {
@@ -1975,7 +1973,10 @@ impl App {
         if let Some(task) = self.heard_on_screen(text, &targets, true) {
             return Some(task);
         }
-        let commands = self.palette_commands();
+        // Not the voice key's own "Talk": the microphone is let go of by
+        // "Bye, Clew" alone.
+        let mut commands = self.palette_commands();
+        commands.retain(|c| !c.is_the_voice_key());
         // Said in English, or as the palette shows it in the reader's
         // language.
         let found = crate::app::palette::command_said(text, &commands).or_else(|| {

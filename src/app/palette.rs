@@ -180,6 +180,18 @@ impl PaletteCommand {
         }
     }
 
+    /// Whether it is the voice key's own "Talk", which turns the
+    /// microphone on or off: never matched to what is said — said, the
+    /// microphone is already on, and it is let go of by "Bye, Clew" alone.
+    pub(crate) fn is_the_voice_key(&self) -> bool {
+        matches!(
+            self.action,
+            PaletteAction::Send(Message::Editor(EditorMsg::RunAction(
+                crate::keymap::Action::Voice
+            )))
+        )
+    }
+
     /// Whether the agent, running it, asks the user first: what costs
     /// something ([`Self::costly`]), and a setting that changes what the
     /// microphone takes in and what is done with it, where the project's

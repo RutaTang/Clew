@@ -1,8 +1,9 @@
 //! Waiting to be called ([`clew_voice::wake`]): with "Start listening when
 //! you say “Hey, Clew”" on, the microphone waits whenever it is not
-//! listening, and "Hey, Clew" starts listening; "Bye, Clew" or "Stop
-//! listening" ([`crate::app::spoken::stops_listening`]) — or a while with
-//! nothing said ([`IDLE`]) — has it wait again.
+//! listening, and "Hey, Clew" starts listening; "Bye, Clew"
+//! ([`crate::app::spoken::stops_listening`]) — or a while with nothing said
+//! ([`IDLE`]) — has it wait again. Both are said as they are in every
+//! language.
 //!
 //! While it waits, what the microphone hears goes, piece by piece, to a
 //! small keyword spotter (`clew-speak listen`) and nowhere else: nothing is
@@ -627,11 +628,12 @@ impl App {
             self.end_hold(call, false);
             return true;
         }
-        // "Bye, Clew" is said to Clew too. Heard while Clew spoke, its own
-        // words heard back are no call.
+        // "Bye, Clew" is said to Clew too — and lets it go on reading: it
+        // ends listening, not what Clew says. Heard while Clew spoke, its
+        // own words heard back are no call.
         let held = self.voice.wake.held.is_some_and(|h| h.call == call);
-        let to_clew = crate::app::spoken::named_in(text).is_some()
-            || crate::app::spoken::stops_listening(text);
+        let stops = crate::app::spoken::stops_listening(text);
+        let to_clew = crate::app::spoken::named_in(text).is_some() || stops;
         let named = to_clew
             && (!held || crate::app::voice::said_over(text, &self.voice.speech.said_lately()));
         if !named {
@@ -643,7 +645,7 @@ impl App {
             self.voice.wake.unproven = None;
         }
         self.voice.prove(call);
-        self.end_hold(call, true);
+        self.end_hold(call, !stops);
         // Given up on — what was heard first was no call — and named after
         // all in what was said next, the spotter not listening meanwhile:
         // a call, and listening begins again for it, Clew stopped.

@@ -2889,7 +2889,9 @@ fn clews_name_alone_asks_nothing() {
 
 /// "Bye, Clew": called by its name, the microphone waits for it again —
 /// the one that listened, kept open; the pill says it stopped listening.
-/// Not called by it, "Stop listening" turns the microphone off.
+/// Not called by it, "Bye, Clew" turns the microphone off. "Stop
+/// listening" and "Talk" — the microphone button's labels, and the voice
+/// key's — are not how it is said: they do not stop it.
 #[test]
 fn bye_clew_waits_for_its_name_again() {
     let (_turn, mut app, script, _, _) = wake_app("wake-bye", "Bye, Clew!", 1);
@@ -2922,11 +2924,30 @@ fn bye_clew_waits_for_its_name_again() {
         Some(&HeardOutcome::Ran("Stop listening".into()))
     );
     drop(app);
-    let (mut app, script, _) = voice_app("wake-stop-listening", "Stop listening.");
+    let (mut app, script, _) = voice_app("wake-bye-off", "Bye, Clew.");
     say(&mut app, &script);
     assert!(!app.voice.mic_on && !app.voice.is_listening());
     assert!(!app.voice.wake.is_waiting());
     assert!(script.lock().unwrap().stopped, "closed");
+    drop(app);
+    // Nor the voice key's "Talk", or its button's labels.
+    for (tag, said) in [
+        ("wake-stop-listening", "Stop listening."),
+        ("wake-talk", "Talk."),
+    ] {
+        let (mut app, script, _) = voice_app(tag, said);
+        say(&mut app, &script);
+        assert!(app.voice.mic_on, "{said} {:?}", app.voice.heard);
+        assert!(!script.lock().unwrap().stopped, "{said}");
+        assert!(
+            !matches!(
+                app.voice.heard.as_ref().map(|h| &h.outcome),
+                Some(HeardOutcome::Ran(_))
+            ),
+            "{said} {:?}",
+            app.voice.heard
+        );
+    }
 }
 
 /// The voice key, while the microphone waits: it listens — with that
@@ -3718,6 +3739,94 @@ fn the_keyword_spotter_downloads_verified_and_is_removed() {
     assert!(app.voice.wake.download.is_none());
     assert!(app.voice.wake.is_waiting(), "{}", app.status);
     assert_eq!(app.status, "Waiting for “Hey, Clew”");
+}
+
+/// Calls in each of Clew's languages, as a real Whisper model writes them
+/// with the window's own hint: Clew's name is found in every one, whether
+/// the language is set or found by Whisper. Opt-in: `CLEW_NAME_WHISPER`
+/// names a multilingual model (Small, the default), `CLEW_NAME_CALLS` a
+/// folder of 16-bit mono WAVs named `<language>_….wav`.
+#[test]
+#[ignore = "needs a real Whisper model and recordings of calls"]
+fn real_calls_in_each_language_name_clew() {
+    let (Some(model), Some(dir)) = (
+        std::env::var_os("CLEW_NAME_WHISPER").map(PathBuf::from),
+        std::env::var_os("CLEW_NAME_CALLS").map(PathBuf::from),
+    ) else {
+        eprintln!("skipped: CLEW_NAME_WHISPER and CLEW_NAME_CALLS not set");
+        return;
+    };
+    let app = scanned_app("name-calls");
+    let hint = app.whisper_hint();
+    let mut calls: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "wav"))
+        .collect();
+    calls.sort();
+    assert!(!calls.is_empty(), "no recordings in {}", dir.display());
+    let mut missed = Vec::new();
+    let mut heard = 0;
+    for path in &calls {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let lang = name.split('_').next().unwrap().to_string();
+        let (samples, rate) = read_wav(path);
+        let audio = clew_voice::audio::prepare(&samples, rate).expect("speech in it");
+        for language in [Some(lang.clone()), None] {
+            let options = Options {
+                language: language.clone(),
+                hint: hint.clone(),
+                threads: 0,
+            };
+            let text = app
+                .voice
+                .transcriber
+                .transcribe(&model, &audio, &options, &AtomicBool::new(false))
+                .unwrap();
+            let named = crate::app::spoken::named_in(&text);
+            eprintln!(
+                "{name} [{}]: {text:?} -> {named:?}",
+                language.as_deref().unwrap_or("found")
+            );
+            heard += 1;
+            if named.is_none() {
+                missed.push(format!("{name} [{language:?}]: {text}"));
+            }
+        }
+    }
+    eprintln!("named in {}/{heard}", heard - missed.len());
+    assert!(missed.is_empty(), "{missed:#?}");
+}
+
+/// A 16-bit PCM WAV's samples, as -1 to 1, and its rate: mono, or its
+/// first channel.
+fn read_wav(path: &Path) -> (Vec<f32>, u32) {
+    let bytes = std::fs::read(path).unwrap();
+    let u16_at = |i: usize| u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+    let u32_at =
+        |i: usize| u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+    let (mut at, mut rate, mut channels) = (12, 0, 1);
+    while at + 8 <= bytes.len() {
+        let size = u32_at(at + 4) as usize;
+        let body = at + 8;
+        match &bytes[at..at + 4] {
+            b"fmt " => {
+                channels = u16_at(body + 2) as usize;
+                rate = u32_at(body + 4);
+            }
+            b"data" => {
+                let end = (body + size).min(bytes.len());
+                let samples = bytes[body..end]
+                    .chunks_exact(2 * channels)
+                    .map(|frame| i16::from_le_bytes([frame[0], frame[1]]) as f32 / 32768.0)
+                    .collect();
+                return (samples, rate);
+            }
+            _ => {}
+        }
+        at = body + size + size % 2;
+    }
+    panic!("no data in {}", path.display());
 }
 
 /// Waiting as it does on the reader's computer — neither a test's
