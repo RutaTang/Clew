@@ -3184,12 +3184,18 @@ fn the_voice_key_takes_a_call_over() {
     app.voice.forget_last_press();
     let task = app.update(Message::Voice(VoiceMsg::Toggle));
     settle(&mut app, task);
-    assert!(app.proj.ask_turns.is_empty() && app.proj.ask_input.is_empty());
     assert!(app.voice.mic_on && app.voice.is_listening());
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
     settle(&mut app, task);
-    assert!(app.settings.open, "{}", app.status);
+    assert!(app.proj.ask_turns.is_empty() && app.proj.ask_input.is_empty());
+    assert_eq!(
+        app.voice
+            .heard
+            .as_ref()
+            .map(|h| (h.text.as_str(), &h.outcome)),
+        Some(("Open settings.", &HeardOutcome::Ran("Settings".into())))
+    );
 }
 
 /// "Goodbye, Clew" said once called, the call before it: it waits again —
