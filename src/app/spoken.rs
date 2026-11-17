@@ -409,7 +409,8 @@ pub(crate) fn stops_listening(said: &str) -> bool {
         for name in NAMES.iter().chain(NAMES_BEFORE_JAPANESE) {
             text = text.replace(name, "clew");
         }
-        text
+        // Korean's calling "야" or "아" after it ("바이 클루야").
+        text.replace("clew야", "clew").replace("clew아", "clew")
     };
     let said: Vec<char> = compact(said).chars().collect();
     if said.is_empty() {
@@ -1213,6 +1214,8 @@ mod tests {
                     "バイバイ、クルー。",
                     "バイ、Clew。",
                     "바이 클루.",
+                    "바이 클루야.",
+                    "Bye, Clew야.",
                     "Bye, Crew.",
                 ] {
                     assert!(stops_listening(said), "{lang:?}: {said}");
@@ -1224,6 +1227,8 @@ mod tests {
                     "잘 가, Clew.",
                     "さようなら、クルー。",
                     "拜拜",
+                    "Bye, Clew. 아, 잠깐",
+                    "바이 클루 아니야",
                 ] {
                     assert!(!stops_listening(said), "{lang:?}: {said}");
                 }
