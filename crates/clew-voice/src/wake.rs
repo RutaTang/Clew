@@ -1018,11 +1018,12 @@ mod tests {
         // One spotter, let go of what it heard before each recording, as a
         // waiting begins afresh — each recording said at several moments
         // after: the model hears a phrase less well at some places in its
-        // stream than at others, 1.1 s and 2.7 s among them.
+        // stream than at others, 1.1 s and 2.7 s among them; and after a
+        // long quiet, as it is most often said, the gain at its most.
         let mut spotter = Spotter::start(Path::new(&program), Path::new(&model)).unwrap();
         for path in names {
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            for after in [0.5, 1.1, 2.7] {
+            for after in [0.5, 1.1, 2.7, 6.0] {
                 spotter.reset().unwrap();
                 let mut samples = vec![0.0; (RATE as f32 * after) as usize];
                 samples.extend(read(&path));
