@@ -649,6 +649,7 @@ impl App {
         // own words heard back are no call.
         let held = self.voice.wake.held.is_some_and(|h| h.call == call);
         let stops = crate::app::spoken::says_bye(text, true);
+        let goes_on = crate::app::spoken::leaves_clew_speaking(text, true);
         let to_clew = crate::app::spoken::named_in(text).is_some() || stops;
         let named = to_clew
             && (!held || crate::app::voice::said_over(text, &self.voice.speech.said_lately()));
@@ -661,7 +662,7 @@ impl App {
             self.voice.wake.unproven = None;
         }
         self.voice.prove(call);
-        self.end_hold(call, !stops);
+        self.end_hold(call, !goes_on);
         // Given up on — what was heard first was no call — and named after
         // all in what was said next, the spotter not listening meanwhile:
         // a call, and listening begins again for it, Clew stopped. Not for

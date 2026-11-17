@@ -991,7 +991,7 @@
  "Listed the window's commands": "已列出窗口的命令",
  "Listening": "聆听",
  "Listening…": "正在聆听…",
- "Listening… say a command or a question — or “Bye, Clew” to stop": "正在聆听…请说出命令或问题——或说“Bye, Clew”停止",
+ "Listening… say a command or question — “Bye, Clew” stops listening": "正在聆听…请说出命令或问题——说“Bye, Clew”停止聆听",
  "Listening… say yes to run {command}, or no": "正在聆听…说“是”运行“{command}”，说“不”则取消",
  "Loading history…": "正在加载历史…",
  "Loading revision…": "正在加载版本…",

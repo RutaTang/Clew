@@ -1128,7 +1128,11 @@ impl App {
                 self.on_voice_escape();
                 Task::none()
             }
-            VoiceMsg::Tick => self.on_voice_tick(),
+            VoiceMsg::Tick => {
+                let task = self.on_voice_tick();
+                // What waited for someone to be heard out.
+                Task::batch([task, self.read_put_off()])
+            }
             VoiceMsg::Judged {
                 listen,
                 pause,
@@ -1347,6 +1351,22 @@ impl App {
     ///
     /// Called by its name ([`VoicePrefs::wake`]), it waits for it again —
     /// with the microphone that listened, if it is still open.
+    /// "Bye, Clew": listening ends — and what was said after it, being
+    /// heard or waiting to be worked out, said to someone else in the room,
+    /// is let go of, not done.
+    fn said_bye(&mut self) -> Task<Message> {
+        self.voice.mic_on = false;
+        self.voice.unheard.clear();
+        self.wait_again();
+        self.voice.wake.listening_ended();
+        self.status = if self.resume_waiting() {
+            tr!("Stopped listening — say “Hey, Clew” to start again").into()
+        } else {
+            tr!("Stopped listening").into()
+        };
+        Task::none()
+    }
+
     fn mic_off(&mut self) -> Task<Message> {
         self.voice.mic_on = false;
         self.status = tr!("Stopped listening").into();
@@ -1515,7 +1535,9 @@ impl App {
                 "Listening… say yes to run {command}, or no",
                 command = waiting.said()
             ),
-            None => tr!("Listening… say a command or a question — or “Bye, Clew” to stop").into(),
+            None => {
+                tr!("Listening… say a command or question — “Bye, Clew” stops listening").into()
+            }
         };
     }
 
@@ -1606,7 +1628,7 @@ impl App {
                     self.voice.speech.hold();
                     self.voice.over_from = Some(from);
                     self.status =
-                        tr!("Listening… say a command or a question — or “Bye, Clew” to stop")
+                        tr!("Listening… say a command or question — “Bye, Clew” stops listening")
                             .into();
                 }
                 None => quiet = None,
@@ -1853,15 +1875,10 @@ impl App {
         // gone on, is theirs.
         if said.over.is_some() {
             let holds = said.over == self.voice.speech.held_since();
-            // "Bye, Clew" — or the microphone's label, which only says
-            // what does stop listening — leaves what Clew says be.
             let (to_clew, bye) = result.as_ref().map_or((false, false), |text| {
                 (
                     said_over(text, &self.voice.speech.said_lately()),
-                    crate::app::spoken::says_bye(text, call)
-                        || crate::app::spoken::says_stop_listening(
-                            crate::app::spoken::what_is_said(text, call),
-                        ),
+                    crate::app::spoken::leaves_clew_speaking(text, call),
                 )
             });
             if !to_clew {
@@ -1912,7 +1929,7 @@ impl App {
                 text,
                 outcome: HeardOutcome::Ran(tr_noop!("Stop listening").into()),
             });
-            return self.mic_off();
+            return self.said_bye();
         }
         // The microphone's label said instead: not a question for Ask —
         // what stops listening is said.

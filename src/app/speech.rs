@@ -323,6 +323,10 @@ pub(crate) struct Speech {
     /// say, in order: what is read of it once one can
     /// ([`App::read_now_heard`]) — not what was heard of it already.
     unsaid: Option<(u64, Vec<Sentence>)>,
+    /// The answer on this stream whose missing voice came while Clew could
+    /// not begin to say what went unsaid of it — someone being heard, or
+    /// Settings' Try speaking: said once it may ([`App::read_put_off`]).
+    put_off: Option<u64>,
     /// A sentence is being made.
     making: bool,
     /// Bumped by every stop: what was being made before it is dropped when
@@ -393,6 +397,7 @@ impl Speech {
             hushed: HashSet::new(),
             queue: VecDeque::new(),
             unsaid: None,
+            put_off: None,
             making: false,
             round: 0,
             current: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -502,14 +507,14 @@ impl Speech {
         self.making && self.output.as_ref().is_none_or(|o| o.idle())
     }
 
-    /// Speaking, onto `output`, as loud as `level`: as when a sentence has
-    /// just been played.
     /// A sentence Clew said a moment ago, for its words to be heard back.
     #[cfg(test)]
     pub(crate) fn said_for_test(&mut self, sentence: &str) {
         self.said_lately.push_back(sentence.to_string());
     }
 
+    /// Speaking, onto `output`, as loud as `level`: as when a sentence has
+    /// just been played.
     #[cfg(test)]
     pub(crate) fn speak_for_test(&mut self, output: Box<dyn Playing>, level: f32) {
         self.output = Some(output);
@@ -805,53 +810,59 @@ impl App {
     /// already — while it is still the last answer, on the card, and not
     /// stopped. Still being read — more of it coming, or its last sentences
     /// being said — they are said next, after the sentence being said; else
-    /// at once, unless someone is heard saying something.
+    /// at once — or, someone heard saying something or Try speaking, once
+    /// Clew may ([`App::read_put_off`]).
     fn read_now_heard(&mut self, stream: u64) -> Task<Message> {
+        self.voice.speech.put_off = None;
         let read_aloud = self.voice.prefs.read_aloud;
-        let Some(done) = self
+        if !self
             .proj
             .ask_turns
             .last()
-            .filter(|t| t.stream == stream && read_aloud.reads(t.spoken))
-            .map(|t| !t.streaming)
-        else {
+            .is_some_and(|t| t.stream == stream && read_aloud.reads(t.spoken))
+        {
             return Task::none();
-        };
+        }
         let hearing = self
             .voice
             .listening_now()
             .is_some_and(|l| l.silence_after_speech().is_some());
         let speech = &mut self.voice.speech;
-        if !self.ask_view.is_open() || speech.hushed.contains(&stream) || speech.trying {
+        if !self.ask_view.is_open() || speech.hushed.contains(&stream) {
             return Task::none();
         }
-        let reading = speech.reading.is_some() || speech.is_speaking();
-        // Someone heard saying something, and Clew not speaking: it does
-        // not begin to.
-        if hearing && !speech.is_speaking() {
+        // Settings' Try speaking, or someone heard saying something with
+        // Clew silent: it does not begin to — not yet.
+        if speech.trying || (hearing && !speech.is_speaking()) {
+            speech.put_off = Some(stream);
             return Task::none();
         }
-        match speech.unsaid.take() {
-            Some((s, unsaid)) if s == stream => {
-                // Next, in their place: each came before all still to be
-                // said of the answer.
-                let speaking = speech.is_speaking();
-                for sentence in unsaid.into_iter().rev() {
-                    speech.queue.push_front(sentence);
-                }
-                if speaking {
-                    return Task::none();
-                }
-                self.hold_mic_for_clew();
-                self.speak_next()
-            }
+        let unsaid = match speech.unsaid.take() {
+            Some((s, unsaid)) if s == stream => unsaid,
             other => {
                 speech.unsaid = other;
-                if reading || !done {
-                    return Task::none();
-                }
-                self.read_answer(stream, true)
+                return Task::none();
             }
+        };
+        // Next, in their place: each came before all still to be said of
+        // the answer.
+        let speaking = speech.is_speaking();
+        for sentence in unsaid.into_iter().rev() {
+            speech.queue.push_front(sentence);
+        }
+        if speaking {
+            return Task::none();
+        }
+        self.hold_mic_for_clew();
+        self.speak_next()
+    }
+
+    /// What went unsaid of an answer whose voice came while Clew could not
+    /// begin to say it ([`Speech::put_off`]): said now, if Clew may.
+    pub(crate) fn read_put_off(&mut self) -> Task<Message> {
+        match self.voice.speech.put_off {
+            Some(stream) => self.read_now_heard(stream),
+            None => Task::none(),
         }
     }
 
@@ -1423,7 +1434,8 @@ impl App {
         speech.quiet_since = None;
         speech.level = 0.0;
         self.resume_listening();
-        Task::none()
+        // What waited for Try to end.
+        self.read_put_off()
     }
 
     /// The output stopped playing, saying why (`error`) or not: opened

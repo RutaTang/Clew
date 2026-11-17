@@ -126,6 +126,8 @@ struct OutputScript {
     absent: bool,
     /// Held: the reader talks over Clew.
     paused: bool,
+    /// Seconds of speech it says it has yet to play: the test says.
+    queued: f32,
 }
 
 struct Output(Arc<Mutex<OutputScript>>);
@@ -148,7 +150,7 @@ impl Playing for Output {
         1000
     }
     fn queued_seconds(&self) -> f32 {
-        0.0
+        self.0.lock().unwrap().queued
     }
     fn idle(&self) -> bool {
         self.0.lock().unwrap().idle
@@ -1100,6 +1102,109 @@ fn what_went_unsaid_waits_for_what_is_being_said() {
         "{:?}",
         voice.texts()
     );
+}
+
+/// What went unsaid of an answer, its voice come while Clew is still
+/// reading it, is said next — in its place, before what of the answer
+/// waits to be said.
+#[test]
+fn what_went_unsaid_is_said_in_its_place() {
+    let (mut app, voice, output) = speech_app("speech-unsaid-place");
+    let store = app.voice.store.clone().unwrap();
+    let qwen = speech::find("qwen3-tts").unwrap();
+    speech::remove(&store, qwen).unwrap();
+    install(&app, speech::find("supertonic-3").unwrap());
+    // Plenty yet to play: the next sentence waits to be made.
+    output.lock().unwrap().queued = 60.0;
+    asked(&mut app, 1, true);
+    delta(
+        &mut app,
+        1,
+        "总数是所有价格的和。The total adds every price. Then it rounds.",
+    );
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert_eq!(voice.texts(), ["The total adds every price."]);
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+    install(&app, qwen);
+    let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+        id: "qwen3-tts",
+        result: Ok(()),
+    }));
+    settle(&mut app, task);
+    output.lock().unwrap().queued = 0.0;
+    for _ in 0..4 {
+        all_played(&mut app, &output);
+    }
+    assert_eq!(
+        voice.texts(),
+        [
+            "The total adds every price.",
+            "总数是所有价格的和。",
+            "Then it rounds."
+        ]
+    );
+}
+
+/// Its voice come while Settings' Try speaks, or while someone is heard
+/// saying something with Clew silent, what went unsaid waits — and is
+/// said once Try is over, or they are heard out.
+#[test]
+fn what_went_unsaid_waits_for_clew_to_be_free_to_say_it() {
+    for tried in [true, false] {
+        let (mut app, voice, output) = speech_app("speech-unsaid-put-off");
+        let model = app.voice.prefs.model();
+        let store = app.voice.store.clone().unwrap();
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.path(model), b"a model").unwrap();
+        let qwen = speech::find("qwen3-tts").unwrap();
+        speech::remove(&store, qwen).unwrap();
+        install(&app, speech::find("supertonic-3").unwrap());
+        app.voice.open_mic = talking_mic;
+        app.voice.transcriber = Arc::new(Hears("wait".into()));
+        TALK.with(|t| t.set(None));
+        OVER.with(|o| o.set(None));
+        GONE.with(|g| g.set(false));
+        let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+        asked(&mut app, 1, true);
+        delta(&mut app, 1, "总数是所有价格的和。");
+        ended(&mut app, 1, StreamOutcome::Done);
+        assert!(voice.texts().is_empty());
+        if tried {
+            let task = app.update(Message::Voice(VoiceMsg::TrySpeech("supertonic-3")));
+            settle(&mut app, task);
+        } else {
+            TALK.with(|t| t.set(Some(0.1)));
+        }
+        let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+        install(&app, qwen);
+        let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+            id: "qwen3-tts",
+            result: Ok(()),
+        }));
+        settle(&mut app, task);
+        let chinese = |voice: &Voice| voice.texts().contains(&"总数是所有价格的和。".to_string());
+        assert!(
+            !chinese(&voice),
+            "{tried}: not over Try, nor over the reader"
+        );
+        if tried {
+            for _ in 0..4 {
+                if app.voice.speech.is_speaking() {
+                    all_played(&mut app, &output);
+                }
+            }
+        } else {
+            TALK.with(|t| t.set(None));
+            let task = app.update(Message::Voice(VoiceMsg::Tick));
+            settle(&mut app, task);
+        }
+        assert!(
+            chinese(&voice),
+            "{tried}: said once Clew may {:?}",
+            voice.texts()
+        );
+        let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    }
 }
 
 /// A voice downloaded says which answers it reads — none of those in the
