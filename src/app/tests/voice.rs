@@ -1198,11 +1198,17 @@ fn the_debugger_is_driven_by_voice() {
             .is_some_and(|b| b.contains_key(&4))
     );
 
-    // Starting asks; "no" says no, "yes" runs it.
+    // Starting asks; "no" says no, "yes" runs it. How to answer is said
+    // first, before what was heard: a long utterance cut off at the end of
+    // the status bar takes nothing of it.
     say_words(&mut app, &script, "Start debugging.");
     assert_eq!(
         app.voice.confirm.as_ref().map(|w| w.said()),
         Some("Start Debugging")
+    );
+    assert_eq!(
+        app.status,
+        "Start Debugging? Say yes or no — “Start debugging.”"
     );
     say_words(&mut app, &script, "No, never mind.");
     assert!(app.voice.confirm.is_none());
@@ -2176,12 +2182,73 @@ fn what_undoes_waits_for_a_yes() {
         "{}",
         app.status
     );
+    assert!(
+        app.status
+            .ends_with("? Say yes or no — “remove src/lib.rs 3”"),
+        "{}",
+        app.status
+    );
     assert_eq!(app.proj.bookmarks.len(), 1, "not before a yes");
     say_words(&mut app, &script, "no");
     assert_eq!(app.proj.bookmarks.len(), 1);
     say_words(&mut app, &script, "remove src/lib.rs 3");
     say_words(&mut app, &script, "yes");
     assert!(app.proj.bookmarks.is_empty(), "{}", app.status);
+}
+
+/// A yes said for the agent's question before its Allow can be pressed —
+/// the card just came up, or is not all in view — is not sent to the
+/// agent: it would read it as consent to what it said last. With no
+/// question on screen, a yes answers what the agent asked in words, and
+/// goes to it.
+#[test]
+fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption};
+    let (mut app, script, _) = voice_app("voice-yes-early", "");
+    app.asking.delay = std::time::Duration::from_secs(60);
+    app.ask_view = AskView::Compact;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 3,
+        question: "tidy the imports".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    let option = |id: &str, label: &str, allows: bool| ApprovalOption {
+        id: id.into(),
+        label: label.into(),
+        allows,
+        always: false,
+    };
+    app.proj.ask_turns[0].extras.approvals.push(Approval {
+        key: ApprovalKey::Mcp { call: 1 },
+        mark: None,
+        title: "files wants to write".into(),
+        detail: String::new(),
+        options: vec![
+            option("allow", "Allow", true),
+            option("deny", "Decline", false),
+        ],
+    });
+    say_words(&mut app, &script, "Yes.");
+    assert!(app.proj.ask_queue.is_empty(), "{:?}", app.proj.ask_queue);
+    assert!(app.proj.ask_input.is_empty(), "{}", app.proj.ask_input);
+    assert_eq!(app.proj.ask_turns.len(), 1);
+    assert!(
+        app.status.starts_with("The question can't be answered yet"),
+        "{}",
+        app.status
+    );
+    // No question on screen: the yes answers the agent in words, and goes
+    // to Ask (kept in its input here, with no key to ask with).
+    app.proj.ask_turns[0].extras.approvals.clear();
+    say_words(&mut app, &script, "Yes.");
+    assert_eq!(
+        app.voice.heard.as_ref().map(|h| &h.outcome),
+        Some(&HeardOutcome::Asked),
+        "{}",
+        app.status
+    );
+    assert_eq!(app.proj.ask_input, "Yes.");
 }
 
 /// A target of the window, as `ui::heard` offers one.
@@ -4231,7 +4298,10 @@ fn a_microphone_lost_while_listening_waits_for_the_call_again() {
     script.lock().unwrap().error = None;
     assert!(!app.voice.mic_on);
     assert!(!app.voice.is_listening());
-    assert_eq!(app.status, "Stopped listening: the device was unplugged");
+    assert_eq!(
+        app.status,
+        "Stopped listening — say “Hey, Clew” to start again (the device was unplugged)"
+    );
     assert!(app.voice.wake.is_waiting());
     assert_eq!(script.lock().unwrap().opened, opened + 1, "opened anew");
 }

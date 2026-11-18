@@ -1658,7 +1658,12 @@ impl App {
             // before, listening stopping is what is said.
             self.voice.wake.listening_ended();
             let failed_before = self.voice.wake.failed.is_some();
-            if self.resume_waiting() || failed_before || self.voice.wake.failed.is_none() {
+            if self.resume_waiting() {
+                self.status = tr!(
+                    "Stopped listening — say “Hey, Clew” to start again ({error})",
+                    error = e
+                );
+            } else if failed_before || self.voice.wake.failed.is_none() {
                 self.status = tr!("Stopped listening: {error}", error = e);
             }
             return Task::none();
@@ -2064,6 +2069,25 @@ impl App {
         if self.voice.prefs.run_commands {
             if let Some(task) = self.heard_command(&text) {
                 return task;
+            }
+            // A yes for the question on screen, said before its Allow can
+            // be pressed (`App::may_allow`), is no question for Ask: sent
+            // to the agent waiting on that question, it would read as
+            // consent to what it said last. A yes with no question on
+            // screen answers what the agent asked in words, and goes on.
+            if crate::app::spoken::only_yes_or_no(&text) == Some(true)
+                && self.question_on_screen().is_some()
+            {
+                let why: String = tr!(
+                    "The question can't be answered yet — say yes again once all of it is in view"
+                )
+                .into();
+                self.status = why.clone();
+                self.voice.hear(Heard {
+                    text,
+                    outcome: HeardOutcome::Failed(why),
+                });
+                return Task::none();
             }
         } else if let Some(task) = self.heard_commands_back_on(&text) {
             return task;

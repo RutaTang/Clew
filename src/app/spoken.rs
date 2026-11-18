@@ -181,10 +181,12 @@ const JAPANESE_TO_MANY: &[&str] = &[
     "あなたたち",
 ];
 /// The particles after a word for many ([`JAPANESE_TO_MANY`]) that make
-/// it what is spoken of — whose, who does, to whom, what, with whom —
-/// not whom the sentence is said to, as "で", "は" and "も" leave it
-/// ("Crew みんなで行こう").
-const JAPANESE_ABOUT_MANY: &[&str] = &["の", "が", "に", "を", "へ", "と", "から", "より"];
+/// it what is spoken of — whose, to whom, what, where, from or than whom
+/// — not whom the sentence is said to, as "で", "は" and "も" leave it
+/// ("Crew みんなで行こう"); "が" and "と" too, who does and with whom, but
+/// only with no hiragana after them: they begin words ("みんながんばって",
+/// "みんなとりあえず").
+const JAPANESE_ABOUT_MANY: &[&str] = &["の", "に", "を", "へ", "から", "より"];
 /// How a Japanese request ends: "開いて", "移動して", "ください".
 const JAPANESE_REQUEST_ENDS: &[&str] = &["て", "で", "ください", "下さい"];
 /// The "Hey" of "Hey, Clew", as whisper writes it.
@@ -312,9 +314,13 @@ fn called_name_at(at: &str, before: &str) -> Option<usize> {
     let next = unmarked(&at[end..]);
     let to_many = JAPANESE_TO_MANY.iter().any(|many| {
         next.strip_prefix(many).is_some_and(|rest| {
-            !JAPANESE_ABOUT_MANY
+            let about = JAPANESE_ABOUT_MANY
                 .iter()
                 .any(|particle| rest.starts_with(particle))
+                || rest
+                    .strip_prefix(['が', 'と'])
+                    .is_some_and(|word| !word.starts_with(hiragana));
+            !about
         })
     });
     (!to_many).then_some(end)
@@ -1470,8 +1476,15 @@ mod tests {
             named_in("Clew、みんなが使うファイルを開いて"),
             Some("みんなが使うファイルを開いて")
         );
-        // All together, said to a crew.
+        // All together, said to a crew — and words that begin with a
+        // particle's kana.
         assert_eq!(named_in("Crew、みんなで行こう"), None);
+        assert_eq!(named_in("Crew、みんながんばって"), None);
+        assert_eq!(named_in("ヘイクルー みんなとりあえず集合"), None);
+        assert_eq!(
+            named_in("Hey Clew、みんなと共有して"),
+            Some("みんなと共有して")
+        );
         // Or as Clew's own Japanese phrases say a value, shown in Japanese.
         with_lang(Lang::Ja, || {
             assert_eq!(named_in("Clew 30行目へ移動"), Some("30行目へ移動"));
