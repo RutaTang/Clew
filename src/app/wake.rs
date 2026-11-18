@@ -415,6 +415,11 @@ pub(crate) struct WakeState {
 }
 
 impl WakeState {
+    /// Whether `call` holds Clew: called as it spoke.
+    pub(crate) fn holds_for(&self, call: u64) -> bool {
+        self.held.as_ref().is_some_and(|h| h.call == call)
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             spotters: SPOTTERS.clone().map(|s| s as Arc<dyn Waking>),

@@ -2832,36 +2832,57 @@ fn a_word_that_closes_answers_only_the_question_on_top() {
     // drop-down, the find bar, Ask's menu of sessions — goes first, the
     // answer left alone; said again, with nothing left but Ask itself to
     // put away, it is that answer.
-    let cancel = [on_screen(
-        "Cancel",
-        Message::Ask(AskMsg::Approve {
-            stream: 1,
-            key: crate::app::model::ApprovalKey::Mcp { call: 1 },
-            option: "reject".into(),
-        }),
-        Layer::Ask,
-        Some(Answer::No),
-    )];
+    // An update's download shows its own "Cancel": the card's is still
+    // the card's.
+    let cancel = [
+        on_screen(
+            "Cancel",
+            Message::Ask(AskMsg::Approve {
+                stream: 1,
+                key: crate::app::model::ApprovalKey::Mcp { call: 1 },
+                option: "reject".into(),
+            }),
+            Layer::Ask,
+            Some(Answer::No),
+        ),
+        on_screen("Cancel", Message::Noop, Layer::Window, None),
+    ];
     // Whatever else is up put away first, as Esc would.
     for _ in 0..10 {
         if app.heard_on_screen("cancel", &[], true).is_none() {
             break;
         }
     }
-    app.ask_view = AskView::Compact;
-    app.proj.find.open = true;
-    app.ask_sessions_menu = true;
-    app.picker = Some(crate::app::pickers::Picker {
+    // A drop-down open in a dialog: put away before the dialog's own
+    // Cancel is pressed for it — and jump mode's codes, before all.
+    let picker = || crate::app::pickers::Picker {
         key: 1,
         picks: Vec::new(),
         at: 0,
         chosen: None,
         owner: None,
         built: 0,
-    });
+    };
+    let dialog = [on_screen(
+        "Cancel",
+        Message::Window(WindowMsg::OpenShortcuts),
+        Layer::Overlay,
+        Some(Answer::No),
+    )];
+    app.jump = Some(String::new());
+    app.picker = Some(picker());
+    assert!(app.heard_on_screen("cancel", &dialog, true).is_some());
+    assert!(app.jump.is_none() && app.picker.is_some(), "{}", app.status);
+    assert!(app.heard_on_screen("cancel", &dialog, true).is_some());
+    assert!(app.picker.is_none(), "{}", app.status);
+    assert!(app.status.ends_with("→ Closed"), "{}", app.status);
+    app.ask_view = AskView::Compact;
+    app.proj.find.open = true;
+    app.ask_sessions_menu = true;
+    app.picker = Some(picker());
     assert!(app.heard_on_screen("cancel", &cancel, true).is_some());
     assert!(app.picker.is_none(), "{}", app.status);
-    assert!(app.proj.find.open, "the find bar before the drop-down");
+    assert!(app.proj.find.open, "the drop-down goes before the find bar");
     assert!(app.status.ends_with("→ Closed"), "{}", app.status);
     assert!(app.heard_on_screen("cancel", &cancel, true).is_some());
     assert!(!app.proj.find.open, "{}", app.status);
@@ -4021,6 +4042,62 @@ fn clews_own_words_naming_it_are_no_call() {
     assert!(app.voice.speech.is_speaking(), "it goes on");
     assert!(!app.voice.speech.held());
     assert!(!app.settings.open, "none of it done");
+}
+
+/// A word that puts away, said over Clew ("Hey, Clew, cancel"), stops it
+/// reading — as Esc does first — and nothing more: the agent's card that
+/// waits, its own answer called "Cancel", is not answered by it, nor Ask
+/// put away.
+#[test]
+fn a_word_that_closes_said_over_clew_only_stops_it() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption};
+    let (turn, mut app, script, _, _) = wake_app("wake-cancel-over", "Hey, Clew. Cancel.", 1);
+    app.voice.prefs.talk_over = true;
+    app.ask_view = AskView::Compact;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 5,
+        question: "clean up".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    app.proj.ask_turns[0].extras.approvals.push(Approval {
+        key: ApprovalKey::Mcp { call: 1 },
+        mark: None,
+        title: "files wants to delete".into(),
+        detail: String::new(),
+        options: vec![
+            ApprovalOption {
+                id: "allow".into(),
+                label: "Allow".into(),
+                allows: true,
+                always: false,
+            },
+            ApprovalOption {
+                id: "reject".into(),
+                label: "Cancel".into(),
+                allows: false,
+                always: false,
+            },
+        ],
+    });
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(!app.voice.speech.is_speaking(), "Clew not stopped");
+    assert_eq!(app.status, "Stopped speaking");
+    assert_eq!(
+        app.proj.ask_turns[0].extras.approvals.len(),
+        1,
+        "the agent's tool call declined"
+    );
+    assert!(app.ask_view.is_open(), "Ask put away");
+    drop(app);
+    drop(turn);
 }
 
 /// "Bye, Clew" said over Clew is said to it, but ends listening, not what

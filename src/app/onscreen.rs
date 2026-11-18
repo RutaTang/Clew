@@ -459,6 +459,12 @@ impl App {
         first: bool,
     ) -> Option<Task<Message>> {
         if first {
+            // A drop-down open, or jump mode's codes up: what Esc puts away
+            // before anything else — a dialog's Close or Cancel under the
+            // drop-down is not pressed for it.
+            if dismisses(said) && (self.picker.is_some() || self.jump.is_some()) {
+                return self.dismiss_heard(said, targets);
+            }
             // A question on screen answered. A word that also puts away
             // what is on top ("cancel", "never mind") answers only a
             // question that is on top: said with a card in Ask, it closes
@@ -679,8 +685,8 @@ impl App {
         Task::none()
     }
 
-    /// Put away what is on top, in the order Esc does, for `said`: a
-    /// drop-down, the tutorial, a dialog or menu, the large Ask, Time
+    /// Put away what is on top, in the order Esc does, for `said`: jump
+    /// mode's codes, a drop-down, the tutorial, a dialog or menu, the large Ask, Time
     /// Travel, the find bar, Ask's menu of sessions, the Ask card, a page
     /// over the code. `None` when nothing is. Where it would put Ask itself
     /// away, an answer of the agent's card called by the very words said
@@ -689,7 +695,9 @@ impl App {
     /// while anything Esc takes first still goes first, the card's answer
     /// left alone.
     fn dismiss_heard(&mut self, said: &str, targets: &[Target]) -> Option<Task<Message>> {
-        let task = if self.picker.is_some() {
+        let task = if self.jump.take().is_some() {
+            Task::none()
+        } else if self.picker.is_some() {
             self.picker = None;
             Task::none()
         } else if self.tutorial.is_some() {
@@ -729,14 +737,31 @@ impl App {
             return None;
         }
         let approves = |t: &Target| matches!(t.message, Message::Ask(AskMsg::Approve { .. }));
-        named(said, targets)
+        // Named among the card's own answers: another "Cancel" on screen —
+        // an update's download — made the name stand for neither.
+        let drawn: Vec<Target> = targets
+            .iter()
             .filter(|t| t.layer == Layer::Ask && approves(t))
-            .map(|t| (t, true))
-            .or_else(|| {
-                named(said, &crate::ui::answers_waiting(self))
-                    .filter(approves)
-                    .map(|t| (t, false))
-            })
+            .cloned()
+            .collect();
+        if let Some(answer) = named(said, &drawn) {
+            return Some((answer, true));
+        }
+        let waiting: Vec<Target> = crate::ui::answers_waiting(self)
+            .into_iter()
+            .filter(approves)
+            .collect();
+        let answer = named(said, &waiting)?;
+        let does = format!("{:?}", answer.message);
+        Some(
+            match drawn
+                .into_iter()
+                .find(|t| format!("{:?}", t.message) == does)
+            {
+                Some(drawn) => (drawn, true),
+                None => (answer, false),
+            },
+        )
     }
 
     /// Give the card's answer `said` named: pressed where it is drawn,

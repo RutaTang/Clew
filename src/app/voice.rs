@@ -1935,6 +1935,12 @@ impl App {
         }
         self.voice.transcribing = None;
         let said = std::mem::take(&mut self.voice.run_said);
+        // Said over Clew: begun as it spoke, or with a call that held it —
+        // known before proving the call lets go of its hold.
+        let over_clew = said.over.is_some()
+            || said
+                .call
+                .is_some_and(|call| self.voice.wake.holds_for(call));
         // Heard after a call not yet proven: its words prove it, or none
         // of it is done.
         if let Some(call) = said.call
@@ -1989,6 +1995,22 @@ impl App {
                 .is_ok_and(|text| crate::app::spoken::says_bye(text, call))
         {
             self.drop_said_in(said.listening);
+            return self.transcribe_next();
+        }
+        // A word that puts away, said over Clew ("cancel", "Hey, Clew,
+        // never mind"), stops it — as Esc does first — and does nothing
+        // more: said to stop Clew reading, it declined the agent's tool
+        // call too, or put Ask away. A command waiting for a yes takes it
+        // as its "no", as it takes Esc.
+        if over_clew
+            && self.voice.confirm.is_none()
+            && result.as_ref().is_ok_and(|text| {
+                crate::app::onscreen::dismisses(crate::app::spoken::what_is_said(text.trim(), call))
+            })
+        {
+            self.stop_for_the_reader();
+            self.status = tr!("Stopped speaking").into();
+            self.voice.heard = None;
             return self.transcribe_next();
         }
         let task = self.on_words(result, call);
