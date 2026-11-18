@@ -4160,8 +4160,9 @@ fn a_word_that_closes_said_as_clew_waits_stops_it_as_esc_does() {
 
 /// "Hey, Clew" in Clew's own last words — "just say “Hey, Clew, open
 /// settings”" — told of by the spotter only once Clew has gone quiet, its
-/// speaker still open or closed since: Clew's voice is in what was kept of
-/// the call, its own words heard back, and no call.
+/// speaker still open or closed since, in a piece two seconds long: Clew's
+/// voice may be in what the call was heard in, its own words heard back,
+/// and no call.
 #[test]
 fn clews_own_call_told_of_late_is_no_call() {
     let said = "Just say Hey Clew, open settings.";
@@ -4174,10 +4175,14 @@ fn clews_own_call_told_of_late_is_no_call() {
         app.voice.speech.said_for_test(said);
         app.voice
             .speech
-            .last_heard_for_test(std::time::Duration::from_secs(1));
+            .last_heard_for_test(std::time::Duration::from_millis(2500));
         assert!(!app.voice.speech.heard_within(std::time::Duration::ZERO));
         assert!(!wait_step(&mut app));
         assert!(wait_step(&mut app));
+        // Clew's voice may be in it: what was heard is kept whole, for its
+        // words to tell.
+        let lead = app.voice.wake.lead.as_ref().expect("what was heard kept");
+        assert_eq!(lead.samples.len(), 64_000, "open {open}");
         script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
         let task = app.update(Message::Voice(VoiceMsg::Tick));
         settle(&mut app, task);
@@ -4210,10 +4215,67 @@ fn a_call_in_clews_silence_is_one_without_its_voice_taken_out() {
     assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app));
     assert!(app.voice.mic_on, "the call let go of: {}", app.status);
+    // Clew held by the call: the microphone listens on, not waiting for it.
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.voice.is_listening(), "{}", app.status);
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
     settle(&mut app, task);
     assert!(app.settings.open, "{}", app.status);
+    assert!(!app.voice.speech.is_speaking(), "Clew not stopped");
+    drop(app);
+    drop(turn);
+}
+
+/// Clew's voice not taken out (Talk over off), a call made just after Clew
+/// is done — its speaker closed — is heard out, not dropped unheard: what
+/// is heard with it decides, and words that are not Clew's are a call.
+#[test]
+fn a_call_just_after_clew_is_heard_without_its_voice_taken_out() {
+    let (turn, mut app, script, _, _) =
+        wake_app("wake-after-no-talk-over", "Hey, Clew, open settings.", 1);
+    app.voice.prefs.talk_over = false;
+    app.voice
+        .speech
+        .said_for_test("The total adds every price, then takes off the discount.");
+    app.voice
+        .speech
+        .last_heard_for_test(std::time::Duration::from_millis(500));
+    assert!(!app.voice.speech.is_speaking());
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    assert!(app.voice.mic_on, "the call dropped: {}", app.status);
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    drop(app);
+    drop(turn);
+}
+
+/// What the microphone heard while Clew could be heard, before a call its
+/// voice was not in, is left out of what the call is worked out with:
+/// Clew's own last words — "just say “Hey, Clew, open settings”" — are not
+/// taken for the reader's.
+#[test]
+fn what_was_heard_of_clew_before_a_call_is_left_out() {
+    let (turn, mut app, script, _, _) = wake_app("wake-lead-cut", "Hey, Clew, open settings.", 4);
+    // Pieces of two thirds of a second: five of them kept, 3.3 s.
+    script.lock().unwrap().rate = 48_000;
+    app.voice.prefs.talk_over = true;
+    app.voice
+        .speech
+        .last_heard_for_test(std::time::Duration::from_secs(3));
+    for _ in 0..4 {
+        assert!(!wait_step(&mut app));
+    }
+    assert!(wait_step(&mut app));
+    let lead = app.voice.wake.lead.as_ref().expect("what was heard kept");
+    let seconds = lead.samples.len() as f32 / lead.rate as f32;
+    // Clew heard until 2.65 s ago, its device's tail with it: what came
+    // before is left out.
+    assert!((seconds - 2.65).abs() < 0.15, "{seconds} s kept");
     drop(app);
     drop(turn);
 }
@@ -4233,7 +4295,7 @@ fn a_call_clew_taught_is_one_said_after_it() {
         .said_for_test("Just say Hey Clew, open settings.");
     app.voice
         .speech
-        .last_heard_for_test(std::time::Duration::from_secs(3));
+        .last_heard_for_test(std::time::Duration::from_millis(3500));
     assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app));
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);

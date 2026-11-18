@@ -1766,7 +1766,7 @@ impl App {
 
     /// Whether the call waiting to be proven was made with Clew heard: what
     /// is heard with it may hold Clew's own words ([`Said::echo`]).
-    fn call_echoes(&self) -> bool {
+    pub(crate) fn call_echoes(&self) -> bool {
         self.voice
             .wake
             .unproven

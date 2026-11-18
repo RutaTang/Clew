@@ -44,8 +44,9 @@ pub(crate) const CALL_QUIET: f32 = 2.0;
 /// Listening this long with nothing said, Clew quiet and nothing on its
 /// way, it waits for its name again.
 pub(crate) const IDLE: Duration = Duration::from_secs(180);
-/// How long "Hey, Clew" may take to say: begun before the piece the spotter
-/// heard it end in, at most this long.
+/// How long before the piece the spotter tells of it in "Hey, Clew" may have
+/// begun: the phrase itself, and the spotter's own delay — it may tell of
+/// it a piece after the one it ended in.
 const PHRASE: Duration = Duration::from_millis(1500);
 /// How often what the microphone heard is handed to the spotter: a piece
 /// ([`clew_voice::wake::FEED_SECONDS`]) at a time.
@@ -128,9 +129,10 @@ pub(crate) struct Hearing {
     /// What the spotter heard before is let go of at the next step: a
     /// waiting begins afresh, and goes on afresh after a call it was not.
     fresh: bool,
-    /// When what the spotter told of the phrase in began to be heard: how
-    /// late it told of it.
-    told_from: Option<Instant>,
+    /// When the piece the spotter told of the phrase in was taken — what is
+    /// kept of the call ([`Hearing::recent`]) ends then — and how long it
+    /// was.
+    told_at: Option<(Instant, Duration)>,
     /// When the spotter failed lately: it is started again after each —
     /// one that fell behind while the computer was busy, or ended, hears
     /// again — until [`FAILURES`] within [`FAILING_WITHIN`] say it will not.
@@ -241,8 +243,8 @@ impl Wait {
                 Step::Nothing
             }
             Ok(Some(true)) => {
-                let seconds = piece.len() as f32 / spot::RATE as f32;
-                self.hearing().told_from = took.checked_sub(Duration::from_secs_f32(seconds));
+                let long = Duration::from_secs_f32(piece.len() as f32 / spot::RATE as f32);
+                self.hearing().told_at = Some((took, long));
                 Step::Called
             }
             Ok(Some(false)) => Step::Nothing,
@@ -277,15 +279,15 @@ impl Wait {
         step
     }
 
-    /// How long ago what the spotter told of the phrase in began to be
-    /// heard — and the phrase with it, which may have begun before it
-    /// ([`PHRASE`]): how far back what is kept of the call may hold Clew's
-    /// voice. All that is kept ([`HEARD_SECONDS`]), not known.
+    /// How long ago the phrase the spotter told of may have begun: the
+    /// piece it told of it in, and before it the phrase ([`PHRASE`]) — how
+    /// far back Clew's voice, heard then, may be what woke it. All that is
+    /// kept ([`HEARD_SECONDS`]), not known.
     fn told_since(&self) -> Duration {
         self.hearing()
-            .told_from
-            .map_or(Duration::from_secs_f32(HEARD_SECONDS), |from| {
-                from.elapsed() + PHRASE
+            .told_at
+            .map_or(Duration::from_secs_f32(HEARD_SECONDS), |(took, long)| {
+                took.elapsed() + long + PHRASE
             })
     }
 
@@ -360,14 +362,17 @@ pub(crate) struct Waiting {
 
 impl Waiting {
     /// The microphone back, and what it heard last ([`HEARD_SECONDS`]).
-    fn into_mic(self) -> Option<(Box<dyn Listening>, Recording)> {
+    /// The microphone, and what it heard last: ending when the spotter told
+    /// of the phrase, if it did.
+    fn into_mic(self) -> Option<(Box<dyn Listening>, Recording, Option<Instant>)> {
         let mut hearing = self.wait.hearing();
         let mic = hearing.mic.take()?;
         let lead = Recording {
             samples: std::mem::take(&mut hearing.recent).into(),
             rate: hearing.rate,
         };
-        Some((mic, lead))
+        let to = hearing.told_at.map(|(took, _)| took);
+        Some((mic, lead, to))
     }
 }
 
@@ -612,14 +617,28 @@ impl App {
     /// The microphone that waited, handed over — to wait in another window
     /// — and this one waiting no more.
     pub(crate) fn give_up_waiting(&mut self) -> Option<Box<dyn Listening>> {
-        let (mic, _) = self.voice.wake.waiting.take()?.into_mic()?;
+        let (mic, ..) = self.voice.wake.waiting.take()?.into_mic()?;
         Some(mic)
     }
 
     /// The microphone that waited, to listen with: what it heard just
-    /// before kept, as the lead of what is worked out next.
+    /// before kept, as the lead of what is worked out next. A call Clew's
+    /// voice was not heard in leaves out what was heard while it was, before
+    /// it: Clew's own words are not the reader's.
     pub(crate) fn take_waiting_mic(&mut self) -> Option<Box<dyn Listening>> {
-        let (mic, lead) = self.voice.wake.waiting.take()?.into_mic()?;
+        let (mic, mut lead, to) = self.voice.wake.waiting.take()?.into_mic()?;
+        if self.voice.wake.unproven.is_some()
+            && !self.call_echoes()
+            && let (Some(to), Some(until)) = (to, self.voice.speech.heard_until())
+            && lead.rate > 0
+        {
+            let kept = to.saturating_duration_since(until).as_secs_f32();
+            let cut = lead
+                .samples
+                .len()
+                .saturating_sub((kept * lead.rate as f32) as usize);
+            lead.samples.drain(..cut);
+        }
         self.voice.wake.lead = Some(lead);
         Some(mic)
     }
@@ -636,9 +655,10 @@ impl App {
         // Clew's voice may be in what the call was heard in: heard since
         // the phrase began.
         let heard = self.voice.speech.heard_within(waiting.wait.told_since());
-        // Heard with Clew's voice in it, nothing taken out: Clew's own,
-        // most likely — no call. Waiting goes on, afresh.
-        if heard && !self.voice.prefs.talk_over {
+        // Heard as Clew speaks, its voice in it, nothing taken out: Clew's
+        // own, most likely — no call. Waiting goes on, afresh. Clew done
+        // since, what is heard with the call decides ([`App::prove_call`]).
+        if heard && self.voice.speech.is_speaking() && !self.voice.prefs.talk_over {
             let mut hearing = waiting.wait.hearing();
             hearing.told = false;
             hearing.fresh = true;

@@ -462,6 +462,12 @@ impl Speech {
         self.playing() || self.last_heard.is_some_and(|at| at.elapsed() < TAIL + lag)
     }
 
+    /// Until when Clew was heard — its device's own tail ([`TAIL`]) with
+    /// it — once it is not playing.
+    pub(crate) fn heard_until(&self) -> Option<Instant> {
+        self.last_heard.map(|at| at + TAIL)
+    }
+
     /// What is being said, by its number: another once Clew is stopped.
     pub(crate) fn round(&self) -> u64 {
         self.round
