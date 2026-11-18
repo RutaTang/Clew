@@ -180,10 +180,66 @@ def trust : Json :=
     ("length_prefixed", Json.arr prefixed.toArray), ("scope_label", Json.arr labels.toArray),
     ("project_key", Json.arr keys.toArray)]
 
+def frameError : Clew.Framing.Error → String
+  | .truncated => "truncated"
+  | .headerLineTooLong => "header_line_too_long"
+  | .tooManyHeaderLines => "too_many_header_lines"
+  | .malformedHeader => "malformed_header"
+  | .missingContentLength => "missing_content_length"
+  | .invalidContentLength => "invalid_content_length"
+  | .conflictingContentLength => "conflicting_content_length"
+  | .tooLarge => "too_large"
+
+def ascii (bs : List Nat) : Json := Json.str (String.ofList (bs.map Char.ofNat))
+
+def framing : Json :=
+  -- Every sequence of up to four of these pieces: headers, values, line
+  -- ends and junk in every order.
+  let tokens := ["Content-Length: ", "1", "\r\n", "\n", "x", ":"]
+  let seqs := (allUpTo tokens 4).map fun ts => utf8 (String.join ts)
+  let crafted := ["", "\r\n", "content-length: 2\r\n\r\n{}", "Content-Length:2\n\n{}",
+    "Content-Type: x\r\nContent-Length: 2\r\n\r\n{}",
+    "Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}",
+    "Content-Length: 2\r\nContent-Length: 3\r\n\r\n{}", "Content-Length: +2\r\n\r\n{}",
+    "Content-Length: 2 \r\n\r\n{}", "Content-Length : 2\r\n\r\n{}",
+    "Content-Length: 123456789012345678901\r\n\r\n", "Content-Length: 18446744073709551616\r\n\r\n",
+    "Content-Length: 67108865\r\n\r\n", "Content-Length: 67108864\r\n\r\n",
+    "X\r\n\r\n", "Content-Length: 5\r\n\r\nab", "Content-Length: 2\r\n",
+    "Cont\u00E9nt-Length: 2\r\n\r\n{}", "Content-Length: \t2\t\r\n\r\n{}",
+    "Content-Length: \u000B2\r\n\r\n{}", "\r\n\r\nContent-Length: 2\r\n\r\n{}",
+    "Content-Length: 0\r\n\r\n", "Content-Length: 2\r\n\r\n{}Content-Length: 1\r\n\r\n1",
+    "\nContent-Length: 1\n\n1\n"]
+  let blanks := String.join (List.replicate 33 "\r\n") ++ "Content-Length: 1\r\n\r\n1"
+  let longLine := List.replicate 8200 97
+  let longHeader := utf8 "X-Pad: " ++ List.replicate 8180 97 ++ utf8 "\r\nContent-Length: 2\r\n\r\n{}"
+  let bodies := ["{}", "[1,2]", "{\"a\":\"\u00E9\"}", "null", "\"\""].map utf8
+  let encoded := bodies.map Clew.Framing.encode ++
+    [bodies.flatMap Clew.Framing.encode, Clew.Framing.encode (bodies.head!) ++ utf8 "garbage"]
+  let inputs := seqs ++ (crafted ++ [blanks]).map utf8 ++ [longLine, longHeader] ++ encoded
+  let frames := inputs.map fun bs =>
+    pair (bytesJson bs) (match Clew.Framing.readFrame bs with
+      | (.ok none, rest) => Json.arr #["eof", toJson rest.length]
+      | (.ok (some b), rest) => Json.arr #["ok", bytesJson b, toJson rest.length]
+      | (.error e, _) => Json.arr #["err", Json.str (frameError e)])
+  let encodes := bodies.map fun b => pair (bytesJson b) (bytesJson (Clew.Framing.encode b))
+  let lineInputs : List (List Nat) := (allUpTo ['a', ' ', '\r', '\n'] 4).map (·.map Char.toNat)
+  let caps := [0, 1, 2, 3]
+  let jsonLines := caps.flatMap fun cap => lineInputs.map fun bs =>
+    pair (Json.arr #[toJson cap, ascii bs]) (match Clew.Framing.readJsonLine cap bs with
+      | (.ok none, rest) => Json.arr #["none", toJson rest.length]
+      | (.ok (some l), rest) => Json.arr #["ok", ascii l, toJson rest.length]
+      | (.error _, _) => Json.arr #["too_large"])
+  let capped := caps.flatMap fun cap => lineInputs.map fun bs =>
+    pair (Json.arr #[toJson cap, ascii bs]) (match Clew.Framing.readLineCapped cap bs with
+      | (some l, rest) => Json.arr #[ascii l, toJson rest.length]
+      | (none, rest) => Json.arr #[Json.null, toJson rest.length])
+  Json.mkObj [("read_frame", Json.arr frames.toArray), ("encode", Json.arr encodes.toArray),
+    ("read_json_line", Json.arr jsonLines.toArray), ("read_line_capped", Json.arr capped.toArray)]
+
 /-- Every model's vectors, by file name. -/
 def all : List (String × Json) :=
   [("confine.json", confine), ("update.json", update), ("server_dist.json", serverDist),
-    ("trust.json", trust)]
+    ("trust.json", trust), ("framing.json", framing)]
 
 end Vectors
 

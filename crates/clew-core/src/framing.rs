@@ -308,10 +308,19 @@ pub async fn read_json_line<R>(reader: &mut R) -> Result<Option<Vec<u8>>, FrameE
 where
     R: AsyncBufRead + Unpin,
 {
+    read_json_line_capped(reader, MAX_FRAME_BYTES).await
+}
+
+/// [`read_json_line`] with the cap a parameter: what the conformance
+/// vectors drive, at caps small enough to reach.
+async fn read_json_line_capped<R>(reader: &mut R, cap: usize) -> Result<Option<Vec<u8>>, FrameError>
+where
+    R: AsyncBufRead + Unpin,
+{
     loop {
         let mut line = Vec::new();
         let n = (&mut *reader)
-            .take(MAX_FRAME_BYTES as u64 + 2)
+            .take(cap as u64 + 2)
             .read_until(b'\n', &mut line)
             .await
             .map_err(FrameError::Io)?;
@@ -325,7 +334,7 @@ where
                 line.pop();
             }
         }
-        if line.len() > MAX_FRAME_BYTES {
+        if line.len() > cap {
             return Err(FrameError::TooLarge(line.len() as u64));
         }
         if line.iter().all(u8::is_ascii_whitespace) {
@@ -1519,6 +1528,86 @@ pub(crate) fn leader_state(pid: u32) -> LeaderState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `read_frame`, `read_json_line`, `read_line_capped` and `encode`
+    /// compute, on every input the Lean model was run on, what the model
+    /// computes — the model whose theorems say what Clew writes is read back
+    /// exactly and the stream stays in step, a body never exceeds the cap,
+    /// every frame read consumes input, and the clew protocol's cap is on
+    /// the line's content (`verification/Clew/Framing.lean`).
+    #[tokio::test]
+    async fn framing_is_the_proven_model() {
+        let vectors = include_str!("../../../verification/vectors/framing.json");
+        let cases = |f| crate::testutil::lean_cases(vectors, f);
+        let bytes = |v: &Value| -> Vec<u8> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b.as_u64().unwrap() as u8)
+                .collect()
+        };
+        let error = |e: &FrameError| match e {
+            FrameError::Truncated => "truncated",
+            FrameError::HeaderLineTooLong => "header_line_too_long",
+            FrameError::TooManyHeaderLines => "too_many_header_lines",
+            FrameError::MalformedHeader(_) => "malformed_header",
+            FrameError::MissingContentLength => "missing_content_length",
+            FrameError::InvalidContentLength(_) => "invalid_content_length",
+            FrameError::ConflictingContentLength => "conflicting_content_length",
+            FrameError::TooLarge(_) => "too_large",
+            other => panic!("a framing error the model has no case for: {other}"),
+        };
+        for (input, want) in cases("read_frame") {
+            let stream = bytes(&input);
+            let mut reader: &[u8] = &stream;
+            let got = read_frame(&mut reader).await;
+            let left = Value::from(reader.len());
+            let got = match got {
+                Ok(None) => serde_json::json!(["eof", left]),
+                Ok(Some(body)) => serde_json::json!(["ok", body, left]),
+                Err(e) => serde_json::json!(["err", error(&e)]),
+            };
+            assert_eq!(
+                got,
+                want,
+                "read_frame({:?})",
+                String::from_utf8_lossy(&stream)
+            );
+        }
+        for (input, want) in cases("encode") {
+            let body: Value = serde_json::from_slice(&bytes(&input)).unwrap();
+            assert_eq!(encode(&body), bytes(&want), "encode({body})");
+        }
+        for (input, want) in cases("read_json_line") {
+            let (cap, text) = (
+                input[0].as_u64().unwrap() as usize,
+                input[1].as_str().unwrap(),
+            );
+            let mut reader = text.as_bytes();
+            let got = match read_json_line_capped(&mut reader, cap).await {
+                Ok(None) => serde_json::json!(["none", reader.len()]),
+                Ok(Some(line)) => {
+                    serde_json::json!(["ok", String::from_utf8(line).unwrap(), reader.len()])
+                }
+                Err(FrameError::TooLarge(_)) => serde_json::json!(["too_large"]),
+                Err(e) => panic!("read_json_line gave {e}, which the model never gives"),
+            };
+            assert_eq!(got, want, "read_json_line({cap}, {text:?})");
+        }
+        for (input, want) in cases("read_line_capped") {
+            let (cap, text) = (
+                input[0].as_u64().unwrap() as usize,
+                input[1].as_str().unwrap(),
+            );
+            let mut reader = text.as_bytes();
+            let got = read_line_capped(&mut reader, cap).await;
+            assert_eq!(
+                serde_json::json!([got, reader.len()]),
+                want,
+                "read_line_capped({cap}, {text:?})"
+            );
+        }
+    }
 
     /// A protocol frame's cap is on its content: a line of exactly the cap
     /// (plus its newline) is read — it is the largest frame a writer
