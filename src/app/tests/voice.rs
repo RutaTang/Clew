@@ -349,9 +349,16 @@ fn stop_said_is_never_asked() {
     for (tag, writing) in [("voice-stop-nothing", false), ("voice-stop-writing", true)] {
         let (mut app, script, _) = voice_app(tag, "Okay, stop.");
         app.proj.asking = writing;
+        // Asked after the answer being written: still to be asked once it
+        // has stopped, not held.
+        let next = ("why that file?".to_string(), true);
+        if writing {
+            app.proj.ask_queue.push(next.clone());
+        }
         say(&mut app, &script);
         assert!(app.proj.ask_turns.is_empty(), "{tag}: asked");
-        assert!(app.proj.ask_queue.is_empty(), "{tag}: queued");
+        let queued = if writing { vec![next] } else { Vec::new() };
+        assert_eq!(app.proj.ask_queue, queued, "{tag}: queued");
         assert_eq!(app.proj.ask_input, "", "{tag}");
         assert!(
             !app.proj.asking,
@@ -373,6 +380,58 @@ fn stop_said_is_never_asked() {
         assert!(!app.settings.open, "{said}: run");
         assert_eq!(app.status, "Didn't run Settings", "{said}");
     }
+}
+
+/// "Stop" said, Clew silent, as the agent writing an answer asks the
+/// reader something: its question stays — Ask's own Stop, on screen, is
+/// not pressed by it — and Ask comes back for it, the status line saying
+/// who waits for an answer.
+#[test]
+fn stop_said_keeps_the_agents_question() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption};
+    for (tag, view) in [
+        ("voice-stop-question-open", AskView::Compact),
+        ("voice-stop-question-away", AskView::Hidden),
+    ] {
+        let (mut app, script, _) = voice_app(tag, "Stop.");
+        app.proj.asking = true;
+        app.proj.ask_turns.push(crate::app::model::AskTurn {
+            stream: 3,
+            question: "tidy the imports".into(),
+            streaming: true,
+            ..Default::default()
+        });
+        app.proj.ask_turns[0].extras.approvals.push(Approval {
+            key: ApprovalKey::Mcp { call: 1 },
+            mark: None,
+            title: "files wants to write".into(),
+            detail: String::new(),
+            options: vec![ApprovalOption {
+                id: "allow".into(),
+                label: "Allow".into(),
+                allows: true,
+                always: false,
+            }],
+        });
+        app.ask_view = view;
+        assert!(app.first_approval().is_some(), "{tag}");
+        say(&mut app, &script);
+        assert!(app.proj.asking, "{tag}: the answer stopped");
+        assert!(app.first_approval().is_some(), "{tag}: its question lost");
+        assert!(!app.proj.ask_queue_held, "{tag}: Ask's Stop pressed");
+        assert!(app.ask_view.is_open(), "{tag}: Ask not brought back");
+        assert_eq!(
+            app.status, "Clew is waiting for your answer in the Ask panel",
+            "{tag}"
+        );
+    }
+    // Ask's own Stop is pressed by its name said as a button's is.
+    let (mut app, script, _) = voice_app("voice-press-stop", "Press Stop.");
+    app.proj.asking = true;
+    app.ask_view = AskView::Compact;
+    say(&mut app, &script);
+    assert!(!app.proj.asking, "the answer not stopped");
+    assert!(app.proj.ask_queue_held, "not Ask's Stop");
 }
 
 /// A question said aloud is asked without the card opening over the code

@@ -3025,9 +3025,13 @@ fn what_was_heard_over_a_moment_is_what_was_said_in_it() {
     let speech = &mut app.voice.speech;
     assert!(within(speech, 0).is_empty());
     assert_eq!(within(speech, 1), ["A second ago."]);
-    // Half of it played, and the next queued: it is heard now.
+    // Half of it played, and the next queued: it is heard now — marked so
+    // as Clew is looked at, playing.
     output.lock().unwrap().queued = 3.0;
     speech.said_lasting_for_test("Still to play.", 2.0);
+    let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
+    settle(&mut app, task);
+    let speech = &app.voice.speech;
     assert_eq!(within(speech, 0), ["Not played yet."]);
 }
 

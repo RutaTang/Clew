@@ -2122,6 +2122,7 @@ impl App {
         if over_clew && (hush || said.is_some_and(crate::app::onscreen::dismisses)) {
             self.stop_for_the_reader();
             let stop = if hush {
+                self.show_agent_question();
                 self.stop_answer_written()
             } else {
                 Task::none()
@@ -2273,7 +2274,16 @@ impl App {
         self.voice.heard = None;
         let speaking = self.voice.speech.is_speaking() || self.answer_read_aloud_coming();
         if !speaking && !self.answer_written_stops() {
-            self.status = tr!("Clew isn't speaking").into();
+            self.status = match self.agent_asking() {
+                Some(label) => {
+                    self.reveal_ask();
+                    tr!(
+                        "{label} is waiting for your answer in the Ask panel",
+                        label = label
+                    )
+                }
+                None => tr!("Clew isn't speaking").into(),
+            };
             return Task::none();
         }
         self.stop_for_the_reader();
@@ -2281,7 +2291,24 @@ impl App {
         if speaking {
             self.status = tr!("Stopped speaking").into();
         }
+        self.show_agent_question();
         stop
+    }
+
+    /// Who asks the reader something as an answer is written — the ACP
+    /// agent by its name, else Clew's own — if anyone does
+    /// ([`App::first_approval`]).
+    fn agent_asking(&self) -> Option<String> {
+        self.first_approval()
+            .map(|(turn, _)| turn.extras.agent.clone().unwrap_or_else(|| "Clew".into()))
+    }
+
+    /// The question the agent asks, brought into view once Clew is quiet:
+    /// an Ask put away comes back for it.
+    fn show_agent_question(&mut self) {
+        if self.agent_asking().is_some() {
+            self.reveal_ask();
+        }
     }
 
     /// Whether a word that stops Clew stops an answer being written too:
@@ -2322,6 +2349,13 @@ impl App {
         // What is on screen, as it is drawn now.
         let mut targets = crate::ui::heard::gather_heard(self);
         targets.retain(|t| !turns_the_microphone(&t.message));
+        // A word that stops Clew is not Ask's own Stop, which holds what
+        // was asked after it and drops the agent's question: what it
+        // stops is decided alike, the card open or not
+        // ([`App::hush_for_the_reader`]).
+        if crate::app::onscreen::hushes(text) {
+            targets.retain(|t| !matches!(t.message, Message::Ask(AskMsg::Stop)));
+        }
         // A dialog takes the voice before anything, as it takes the pointer.
         if let Some(task) = self.heard_on_screen(text, &targets, true) {
             return Some(task);
