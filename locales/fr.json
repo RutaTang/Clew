@@ -1700,7 +1700,7 @@
  "The Type Graph shows Discount and the two kinds of it the shop has: MemberDiscount and BulkDiscount.": "Le graphe des types montre Discount et ses deux variantes dans la boutique : MemberDiscount et BulkDiscount.",
  "The TypeScript the language server runs.": "Le TypeScript exécuté par le serveur de langage.",
  "The agent did not accept the setting: {error}": "L’agent n’a pas accepté le réglage : {error}",
- "The agent is waiting for your answer in the Ask panel — say “press Stop” to stop it": "L’agent attend votre réponse dans le panneau Questions — dites « appuie sur Arrêter » pour l’arrêter",
+ "The agent is waiting for your answer in the Ask panel": "L’agent attend votre réponse dans le panneau Questions",
  "The agent wants to run “{command}” — answer it in Ask": "L’agent veut exécuter « {command} » — répondez dans le panneau Questions",
  "The big picture": "Vue d’ensemble",
  "The build tags and platform gopls uses for the project.": "Les tags de build et la plateforme que gopls utilise pour le projet.",

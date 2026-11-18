@@ -1700,7 +1700,7 @@
  "The Type Graph shows Discount and the two kinds of it the shop has: MemberDiscount and BulkDiscount.": "类型图展示了 Discount 以及商店中它的两种子类：MemberDiscount 和 BulkDiscount。",
  "The TypeScript the language server runs.": "语言服务器运行的 TypeScript。",
  "The agent did not accept the setting: {error}": "智能体未接受该设置：{error}",
- "The agent is waiting for your answer in the Ask panel — say “press Stop” to stop it": "智能体正在提问面板中等待你的答复——说“按停止”可以让它停下",
+ "The agent is waiting for your answer in the Ask panel": "智能体正在提问面板中等待你的答复",
  "The agent wants to run “{command}” — answer it in Ask": "智能体想运行“{command}”，请在提问面板中答复",
  "The big picture": "全局",
  "The build tags and platform gopls uses for the project.": "gopls 为此项目使用的构建标签和平台。",

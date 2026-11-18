@@ -393,8 +393,8 @@ fn stop_said_is_never_asked() {
 /// "Stop" said, Clew silent, as the agent writing an answer asks the
 /// reader something — "okay, stop" too, though it opens with a yes: its
 /// question stays, unanswered — Ask's own Stop, on screen, is not pressed
-/// by it — and Ask comes back for it, the status line saying how to stop
-/// the agent instead.
+/// by it — and Ask comes back for it, the status line saying it waits. An
+/// answer the agent names "Stop" is that answer, the card put away or not.
 #[test]
 fn stop_said_keeps_the_agents_question() {
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption};
@@ -430,11 +430,45 @@ fn stop_said_keeps_the_agents_question() {
         assert!(!app.proj.ask_queue_held, "{tag}: Ask's Stop pressed");
         assert!(app.ask_view.is_open(), "{tag}: Ask not brought back");
         assert_eq!(
-            app.status,
-            "The agent is waiting for your answer in the Ask panel — say “press Stop” to stop it",
+            app.status, "The agent is waiting for your answer in the Ask panel",
             "{tag}"
         );
     }
+    // An answer the agent names "Stop", the card put away: that answer,
+    // brought into view — not a word that stops Clew.
+    let (mut app, script, _) = voice_app("voice-stop-the-answer", "Stop.");
+    app.proj.asking = true;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 3,
+        question: "tidy the imports".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    let option = |id: &str, label: &str, allows: bool| ApprovalOption {
+        id: id.into(),
+        label: label.into(),
+        allows,
+        always: false,
+    };
+    app.proj.ask_turns[0].extras.approvals.push(Approval {
+        key: ApprovalKey::Mcp { call: 1 },
+        mark: None,
+        title: "files wants to write".into(),
+        detail: String::new(),
+        options: vec![
+            option("allow", "Allow", true),
+            option("halt", "Stop", false),
+        ],
+    });
+    app.ask_view = AskView::Hidden;
+    say(&mut app, &script);
+    assert!(app.proj.asking, "the answer stopped");
+    assert!(app.first_approval().is_some(), "answered unseen");
+    assert!(app.ask_view.is_open(), "its question not shown");
+    assert_ne!(
+        app.status, "The agent is waiting for your answer in the Ask panel",
+        "taken for a word that stops Clew"
+    );
     // Ask's own Stop is pressed by its name said as a button's is.
     let (mut app, script, _) = voice_app("voice-press-stop", "Press Stop.");
     app.proj.asking = true;

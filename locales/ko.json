@@ -1700,7 +1700,7 @@
  "The Type Graph shows Discount and the two kinds of it the shop has: MemberDiscount and BulkDiscount.": "타입 그래프는 Discount와 이 상점에 있는 두 종류, MemberDiscount와 BulkDiscount를 보여 줍니다.",
  "The TypeScript the language server runs.": "언어 서버가 실행할 TypeScript입니다.",
  "The agent did not accept the setting: {error}": "에이전트가 설정을 받아들이지 않았습니다: {error}",
- "The agent is waiting for your answer in the Ask panel — say “press Stop” to stop it": "에이전트가 질문 패널에서 응답을 기다리고 있습니다 — 멈추려면 “중지 눌러”라고 말하세요",
+ "The agent is waiting for your answer in the Ask panel": "에이전트가 질문 패널에서 응답을 기다리고 있습니다",
  "The agent wants to run “{command}” — answer it in Ask": "에이전트가 “{command}” 명령을 실행하려고 합니다 — 질문 패널에서 응답하세요",
  "The big picture": "큰 그림",
  "The build tags and platform gopls uses for the project.": "gopls가 이 프로젝트에 사용하는 빌드 태그와 플랫폼입니다.",

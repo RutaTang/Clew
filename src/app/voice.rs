@@ -2224,20 +2224,23 @@ impl App {
         } else if let Some(task) = self.heard_commands_back_on(&text) {
             return task;
         }
-        // A word that stops Clew, nothing on screen named by it ("stop",
-        // said after "Hey, Clew" and a pause): not a question for Ask —
-        // nor an answer to one waiting, though it opens with a yes ("okay,
-        // stop").
-        if crate::app::onscreen::hushes(&text) {
-            return self.hush_for_the_reader();
-        }
         // What opens with a yes or a no, or an answer's words, with a
         // question waiting — that question covered, not ready to answer,
         // put away, or spoken commands off: held (`App::hold_for_question`),
         // never sent to Ask, where the agent asking would read a yes as
         // consent and a no would wait on the question. With no question
         // waiting, it answers what the agent asked in words, and goes on.
-        if let Some(to) = self.said_to_question(&text) {
+        let to = self.said_to_question(&text);
+        // A word that stops Clew, nothing on screen named by it ("stop",
+        // said after "Hey, Clew" and a pause): not a question for Ask —
+        // nor a yes to one waiting, though it opens with one ("okay,
+        // stop"). An answer of that name, offered, is that answer.
+        if crate::app::onscreen::hushes(&text)
+            && !matches!(to, Some(crate::app::onscreen::ToQuestion::Answer(_)))
+        {
+            return self.hush_for_the_reader();
+        }
+        if let Some(to) = to {
             return self.hold_for_question(text, to);
         }
         // A question: to Ask. Sent, it is answered where Ask is — the card
@@ -2276,12 +2279,11 @@ impl App {
         self.voice.heard = None;
         let speaking = self.voice.speech.is_speaking() || self.answer_read_aloud_coming();
         if !speaking && !self.answer_written_stops() {
-            // The agent asks something: its question in view, and how to
-            // stop it instead of answering — its card's Stop, now shown.
+            // The agent asks something: its question in view, its answers
+            // — a decline among them — on its card.
             self.status = if self.agent_asks() {
                 self.reveal_ask();
-                tr!("The agent is waiting for your answer in the Ask panel — say “press Stop” to stop it")
-                    .into()
+                tr!("The agent is waiting for your answer in the Ask panel").into()
             } else {
                 tr!("Clew isn't speaking").into()
             };
