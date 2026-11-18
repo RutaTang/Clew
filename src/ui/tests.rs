@@ -6312,6 +6312,46 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     ));
 }
 
+/// Set up project's Apply answers no question: while the project is
+/// looked at it is not offered at all — said then, it is nothing the sheet
+/// has, not an answer held as said too soon — and once looked at it is
+/// pressed as any button is, never held as one that allows.
+#[test]
+fn the_setup_sheets_apply_answers_no_question() {
+    use crate::app::setup::{Census, Fetch, ProjectSetup, SetupMode, SetupServer};
+    let mut app = reader_app();
+    let root = PathBuf::from("/nonexistent/iced");
+    app.setup = Some(ProjectSetup {
+        mode: SetupMode::Manage,
+        root: root.clone(),
+        servers: true,
+        servers_declined: false,
+        explain: false,
+        no_code: false,
+        census: None,
+    });
+    let apply = |app: &crate::app::state::App| -> Vec<(bool, bool)> {
+        crate::ui::heard::gather_of(|| {
+            super::setup::setup_sheet(app, &root, app.setup.as_ref(), true)
+        })
+        .into_iter()
+        .filter(|t| t.shown == "Apply")
+        .map(|t| (t.waiting, t.allows))
+        .collect()
+    };
+    assert_eq!(apply(&app), [], "offered while the project is looked at");
+    app.setup.as_mut().unwrap().census = Some(Census {
+        servers: vec![SetupServer {
+            language: "rust".into(),
+            name: "rust-analyzer".into(),
+            fetch: Fetch::Download,
+            builds: false,
+        }],
+        calls: Some(40),
+    });
+    assert_eq!(apply(&app), [(false, false)]);
+}
+
 /// The first-open sheet holds still while it looks at the project: the
 /// servers' row is there from the first frame, ticked as it will be, and
 /// keeps its room, so the look landing — with a server to set up or none —
