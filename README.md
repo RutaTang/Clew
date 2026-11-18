@@ -67,7 +67,7 @@ Clew is an **IUE**, an *Integrated Understanding Environment*, where you underst
 
 ## Learn more
 
-[Keyboard](docs/keyboard.md) · [Voice](docs/voice.md) · [MCP and ACP](docs/mcp-acp.md) · [Language support](docs/languages.md) · [Project graphs](docs/project-graphs.md)
+[Keyboard](docs/keyboard.md) · [Voice](docs/voice.md) · [MCP and ACP](docs/mcp-acp.md) · [Language support](docs/languages.md) · [Project graphs](docs/project-graphs.md) · [Formal verification](docs/verification.md)
 
 ## Contributing
 

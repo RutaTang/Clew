@@ -67,7 +67,7 @@ Clew 是一个 **IUE**，即*集成理解环境*（Integrated Understanding Envi
 
 ## 了解更多
 
-[键盘操作](docs/keyboard.zh-CN.md) · [语音](docs/voice.zh-CN.md) · [MCP 与 ACP](docs/mcp-acp.zh-CN.md) · [语言支持](docs/languages.zh-CN.md) · [项目图](docs/project-graphs.zh-CN.md)
+[键盘操作](docs/keyboard.zh-CN.md) · [语音](docs/voice.zh-CN.md) · [MCP 与 ACP](docs/mcp-acp.zh-CN.md) · [语言支持](docs/languages.zh-CN.md) · [项目图](docs/project-graphs.zh-CN.md) · [形式化验证](docs/verification.zh-CN.md)
 
 ## 参与贡献
 
