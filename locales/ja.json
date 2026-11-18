@@ -1837,7 +1837,7 @@
  "Time Travel needs a git repository": "タイムトラベルには Git リポジトリが必要です",
  "Time Travel: older / newer commit": "タイムトラベル: 古い / 新しいコミット",
  "Tiny (English)": "Tiny（英語）",
- "To answer, say “yes” or “no” — not as a question": "答えるには、問いかけではなく「はい」か「いいえ」と言ってください",
+ "To answer, say it plainly — not as a question": "答えるには、問いかけではなく、そのまま言ってください",
  "To hear answers read aloud, download {model}": "回答を読み上げるには、{model} をダウンロードしてください",
  "To hear answers read aloud, download {model} ({size} MB) in Settings → Voice": "回答を読み上げるには、「設定 → 音声」で {model}（{size} MB）をダウンロードしてください",
  "Today": "今日",

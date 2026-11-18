@@ -16,7 +16,7 @@ pub(crate) const TOO_SOON: &str = tr_noop!(
     "Too soon to answer — say it again once the question has been in view, uncovered, for a moment, with the window in front"
 );
 /// … it allows, and was said as a question ("Allow?").
-pub(crate) const ASKED: &str = tr_noop!("To answer, say “yes” or “no” — not as a question");
+pub(crate) const ASKED: &str = tr_noop!("To answer, say it plainly — not as a question");
 /// … more was said after a yes or a no ("yes, allow it", "okay, why that
 /// file?"), which answers nothing: the question waits for a plain answer
 /// before anything else is said.
@@ -481,14 +481,7 @@ impl App {
                 return Some(self.press_heard(said, t));
             }
             if dismisses(said) {
-                // An answer drawn under the very words said ("Cancel", an
-                // agent's own name for declining) is that answer: put away
-                // instead, its card came back held and went again, said
-                // again, round and round.
-                if let Some(t) = named(said, targets).filter(|t| t.answer.is_some()) {
-                    return Some(self.press_heard(said, t));
-                }
-                return self.dismiss_heard(said);
+                return self.dismiss_heard(said, targets);
             }
             // What is on top put away by its name: "close the call graph"
             // went to Ask as a question about the call graph.
@@ -636,7 +629,9 @@ impl App {
             BY_NAME
         } else if more {
             ALONE
-        } else if crate::app::spoken::asked(&text) {
+        } else if crate::app::spoken::asked(&text) && meant.as_ref().is_some_and(|t| t.allows) {
+            // Only what allows wants it said plainly: a decline is taken
+            // asked too, once in view.
             ASKED
         } else {
             TOO_SOON
@@ -686,18 +681,33 @@ impl App {
 
     /// Put away what is on top, as Esc does, for `said`: the tutorial, a
     /// dialog or menu, the large Ask, Time Travel, the find bar, the Ask
-    /// card, a page over the code. `None` when nothing is.
-    fn dismiss_heard(&mut self, said: &str) -> Option<Task<Message>> {
+    /// card, a page over the code. `None` when nothing is. Where it would
+    /// put Ask away, an answer of its card called by the very words said
+    /// ("Cancel", an agent's own name for declining) is pressed instead:
+    /// put away, the card came back held, and went again said again —
+    /// while what is open over it, the find bar or a peek, still goes
+    /// first, the card's answer left alone.
+    fn dismiss_heard(&mut self, said: &str, targets: &[Target]) -> Option<Task<Message>> {
+        let ask_answer =
+            || named(said, targets).filter(|t| t.answer.is_some() && t.layer == Layer::Ask);
         let task = if self.tutorial.is_some() {
             self.on_tutorial_exit()
         } else if let Some(message) = ui::escape_message(self) {
             self.update(message)
+        } else if self.ask_view == AskView::Expanded
+            && let Some(answer) = ask_answer()
+        {
+            return Some(self.press_heard(said, answer));
         } else if self.ask_view == AskView::Expanded && self.step_ask_down() {
             Task::none()
         } else if ui::time_travel_on_screen(self).is_some() {
             self.update(Message::TimeTravel(TimeTravelMsg::Exit))
         } else if self.proj.find.open {
             self.update(Message::Editor(EditorMsg::FindClosed))
+        } else if self.ask_view.is_open()
+            && let Some(answer) = ask_answer()
+        {
+            return Some(self.press_heard(said, answer));
         } else if (self.ask_view.is_open() && self.step_ask_down())
             || (ui::pane_cover(self).is_some_and(|c| c.is_page()) && self.put_away_page())
         {

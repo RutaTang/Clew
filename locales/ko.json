@@ -1837,7 +1837,7 @@
  "Time Travel needs a git repository": "타임 트래블은 Git 저장소에서만 사용할 수 있습니다",
  "Time Travel: older / newer commit": "타임 트래블: 이전 / 다음 커밋",
  "Tiny (English)": "Tiny (영어)",
- "To answer, say “yes” or “no” — not as a question": "답하려면 질문하듯 말하지 말고 “네” 또는 “아니요”라고 말하세요",
+ "To answer, say it plainly — not as a question": "답하려면 질문하듯 말하지 말고 그대로 말하세요",
  "To hear answers read aloud, download {model}": "답변을 소리로 들으려면 {model}을(를) 다운로드하세요",
  "To hear answers read aloud, download {model} ({size} MB) in Settings → Voice": "답변을 소리로 들으려면 설정 → 음성에서 {model}({size} MB)을 다운로드하세요",
  "Today": "오늘",

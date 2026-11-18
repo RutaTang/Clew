@@ -2496,7 +2496,9 @@ fn a_yes_for_a_question_not_drawn_is_held() {
     );
     // A yes, a no, an answer by name — one that declines too: each waits
     // for the question, and brings it into view.
-    for said in ["Yes.", "No.", "Always reject"] {
+    // A decline asked is held as not yet read, not told to be said
+    // plainly: once in view it is taken, asked or not.
+    for said in ["Yes.", "No.", "Always reject", "No?", "Decline?"] {
         app.hide_ask();
         held(&mut app, &script, said);
         assert!(app.ask_view.is_open(), "{said}: not brought into view");
@@ -2825,6 +2827,29 @@ fn a_word_that_closes_answers_only_the_question_on_top() {
     let dialog = [deny(Layer::Overlay)];
     assert!(app.heard_on_screen("never mind", &dialog, true).is_some());
     assert!(app.status.contains("Deny"), "{}", app.status);
+    // An agent's answer called "Cancel": the find bar open over the card
+    // goes first, the answer left alone; said again, with nothing left
+    // over the card but Ask itself to put away, it is that answer.
+    let cancel = [on_screen(
+        "Cancel",
+        Message::Window(WindowMsg::OpenShortcuts),
+        Layer::Ask,
+        Some(Answer::No),
+    )];
+    // Whatever else is up put away first, as Esc would.
+    for _ in 0..10 {
+        if app.heard_on_screen("cancel", &[], true).is_none() {
+            break;
+        }
+    }
+    app.ask_view = AskView::Compact;
+    app.proj.find.open = true;
+    assert!(app.heard_on_screen("cancel", &cancel, true).is_some());
+    assert!(!app.proj.find.open, "{}", app.status);
+    assert!(app.status.ends_with("→ Closed"), "{}", app.status);
+    assert!(app.heard_on_screen("cancel", &cancel, true).is_some());
+    assert!(app.status.ends_with("→ Cancel"), "{}", app.status);
+    assert!(app.ask_view.is_open(), "Ask put away instead");
 }
 
 /// Said to a dialog with a field and a list — the command bar — a row's

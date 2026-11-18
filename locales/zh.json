@@ -1837,7 +1837,7 @@
  "Time Travel needs a git repository": "时间旅行需要 Git 仓库",
  "Time Travel: older / newer commit": "时间旅行：更早 / 更新的提交",
  "Tiny (English)": "Tiny（英语）",
- "To answer, say “yes” or “no” — not as a question": "要回答，请说“是”或“不”，不要用问句",
+ "To answer, say it plainly — not as a question": "要回答，请直接说出来，不要用问句",
  "To hear answers read aloud, download {model}": "要听到朗读的回答，请下载 {model}",
  "To hear answers read aloud, download {model} ({size} MB) in Settings → Voice": "要听到朗读的回答，请在“设置 → 语音”中下载 {model}（{size} MB）",
  "Today": "今天",
