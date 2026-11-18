@@ -372,11 +372,9 @@ pub(crate) struct CallHold {
     /// ([`Speech::round`](crate::app::speech::Speech::round)): stopped
     /// since, it is not stopped again — gone on, held too long, it is.
     round: u64,
-    /// Whether Clew was heard then ([`Speech::heard`]): what was said
-    /// with the call was said over its voice — not over a silence, an
-    /// answer still coming.
-    ///
-    /// [`Speech::heard`]: crate::app::speech::Speech::heard
+    /// Whether Clew was speaking then, as the window shows it and Esc
+    /// stops it — not only an answer still coming: what was said with the
+    /// call was said over Clew.
     spoke: bool,
 }
 
@@ -410,6 +408,9 @@ pub(crate) struct WakeState {
     /// Clew, held for a call as it spoke: it stops once the call is
     /// proven, and goes on if it was no call.
     pub(crate) held: Option<CallHold>,
+    /// The last call made with Clew heard in what is kept of it
+    /// ([`HEARD_SECONDS`]): its words may be Clew's own, heard back.
+    pub(crate) echo: Option<u64>,
     /// The last call's number.
     calls: u64,
     /// Why waiting failed: it is not tried again by itself — only once the
@@ -421,8 +422,8 @@ pub(crate) struct WakeState {
 }
 
 impl WakeState {
-    /// Whether `call` holds Clew, called as it was heard: what was said
-    /// with it was said over Clew's voice.
+    /// Whether `call` holds Clew, called as it spoke: what was said with
+    /// it was said over Clew.
     pub(crate) fn spoken_over(&self, call: u64) -> bool {
         self.held
             .as_ref()
@@ -441,6 +442,7 @@ impl WakeState {
             unproven: None,
             given_up: None,
             held: None,
+            echo: None,
             calls: 0,
             failed: None,
         }
@@ -615,7 +617,8 @@ impl App {
             hearing.fresh = true;
             return Task::none();
         }
-        let speaking = self.voice.speech.is_speaking() || self.answer_read_aloud_coming();
+        let spoke = self.voice.speech.is_speaking();
+        let speaking = spoke || self.answer_read_aloud_coming();
         // The model listened with, removed meanwhile: nothing to hear with,
         // nor to hear whether it was a call — said as the voice key says
         // it, and Clew stopped as the voice key stops it.
@@ -627,13 +630,17 @@ impl App {
             return self.listen_now(None);
         }
         let call = self.voice.wake.next_call();
+        self.voice.wake.echo = self
+            .voice
+            .speech
+            .heard_within(Duration::from_secs_f32(HEARD_SECONDS))
+            .then_some(call);
         // Clew held, not stopped — an answer still on its way to being read
         // aloud held too, once it plays: if what is heard with the call
         // holds no "Clew", it was no call, and Clew goes on where it was.
         if speaking {
             self.voice.speech.hold();
             let round = self.voice.speech.round();
-            let spoke = self.voice.speech.held_over_voice();
             self.voice.wake.held = self.voice.speech.held_since().map(|since| CallHold {
                 call,
                 since,
@@ -668,14 +675,14 @@ impl App {
             return true;
         }
         // "Bye, Clew" is said to Clew too — and lets it go on reading: it
-        // ends listening, not what Clew says. Said over Clew's voice, its
+        // ends listening, not what Clew says. Heard with Clew's voice, its
         // own words heard back are no call.
-        let held = self.voice.wake.spoken_over(call);
+        let echo = self.voice.wake.echo == Some(call);
         let stops = crate::app::spoken::says_bye(text, true);
         let goes_on = crate::app::spoken::leaves_clew_speaking(text, true);
         let to_clew = crate::app::spoken::named_in(text).is_some() || stops;
         let named = to_clew
-            && (!held || crate::app::voice::said_over(text, &self.voice.speech.said_lately()));
+            && (!echo || crate::app::voice::said_over(text, &self.voice.speech.said_lately()));
         if !named {
             self.end_hold(call, false);
             self.not_called(call);

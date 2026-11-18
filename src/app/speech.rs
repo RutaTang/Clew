@@ -372,10 +372,10 @@ pub(crate) struct Speech {
     /// voice ([`said_over`](crate::app::voice::said_over)), or found to
     /// call it or not ([`App::prove_call`]).
     barged: Option<Instant>,
-    /// Whether Clew was heard ([`Speech::heard`]) as it was held: what was
-    /// said then was said over its voice — not over a silence, an answer
-    /// still coming.
-    heard_when_held: bool,
+    /// When Clew was last heard ([`Speech::heard_within`]): playing, as
+    /// last looked at, held, or stopped — not while it makes what it says
+    /// next, nor waits for more of an answer, its speaker open and silent.
+    last_heard: Option<Instant>,
     /// The last sentences made to be said, each with the seconds of it
     /// made so far: what the microphone may still hear of Clew's own voice,
     /// its echo not all taken out — all still to be played, however many
@@ -429,7 +429,7 @@ impl Speech {
             open_output: Arc::new(open_system_output),
             synthesizer: SYSTEM.clone(),
             barged: None,
-            heard_when_held: false,
+            last_heard: None,
             said_lately: VecDeque::new(),
             blocked: None,
             trying: false,
@@ -446,18 +446,20 @@ impl Speech {
         self.barged
     }
 
-    /// Whether Clew is heard: something of what it says plays, or played
-    /// a moment ago — the device still holds the last of it ([`TAIL`]).
-    /// Not while its first sentence is still being made, nor once all of
-    /// an answer so far is said, the rest still coming.
-    pub(crate) fn heard(&self) -> bool {
-        self.output.is_some() && self.quiet_since.is_none_or(|since| since.elapsed() < TAIL)
+    /// Whether something of what Clew says is playing now: not held, and
+    /// its speaker has more to play.
+    fn playing(&self) -> bool {
+        self.barged.is_none() && self.output.as_ref().is_some_and(|o| !o.idle())
     }
 
-    /// Whether Clew is held, and was heard as it was: what is said now was
-    /// said over its voice, which may be heard back in it.
-    pub(crate) fn held_over_voice(&self) -> bool {
-        self.barged.is_some() && self.heard_when_held
+    /// Whether Clew was heard within `lag` — playing, or played that long
+    /// ago, the device's own tail ([`TAIL`]) aside: what the microphone
+    /// heard over that time may hold its voice, heard back. Not so for a
+    /// silence, though Clew is speaking as the window shows it: its first
+    /// sentence, or the next, still being made, or an answer waited on for
+    /// more.
+    pub(crate) fn heard_within(&self, lag: Duration) -> bool {
+        self.playing() || self.last_heard.is_some_and(|at| at.elapsed() < TAIL + lag)
     }
 
     /// What is being said, by its number: another once Clew is stopped.
@@ -471,7 +473,9 @@ impl Speech {
     /// answer still coming — what comes waits too: the output opens held.
     pub(crate) fn hold(&mut self) {
         if self.barged.is_none() {
-            self.heard_when_held = self.heard();
+            if self.playing() {
+                self.last_heard = Some(Instant::now());
+            }
             if let Some(output) = &self.output {
                 output.pause();
             }
@@ -511,10 +515,10 @@ impl Speech {
             .is_some_and(|since| since.elapsed() >= HELD_AT_MOST)
     }
 
-    /// Quiet — nothing left to play, nor to make — as if since `ago`.
+    /// Last heard `ago`.
     #[cfg(test)]
-    pub(crate) fn quiet_for_test(&mut self, ago: Duration) {
-        self.quiet_since = Instant::now().checked_sub(ago);
+    pub(crate) fn last_heard_for_test(&mut self, ago: Duration) {
+        self.last_heard = Instant::now().checked_sub(ago);
     }
 
     /// Held as if since `ago`.
@@ -630,6 +634,9 @@ impl Speech {
 
     /// Stop: nothing more is said of what was being said.
     fn hush(&mut self) {
+        if self.playing() {
+            self.last_heard = Some(Instant::now());
+        }
         if let Some((stream, _)) = self.reading.take() {
             self.hushed.insert(stream);
         }
@@ -1512,6 +1519,9 @@ impl App {
             }
             speech.level = 0.0;
             return Task::none();
+        }
+        if !output.idle() {
+            speech.last_heard = Some(Instant::now());
         }
         match speech.progress {
             // Nothing played since, though there was something to play.

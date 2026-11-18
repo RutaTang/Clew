@@ -586,6 +586,10 @@ pub(crate) struct VoiceState {
     /// began, in seconds: what is heard before it — what was left of Clew's
     /// voice — is not worked out with it.
     over_from: Option<f32>,
+    /// Whether Clew was heard as that speech began, or the moment kept
+    /// from before it ([`OVER_LEAD`]): its own words may be heard back in
+    /// what is worked out.
+    over_echo: bool,
     /// The run working out what was said, by its token.
     transcribing: Option<u64>,
     /// The last run started.
@@ -645,6 +649,7 @@ impl VoiceState {
             run_said: Said::default(),
             listenings: 0,
             over_from: None,
+            over_echo: false,
             transcribing: None,
             token: 0,
             last_toggle: None,
@@ -743,11 +748,9 @@ pub(crate) struct Said {
     /// [`Speech::held_since`](crate::app::speech::Speech::held_since):
     /// found to be no call, it was not said to Clew, and Clew goes on.
     over: Option<Instant>,
-    /// Whether that hold was over Clew's voice
-    /// ([`Speech::held_over_voice`](crate::app::speech::Speech::held_over_voice)),
-    /// not over a silence: only then is what was said heard with Clew's
-    /// own words, and said over it.
-    over_voice: bool,
+    /// Whether Clew was heard as it was said over: Clew's own words may be
+    /// heard back in it.
+    echo: bool,
     /// The listening it was heard in ([`VoiceState::listenings`]).
     listening: u64,
 }
@@ -1711,6 +1714,10 @@ impl App {
         if self.voice.speech.is_speaking() && !self.voice.speech.held() {
             match over {
                 Some(from) => {
+                    self.voice.over_echo = self
+                        .voice
+                        .speech
+                        .heard_within(Duration::from_secs_f32(OVER_LEAD) + LISTEN_TICK);
                     self.voice.speech.hold();
                     self.voice.over_from = Some(from);
                     self.status =
@@ -1743,7 +1750,7 @@ impl App {
                 lead: true,
                 call: self.voice.wake.unproven,
                 over: None,
-                over_voice: false,
+                echo: false,
                 listening: self.voice.listenings,
             };
             self.voice.unheard.push_back((lead, model, said));
@@ -1768,12 +1775,12 @@ impl App {
     /// waiting to be.
     fn said_from(&mut self, recording: &mut Recording) -> Said {
         let mut over = None;
-        let mut over_voice = false;
+        let mut echo = false;
         if let Some(from) = self.voice.over_from.take() {
             let cut = ((from - OVER_LEAD).max(0.0) * recording.rate as f32) as usize;
             recording.samples.drain(..cut.min(recording.samples.len()));
             over = self.voice.speech.held_since();
-            over_voice = self.voice.speech.held_over_voice();
+            echo = std::mem::take(&mut self.voice.over_echo);
         }
         let lead = match self.voice.wake.lead.take() {
             Some(lead) if lead.rate == recording.rate => {
@@ -1786,7 +1793,7 @@ impl App {
             lead,
             call: self.voice.wake.unproven,
             over,
-            over_voice,
+            echo,
             listening: self.voice.listenings,
         }
     }
@@ -1944,9 +1951,10 @@ impl App {
         }
         self.voice.transcribing = None;
         let said = std::mem::take(&mut self.voice.run_said);
-        // Said over Clew: begun as it was heard, or with a call that held it
-        // as it was — known before proving the call lets go of its hold.
-        let over_clew = said.over_voice
+        // Said over Clew: begun as it spoke, or with a call that held it as
+        // it spoke — as the window shows it, and Esc stops it — known before
+        // proving the call lets go of its hold.
+        let over_clew = said.over.is_some()
             || said
                 .call
                 .is_some_and(|call| self.voice.wake.spoken_over(call));
@@ -1967,16 +1975,23 @@ impl App {
         let call = said.lead || said.call.is_some();
         // Said over Clew: Clew's own words, heard back, are dropped — and
         // Clew, if those words still hold it, goes on where it was, unless
-        // a call holds it too ([`App::words_let_go`]). Words
-        // to Clew stop it, if they hold it, and are read as any are — but
-        // "Bye, Clew", which ends listening, not what Clew says. Only the
-        // words that hold it decide: Clew held since by other words, or
-        // gone on, is theirs.
+        // a call holds it too ([`App::words_let_go`]); so is nothing heard
+        // in it. Words to Clew stop it, if they hold it, and are read as
+        // any are — but "Bye, Clew", which ends listening, not what Clew
+        // says. Only the words that hold it decide: Clew held since by
+        // other words, or gone on, is theirs. Clew not heard as they were
+        // said — making what it says next, or waiting for more — none of
+        // them is its own.
         if said.over.is_some() {
             let holds = said.over == self.voice.speech.held_since();
+            let lately = if said.echo {
+                self.voice.speech.said_lately()
+            } else {
+                Vec::new()
+            };
             let (to_clew, bye) = result.as_ref().map_or((false, false), |text| {
                 (
-                    !said.over_voice || said_over(text, &self.voice.speech.said_lately()),
+                    said_over(text, &lately),
                     crate::app::spoken::leaves_clew_speaking(text, call),
                 )
             });

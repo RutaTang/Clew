@@ -3243,6 +3243,37 @@ impl crate::app::speech::Playing for Playing {
     fn resume(&self) {}
 }
 
+/// Clew's voice with all it was given played: its speaker open, silent,
+/// waiting for more of an answer.
+struct Played;
+
+impl crate::app::speech::Playing for Played {
+    fn play(&self, _samples: &[f32], _rate: u32) {}
+    fn rate(&self) -> u32 {
+        1000
+    }
+    fn queued_seconds(&self) -> f32 {
+        0.0
+    }
+    fn played(&self) -> u64 {
+        0
+    }
+    fn take_rest(&self) -> (Vec<f32>, u32) {
+        (Vec::new(), 1000)
+    }
+    fn idle(&self) -> bool {
+        true
+    }
+    fn level(&self) -> f32 {
+        0.0
+    }
+    fn error(&self) -> Option<String> {
+        None
+    }
+    fn pause(&self) {}
+    fn resume(&self) {}
+}
+
 /// "Hey, Clew": the spotter, loaded at the first step, hears it — and the
 /// microphone that waited listens, the moment before the phrase kept, so
 /// that what was said in one breath with it is heard whole; the name is
@@ -4100,18 +4131,19 @@ fn a_word_that_closes_said_over_clew_only_stops_it() {
     drop(turn);
 }
 
-/// "Hey, Clew, close" said as Clew waits, silent, for more of an answer —
-/// all of it so far said, its speaker still open — is not said over its
-/// voice: it closes what is on top, as with Clew quiet.
+/// Clew's speaker kept open and silent — all of an answer so far said,
+/// the rest still coming: Clew still speaks as the window shows it, and
+/// Esc would stop it first; so does "Hey, Clew, close", and nothing more.
 #[test]
-fn a_word_that_closes_said_as_clew_waits_closes() {
+fn a_word_that_closes_said_as_clew_waits_stops_it_as_esc_does() {
     let (turn, mut app, script, _, _) = wake_app("wake-close-quiet", "Hey, Clew. Close.", 1);
     app.voice.prefs.talk_over = true;
-    app.voice.speech.speak_for_test(Box::new(Playing), 0.0);
+    app.voice.speech.speak_for_test(Box::new(Played), 0.0);
     app.voice
         .speech
-        .quiet_for_test(std::time::Duration::from_secs(1));
-    assert!(app.voice.speech.is_speaking() && !app.voice.speech.heard());
+        .last_heard_for_test(std::time::Duration::from_secs(2));
+    assert!(app.voice.speech.is_speaking());
+    assert!(!app.voice.speech.heard_within(std::time::Duration::ZERO));
     app.proj.find.open = true;
     assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app));
@@ -4119,10 +4151,40 @@ fn a_word_that_closes_said_as_clew_waits_closes() {
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
     settle(&mut app, task);
-    assert!(!app.proj.find.open, "{}", app.status);
-    assert_ne!(app.status, "Stopped speaking");
+    assert!(!app.voice.speech.is_speaking(), "Clew not stopped");
+    assert!(app.proj.find.open, "{}", app.status);
+    assert_eq!(app.status, "Stopped speaking");
     drop(app);
     drop(turn);
+}
+
+/// "Hey, Clew" in Clew's own last words — "just say “Hey, Clew, open
+/// settings”" — told of by the spotter only once Clew has gone quiet, its
+/// speaker still open or closed since: Clew's voice is in what was kept of
+/// the call, its own words heard back, and no call.
+#[test]
+fn clews_own_call_told_of_late_is_no_call() {
+    let said = "Just say Hey Clew, open settings.";
+    for open in [true, false] {
+        let (turn, mut app, script, _, _) = wake_app("wake-own-late", said, 1);
+        app.voice.prefs.talk_over = true;
+        if open {
+            app.voice.speech.speak_for_test(Box::new(Played), 0.0);
+        }
+        app.voice.speech.said_for_test(said);
+        app.voice
+            .speech
+            .last_heard_for_test(std::time::Duration::from_secs(1));
+        assert!(!app.voice.speech.heard_within(std::time::Duration::ZERO));
+        assert!(!wait_step(&mut app));
+        assert!(wait_step(&mut app));
+        script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+        let task = app.update(Message::Voice(VoiceMsg::Tick));
+        settle(&mut app, task);
+        assert!(!app.settings.open, "open {open}: {}", app.status);
+        drop(app);
+        drop(turn);
+    }
 }
 
 /// A call said with Clew silent — an answer only coming — is never taken
