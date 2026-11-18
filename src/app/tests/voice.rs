@@ -4272,6 +4272,50 @@ fn a_call_starts_past_clews_own_sentence() {
         assert_eq!(past_clews_words(kept, &taught), kept);
     }
     assert_eq!(past_clews_words(twice, &[]), twice);
+    // The reader's own sentence after a long one of Clew's is judged on
+    // its own, and kept.
+    let long = vec![
+        "The total adds every price, then takes off the discount, so just say Hey Clew, open \
+         settings."
+            .to_string(),
+    ];
+    let mixed = format!("{} Okay, let me try. Hey, Clew, open settings.", long[0]);
+    assert_eq!(
+        past_clews_words(&mixed, &long),
+        "Okay, let me try. Hey, Clew, open settings."
+    );
+    // A dot with no space after it ends no sentence.
+    let unspaced = "Clew reads cart.Hey, Clew, open settings.";
+    assert_eq!(
+        past_clews_words(unspaced, &["Clew reads cart.".to_string()]),
+        unspaced
+    );
+}
+
+/// Clew's own "…in Settings. Hey, Clew." heard back, its voice in it: no
+/// call, though what follows its last sentence, alone, is too short to be
+/// taken for Clew's. Whether it was a call is judged on all that was heard;
+/// the status line only says Clew waits again.
+#[test]
+fn clews_own_call_after_its_sentence_is_no_call() {
+    let said = "Turn it on in Settings. Hey, Clew.";
+    let (turn, mut app, script, _, _) = wake_app("wake-own-short", said, 1);
+    app.voice.prefs.talk_over = true;
+    app.voice
+        .speech
+        .said_for_test("Turn it on in Settings. Hey, Clew starts listening.");
+    app.voice
+        .speech
+        .last_heard_for_test(std::time::Duration::from_millis(500));
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.voice.wake.is_waiting(), "{}", app.status);
+    assert_eq!(app.status, "Waiting for “Hey, Clew”");
+    drop(app);
+    drop(turn);
 }
 
 /// A call Clew taught, said just after it — Clew's sentence kept with it,

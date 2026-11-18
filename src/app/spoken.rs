@@ -415,7 +415,7 @@ fn mark(c: char) -> bool {
 }
 
 /// What ends a sentence.
-fn sentence_end(c: char) -> bool {
+pub(crate) fn sentence_end(c: char) -> bool {
     matches!(c, '.' | '!' | '?' | '。' | '！' | '？')
 }
 

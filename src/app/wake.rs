@@ -129,9 +129,8 @@ pub(crate) struct Hearing {
     /// What the spotter heard before is let go of at the next step: a
     /// waiting begins afresh, and goes on afresh after a call it was not.
     fresh: bool,
-    /// When the piece the spotter told of the phrase in was taken, and how
-    /// long it was.
-    told_at: Option<(Instant, Duration)>,
+    /// When the piece the spotter told of the phrase in began to be heard.
+    told_from: Option<Instant>,
     /// When the spotter failed lately: it is started again after each —
     /// one that fell behind while the computer was busy, or ended, hears
     /// again — until [`FAILURES`] within [`FAILING_WITHIN`] say it will not.
@@ -243,7 +242,7 @@ impl Wait {
             }
             Ok(Some(true)) => {
                 let long = Duration::from_secs_f32(piece.len() as f32 / spot::RATE as f32);
-                self.hearing().told_at = Some((took, long));
+                self.hearing().told_from = took.checked_sub(long);
                 Step::Called
             }
             Ok(Some(false)) => Step::Nothing,
@@ -284,9 +283,9 @@ impl Wait {
     /// kept ([`HEARD_SECONDS`]), not known.
     fn told_since(&self) -> Duration {
         self.hearing()
-            .told_at
-            .map_or(Duration::from_secs_f32(HEARD_SECONDS), |(took, long)| {
-                took.elapsed() + long + PHRASE
+            .told_from
+            .map_or(Duration::from_secs_f32(HEARD_SECONDS), |from| {
+                from.elapsed() + PHRASE
             })
     }
 
@@ -715,12 +714,7 @@ impl App {
             && !crate::app::voice::said_over(text, &self.voice.speech.said_lately());
         if !to_clew || own {
             self.end_hold(call, false);
-            self.not_called(call);
-            // Clew's own voice, heard back: its name was heard — Clew only
-            // waits again, saying nothing of not hearing it.
-            if own && self.voice.wake.is_waiting() {
-                self.status = tr!("Waiting for “Hey, Clew”").into();
-            }
+            self.not_called(call, own);
             return false;
         }
         if self.voice.wake.unproven == Some(call) {
@@ -777,8 +771,9 @@ impl App {
     /// or not, each on its own: "Hey, Clew" said once someone else's
     /// "Hey, cool" woke Clew — the spotter not listening meanwhile — is a
     /// call still, and listening begins again for it
-    /// ([`App::prove_call`]).
-    pub(crate) fn not_called(&mut self, call: u64) {
+    /// ([`App::prove_call`]). Clew's `own` voice heard back, its name was
+    /// heard: the status line only says it waits again.
+    pub(crate) fn not_called(&mut self, call: u64, own: bool) {
         if self.voice.wake.unproven != Some(call) {
             return;
         }
@@ -790,7 +785,11 @@ impl App {
             self.voice.wake.given_up = Some(call);
         }
         self.status = if self.resume_waiting() {
-            tr!("Didn't hear “Clew” — waiting for “Hey, Clew”").into()
+            if own {
+                tr!("Waiting for “Hey, Clew”").into()
+            } else {
+                tr!("Didn't hear “Clew” — waiting for “Hey, Clew”").into()
+            }
         } else if let Some(error) = &self.voice.wake.failed {
             tr!(
                 "Stopped waiting for “Hey, Clew”: {error}",

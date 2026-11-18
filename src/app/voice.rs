@@ -1090,19 +1090,29 @@ pub(crate) fn said_over(heard: &str, said: &[String]) -> bool {
 /// What was heard with a call, from the sentence that calls Clew after
 /// Clew's own last words (`said`), heard back: what the microphone kept
 /// from before the call — "Just say “Hey, Clew, open settings”." — is not
-/// what the reader said. Whole sentences only, and only before a call.
+/// what the reader said. Whole sentences only, each run of them judged on
+/// its own, and only before a call: the reader's own words are kept. What
+/// is done is decided by this; whether it was a call at all, by all that
+/// was heard ([`App::prove_call`]).
 pub(crate) fn past_clews_words<'a>(heard: &'a str, said: &[String]) -> &'a str {
     if said.is_empty() {
         return heard;
     }
     let mut from = 0;
-    for (i, c) in heard.char_indices() {
-        if !matches!(c, '.' | '!' | '?' | '。' | '！' | '？') {
+    let mut chars = heard.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        // A sentence's end: a mark that ends it, a space or the end after
+        // it — not the dot of "cart.py" — unless it is one of Chinese or
+        // Japanese, written unspaced.
+        let ends = crate::app::spoken::sentence_end(c)
+            && (!c.is_ascii() || chars.peek().is_none_or(|(_, next)| next.is_whitespace()));
+        if !ends {
             continue;
         }
         let at = i + c.len_utf8();
-        let (before, after) = heard.split_at(at);
-        if crate::app::spoken::named_in(after).is_some() && !said_over(before, said) {
+        if crate::app::spoken::named_in(&heard[at..]).is_some()
+            && !said_over(&heard[from..at], said)
+        {
             from = at;
         }
     }
@@ -1979,15 +1989,6 @@ impl App {
         }
         self.voice.transcribing = None;
         let said = std::mem::take(&mut self.voice.run_said);
-        // Kept with a call from before it, Clew's own last words heard back
-        // are not the reader's: what is heard starts at the sentence that
-        // calls Clew ([`past_clews_words`]).
-        let result = if said.call.is_some() || said.lead {
-            let lately = self.voice.speech.said_lately();
-            result.map(|text| past_clews_words(&text, &lately).to_string())
-        } else {
-            result
-        };
         // Said over Clew: begun as it spoke, or with a call that held it as
         // it spoke — as the window shows it, and Esc stops it — known before
         // proving the call lets go of its hold.
@@ -2047,6 +2048,16 @@ impl App {
                 }
             }
         }
+        // A call proven — on all that was heard with it — what was kept with
+        // it from before, Clew's own last words heard back, is not what the
+        // reader said: what is done starts at the sentence that calls Clew
+        // ([`past_clews_words`]).
+        let result = if call {
+            let lately = self.voice.speech.said_lately();
+            result.map(|text| past_clews_words(&text, &lately).to_string())
+        } else {
+            result
+        };
         // "Bye, Clew" said in a listening that has ended since — turned
         // off, and begun again, or called anew — ends nothing of this one;
         // what was said after it in its own is let go of all the same.
