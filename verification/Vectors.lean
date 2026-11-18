@@ -236,10 +236,40 @@ def framing : Json :=
   Json.mkObj [("read_frame", Json.arr frames.toArray), ("encode", Json.arr encodes.toArray),
     ("read_json_line", Json.arr jsonLines.toArray), ("read_line_capped", Json.arr capped.toArray)]
 
+def stepName : Clew.VoiceRoute.Step → String
+  | .bye => "bye"
+  | .sayHowToStop => "say_how_to_stop"
+  | .nothing => "nothing"
+  | .runWaiting => "run_waiting"
+  | .declineWaiting => "decline_waiting"
+  | .hush => "hush"
+  | .tryCommand => "try_command"
+  | .tryCommandsBackOn => "try_commands_back_on"
+  | .hold => "hold"
+  | .ask => "ask"
+
+/-- Every combination of facts — so the Rust `route` is checked to be the
+model everywhere, and the theorems hold of it outright. -/
+def voiceRoute : Json :=
+  let facts := Clew.VoiceRoute.allFacts.map fun f =>
+    let question : Json := match f.toQuestion with
+      | none => Json.null
+      | some .yesOrNo => Json.str "yes_or_no"
+      | some .answer => Json.str "answer"
+    pair (Json.mkObj [("bye", Json.bool f.bye), ("stop_listening_said", Json.bool f.stopListeningSaid),
+        ("empty", Json.bool f.empty), ("confirm_waiting", Json.bool f.confirmWaiting),
+        ("hush", Json.bool f.hush), ("yes_or_no", match f.yesOrNo with
+          | some b => Json.bool b
+          | none => Json.null),
+        ("to_question", question), ("answer_being_written", Json.bool f.answerBeingWritten),
+        ("run_commands", Json.bool f.runCommands)])
+      (Json.arr ((Clew.VoiceRoute.route f).map (Json.str ∘ stepName)).toArray)
+  Json.mkObj [("route", Json.arr facts.toArray)]
+
 /-- Every model's vectors, by file name. -/
 def all : List (String × Json) :=
   [("confine.json", confine), ("update.json", update), ("server_dist.json", serverDist),
-    ("trust.json", trust), ("framing.json", framing)]
+    ("trust.json", trust), ("framing.json", framing), ("voice_route.json", voiceRoute)]
 
 end Vectors
 

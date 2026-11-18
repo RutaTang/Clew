@@ -6121,3 +6121,54 @@ fn a_real_microphone_wakes_clew() {
         assert!(!heard.text.to_lowercase().contains("clew"), "{heard:?}");
     }
 }
+
+/// `route` sends heard words where the Lean model does, on every one of the
+/// 1152 combinations of facts — so the model's theorems are theorems about
+/// it: a stop word is never asked of Ask nor taken for a yes, what is said
+/// to a question waiting is never asked, "Bye, Clew" comes first, and every
+/// route ends in one step that acts (`verification/Clew/VoiceRoute.lean`).
+#[test]
+fn where_heard_words_go_is_the_proven_model() {
+    use crate::app::voice::{QuestionWord, RouteFacts, Step, route};
+    let vectors = include_str!("../../../verification/vectors/voice_route.json");
+    let flag = |f: &serde_json::Value, k: &str| f[k].as_bool().unwrap();
+    for (facts, want) in clew_core::testutil::lean_cases(vectors, "route") {
+        let f = RouteFacts {
+            bye: flag(&facts, "bye"),
+            stop_listening_said: flag(&facts, "stop_listening_said"),
+            empty: flag(&facts, "empty"),
+            confirm_waiting: flag(&facts, "confirm_waiting"),
+            hush: flag(&facts, "hush"),
+            yes_or_no: facts["yes_or_no"].as_bool(),
+            to_question: match facts["to_question"].as_str() {
+                Some("yes_or_no") => Some(QuestionWord::YesOrNo),
+                Some("answer") => Some(QuestionWord::Answer),
+                _ => None,
+            },
+            answer_being_written: flag(&facts, "answer_being_written"),
+            run_commands: flag(&facts, "run_commands"),
+        };
+        let got: Vec<&str> = route(&f)
+            .into_iter()
+            .map(|step| match step {
+                Step::Bye => "bye",
+                Step::SayHowToStop => "say_how_to_stop",
+                Step::Nothing => "nothing",
+                Step::RunWaiting => "run_waiting",
+                Step::DeclineWaiting => "decline_waiting",
+                Step::Hush => "hush",
+                Step::TryCommand => "try_command",
+                Step::TryCommandsBackOn => "try_commands_back_on",
+                Step::Hold => "hold",
+                Step::Ask => "ask",
+            })
+            .collect();
+        let want: Vec<&str> = want
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap())
+            .collect();
+        assert_eq!(got, want, "route({f:?})");
+    }
+}

@@ -1127,6 +1127,102 @@ pub(crate) fn past_clews_words<'a>(heard: &'a str, said: &[String]) -> &'a str {
     heard[from..].trim_start()
 }
 
+/// What sends a heard utterance where it goes: every fact [`App::on_words`]
+/// routes on, read off the words and the app before anything is done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RouteFacts {
+    /// "Bye, Clew".
+    pub(crate) bye: bool,
+    /// The microphone's label, "Stop listening", said.
+    pub(crate) stop_listening_said: bool,
+    /// Nothing said past Clew's name.
+    pub(crate) empty: bool,
+    /// A command waits for a yes.
+    pub(crate) confirm_waiting: bool,
+    /// Only a word that stops Clew ("stop", "okay, be quiet").
+    pub(crate) hush: bool,
+    /// What opens with a yes or a no.
+    pub(crate) yes_or_no: Option<bool>,
+    /// What it is to a question waiting: one of its answers, or a yes or a no.
+    pub(crate) to_question: Option<QuestionWord>,
+    /// An answer is being written in Ask.
+    pub(crate) answer_being_written: bool,
+    /// Spoken commands are on.
+    pub(crate) run_commands: bool,
+}
+
+/// What words are to a question waiting ([`crate::app::onscreen::ToQuestion`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuestionWord {
+    YesOrNo,
+    Answer,
+}
+
+/// One step of where heard words go. Every step acts but the two `Try`s,
+/// which act only on words that are a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    Bye,
+    SayHowToStop,
+    Nothing,
+    RunWaiting,
+    DeclineWaiting,
+    Hush,
+    TryCommand,
+    TryCommandsBackOn,
+    Hold,
+    Ask,
+}
+
+/// Where heard words go: the steps to take, in order, until one acts.
+///
+/// The rules the voice reviews kept returning to are theorems about this
+/// function in `verification/Clew/VoiceRoute.lean` — a word that stops Clew
+/// is never sent to Ask, nor taken for a yes; what is said to a question
+/// waiting is never asked; "Bye, Clew" is always heard first — and a test
+/// checks this function against the model on every combination of facts.
+pub(crate) fn route(f: &RouteFacts) -> Vec<Step> {
+    if f.bye {
+        return vec![Step::Bye];
+    }
+    if f.stop_listening_said {
+        return vec![Step::SayHowToStop];
+    }
+    if f.empty {
+        return vec![Step::Nothing];
+    }
+    if f.confirm_waiting {
+        // "Stop" is a no too — "Okay, stop" as well, though it opens with a
+        // yes. Anything else said puts the command away, and is read as
+        // itself.
+        match if f.hush { Some(false) } else { f.yes_or_no } {
+            Some(true) => return vec![Step::RunWaiting],
+            Some(false) => return vec![Step::DeclineWaiting],
+            None => {}
+        }
+    }
+    // An answer of a stop word's name the question offers is that answer.
+    let hush = f.hush && f.to_question != Some(QuestionWord::Answer);
+    // While an answer is being written, a stop word is that answer's —
+    // before any command of its name (the debugger's Stop).
+    if hush && f.answer_being_written {
+        return vec![Step::Hush];
+    }
+    let mut steps = vec![if f.run_commands {
+        Step::TryCommand
+    } else {
+        Step::TryCommandsBackOn
+    }];
+    steps.push(if hush {
+        Step::Hush
+    } else if f.to_question.is_some() {
+        Step::Hold
+    } else {
+        Step::Ask
+    });
+    steps
+}
+
 /// Whether a call is Clew's own voice, heard back (`said`, its last
 /// sentences): only if Clew called itself (`named` times) in what it
 /// played as the phrase may have been said ("…just say “Hey, Clew”") —
@@ -2159,95 +2255,113 @@ impl App {
         // Clew called by its name before what is said to it: what is said
         // is what follows ("Hey, Clew, open Settings").
         let named = crate::app::spoken::what_is_said(&text, call);
-        // "Bye, Clew" — after the name or not: the microphone turned off —
-        // or, called by its name, waiting for it again. A command waiting
-        // for a yes is put away, as by anything else said.
-        if crate::app::spoken::says_bye(&text, call) {
-            self.voice.confirm = None;
-            self.voice.hear(Heard {
-                text,
-                outcome: HeardOutcome::Ran(tr_noop!("Stop listening").into()),
-            });
-            return self.said_bye();
-        }
-        // The microphone's label said instead: not a question for Ask —
-        // what stops listening is said.
-        if crate::app::spoken::says_stop_listening(named) {
-            let say = tr_noop!("Say “Bye, Clew” to stop listening");
-            self.voice.confirm = None;
-            self.status = crate::i18n::lookup(say).into();
-            self.voice.hear(Heard {
-                text,
-                outcome: HeardOutcome::Failed(say.into()),
-            });
-            return Task::none();
-        }
-        let text = named.to_string();
-        if text.is_empty() {
-            return Task::none();
-        }
-        // The answer to a command waiting for a yes; anything else said
-        // instead puts it away and is read as itself.
-        if let Some(waiting) = self.voice.confirm.take() {
-            // "Stop" is a no too — "Okay, stop" as well, though it opens
-            // with a yes.
-            let answer = if crate::app::onscreen::hushes(&text) {
-                Some(false)
-            } else {
-                crate::app::spoken::yes_or_no(&text)
-            };
-            match answer {
-                Some(true) => {
+        // Everything where the words go turns on, read before anything is
+        // done; `route` decides from it alone.
+        let bye = crate::app::spoken::says_bye(&text, call);
+        let stop_listening_said = crate::app::spoken::says_stop_listening(named);
+        let to = if bye || stop_listening_said || named.is_empty() {
+            None
+        } else {
+            self.said_to_question(named)
+        };
+        let facts = RouteFacts {
+            bye,
+            stop_listening_said,
+            empty: named.is_empty(),
+            confirm_waiting: self.voice.confirm.is_some(),
+            hush: crate::app::onscreen::hushes(named),
+            yes_or_no: crate::app::spoken::yes_or_no(named),
+            to_question: to.as_ref().map(|to| match to {
+                crate::app::onscreen::ToQuestion::YesOrNo => QuestionWord::YesOrNo,
+                crate::app::onscreen::ToQuestion::Answer(_) => QuestionWord::Answer,
+            }),
+            answer_being_written: self.ask_stream_active(),
+            run_commands: self.voice.prefs.run_commands,
+        };
+        let plan = route(&facts);
+        // A command waiting for a yes is put away by anything said — "Bye,
+        // Clew" and the microphone's label too — but nothing.
+        let mut waiting = if plan.first() == Some(&Step::Nothing) {
+            None
+        } else {
+            self.voice.confirm.take()
+        };
+        let mut to = to;
+        let said = named.to_string();
+        for step in plan {
+            match step {
+                // "Bye, Clew" — after the name or not: the microphone turned
+                // off — or, called by its name, waiting for it again.
+                Step::Bye => {
+                    self.voice.hear(Heard {
+                        text,
+                        outcome: HeardOutcome::Ran(tr_noop!("Stop listening").into()),
+                    });
+                    return self.said_bye();
+                }
+                // The microphone's label said instead: not a question for
+                // Ask — what stops listening is said.
+                Step::SayHowToStop => {
+                    let say = tr_noop!("Say “Bye, Clew” to stop listening");
+                    self.status = crate::i18n::lookup(say).into();
+                    self.voice.hear(Heard {
+                        text,
+                        outcome: HeardOutcome::Failed(say.into()),
+                    });
+                    return Task::none();
+                }
+                Step::Nothing => return Task::none(),
+                // The answer to a command waiting for a yes.
+                Step::RunWaiting => {
+                    let Some(waiting) = waiting.take() else {
+                        return Task::none();
+                    };
                     self.status = tr!(
                         "“{text}” → {command}",
-                        text = text,
+                        text = said,
                         command = waiting.said()
                     );
                     self.voice.hear(Heard {
-                        text,
+                        text: said,
                         outcome: HeardOutcome::Ran(waiting.done()),
                     });
                     return self.run_waiting(waiting);
                 }
-                Some(false) => {
-                    self.status = tr!("Didn't run {command}", command = waiting.said());
+                // A no — "stop", "okay, stop" too, though it opens with a yes.
+                Step::DeclineWaiting => {
+                    if let Some(waiting) = waiting.take() {
+                        self.status = tr!("Didn't run {command}", command = waiting.said());
+                    }
                     self.voice.heard = None;
                     return Task::none();
                 }
-                None => {}
+                // A word that stops Clew: not a question for Ask, nor a yes
+                // to one waiting.
+                Step::Hush => return self.hush_for_the_reader(),
+                Step::TryCommand => {
+                    if let Some(task) = self.heard_command(&said) {
+                        return task;
+                    }
+                }
+                Step::TryCommandsBackOn => {
+                    if let Some(task) = self.heard_commands_back_on(&said) {
+                        return task;
+                    }
+                }
+                // What opens with a yes or a no, or an answer's words, with
+                // a question waiting: held (`App::hold_for_question`), never
+                // sent to Ask, where the agent asking would read a yes as
+                // consent and a no would wait on the question.
+                Step::Hold => {
+                    if let Some(to) = to.take() {
+                        return self.hold_for_question(said, to);
+                    }
+                    return Task::none();
+                }
+                Step::Ask => break,
             }
         }
-        // What opens with a yes or a no, or an answer's words, with a
-        // question waiting — that question covered, not ready to answer,
-        // put away, or spoken commands off: held (`App::hold_for_question`),
-        // never sent to Ask, where the agent asking would read a yes as
-        // consent and a no would wait on the question. With no question
-        // waiting, it answers what the agent asked in words, and goes on.
-        let to = self.said_to_question(&text);
-        // A word that stops Clew ("stop", said after "Hey, Clew" and a
-        // pause): not a question for Ask — nor a yes to one waiting, though
-        // it opens with one ("okay, stop"). An answer of that name the
-        // question offers is that answer. While an answer is being
-        // written, it is that answer's — before any command of its name
-        // (the debugger's Stop); else it is heard as any command is first.
-        let hush = crate::app::onscreen::hushes(&text)
-            && !matches!(to, Some(crate::app::onscreen::ToQuestion::Answer(_)));
-        if hush && self.ask_stream_active() {
-            return self.hush_for_the_reader();
-        }
-        if self.voice.prefs.run_commands {
-            if let Some(task) = self.heard_command(&text) {
-                return task;
-            }
-        } else if let Some(task) = self.heard_commands_back_on(&text) {
-            return task;
-        }
-        if hush {
-            return self.hush_for_the_reader();
-        }
-        if let Some(to) = to {
-            return self.hold_for_question(text, to);
-        }
+        let text = said;
         // A question: to Ask. Sent, it is answered where Ask is — the card
         // is not opened over the code for it: the pill says it is being
         // answered, and the answer is read aloud. Kept for the reader to
