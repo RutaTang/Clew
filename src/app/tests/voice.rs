@@ -4100,6 +4100,36 @@ fn a_word_that_closes_said_over_clew_only_stops_it() {
     drop(turn);
 }
 
+/// "Hey, Clew, close" said as an answer is only coming to be read aloud —
+/// nothing of it heard yet — is not said over Clew: it closes what is on
+/// top, as with Clew quiet, and says nothing of stopping Clew.
+#[test]
+fn a_word_that_closes_said_as_an_answer_comes_closes() {
+    let (turn, mut app, script, _, _) = wake_app("wake-close-coming", "Hey, Clew. Close.", 1);
+    app.voice.prefs.talk_over = true;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 7,
+        question: "what does total do?".into(),
+        spoken: true,
+        streaming: true,
+        ..Default::default()
+    });
+    app.proj.find.open = true;
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    assert!(app.voice.speech.held(), "the answer coming held");
+    assert!(!app.voice.speech.is_speaking());
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(!app.proj.find.open, "{}", app.status);
+    assert_ne!(app.status, "Stopped speaking");
+    drop(app);
+    drop(turn);
+}
+
 /// "Bye, Clew" said over Clew is said to it, but ends listening, not what
 /// Clew says: it goes on reading, the microphone waiting for its name
 /// again.

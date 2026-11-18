@@ -372,6 +372,9 @@ pub(crate) struct CallHold {
     /// ([`Speech::round`](crate::app::speech::Speech::round)): stopped
     /// since, it is not stopped again — gone on, held too long, it is.
     round: u64,
+    /// Whether Clew was speaking then — not only an answer still coming
+    /// to be read aloud, of which nothing was heard yet.
+    spoke: bool,
 }
 
 /// Waiting's state in a window.
@@ -415,9 +418,12 @@ pub(crate) struct WakeState {
 }
 
 impl WakeState {
-    /// Whether `call` holds Clew: called as it spoke.
-    pub(crate) fn holds_for(&self, call: u64) -> bool {
-        self.held.as_ref().is_some_and(|h| h.call == call)
+    /// Whether `call` holds Clew, called as it spoke: what was said with
+    /// it was said over Clew. Not so for an answer only coming then.
+    pub(crate) fn spoken_over(&self, call: u64) -> bool {
+        self.held
+            .as_ref()
+            .is_some_and(|h| h.call == call && h.spoke)
     }
 
     pub(crate) fn new() -> Self {
@@ -606,7 +612,8 @@ impl App {
             hearing.fresh = true;
             return Task::none();
         }
-        let speaking = self.voice.speech.is_speaking() || self.answer_read_aloud_coming();
+        let spoke = self.voice.speech.is_speaking();
+        let speaking = spoke || self.answer_read_aloud_coming();
         // The model listened with, removed meanwhile: nothing to hear with,
         // nor to hear whether it was a call — said as the voice key says
         // it, and Clew stopped as the voice key stops it.
@@ -624,11 +631,12 @@ impl App {
         if speaking {
             self.voice.speech.hold();
             let round = self.voice.speech.round();
-            self.voice.wake.held =
-                self.voice
-                    .speech
-                    .held_since()
-                    .map(|since| CallHold { call, since, round });
+            self.voice.wake.held = self.voice.speech.held_since().map(|since| CallHold {
+                call,
+                since,
+                round,
+                spoke,
+            });
         }
         let task = self.listen_now(Some(call));
         // The microphone would not open: nothing will prove the call.

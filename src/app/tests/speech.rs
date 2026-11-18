@@ -2498,6 +2498,37 @@ fn what_was_said_over_clew_is_worked_out_from_where_it_began() {
     assert!(!app.voice.speech.is_speaking(), "the reader's: Clew stops");
 }
 
+/// A word that puts away, talked over Clew as it reads ("close"), stops it
+/// and does nothing more: the find bar under it stays open. A command
+/// waiting for a yes is declined with it, as Esc declines it.
+#[test]
+fn a_word_that_closes_talked_over_clew_only_stops_it() {
+    for (tag, said, waiting) in [
+        ("speech-talk-close", "Close.", false),
+        ("speech-talk-close-asked", "Close it.", true),
+    ] {
+        let (mut app, _output) = talked_over(tag, said);
+        app.proj.find.open = true;
+        if waiting {
+            app.voice.confirm = Some(crate::app::voice::Waiting::Command("Settings".into()));
+        }
+        talk(Some(0.1));
+        voice_tick(&mut app);
+        assert!(app.voice.speech.held(), "{tag}");
+        talk(Some(crate::app::voice::END_SILENCE + 0.1));
+        voice_tick(&mut app);
+        assert!(!app.voice.speech.is_speaking(), "{tag}: Clew not stopped");
+        assert!(app.proj.find.open, "{tag}: the find bar closed");
+        assert!(app.voice.confirm.is_none(), "{tag}: still asked");
+        let status = if waiting {
+            "Didn't run Settings"
+        } else {
+            "Stopped speaking"
+        };
+        assert_eq!(app.status, status, "{tag}");
+    }
+}
+
 /// Where words said over Clew began is of what that microphone heard: one
 /// opened afresh — the last gone away while Clew was held — keeps all it
 /// hears.
