@@ -4187,11 +4187,7 @@ fn clews_own_call_told_of_late_is_no_call() {
         let task = app.update(Message::Voice(VoiceMsg::Tick));
         settle(&mut app, task);
         assert!(!app.settings.open, "open {open}: {}", app.status);
-        assert!(
-            app.status.starts_with("Didn't hear “Clew”"),
-            "{}",
-            app.status
-        );
+        assert_eq!(app.status, "Waiting for “Hey, Clew”", "open {open}");
         assert!(!app.voice.speech.held(), "open {open}: Clew not let go on");
         drop(app);
         drop(turn);
@@ -4254,28 +4250,52 @@ fn a_call_just_after_clew_is_heard_without_its_voice_taken_out() {
     drop(turn);
 }
 
-/// What the microphone heard while Clew could be heard, before a call its
-/// voice was not in, is left out of what the call is worked out with:
-/// Clew's own last words — "just say “Hey, Clew, open settings”" — are not
-/// taken for the reader's.
+/// Clew's own last sentence, kept with a call from before it — "Just say
+/// “Hey, Clew, open settings”." — is not the reader's: what is heard
+/// starts at the sentence that calls Clew. Words of the reader's own, or no
+/// later call, keep all of it.
 #[test]
-fn what_was_heard_of_clew_before_a_call_is_left_out() {
-    let (turn, mut app, script, _, _) = wake_app("wake-lead-cut", "Hey, Clew, open settings.", 4);
-    // Pieces of two thirds of a second: five of them kept, 3.3 s.
-    script.lock().unwrap().rate = 48_000;
+fn a_call_starts_past_clews_own_sentence() {
+    use crate::app::voice::past_clews_words;
+    let taught = vec!["Just say Hey Clew, open settings.".to_string()];
+    let twice = "Just say Hey Clew, open settings. Hey, Clew, open settings.";
+    assert_eq!(
+        past_clews_words(twice, &taught),
+        "Hey, Clew, open settings."
+    );
+    for kept in [
+        "Hey, Clew, open settings.",
+        "Hey, Clew. What does Clew do?",
+        "I like this one. Hey, Clew, open settings.",
+        "Just say Hey Clew, open settings. Then it rounds.",
+    ] {
+        assert_eq!(past_clews_words(kept, &taught), kept);
+    }
+    assert_eq!(past_clews_words(twice, &[]), twice);
+}
+
+/// A call Clew taught, said just after it — Clew's sentence kept with it,
+/// its voice not taken out — runs what the reader said, not what Clew did.
+#[test]
+fn a_call_with_clews_sentence_before_it_runs_the_readers() {
+    let (turn, mut app, script, _, _) = wake_app(
+        "wake-taught-heard-back",
+        "Just say Hey Clew, open settings. Hey, Clew, open settings.",
+        1,
+    );
     app.voice.prefs.talk_over = true;
     app.voice
         .speech
-        .last_heard_for_test(std::time::Duration::from_secs(3));
-    for _ in 0..4 {
-        assert!(!wait_step(&mut app));
-    }
+        .said_for_test("Just say Hey Clew, open settings.");
+    app.voice
+        .speech
+        .last_heard_for_test(std::time::Duration::from_secs(10));
+    assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app));
-    let lead = app.voice.wake.lead.as_ref().expect("what was heard kept");
-    let seconds = lead.samples.len() as f32 / lead.rate as f32;
-    // Clew heard until 2.65 s ago, its device's tail with it: what came
-    // before is left out.
-    assert!((seconds - 2.65).abs() < 0.15, "{seconds} s kept");
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
     drop(app);
     drop(turn);
 }

@@ -1087,6 +1087,28 @@ pub(crate) fn said_over(heard: &str, said: &[String]) -> bool {
     echoed * 10 < words.len() * 7
 }
 
+/// What was heard with a call, from the sentence that calls Clew after
+/// Clew's own last words (`said`), heard back: what the microphone kept
+/// from before the call — "Just say “Hey, Clew, open settings”." — is not
+/// what the reader said. Whole sentences only, and only before a call.
+pub(crate) fn past_clews_words<'a>(heard: &'a str, said: &[String]) -> &'a str {
+    if said.is_empty() {
+        return heard;
+    }
+    let mut from = 0;
+    for (i, c) in heard.char_indices() {
+        if !matches!(c, '.' | '!' | '?' | '。' | '！' | '？') {
+            continue;
+        }
+        let at = i + c.len_utf8();
+        let (before, after) = heard.split_at(at);
+        if crate::app::spoken::named_in(after).is_some() && !said_over(before, said) {
+            from = at;
+        }
+    }
+    heard[from..].trim_start()
+}
+
 /// Fewest words an echo of Clew is taken to be: anything shorter said over
 /// it is the reader's.
 const ECHO_WORDS: usize = 3;
@@ -1766,7 +1788,7 @@ impl App {
 
     /// Whether the call waiting to be proven was made with Clew heard: what
     /// is heard with it may hold Clew's own words ([`Said::echo`]).
-    pub(crate) fn call_echoes(&self) -> bool {
+    fn call_echoes(&self) -> bool {
         self.voice
             .wake
             .unproven
@@ -1957,6 +1979,15 @@ impl App {
         }
         self.voice.transcribing = None;
         let said = std::mem::take(&mut self.voice.run_said);
+        // Kept with a call from before it, Clew's own last words heard back
+        // are not the reader's: what is heard starts at the sentence that
+        // calls Clew ([`past_clews_words`]).
+        let result = if said.call.is_some() || said.lead {
+            let lately = self.voice.speech.said_lately();
+            result.map(|text| past_clews_words(&text, &lately).to_string())
+        } else {
+            result
+        };
         // Said over Clew: begun as it spoke, or with a call that held it as
         // it spoke — as the window shows it, and Esc stops it — known before
         // proving the call lets go of its hold.

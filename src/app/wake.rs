@@ -129,9 +129,8 @@ pub(crate) struct Hearing {
     /// What the spotter heard before is let go of at the next step: a
     /// waiting begins afresh, and goes on afresh after a call it was not.
     fresh: bool,
-    /// When the piece the spotter told of the phrase in was taken — what is
-    /// kept of the call ([`Hearing::recent`]) ends then — and how long it
-    /// was.
+    /// When the piece the spotter told of the phrase in was taken, and how
+    /// long it was.
     told_at: Option<(Instant, Duration)>,
     /// When the spotter failed lately: it is started again after each —
     /// one that fell behind while the computer was busy, or ended, hears
@@ -362,17 +361,14 @@ pub(crate) struct Waiting {
 
 impl Waiting {
     /// The microphone back, and what it heard last ([`HEARD_SECONDS`]).
-    /// The microphone, and what it heard last: ending when the spotter told
-    /// of the phrase, if it did.
-    fn into_mic(self) -> Option<(Box<dyn Listening>, Recording, Option<Instant>)> {
+    fn into_mic(self) -> Option<(Box<dyn Listening>, Recording)> {
         let mut hearing = self.wait.hearing();
         let mic = hearing.mic.take()?;
         let lead = Recording {
             samples: std::mem::take(&mut hearing.recent).into(),
             rate: hearing.rate,
         };
-        let to = hearing.told_at.map(|(took, _)| took);
-        Some((mic, lead, to))
+        Some((mic, lead))
     }
 }
 
@@ -617,28 +613,14 @@ impl App {
     /// The microphone that waited, handed over — to wait in another window
     /// — and this one waiting no more.
     pub(crate) fn give_up_waiting(&mut self) -> Option<Box<dyn Listening>> {
-        let (mic, ..) = self.voice.wake.waiting.take()?.into_mic()?;
+        let (mic, _) = self.voice.wake.waiting.take()?.into_mic()?;
         Some(mic)
     }
 
     /// The microphone that waited, to listen with: what it heard just
-    /// before kept, as the lead of what is worked out next. A call Clew's
-    /// voice was not heard in leaves out what was heard while it was, before
-    /// it: Clew's own words are not the reader's.
+    /// before kept, as the lead of what is worked out next.
     pub(crate) fn take_waiting_mic(&mut self) -> Option<Box<dyn Listening>> {
-        let (mic, mut lead, to) = self.voice.wake.waiting.take()?.into_mic()?;
-        if self.voice.wake.unproven.is_some()
-            && !self.call_echoes()
-            && let (Some(to), Some(until)) = (to, self.voice.speech.heard_until())
-            && lead.rate > 0
-        {
-            let kept = to.saturating_duration_since(until).as_secs_f32();
-            let cut = lead
-                .samples
-                .len()
-                .saturating_sub((kept * lead.rate as f32) as usize);
-            lead.samples.drain(..cut);
-        }
+        let (mic, lead) = self.voice.wake.waiting.take()?.into_mic()?;
         self.voice.wake.lead = Some(lead);
         Some(mic)
     }
@@ -728,11 +710,17 @@ impl App {
         let stops = crate::app::spoken::says_bye(text, true);
         let goes_on = crate::app::spoken::leaves_clew_speaking(text, true);
         let to_clew = crate::app::spoken::named_in(text).is_some() || stops;
-        let named = to_clew
-            && (!echo || crate::app::voice::said_over(text, &self.voice.speech.said_lately()));
-        if !named {
+        let own = to_clew
+            && echo
+            && !crate::app::voice::said_over(text, &self.voice.speech.said_lately());
+        if !to_clew || own {
             self.end_hold(call, false);
             self.not_called(call);
+            // Clew's own voice, heard back: its name was heard — Clew only
+            // waits again, saying nothing of not hearing it.
+            if own && self.voice.wake.is_waiting() {
+                self.status = tr!("Waiting for “Hey, Clew”").into();
+            }
             return false;
         }
         if self.voice.wake.unproven == Some(call) {
