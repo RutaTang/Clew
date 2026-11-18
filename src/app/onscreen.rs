@@ -374,8 +374,12 @@ fn only_one<'a>(found: &[&'a Target]) -> Option<&'a Target> {
 }
 
 /// The row of a list on screen `said` asks for by its place: of the first
-/// list drawn (the sidebar's before the margin's).
+/// list drawn (the sidebar's before the margin's). Never for a yes or a no
+/// said alone: Korean's 네 is "yes" before it is "four".
 pub(crate) fn row(said: &str, targets: &[Target]) -> Option<Target> {
+    if crate::app::spoken::only_yes_or_no(said).is_some() {
+        return None;
+    }
     let asked = row_asked(said)?;
     let list = targets.iter().find_map(|t| t.row.map(|(list, _)| list))?;
     let rows: Vec<&Target> = targets
@@ -550,17 +554,12 @@ impl App {
     /// Whether `said` answers the question waiting ([`App::question_pending`])
     /// — a yes, or an allowing answer's own words ("Trust and connect",
     /// "Always allow read_file"), plainly or asked — wherever that answer
-    /// is: not yet pressable, covered, or not offered at all.
+    /// is: not yet pressable, covered, or not drawn at all
+    /// ([`crate::ui::allowing_answers`]).
     pub(crate) fn answers_question(&self, said: &str) -> bool {
         self.question_pending().is_some()
-            && (crate::app::spoken::only_yes_or_no(said) == Some(true) || {
-                let allows: Vec<Target> = crate::ui::heard::gather_all(self)
-                    .0
-                    .into_iter()
-                    .filter(|t| t.allows)
-                    .collect();
-                named(said, &allows).is_some()
-            })
+            && (crate::app::spoken::only_yes_or_no(said) == Some(true)
+                || named(said, &crate::ui::allowing_answers(self)).is_some())
     }
 
     /// An answer said (`text`) for the question on screen, held, saying
@@ -568,6 +567,15 @@ impl App {
     /// nothing, and goes nowhere else — sent on to Ask, a "yes" would read
     /// to the agent asking as consent.
     pub(crate) fn hold_answer(&mut self, text: String, why: &'static str) -> Task<Message> {
+        // An approval waiting in an Ask put away comes into view, to be
+        // read and answered there: the status asks for the answer again
+        // once it has been, and nothing else would show it.
+        if matches!(
+            self.question_pending(),
+            Some(crate::app::model::Question::Approval { .. })
+        ) {
+            self.reveal_ask();
+        }
         self.status = crate::i18n::lookup(why).into();
         self.voice.hear(Heard {
             text,
@@ -675,6 +683,32 @@ mod tests {
         for said in ["open the file", "line 3", "go to total", "three files", ""] {
             assert_eq!(row_asked(said), None, "{said:?}");
         }
+    }
+
+    /// A yes or a no said alone is no row's place: Korean's 네 is "yes"
+    /// before it is "four" — 네 번째 is the fourth.
+    #[test]
+    fn a_yes_said_alone_picks_no_row() {
+        use crate::i18n::{Lang, with_lang};
+        let rows: Vec<Target> = (1..=5)
+            .map(|i| Target {
+                row: Some((0, i)),
+                ..target(&format!("file {i}"), Message::Noop)
+            })
+            .collect();
+        with_lang(Lang::Ko, || {
+            for said in ["네", "네.", "네, 네"] {
+                assert!(row(said, &rows).is_none(), "{said:?}");
+            }
+            assert_eq!(
+                row("네 번째", &rows).map(|t| t.title),
+                Some("file 4".to_string())
+            );
+            assert_eq!(
+                row("세 번째", &rows).map(|t| t.title),
+                Some("file 3".to_string())
+            );
+        });
     }
 
     fn target(title: &str, message: Message) -> Target {

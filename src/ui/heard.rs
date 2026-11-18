@@ -65,9 +65,11 @@ pub(crate) struct Target {
     /// reader's reach long enough to be read (`App::may_allow`). Only
     /// voice is offered it ([`gather_heard`]), to wait when it is said.
     pub waiting: bool,
-    /// It allows, runs or trusts what the question on screen asks — its
-    /// "yes", or what answers every such question from now on ("Always
-    /// allow…"): said as a question, it is not pressed.
+    /// It allows, runs or trusts what a question waiting on the user asks
+    /// — its "yes" ([`answer_when`]), or what answers every such question
+    /// from now on ("Always allow…", [`said_when`]): said as a question, it
+    /// is not pressed. A dialog's plain "yes" ([`answer`]) — Save, Update
+    /// now — answers no such question, and is not.
     pub allows: bool,
 }
 
@@ -143,8 +145,7 @@ pub(crate) fn gathering() -> bool {
 }
 
 fn push(title: String, shown: String, message: &Message, answer: Option<Answer>, row: bool) {
-    let allows = answer == Some(Answer::Yes);
-    push_as(title, shown, message, answer, row, (false, allows));
+    push_as(title, shown, message, answer, row, (false, false));
 }
 
 /// [`push`], `(waiting, allows)` as given ([`Target::waiting`],
@@ -303,9 +304,6 @@ pub(crate) fn answer_when(
     answer: Answer,
     message: Message,
 ) -> Option<Message> {
-    if ready {
-        return Some(self::answer(shown, answer, message));
-    }
     if gathering() {
         push_as(
             title_of(shown),
@@ -313,8 +311,12 @@ pub(crate) fn answer_when(
             &message,
             Some(answer),
             false,
-            (true, answer == Answer::Yes),
+            (!ready, answer == Answer::Yes),
         );
+    }
+    if ready {
+        note(shown, &message);
+        return Some(message);
     }
     None
 }
@@ -457,6 +459,20 @@ pub(crate) fn gather_heard(app: &App) -> Vec<Target> {
 /// Every target the view offers, of every layer, and every press it marks
 /// for jump mode ([`marked`]).
 pub(crate) fn gather_all(app: &App) -> (Vec<Target>, Vec<(String, Layer)>) {
+    gather_all_of(|| crate::ui::view(app))
+}
+
+/// What building `build` offers, all of it — one part of the view,
+/// gathered as [`gather`] gathers the whole.
+pub(crate) fn gather_of<T>(build: impl FnOnce() -> T) -> Vec<Target> {
+    gather_all_of(build).0
+}
+
+/// [`gather_of`], with every press it marks for jump mode too: what
+/// [`gather_all`] gives for the whole view.
+pub(crate) fn gather_all_of<T>(build: impl FnOnce() -> T) -> (Vec<Target>, Vec<(String, Layer)>) {
+    // Gathering ends however building does: a panic in it left every view
+    // built after gathering for no one.
     struct Stop;
     impl Drop for Stop {
         fn drop(&mut self) {
@@ -465,36 +481,12 @@ pub(crate) fn gather_all(app: &App) -> (Vec<Target>, Vec<(String, Layer)>) {
     }
     GATHERING.with(|g| *g.borrow_mut() = Some(Gathering::default()));
     let stop = Stop;
-    drop(crate::ui::view(app));
+    drop(build());
     let gathered = GATHERING
         .with(|g| g.borrow_mut().take())
         .unwrap_or_default();
     drop(stop);
     (gathered.targets, gathered.marks)
-}
-
-/// What building `build` offers, all of it — one part of the view,
-/// gathered as [`gather`] gathers the whole.
-#[cfg(test)]
-pub(crate) fn gather_of<T>(build: impl FnOnce() -> T) -> Vec<Target> {
-    GATHERING.with(|g| *g.borrow_mut() = Some(Gathering::default()));
-    drop(build());
-    GATHERING
-        .with(|g| g.borrow_mut().take())
-        .map(|g| g.targets)
-        .unwrap_or_default()
-}
-
-/// [`gather_of`], with every press it marks for jump mode too: what
-/// [`gather_all`] gives for the whole view.
-#[cfg(test)]
-pub(crate) fn gather_all_of<T>(build: impl FnOnce() -> T) -> (Vec<Target>, Vec<(String, Layer)>) {
-    GATHERING.with(|g| *g.borrow_mut() = Some(Gathering::default()));
-    drop(build());
-    GATHERING
-        .with(|g| g.borrow_mut().take())
-        .map(|g| (g.targets, g.marks))
-        .unwrap_or_default()
 }
 
 /// Of `targets`, those a press can reach: the tutorial's while it runs, a
@@ -522,8 +514,10 @@ mod tests {
     #[test]
     fn what_allows_and_what_waits_is_marked() {
         let targets = gather_of(|| {
-            answer("Allow", Answer::Yes, Message::Noop);
-            answer("Decline", Answer::No, Message::Noop);
+            answer_when(true, "Allow", Answer::Yes, Message::Noop);
+            answer_when(true, "Decline", Answer::No, Message::Noop);
+            // A dialog's own yes, which answers no question waiting.
+            answer("Save", Answer::Yes, Message::Noop);
             answer_when(false, "Trust and connect", Answer::Yes, Message::Noop);
             said_when(true, "Always allow", Message::Noop);
             said_when(false, "Download", Message::Noop);
@@ -539,6 +533,7 @@ mod tests {
         };
         assert_eq!(kind("Allow"), (true, false));
         assert_eq!(kind("Decline"), (false, false));
+        assert_eq!(kind("Save"), (false, false));
         assert_eq!(kind("Trust and connect"), (true, true));
         assert_eq!(kind("Always allow"), (true, false));
         assert_eq!(kind("Download"), (true, true));

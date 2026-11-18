@@ -408,12 +408,14 @@ pub(crate) fn setup_sheet<'a>(
     let accept_button = button(text(accept).size(ts::BASE))
         .style(theme::primary_button)
         .padding([6, 16])
-        // Waiting for the question to be read, or the project to be looked
-        // at: what is said for it waits too ([`super::heard::answer_when`]).
-        .on_press_maybe(if something {
+        // A first open's Open answers its question: waiting for it to be
+        // read, or the project to be looked at, what is said for it waits
+        // too ([`super::heard::answer_when`]). Apply and Explain answer
+        // none — they are pressed once there is something to do.
+        .on_press_maybe(if gated {
             super::heard::answer_when(ready, accept, super::heard::Answer::Yes, accept_msg)
         } else {
-            None
+            ready.then(|| super::heard::answer(accept, super::heard::Answer::Yes, accept_msg))
         });
     let decline_ready = !decline_gated || asked.ready;
     let decline_button = button(text(decline_label).size(ts::BASE))

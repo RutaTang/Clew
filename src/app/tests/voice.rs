@@ -2352,6 +2352,141 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
     assert_eq!(app.proj.ask_input, "Yes.");
 }
 
+/// A question waiting where its answers are not drawn — the project's
+/// sheet or the connect sheet under Settings, an approval in an Ask put
+/// away, its answer a page further — holds a yes said for it, and its
+/// answers' own words, as one in view does: none goes to Ask. Held, an
+/// approval put away comes back into view, to be read and answered. What
+/// a dialog on top asks for itself — a note's words, its Save, said as a
+/// question too — is its own.
+#[test]
+fn a_yes_for_a_question_not_drawn_is_held() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption};
+    let (mut app, script, _) = voice_app("voice-yes-undrawn", "");
+    app.asking.delay = std::time::Duration::from_secs(60);
+    let held = |app: &mut App, script: &Arc<Mutex<MicScript>>, said: &str| {
+        say_words(app, script, said);
+        assert!(
+            app.proj.ask_queue.is_empty(),
+            "{said}: {:?}",
+            app.proj.ask_queue
+        );
+        assert!(
+            app.proj.ask_input.is_empty(),
+            "{said}: {}",
+            app.proj.ask_input
+        );
+        assert!(
+            app.status.starts_with("Too soon to answer"),
+            "{said}: {}",
+            app.status
+        );
+    };
+    // The project's sheet, under the Settings its "Add an API Key…" opened.
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.pending_consent = Some(root.clone());
+    app.settings.open = true;
+    for said in ["Yes.", "Open without setup"] {
+        held(&mut app, &script, said);
+    }
+    assert_eq!(app.pending_consent.as_ref(), Some(&root), "not answered");
+    app.settings.open = false;
+    app.pending_consent = None;
+    // The connect sheet asking to trust a host, under Settings.
+    let target = crate::backend::connect::ConnTarget::Ssh {
+        label: "root@devbox".into(),
+        args: vec!["root@devbox".into()],
+    };
+    app.connect = Some(crate::ConnectUi {
+        stage: crate::ConnectStage::TrustHost {
+            target,
+            reason: "devbox is not a known host".into(),
+            key: crate::backend::connect::ScannedHostKey {
+                host: "devbox".into(),
+                line: "devbox ssh-ed25519 AAAA".into(),
+                kind: "ED25519".into(),
+                fingerprint: "SHA256:abc".into(),
+            },
+        },
+        ..crate::ConnectUi::default()
+    });
+    app.settings.open = true;
+    for said in ["Yes.", "Trust and connect"] {
+        held(&mut app, &script, said);
+    }
+    assert!(
+        matches!(
+            app.connect.as_ref().map(|c| &c.stage),
+            Some(crate::ConnectStage::TrustHost { .. })
+        ),
+        "not trusted"
+    );
+    app.settings.open = false;
+    app.connect = None;
+    // An approval in an Ask put away, the answer named a page further.
+    app.ask_view = AskView::Hidden;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 3,
+        question: "tidy the imports".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    let option = |id: &str, label: &str, allows: bool| ApprovalOption {
+        id: id.into(),
+        label: label.into(),
+        allows,
+        always: false,
+    };
+    app.proj.ask_turns[0].extras.approvals.push(Approval {
+        key: ApprovalKey::Mcp { call: 1 },
+        mark: None,
+        title: "files wants to read".into(),
+        detail: String::new(),
+        options: vec![
+            option("once", "Allow", true),
+            option("session", "Allow for this session", true),
+            option("folder", "Allow in this folder", true),
+            ApprovalOption {
+                always: true,
+                ..option("always", "Always allow read_file", true)
+            },
+            option("deny", "Decline", false),
+        ],
+    });
+    assert_eq!(
+        crate::ui::shown_answers(&app.proj.ask_turns[0].extras.approvals[0].options, 0).1,
+        2,
+        "the always a page further"
+    );
+    held(&mut app, &script, "Always allow read_file");
+    assert!(app.ask_view.is_open(), "the question brought into view");
+    assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1);
+    // A note over the window, the approval still waiting in Ask put away:
+    // the note takes its words, and its Save — asked or not.
+    app.hide_ask();
+    let seed = vec![bookmarks::Bookmark {
+        rel: "src/lib.rs".into(),
+        line: 3,
+        preview: "fn".into(),
+        note: None,
+    }];
+    bookmarks::save(&root, &seed).unwrap();
+    app.proj.bookmarks = bookmarks::load(&root);
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteEdit(
+        "src/lib.rs".into(),
+        3,
+    )));
+    say_words(&mut app, &script, "Why this line matters.");
+    say_words(&mut app, &script, "Save?");
+    assert!(app.proj.note_edit.is_none(), "{}", app.status);
+    assert_eq!(
+        app.proj.bookmarks.first().and_then(|b| b.note.as_deref()),
+        Some("Why this line matters")
+    );
+    assert!(app.proj.ask_input.is_empty(), "{}", app.proj.ask_input);
+    assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1);
+}
+
 /// A dialog's main button that answers no question waiting — Update now,
 /// a prompt's Save — is pressed said as a question too: only what allows
 /// a question's ask wants a plain answer.

@@ -226,6 +226,7 @@ impl App {
     pub(crate) fn question_pending(&self) -> Option<crate::app::model::Question> {
         use crate::app::model::Question;
         self.question_shown()
+            .or_else(|| self.pending_consent.clone().map(Question::Project))
             .or_else(|| self.connect_question())
             .or_else(|| {
                 self.first_approval()
@@ -238,7 +239,7 @@ impl App {
 
     /// The question connecting asks, if it asks one: trust a new host, or
     /// forget a changed host key.
-    fn connect_question(&self) -> Option<crate::app::model::Question> {
+    pub(crate) fn connect_question(&self) -> Option<crate::app::model::Question> {
         use crate::app::model::Question;
         match self.connect.as_ref().map(|c| &c.stage) {
             Some(ConnectStage::TrustHost { key, .. }) => {

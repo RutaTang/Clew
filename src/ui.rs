@@ -487,6 +487,50 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
     Some(overlay)
 }
 
+/// The answers that allow ([`heard::Target::allows`]) of every question
+/// waiting on the user, drawn or not: the project's sheet under Settings,
+/// the connect sheet under another, an approval card in an Ask put away —
+/// its answers on every page. What a "yes", or one of their names, said
+/// while a question waits is held by (`App::answers_question`): sent on to
+/// Ask, it would read to the agent asking as consent.
+pub(crate) fn allowing_answers(app: &App) -> Vec<heard::Target> {
+    heard::gather_of(|| {
+        let mut parts: Vec<Element<'_, Message>> = Vec::new();
+        if let Some(root) = &app.pending_consent {
+            let setup = app
+                .setup
+                .as_ref()
+                .filter(|s| &s.root == root && s.mode == crate::app::setup::SetupMode::Open);
+            parts.push(setup::setup_sheet(app, root, setup, false));
+        }
+        if let Some((number, pending)) = app.proj.pending_lsp_command.on_screen() {
+            parts.push(lsp_command_modal(pending, number, 0, false));
+        }
+        if let Some((number, consent)) = app.proj.pending_lsp_consent.on_screen() {
+            parts.push(lsp_consent_modal(consent, number, 0, false));
+        }
+        if app.connect_question().is_some() {
+            parts.push(connect_modal(app));
+        }
+        if let Some((turn, approval)) = app.first_approval() {
+            let (_, pages) = panels::shown_answers(&approval.options, 0);
+            for page in 0..pages {
+                parts.push(panels::approval_card(
+                    turn.stream,
+                    approval,
+                    false,
+                    f32::INFINITY,
+                    page,
+                ));
+            }
+        }
+        parts
+    })
+    .into_iter()
+    .filter(|t| t.allows)
+    .collect()
+}
+
 impl<'a> ActiveOverlay<'a> {
     /// Which overlay it is, when it holds the keys yet takes none to a
     /// field of its own: every one but the hover peek (no keys), the
