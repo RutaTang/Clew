@@ -1087,36 +1087,52 @@ pub(crate) fn said_over(heard: &str, said: &[String]) -> bool {
     echoed * 10 < words.len() * 7
 }
 
-/// What was heard with a call, from the sentence that calls Clew after
-/// Clew's own last words (`said`), heard back: what the microphone kept
-/// from before the call — "Just say “Hey, Clew, open settings”." — is not
-/// what the reader said. Whole sentences only, each run of them judged on
-/// its own, and only before a call: the reader's own words are kept. What
-/// is done is decided by this; whether it was a call at all, by all that
-/// was heard ([`App::prove_call`]).
+/// What was heard with a call, from the sentence that calls Clew — or
+/// says "Bye, Clew" — after Clew's own last words (`said`), heard back:
+/// what the microphone kept from before the call — "Just say “Hey, Clew,
+/// open settings”." — is not what the reader said. Whole sentences only,
+/// the run since the last one left out judged on its own, and only before a
+/// call: the reader's own words are kept. What is done is decided by this;
+/// whether it was a call at all, by all that was heard ([`clews_own`]).
 pub(crate) fn past_clews_words<'a>(heard: &'a str, said: &[String]) -> &'a str {
     if said.is_empty() {
         return heard;
     }
     let mut from = 0;
-    let mut chars = heard.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        // A sentence's end: a mark that ends it, a space or the end after
-        // it — not the dot of "cart.py" — unless it is one of Chinese or
-        // Japanese, written unspaced.
-        let ends = crate::app::spoken::sentence_end(c)
-            && (!c.is_ascii() || chars.peek().is_none_or(|(_, next)| next.is_whitespace()));
-        if !ends {
+    for (i, c) in heard.char_indices() {
+        if !crate::app::spoken::sentence_end(c) {
             continue;
         }
-        let at = i + c.len_utf8();
-        if crate::app::spoken::named_in(&heard[at..]).is_some()
-            && !said_over(&heard[from..at], said)
-        {
+        // The sentence ends past the quotes that close it — a space or the
+        // end after them, not the dot of "cart.py" — or at once, a mark of
+        // Chinese or Japanese, written unspaced.
+        let rest = heard[i + c.len_utf8()..]
+            .trim_start_matches(['"', '\'', '”', '’', ')', ']', '」', '』']);
+        if c.is_ascii() && !rest.chars().next().is_none_or(char::is_whitespace) {
+            continue;
+        }
+        let at = heard.len() - rest.len();
+        let after = &heard[at..];
+        let to_clew = crate::app::spoken::named_in(after).is_some()
+            || crate::app::spoken::says_bye(after, true);
+        if to_clew && !said_over(&heard[from..at], said) {
             from = at;
         }
     }
     heard[from..].trim_start()
+}
+
+/// Whether what was heard is Clew's own voice, heard back (`said`, its
+/// last sentences): mostly Clew's words, all of it — and what is left once
+/// Clew's own sentences before a call are left out ([`past_clews_words`])
+/// too: a call said over what was left of Clew's voice is the reader's.
+/// What is left too short to tell ([`ECHO_WORDS`]), all of it decides.
+pub(crate) fn clews_own(heard: &str, said: &[String]) -> bool {
+    if said_over(heard, said) {
+        return false;
+    }
+    let kept = past_clews_words(heard, said);
+    word_tokens(kept).len() < ECHO_WORDS || !said_over(kept, said)
 }
 
 /// Fewest words an echo of Clew is taken to be: anything shorter said over
@@ -2029,7 +2045,7 @@ impl App {
             };
             let (to_clew, bye) = result.as_ref().map_or((false, false), |text| {
                 (
-                    said_over(text, &lately),
+                    !clews_own(text, &lately),
                     crate::app::spoken::leaves_clew_speaking(text, call),
                 )
             });

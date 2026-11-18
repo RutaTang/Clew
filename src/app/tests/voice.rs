@@ -4290,6 +4290,93 @@ fn a_call_starts_past_clews_own_sentence() {
         past_clews_words(unspaced, &["Clew reads cart.".to_string()]),
         unspaced
     );
+    // One closed by a quote does; and one of Chinese, written unspaced.
+    let quoted = vec!["Just say \"Hey Clew, open settings.\"".to_string()];
+    assert_eq!(
+        past_clews_words(&format!("{} Hey, Clew, open settings.", quoted[0]), &quoted),
+        "Hey, Clew, open settings."
+    );
+    assert_eq!(
+        past_clews_words(
+            "记住这个。Hey, Clew, open settings.",
+            &["记住这个。".to_string()]
+        ),
+        "Hey, Clew, open settings."
+    );
+    // "Bye, Clew" after Clew's sentence is the reader's too.
+    assert_eq!(
+        past_clews_words("Just say Hey Clew, open settings. Bye, Clew.", &taught),
+        "Bye, Clew."
+    );
+}
+
+/// Clew's own voice heard back: all of it mostly Clew's words, and what is
+/// left once Clew's sentences before a call are left out too. A call said
+/// over what was left of Clew's voice is the reader's; Clew's own
+/// "…Hey, Clew." — too short, left alone, to tell — is Clew's.
+#[test]
+fn clews_own_voice_is_told_by_what_follows_its_sentences() {
+    use crate::app::voice::clews_own;
+    let total = vec!["The total adds every price, then takes off the discount.".to_string()];
+    assert!(!clews_own(
+        "The total adds every price, then takes off the discount. Hey, Clew, open settings.",
+        &total
+    ));
+    let own = vec!["Turn it on in Settings. Hey, Clew starts listening.".to_string()];
+    assert!(clews_own("Turn it on in Settings. Hey, Clew.", &own));
+    assert!(clews_own("", &own), "nothing heard is nobody's call");
+    assert!(!clews_own("Hey, Clew, open settings.", &[]));
+}
+
+/// A call said over Clew, what was left of Clew's voice heard with it: the
+/// reader's call, though most of what was heard is Clew's.
+#[test]
+fn a_call_over_what_is_left_of_clews_voice_is_the_readers() {
+    let (turn, mut app, script, _, _) = wake_app(
+        "wake-call-over-leftover",
+        "The total adds every price, then takes off the discount. Hey, Clew, open settings.",
+        1,
+    );
+    app.voice.prefs.talk_over = true;
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    app.voice
+        .speech
+        .said_for_test("The total adds every price, then takes off the discount.");
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    drop(app);
+    drop(turn);
+}
+
+/// "Bye, Clew" said after Clew's own sentence, kept from before the call
+/// that sentence made: listening ends — Clew's "open settings" is not run.
+#[test]
+fn bye_clew_after_clews_sentence_ends_listening() {
+    let (turn, mut app, script, _, _) = wake_app(
+        "wake-bye-after-taught",
+        "Just say Hey Clew, open settings. Bye, Clew.",
+        1,
+    );
+    app.voice.prefs.talk_over = true;
+    app.voice
+        .speech
+        .said_for_test("Just say Hey Clew, open settings.");
+    app.voice
+        .speech
+        .last_heard_for_test(std::time::Duration::from_secs(10));
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(!app.settings.open, "{}", app.status);
+    assert!(app.voice.wake.is_waiting(), "{}", app.status);
+    drop(app);
+    drop(turn);
 }
 
 /// Clew's own "…in Settings. Hey, Clew." heard back, its voice in it: no

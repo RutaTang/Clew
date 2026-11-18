@@ -709,9 +709,8 @@ impl App {
         let stops = crate::app::spoken::says_bye(text, true);
         let goes_on = crate::app::spoken::leaves_clew_speaking(text, true);
         let to_clew = crate::app::spoken::named_in(text).is_some() || stops;
-        let own = to_clew
-            && echo
-            && !crate::app::voice::said_over(text, &self.voice.speech.said_lately());
+        let own =
+            to_clew && echo && crate::app::voice::clews_own(text, &self.voice.speech.said_lately());
         if !to_clew || own {
             self.end_hold(call, false);
             self.not_called(call, own);
