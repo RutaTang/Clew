@@ -341,7 +341,8 @@ fn a_question_heard_goes_to_ask() {
 
 /// "Stop" said with nothing on screen named by it is not a question for
 /// Ask: an answer being written stops, as Ask's Stop stops it — and with
-/// nothing being said or written, the status line says so.
+/// nothing being said or written, the status line says so. A command that
+/// asked first takes it as a "no".
 #[test]
 fn stop_said_is_never_asked() {
     for (tag, writing) in [("voice-stop-nothing", false), ("voice-stop-writing", true)] {
@@ -355,6 +356,12 @@ fn stop_said_is_never_asked() {
             assert_eq!(app.status, "Nothing to stop", "{tag}");
         }
     }
+    let (mut app, script, _) = voice_app("voice-stop-asked", "Stop.");
+    app.voice.confirm = Some(crate::app::voice::Waiting::Command("Settings".into()));
+    say(&mut app, &script);
+    assert!(app.voice.confirm.is_none(), "still asked");
+    assert!(!app.settings.open, "run");
+    assert_eq!(app.status, "Didn't run Settings");
 }
 
 /// A question said aloud is asked without the card opening over the code
