@@ -347,6 +347,71 @@ fn sweep_older_than(dist: &Path, keep: &str, now: std::time::SystemTime, age: Du
 mod tests {
     use super::*;
 
+    /// `slug`, `asset_name`, `parse_digest_list`, `embedded_digest`,
+    /// `parse_sha256` and `verify` compute, on every input the Lean model
+    /// was run on, what the model computes — the model whose theorems say a
+    /// slug is a plain token, an asset name names one platform and protocol,
+    /// and with a list embedded only the digest pinned for the asset itself
+    /// is ever accepted (`verification/Clew/ServerDist.lean`).
+    #[test]
+    fn deployment_checks_are_the_proven_model() {
+        let vectors = include_str!("../../../verification/vectors/server_dist.json");
+        let cases = |f| crate::testutil::lean_cases(vectors, f);
+        for (input, want) in cases("slug") {
+            let platform = input.as_str().unwrap();
+            assert_eq!(
+                slug(platform).ok().as_deref(),
+                want.as_str(),
+                "slug({platform:?})"
+            );
+        }
+        for (input, want) in cases("asset_name") {
+            let (s, p) = (
+                input[0].as_str().unwrap(),
+                input[1].as_u64().unwrap() as u32,
+            );
+            assert_eq!(asset_name(s, p), want.as_str().unwrap());
+        }
+        for (input, want) in cases("parse_digest_list") {
+            let text = input.as_str().unwrap();
+            let want: std::collections::BTreeMap<String, String> = want
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| (e[0].as_str().unwrap().into(), e[1].as_str().unwrap().into()))
+                .collect();
+            let got: std::collections::BTreeMap<String, String> =
+                parse_digest_list(text).into_iter().collect();
+            assert_eq!(got, want, "parse_digest_list({text:?})");
+        }
+        for (input, want) in cases("embedded_digest") {
+            let (list, asset) = (input[0].as_str(), input[1].as_str().unwrap());
+            let got = match embedded_digest(list, asset) {
+                Ok(None) => "none".to_string(),
+                Ok(Some(d)) => d,
+                Err(_) => "refused".to_string(),
+            };
+            assert_eq!(
+                got,
+                want.as_str().unwrap(),
+                "embedded_digest({list:?}, {asset:?})"
+            );
+        }
+        for (input, want) in cases("parse_sha256") {
+            let text = input.as_str().unwrap();
+            assert_eq!(
+                parse_sha256(text).as_deref(),
+                want.as_str(),
+                "parse_sha256({text:?})"
+            );
+        }
+        for (input, want) in cases("verify_abc") {
+            let expected = input.as_str().unwrap();
+            let got = verify(b"abc".to_vec(), expected).is_ok();
+            assert_eq!(got, want.as_bool().unwrap(), "verify(abc, {expected:?})");
+        }
+    }
+
     #[test]
     fn slug_accepts_known_platforms() {
         assert_eq!(slug("Linux x86_64").unwrap(), "linux-x86_64");

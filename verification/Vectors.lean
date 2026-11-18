@@ -85,9 +85,69 @@ def update : Json :=
   Json.mkObj [("parse", Json.arr parses.toArray), ("lt", Json.arr order.toArray),
     ("ensure_upgrade", Json.arr upgrades.toArray)]
 
+/-- `char::to_lowercase` on the characters the slug vectors use: ASCII, and
+three whose lower case is not themselves in one character or not ASCII. -/
+def rustLower (c : Char) : List Char :=
+  if c == '\u212A' then ['k']                -- KELVIN SIGN
+  else if c == '\u0130' then ['i', '\u0307']  -- I WITH DOT ABOVE
+  else if c == '\u00C9' then ['\u00E9']       -- E WITH ACUTE
+  else [Clew.Text.toAsciiLowercase c]
+
+def optStr : Option (List Char) → Json
+  | some s => str s
+  | none => Json.null
+
+def serverDist : Json :=
+  let alphabet := ['L', 'x', ' ', '-', '/', '.', '_', '8']
+  let platforms : List (List Char) := allUpTo alphabet 3 ++ ["Linux x86_64", "Darwin arm64",
+    " linux aarch64 ", "../etc", "linux/x86", "Linux\tx86", "LINUX X86_64", "linux.x86",
+    "li_nux-1", "Linux\u00A0x86", "\u212A", "\u0130", "\u00C9", "x86%2F", "a?b", "a#b"].map String.toList
+  let slugs := platforms.map fun p => pair (str p) (optStr (Clew.ServerDist.slug rustLower p))
+  let assets := [("linux-x86_64", 27), ("a", 0), ("a-p1", 2), ("x", 1234567)].map fun (sl, k) =>
+    pair (Json.arr #[Json.str sl, toJson k]) (str (Clew.ServerDist.assetName sl.toList k))
+  let d1 := "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  let digests := [d1, d1.toUpper, "abc123", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ag"]
+  let names := ["clew-server-linux-x86_64-p27", "*clew-server-x", "a b", ""]
+  let shapes : List (String → String → String) := [
+    fun d n => d ++ "  " ++ n, fun d n => n ++ "=" ++ d, fun d n => " " ++ n ++ " = " ++ d ++ " ",
+    fun d n => d ++ " " ++ n ++ " extra", fun d _ => d]
+  let entries := shapes.flatMap fun f => names.flatMap fun n => digests.map fun d => f d n
+  let good := [d1 ++ "  clew-server-linux-x86_64-p27", "clew-server-linux-aarch64-p27=" ++ d1.toUpper,
+    d1 ++ " *clew-server-macos", "garbage", "", "a=b=" ++ d1,
+    "clew-server-linux-x86_64-p27=" ++ String.ofList (List.replicate 64 'a')]
+  let seps := ["\n", ";", ",", "\r\n"]
+  let pairs := good.flatMap fun a => good.flatMap fun b => seps.map fun sep => a ++ sep ++ b
+  let texts : List (List Char) := (entries ++ pairs ++
+    [String.join (good.map (· ++ "\n")), "", "\n\n;,"]).map String.toList
+  -- The map `parse_digest_list` returns: each name's last digest.
+  let asMap (l : List (List Char × List Char)) : List (List Char × List Char) :=
+    l.foldl (fun acc e => (acc.filter (·.1 != e.1)) ++ [e]) []
+  let lists := texts.map fun t =>
+    pair (str t) (Json.arr ((asMap (Clew.ServerDist.parseDigestList t)).map
+      (fun (n, d) => Json.arr #[str n, str d])).toArray)
+  let assetNames := ["clew-server-linux-x86_64-p27", "clew-server-linux-aarch64-p27",
+    "clew-server-macos", "clew-server-x", "missing"]
+  let embeddedLists : List (Option String) :=
+    [none, some "", some (String.join (good.map (· ++ "\n"))), some (good.head! ++ ";" ++ good[1]!)]
+  let embedded := embeddedLists.flatMap fun l => assetNames.map fun a =>
+    pair (Json.arr #[(match l with | some t => Json.str t | none => Json.null), Json.str a])
+      (match Clew.ServerDist.embeddedDigest (l.map String.toList) a.toList with
+        | .ok none => Json.str "none"
+        | .ok (some d) => str d
+        | .error () => Json.str "refused")
+  let sidecars : List (List Char) := (digests.map (· ++ "  clew-server-linux-x86_64-p27\n") ++
+    digests ++ ["", "  ", "abc " ++ d1, d1.toUpper ++ " x", "x y z"]).map String.toList
+  let sums := sidecars.map fun t => pair (str t) (optStr (Clew.ServerDist.parseSha256 t))
+  -- `verify` of the bytes `abc`, whose SHA-256 is `d1`, against each expected digest.
+  let verifies := (digests ++ ["", d1 ++ " "]).map fun e =>
+    pair (Json.str e) (Json.bool (d1.toList == Clew.ServerDist.lowerHex e.toList))
+  Json.mkObj [("slug", Json.arr slugs.toArray), ("asset_name", Json.arr assets.toArray),
+    ("parse_digest_list", Json.arr lists.toArray), ("embedded_digest", Json.arr embedded.toArray),
+    ("parse_sha256", Json.arr sums.toArray), ("verify_abc", Json.arr verifies.toArray)]
+
 /-- Every model's vectors, by file name. -/
 def all : List (String × Json) :=
-  [("confine.json", confine), ("update.json", update)]
+  [("confine.json", confine), ("update.json", update), ("server_dist.json", serverDist)]
 
 end Vectors
 
