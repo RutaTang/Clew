@@ -2684,9 +2684,24 @@ fn a_no_the_question_has_no_answer_for_asks_for_its_words() {
         assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1, "{said}");
     };
     by_name(&mut app, &script, "No.");
-    // Put away, with nothing else left for "cancel" to put away (as Esc
-    // would, a page over the code first), it brings the question back —
-    // and asks for its words.
+    say_words(&mut app, &script, "Always reject");
+    assert!(
+        app.proj.ask_turns[0].extras.approvals.is_empty(),
+        "{}",
+        app.status
+    );
+    // A card with a Decline, put away: with nothing else left for "cancel"
+    // to put away (as Esc would, a page over the code first), it brings
+    // the question back — and asks for its words, not the Decline's: said
+    // again, it would close the card.
+    let mut declines = approval(2);
+    declines.options.push(ApprovalOption {
+        id: "deny".into(),
+        label: "Decline".into(),
+        allows: false,
+        always: false,
+    });
+    app.proj.ask_turns[0].extras.approvals.push(declines);
     app.hide_ask();
     for _ in 0..3 {
         say_words(&mut app, &script, "Cancel.");
@@ -2700,10 +2715,9 @@ fn a_no_the_question_has_no_answer_for_asks_for_its_words() {
         "{}",
         app.status
     );
-    assert!(app.proj.ask_input.is_empty());
-    assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1);
     assert!(app.ask_view.is_open(), "the question not brought into view");
-    say_words(&mut app, &script, "Always reject");
+    assert!(app.proj.ask_input.is_empty());
+    say_words(&mut app, &script, "Decline");
     assert!(
         app.proj.ask_turns[0].extras.approvals.is_empty(),
         "{}",
