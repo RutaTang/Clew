@@ -768,15 +768,14 @@ impl App {
         }
         let approves = |t: &Target| matches!(t.message, Message::Ask(AskMsg::Approve { .. }));
         // Named among the card's own answers: another "Cancel" on screen —
-        // an update's download — made the name stand for neither.
+        // an update's download — made the name stand for neither. And
+        // among all its pages: the page in view's "Cancel (keep edits)" is
+        // not the "Cancel" on the next.
         let drawn: Vec<Target> = targets
             .iter()
             .filter(|t| t.layer == Layer::Ask && approves(t))
             .cloned()
             .collect();
-        if let Some(answer) = named(said, &drawn) {
-            return Some((answer, true));
-        }
         let waiting: Vec<Target> = crate::ui::answers_waiting(self)
             .into_iter()
             .filter(approves)

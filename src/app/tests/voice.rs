@@ -561,37 +561,55 @@ fn an_answer_said_by_name_is_that_answer() {
         assert!(app.ask_view.is_open(), "{tag}: its question not shown");
         if view == AskView::Compact {
             assert!(app.first_approval().is_none(), "{tag}: not answered");
+            assert_eq!(ran(&app), Some("Continue"), "{tag}: another answer");
         } else {
             assert!(app.first_approval().is_some(), "{tag}: answered unseen");
             assert_eq!(app.status, too_soon, "{tag}");
         }
     }
-    // "Stop", on the card's second page, the first showing "Stop (keep
-    // edits)": nothing pressed — the page with "Stop" brought into view.
-    let (mut app, script, _) = voice_app("voice-answer-next-page", "Stop.");
+    // The debugger's command by its full name still steps it.
+    let (mut app, script, _) = voice_app("voice-debug-continue", "Debug continue.");
     asking(
         &mut app,
         vec![
             option("allow", "Allow", true),
-            option("keep", "Stop (keep edits)", false),
-            option("reject", "Reject", false),
-            option("skip", "Skip", false),
-            option("halt", "Stop", false),
+            option("go", "Continue", false),
         ],
     );
+    app.debug.session = Some(paused_program());
     app.ask_view = AskView::Compact;
     say(&mut app, &script);
-    assert!(
-        app.first_approval().is_some(),
-        "answered with another: {}",
-        app.status
-    );
-    assert_eq!(app.status, too_soon);
-    assert_eq!(
-        app.asking.answers_page.as_ref().map(|(_, page)| *page),
-        Some(1),
-        "its page not brought into view"
-    );
+    assert_eq!(ran(&app), Some("Debug: Continue"), "{}", app.status);
+    assert!(app.first_approval().is_some(), "the agent answered");
+    // "Stop" — or "Cancel", which closes things — on the card's second
+    // page, the first showing "Stop (keep edits)": nothing pressed — the
+    // page with it brought into view.
+    for word in ["Stop", "Cancel"] {
+        let (mut app, script, _) = voice_app("voice-answer-next-page", &format!("{word}."));
+        asking(
+            &mut app,
+            vec![
+                option("allow", "Allow", true),
+                option("keep", &format!("{word} (keep edits)"), false),
+                option("reject", "Reject", false),
+                option("skip", "Skip", false),
+                option("halt", word, false),
+            ],
+        );
+        app.ask_view = AskView::Compact;
+        say(&mut app, &script);
+        assert!(
+            app.first_approval().is_some(),
+            "{word}: answered with another: {}",
+            app.status
+        );
+        assert_eq!(app.status, too_soon, "{word}");
+        assert_eq!(
+            app.asking.answers_page.as_ref().map(|(_, page)| *page),
+            Some(1),
+            "{word}: its page not brought into view"
+        );
+    }
 }
 
 /// "Stop" said as an answer is written, a program paused in the debugger:
@@ -3158,6 +3176,28 @@ fn a_word_that_closes_answers_only_the_question_on_top() {
     assert!(app.picker.is_none(), "{}", app.status);
     assert!(app.status.ends_with("→ Closed"), "{}", app.status);
     app.ask_view = AskView::Compact;
+    // The agent's question, waiting: the card drawn as `cancel` holds.
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 1,
+        question: "tidy the imports".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    app.proj.ask_turns[0]
+        .extras
+        .approvals
+        .push(crate::app::model::Approval {
+            key: crate::app::model::ApprovalKey::Mcp { call: 1 },
+            mark: None,
+            title: "files wants to write".into(),
+            detail: String::new(),
+            options: vec![crate::app::model::ApprovalOption {
+                id: "reject".into(),
+                label: "Cancel".into(),
+                allows: false,
+                always: false,
+            }],
+        });
     app.proj.find.open = true;
     app.ask_sessions_menu = true;
     app.picker = Some(picker());
