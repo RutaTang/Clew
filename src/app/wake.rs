@@ -372,8 +372,11 @@ pub(crate) struct CallHold {
     /// ([`Speech::round`](crate::app::speech::Speech::round)): stopped
     /// since, it is not stopped again — gone on, held too long, it is.
     round: u64,
-    /// Whether Clew was speaking then — not only an answer still coming
-    /// to be read aloud, of which nothing was heard yet.
+    /// Whether Clew was heard then ([`Speech::heard`]): what was said
+    /// with the call was said over its voice — not over a silence, an
+    /// answer still coming.
+    ///
+    /// [`Speech::heard`]: crate::app::speech::Speech::heard
     spoke: bool,
 }
 
@@ -418,8 +421,8 @@ pub(crate) struct WakeState {
 }
 
 impl WakeState {
-    /// Whether `call` holds Clew, called as it spoke: what was said with
-    /// it was said over Clew. Not so for an answer only coming then.
+    /// Whether `call` holds Clew, called as it was heard: what was said
+    /// with it was said over Clew's voice.
     pub(crate) fn spoken_over(&self, call: u64) -> bool {
         self.held
             .as_ref()
@@ -612,8 +615,7 @@ impl App {
             hearing.fresh = true;
             return Task::none();
         }
-        let spoke = self.voice.speech.is_speaking();
-        let speaking = spoke || self.answer_read_aloud_coming();
+        let speaking = self.voice.speech.is_speaking() || self.answer_read_aloud_coming();
         // The model listened with, removed meanwhile: nothing to hear with,
         // nor to hear whether it was a call — said as the voice key says
         // it, and Clew stopped as the voice key stops it.
@@ -631,6 +633,7 @@ impl App {
         if speaking {
             self.voice.speech.hold();
             let round = self.voice.speech.round();
+            let spoke = self.voice.speech.held_over_voice();
             self.voice.wake.held = self.voice.speech.held_since().map(|since| CallHold {
                 call,
                 since,
@@ -665,9 +668,9 @@ impl App {
             return true;
         }
         // "Bye, Clew" is said to Clew too — and lets it go on reading: it
-        // ends listening, not what Clew says. Heard while Clew spoke, its
+        // ends listening, not what Clew says. Said over Clew's voice, its
         // own words heard back are no call.
-        let held = self.voice.wake.held.is_some_and(|h| h.call == call);
+        let held = self.voice.wake.spoken_over(call);
         let stops = crate::app::spoken::says_bye(text, true);
         let goes_on = crate::app::spoken::leaves_clew_speaking(text, true);
         let to_clew = crate::app::spoken::named_in(text).is_some() || stops;

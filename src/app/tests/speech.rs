@@ -2277,6 +2277,15 @@ impl crate::app::voice::Transcriber for Hears {
 /// Clew reading an answer aloud with the microphone on, to be talked over;
 /// what the reader is heard to say is `heard`.
 fn talked_over(tag: &str, heard: &str) -> (App, Arc<Mutex<OutputScript>>) {
+    let (mut app, output) = reading_with_mic(tag, heard);
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert!(app.voice.speech.is_speaking());
+    (app, output)
+}
+
+/// An answer read aloud, still coming, the microphone listening through
+/// it — the reader may talk over Clew — and hearing `heard`.
+fn reading_with_mic(tag: &str, heard: &str) -> (App, Arc<Mutex<OutputScript>>) {
     let (mut app, _voice, output) = speech_app(tag);
     let model = app.voice.prefs.model();
     let store = app.voice.store.clone().unwrap();
@@ -2306,8 +2315,6 @@ fn talked_over(tag: &str, heard: &str) -> (App, Arc<Mutex<OutputScript>>) {
         "listening while Clew speaks: {:?}",
         app.voice.phase
     );
-    ended(&mut app, 1, StreamOutcome::Done);
-    assert!(app.voice.speech.is_speaking());
     (app, output)
 }
 
@@ -2496,6 +2503,47 @@ fn what_was_said_over_clew_is_worked_out_from_where_it_began() {
     let given = given("wait for me").expect("worked out");
     assert!((given - 1.75).abs() < 0.05, "{given} s");
     assert!(!app.voice.speech.is_speaking(), "the reader's: Clew stops");
+}
+
+/// Words said as Clew waits, silent, for more of an answer still coming —
+/// all of it so far said — are not said over its voice: "close" closes
+/// what is on top, as with Clew quiet, and says nothing of stopping Clew;
+/// words that repeat Clew's own are the reader's, with no voice to hear
+/// back — not dropped as its echo.
+#[test]
+fn words_said_as_clew_waits_for_more_are_not_over_it() {
+    for (tag, said, closes) in [
+        ("speech-talk-quiet", "Close.", true),
+        (
+            "speech-talk-quiet-echo",
+            "The total adds every price.",
+            false,
+        ),
+    ] {
+        let (mut app, output) = reading_with_mic(tag, said);
+        output.lock().unwrap().idle = true;
+        voice_tick(&mut app);
+        app.voice
+            .speech
+            .quiet_for_test(std::time::Duration::from_secs(1));
+        assert!(app.voice.speech.is_speaking(), "{tag}: waiting for more");
+        assert!(!app.voice.speech.heard(), "{tag}");
+        app.proj.find.open = true;
+        talk(Some(0.1));
+        voice_tick(&mut app);
+        assert!(
+            app.voice.speech.held(),
+            "{tag}: the rest held while it is said"
+        );
+        talk(Some(crate::app::voice::END_SILENCE + 0.1));
+        voice_tick(&mut app);
+        assert!(
+            !app.voice.speech.is_speaking(),
+            "{tag}: taken for Clew's own"
+        );
+        assert_eq!(app.proj.find.open, !closes, "{tag}: {}", app.status);
+        assert_ne!(app.status, "Stopped speaking", "{tag}");
+    }
 }
 
 /// A word that puts away, talked over Clew as it reads ("close"), stops it

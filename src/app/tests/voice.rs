@@ -4100,6 +4100,60 @@ fn a_word_that_closes_said_over_clew_only_stops_it() {
     drop(turn);
 }
 
+/// "Hey, Clew, close" said as Clew waits, silent, for more of an answer —
+/// all of it so far said, its speaker still open — is not said over its
+/// voice: it closes what is on top, as with Clew quiet.
+#[test]
+fn a_word_that_closes_said_as_clew_waits_closes() {
+    let (turn, mut app, script, _, _) = wake_app("wake-close-quiet", "Hey, Clew. Close.", 1);
+    app.voice.prefs.talk_over = true;
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.0);
+    app.voice
+        .speech
+        .quiet_for_test(std::time::Duration::from_secs(1));
+    assert!(app.voice.speech.is_speaking() && !app.voice.speech.heard());
+    app.proj.find.open = true;
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    assert!(app.voice.speech.held());
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(!app.proj.find.open, "{}", app.status);
+    assert_ne!(app.status, "Stopped speaking");
+    drop(app);
+    drop(turn);
+}
+
+/// A call said with Clew silent — an answer only coming — is never taken
+/// for Clew's own words heard back, though it repeats what Clew said last
+/// ("say “Hey, Clew, open settings”"): there was no voice to hear back.
+#[test]
+fn a_call_with_clew_silent_is_no_echo() {
+    let (turn, mut app, script, _, _) =
+        wake_app("wake-coming-echo", "Hey, Clew, open settings.", 1);
+    app.voice.prefs.talk_over = true;
+    app.voice
+        .speech
+        .said_for_test("Say Hey Clew, open settings.");
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 7,
+        question: "how do I change the voice?".into(),
+        spoken: true,
+        streaming: true,
+        ..Default::default()
+    });
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    assert!(app.voice.speech.held(), "the answer coming held");
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    drop(app);
+    drop(turn);
+}
+
 /// "Hey, Clew, close" said as an answer is only coming to be read aloud —
 /// nothing of it heard yet — is not said over Clew: it closes what is on
 /// top, as with Clew quiet, and says nothing of stopping Clew.

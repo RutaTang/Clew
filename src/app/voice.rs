@@ -743,6 +743,11 @@ pub(crate) struct Said {
     /// [`Speech::held_since`](crate::app::speech::Speech::held_since):
     /// found to be no call, it was not said to Clew, and Clew goes on.
     over: Option<Instant>,
+    /// Whether that hold was over Clew's voice
+    /// ([`Speech::held_over_voice`](crate::app::speech::Speech::held_over_voice)),
+    /// not over a silence: only then is what was said heard with Clew's
+    /// own words, and said over it.
+    over_voice: bool,
     /// The listening it was heard in ([`VoiceState::listenings`]).
     listening: u64,
 }
@@ -1738,6 +1743,7 @@ impl App {
                 lead: true,
                 call: self.voice.wake.unproven,
                 over: None,
+                over_voice: false,
                 listening: self.voice.listenings,
             };
             self.voice.unheard.push_back((lead, model, said));
@@ -1762,10 +1768,12 @@ impl App {
     /// waiting to be.
     fn said_from(&mut self, recording: &mut Recording) -> Said {
         let mut over = None;
+        let mut over_voice = false;
         if let Some(from) = self.voice.over_from.take() {
             let cut = ((from - OVER_LEAD).max(0.0) * recording.rate as f32) as usize;
             recording.samples.drain(..cut.min(recording.samples.len()));
             over = self.voice.speech.held_since();
+            over_voice = self.voice.speech.held_over_voice();
         }
         let lead = match self.voice.wake.lead.take() {
             Some(lead) if lead.rate == recording.rate => {
@@ -1778,6 +1786,7 @@ impl App {
             lead,
             call: self.voice.wake.unproven,
             over,
+            over_voice,
             listening: self.voice.listenings,
         }
     }
@@ -1935,9 +1944,9 @@ impl App {
         }
         self.voice.transcribing = None;
         let said = std::mem::take(&mut self.voice.run_said);
-        // Said over Clew: begun as it spoke, or with a call that held it as
-        // it spoke — known before proving the call lets go of its hold.
-        let over_clew = said.over.is_some()
+        // Said over Clew: begun as it was heard, or with a call that held it
+        // as it was — known before proving the call lets go of its hold.
+        let over_clew = said.over_voice
             || said
                 .call
                 .is_some_and(|call| self.voice.wake.spoken_over(call));
@@ -1967,7 +1976,7 @@ impl App {
             let holds = said.over == self.voice.speech.held_since();
             let (to_clew, bye) = result.as_ref().map_or((false, false), |text| {
                 (
-                    said_over(text, &self.voice.speech.said_lately()),
+                    !said.over_voice || said_over(text, &self.voice.speech.said_lately()),
                     crate::app::spoken::leaves_clew_speaking(text, call),
                 )
             });
@@ -1998,10 +2007,9 @@ impl App {
             return self.transcribe_next();
         }
         // A word that puts away, said over Clew ("cancel", "Hey, Clew,
-        // never mind"), stops it — as Esc does first — and does nothing
-        // more: said to stop Clew reading, it declined the agent's tool
-        // call too, or put Ask away. A command waiting for a yes is
-        // declined with it, as Esc declines it.
+        // never mind"), stops it, and declines a command waiting for a yes,
+        // as Esc does — and nothing more: said to stop Clew reading, it
+        // declined the agent's tool call too, or put Ask away.
         if over_clew
             && result.as_ref().is_ok_and(|text| {
                 crate::app::onscreen::dismisses(crate::app::spoken::what_is_said(text.trim(), call))

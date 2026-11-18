@@ -372,6 +372,10 @@ pub(crate) struct Speech {
     /// voice ([`said_over`](crate::app::voice::said_over)), or found to
     /// call it or not ([`App::prove_call`]).
     barged: Option<Instant>,
+    /// Whether Clew was heard ([`Speech::heard`]) as it was held: what was
+    /// said then was said over its voice — not over a silence, an answer
+    /// still coming.
+    heard_when_held: bool,
     /// The last sentences made to be said, each with the seconds of it
     /// made so far: what the microphone may still hear of Clew's own voice,
     /// its echo not all taken out — all still to be played, however many
@@ -425,6 +429,7 @@ impl Speech {
             open_output: Arc::new(open_system_output),
             synthesizer: SYSTEM.clone(),
             barged: None,
+            heard_when_held: false,
             said_lately: VecDeque::new(),
             blocked: None,
             trying: false,
@@ -441,6 +446,20 @@ impl Speech {
         self.barged
     }
 
+    /// Whether Clew is heard: something of what it says plays, or played
+    /// a moment ago — the device still holds the last of it ([`TAIL`]).
+    /// Not while its first sentence is still being made, nor once all of
+    /// an answer so far is said, the rest still coming.
+    pub(crate) fn heard(&self) -> bool {
+        self.output.is_some() && self.quiet_since.is_none_or(|since| since.elapsed() < TAIL)
+    }
+
+    /// Whether Clew is held, and was heard as it was: what is said now was
+    /// said over its voice, which may be heard back in it.
+    pub(crate) fn held_over_voice(&self) -> bool {
+        self.barged.is_some() && self.heard_when_held
+    }
+
     /// What is being said, by its number: another once Clew is stopped.
     pub(crate) fn round(&self) -> u64 {
         self.round
@@ -452,6 +471,7 @@ impl Speech {
     /// answer still coming — what comes waits too: the output opens held.
     pub(crate) fn hold(&mut self) {
         if self.barged.is_none() {
+            self.heard_when_held = self.heard();
             if let Some(output) = &self.output {
                 output.pause();
             }
@@ -489,6 +509,12 @@ impl Speech {
     pub(crate) fn held_too_long(&self) -> bool {
         self.barged
             .is_some_and(|since| since.elapsed() >= HELD_AT_MOST)
+    }
+
+    /// Quiet — nothing left to play, nor to make — as if since `ago`.
+    #[cfg(test)]
+    pub(crate) fn quiet_for_test(&mut self, ago: Duration) {
+        self.quiet_since = Instant::now().checked_sub(ago);
     }
 
     /// Held as if since `ago`.
