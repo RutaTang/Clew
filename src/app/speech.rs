@@ -372,9 +372,12 @@ pub(crate) struct Speech {
     /// voice ([`said_over`](crate::app::voice::said_over)), or found to
     /// call it or not ([`App::prove_call`]).
     barged: Option<Instant>,
-    /// The last sentences made to be said: what the microphone may still
-    /// hear of Clew's own voice, its echo not all taken out.
-    said_lately: VecDeque<String>,
+    /// The last sentences made to be said, each with the seconds of it
+    /// made so far: what the microphone may still hear of Clew's own voice,
+    /// its echo not all taken out — all still to be played, however many
+    /// [`AHEAD_SECONDS`] holds, and those played lately
+    /// ([`Speech::forget_said`]).
+    said_lately: VecDeque<(String, f32)>,
     /// Why an answer was not heard: said on the Ask card while it is so of
     /// the answer there ([`App::blocked_now`]).
     pub(crate) blocked: Option<Blocked>,
@@ -383,8 +386,14 @@ pub(crate) struct Speech {
     trying: bool,
 }
 
-/// How many of the sentences last made [`Speech::said_lately`] keeps.
+/// How many of the sentences last made [`Speech::said_lately`] keeps at
+/// least.
 const SAID_LATELY: usize = 6;
+
+/// How long after a sentence was played it may still be heard back: what
+/// the microphone heard is told from Clew's own voice once it is worked
+/// out, seconds later.
+const HEARD_BACK_SECONDS: f32 = 10.0;
 
 /// How long Clew is held for the reader at most, before it goes on: what
 /// was said is heard by then.
@@ -492,7 +501,41 @@ impl Speech {
 
     /// The sentences last made to be said.
     pub(crate) fn said_lately(&self) -> Vec<String> {
-        self.said_lately.iter().cloned().collect()
+        self.said_lately
+            .iter()
+            .map(|(text, _)| text.clone())
+            .collect()
+    }
+
+    /// `sentence` is being made to be said: its words may be heard back.
+    fn making_said(&mut self, sentence: &str) {
+        self.said_lately.push_back((sentence.to_string(), 0.0));
+        self.forget_said();
+    }
+
+    /// `seconds` more of the sentence being made were made.
+    fn made_said(&mut self, seconds: f32) {
+        if let Some((_, made)) = self.said_lately.back_mut() {
+            *made += seconds;
+        }
+        self.forget_said();
+    }
+
+    /// The first of the sentences kept, forgotten while more than
+    /// [`SAID_LATELY`] are and it was all played over
+    /// [`HEARD_BACK_SECONDS`] ago: what was made after it, but for what is
+    /// still to play, is longer than that. Sentences made ahead, up to
+    /// [`AHEAD_SECONDS`] of them, are many: the one being played is never
+    /// among those forgotten.
+    fn forget_said(&mut self) {
+        let queued = self.output.as_ref().map_or(0.0, |o| o.queued_seconds());
+        while self.said_lately.len() > SAID_LATELY {
+            let after: f32 = self.said_lately.iter().skip(1).map(|(_, s)| s).sum();
+            if after - queued <= HEARD_BACK_SECONDS {
+                break;
+            }
+            self.said_lately.pop_front();
+        }
     }
 
     /// What went unsaid of an answer, waiting for Clew to be free to say it
@@ -535,7 +578,7 @@ impl Speech {
     /// A sentence Clew said a moment ago, for its words to be heard back.
     #[cfg(test)]
     pub(crate) fn said_for_test(&mut self, sentence: &str) {
-        self.said_lately.push_back(sentence.to_string());
+        self.making_said(sentence);
     }
 
     /// Speaking, onto `output`, as loud as `level`: as when a sentence has
@@ -1215,11 +1258,7 @@ impl App {
                 continue;
             };
             let dir = speech::dir(&store, model);
-            let lately = &mut self.voice.speech.said_lately;
-            lately.push_back(sentence.text.clone());
-            while lately.len() > SAID_LATELY {
-                lately.pop_front();
-            }
+            self.voice.speech.making_said(&sentence.text);
             let voice = self.voice.prefs.voice_for(model);
             let speed = self.voice.prefs.speed;
             let synthesizer = self.voice.speech.synthesizer.clone();
@@ -1393,6 +1432,11 @@ impl App {
                         }
                         output.play(&audio.samples, audio.rate);
                     }
+                }
+                // Counted once it is queued to play.
+                if !audio.samples.is_empty() && audio.rate > 0 {
+                    let seconds = audio.samples.len() as f32 / audio.rate as f32;
+                    self.voice.speech.made_said(seconds);
                 }
                 self.voice.speech.quiet_since = None;
                 if last {

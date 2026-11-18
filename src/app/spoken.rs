@@ -162,6 +162,21 @@ const JAPANESE_PARTICLES: &[&str] = &[
 /// "とめて"): particles only with no hiragana after them ("Clew も落ちた",
 /// "Clew と比べて", "Clew や VS Code").
 const JAPANESE_SHORT_PARTICLES: &[char] = &['と', 'も', 'や'];
+/// What a Japanese sentence says to many by: after the name, it was said
+/// to a crew, not to Clew, who is one ("Crew 全員集まって", "ヘイクルー
+/// みんな聞いて") — but not as whose something is ("Clew みんなのファイル
+/// を開いて"). Not "皆" alone, which begins other words ("皆既日食").
+const JAPANESE_TO_MANY: &[&str] = &[
+    "全員",
+    "みんな",
+    "皆さん",
+    "皆様",
+    "みなさん",
+    "各自",
+    "お前ら",
+    "君たち",
+    "あなたたち",
+];
 /// How a Japanese request ends: "開いて", "移動して", "ください".
 const JAPANESE_REQUEST_ENDS: &[&str] = &["て", "で", "ください", "下さい"];
 /// The "Hey" of "Hey, Clew", as whisper writes it.
@@ -172,6 +187,25 @@ const HEY: &[&str] = &["hey", "hi", "hé", "嘿", "嗨", "헤이", "ヘイ"];
 /// own elsewhere, it is the call only first in its sentence
 /// ([`named_in`]).
 const HEY_HEARD_AS: &[&str] = &["et", "eh", "hay", "hei", "ネー", "ねえ", "ネイ"];
+/// What is said around "Bye, Clew" to be polite, or added by whisper
+/// ("Bye, Clew. Thank you."): "Okay, bye, Clew" ends listening too.
+const COURTESY: &[&str] = &[
+    "ok",
+    "okay",
+    "alright",
+    "all right",
+    "thanks",
+    "thank you",
+    "cheers",
+    "好",
+    "好的",
+    "谢谢",
+    "고마워",
+    "고마워요",
+    "감사합니다",
+    "じゃあ",
+    "ありがとう",
+];
 /// The "Bye" of "Bye, Clew", as whisper writes it.
 const BYE: &[&str] = &[
     "bye",
@@ -188,8 +222,13 @@ const BYE: &[&str] = &[
 
 /// Whether `c` is of a script written without spaces between its words —
 /// Chinese, Japanese — or with its syllables run together, as Korean is.
-fn cjk(c: char) -> bool {
+pub(crate) fn cjk(c: char) -> bool {
     matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF)
+}
+
+/// Whether `c` is a Chinese character, as Japanese writes them too.
+fn han(c: char) -> bool {
+    matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF)
 }
 
 /// Whether `c` is Japanese kana: hiragana or katakana.
@@ -244,19 +283,26 @@ fn in_japanese(before: &str, rest: &str) -> bool {
     let japanese_window = crate::i18n::current() == crate::i18n::Lang::Ja;
     !between.contains(['.', '!', '?'])
         && (japanese_follows(after)
-            || ((between.contains('、') || japanese_window) && after.starts_with(cjk)))
+            || ((between.contains('、') || japanese_window) && after.starts_with(han)))
 }
 
 /// Where Clew's name ends, said from the start of `at`, after `before`
 /// ([`name_at`]) — or written "crew" in a Japanese sentence
-/// ([`NAMES_BEFORE_JAPANESE`], [`in_japanese`]).
+/// ([`NAMES_BEFORE_JAPANESE`], [`in_japanese`]) — not said to many
+/// ([`JAPANESE_TO_MANY`]).
 fn called_name_at(at: &str, before: &str) -> Option<usize> {
-    name_at(at).or_else(|| {
+    let end = name_at(at).or_else(|| {
         let end = NAMES_BEFORE_JAPANESE
             .iter()
             .find_map(|name| begins(at, name))?;
         in_japanese(before, &at[end..]).then_some(end)
-    })
+    })?;
+    let next = unmarked(&at[end..]);
+    let to_many = JAPANESE_TO_MANY.iter().any(|many| {
+        next.strip_prefix(many)
+            .is_some_and(|rest| !rest.starts_with('の'))
+    });
+    (!to_many).then_some(end)
 }
 
 /// Whether Clew's name, `name` as written, is set apart from `rest`, what
@@ -269,9 +315,10 @@ fn called_name_at(at: &str, before: &str) -> Option<usize> {
 /// before Chinese or Korean, where it may as well be said of Clew ("Clew
 /// 又卡住了"): a call there is written with a mark or a "Hey" — or in
 /// Korean, "야" or "아" after the name, which a pause after it sets apart
-/// ("클루야 설정 열어줘"). A pause is no sure sign: "Crew 全員集まって"
-/// ("crew, everyone gather"), said to others, is taken for a call too —
-/// no words tell it from one.
+/// ("클루야 설정 열어줘"). A pause is no sure sign: "Crew 集合して"
+/// ("crew, gather"), said to others, is taken for a call too — no words
+/// tell it from one; only the many it is said to, named after it, do
+/// ([`JAPANESE_TO_MANY`]).
 fn set_apart(name: &str, rest: &str) -> bool {
     let after = rest.trim_start();
     // Korean calls with "야" or "아" after the name ([`name_at`]): a pause
@@ -357,6 +404,14 @@ fn name_at(at: &str) -> Option<usize> {
         {
             return Some(end + called.len_utf8());
         }
+        // "Clew's graph", "Clew’s slow": said of Clew, not to it.
+        if last.is_ascii_alphabetic()
+            && at[end..]
+                .strip_prefix(['\'', '’'])
+                .is_some_and(|rest| rest.starts_with(char::is_alphabetic))
+        {
+            return None;
+        }
         let goes_on = next.is_some_and(|c| match last as u32 {
             // Katakana, and its long vowel mark: "クルーズ" (cruise),
             // "クルーネック" (crew-neck).
@@ -395,10 +450,11 @@ fn begins(said: &str, phrase: &str) -> Option<usize> {
 }
 
 /// Whether `said` is nothing but "Bye, Clew" — once or more, "Bye-bye,
-/// Clew", "Goodbye, Clew" — not a "bye" said to someone else in the room,
-/// nor "say bye to Clew". Matched with its spaces and marks left out, so
-/// that Chinese and Japanese, written without them, are heard too
-/// ("拜拜克鲁").
+/// Clew", "Goodbye, Clew", with an "okay" or "thank you" around it
+/// ([`COURTESY`]) — not a "bye" said to someone else in the room, nor "say
+/// bye to Clew", nor "Thanks, Clew". Matched with its spaces and marks
+/// left out, so that Chinese and Japanese, written without them, are heard
+/// too ("拜拜克鲁").
 pub(crate) fn stops_listening(said: &str) -> bool {
     let compact = |text: &str| -> String {
         let mut text: String = text
@@ -419,23 +475,30 @@ pub(crate) fn stops_listening(said: &str) -> bool {
     if said.is_empty() {
         return false;
     }
-    let phrases: Vec<Vec<char>> = BYE
+    let byes: Vec<Vec<char>> = BYE
         .iter()
         .map(|bye| compact(&format!("{bye} clew")).chars().collect())
         .collect();
-    // Made, from its start, of nothing but those phrases.
-    let mut made = vec![false; said.len() + 1];
-    made[0] = true;
+    let courtesies: Vec<Vec<char>> = COURTESY
+        .iter()
+        .map(|c| compact(c).chars().collect())
+        .collect();
+    // Made, from its start, of nothing but those phrases: up to each
+    // place, whether it can be (`Some`), and whether with a goodbye.
+    let mut made: Vec<Option<bool>> = vec![None; said.len() + 1];
+    made[0] = Some(false);
     for i in 0..said.len() {
-        if made[i] {
-            for p in &phrases {
+        let Some(bye) = made[i] else { continue };
+        for (phrases, is_bye) in [(&byes, true), (&courtesies, false)] {
+            for p in phrases {
                 if said[i..].starts_with(p) {
-                    made[i + p.len()] = true;
+                    let next = &mut made[i + p.len()];
+                    *next = Some(next.unwrap_or(false) || bye || is_bye);
                 }
             }
         }
     }
-    made[said.len()]
+    made[said.len()] == Some(true)
 }
 
 /// What words heard say to Clew: those after its name, when they `call` it
@@ -1156,6 +1219,12 @@ mod tests {
             "Bye-bye, Clew.",
             "Good bye, Clew",
             "Bye, Clou.",
+            "Okay, bye, Clew.",
+            "Thanks, bye Clew",
+            "Bye, Clew. Thank you.",
+            "All right. Bye-bye, Clew!",
+            "好的，拜拜 Clew",
+            "バイバイ、クルー。ありがとう",
         ] {
             assert!(stops_listening(said), "{said}");
         }
@@ -1169,6 +1238,11 @@ mod tests {
             "Clew",
             "Hey, Clew",
             "stop",
+            "Thanks, Clew",
+            "Okay",
+            "Thank you.",
+            "Okay, bye.",
+            "Bye, Clew. Thank you so much.",
         ] {
             assert!(!stops_listening(said), "{said}");
         }
@@ -1365,6 +1439,11 @@ mod tests {
         );
         // A Japanese comma after it.
         assert_eq!(named_in("Hey Crew、設定"), Some("設定"));
+        // Everyone's, said to Clew.
+        assert_eq!(
+            named_in("Hey Clew、みんなのファイルを開いて"),
+            Some("みんなのファイルを開いて")
+        );
         // Or as Clew's own Japanese phrases say a value, shown in Japanese.
         with_lang(Lang::Ja, || {
             assert_eq!(named_in("Clew 30行目へ移動"), Some("30行目へ移動"));
@@ -1379,6 +1458,10 @@ mod tests {
             // Japanese: a command's name alone.
             assert_eq!(named_in("Hey Crew 続行"), Some("続行"));
             assert_eq!(named_in("Hey Crew 設定"), Some("設定"));
+            // Said to many, it is no call.
+            assert_eq!(named_in("Hey Crew 全員集合"), None);
+            // Korean after it is not Japanese.
+            assert_eq!(named_in("Hey Crew 가자"), None);
             // Names with katakana in them are names.
             assert_eq!(
                 named_in("Clew READMEファイルを開く"),
@@ -1449,6 +1532,12 @@ mod tests {
             // mark: "crew, everyone gather".
             "クルー 全員集合",
             "クルー 全員集まって",
+            // Said to many: to a crew, not to Clew.
+            "Crew 全員集まって",
+            "Hey Crew 全員集合",
+            "ヘイ、クルー、全員集合",
+            "ヘイクルー みんな聞いて",
+            "Hey Clew、皆さん、こちらへ",
         ] {
             assert_eq!(named_in(said), None, "{said:?}");
         }
@@ -1456,6 +1545,8 @@ mod tests {
         for said in [
             "Clew keeps crashing on my machine.",
             "Clew's graph is slow",
+            "Hey, Clew's graph is slow",
+            "Hey Clew’s not answering",
             "this is Clew's graph",
             "the clue is here",
             "The clue, I think",

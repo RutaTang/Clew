@@ -763,6 +763,8 @@ impl App {
         };
         self.voice.wake.unproven = None;
         self.voice.wake.lead = None;
+        // Clew is stopped for the reader: the call holds it no more.
+        self.voice.wake.held = None;
         // The reader's listening: it does not go back to waiting after a
         // while with nothing said, as listening begun by a call does.
         self.voice.wake.called = false;
@@ -808,22 +810,34 @@ impl App {
         if self.voice.mic_on {
             return;
         }
+        if let Some(why) = self.why_not_waiting() {
+            self.status = why;
+        }
+    }
+
+    /// What waiting, turned on, still needs from the reader, as the status
+    /// line says it: `clew-speak`, the keyword spotter (unless it is being
+    /// downloaded) or a speech model. None when nothing is missing — it
+    /// waits, another window waits, or why it failed was said already.
+    fn why_not_waiting(&self) -> Option<String> {
         let store = self.voice.store.as_ref();
         if self.voice.wake.spotters.is_none() {
-            self.status = tr!("clew-speak, which runs it, is not installed beside Clew").into();
+            Some(tr!("“Hey, Clew” needs clew-speak, which is not installed beside Clew").into())
         } else if !store.is_some_and(spot::installed) && self.voice.wake.download.is_none() {
-            self.status = tr!(
+            Some(tr!(
                 "Download {model} ({size} MB) in Settings → Voice to start listening when you say “Hey, Clew”",
                 model = crate::i18n::lookup(MODEL.name),
                 size = MODEL.size_mb()
-            );
+            ))
         } else if !self.voice.installed(self.voice.prefs.model()) {
             let model = self.voice.prefs.model();
-            self.status = tr!(
+            Some(tr!(
                 "Voice needs a speech model on this computer — download {model} ({size} MB) in Settings → Voice",
                 model = crate::i18n::lookup(model.name),
                 size = model.size_mb
-            );
+            ))
+        } else {
+            None
         }
     }
 
@@ -859,11 +873,18 @@ impl App {
                     Ok(()) => {
                         self.voice.wake.error = None;
                         self.voice.wake.failed = None;
-                        self.status = if self.resume_waiting() {
-                            tr!("Waiting for “Hey, Clew”").into()
-                        } else {
-                            tr!("{model} is ready", model = name)
-                        };
+                        if self.resume_waiting() {
+                            self.status = tr!("Waiting for “Hey, Clew”").into();
+                        } else if self.voice.wake.failed.is_none() {
+                            // Turned on and not listening, it does not
+                            // wait yet: what it still needs is said, not
+                            // that it is ready. (Failing, it said why.)
+                            let why = (self.voice.prefs.wake && !self.voice.mic_on)
+                                .then(|| self.why_not_waiting())
+                                .flatten();
+                            self.status =
+                                why.unwrap_or_else(|| tr!("{model} is ready", model = name));
+                        }
                     }
                     Err(e) => {
                         self.status = tr!(

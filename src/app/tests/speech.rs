@@ -2802,3 +2802,38 @@ fn a_real_answer_is_read_aloud() {
     assert!(rms > 0.01, "speech, not silence: rms {rms:.4}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What the microphone may hear back of Clew's own voice is every
+/// sentence still to be played, however many are made ahead of it; once
+/// played, a sentence is forgotten only when ten seconds were played since.
+#[test]
+fn every_sentence_still_to_be_played_may_be_heard_back() {
+    const WORDS: [&str; 10] = [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet",
+    ];
+    let (mut app, voice, output) = speech_app("speech-said-lately");
+    // Fifteen seconds yet to play, less than is made ahead: all ten
+    // sentences, 1.6 seconds each, are made, none of them played yet.
+    output.lock().unwrap().queued = 15.0;
+    asked(&mut app, 1, true);
+    let ahead: Vec<String> = WORDS
+        .iter()
+        .map(|w| format!("The word is {w}, and it is said here once more so that it lasts long."))
+        .collect();
+    delta(&mut app, 1, &ahead.join(" "));
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert_eq!(voice.texts(), ahead);
+    assert_eq!(app.voice.speech.said_lately(), ahead);
+    output.lock().unwrap().queued = 0.0;
+    all_played(&mut app, &output);
+    // Nothing yet to play: thirty half-second sentences, each played as it
+    // is made. Kept are the last and the twenty before it, ten seconds of
+    // them.
+    asked(&mut app, 2, true);
+    let played: Vec<String> = (0..30)
+        .map(|n| format!("Now it is {} {}.", WORDS[n % 10], WORDS[n / 10]))
+        .collect();
+    delta(&mut app, 2, &played.join(" "));
+    ended(&mut app, 2, StreamOutcome::Done);
+    assert_eq!(app.voice.speech.said_lately(), played[9..]);
+}

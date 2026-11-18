@@ -4183,6 +4183,57 @@ fn junk_wake_fetch(
 
 /// The keyword spotter is downloaded checked, and removed with the
 /// microphone no longer waiting and the spotter let go of first.
+/// The keyword spotter downloaded with no speech model to hear what is
+/// said after "Hey, Clew": it cannot wait yet, and the status line says
+/// what it still needs — not that all is ready.
+#[test]
+fn a_spotter_downloaded_without_a_speech_model_says_what_is_missing() {
+    let _turn = crate::app::wake::TEST_TURN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut app, _script, _) = voice_app("wake-download-no-model", "open settings");
+    let store = app.voice.store.clone().unwrap();
+    std::fs::remove_file(store.path(app.voice.prefs.model())).unwrap();
+    app.voice.wake.spotters = Some(Arc::new(Spots::default()));
+    let _ = app.update(Message::Voice(VoiceMsg::SetWake(true)));
+    assert!(!app.voice.wake.is_waiting());
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadWake));
+    install_wake(&store);
+    let _ = app.update(Message::Voice(VoiceMsg::WakeDownloaded(Ok(()))));
+    assert!(!app.voice.wake.is_waiting());
+    assert!(
+        app.status
+            .starts_with("Voice needs a speech model on this computer"),
+        "{}",
+        app.status
+    );
+    // Turned off, it is only ready.
+    let _ = app.update(Message::Voice(VoiceMsg::SetWake(false)));
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadWake));
+    let _ = app.update(Message::Voice(VoiceMsg::WakeDownloaded(Ok(()))));
+    assert_eq!(app.status, "Keyword Spotter is ready");
+}
+
+/// The microphone lost while it listens — a headset unplugged — listening
+/// stops, saying why, and "Hey, Clew" is waited for again on one opened
+/// anew.
+#[test]
+fn a_microphone_lost_while_listening_waits_for_the_call_again() {
+    let (_turn, mut app, script, _, _) = wake_app("wake-mic-lost", "open settings", 0);
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening(), "{}", app.status);
+    assert!(!app.voice.wake.is_waiting());
+    let opened = script.lock().unwrap().opened;
+    script.lock().unwrap().error = Some("the device was unplugged".into());
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    script.lock().unwrap().error = None;
+    assert!(!app.voice.mic_on);
+    assert!(!app.voice.is_listening());
+    assert_eq!(app.status, "Stopped listening: the device was unplugged");
+    assert!(app.voice.wake.is_waiting());
+    assert_eq!(script.lock().unwrap().opened, opened + 1, "opened anew");
+}
+
 #[test]
 fn the_keyword_spotter_downloads_verified_and_is_removed() {
     let (_turn, mut app, script, _, spots) = wake_app("wake-download", "open settings", 0);

@@ -501,7 +501,11 @@ impl App {
     fn press_heard(&mut self, said: &str, target: Target) -> Task<Message> {
         let text = said.to_string();
         if asks_first(&target) {
-            self.status = tr!("“{text}” → {command}?", text = text, command = target.shown);
+            self.status = tr!(
+                "“{text}” → {command}? Say yes or no",
+                text = text,
+                command = target.shown
+            );
             self.voice.hear(Heard {
                 text,
                 outcome: HeardOutcome::Confirm(target.shown.clone()),

@@ -665,10 +665,9 @@ impl VoiceState {
         }
     }
 
-    /// Whether Esc has something of voice's to put away: listening, a
-    /// transcription, a command waiting for a yes, Clew speaking.
     /// Whether Esc is voice's: a command waits for a yes, or Clew speaks.
-    /// Not the microphone: on, it stays on until its button turns it off.
+    /// Not the microphone: on, it stays on until its button, the voice key
+    /// or "Bye, Clew" turns it off.
     pub(crate) fn takes_esc(&self) -> bool {
         self.confirm.is_some() || self.speech.is_speaking()
     }
@@ -1093,9 +1092,7 @@ fn word_tokens(text: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     for c in text.chars() {
-        let cjk = matches!(c as u32,
-            0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF);
-        if cjk {
+        if crate::app::spoken::cjk(c) {
             if !word.is_empty() {
                 words.push(std::mem::take(&mut word));
             }
@@ -1656,7 +1653,12 @@ impl App {
         if let Some(e) = listening.error() {
             self.voice.mic_on = false;
             self.close_mic();
-            self.status = tr!("Stopped listening: {error}", error = e);
+            // It waits for "Hey, Clew" again, on a microphone opened anew —
+            // one failing too says so, as waiting does.
+            self.voice.wake.listening_ended();
+            if self.resume_waiting() || self.voice.wake.failed.is_none() {
+                self.status = tr!("Stopped listening: {error}", error = e);
+            }
             return Task::none();
         }
         let level = listening.level();
@@ -2134,7 +2136,7 @@ impl App {
             };
             if command.asks_when_said() {
                 self.status = tr!(
-                    "“{text}” → {command}?",
+                    "“{text}” → {command}? Say yes or no",
                     text = text,
                     command = crate::i18n::lookup(&said).trim_end_matches('…')
                 );
