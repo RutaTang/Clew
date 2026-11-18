@@ -3243,8 +3243,8 @@ impl crate::app::speech::Playing for Playing {
     fn resume(&self) {}
 }
 
-/// Clew's voice with all it was given played: its speaker open, silent,
-/// waiting for more of an answer.
+/// Clew's voice with all it was given played: its speaker open, and
+/// silent.
 struct Played;
 
 impl crate::app::speech::Playing for Played {
@@ -4182,14 +4182,72 @@ fn clews_own_call_told_of_late_is_no_call() {
         let task = app.update(Message::Voice(VoiceMsg::Tick));
         settle(&mut app, task);
         assert!(!app.settings.open, "open {open}: {}", app.status);
+        assert!(
+            app.status.starts_with("Didn't hear “Clew”"),
+            "{}",
+            app.status
+        );
+        assert!(!app.voice.speech.held(), "open {open}: Clew not let go on");
         drop(app);
         drop(turn);
     }
 }
 
-/// A call said with Clew silent — an answer only coming — is never taken
-/// for Clew's own words heard back, though it repeats what Clew said last
-/// ("say “Hey, Clew, open settings”"): there was no voice to hear back.
+/// Clew's voice not taken out of what is heard (Talk over off), a call
+/// heard as Clew waits, silent, for more of an answer is one all the same:
+/// no voice of Clew's was there to be heard as the call.
+#[test]
+fn a_call_in_clews_silence_is_one_without_its_voice_taken_out() {
+    let (turn, mut app, script, _, _) =
+        wake_app("wake-quiet-no-talk-over", "Hey, Clew, open settings.", 1);
+    script.lock().unwrap().rate = 48_000;
+    app.voice.prefs.talk_over = false;
+    app.voice.speech.speak_for_test(Box::new(Played), 0.0);
+    app.voice
+        .speech
+        .last_heard_for_test(std::time::Duration::from_secs(3));
+    assert!(app.voice.speech.is_speaking());
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    assert!(app.voice.mic_on, "the call let go of: {}", app.status);
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    drop(app);
+    drop(turn);
+}
+
+/// A call Clew taught — "just say “Hey, Clew, open settings”" — said once
+/// Clew has been quiet a moment: its voice is not in what the call was
+/// heard in, and it is a call, though every word of it is Clew's.
+#[test]
+fn a_call_clew_taught_is_one_said_after_it() {
+    let (turn, mut app, script, _, _) = wake_app("wake-taught", "Hey, Clew, open settings.", 1);
+    // Pieces of two thirds of a second to the spotter, not two seconds:
+    // what it told of the call in began well after Clew was last heard.
+    script.lock().unwrap().rate = 48_000;
+    app.voice.prefs.talk_over = true;
+    app.voice
+        .speech
+        .said_for_test("Just say Hey Clew, open settings.");
+    app.voice
+        .speech
+        .last_heard_for_test(std::time::Duration::from_secs(3));
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    drop(app);
+    drop(turn);
+}
+
+/// A call said with Clew silent — an answer only coming, Clew not heard
+/// for a while — is not taken for Clew's own words heard back, though it
+/// repeats what Clew said last ("say “Hey, Clew, open settings”"): there
+/// was no voice to hear back.
 #[test]
 fn a_call_with_clew_silent_is_no_echo() {
     let (turn, mut app, script, _, _) =

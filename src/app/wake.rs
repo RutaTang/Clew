@@ -44,6 +44,9 @@ pub(crate) const CALL_QUIET: f32 = 2.0;
 /// Listening this long with nothing said, Clew quiet and nothing on its
 /// way, it waits for its name again.
 pub(crate) const IDLE: Duration = Duration::from_secs(180);
+/// How long "Hey, Clew" may take to say: begun before the piece the spotter
+/// heard it end in, at most this long.
+const PHRASE: Duration = Duration::from_millis(1500);
 /// How often what the microphone heard is handed to the spotter: a piece
 /// ([`clew_voice::wake::FEED_SECONDS`]) at a time.
 pub(crate) const STEP: Duration = Duration::from_millis(200);
@@ -125,6 +128,9 @@ pub(crate) struct Hearing {
     /// What the spotter heard before is let go of at the next step: a
     /// waiting begins afresh, and goes on afresh after a call it was not.
     fresh: bool,
+    /// When what the spotter told of the phrase in began to be heard: how
+    /// late it told of it.
+    told_from: Option<Instant>,
     /// When the spotter failed lately: it is started again after each —
     /// one that fell behind while the computer was busy, or ended, hears
     /// again — until [`FAILURES`] within [`FAILING_WITHIN`] say it will not.
@@ -181,7 +187,7 @@ impl Wait {
     /// What the microphone heard since the last step, to the spotter: the
     /// model loaded first, if it is not.
     pub(crate) fn step(&self) -> Step {
-        let (piece, fresh) = {
+        let (piece, fresh, took) = {
             let mut hearing = self.hearing();
             let hearing = &mut *hearing;
             if hearing.told {
@@ -195,6 +201,7 @@ impl Wait {
                 return Step::Failed(e);
             }
             let heard = mic.take();
+            let took = Instant::now();
             if heard.rate != hearing.rate {
                 hearing.recent.clear();
                 hearing.rate = heard.rate;
@@ -206,6 +213,7 @@ impl Wait {
             (
                 hearing.feed.push(&heard.samples, heard.rate),
                 std::mem::take(&mut hearing.fresh),
+                took,
             )
         };
         if fresh {
@@ -232,7 +240,11 @@ impl Wait {
                 self.hearing().fresh = true;
                 Step::Nothing
             }
-            Ok(Some(true)) => Step::Called,
+            Ok(Some(true)) => {
+                let seconds = piece.len() as f32 / spot::RATE as f32;
+                self.hearing().told_from = took.checked_sub(Duration::from_secs_f32(seconds));
+                Step::Called
+            }
             Ok(Some(false)) => Step::Nothing,
             // Not loaded — the first step, or the one after it failed: it
             // loads now, and hears from the next piece. Not for a waiting
@@ -263,6 +275,18 @@ impl Wait {
             self.hearing().told = true;
         }
         step
+    }
+
+    /// How long ago what the spotter told of the phrase in began to be
+    /// heard — and the phrase with it, which may have begun before it
+    /// ([`PHRASE`]): how far back what is kept of the call may hold Clew's
+    /// voice. All that is kept ([`HEARD_SECONDS`]), not known.
+    fn told_since(&self) -> Duration {
+        self.hearing()
+            .told_from
+            .map_or(Duration::from_secs_f32(HEARD_SECONDS), |from| {
+                from.elapsed() + PHRASE
+            })
     }
 
     /// Whether what was heard last ([`HEARD_SECONDS`], the phrase among it)
@@ -408,8 +432,8 @@ pub(crate) struct WakeState {
     /// Clew, held for a call as it spoke: it stops once the call is
     /// proven, and goes on if it was no call.
     pub(crate) held: Option<CallHold>,
-    /// The last call made with Clew heard in what is kept of it
-    /// ([`HEARD_SECONDS`]): its words may be Clew's own, heard back.
+    /// The last call made with Clew heard as it was: what is heard with it
+    /// ([`Said`](crate::app::voice::Said)) may hold Clew's own words.
     pub(crate) echo: Option<u64>,
     /// The last call's number.
     calls: u64,
@@ -609,9 +633,12 @@ impl App {
         if waiting.wait.id != wait {
             return Task::none();
         }
+        // Clew's voice may be in what the call was heard in: heard since
+        // the phrase began.
+        let heard = self.voice.speech.heard_within(waiting.wait.told_since());
         // Heard with Clew's voice in it, nothing taken out: Clew's own,
         // most likely — no call. Waiting goes on, afresh.
-        if self.voice.speech.is_speaking() && !self.voice.prefs.talk_over {
+        if heard && !self.voice.prefs.talk_over {
             let mut hearing = waiting.wait.hearing();
             hearing.told = false;
             hearing.fresh = true;
@@ -630,11 +657,7 @@ impl App {
             return self.listen_now(None);
         }
         let call = self.voice.wake.next_call();
-        self.voice.wake.echo = self
-            .voice
-            .speech
-            .heard_within(Duration::from_secs_f32(HEARD_SECONDS))
-            .then_some(call);
+        self.voice.wake.echo = heard.then_some(call);
         // Clew held, not stopped — an answer still on its way to being read
         // aloud held too, once it plays: if what is heard with the call
         // holds no "Clew", it was no call, and Clew goes on where it was.
@@ -668,16 +691,20 @@ impl App {
     /// not: Clew goes on, and none of it is done ([`App::not_called`]).
     /// Nothing written down, or nothing worked out, is no sign either way:
     /// Clew goes on, and what is said next decides.
-    pub(crate) fn prove_call(&mut self, call: u64, result: &Result<String, String>) -> bool {
+    pub(crate) fn prove_call(
+        &mut self,
+        call: u64,
+        echo: bool,
+        result: &Result<String, String>,
+    ) -> bool {
         let text = result.as_deref().map_or("", str::trim);
         if text.is_empty() {
             self.end_hold(call, false);
             return true;
         }
         // "Bye, Clew" is said to Clew too — and lets it go on reading: it
-        // ends listening, not what Clew says. Heard with Clew's voice, its
-        // own words heard back are no call.
-        let echo = self.voice.wake.echo == Some(call);
+        // ends listening, not what Clew says. Heard with Clew's voice
+        // (`echo`), its own words heard back are no call.
         let stops = crate::app::spoken::says_bye(text, true);
         let goes_on = crate::app::spoken::leaves_clew_speaking(text, true);
         let to_clew = crate::app::spoken::named_in(text).is_some() || stops;

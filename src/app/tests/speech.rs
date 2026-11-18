@@ -2507,23 +2507,38 @@ fn what_was_said_over_clew_is_worked_out_from_where_it_began() {
 
 /// Words said as Clew waits, silent, for more of an answer — all of it so
 /// far said, the rest still coming — are said over Clew as the window shows
-/// it speaking: "close" stops it, as Esc does, and nothing more. But no
-/// voice of Clew's is in them: words that repeat Clew's are the reader's,
-/// not its echo; and nothing heard in them — a cough — lets Clew go on.
+/// it speaking: "close" stops it, and nothing more. But no voice of Clew's
+/// is in them: words that repeat Clew's are the reader's, not its echo;
+/// and nothing heard in them — a cough — lets Clew go on. Said just as
+/// Clew fell quiet, its voice may still be in them: words that repeat its
+/// own are its echo, and Clew goes on.
 #[test]
 fn words_said_as_clew_waits_for_more_hold_none_of_its_voice() {
-    for (tag, said) in [
-        ("speech-talk-quiet", "Close."),
-        ("speech-talk-quiet-echo", "The total adds every price."),
-        ("speech-talk-quiet-cough", ""),
+    let quiet = std::time::Duration::from_secs(2);
+    let just = std::time::Duration::from_millis(100);
+    for (tag, said, ago) in [
+        ("speech-talk-quiet", "Close.", quiet),
+        (
+            "speech-talk-quiet-echo",
+            "The total adds every price.",
+            quiet,
+        ),
+        ("speech-talk-quiet-cough", "", quiet),
+        (
+            "speech-talk-just-quiet",
+            "The total adds every price.",
+            just,
+        ),
     ] {
         let (mut app, output) = reading_with_mic(tag, said);
         output.lock().unwrap().idle = true;
-        app.voice
-            .speech
-            .last_heard_for_test(std::time::Duration::from_secs(2));
+        app.voice.speech.last_heard_for_test(ago);
         assert!(app.voice.speech.is_speaking(), "{tag}: waiting for more");
-        assert!(!app.voice.speech.heard_within(std::time::Duration::ZERO));
+        assert_eq!(
+            app.voice.speech.heard_within(std::time::Duration::ZERO),
+            ago == just,
+            "{tag}"
+        );
         app.proj.find.open = true;
         talk(Some(0.1));
         voice_tick(&mut app);
@@ -2531,15 +2546,15 @@ fn words_said_as_clew_waits_for_more_hold_none_of_its_voice() {
         talk(Some(crate::app::voice::END_SILENCE + 0.1));
         voice_tick(&mut app);
         assert!(app.proj.find.open, "{tag}: {}", app.status);
-        match said {
-            "" => {
+        match (said, ago == just) {
+            ("Close.", _) => {
+                assert!(!app.voice.speech.is_speaking(), "{tag}: not stopped");
+                assert_eq!(app.status, "Stopped speaking", "{tag}");
+            }
+            ("", _) | (_, true) => {
                 assert!(app.voice.speech.is_speaking(), "{tag}: stopped");
                 assert!(!app.voice.speech.held(), "{tag}: still held");
                 assert_ne!(app.status, "Stopped speaking", "{tag}");
-            }
-            "Close." => {
-                assert!(!app.voice.speech.is_speaking(), "{tag}: not stopped");
-                assert_eq!(app.status, "Stopped speaking", "{tag}");
             }
             _ => assert!(
                 !app.voice.speech.is_speaking(),
