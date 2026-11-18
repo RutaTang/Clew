@@ -1851,7 +1851,7 @@
  "Tokens": "Token",
  "Tokens per day": "每日 token 数",
  "Too many open files (os error {arg1})": "打开的文件过多（系统错误 {arg1}）",
- "Too soon to answer — say it again once the question has been in view for a moment, with the window in front": "现在回答还太早——等窗口切到前台、问题显示片刻后再说一次",
+ "Too soon to answer — say it again once the question has been in view, uncovered, for a moment, with the window in front": "现在回答还太早——等窗口切到前台、问题未被遮挡地显示片刻后再说一次",
  "Tool calls": "工具调用",
  "Tools": "工具",
  "Tools for this file": "当前文件的工具",

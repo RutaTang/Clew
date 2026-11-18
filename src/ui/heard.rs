@@ -517,6 +517,40 @@ fn on_top(targets: Vec<Target>, ask_large: bool) -> Vec<Target> {
 mod tests {
     use super::*;
 
+    /// What allows is marked so, each kind of target ([`Target::allows`]),
+    /// and what waits for its question to be read ([`Target::waiting`]).
+    #[test]
+    fn what_allows_and_what_waits_is_marked() {
+        let targets = gather_of(|| {
+            answer("Allow", Answer::Yes, Message::Noop);
+            answer("Decline", Answer::No, Message::Noop);
+            answer_when(false, "Trust and connect", Answer::Yes, Message::Noop);
+            said_when(true, "Always allow", Message::Noop);
+            said_when(false, "Download", Message::Noop);
+            said("Open", Message::Noop);
+            row(|| "README.md".to_string(), Message::Noop);
+        });
+        let kind = |shown: &str| {
+            let t = targets
+                .iter()
+                .find(|t| t.shown == shown)
+                .unwrap_or_else(|| panic!("{shown} offered: {targets:?}"));
+            (t.allows, t.waiting)
+        };
+        assert_eq!(kind("Allow"), (true, false));
+        assert_eq!(kind("Decline"), (false, false));
+        assert_eq!(kind("Trust and connect"), (true, true));
+        assert_eq!(kind("Always allow"), (true, false));
+        assert_eq!(kind("Download"), (true, true));
+        assert_eq!(kind("Open"), (false, false));
+        assert!(
+            targets
+                .iter()
+                .filter(|t| t.row.is_some())
+                .all(|t| !t.allows)
+        );
+    }
+
     fn target(title: &str, layer: Layer) -> Target {
         Target {
             title: title.into(),

@@ -9,13 +9,11 @@ use crate::app::voice::{Heard, HeardOutcome, Waiting};
 use crate::ui::heard::{Answer, Layer, Target};
 use crate::*;
 
-/// What is said before or after a thing's name to press it — "click on
-/// Download", "the Retry button" — and means nothing more: the English
-/// words, and each language's.
 /// Why an answer is held ([`App::hold_answer`]): its question was not
-/// read yet — its Allow cannot be pressed.
+/// read yet — not in view, covered, or just come — and its Allow cannot be
+/// pressed.
 pub(crate) const TOO_SOON: &str = tr_noop!(
-    "Too soon to answer — say it again once the question has been in view for a moment, with the window in front"
+    "Too soon to answer — say it again once the question has been in view, uncovered, for a moment, with the window in front"
 );
 /// … it allows, and was said as a question ("Allow?").
 pub(crate) const ASKED: &str = tr_noop!("To answer, say “yes” or “no” — not as a question");
@@ -23,6 +21,9 @@ pub(crate) const ASKED: &str = tr_noop!("To answer, say “yes” or “no” �
 pub(crate) const COMMANDS_OFF: &str =
     tr_noop!("Spoken commands are off — answer the question on screen with its buttons");
 
+/// What is said before or after a thing's name to press it — "click on
+/// Download", "the Retry button" — and means nothing more: the English
+/// words, and each language's.
 const PRESS: &str = tr_noop!("click, click on, press, tap, hit, select, choose, pick, the, button");
 
 /// What puts away what is on top — a dialog, a menu, Time Travel, the find
@@ -519,7 +520,7 @@ impl App {
         }
         // "Allow?", "Always allow read_file?": asked, not answered — what
         // allows wants to be said plainly.
-        if target.allows && crate::app::spoken::asked(said) {
+        if target.allows && crate::app::spoken::asked(said) && self.question_pending().is_some() {
             return self.hold_answer(text, ASKED);
         }
         if asks_first(&target) {
@@ -544,6 +545,22 @@ impl App {
             outcome: HeardOutcome::Ran(target.shown),
         });
         self.press(target.message)
+    }
+
+    /// Whether `said` answers the question waiting ([`App::question_pending`])
+    /// — a yes, or an allowing answer's own words ("Trust and connect",
+    /// "Always allow read_file"), plainly or asked — wherever that answer
+    /// is: not yet pressable, covered, or not offered at all.
+    pub(crate) fn answers_question(&self, said: &str) -> bool {
+        self.question_pending().is_some()
+            && (crate::app::spoken::only_yes_or_no(said) == Some(true) || {
+                let allows: Vec<Target> = crate::ui::heard::gather_all(self)
+                    .0
+                    .into_iter()
+                    .filter(|t| t.allows)
+                    .collect();
+                named(said, &allows).is_some()
+            })
     }
 
     /// An answer said (`text`) for the question on screen, held, saying

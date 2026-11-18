@@ -1851,7 +1851,7 @@
  "Tokens": "Jetons",
  "Tokens per day": "Jetons par jour",
  "Too many open files (os error {arg1})": "Trop de fichiers ouverts (erreur système {arg1})",
- "Too soon to answer — say it again once the question has been in view for a moment, with the window in front": "Trop tôt pour répondre — redites-le une fois la question affichée depuis un instant, la fenêtre au premier plan",
+ "Too soon to answer — say it again once the question has been in view, uncovered, for a moment, with the window in front": "Trop tôt pour répondre — redites-le une fois la question affichée sans rien par-dessus depuis un instant, la fenêtre au premier plan",
  "Tool calls": "Appels d’outils",
  "Tools": "Outils",
  "Tools for this file": "Outils pour ce fichier",

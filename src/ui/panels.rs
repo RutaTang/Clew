@@ -2156,8 +2156,11 @@ pub(crate) fn approval_card<'a>(
             // may be pressed, what is said for it with it.
             .on_press_maybe({
                 let ready = ready || !option.allows;
-                if option.always {
+                if option.always && option.allows {
                     super::heard::said_when(ready, &option.label, answer)
+                } else if option.always {
+                    // "Always reject": declines, at once.
+                    Some(super::heard::said(&option.label, answer))
                 } else {
                     super::heard::answer_when(
                         ready,

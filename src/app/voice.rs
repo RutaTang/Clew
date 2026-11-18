@@ -2066,31 +2066,27 @@ impl App {
                 None => {}
             }
         }
-        // A yes with a question shown — said plainly or asked: if no
-        // answer on screen takes it, it is held (`App::hold_answer`), never
-        // a question for Ask, which the agent asking would read as consent.
-        // A yes with no question on screen answers what the agent asked in
-        // words, and goes on.
-        let yes_to_question = crate::app::spoken::only_yes_or_no(&text) == Some(true)
-            && self.question_shown().is_some();
         if self.voice.prefs.run_commands {
             if let Some(task) = self.heard_command(&text) {
                 return task;
             }
-            // Its answer not offered yet — a tour over it, the project
-            // still being looked at: it waits as one not yet pressable.
-            if yes_to_question {
-                let why = if crate::app::spoken::asked(&text) {
-                    crate::app::onscreen::ASKED
-                } else {
-                    crate::app::onscreen::TOO_SOON
-                };
-                return self.hold_answer(text, why);
-            }
         } else if let Some(task) = self.heard_commands_back_on(&text) {
             return task;
-        } else if yes_to_question {
-            return self.hold_answer(text, crate::app::onscreen::COMMANDS_OFF);
+        }
+        // A yes, or an allowing answer's words, with a question waiting —
+        // its answer covered, not offered yet, or spoken commands off: held
+        // (`App::hold_answer`), never a question for Ask, which the agent
+        // asking would read as consent. A yes with no question waiting
+        // answers what the agent asked in words, and goes on.
+        if self.answers_question(&text) {
+            let why = if !self.voice.prefs.run_commands {
+                crate::app::onscreen::COMMANDS_OFF
+            } else if crate::app::spoken::asked(&text) {
+                crate::app::onscreen::ASKED
+            } else {
+                crate::app::onscreen::TOO_SOON
+            };
+            return self.hold_answer(text, why);
         }
         // A question: to Ask. Sent, it is answered where Ask is — the card
         // is not opened over the code for it: the pill says it is being

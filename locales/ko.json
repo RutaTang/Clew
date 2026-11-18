@@ -1851,7 +1851,7 @@
  "Tokens": "토큰",
  "Tokens per day": "일별 토큰",
  "Too many open files (os error {arg1})": "열린 파일이 너무 많음 (시스템 오류 {arg1})",
- "Too soon to answer — say it again once the question has been in view for a moment, with the window in front": "아직 답할 수 없습니다 — 창을 앞으로 가져와 질문이 잠시 표시된 뒤 다시 말하세요",
+ "Too soon to answer — say it again once the question has been in view, uncovered, for a moment, with the window in front": "아직 답할 수 없습니다 — 창을 앞으로 가져와 질문이 가려지지 않은 채 잠시 표시된 뒤 다시 말하세요",
  "Tool calls": "도구 호출",
  "Tools": "도구",
  "Tools for this file": "이 파일용 도구",

@@ -408,9 +408,9 @@ pub(crate) fn setup_sheet<'a>(
     let accept_button = button(text(accept).size(ts::BASE))
         .style(theme::primary_button)
         .padding([6, 16])
-        // Waiting only for the question to be read: what is said for it
-        // waits too ([`super::heard::answer_when`]).
-        .on_press_maybe(if ready || (something && !looking) {
+        // Waiting for the question to be read, or the project to be looked
+        // at: what is said for it waits too ([`super::heard::answer_when`]).
+        .on_press_maybe(if something {
             super::heard::answer_when(ready, accept, super::heard::Answer::Yes, accept_msg)
         } else {
             None

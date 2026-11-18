@@ -2231,6 +2231,10 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
                 ..option("always", "Always allow", true)
             },
             option("deny", "Decline", false),
+            ApprovalOption {
+                always: true,
+                ..option("reject_always", "Always reject", false)
+            },
         ],
     });
     // Said as a yes, by its name, a sentence apart, with the window not
@@ -2278,11 +2282,17 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
     // waits all the same.
     app.tutorial = Some(0);
     held(&mut app, &script, "Yes.");
+    held(&mut app, &script, "Always allow");
     say_words(&mut app, &script, "Yes?");
     assert!(app.proj.ask_input.is_empty(), "{}", app.proj.ask_input);
     assert!(app.status.starts_with("To answer, say"), "{}", app.status);
     app.tutorial = None;
-    // Asked, not answered: no yes, and not held as one.
+    // Settings over the card, which is otherwise ready: covered, it waits.
+    app.asking.delay = std::time::Duration::ZERO;
+    app.settings.open = true;
+    held(&mut app, &script, "Yes.");
+    app.settings.open = false;
+    // Asked, not answered: held, and told to say it plainly.
     app.asking.delay = std::time::Duration::ZERO;
     for said in ["Allow?", "Yes?", "Always allow?"] {
         say_words(&mut app, &script, said);
@@ -2307,7 +2317,7 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
     // Spoken commands off: a yes answers nothing — and is not asked,
     // said plainly or as a question.
     app.voice.prefs.run_commands = false;
-    for said in ["Yes.", "Yes?"] {
+    for said in ["Yes.", "Yes?", "Always allow"] {
         say_words(&mut app, &script, said);
         assert!(
             app.proj.ask_input.is_empty(),
@@ -2321,6 +2331,14 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
         );
     }
     app.voice.prefs.run_commands = true;
+    // What declines is taken at once, the Allow still waiting — said as a
+    // question too: it allows nothing.
+    say_words(&mut app, &script, "Always reject?");
+    assert!(
+        app.status.starts_with("“Always reject?” →"),
+        "{}",
+        app.status
+    );
     // No question on screen: the yes answers the agent in words, and goes
     // to Ask (kept in its input here, with no key to ask with).
     app.proj.ask_turns[0].extras.approvals.clear();
@@ -2332,6 +2350,23 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
         app.status
     );
     assert_eq!(app.proj.ask_input, "Yes.");
+}
+
+/// A dialog's main button that answers no question waiting — Update now,
+/// a prompt's Save — is pressed said as a question too: only what allows
+/// a question's ask wants a plain answer.
+#[test]
+fn a_main_button_said_as_a_question_is_pressed_with_no_question_waiting() {
+    use crate::ui::heard::{Answer, Layer};
+    let mut app = blank_app();
+    let targets = [on_screen(
+        "Update now",
+        Message::Noop,
+        Layer::Overlay,
+        Some(Answer::Yes),
+    )];
+    assert!(app.heard_on_screen("Update now?", &targets, true).is_some());
+    assert!(app.status.ends_with("→ Update now"), "{}", app.status);
 }
 
 /// A target of the window, as `ui::heard` offers one.

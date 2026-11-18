@@ -1851,7 +1851,7 @@
  "Tokens": "トークン",
  "Tokens per day": "1 日あたりのトークン",
  "Too many open files (os error {arg1})": "開いているファイルが多すぎます（システムエラー {arg1}）",
- "Too soon to answer — say it again once the question has been in view for a moment, with the window in front": "まだ答えられません。ウィンドウを前面に出し、質問が表示されて少し経ってから、もう一度言ってください",
+ "Too soon to answer — say it again once the question has been in view, uncovered, for a moment, with the window in front": "まだ答えられません。ウィンドウを前面に出し、質問が何にも隠れずに表示されて少し経ってから、もう一度言ってください",
  "Tool calls": "ツール呼び出し",
  "Tools": "ツール",
  "Tools for this file": "このファイルのツール",
