@@ -2799,6 +2799,7 @@
  "step": "단계 실행",
  "step {n} of {total}": "{total}단계 중 {n}단계",
  "stop watching {text}": "{text} 조사식 중지",
+ "stop, stop it, stop now, please stop, stop talking, stop speaking, stop reading, be quiet, quiet, enough, that's enough, shh, shush, hush": "멈춰, 멈춰 줘, 그만해, 조용히, 조용히 해, 됐어, 스톱",
  "stopped": "중지됨",
  "stopped by you": "직접 중지함",
  "stopped, restarts on open": "중지됨, 파일을 열면 다시 시작",

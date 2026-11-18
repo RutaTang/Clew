@@ -547,6 +547,40 @@ impl Speech {
         said
     }
 
+    /// The sentences played within `lag`, as [`Speech::heard_within`]
+    /// tells it, the device's own tail ([`TAIL`]) aside — newest last: what
+    /// of Clew's voice the microphone may have heard over that time. Not
+    /// those played before it, nor those still wholly to play.
+    pub(crate) fn said_within(&self, lag: Duration) -> Vec<String> {
+        let since = if self.playing() {
+            Duration::ZERO
+        } else {
+            match self.last_heard {
+                Some(at) => at.elapsed(),
+                None => return Vec::new(),
+            }
+        };
+        let Some(window) = (TAIL + lag).checked_sub(since) else {
+            return Vec::new();
+        };
+        let mut left = window.as_secs_f32();
+        let mut to_play = self.output.as_ref().map_or(0.0, |o| o.queued_seconds());
+        let mut said = Vec::new();
+        for (text, seconds) in self.said_lately.iter().rev() {
+            if left <= 0.0 {
+                break;
+            }
+            let played = seconds - to_play.min(*seconds);
+            to_play -= to_play.min(*seconds);
+            if played > 0.0 {
+                said.push(text.clone());
+                left -= played;
+            }
+        }
+        said.reverse();
+        said
+    }
+
     /// `sentence` is being made to be said: its words may be heard back.
     fn making_said(&mut self, sentence: &str) {
         self.said_lately.push_back((sentence.to_string(), 0.0));
@@ -620,8 +654,14 @@ impl Speech {
     pub(crate) fn said_for_test(&mut self, sentence: &str) {
         // Played in part: longer than what is still to play.
         let to_play = self.output.as_ref().map_or(0.0, |o| o.queued_seconds());
+        self.said_lasting_for_test(sentence, to_play + 1.0);
+    }
+
+    /// `sentence` made to be said, `seconds` long.
+    #[cfg(test)]
+    pub(crate) fn said_lasting_for_test(&mut self, sentence: &str, seconds: f32) {
         self.making_said(sentence);
-        self.made_said(to_play + 1.0);
+        self.made_said(seconds);
     }
 
     /// Speaking, onto `output`, as loud as `level`: as when a sentence has

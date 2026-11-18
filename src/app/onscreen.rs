@@ -49,6 +49,13 @@ const DISMISS: &str = tr_noop!(
     "close, close it, close this, close that, cancel, never mind, dismiss, escape, exit, go away, hide it, hide this"
 );
 
+/// What stops Clew speaking, said while it speaks — as Esc does then, and
+/// a word that puts away ([`DISMISS`]): the English words, and each
+/// language's.
+const HUSH: &str = tr_noop!(
+    "stop, stop it, stop now, please stop, stop talking, stop speaking, stop reading, be quiet, quiet, enough, that's enough, shh, shush, hush"
+);
+
 /// The words a list's place is said with, around its number: "open the
 /// third result", "number 4", "第三个", "3番目", "세 번째".
 const AROUND_A_ROW: &[&str] = &[
@@ -300,11 +307,23 @@ fn bare(said: &str) -> Vec<String> {
 
 /// Whether `said` is only a word that puts away what is on top.
 pub(crate) fn dismisses(said: &str) -> bool {
+    only_one_of(said, DISMISS)
+}
+
+/// Whether `said` is only a word that stops Clew speaking ("stop", "be
+/// quiet"): said while it speaks, it stops it, as Esc does.
+pub(crate) fn hushes(said: &str) -> bool {
+    only_one_of(said, HUSH)
+}
+
+/// Whether `said` is only one of `words` — a list, split at its commas —
+/// or of any language's words for them.
+fn only_one_of(said: &str, words: &str) -> bool {
     use crate::app::choices::units;
     let said = units(said);
     !said.is_empty()
         && crate::i18n::Lang::ALL.into_iter().any(|l| {
-            crate::i18n::lookup_in(l, DISMISS)
+            crate::i18n::lookup_in(l, words)
                 .split([',', '，', '、'])
                 .any(|w| units(w) == said)
         })
@@ -949,6 +968,27 @@ mod tests {
         }
         for said in ["close the minimap", "close the file", ""] {
             assert!(!dismisses(said), "{said:?}");
+        }
+    }
+
+    /// What stops Clew speaking is said alone too, in any language: "stop
+    /// the run" is a command of its own.
+    #[test]
+    fn stop_alone_stops_clew_speaking() {
+        for said in [
+            "stop",
+            "Stop.",
+            "That's enough.",
+            "Be quiet!",
+            "arrête",
+            "别说了。",
+            "静かに",
+            "그만해",
+        ] {
+            assert!(hushes(said), "{said:?}");
+        }
+        for said in ["stop the run", "stop watching total", "quiet mode", ""] {
+            assert!(!hushes(said), "{said:?}");
         }
     }
 }

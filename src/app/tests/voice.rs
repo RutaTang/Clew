@@ -4311,13 +4311,19 @@ fn a_call_starts_past_clews_own_sentence() {
 }
 
 /// A call is Clew's own voice heard back only if Clew named itself as a
-/// call is in its last sentences — else the phrase the spotter woke on was
-/// not Clew's to say — and what was heard is mostly its words. A call said
-/// after what was left of Clew's other words is the reader's, bare or not;
-/// Clew's own "…Hey, Clew" is Clew's, a word of it misheard or not.
+/// call is in what it played as the phrase may have been said — else the
+/// phrase the spotter woke on was not Clew's to say — and what was heard
+/// is mostly its words. A call said after what was left of Clew's other
+/// words is the reader's, bare or not; Clew's own "…Hey, Clew" is Clew's,
+/// a word of it misheard or not.
 #[test]
 fn clews_own_voice_needs_it_to_have_named_itself() {
-    use crate::app::voice::clews_own;
+    use crate::app::voice::calls_in;
+    // Clew's sentences, all played as the phrase may have been said.
+    let clews_own = |heard: &str, said: &[String]| {
+        let named = said.iter().map(|s| calls_in(s)).sum();
+        crate::app::voice::clews_own(heard, said, named)
+    };
     let total = vec!["The total adds every price, then takes off the discount.".to_string()];
     for heard in [
         "The total adds every price, then takes off the discount. Hey, Clew, open settings.",
@@ -4344,6 +4350,18 @@ fn clews_own_voice_needs_it_to_have_named_itself() {
     let twice = vec!["Say Hey Clew. Hey Clew, then, listens.".to_string()];
     assert!(clews_own("Say Hey Clew. Hey Clew, then, listens.", &twice));
     assert!(!clews_own("Hey, Clew, open settings.", &[]));
+    // Clew taught the call a while before, and played none since: the
+    // reader's call, every word of it Clew's.
+    let before = vec![
+        "Say Hey Clew, stop, or press Esc.".to_string(),
+        "It goes on where it paused.".to_string(),
+    ];
+    assert!(!crate::app::voice::clews_own(
+        "Hey, Clew, stop.",
+        &before,
+        0
+    ));
+    assert!(crate::app::voice::clews_own("Hey, Clew, stop.", &before, 1));
 }
 
 /// The reader's call said just after Clew taught it, Clew's sentence heard
@@ -4456,6 +4474,36 @@ fn bye_clew_after_clews_sentence_ends_listening() {
     settle(&mut app, task);
     assert!(!app.settings.open, "{}", app.status);
     assert!(app.voice.wake.is_waiting(), "{}", app.status);
+    drop(app);
+    drop(turn);
+}
+
+/// Clew taught the call — "Say “Hey, Clew, stop”, or press Esc." — and
+/// went on to its next sentence; said over that one, the reader's "Hey,
+/// Clew, stop" is a call, every word of it Clew's: the phrase was not in
+/// what Clew played as it was said.
+#[test]
+fn a_call_clew_taught_before_its_sentence_is_the_readers() {
+    let (turn, mut app, script, _, _) = wake_app("wake-taught-before", "Hey, Clew, stop.", 1);
+    // Pieces of two thirds of a second to the spotter.
+    script.lock().unwrap().rate = 48_000;
+    app.voice.prefs.talk_over = true;
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.3);
+    app.voice
+        .speech
+        .said_lasting_for_test("Say Hey Clew, stop, or press Esc.", 3.0);
+    // Five seconds of it played, one still to play.
+    app.voice
+        .speech
+        .said_lasting_for_test("It goes on where it paused, for as long as you like.", 6.0);
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    assert!(app.voice.speech.held());
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(!app.voice.speech.is_speaking(), "{}", app.status);
+    assert_eq!(app.status, "Stopped speaking");
     drop(app);
     drop(turn);
 }

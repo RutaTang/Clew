@@ -433,8 +433,13 @@ pub(crate) struct WakeState {
     /// proven, and goes on if it was no call.
     pub(crate) held: Option<CallHold>,
     /// The last call made with Clew heard as it was: what is heard with it
-    /// ([`Said`](crate::app::voice::Said)) may hold Clew's own words.
-    pub(crate) echo: Option<u64>,
+    /// ([`Said`](crate::app::voice::Said)) may hold Clew's own words. With
+    /// it, how many times Clew called itself in what it played as the
+    /// phrase may have been said ([`Speech::said_within`]): none, and its
+    /// voice did not make the call.
+    ///
+    /// [`Speech::said_within`]: crate::app::speech::Speech::said_within
+    pub(crate) echo: Option<(u64, usize)>,
     /// The last call's number.
     calls: u64,
     /// Why waiting failed: it is not tried again by itself — only once the
@@ -635,7 +640,8 @@ impl App {
         }
         // Clew's voice may be in what the call was heard in: heard since
         // the phrase began.
-        let heard = self.voice.speech.heard_within(waiting.wait.told_since());
+        let since = waiting.wait.told_since();
+        let heard = self.voice.speech.heard_within(since);
         // Heard as Clew speaks, its voice in it, nothing taken out: Clew's
         // own, most likely — no call. Waiting goes on, afresh. Clew done
         // since, what is heard with the call decides ([`App::prove_call`]).
@@ -658,7 +664,11 @@ impl App {
             return self.listen_now(None);
         }
         let call = self.voice.wake.next_call();
-        self.voice.wake.echo = heard.then_some(call);
+        self.voice.wake.echo = heard.then(|| {
+            let said = self.voice.speech.said_within(since);
+            let named = said.iter().map(|s| crate::app::voice::calls_in(s)).sum();
+            (call, named)
+        });
         // Clew held, not stopped — an answer still on its way to being read
         // aloud held too, once it plays: if what is heard with the call
         // holds no "Clew", it was no call, and Clew goes on where it was.
@@ -695,7 +705,7 @@ impl App {
     pub(crate) fn prove_call(
         &mut self,
         call: u64,
-        echo: bool,
+        named: usize,
         result: &Result<String, String>,
     ) -> bool {
         let text = result.as_deref().map_or("", str::trim);
@@ -706,7 +716,8 @@ impl App {
         // "Bye, Clew" is said to Clew too — and lets it go on reading: it
         // ends listening, not what Clew says; told past Clew's own last
         // words kept from before the call ([`past_clews_words`]). Heard with
-        // Clew's voice (`echo`), its own words heard back are no call.
+        // Clew's voice, which called itself `named` times as the call may
+        // have been said, its own words heard back are no call.
         //
         // [`past_clews_words`]: crate::app::voice::past_clews_words
         let lately = self.voice.speech.said_lately();
@@ -714,7 +725,7 @@ impl App {
         let stops = crate::app::spoken::says_bye(said, true);
         let goes_on = crate::app::spoken::leaves_clew_speaking(said, true);
         let to_clew = crate::app::spoken::named_in(text).is_some() || stops;
-        let own = to_clew && echo && crate::app::voice::clews_own(text, &lately);
+        let own = to_clew && crate::app::voice::clews_own(text, &lately, named);
         if !to_clew || own {
             self.end_hold(call, false);
             self.not_called(call, own);

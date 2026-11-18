@@ -2799,6 +2799,7 @@
  "step": "单步",
  "step {n} of {total}": "第 {n} 步，共 {total} 步",
  "stop watching {text}": "停止监视{text}",
+ "stop, stop it, stop now, please stop, stop talking, stop speaking, stop reading, be quiet, quiet, enough, that's enough, shh, shush, hush": "停, 停下, 停止, 别说了, 不要说了, 闭嘴, 够了, 安静",
  "stopped": "已暂停",
  "stopped by you": "已由你停止",
  "stopped, restarts on open": "已停止，打开文件时重启",

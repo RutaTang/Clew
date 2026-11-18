@@ -2799,6 +2799,7 @@
  "step": "pas à pas",
  "step {n} of {total}": "pas {n} sur {total}",
  "stop watching {text}": "ne plus surveiller {text}",
+ "stop, stop it, stop now, please stop, stop talking, stop speaking, stop reading, be quiet, quiet, enough, that's enough, shh, shush, hush": "arrête, arrêtez, arrête-toi, stop, tais-toi, taisez-vous, chut, ça suffit, silence",
  "stopped": "en pause",
  "stopped by you": "arrêté par vous",
  "stopped, restarts on open": "arrêté, redémarre à l’ouverture",

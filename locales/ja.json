@@ -2799,6 +2799,7 @@
  "step": "ステップ",
  "step {n} of {total}": "ステップ {n} / {total}",
  "stop watching {text}": "{text}のウォッチをやめる",
+ "stop, stop it, stop now, please stop, stop talking, stop speaking, stop reading, be quiet, quiet, enough, that's enough, shh, shush, hush": "止めて, 止まって, ストップ, 黙って, 静かに, もういい",
  "stopped": "停止中",
  "stopped by you": "停止しました",
  "stopped, restarts on open": "停止中、ファイルを開くと再起動",

@@ -748,6 +748,10 @@ pub(crate) struct Said {
     /// Whether Clew was heard as it was said over Clew, or as the call it
     /// proves was made: Clew's own words may be heard back in it.
     echo: bool,
+    /// How many times Clew called itself in what it played as the call it
+    /// proves may have been said: none, and the call was not Clew's own
+    /// voice ([`App::prove_call`]).
+    named: usize,
     /// The listening it was heard in ([`VoiceState::listenings`]).
     listening: u64,
 }
@@ -1124,18 +1128,19 @@ pub(crate) fn past_clews_words<'a>(heard: &'a str, said: &[String]) -> &'a str {
 }
 
 /// Whether a call is Clew's own voice, heard back (`said`, its last
-/// sentences): only if Clew named itself in them as a call is ("…just say
-/// “Hey, Clew”") — else the phrase the spotter woke on was not Clew's to
-/// say, whatever was left of Clew's voice is heard with it — and no more
-/// often than what was heard calls it: a call more is the reader's, said
-/// after Clew taught it. And what was heard is mostly its words.
-pub(crate) fn clews_own(heard: &str, said: &[String]) -> bool {
-    let named: usize = said.iter().map(|sentence| calls_in(sentence)).sum();
+/// sentences): only if Clew called itself (`named` times) in what it
+/// played as the phrase may have been said ("…just say “Hey, Clew”") —
+/// else the phrase the spotter woke on was not Clew's to say, whatever was
+/// left of Clew's voice is heard with it, and whatever it taught before —
+/// and no more often than what was heard calls it: a call more is the
+/// reader's, said after Clew taught it. And what was heard is mostly its
+/// words.
+pub(crate) fn clews_own(heard: &str, said: &[String], named: usize) -> bool {
     named > 0 && calls_in(heard) <= named && !said_over(heard, said)
 }
 
 /// How many times `text` calls Clew ([`named_in`](crate::app::spoken::named_in)).
-fn calls_in(text: &str) -> usize {
+pub(crate) fn calls_in(text: &str) -> usize {
     let mut calls = 0;
     let mut rest = text;
     while let Some(after) = crate::app::spoken::named_in(rest) {
@@ -1801,11 +1806,13 @@ impl App {
             && let Some(model) = self.voice.listening.as_ref().map(|(_, model)| *model)
             && let Some(lead) = self.voice.wake.lead.take()
         {
+            let named = self.call_echo();
             let said = Said {
                 lead: true,
                 call: self.voice.wake.unproven,
                 over: None,
-                echo: self.call_echoes(),
+                echo: named.is_some(),
+                named: named.unwrap_or(0),
                 listening: self.voice.listenings,
             };
             self.voice.unheard.push_back((lead, model, said));
@@ -1822,13 +1829,16 @@ impl App {
         Task::none()
     }
 
-    /// Whether the call waiting to be proven was made with Clew heard: what
-    /// is heard with it may hold Clew's own words ([`Said::echo`]).
-    fn call_echoes(&self) -> bool {
+    /// The call waiting to be proven, made with Clew heard — what is heard
+    /// with it may hold Clew's own words ([`Said::echo`]): how many times
+    /// Clew called itself as it was ([`Said::named`]).
+    fn call_echo(&self) -> Option<usize> {
+        let call = self.voice.wake.unproven?;
         self.voice
             .wake
-            .unproven
-            .is_some_and(|call| self.voice.wake.echo == Some(call))
+            .echo
+            .filter(|(echoed, _)| *echoed == call)
+            .map(|(_, named)| named)
     }
 
     /// Of what was heard, what was said over Clew: from where it began, a
@@ -1839,7 +1849,8 @@ impl App {
     /// waiting to be.
     fn said_from(&mut self, recording: &mut Recording) -> Said {
         let mut over = None;
-        let mut echo = self.call_echoes();
+        let named = self.call_echo();
+        let mut echo = named.is_some();
         if let Some((from, over_echo)) = self.voice.over_from.take() {
             let cut = ((from - OVER_LEAD).max(0.0) * recording.rate as f32) as usize;
             recording.samples.drain(..cut.min(recording.samples.len()));
@@ -1858,6 +1869,7 @@ impl App {
             call: self.voice.wake.unproven,
             over,
             echo,
+            named: named.unwrap_or(0),
             listening: self.voice.listenings,
         }
     }
@@ -2025,7 +2037,7 @@ impl App {
         // Heard after a call not yet proven: its words prove it, or none
         // of it is done.
         if let Some(call) = said.call
-            && !self.prove_call(call, said.echo, &result)
+            && !self.prove_call(call, said.named, &result)
         {
             // Said over Clew, which it held, and no call: not said to Clew
             // either — Clew goes on, unless a call holds it too.
@@ -2095,13 +2107,15 @@ impl App {
             self.drop_said_in(said.listening);
             return self.transcribe_next();
         }
-        // A word that puts away, said over Clew ("cancel", "Hey, Clew,
-        // never mind"), stops it, and declines a command waiting for a yes
-        // — and nothing more: said to stop Clew reading, it declined the
-        // agent's tool call too, or put Ask away.
+        // A word that puts away, or one that stops Clew, said over it
+        // ("cancel", "Hey, Clew, stop"), stops it, and declines a command
+        // waiting for a yes — and nothing more: said to stop Clew reading,
+        // it declined the agent's tool call too, put Ask away, or was asked
+        // of Ask, whose answer Clew would read.
         if over_clew
             && result.as_ref().is_ok_and(|text| {
-                crate::app::onscreen::dismisses(crate::app::spoken::what_is_said(text.trim(), call))
+                let said = crate::app::spoken::what_is_said(text.trim(), call);
+                crate::app::onscreen::dismisses(said) || crate::app::onscreen::hushes(said)
             })
         {
             self.stop_for_the_reader();
