@@ -306,6 +306,18 @@ pub(crate) fn answer_when(
     answer: Answer,
     message: Message,
 ) -> Option<Message> {
+    answer_unless(too_soon(ready), shown, answer, message)
+}
+
+/// [`answer_when`], held for `why` when there is a reason it cannot be
+/// pressed yet — the question not read yet, or what its tip says (the
+/// project still checked) — and what is said for it told that reason.
+pub(crate) fn answer_unless(
+    why: Option<&'static str>,
+    shown: &str,
+    answer: Answer,
+    message: Message,
+) -> Option<Message> {
     if gathering() {
         push_as(
             title_of(shown),
@@ -313,10 +325,10 @@ pub(crate) fn answer_when(
             &message,
             Some(answer),
             false,
-            (too_soon(ready), answer == Answer::Yes),
+            (why, answer == Answer::Yes),
         );
     }
-    if ready {
+    if why.is_none() {
         note(shown, &message);
         return Some(message);
     }

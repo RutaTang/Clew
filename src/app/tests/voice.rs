@@ -2314,6 +2314,19 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
         );
     }
     assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1);
+    // What only opens with "okay" or "don't" is words for the agent: it
+    // goes on to Ask (kept in its input here, with no key to ask with).
+    for said in ["Okay, why do you need that file?", "Don't touch the tests."] {
+        say_words(&mut app, &script, said);
+        assert_eq!(
+            app.voice.heard.as_ref().map(|h| &h.outcome),
+            Some(&HeardOutcome::Asked),
+            "{said}: {}",
+            app.status
+        );
+        assert_eq!(app.proj.ask_input, said);
+        app.proj.ask_input.clear();
+    }
     // Asked, not answered: held, and told to say it plainly.
     for said in ["Allow?", "Yes?", "Always allow?"] {
         say_words(&mut app, &script, said);
@@ -2535,7 +2548,6 @@ fn a_yes_for_a_question_not_drawn_is_held() {
     assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1);
     // In view, read, on its page: said again, it answers.
     app.reveal_ask();
-    // In view, read, on its page: said again, it answers.
     app.asking.delay = std::time::Duration::ZERO;
     say_words(&mut app, &script, "Always allow read_file");
     assert!(
@@ -2546,26 +2558,28 @@ fn a_yes_for_a_question_not_drawn_is_held() {
     assert!(app.proj.ask_input.is_empty(), "{}", app.proj.ask_input);
 }
 
-/// Set up project's Apply, said — or a yes — while the project is still
-/// checked, is held with the reason its tip gives, not sent on to Ask
-/// behind the sheet.
+/// The setup sheet's main button, said — or a yes — before it can be
+/// pressed, is held with the reason it gives under it or where the pointer
+/// rests, not sent on to Ask behind the sheet: Apply while the project is
+/// checked, or with nothing to do; a first open's Open while the project
+/// is checked, however long it has been read.
 #[test]
 fn a_button_said_before_it_can_be_pressed_says_why() {
-    use crate::app::setup::{ProjectSetup, SetupMode};
+    use crate::app::setup::{Census, ProjectSetup, SetupMode};
     let (mut app, script, _) = voice_app("voice-setup-looking", "");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     app.setup = Some(ProjectSetup {
         mode: SetupMode::Manage,
-        root,
+        root: root.clone(),
         servers: true,
         servers_declined: false,
         explain: false,
         no_code: false,
         census: None,
     });
-    for said in ["Apply", "Yes."] {
-        say_words(&mut app, &script, said);
-        assert_eq!(app.status, "Ready once the project is checked", "{said}");
+    let held = |app: &mut App, script: &Arc<Mutex<MicScript>>, said: &str, why: &str| {
+        say_words(app, script, said);
+        assert_eq!(app.status, why, "{said}");
         assert!(
             app.proj.ask_input.is_empty(),
             "{said}: {}",
@@ -2573,24 +2587,128 @@ fn a_button_said_before_it_can_be_pressed_says_why() {
         );
         assert!(app.proj.ask_queue.is_empty(), "{said}");
         assert!(app.setup.is_some(), "{said}: the sheet went");
+    };
+    for said in ["Apply", "Yes."] {
+        held(&mut app, &script, said, "Ready once the project is checked");
     }
+    app.setup.as_mut().unwrap().census = Some(Census {
+        servers: Vec::new(),
+        calls: Some(40),
+    });
+    held(
+        &mut app,
+        &script,
+        "Apply",
+        "Nothing to apply: the language servers are already set up.",
+    );
+    // A first open's sheet, read long since, the look still on its way.
+    app.asking.delay = std::time::Duration::ZERO;
+    app.pending_consent = Some(root.clone());
+    let setup = app.setup.as_mut().unwrap();
+    setup.mode = SetupMode::Open;
+    setup.census = None;
+    for said in ["Open", "Yes."] {
+        held(&mut app, &script, said, "Ready once the project is checked");
+    }
+    assert_eq!(app.pending_consent.as_ref(), Some(&root), "not answered");
 }
 
-/// A dialog's main button that answers no question waiting — Update now,
-/// a prompt's Save — is pressed said as a question too: only what allows
-/// a question's ask wants a plain answer.
+/// What allows, said as a question, is pressed when no question waits —
+/// its ask wants a plain answer only while one does — and a dialog's main
+/// button that answers none (Update now) is pressed said so too.
 #[test]
 fn a_main_button_said_as_a_question_is_pressed_with_no_question_waiting() {
     use crate::ui::heard::{Answer, Layer};
     let mut app = blank_app();
-    let targets = [on_screen(
-        "Update now",
-        Message::Noop,
-        Layer::Overlay,
-        Some(Answer::Yes),
-    )];
+    let targets = [
+        crate::ui::heard::Target {
+            allows: true,
+            ..on_screen("Allow", Message::Noop, Layer::Overlay, Some(Answer::Yes))
+        },
+        on_screen("Update now", Message::Noop, Layer::Overlay, None),
+    ];
+    assert!(app.question_pending().is_none());
+    assert!(app.heard_on_screen("Allow?", &targets, true).is_some());
+    assert!(app.status.ends_with("→ Allow"), "{}", app.status);
     assert!(app.heard_on_screen("Update now?", &targets, true).is_some());
     assert!(app.status.ends_with("→ Update now"), "{}", app.status);
+}
+
+/// A plain yes or no a question has no answer for — a card whose only way
+/// to decline is "Always reject" — and a word that also puts away what is
+/// on top ("cancel"), said to a question waiting, are told to name the
+/// answer: said again, the one would be held again, the other would close
+/// the question. Named, it answers.
+#[test]
+fn a_no_the_question_has_no_answer_for_asks_for_its_words() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption};
+    let (mut app, script, _) = voice_app("voice-no-by-name", "");
+    app.asking.delay = std::time::Duration::ZERO;
+    app.ask_view = AskView::Compact;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 4,
+        question: "clean up".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    let approval = |call| Approval {
+        key: ApprovalKey::Mcp { call },
+        mark: None,
+        title: "files wants to delete".into(),
+        detail: String::new(),
+        options: vec![
+            ApprovalOption {
+                id: "allow_once".into(),
+                label: "Allow".into(),
+                allows: true,
+                always: false,
+            },
+            ApprovalOption {
+                id: "reject_always".into(),
+                label: "Always reject".into(),
+                allows: false,
+                always: true,
+            },
+        ],
+    };
+    app.proj.ask_turns[0].extras.approvals.push(approval(1));
+    let by_name = |app: &mut App, script: &Arc<Mutex<MicScript>>, said: &str| {
+        say_words(app, script, said);
+        assert!(
+            app.status
+                .starts_with("Say the answer you mean by the words on its button"),
+            "{said}: {}",
+            app.status
+        );
+        assert!(app.proj.ask_input.is_empty(), "{said}");
+        assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1, "{said}");
+    };
+    by_name(&mut app, &script, "No.");
+    // Put away, with nothing else left for "cancel" to put away (as Esc
+    // would, a page over the code first), it brings the question back —
+    // and asks for its words.
+    app.hide_ask();
+    for _ in 0..3 {
+        say_words(&mut app, &script, "Cancel.");
+        if !app.status.ends_with("→ Closed") {
+            break;
+        }
+    }
+    assert!(
+        app.status
+            .starts_with("Say the answer you mean by the words on its button"),
+        "{}",
+        app.status
+    );
+    assert!(app.proj.ask_input.is_empty());
+    assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1);
+    assert!(app.ask_view.is_open(), "the question not brought into view");
+    say_words(&mut app, &script, "Always reject");
+    assert!(
+        app.proj.ask_turns[0].extras.approvals.is_empty(),
+        "{}",
+        app.status
+    );
 }
 
 /// A target of the window, as `ui::heard` offers one.

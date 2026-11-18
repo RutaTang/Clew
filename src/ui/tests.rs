@@ -6354,6 +6354,18 @@ fn the_setup_sheets_apply_answers_no_question() {
         calls: Some(40),
     });
     assert_eq!(apply(&app), [(None, false)]);
+    // Nothing to do: held, saying so.
+    app.setup.as_mut().unwrap().census = Some(Census {
+        servers: Vec::new(),
+        calls: Some(40),
+    });
+    assert_eq!(
+        apply(&app),
+        [(
+            Some("Nothing to apply: the language servers are already set up."),
+            false
+        )]
+    );
 }
 
 /// The first-open sheet holds still while it looks at the project: the
