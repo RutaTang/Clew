@@ -704,13 +704,17 @@ impl App {
             return true;
         }
         // "Bye, Clew" is said to Clew too — and lets it go on reading: it
-        // ends listening, not what Clew says. Heard with Clew's voice
-        // (`echo`), its own words heard back are no call.
-        let stops = crate::app::spoken::says_bye(text, true);
-        let goes_on = crate::app::spoken::leaves_clew_speaking(text, true);
+        // ends listening, not what Clew says; told past Clew's own last
+        // words kept from before the call ([`past_clews_words`]). Heard with
+        // Clew's voice (`echo`), its own words heard back are no call.
+        //
+        // [`past_clews_words`]: crate::app::voice::past_clews_words
+        let lately = self.voice.speech.said_lately();
+        let said = crate::app::voice::past_clews_words(text, &lately);
+        let stops = crate::app::spoken::says_bye(said, true);
+        let goes_on = crate::app::spoken::leaves_clew_speaking(said, true);
         let to_clew = crate::app::spoken::named_in(text).is_some() || stops;
-        let own =
-            to_clew && echo && crate::app::voice::clews_own(text, &self.voice.speech.said_lately());
+        let own = to_clew && echo && crate::app::voice::clews_own(text, &lately);
         if !to_clew || own {
             self.end_hold(call, false);
             self.not_called(call, own);

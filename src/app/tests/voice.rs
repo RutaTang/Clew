@@ -4310,22 +4310,71 @@ fn a_call_starts_past_clews_own_sentence() {
     );
 }
 
-/// Clew's own voice heard back: all of it mostly Clew's words, and what is
-/// left once Clew's sentences before a call are left out too. A call said
-/// over what was left of Clew's voice is the reader's; Clew's own
-/// "…Hey, Clew." — too short, left alone, to tell — is Clew's.
+/// A call is Clew's own voice heard back only if Clew named itself as a
+/// call is in its last sentences — else the phrase the spotter woke on was
+/// not Clew's to say — and what was heard is mostly its words. A call said
+/// after what was left of Clew's other words is the reader's, bare or not;
+/// Clew's own "…Hey, Clew" is Clew's, a word of it misheard or not.
 #[test]
-fn clews_own_voice_is_told_by_what_follows_its_sentences() {
+fn clews_own_voice_needs_it_to_have_named_itself() {
     use crate::app::voice::clews_own;
     let total = vec!["The total adds every price, then takes off the discount.".to_string()];
-    assert!(!clews_own(
+    for heard in [
         "The total adds every price, then takes off the discount. Hey, Clew, open settings.",
-        &total
-    ));
+        "The total adds every price, then takes off the discount. Hey, Clew.",
+    ] {
+        assert!(!clews_own(heard, &total), "{heard}");
+    }
     let own = vec!["Turn it on in Settings. Hey, Clew starts listening.".to_string()];
-    assert!(clews_own("Turn it on in Settings. Hey, Clew.", &own));
-    assert!(clews_own("", &own), "nothing heard is nobody's call");
+    for heard in [
+        "Turn it on in Settings. Hey, Clew.",
+        "Turn it on in Settings. Hey, Clew, start listing.",
+    ] {
+        assert!(clews_own(heard, &own), "{heard}");
+    }
+    let taught = vec!["Just say Hey Clew, open settings.".to_string()];
+    assert!(!clews_own(
+        "Just say Hey Clew, open settings. Hey, Clew, what does total do?",
+        &taught
+    ));
     assert!(!clews_own("Hey, Clew, open settings.", &[]));
+}
+
+/// "Bye, Clew" after Clew's own sentence, an answer on its way to being
+/// read aloud: it ends listening, and lets the answer be read — as "Bye,
+/// Clew" does, told past Clew's words.
+#[test]
+fn bye_clew_after_clews_sentence_lets_an_answer_be_read() {
+    let (turn, mut app, script, _, _) = wake_app(
+        "wake-bye-after-taught-coming",
+        "Just say Hey Clew, open settings. Bye, Clew.",
+        1,
+    );
+    app.voice.prefs.talk_over = true;
+    app.voice
+        .speech
+        .said_for_test("Just say Hey Clew, open settings.");
+    app.voice
+        .speech
+        .last_heard_for_test(std::time::Duration::from_secs(10));
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 7,
+        question: "how do I open settings?".into(),
+        spoken: true,
+        streaming: true,
+        ..Default::default()
+    });
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    assert!(app.voice.speech.held(), "the answer coming held");
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(!app.settings.open, "{}", app.status);
+    assert!(app.voice.wake.is_waiting(), "{}", app.status);
+    assert!(app.answer_read_aloud_coming(), "the answer stopped");
+    drop(app);
+    drop(turn);
 }
 
 /// A call said over Clew, what was left of Clew's voice heard with it: the

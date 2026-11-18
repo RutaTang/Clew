@@ -1122,17 +1122,15 @@ pub(crate) fn past_clews_words<'a>(heard: &'a str, said: &[String]) -> &'a str {
     heard[from..].trim_start()
 }
 
-/// Whether what was heard is Clew's own voice, heard back (`said`, its
-/// last sentences): mostly Clew's words, all of it — and what is left once
-/// Clew's own sentences before a call are left out ([`past_clews_words`])
-/// too: a call said over what was left of Clew's voice is the reader's.
-/// What is left too short to tell ([`ECHO_WORDS`]), all of it decides.
+/// Whether a call is Clew's own voice, heard back (`said`, its last
+/// sentences): only if Clew named itself in them as a call is ("…just say
+/// “Hey, Clew”") — else the phrase the spotter woke on was not Clew's to
+/// say, and the call is the reader's, whatever was left of Clew's voice
+/// is heard with it — and what was heard is mostly its words, all of it.
 pub(crate) fn clews_own(heard: &str, said: &[String]) -> bool {
-    if said_over(heard, said) {
-        return false;
-    }
-    let kept = past_clews_words(heard, said);
-    word_tokens(kept).len() < ECHO_WORDS || !said_over(kept, said)
+    said.iter()
+        .any(|sentence| crate::app::spoken::named_in(sentence).is_some())
+        && !said_over(heard, said)
 }
 
 /// Fewest words an echo of Clew is taken to be: anything shorter said over
@@ -2045,7 +2043,7 @@ impl App {
             };
             let (to_clew, bye) = result.as_ref().map_or((false, false), |text| {
                 (
-                    !clews_own(text, &lately),
+                    said_over(text, &lately),
                     crate::app::spoken::leaves_clew_speaking(text, call),
                 )
             });
