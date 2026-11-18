@@ -2217,13 +2217,6 @@ impl App {
                 None => {}
             }
         }
-        if self.voice.prefs.run_commands {
-            if let Some(task) = self.heard_command(&text) {
-                return task;
-            }
-        } else if let Some(task) = self.heard_commands_back_on(&text) {
-            return task;
-        }
         // What opens with a yes or a no, or an answer's words, with a
         // question waiting — that question covered, not ready to answer,
         // put away, or spoken commands off: held (`App::hold_for_question`),
@@ -2231,13 +2224,25 @@ impl App {
         // consent and a no would wait on the question. With no question
         // waiting, it answers what the agent asked in words, and goes on.
         let to = self.said_to_question(&text);
-        // A word that stops Clew, nothing on screen named by it ("stop",
-        // said after "Hey, Clew" and a pause): not a question for Ask —
-        // nor a yes to one waiting, though it opens with one ("okay,
-        // stop"). An answer of that name, offered, is that answer.
-        if crate::app::onscreen::hushes(&text)
-            && !matches!(to, Some(crate::app::onscreen::ToQuestion::Answer(_)))
-        {
+        // A word that stops Clew ("stop", said after "Hey, Clew" and a
+        // pause): not a question for Ask — nor a yes to one waiting, though
+        // it opens with one ("okay, stop"). An answer of that name the
+        // question offers is that answer. While an answer is being
+        // written, it is that answer's — before any command of its name
+        // (the debugger's Stop); else it is heard as any command is first.
+        let hush = crate::app::onscreen::hushes(&text)
+            && !matches!(to, Some(crate::app::onscreen::ToQuestion::Answer(_)));
+        if hush && self.ask_stream_active() {
+            return self.hush_for_the_reader();
+        }
+        if self.voice.prefs.run_commands {
+            if let Some(task) = self.heard_command(&text) {
+                return task;
+            }
+        } else if let Some(task) = self.heard_commands_back_on(&text) {
+            return task;
+        }
+        if hush {
             return self.hush_for_the_reader();
         }
         if let Some(to) = to {

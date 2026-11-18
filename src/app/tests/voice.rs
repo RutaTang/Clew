@@ -434,41 +434,51 @@ fn stop_said_keeps_the_agents_question() {
             "{tag}"
         );
     }
-    // An answer the agent names "Stop", the card put away: that answer,
-    // brought into view — not a word that stops Clew.
-    let (mut app, script, _) = voice_app("voice-stop-the-answer", "Stop.");
-    app.proj.asking = true;
-    app.proj.ask_turns.push(crate::app::model::AskTurn {
-        stream: 3,
-        question: "tidy the imports".into(),
-        streaming: true,
-        ..Default::default()
-    });
-    let option = |id: &str, label: &str, allows: bool| ApprovalOption {
-        id: id.into(),
-        label: label.into(),
-        allows,
-        always: false,
-    };
-    app.proj.ask_turns[0].extras.approvals.push(Approval {
-        key: ApprovalKey::Mcp { call: 1 },
-        mark: None,
-        title: "files wants to write".into(),
-        detail: String::new(),
-        options: vec![
-            option("allow", "Allow", true),
-            option("halt", "Stop", false),
-        ],
-    });
-    app.ask_view = AskView::Hidden;
-    say(&mut app, &script);
-    assert!(app.proj.asking, "the answer stopped");
-    assert!(app.first_approval().is_some(), "answered unseen");
-    assert!(app.ask_view.is_open(), "its question not shown");
-    assert_ne!(
-        app.status, "The agent is waiting for your answer in the Ask panel",
-        "taken for a word that stops Clew"
-    );
+    // An answer the agent names "Stop": that answer — given with its card
+    // in view, brought into view with it put away — not a word that stops
+    // Clew.
+    for (tag, view) in [
+        ("voice-stop-the-answer-open", AskView::Compact),
+        ("voice-stop-the-answer-away", AskView::Hidden),
+    ] {
+        let (mut app, script, _) = voice_app(tag, "Stop.");
+        app.proj.asking = true;
+        app.proj.ask_turns.push(crate::app::model::AskTurn {
+            stream: 3,
+            question: "tidy the imports".into(),
+            streaming: true,
+            ..Default::default()
+        });
+        let option = |id: &str, label: &str, allows: bool| ApprovalOption {
+            id: id.into(),
+            label: label.into(),
+            allows,
+            always: false,
+        };
+        app.proj.ask_turns[0].extras.approvals.push(Approval {
+            key: ApprovalKey::Mcp { call: 1 },
+            mark: None,
+            title: "files wants to write".into(),
+            detail: String::new(),
+            options: vec![
+                option("allow", "Allow", true),
+                option("halt", "Stop", false),
+            ],
+        });
+        app.ask_view = view;
+        say(&mut app, &script);
+        assert!(app.ask_view.is_open(), "{tag}: its question not shown");
+        if view == AskView::Compact {
+            assert!(app.first_approval().is_none(), "{tag}: not answered");
+        } else {
+            assert!(app.first_approval().is_some(), "{tag}: answered unseen");
+            assert_eq!(
+                app.status,
+                crate::i18n::lookup(crate::app::onscreen::TOO_SOON),
+                "{tag}: not held for its question"
+            );
+        }
+    }
     // Ask's own Stop is pressed by its name said as a button's is.
     let (mut app, script, _) = voice_app("voice-press-stop", "Press Stop.");
     app.proj.asking = true;
@@ -476,6 +486,46 @@ fn stop_said_keeps_the_agents_question() {
     say(&mut app, &script);
     assert!(!app.proj.asking, "the answer not stopped");
     assert!(app.proj.ask_queue_held, "not Ask's Stop");
+}
+
+/// "Stop" said as an answer is written, a program paused in the debugger:
+/// the answer stops — the debugger's Stop is not asked about. With no
+/// answer being written, it is heard as any command is: the debugger's
+/// Stop asks first.
+#[test]
+fn stop_said_stops_the_answer_before_the_debugger() {
+    for (tag, writing) in [("voice-stop-over-debug", true), ("voice-stop-debug", false)] {
+        let (mut app, script, _) = voice_app(tag, "Stop.");
+        app.debug.session = Some(DebugSession {
+            client: None,
+            status: DebugStatus::Stopped,
+            exit_code: None,
+            thread_id: Some(1),
+            frames: Vec::new(),
+            scopes: Vec::new(),
+            watches: Vec::new(),
+            output: Vec::new(),
+            current: None,
+            program: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            cwd: PathBuf::from("/"),
+            addr: None,
+        });
+        app.proj.asking = writing;
+        say(&mut app, &script);
+        assert!(!app.proj.asking, "{tag}: the answer not stopped");
+        let asked = app.voice.confirm.as_ref().map(|w| w.said().to_string());
+        if writing {
+            assert_eq!(asked, None, "{tag}: {}", app.status);
+        } else {
+            assert_eq!(
+                asked.as_deref(),
+                Some("Debug: Stop"),
+                "{tag}: {}",
+                app.status
+            );
+        }
+    }
 }
 
 /// A question said aloud is asked without the card opening over the code
