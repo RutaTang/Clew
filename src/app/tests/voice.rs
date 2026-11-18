@@ -581,8 +581,9 @@ fn an_answer_said_by_name_is_that_answer() {
     say(&mut app, &script);
     assert_eq!(ran(&app), Some("Debug: Continue"), "{}", app.status);
     assert!(app.first_approval().is_some(), "the agent answered");
-    // Two answers named alike, one on each page: the one in view.
-    for word in ["Stop", "Cancel"] {
+    // Two answers named alike, one on each page: the one in view — on
+    // the first page, or the second, turned to.
+    for (word, page) in [("Stop", 0), ("Cancel", 0), ("Stop", 1), ("Cancel", 1)] {
         let (mut app, script, _) = voice_app("voice-answer-alike", &format!("{word}."));
         asking(
             &mut app,
@@ -595,11 +596,22 @@ fn an_answer_said_by_name_is_that_answer() {
             ],
         );
         app.ask_view = AskView::Compact;
+        app.asking.answers_page = Some((
+            crate::app::model::Question::Approval {
+                stream: 3,
+                key: ApprovalKey::Mcp { call: 1 },
+            },
+            page,
+        ));
         say(&mut app, &script);
-        assert!(app.ask_view.is_open(), "{word}: Ask put away");
-        assert!(app.first_approval().is_none(), "{word}: {}", app.status);
-        let given = format!("{word} (keep edits)");
-        assert_eq!(ran(&app), Some(given.as_str()), "{word}");
+        assert!(app.ask_view.is_open(), "{word} {page}: Ask put away");
+        assert!(
+            app.first_approval().is_none(),
+            "{word} {page}: {}",
+            app.status
+        );
+        let given = format!("{word} ({} edits)", ["keep", "revert"][page]);
+        assert_eq!(ran(&app), Some(given.as_str()), "{word} {page}");
     }
     // "Stop" — or "Cancel", which closes things — on the card's second
     // page, the first showing "Stop (keep edits)": nothing pressed — the
