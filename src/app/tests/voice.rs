@@ -2546,6 +2546,36 @@ fn a_yes_for_a_question_not_drawn_is_held() {
     assert!(app.proj.ask_input.is_empty(), "{}", app.proj.ask_input);
 }
 
+/// Set up project's Apply, said — or a yes — while the project is still
+/// checked, is held with the reason its tip gives, not sent on to Ask
+/// behind the sheet.
+#[test]
+fn a_button_said_before_it_can_be_pressed_says_why() {
+    use crate::app::setup::{ProjectSetup, SetupMode};
+    let (mut app, script, _) = voice_app("voice-setup-looking", "");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.setup = Some(ProjectSetup {
+        mode: SetupMode::Manage,
+        root,
+        servers: true,
+        servers_declined: false,
+        explain: false,
+        no_code: false,
+        census: None,
+    });
+    for said in ["Apply", "Yes."] {
+        say_words(&mut app, &script, said);
+        assert_eq!(app.status, "Ready once the project is checked", "{said}");
+        assert!(
+            app.proj.ask_input.is_empty(),
+            "{said}: {}",
+            app.proj.ask_input
+        );
+        assert!(app.proj.ask_queue.is_empty(), "{said}");
+        assert!(app.setup.is_some(), "{said}: the sheet went");
+    }
+}
+
 /// A dialog's main button that answers no question waiting — Update now,
 /// a prompt's Save — is pressed said as a question too: only what allows
 /// a question's ask wants a plain answer.
