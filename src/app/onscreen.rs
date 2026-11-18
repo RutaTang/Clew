@@ -12,6 +12,17 @@ use crate::*;
 /// What is said before or after a thing's name to press it — "click on
 /// Download", "the Retry button" — and means nothing more: the English
 /// words, and each language's.
+/// Why an answer is held ([`App::hold_answer`]): its question was not
+/// read yet — its Allow cannot be pressed.
+pub(crate) const TOO_SOON: &str = tr_noop!(
+    "Too soon to answer — say it again once the question has been in view for a moment, with the window in front"
+);
+/// … it allows, and was said as a question ("Allow?").
+pub(crate) const ASKED: &str = tr_noop!("To answer, say “yes” or “no” — not as a question");
+/// … spoken commands are off: voice presses nothing.
+pub(crate) const COMMANDS_OFF: &str =
+    tr_noop!("Spoken commands are off — answer the question on screen with its buttons");
+
 const PRESS: &str = tr_noop!("click, click on, press, tap, hit, select, choose, pick, the, button");
 
 /// What puts away what is on top — a dialog, a menu, Time Travel, the find
@@ -504,11 +515,12 @@ impl App {
         // what was said for it waits — sent on to Ask, a "yes" would read
         // to the agent asking as consent.
         if target.waiting {
-            return self.answer_waits(text);
+            return self.hold_answer(text, TOO_SOON);
         }
-        // "Allow?": asked, not answered — what allows wants a plain yes.
-        if target.answer == Some(Answer::Yes) && crate::app::spoken::asked(said) {
-            return self.answer_asked(text);
+        // "Allow?", "Always allow read_file?": asked, not answered — what
+        // allows wants to be said plainly.
+        if target.allows && crate::app::spoken::asked(said) {
+            return self.hold_answer(text, ASKED);
         }
         if asks_first(&target) {
             self.status = tr!(
@@ -534,28 +546,15 @@ impl App {
         self.press(target.message)
     }
 
-    /// An answer said (`text`) for a question not read yet — its Allow
-    /// cannot be pressed: it waits, saying so, and goes nowhere else.
-    pub(crate) fn answer_waits(&mut self, text: String) -> Task<Message> {
-        let wait = tr_noop!(
-            "Too soon to answer — say it again once the question has been in view for a moment, with the window in front"
-        );
-        self.status = crate::i18n::lookup(wait).into();
+    /// An answer said (`text`) for the question on screen, held, saying
+    /// `why` ([`TOO_SOON`], [`ASKED`], [`COMMANDS_OFF`]): it presses
+    /// nothing, and goes nowhere else — sent on to Ask, a "yes" would read
+    /// to the agent asking as consent.
+    pub(crate) fn hold_answer(&mut self, text: String, why: &'static str) -> Task<Message> {
+        self.status = crate::i18n::lookup(why).into();
         self.voice.hear(Heard {
             text,
-            outcome: HeardOutcome::Failed(wait.into()),
-        });
-        Task::none()
-    }
-
-    /// A yes said as a question (`text`, "Allow?") for the question on
-    /// screen: it allows nothing, and goes nowhere else.
-    pub(crate) fn answer_asked(&mut self, text: String) -> Task<Message> {
-        let plain = tr_noop!("To answer, say “yes” or “no” — not as a question");
-        self.status = crate::i18n::lookup(plain).into();
-        self.voice.hear(Heard {
-            text,
-            outcome: HeardOutcome::Failed(plain.into()),
+            outcome: HeardOutcome::Failed(why.into()),
         });
         Task::none()
     }
@@ -671,6 +670,7 @@ mod tests {
             answer: None,
             typing: None,
             waiting: false,
+            allows: false,
         }
     }
 

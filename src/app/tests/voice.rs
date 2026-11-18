@@ -2226,6 +2226,10 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
         detail: String::new(),
         options: vec![
             option("allow", "Allow", true),
+            ApprovalOption {
+                always: true,
+                ..option("always", "Always allow", true)
+            },
             option("deny", "Decline", false),
         ],
     });
@@ -2274,10 +2278,13 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
     // waits all the same.
     app.tutorial = Some(0);
     held(&mut app, &script, "Yes.");
+    say_words(&mut app, &script, "Yes?");
+    assert!(app.proj.ask_input.is_empty(), "{}", app.proj.ask_input);
+    assert!(app.status.starts_with("To answer, say"), "{}", app.status);
     app.tutorial = None;
     // Asked, not answered: no yes, and not held as one.
     app.asking.delay = std::time::Duration::ZERO;
-    for said in ["Allow?", "Yes?"] {
+    for said in ["Allow?", "Yes?", "Always allow?"] {
         say_words(&mut app, &script, said);
         assert!(
             app.proj.ask_input.is_empty(),
@@ -2297,15 +2304,22 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
     );
     app.proj.ask_input.clear();
     app.asking.delay = std::time::Duration::from_secs(60);
-    // Spoken commands off: a yes answers nothing — and is not asked.
+    // Spoken commands off: a yes answers nothing — and is not asked,
+    // said plainly or as a question.
     app.voice.prefs.run_commands = false;
-    say_words(&mut app, &script, "Yes.");
-    assert!(app.proj.ask_input.is_empty(), "{}", app.proj.ask_input);
-    assert!(
-        app.status.starts_with("Spoken commands are off"),
-        "{}",
-        app.status
-    );
+    for said in ["Yes.", "Yes?"] {
+        say_words(&mut app, &script, said);
+        assert!(
+            app.proj.ask_input.is_empty(),
+            "{said}: {}",
+            app.proj.ask_input
+        );
+        assert!(
+            app.status.starts_with("Spoken commands are off"),
+            "{said}: {}",
+            app.status
+        );
+    }
     app.voice.prefs.run_commands = true;
     // No question on screen: the yes answers the agent in words, and goes
     // to Ask (kept in its input here, with no key to ask with).
@@ -2336,6 +2350,7 @@ fn on_screen(
         answer,
         typing: None,
         waiting: false,
+        allows: answer == Some(crate::ui::heard::Answer::Yes),
     }
 }
 

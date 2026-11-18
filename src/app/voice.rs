@@ -2066,43 +2066,31 @@ impl App {
                 None => {}
             }
         }
+        // A yes with a question shown — said plainly or asked: if no
+        // answer on screen takes it, it is held (`App::hold_answer`), never
+        // a question for Ask, which the agent asking would read as consent.
+        // A yes with no question on screen answers what the agent asked in
+        // words, and goes on.
+        let yes_to_question = crate::app::spoken::only_yes_or_no(&text) == Some(true)
+            && self.question_shown().is_some();
         if self.voice.prefs.run_commands {
             if let Some(task) = self.heard_command(&text) {
                 return task;
             }
-            // A yes no answer on screen took, with a question shown: one
-            // whose answer is not offered yet — a tour over it, the
-            // project still being looked at. It waits as an answer offered
-            // and not yet pressable does (`App::answer_waits`): sent to the
-            // agent asking, it would read as consent.
-            let yes = text.trim_end().trim_end_matches(['?', '？']);
-            if crate::app::spoken::only_yes_or_no(yes) == Some(true)
-                && self.question_shown().is_some()
-            {
-                return if crate::app::spoken::asked(&text) {
-                    self.answer_asked(text)
+            // Its answer not offered yet — a tour over it, the project
+            // still being looked at: it waits as one not yet pressable.
+            if yes_to_question {
+                let why = if crate::app::spoken::asked(&text) {
+                    crate::app::onscreen::ASKED
                 } else {
-                    self.answer_waits(text)
+                    crate::app::onscreen::TOO_SOON
                 };
+                return self.hold_answer(text, why);
             }
         } else if let Some(task) = self.heard_commands_back_on(&text) {
             return task;
-        } else if crate::app::spoken::only_yes_or_no(&text) == Some(true)
-            && self.question_shown().is_some()
-        {
-            // Commands off, a yes for the question on screen answers
-            // nothing — and is no question for Ask: sent to the agent
-            // asking, it would read as consent. A yes with no question on
-            // screen answers what the agent asked in words, and goes on.
-            let say = tr_noop!(
-                "Spoken commands are off — answer the question on screen with its buttons"
-            );
-            self.status = crate::i18n::lookup(say).into();
-            self.voice.hear(Heard {
-                text,
-                outcome: HeardOutcome::Failed(say.into()),
-            });
-            return Task::none();
+        } else if yes_to_question {
+            return self.hold_answer(text, crate::app::onscreen::COMMANDS_OFF);
         }
         // A question: to Ask. Sent, it is answered where Ask is — the card
         // is not opened over the code for it: the pill says it is being

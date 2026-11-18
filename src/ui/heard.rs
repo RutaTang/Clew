@@ -65,6 +65,10 @@ pub(crate) struct Target {
     /// reader's reach long enough to be read (`App::may_allow`). Only
     /// voice is offered it ([`gather_heard`]), to wait when it is said.
     pub waiting: bool,
+    /// It allows, runs or trusts what the question on screen asks — its
+    /// "yes", or what answers every such question from now on ("Always
+    /// allow…"): said as a question, it is not pressed.
+    pub allows: bool,
 }
 
 /// A field's text, and what typing in it sends.
@@ -139,16 +143,19 @@ pub(crate) fn gathering() -> bool {
 }
 
 fn push(title: String, shown: String, message: &Message, answer: Option<Answer>, row: bool) {
-    push_as(title, shown, message, answer, row, false);
+    let allows = answer == Some(Answer::Yes);
+    push_as(title, shown, message, answer, row, (false, allows));
 }
 
+/// [`push`], `(waiting, allows)` as given ([`Target::waiting`],
+/// [`Target::allows`]).
 fn push_as(
     title: String,
     shown: String,
     message: &Message,
     answer: Option<Answer>,
     row: bool,
-    waiting: bool,
+    (waiting, allows): (bool, bool),
 ) {
     GATHERING.with(|g| {
         if let Some(g) = g.borrow_mut().as_mut() {
@@ -168,6 +175,7 @@ fn push_as(
                     answer,
                     typing: None,
                     waiting,
+                    allows,
                 });
             }
             g.targets.push(Target {
@@ -179,6 +187,7 @@ fn push_as(
                 answer,
                 typing: None,
                 waiting,
+                allows,
             });
         }
     });
@@ -304,18 +313,17 @@ pub(crate) fn answer_when(
             &message,
             Some(answer),
             false,
-            true,
+            (true, answer == Answer::Yes),
         );
     }
     None
 }
 
 /// [`said`] once it may be pressed (`ready`), as [`answer_when`] — for an
-/// answer that no "yes" gives, only its own words ("Always allow…").
+/// answer that allows but that no "yes" gives, only its own words
+/// ("Always allow…"): said as a question, it is not pressed
+/// ([`Target::allows`]).
 pub(crate) fn said_when(ready: bool, shown: &str, message: Message) -> Option<Message> {
-    if ready {
-        return Some(said(shown, message));
-    }
     if gathering() {
         push_as(
             title_of(shown),
@@ -323,8 +331,12 @@ pub(crate) fn said_when(ready: bool, shown: &str, message: Message) -> Option<Me
             &message,
             None,
             false,
-            true,
+            (!ready, true),
         );
+    }
+    if ready {
+        note(shown, &message);
+        return Some(message);
     }
     None
 }
@@ -344,6 +356,7 @@ pub(crate) fn field(value: &str, on_input: fn(String) -> Message) {
                 answer: None,
                 typing: Some((value.to_string(), on_input)),
                 waiting: false,
+                allows: false,
             });
         }
     });
@@ -514,6 +527,7 @@ mod tests {
             answer: None,
             typing: None,
             waiting: false,
+            allows: false,
         }
     }
 
