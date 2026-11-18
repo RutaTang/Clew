@@ -229,6 +229,54 @@ pub fn download_to_capped(
 mod tests {
     use super::*;
 
+    /// `Version::parse`, the order `Version` derives and `ensure_upgrade`
+    /// compute, on every input the Lean model was run on, what the model
+    /// computes — the model whose theorems say an accepted update is
+    /// strictly newer, successive ones never repeat a version, and every
+    /// tag Clew publishes reads back (`verification/Clew/Update.lean`).
+    #[test]
+    fn versions_are_the_proven_model() {
+        let vectors = include_str!("../../../verification/vectors/update.json");
+        let version = |v: &serde_json::Value| Version {
+            major: v[0].as_u64().unwrap(),
+            minor: v[1].as_u64().unwrap(),
+            patch: v[2].as_u64().unwrap(),
+        };
+        for (input, want) in crate::testutil::lean_cases(vectors, "parse") {
+            let s = input.as_str().unwrap();
+            let want = (!want.is_null()).then(|| version(&want));
+            assert_eq!(Version::parse(s), want, "Version::parse({s:?})");
+        }
+        for (input, want) in crate::testutil::lean_cases(vectors, "lt") {
+            let (a, b) = (version(&input[0]), version(&input[1]));
+            assert_eq!(a < b, want.as_bool().unwrap(), "{a} < {b}");
+        }
+        for (input, want) in crate::testutil::lean_cases(vectors, "ensure_upgrade") {
+            let running = version(&input[0]);
+            let candidate = input[1].as_str().unwrap();
+            let got = ensure_upgrade(running, candidate);
+            match want.as_str() {
+                Some("unreadable") => {
+                    assert!(
+                        Version::parse(candidate).is_none() && got.is_err(),
+                        "{candidate:?}"
+                    )
+                }
+                Some("not_newer") => {
+                    assert!(
+                        Version::parse(candidate).is_some() && got.is_err(),
+                        "{candidate:?}"
+                    )
+                }
+                _ => assert_eq!(
+                    got,
+                    Ok(version(&want)),
+                    "ensure_upgrade({running}, {candidate:?})"
+                ),
+            }
+        }
+    }
+
     /// A cancel flag nothing sets.
     fn never() -> AtomicBool {
         AtomicBool::new(false)

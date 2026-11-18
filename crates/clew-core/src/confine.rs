@@ -161,6 +161,33 @@ fn names_a_folder(rel: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The lexical check computes, on every input the Lean model was run
+    /// on, what the model computes — the model whose theorems say an
+    /// accepted path never leaves the root (`verification/Clew/Confine.lean`).
+    #[test]
+    fn the_lexical_check_is_the_proven_model() {
+        let vectors = include_str!("../../../verification/vectors/confine.json");
+        for (input, want) in crate::testutil::lean_cases(vectors, "check_lexical") {
+            let rel = input.as_str().unwrap();
+            let got = match check_lexical(rel) {
+                Ok(()) => "ok",
+                Err(ConfineError::Empty) => "empty",
+                Err(ConfineError::Absolute) => "absolute",
+                Err(ConfineError::Traversal) => "traversal",
+                Err(e) => panic!("check_lexical({rel:?}) gave {e}, which it never gives"),
+            };
+            assert_eq!(got, want, "check_lexical({rel:?})");
+        }
+        for (input, want) in crate::testutil::lean_cases(vectors, "names_a_folder") {
+            let rel = input.as_str().unwrap();
+            assert_eq!(
+                serde_json::Value::Bool(names_a_folder(rel)),
+                want,
+                "names_a_folder({rel:?})"
+            );
+        }
+    }
+
     use crate::testutil::TempDir;
 
     fn project(tag: &str) -> TempDir {
