@@ -1700,6 +1700,7 @@
  "The Type Graph shows Discount and the two kinds of it the shop has: MemberDiscount and BulkDiscount.": "型グラフには、Discount と、ショップにあるその 2 種類、MemberDiscount と BulkDiscount が表示されます。",
  "The TypeScript the language server runs.": "言語サーバーが実行する TypeScript です。",
  "The agent did not accept the setting: {error}": "エージェントがこの設定を受け付けませんでした: {error}",
+ "The agent is waiting for your answer in the Ask panel — say “press Stop” to stop it": "エージェントが質問パネルであなたの応答を待っています — 止めるには「停止を押して」と言ってください",
  "The agent wants to run “{command}” — answer it in Ask": "エージェントが「{command}」を実行しようとしています。質問パネルで応答してください",
  "The big picture": "全体像",
  "The build tags and platform gopls uses for the project.": "gopls がこのプロジェクトで使うビルドタグとプラットフォームです。",

@@ -346,9 +346,16 @@ fn a_question_heard_goes_to_ask() {
 /// a "no" — "Okay, stop" too, though it opens with a yes.
 #[test]
 fn stop_said_is_never_asked() {
-    for (tag, writing) in [("voice-stop-nothing", false), ("voice-stop-writing", true)] {
+    for (tag, writing, view) in [
+        ("voice-stop-nothing", false, AskView::Hidden),
+        ("voice-stop-writing", true, AskView::Hidden),
+        // Ask's own Stop on screen: not pressed by it, which would hold
+        // what was asked after the answer.
+        ("voice-stop-writing-open", true, AskView::Compact),
+    ] {
         let (mut app, script, _) = voice_app(tag, "Okay, stop.");
         app.proj.asking = writing;
+        app.ask_view = view;
         // Asked after the answer being written: asked once it has stopped,
         // not held out of sight.
         let next = ("why that file?".to_string(), true);
@@ -384,9 +391,10 @@ fn stop_said_is_never_asked() {
 }
 
 /// "Stop" said, Clew silent, as the agent writing an answer asks the
-/// reader something: its question stays — Ask's own Stop, on screen, is
-/// not pressed by it — and Ask comes back for it, the status line saying
-/// who waits for an answer.
+/// reader something — "okay, stop" too, though it opens with a yes: its
+/// question stays, unanswered — Ask's own Stop, on screen, is not pressed
+/// by it — and Ask comes back for it, the status line saying how to stop
+/// the agent instead.
 #[test]
 fn stop_said_keeps_the_agents_question() {
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption};
@@ -394,7 +402,7 @@ fn stop_said_keeps_the_agents_question() {
         ("voice-stop-question-open", AskView::Compact),
         ("voice-stop-question-away", AskView::Hidden),
     ] {
-        let (mut app, script, _) = voice_app(tag, "Stop.");
+        let (mut app, script, _) = voice_app(tag, "Okay, stop.");
         app.proj.asking = true;
         app.proj.ask_turns.push(crate::app::model::AskTurn {
             stream: 3,
@@ -422,7 +430,8 @@ fn stop_said_keeps_the_agents_question() {
         assert!(!app.proj.ask_queue_held, "{tag}: Ask's Stop pressed");
         assert!(app.ask_view.is_open(), "{tag}: Ask not brought back");
         assert_eq!(
-            app.status, "Clew is waiting for your answer in the Ask panel",
+            app.status,
+            "The agent is waiting for your answer in the Ask panel — say “press Stop” to stop it",
             "{tag}"
         );
     }

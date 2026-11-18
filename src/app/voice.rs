@@ -2224,6 +2224,13 @@ impl App {
         } else if let Some(task) = self.heard_commands_back_on(&text) {
             return task;
         }
+        // A word that stops Clew, nothing on screen named by it ("stop",
+        // said after "Hey, Clew" and a pause): not a question for Ask —
+        // nor an answer to one waiting, though it opens with a yes ("okay,
+        // stop").
+        if crate::app::onscreen::hushes(&text) {
+            return self.hush_for_the_reader();
+        }
         // What opens with a yes or a no, or an answer's words, with a
         // question waiting — that question covered, not ready to answer,
         // put away, or spoken commands off: held (`App::hold_for_question`),
@@ -2232,11 +2239,6 @@ impl App {
         // waiting, it answers what the agent asked in words, and goes on.
         if let Some(to) = self.said_to_question(&text) {
             return self.hold_for_question(text, to);
-        }
-        // A word that stops Clew, nothing on screen named by it ("stop",
-        // said after "Hey, Clew" and a pause): not a question for Ask.
-        if crate::app::onscreen::hushes(&text) {
-            return self.hush_for_the_reader();
         }
         // A question: to Ask. Sent, it is answered where Ask is — the card
         // is not opened over the code for it: the pill says it is being
@@ -2274,15 +2276,14 @@ impl App {
         self.voice.heard = None;
         let speaking = self.voice.speech.is_speaking() || self.answer_read_aloud_coming();
         if !speaking && !self.answer_written_stops() {
-            self.status = match self.agent_asking() {
-                Some(label) => {
-                    self.reveal_ask();
-                    tr!(
-                        "{label} is waiting for your answer in the Ask panel",
-                        label = label
-                    )
-                }
-                None => tr!("Clew isn't speaking").into(),
+            // The agent asks something: its question in view, and how to
+            // stop it instead of answering — its card's Stop, now shown.
+            self.status = if self.agent_asks() {
+                self.reveal_ask();
+                tr!("The agent is waiting for your answer in the Ask panel — say “press Stop” to stop it")
+                    .into()
+            } else {
+                tr!("Clew isn't speaking").into()
             };
             return Task::none();
         }
@@ -2295,18 +2296,16 @@ impl App {
         stop
     }
 
-    /// Who asks the reader something as an answer is written — the ACP
-    /// agent by its name, else Clew's own — if anyone does
+    /// Whether the agent writing an answer asks the reader something
     /// ([`App::first_approval`]).
-    fn agent_asking(&self) -> Option<String> {
-        self.first_approval()
-            .map(|(turn, _)| turn.extras.agent.clone().unwrap_or_else(|| "Clew".into()))
+    fn agent_asks(&self) -> bool {
+        self.first_approval().is_some()
     }
 
     /// The question the agent asks, brought into view once Clew is quiet:
     /// an Ask put away comes back for it.
     fn show_agent_question(&mut self) {
-        if self.agent_asking().is_some() {
+        if self.agent_asks() {
             self.reveal_ask();
         }
     }
@@ -2315,7 +2314,7 @@ impl App {
     /// one is, and the agent writing it asks nothing — its question is
     /// the reader's to answer, not to lose to a word said to quiet Clew.
     fn answer_written_stops(&self) -> bool {
-        self.ask_stream_active() && self.first_approval().is_none()
+        self.ask_stream_active() && !self.agent_asks()
     }
 
     /// The answer being written stopped by a word that stops Clew
