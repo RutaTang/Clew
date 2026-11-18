@@ -419,15 +419,17 @@ pub(crate) fn setup_sheet<'a>(
     let decline_button = button(text(decline_label).size(ts::BASE))
         .style(theme::toolbar_button)
         .padding([6, 16])
-        .on_press_maybe(decline_ready.then(|| {
-            // Open without setup opens the project: no "no" to opening it, which
-            // the × is; Cancel is.
-            if decline_gated {
-                super::heard::said(decline_label, decline)
-            } else {
-                super::heard::answer(decline_label, super::heard::Answer::No, decline)
-            }
-        }));
+        // Open without setup opens the project: no "no" to opening it, which
+        // the × is; Cancel is. Gated, it waits as the Open does.
+        .on_press_maybe(if decline_gated {
+            super::heard::said_when(decline_ready, decline_label, decline)
+        } else {
+            Some(super::heard::answer(
+                decline_label,
+                super::heard::Answer::No,
+                decline,
+            ))
+        });
     // A first open of a folder with no code, nothing to set up for it: the
     // two buttons did the same — Open alone.
     let nothing_to_set_up = mode == SetupMode::Open

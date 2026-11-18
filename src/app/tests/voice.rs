@@ -2270,6 +2270,33 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
     held(&mut app, &script, "Yes.");
     app.window_focused = true;
     app.asking.delay = std::time::Duration::from_secs(60);
+    // The tour over the card: its Allow is not offered at all — the yes
+    // waits all the same.
+    app.tutorial = Some(0);
+    held(&mut app, &script, "Yes.");
+    app.tutorial = None;
+    // Asked, not answered: no yes, and not held as one.
+    app.asking.delay = std::time::Duration::ZERO;
+    for said in ["Allow?", "Yes?"] {
+        say_words(&mut app, &script, said);
+        assert!(
+            app.proj.ask_input.is_empty(),
+            "{said}: {}",
+            app.proj.ask_input
+        );
+        assert!(
+            app.status.starts_with("To answer, say"),
+            "{said}: {}",
+            app.status
+        );
+    }
+    assert_eq!(
+        app.proj.ask_turns[0].extras.approvals.len(),
+        1,
+        "not allowed"
+    );
+    app.proj.ask_input.clear();
+    app.asking.delay = std::time::Duration::from_secs(60);
     // Spoken commands off: a yes answers nothing — and is not asked.
     app.voice.prefs.run_commands = false;
     say_words(&mut app, &script, "Yes.");

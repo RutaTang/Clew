@@ -83,6 +83,8 @@ pub(crate) fn yes_or_no(said: &str) -> Option<bool> {
 /// where what only opens with a yes ("run the tests") must not allow
 /// what it asks.
 pub(crate) fn only_yes_or_no(said: &str) -> Option<bool> {
+    // "Allow?", "对？": asked, not answered — no yes.
+    let asked = asked(said);
     let said: Vec<String> = plain(said).split(' ').map(str::to_string).collect();
     if said.iter().all(|w| w.is_empty()) {
         return None;
@@ -110,10 +112,16 @@ pub(crate) fn only_yes_or_no(said: &str) -> Option<bool> {
         made[said.len()]
     };
     match (made_of(YES), made_of(NO)) {
-        (true, false) => Some(true),
+        (true, false) if !asked => Some(true),
         (false, true) => Some(false),
         _ => None,
     }
+}
+
+/// Whether `said` was said as a question ("Allow?", "对？"): no answer
+/// that allows, which wants one said plainly.
+pub(crate) fn asked(said: &str) -> bool {
+    said.trim_end().ends_with(['?', '？'])
 }
 
 /// Clew's name as whisper writes it: "Clew", the words it is heard as
@@ -1718,6 +1726,8 @@ mod tests {
             "no idea why",
             "nothing",
             "",
+            "Allow?",
+            "Yes?",
         ] {
             assert_eq!(only_yes_or_no(said), None, "{said:?}");
         }

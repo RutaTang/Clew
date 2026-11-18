@@ -6133,6 +6133,18 @@ fn the_download_question_offers_the_program_already_here() {
     ));
     let sim = sim_elem(super::lsp_consent_modal(&consent, 4, 0, false));
     assert!(click(sim, "Use that one").is_empty(), "not yet read");
+    // Not yet read, both are offered to voice as waiting: what is said for
+    // them waits, and is not sent on to Ask.
+    let waiting: Vec<String> =
+        crate::ui::heard::gather_of(|| super::lsp_consent_modal(&consent, 4, 0, false))
+            .into_iter()
+            .filter(|t| t.waiting)
+            .map(|t| t.shown)
+            .collect();
+    assert!(
+        waiting.iter().any(|s| s == "Use that one") && waiting.iter().any(|s| s == "Download"),
+        "{waiting:?}"
+    );
 }
 
 /// F#8: consent questions are asked one at a time, and the modal says when

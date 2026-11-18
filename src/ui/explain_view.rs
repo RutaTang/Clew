@@ -1107,14 +1107,14 @@ pub(crate) fn lsp_consent_modal(
                             theme::primary_button
                         })
                         .padding([6, 16])
-                        .on_press_maybe(ready.then(|| {
+                        .on_press_maybe({
                             let allowed = Message::Lsp(LspMsg::ConsentAllowed(number));
                             if use_path {
-                                heard::said(&action, allowed)
+                                heard::said_when(ready, &action, allowed)
                             } else {
-                                heard::answer(&action, heard::Answer::Yes, allowed)
+                                heard::answer_when(ready, &action, heard::Answer::Yes, allowed)
                             }
-                        }))
+                        })
                 ),
                 use_path.then(|| crate::ui::fresh::allow(
                     ready,

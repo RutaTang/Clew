@@ -2070,6 +2070,21 @@ impl App {
             if let Some(task) = self.heard_command(&text) {
                 return task;
             }
+            // A yes no answer on screen took, with a question shown: one
+            // whose answer is not offered yet — a tour over it, the
+            // project still being looked at. It waits as an answer offered
+            // and not yet pressable does (`App::answer_waits`): sent to the
+            // agent asking, it would read as consent.
+            let yes = text.trim_end().trim_end_matches(['?', '？']);
+            if crate::app::spoken::only_yes_or_no(yes) == Some(true)
+                && self.question_shown().is_some()
+            {
+                return if crate::app::spoken::asked(&text) {
+                    self.answer_asked(text)
+                } else {
+                    self.answer_waits(text)
+                };
+            }
         } else if let Some(task) = self.heard_commands_back_on(&text) {
             return task;
         } else if crate::app::spoken::only_yes_or_no(&text) == Some(true)
