@@ -581,6 +581,26 @@ fn an_answer_said_by_name_is_that_answer() {
     say(&mut app, &script);
     assert_eq!(ran(&app), Some("Debug: Continue"), "{}", app.status);
     assert!(app.first_approval().is_some(), "the agent answered");
+    // Two answers named alike, one on each page: the one in view.
+    for word in ["Stop", "Cancel"] {
+        let (mut app, script, _) = voice_app("voice-answer-alike", &format!("{word}."));
+        asking(
+            &mut app,
+            vec![
+                option("allow", "Allow", true),
+                option("keep", &format!("{word} (keep edits)"), false),
+                option("reject", "Reject", false),
+                option("skip", "Skip", false),
+                option("revert", &format!("{word} (revert edits)"), false),
+            ],
+        );
+        app.ask_view = AskView::Compact;
+        say(&mut app, &script);
+        assert!(app.ask_view.is_open(), "{word}: Ask put away");
+        assert!(app.first_approval().is_none(), "{word}: {}", app.status);
+        let given = format!("{word} (keep edits)");
+        assert_eq!(ran(&app), Some(given.as_str()), "{word}");
+    }
     // "Stop" — or "Cancel", which closes things — on the card's second
     // page, the first showing "Stop (keep edits)": nothing pressed — the
     // page with it brought into view.

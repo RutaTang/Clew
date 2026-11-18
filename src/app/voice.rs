@@ -2368,17 +2368,10 @@ impl App {
         }
         // An answer the question waiting offers, said by its name
         // ("Stop", "Continue"): that answer, before any command of its name
-        // (the debugger's) — the very one named among all its card's
-        // pages, not one the page in view names alike. Pressed if it is in
-        // view, else held for it, brought into view
-        // ([`App::hold_for_question`]).
-        if let Some(crate::app::onscreen::ToQuestion::Answer(meant)) = self.said_to_question(text) {
-            let meant = format!("{:?}", meant.message);
-            return targets
-                .iter()
-                .find(|t| format!("{:?}", t.message) == meant)
-                .cloned()
-                .map(|t| self.press_heard(text, t));
+        // (the debugger's) — pressed if it is in view, else held for it,
+        // brought into view ([`App::hold_for_question`]).
+        if let Some((answer, drawn)) = self.answer_named(text, &targets, |_| true) {
+            return drawn.then(|| self.press_heard(text, answer));
         }
         // Said in English, or as the palette shows it in the reader's
         // language.

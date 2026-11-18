@@ -607,7 +607,7 @@ impl App {
 
     /// What `said` says to a question waiting ([`App::question_pending`])
     /// that nothing within reach took — the name of something it offers
-    /// ([`crate::ui::answers_waiting`]: "Trust and connect", "Always reject"),
+    /// ([`App::answer_named`]: "Trust and connect", "Always reject"),
     /// or anything that opens with a yes or a no ("yes", "allow it", "okay,
     /// why that file?", "don't run it") — wherever that question is:
     /// covered, not yet ready to answer, in an Ask put away, a page further
@@ -616,7 +616,8 @@ impl App {
     /// is said after.
     pub(crate) fn said_to_question(&self, said: &str) -> Option<ToQuestion> {
         self.question_pending()?;
-        if let Some(target) = named(said, &crate::ui::answers_waiting(self)) {
+        let drawn = crate::ui::heard::gather_heard(self);
+        if let Some((target, _)) = self.answer_named(said, &drawn, |_| true) {
             return Some(ToQuestion::Answer(Box::new(target)));
         }
         crate::app::spoken::yes_or_no(said).map(|_| ToQuestion::YesOrNo)
@@ -766,31 +767,41 @@ impl App {
         if self.ask_sessions_menu {
             return None;
         }
-        let approves = |t: &Target| matches!(t.message, Message::Ask(AskMsg::Approve { .. }));
         // Named among the card's own answers: another "Cancel" on screen —
-        // an update's download — made the name stand for neither. And
-        // among all its pages: the page in view's "Cancel (keep edits)" is
-        // not the "Cancel" on the next.
-        let drawn: Vec<Target> = targets
-            .iter()
-            .filter(|t| t.layer == Layer::Ask && approves(t))
-            .cloned()
-            .collect();
+        // an update's download — made the name stand for neither.
+        self.answer_named(said, targets, |t| {
+            matches!(t.message, Message::Ask(AskMsg::Approve { .. }))
+        })
+    }
+
+    /// The answer of a question waiting that `said` names, of those `of`
+    /// keeps, and whether its button is drawn (`targets`): named among all
+    /// its answers — a card's every page, so the "Stop" on the next is not
+    /// the page in view's "Stop (keep edits)" — else, two of them named
+    /// alike, among those in view.
+    pub(crate) fn answer_named(
+        &self,
+        said: &str,
+        targets: &[Target],
+        of: impl Fn(&Target) -> bool,
+    ) -> Option<(Target, bool)> {
+        let does = |t: &Target| format!("{:?}", t.message);
         let waiting: Vec<Target> = crate::ui::answers_waiting(self)
             .into_iter()
-            .filter(approves)
+            .filter(|t| of(t))
             .collect();
-        let answer = named(said, &waiting)?;
-        let does = format!("{:?}", answer.message);
-        Some(
-            match drawn
-                .into_iter()
-                .find(|t| format!("{:?}", t.message) == does)
-            {
-                Some(drawn) => (drawn, true),
-                None => (answer, false),
-            },
-        )
+        let answers: std::collections::HashSet<String> = waiting.iter().map(does).collect();
+        let drawn: Vec<Target> = targets
+            .iter()
+            .filter(|t| answers.contains(&does(t)))
+            .cloned()
+            .collect();
+        let answer = named(said, &waiting).or_else(|| named(said, &drawn))?;
+        let it = does(&answer);
+        Some(match drawn.into_iter().find(|t| does(t) == it) {
+            Some(drawn) => (drawn, true),
+            None => (answer, false),
+        })
     }
 
     /// Give the card's answer `said` named: pressed where it is drawn,
