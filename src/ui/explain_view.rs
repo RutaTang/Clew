@@ -1107,25 +1107,26 @@ pub(crate) fn lsp_consent_modal(
                             theme::primary_button
                         })
                         .padding([6, 16])
-                        .on_press_maybe(ready.then(|| {
+                        .on_press_maybe({
                             let allowed = Message::Lsp(LspMsg::ConsentAllowed(number));
                             if use_path {
-                                heard::said(&action, allowed)
+                                heard::said_when(ready, &action, allowed)
                             } else {
-                                heard::answer(&action, heard::Answer::Yes, allowed)
+                                heard::answer_when(ready, &action, heard::Answer::Yes, allowed)
                             }
-                        }))
+                        })
                 ),
                 use_path.then(|| crate::ui::fresh::allow(
                     ready,
                     button(text(tr!("Use that one")).size(ts::BASE))
                         .style(theme::primary_button)
                         .padding([6, 16])
-                        .on_press_maybe(ready.then(|| heard::answer(
+                        .on_press_maybe(heard::answer_when(
+                            ready,
                             tr!("Use that one"),
                             heard::Answer::Yes,
                             Message::Lsp(LspMsg::ConsentUsePath(number))
-                        )))
+                        ))
                 )),
             ]
             .spacing(10)
@@ -1264,11 +1265,12 @@ pub(crate) fn lsp_command_modal(
                     button(text(accept).size(ts::BASE))
                         .style(theme::toolbar_button)
                         .padding([6, 16])
-                        .on_press_maybe(ready.then(|| heard::answer(
+                        .on_press_maybe(heard::answer_when(
+                            ready,
                             accept,
                             heard::Answer::Yes,
                             Message::Lsp(LspMsg::CommandAllowed(number))
-                        )))
+                        ))
                 ),
             ]
             .spacing(10)

@@ -1595,6 +1595,132 @@ fn a_download_in_progress_is_cancelled_from_its_banner() {
     );
 }
 
+/// What keeps answers from being heard is said on the Ask card, with what
+/// puts it right: the voice to download — Download sends for it, the ✕
+/// hides the notice — that it is downloading, once it is, and why its
+/// download failed; or why the voice failed, with Settings, where voices
+/// are tried. Nothing once a voice here reads the answer's language. Said
+/// while Clew speaks too: a sentence another voice reads took it away.
+#[test]
+fn the_ask_card_says_what_keeps_answers_from_being_heard() {
+    use crate::app::speech::Blocked;
+    use clew_voice::speech;
+    let mut app = blank_app();
+    app.ask_view = crate::AskView::Compact;
+    let dir = crate::app::tests::test_dir("ui-blocked-models");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = clew_voice::models::Store::new(dir);
+    app.voice.store = Some(store.clone());
+    let qwen = speech::find("qwen3-tts").unwrap();
+    // Said of the last answer.
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 1,
+        question: "what does total do?".into(),
+        spoken: true,
+        ..Default::default()
+    });
+    let missing = |lang| Blocked::Missing {
+        model: "qwen3-tts",
+        lang,
+        stream: 1,
+    };
+    // No voice here: no answer is heard.
+    app.voice.speech.blocked = Some(missing("en"));
+    let needed = "To hear answers read aloud, download Qwen3-TTS";
+    assert!(shows(&mut sim_of(&app), needed));
+    let download = format!("Download ({} MB)", qwen.size_mb());
+    let sent = click(sim_of(&app), &download);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Voice(crate::VoiceMsg::DownloadSpeech("qwen3-tts"))]
+        ),
+        "{sent:?}"
+    );
+    let sent = click_right_of(
+        || sim_of(&app),
+        needed,
+        |m| {
+            matches!(
+                m,
+                Message::Voice(crate::VoiceMsg::DismissBlocked(Blocked::Missing {
+                    model: "qwen3-tts",
+                    lang: "en",
+                    stream: 1
+                }))
+            )
+        },
+    );
+    assert!(!sent.is_empty(), "its ✕ puts it away");
+    // Downloading: that it is, how far it has come, and Cancel, where
+    // Download was — not still to download it.
+    let _ = app.update(Message::Voice(crate::VoiceMsg::DownloadSpeech("qwen3-tts")));
+    assert!(shows(&mut sim_of(&app), "0%"));
+    assert!(shows(
+        &mut sim_of(&app),
+        &format!("Downloading Qwen3-TTS ({} MB)…", qwen.size_mb())
+    ));
+    assert!(!shows(&mut sim_of(&app), needed));
+    assert!(!shows(&mut sim_of(&app), &download));
+    let sent = click(sim_of(&app), "Cancel");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Voice(crate::VoiceMsg::CancelSpeechDownload(
+                "qwen3-tts"
+            ))]
+        ),
+        "{sent:?}"
+    );
+    let _ = app.update(Message::Voice(crate::VoiceMsg::CancelSpeechDownload(
+        "qwen3-tts",
+    )));
+    // Its download failed: why, under it.
+    app.voice
+        .speech
+        .download_errors
+        .insert("qwen3-tts", "the connection was reset".into());
+    assert!(shows(&mut sim_of(&app), "the connection was reset"));
+    // Supertonic here: a Chinese answer — this one — needs Qwen3-TTS; an
+    // English one is read, and nothing is said.
+    let supertonic = speech::find("supertonic-3").unwrap();
+    for file in supertonic.files {
+        let path = speech::path(&store, supertonic, file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+    app.voice.speech.blocked = Some(missing("zh"));
+    assert!(shows(
+        &mut sim_of(&app),
+        "Qwen3-TTS is needed to read this answer aloud"
+    ));
+    // Supertonic reading the answer's English sentences: still said.
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.5);
+    assert!(app.voice.speech.is_speaking());
+    assert!(shows(
+        &mut sim_of(&app),
+        "Qwen3-TTS is needed to read this answer aloud"
+    ));
+    app.voice.speech.blocked = Some(missing("en"));
+    assert!(!shows(&mut sim_of(&app), "is needed to read"));
+    // The voice failing: why, in its own words, and Settings.
+    app.voice.speech.blocked = Some(Blocked::Failed {
+        why: "Could not speak: the voice ended unexpectedly".into(),
+        stream: 1,
+    });
+    assert!(shows(&mut sim_of(&app), "the voice ended unexpectedly"));
+    let sent = click(sim_of(&app), "Settings");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Settings(crate::SettingsMsg::OpenAt(
+                crate::SettingsPage::Voice
+            ))]
+        ),
+        "{sent:?}"
+    );
+}
+
 /// The Files view marks what the working tree changes: a file by git's
 /// letter for it, a folder holding a change by a dot; an unchanged one by
 /// nothing.
@@ -6007,6 +6133,18 @@ fn the_download_question_offers_the_program_already_here() {
     ));
     let sim = sim_elem(super::lsp_consent_modal(&consent, 4, 0, false));
     assert!(click(sim, "Use that one").is_empty(), "not yet read");
+    // Not yet read, both are offered to voice as waiting: what is said for
+    // them waits, and is not sent on to Ask.
+    let waiting: Vec<String> =
+        crate::ui::heard::gather_of(|| super::lsp_consent_modal(&consent, 4, 0, false))
+            .into_iter()
+            .filter(|t| t.waiting.is_some())
+            .map(|t| t.shown)
+            .collect();
+    assert!(
+        waiting.iter().any(|s| s == "Use that one") && waiting.iter().any(|s| s == "Download"),
+        "{waiting:?}"
+    );
 }
 
 /// F#8: consent questions are asked one at a time, and the modal says when
@@ -6172,6 +6310,82 @@ fn the_setup_sheet_says_what_each_choice_takes() {
         click(sim_elem(sheet(&app, &root)), "Explain").as_slice(),
         [Message::Project(ProjectMsg::SetupApply)]
     ));
+}
+
+/// Set up project's Apply answers no question: said while the project is
+/// looked at, it is held with the reason its tip gives — not as an answer
+/// said too soon, nor sent on to Ask behind the sheet — and once looked at
+/// it is pressed as any button is, never held as one that allows.
+#[test]
+fn the_setup_sheets_apply_answers_no_question() {
+    use crate::app::setup::{Census, Fetch, ProjectSetup, SetupMode, SetupServer};
+    let mut app = reader_app();
+    let root = PathBuf::from("/nonexistent/iced");
+    app.setup = Some(ProjectSetup {
+        mode: SetupMode::Manage,
+        root: root.clone(),
+        servers: true,
+        servers_declined: false,
+        explain: false,
+        no_code: false,
+        census: None,
+    });
+    let apply = |app: &crate::app::state::App| -> Vec<(Option<&'static str>, bool)> {
+        crate::ui::heard::gather_of(|| {
+            super::setup::setup_sheet(app, &root, app.setup.as_ref(), true)
+        })
+        .into_iter()
+        .filter(|t| t.shown == "Apply")
+        .map(|t| (t.waiting, t.allows))
+        .collect()
+    };
+    assert_eq!(
+        apply(&app),
+        [(Some("Ready once the project is checked"), false)],
+        "held for the look"
+    );
+    app.setup.as_mut().unwrap().census = Some(Census {
+        servers: vec![SetupServer {
+            language: "rust".into(),
+            name: "rust-analyzer".into(),
+            fetch: Fetch::Download,
+            builds: false,
+        }],
+        calls: Some(40),
+    });
+    assert_eq!(apply(&app), [(None, false)]);
+    // Explain All on a folder with no code: held, saying so — not that
+    // all of it is explained.
+    let mut explain = app.setup.clone().unwrap();
+    explain.mode = SetupMode::Explain;
+    explain.explain = true;
+    explain.no_code = true;
+    explain.census = Some(Census {
+        servers: Vec::new(),
+        calls: Some(0),
+    });
+    let mut no_code = reader_app();
+    no_code.setup = Some(explain);
+    let held: Vec<Option<&'static str>> = crate::ui::heard::gather_of(|| {
+        super::setup::setup_sheet(&no_code, &root, no_code.setup.as_ref(), true)
+    })
+    .into_iter()
+    .filter(|t| t.shown == "Explain")
+    .map(|t| t.waiting)
+    .collect();
+    assert_eq!(held, [Some("There is no code here to explain.")]);
+    // Nothing to do: held, saying so.
+    app.setup.as_mut().unwrap().census = Some(Census {
+        servers: Vec::new(),
+        calls: Some(40),
+    });
+    assert_eq!(
+        apply(&app),
+        [(
+            Some("Nothing to apply: the language servers are already set up."),
+            false
+        )]
+    );
 }
 
 /// The first-open sheet holds still while it looks at the project: the
@@ -13993,10 +14207,39 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
             .set_len(file.bytes)
             .unwrap();
     }
-    app.voice.wake.error = Some("the microphone was unplugged".into());
+    app.voice.wake.error = Some("the folder could not be removed".into());
     let mut sim = sim_elem(super::voice_section(&app));
-    assert!(shows(&mut sim, "the microphone was unplugged"));
+    assert!(shows(&mut sim, "the folder could not be removed"));
     assert!(!shows(&mut sim, "Download (33 MB)"));
+    assert!(!shows(&mut sim, "Try again"), "tried again by itself");
+    drop(sim);
+    // Waiting ended by failing, its switch still on: that it stopped, and
+    // why — and Try again begins it.
+    app.voice.wake.error = None;
+    app.voice.prefs.wake = true;
+    app.voice.wake.failed = Some("the keyword spotter could not keep up".into());
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(
+        &mut sim,
+        "Stopped waiting for “Hey, Clew”: the keyword spotter could not keep up"
+    ));
+    assert!(matches!(
+        click(sim, "Try again").as_slice(),
+        [Message::Voice(VoiceMsg::SetWake(true))]
+    ));
+    // A download's failure after it is said as such, not with Try again,
+    // which would not try the download.
+    app.voice.wake.error = Some("the connection was reset".into());
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(&mut sim, "the connection was reset"));
+    let again = text_at(&mut sim, |t| t == "Try again", 0).expect("Try again");
+    let error = text_at(&mut sim, |t| t == "the connection was reset", 0).unwrap();
+    assert!(again.y > error.y, "beside the waiting's failure, under it");
+    drop(sim);
+    app.voice.wake.error = None;
+    app.voice.prefs.wake = false;
+    app.voice.wake.failed = None;
+    let sim = sim_elem(super::voice_section(&app));
     assert!(matches!(
         click(sim, "Remove").as_slice(),
         [Message::Voice(VoiceMsg::RemoveWake)]
@@ -14015,6 +14258,10 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
     crate::app::wake::testing::ready(&mut app, store.clone());
     assert!(app.resume_waiting());
     assert_eq!(super::askfloat::talk_tip(&app), "Talk — or say “Hey, Clew”");
+    assert_eq!(
+        super::askfloat::stop_listening_tip(),
+        "Stop listening — or say “Bye, Clew”"
+    );
     assert_eq!(
         super::askfloat::talk_tint(&app, rest),
         crate::theme::accent()
@@ -14338,38 +14585,41 @@ fn voice_failures_are_said_in_the_readers_language() {
     });
 }
 
+/// An output Clew is speaking on: playing, half loud.
+struct Playing;
+
+impl crate::app::speech::Playing for Playing {
+    fn play(&self, _: &[f32], _: u32) {}
+    fn rate(&self) -> u32 {
+        48_000
+    }
+    fn queued_seconds(&self) -> f32 {
+        1.0
+    }
+    fn played(&self) -> u64 {
+        0
+    }
+    fn take_rest(&self) -> (Vec<f32>, u32) {
+        (Vec::new(), 1)
+    }
+    fn idle(&self) -> bool {
+        false
+    }
+    fn level(&self) -> f32 {
+        0.5
+    }
+    fn error(&self) -> Option<String> {
+        None
+    }
+    fn pause(&self) {}
+    fn resume(&self) {}
+}
+
 /// Clew speaking shows as listening does: on the pill, even with Ask put
 /// away, and in the card's composer — the speaker, how loud, and the
 /// button lit to stop it.
 #[test]
 fn speaking_shows_with_a_stop() {
-    struct Playing;
-    impl crate::app::speech::Playing for Playing {
-        fn play(&self, _: &[f32], _: u32) {}
-        fn rate(&self) -> u32 {
-            48_000
-        }
-        fn queued_seconds(&self) -> f32 {
-            1.0
-        }
-        fn played(&self) -> u64 {
-            0
-        }
-        fn take_rest(&self) -> (Vec<f32>, u32) {
-            (Vec::new(), 1)
-        }
-        fn idle(&self) -> bool {
-            false
-        }
-        fn level(&self) -> f32 {
-            0.5
-        }
-        fn error(&self) -> Option<String> {
-            None
-        }
-        fn pause(&self) {}
-        fn resume(&self) {}
-    }
     let mut app = reader_app();
     app.ask_view = crate::AskView::Hidden;
     app.voice.speech.speak_for_test(Box::new(Playing), 0.5);
@@ -14408,6 +14658,13 @@ fn speaking_shows_with_a_stop() {
     // left to type in, Esc left to the pill.
     app.ask_view = crate::AskView::Compact;
     assert!(!shows(&mut sim_of(&app), "Esc"));
+    // What was heard stays under the card's header as Clew reads the
+    // answer: the answer under it does not jump as Clew begins and ends.
+    app.voice.heard = Some(crate::app::voice::Heard {
+        text: "what does total do".into(),
+        outcome: crate::app::voice::HeardOutcome::Asked,
+    });
+    assert!(shows(&mut sim_of(&app), "“what does total do”"));
     let lit = super::askfloat::voice_lit(&app, super::ROUND_BUTTON, 15.0).expect("lit");
     let mut sim = sim_elem(lit);
     sim.point_at(Point::new(
@@ -18444,17 +18701,24 @@ fn base_clone(_base: &App) -> App {
 /// Every button a click presses offers itself to voice and to the
 /// command bar too (`heard`): in every state audited, each press a button
 /// marks for jump mode is one voice can make by a word. A button built
-/// without a word for it fails here.
+/// without a word for it fails here. All but the microphone's own: what it
+/// does is said "Hey, Clew" and "Bye, Clew" ([`crate::ui::heard::named_only`]),
+/// not its label.
 #[test]
 fn every_button_a_click_presses_a_word_presses_too() {
     let mut unsaid = Vec::new();
+    let microphone = format!("{:?}", Message::Voice(crate::VoiceMsg::Toggle));
     for (name, app) in audited_states() {
         let (targets, marks) = crate::ui::heard::gather_all(&app);
         assert!(!marks.is_empty(), "{name}: nothing marked");
         let offered: std::collections::HashSet<String> =
             targets.iter().map(|t| format!("{:?}", t.message)).collect();
+        assert!(
+            !offered.contains(&microphone),
+            "{name}: the microphone's button offered to be said"
+        );
         for (mark, _) in marks {
-            if !offered.contains(&mark) {
+            if mark != microphone && !offered.contains(&mark) {
                 unsaid.push(format!("{name}: {mark}"));
             }
         }

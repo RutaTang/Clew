@@ -180,27 +180,26 @@ impl App {
     /// [`crate::app::model::Asking`]): the overlay on top, with no tour over
     /// it, in the window that has the focus.
     pub(crate) fn question_on_screen(&self) -> Option<crate::app::model::Question> {
-        use crate::app::model::Question;
-        use crate::ui::ActiveOverlay as O;
         // A widget's own overlay — a picker's menu, a tooltip — is drawn
         // over everything, modals and the tour included, and may hide any
         // question: none is within reach until it goes, and each waits anew.
         if self.tutorial.is_some() || !self.window_focused || self.overlay_open {
             return None;
         }
+        self.question_shown()
+    }
+
+    /// The question the window shows — within the user's reach or not
+    /// ([`App::question_on_screen`]): the overlay on top, or the approval
+    /// card in the Ask panel.
+    pub(crate) fn question_shown(&self) -> Option<crate::app::model::Question> {
+        use crate::app::model::Question;
+        use crate::ui::ActiveOverlay as O;
         match ui::active_overlay(self) {
             Some(O::Consent(root)) => Some(Question::Project(root.to_path_buf())),
             Some(O::LspCommand(_, number, _)) => Some(Question::LspCommand(number)),
             Some(O::LspConsent(_, number, _)) => Some(Question::LspConsent(number)),
-            Some(O::Connect) => match self.connect.as_ref().map(|c| &c.stage) {
-                Some(ConnectStage::TrustHost { key, .. }) => {
-                    Some(Question::TrustHost(key.fingerprint.clone()))
-                }
-                Some(ConnectStage::HostKeyChanged { forget_host, .. }) => {
-                    Some(Question::ForgetHostKey(forget_host.clone()))
-                }
-                _ => None,
-            },
+            Some(O::Connect) => self.connect_question(),
             // Nothing over the window: the approval card pinned in the Ask
             // panel, while the panel shows. A hover's peek counts as over
             // it — one opened over the panel hides it, and Esc took it away
@@ -217,6 +216,62 @@ impl App {
                     key: approval.key,
                 }),
             Some(_) => None,
+        }
+    }
+
+    /// The question waiting on the user's answer, shown or not — under
+    /// Settings or a menu, behind a tour, in an Ask panel put away: what a
+    /// "yes" said now may be meant for, and must never be sent on to Ask
+    /// as a question. The one shown ([`App::question_shown`]), else the
+    /// first of [`App::questions_waiting`].
+    pub(crate) fn question_pending(&self) -> Option<crate::app::model::Question> {
+        self.question_shown()
+            .or_else(|| self.questions_waiting().into_iter().next())
+    }
+
+    /// Every question waiting on the user's answer, shown or not, in the
+    /// order they are put: the project's sheet, a language server's command,
+    /// then its download or build, the connect sheet's, then the agent's
+    /// tool call — each queue's first, the one it asks now.
+    pub(crate) fn questions_waiting(&self) -> Vec<crate::app::model::Question> {
+        use crate::app::model::Question;
+        let mut waiting = Vec::new();
+        waiting.extend(self.pending_consent.clone().map(Question::Project));
+        waiting.extend(
+            self.proj
+                .pending_lsp_command
+                .asked()
+                .map(Question::LspCommand),
+        );
+        waiting.extend(
+            self.proj
+                .pending_lsp_consent
+                .asked()
+                .map(Question::LspConsent),
+        );
+        waiting.extend(self.connect_question());
+        waiting.extend(
+            self.first_approval()
+                .map(|(turn, approval)| Question::Approval {
+                    stream: turn.stream,
+                    key: approval.key,
+                }),
+        );
+        waiting
+    }
+
+    /// The question connecting asks, if it asks one: trust a new host, or
+    /// forget a changed host key.
+    pub(crate) fn connect_question(&self) -> Option<crate::app::model::Question> {
+        use crate::app::model::Question;
+        match self.connect.as_ref().map(|c| &c.stage) {
+            Some(ConnectStage::TrustHost { key, .. }) => {
+                Some(Question::TrustHost(key.fingerprint.clone()))
+            }
+            Some(ConnectStage::HostKeyChanged { forget_host, .. }) => {
+                Some(Question::ForgetHostKey(forget_host.clone()))
+            }
+            _ => None,
         }
     }
 

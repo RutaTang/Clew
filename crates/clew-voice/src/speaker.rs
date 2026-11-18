@@ -532,14 +532,25 @@ mod tests {
     }
 
     /// A real `clew-speak` and a real model, when the test is pointed at
-    /// them: what it says is as long as speech of it is.
+    /// them — Qwen3-TTS, or the voice `CLEW_SPEAK_VOICE` names: what it
+    /// says is as long as speech of it is. Not pointed at them, it says so
+    /// and passes.
     #[test]
     #[ignore = "needs CLEW_SPEAK and CLEW_SPEAK_MODEL"]
     fn a_real_speaker_speaks() {
-        let program = PathBuf::from(std::env::var("CLEW_SPEAK").unwrap());
-        let dir = PathBuf::from(std::env::var("CLEW_SPEAK_MODEL").unwrap());
+        let (Some(program), Some(dir)) = (
+            std::env::var_os("CLEW_SPEAK"),
+            std::env::var_os("CLEW_SPEAK_MODEL"),
+        ) else {
+            eprintln!("skipped: CLEW_SPEAK and CLEW_SPEAK_MODEL are not set");
+            return;
+        };
+        let (program, dir) = (PathBuf::from(program), PathBuf::from(dir));
         let speakers = Speakers::new(program);
-        let model = &crate::speech::VOICE_MODELS[0];
+        let model = std::env::var("CLEW_SPEAK_VOICE")
+            .map_or(&crate::speech::VOICE_MODELS[0], |id| {
+                crate::speech::find(&id).unwrap()
+            });
         let (samples, rate) = said(
             &speakers,
             model,
@@ -552,6 +563,9 @@ mod tests {
         .unwrap();
         let seconds = samples.len() as f32 / rate as f32;
         assert!((1.0..6.0).contains(&seconds), "{seconds}");
+        // Heard: speech, not silence as long as speech.
+        let loudness = crate::audio::rms(&samples);
+        assert!(loudness > 0.01, "{loudness}");
         // Again, with the model kept: and in Korean.
         let (samples, _) = said(&speakers, model, &dir, "안녕하세요.", "ko", 3, 1.0).unwrap();
         assert!(!samples.is_empty());
@@ -567,12 +581,18 @@ mod tests {
     /// A real `clew-speak` and a real model, removed while a sentence
     /// waited for it: that sentence is passed over, not taken for a voice
     /// that failed. The model is not touched: what is removed are links to
-    /// its files.
+    /// its files. Not pointed at them, it says so and passes.
     #[test]
     #[ignore = "needs CLEW_SPEAK and CLEW_SPEAK_MODEL"]
     fn a_real_model_removed_meanwhile_passes_the_sentence_over() {
-        let program = PathBuf::from(std::env::var("CLEW_SPEAK").unwrap());
-        let model_dir = PathBuf::from(std::env::var("CLEW_SPEAK_MODEL").unwrap());
+        let (Some(program), Some(model_dir)) = (
+            std::env::var_os("CLEW_SPEAK"),
+            std::env::var_os("CLEW_SPEAK_MODEL"),
+        ) else {
+            eprintln!("skipped: CLEW_SPEAK and CLEW_SPEAK_MODEL are not set");
+            return;
+        };
+        let (program, model_dir) = (PathBuf::from(program), PathBuf::from(model_dir));
         let model = &crate::speech::VOICE_MODELS[0];
         let dir = std::env::temp_dir().join(format!("clew-speaker-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

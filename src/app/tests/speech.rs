@@ -5,7 +5,7 @@
 //! settings and models.
 
 use super::*;
-use crate::app::speech::{Playing, Synthesizer};
+use crate::app::speech::{Blocked, Playing, Synthesizer};
 use crate::app::voice::{Claim, ClaimedFor, ReadAloud, VoicePhase, VoicePrefs};
 use clew_protocol::StreamOutcome;
 use clew_voice::speaker::SayError;
@@ -126,6 +126,8 @@ struct OutputScript {
     absent: bool,
     /// Held: the reader talks over Clew.
     paused: bool,
+    /// Seconds of speech it says it has yet to play: the test says.
+    queued: f32,
 }
 
 struct Output(Arc<Mutex<OutputScript>>);
@@ -148,7 +150,7 @@ impl Playing for Output {
         1000
     }
     fn queued_seconds(&self) -> f32 {
-        0.0
+        self.0.lock().unwrap().queued
     }
     fn idle(&self) -> bool {
         self.0.lock().unwrap().idle
@@ -219,18 +221,6 @@ fn asked(app: &mut App, stream: u64, spoken: bool) {
         streaming: true,
         ..Default::default()
     });
-}
-
-/// Feed `task`'s messages back, and theirs, until there are none.
-fn settle(app: &mut App, task: Task<Message>) {
-    let mut pending = run_task(task);
-    while !pending.is_empty() {
-        let mut next = Vec::new();
-        for message in pending {
-            next.extend(run_task(app.update(message)));
-        }
-        pending = next;
-    }
 }
 
 fn delta(app: &mut App, stream: u64, text: &str) {
@@ -729,7 +719,25 @@ fn what_cannot_be_said_says_why() {
         "{}",
         app.status
     );
-    // Without the voice downloaded: nothing said, and where to get it.
+    // The voice failing is said on the Ask card too, until what is said
+    // next is heard.
+    let (mut app, voice, _) = speech_app("speech-failed-said");
+    *voice.fail.lock().unwrap() = Some(SayError::Voice("the voice ended unexpectedly".into()));
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "This is. Second");
+    assert!(
+        matches!(
+            &app.voice.speech.blocked,
+            Some(Blocked::Failed { why, stream: 1 }) if why.contains("ended unexpectedly")
+        ),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "This is. Second");
+    assert_eq!(app.voice.speech.blocked, None, "heard again");
+    // Without the voice downloaded: nothing said, and where to get it — on
+    // the status line, and on the Ask card until it is put away.
     let (mut app, voice, _) = speech_app("speech-none");
     let store = app.voice.store.clone().unwrap();
     speech::remove(&store, speech::find("qwen3-tts").unwrap()).unwrap();
@@ -738,6 +746,686 @@ fn what_cannot_be_said_says_why() {
     assert!(voice.texts().is_empty());
     assert!(app.status.contains("Qwen3-TTS"), "{}", app.status);
     assert!(!app.voice.speech.is_speaking());
+    let missing = |stream| {
+        Some(Blocked::Missing {
+            model: "qwen3-tts",
+            lang: "en",
+            stream,
+        })
+    };
+    assert_eq!(app.voice.speech.blocked, missing(1));
+    // Reading aloud turned off: nothing is said to be missing.
+    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Never)));
+    assert_eq!(app.voice.speech.blocked, None);
+    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Spoken)));
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "This is. Second");
+    assert_eq!(
+        app.voice.speech.blocked,
+        missing(2),
+        "said again of this one"
+    );
+    // Put away, it is not said again in this window: a reader who does not
+    // want the voice is not asked at every answer.
+    // The ✕ of a notice said over since puts nothing away unseen.
+    let _ = app.update(Message::Voice(VoiceMsg::DismissBlocked(
+        missing(1).unwrap(),
+    )));
+    assert_eq!(app.voice.speech.blocked, missing(2));
+    let _ = app.update(Message::Voice(VoiceMsg::DismissBlocked(
+        missing(2).unwrap(),
+    )));
+    assert_eq!(app.voice.speech.blocked, None);
+    asked(&mut app, 3, true);
+    delta(&mut app, 3, "This is. Second");
+    assert_eq!(app.voice.speech.blocked, None, "put away for the window");
+    // Downloaded — and since let go of — it may be said of again.
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+    let _ = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+        id: "qwen3-tts",
+        result: Ok(()),
+    }));
+    asked(&mut app, 4, true);
+    delta(&mut app, 4, "This is. Second");
+    assert_eq!(app.voice.speech.blocked, missing(4));
+    // Another voice that reads English downloaded instead — the smaller
+    // one: nothing keeps English answers from being heard.
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("supertonic-3")));
+    install(&app, speech::find("supertonic-3").unwrap());
+    let _ = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+        id: "supertonic-3",
+        result: Ok(()),
+    }));
+    assert_eq!(app.voice.speech.blocked, None);
+}
+
+/// A voice missing is said of the answer it kept from being heard, while
+/// that answer is the last and one read aloud: not of the next until it
+/// too is not heard — it may be — nor over a typed one Clew does not read,
+/// nor once typed ones are no longer read, nor in a new session, nor on the
+/// status line as though no answer were heard. Stopped, that answer was
+/// still not heard: it is still said.
+#[test]
+fn a_voice_missing_is_said_of_its_answer() {
+    let (mut app, _voice, _) = speech_app("speech-missing-of-answer");
+    let store = app.voice.store.clone().unwrap();
+    speech::remove(&store, speech::find("qwen3-tts").unwrap()).unwrap();
+    install(&app, speech::find("supertonic-3").unwrap());
+    let shown = |app: &App| match app.blocked_now() {
+        Some((Blocked::Missing { stream, .. }, true)) => Some(*stream),
+        _ => None,
+    };
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "总数是所有价格的和。然后");
+    assert_eq!(shown(&app), Some(1));
+    assert_eq!(
+        app.status, "Qwen3-TTS is needed to read this answer aloud",
+        "not that no answer is heard: English ones are"
+    );
+    // Asked again by voice: not said of the new answer, which may be heard …
+    ended(&mut app, 1, StreamOutcome::Done);
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "总数");
+    assert_eq!(shown(&app), None, "not said of an answer not yet heard");
+    // … and said of it once its first sentence is not.
+    delta(&mut app, 2, "是所有价格的和。然后");
+    assert_eq!(shown(&app), Some(2));
+    // A typed question's answer, not read aloud: nothing said over it.
+    ended(&mut app, 2, StreamOutcome::Done);
+    asked(&mut app, 3, false);
+    delta(&mut app, 3, "The total adds every price. Then");
+    assert_eq!(shown(&app), None);
+    // Stopped, the answer it is said of was still not heard.
+    asked(&mut app, 4, true);
+    delta(&mut app, 4, "总数是所有价格的和。然后");
+    assert_eq!(shown(&app), Some(4));
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    assert_eq!(shown(&app), Some(4), "still so, stopped");
+    // The next stopped before its first word: nothing of it read, and what
+    // is said of the last is not said of it.
+    asked(&mut app, 5, true);
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    delta(&mut app, 5, "The total adds every price. Then");
+    assert!(
+        matches!(
+            app.voice.speech.blocked,
+            Some(Blocked::Missing { stream: 4, .. })
+        ),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    assert_eq!(shown(&app), None, "not of this answer");
+    // Not in a new session.
+    asked(&mut app, 6, true);
+    delta(&mut app, 6, "总数是所有价格的和。然后");
+    assert_eq!(shown(&app), Some(6));
+    // Got in another window: there is no Download to offer.
+    let qwen = speech::find("qwen3-tts").unwrap();
+    let Ok(claim) = Claim::take(speech::dir(&store, qwen), ClaimedFor::Download) else {
+        panic!("the voice's folder claimed");
+    };
+    assert_eq!(shown(&app), None, "got in another window");
+    drop(claim);
+    assert_eq!(shown(&app), Some(6));
+    let _ = app.update(Message::Ask(AskMsg::NewSession));
+    assert_eq!(shown(&app), None, "a new session");
+    // Every answer read: a typed one's said of; no longer, and it is not.
+    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Always)));
+    asked(&mut app, 7, false);
+    delta(&mut app, 7, "总数是所有价格的和。然后");
+    assert_eq!(shown(&app), Some(7));
+    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Spoken)));
+    assert_eq!(shown(&app), None, "typed answers no longer read");
+}
+
+/// The voice failing partway through an answer is said of that answer —
+/// shown, as the rest of it will not be heard: a question said is answered
+/// without the card — while it is the last and one read aloud: not over a
+/// typed one Clew does not read, nor in a new session.
+#[test]
+fn a_voice_failing_is_said_of_its_answer() {
+    let (mut app, voice, _) = speech_app("speech-failed-of-answer");
+    let shown = |app: &App| match app.blocked_now() {
+        Some((Blocked::Failed { stream, .. }, _)) => Some(*stream),
+        _ => None,
+    };
+    assert!(!app.ask_view.is_open());
+    *voice.fail.lock().unwrap() = Some(SayError::Voice("the voice ended unexpectedly".into()));
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "This is. Second");
+    assert_eq!(shown(&app), Some(1));
+    assert!(app.ask_view.is_open(), "the answer shown, not heard");
+    // A typed question's answer, not read aloud: nothing said over it.
+    ended(&mut app, 1, StreamOutcome::Done);
+    asked(&mut app, 2, false);
+    delta(&mut app, 2, "This is. Second");
+    assert_eq!(shown(&app), None);
+    // Not in a new session.
+    *voice.fail.lock().unwrap() = Some(SayError::Voice("the voice ended unexpectedly".into()));
+    asked(&mut app, 3, true);
+    delta(&mut app, 3, "This is. Second");
+    assert_eq!(shown(&app), Some(3));
+    let _ = app.update(Message::Ask(AskMsg::NewSession));
+    assert_eq!(shown(&app), None, "a new session");
+}
+
+/// An answer the Ask card said needs a voice is read once that voice is
+/// downloaded — what its Download was pressed for — while it is still the
+/// answer on the card; not once another has been asked, nor with the card
+/// closed, nor over what Clew is saying, nor once the reader stopped it.
+#[test]
+fn an_answer_is_read_once_its_voice_comes() {
+    let (mut app, voice, output) = speech_app("speech-read-once-here");
+    let store = app.voice.store.clone().unwrap();
+    let qwen = speech::find("qwen3-tts").unwrap();
+    let unheard = |app: &mut App, stream| {
+        speech::remove(&store, qwen).unwrap();
+        asked(app, stream, true);
+        delta(app, stream, "This is. Second");
+        ended(app, stream, StreamOutcome::Done);
+        assert!(
+            matches!(app.voice.speech.blocked, Some(Blocked::Missing { stream: s, .. }) if s == stream),
+            "{:?}",
+            app.voice.speech.blocked
+        );
+    };
+    let downloaded = |app: &mut App| {
+        let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+        install(app, qwen);
+        let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+            id: "qwen3-tts",
+            result: Ok(()),
+        }));
+        settle(app, task);
+    };
+    unheard(&mut app, 1);
+    assert!(app.ask_view.is_open(), "shown, not heard");
+    assert!(voice.texts().is_empty());
+    downloaded(&mut app);
+    assert_eq!(app.voice.speech.blocked, None);
+    assert_eq!(voice.texts(), ["This is.", "Second"], "read now");
+    // Another asked since: that one is not read over it.
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    let said = voice.texts().len();
+    unheard(&mut app, 2);
+    asked(&mut app, 3, false);
+    downloaded(&mut app);
+    assert_eq!(voice.texts().len(), said, "not the last answer");
+    // The card closed: nothing read out of nowhere.
+    unheard(&mut app, 4);
+    app.hide_ask();
+    downloaded(&mut app);
+    assert_eq!(voice.texts().len(), said, "the card closed");
+    // Clew saying something else: not said over it.
+    unheard(&mut app, 5);
+    assert!(app.ask_view.is_open());
+    app.voice
+        .speech
+        .speak_for_test(Box::new(Output(output.clone())), 0.3);
+    downloaded(&mut app);
+    assert_eq!(voice.texts().len(), said, "said over Clew");
+    app.stop_speaking();
+    // Stopped by the reader as it came: not read after all.
+    speech::remove(&store, qwen).unwrap();
+    asked(&mut app, 6, true);
+    delta(&mut app, 6, "This is. Second");
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    ended(&mut app, 6, StreamOutcome::Done);
+    assert!(
+        matches!(
+            app.voice.speech.blocked,
+            Some(Blocked::Missing { stream: 6, .. })
+        ),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    downloaded(&mut app);
+    assert_eq!(voice.texts().len(), said, "stopped");
+}
+
+/// An answer read in part — its English by Supertonic, its Chinese, which
+/// only Qwen3-TTS speaks, not — is read on from what went unsaid once
+/// Qwen3-TTS is downloaded: not again from its start.
+#[test]
+fn only_what_went_unsaid_is_read_once_its_voice_comes() {
+    let (mut app, voice, output) = speech_app("speech-read-unsaid");
+    let store = app.voice.store.clone().unwrap();
+    let qwen = speech::find("qwen3-tts").unwrap();
+    speech::remove(&store, qwen).unwrap();
+    install(&app, speech::find("supertonic-3").unwrap());
+    asked(&mut app, 1, true);
+    delta(
+        &mut app,
+        1,
+        "The total adds every price. 总数是所有价格的和。",
+    );
+    ended(&mut app, 1, StreamOutcome::Done);
+    all_played(&mut app, &output);
+    assert_eq!(voice.texts(), ["The total adds every price."]);
+    assert!(
+        matches!(
+            app.voice.speech.blocked,
+            Some(Blocked::Missing { stream: 1, .. })
+        ),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+    install(&app, qwen);
+    let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+        id: "qwen3-tts",
+        result: Ok(()),
+    }));
+    settle(&mut app, task);
+    assert_eq!(
+        voice.texts(),
+        ["The total adds every price.", "总数是所有价格的和。"],
+        "the Chinese alone, read now"
+    );
+}
+
+/// Its voice downloaded while Clew still says what it could of the
+/// answer, what went unsaid is said after that — not lost; and of an
+/// answer the reader stopped, nothing is said once its voice comes.
+#[test]
+fn what_went_unsaid_waits_for_what_is_being_said() {
+    let (mut app, voice, output) = speech_app("speech-unsaid-speaking");
+    let store = app.voice.store.clone().unwrap();
+    let qwen = speech::find("qwen3-tts").unwrap();
+    let unsaid = |app: &mut App, stream| {
+        speech::remove(&store, qwen).unwrap();
+        asked(app, stream, true);
+        delta(
+            app,
+            stream,
+            "总数是所有价格的和。The total adds every price. Then it rounds.",
+        );
+        ended(app, stream, StreamOutcome::Done);
+        assert!(app.voice.speech.is_speaking());
+    };
+    let downloaded = |app: &mut App| {
+        let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+        install(app, qwen);
+        let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+            id: "qwen3-tts",
+            result: Ok(()),
+        }));
+        settle(app, task);
+    };
+    install(&app, speech::find("supertonic-3").unwrap());
+    unsaid(&mut app, 1);
+    downloaded(&mut app);
+    all_played(&mut app, &output);
+    all_played(&mut app, &output);
+    assert_eq!(
+        voice.texts(),
+        [
+            "The total adds every price.",
+            "Then it rounds.",
+            "总数是所有价格的和。"
+        ]
+    );
+    // Settings' Try, nothing being said: what went unsaid stays, and is
+    // read once its voice comes.
+    let said = voice.texts().len();
+    unsaid(&mut app, 3);
+    for _ in 0..5 {
+        if app.voice.speech.is_speaking() {
+            all_played(&mut app, &output);
+        }
+    }
+    assert!(!app.voice.speech.is_speaking(), "all said that could be");
+    let task = app.update(Message::Voice(VoiceMsg::TrySpeech("supertonic-3")));
+    settle(&mut app, task);
+    for _ in 0..5 {
+        if app.voice.speech.is_speaking() {
+            all_played(&mut app, &output);
+        }
+    }
+    downloaded(&mut app);
+    all_played(&mut app, &output);
+    assert_eq!(
+        voice.texts()[said..].last().map(String::as_str),
+        Some("总数是所有价格的和。"),
+        "{:?}",
+        voice.texts()
+    );
+    // Stopped by the reader as its last sentences were said: what went
+    // unsaid of it is not said either.
+    let before = voice.texts().len();
+    unsaid(&mut app, 2);
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    downloaded(&mut app);
+    all_played(&mut app, &output);
+    assert!(
+        !voice.texts()[before..].contains(&"总数是所有价格的和。".to_string()),
+        "{:?}",
+        voice.texts()
+    );
+}
+
+/// What went unsaid of an answer, its voice come while Clew is still
+/// reading it, is said next — in its place, before what of the answer
+/// waits to be said.
+#[test]
+fn what_went_unsaid_is_said_in_its_place() {
+    let (mut app, voice, output) = speech_app("speech-unsaid-place");
+    let store = app.voice.store.clone().unwrap();
+    let qwen = speech::find("qwen3-tts").unwrap();
+    speech::remove(&store, qwen).unwrap();
+    install(&app, speech::find("supertonic-3").unwrap());
+    // Plenty yet to play: the next sentence waits to be made.
+    output.lock().unwrap().queued = 60.0;
+    asked(&mut app, 1, true);
+    delta(
+        &mut app,
+        1,
+        "总数是所有价格的和。The total adds every price. Then it rounds.",
+    );
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert_eq!(voice.texts(), ["The total adds every price."]);
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+    install(&app, qwen);
+    let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+        id: "qwen3-tts",
+        result: Ok(()),
+    }));
+    settle(&mut app, task);
+    output.lock().unwrap().queued = 0.0;
+    for _ in 0..4 {
+        all_played(&mut app, &output);
+    }
+    assert_eq!(
+        voice.texts(),
+        [
+            "The total adds every price.",
+            "总数是所有价格的和。",
+            "Then it rounds."
+        ]
+    );
+}
+
+/// Its voice come while Settings' Try speaks, or while someone is heard
+/// saying something with Clew silent, what went unsaid waits — and is
+/// said once Try is over, or they are heard out.
+#[test]
+fn what_went_unsaid_waits_for_clew_to_be_free_to_say_it() {
+    // Try speaking; Try stopped by the reader; someone heard; the voice
+    // key pressed over Try, or words to Clew said over it — the reader
+    // taking the floor, which lets go of it.
+    for case in ["tried", "stopped", "heard", "keyed", "talked"] {
+        let (mut app, voice, output) = speech_app("speech-unsaid-put-off");
+        let model = app.voice.prefs.model();
+        let store = app.voice.store.clone().unwrap();
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.path(model), b"a model").unwrap();
+        let qwen = speech::find("qwen3-tts").unwrap();
+        speech::remove(&store, qwen).unwrap();
+        install(&app, speech::find("supertonic-3").unwrap());
+        app.voice.open_mic = talking_mic;
+        app.voice.transcriber = Arc::new(Hears("wait".into()));
+        TALK.with(|t| t.set(None));
+        OVER.with(|o| o.set(None));
+        GONE.with(|g| g.set(false));
+        let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+        asked(&mut app, 1, true);
+        delta(&mut app, 1, "总数是所有价格的和。");
+        ended(&mut app, 1, StreamOutcome::Done);
+        assert!(voice.texts().is_empty());
+        if case == "heard" {
+            TALK.with(|t| t.set(Some(0.1)));
+        } else {
+            let task = app.update(Message::Voice(VoiceMsg::TrySpeech("supertonic-3")));
+            settle(&mut app, task);
+        }
+        let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+        install(&app, qwen);
+        let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+            id: "qwen3-tts",
+            result: Ok(()),
+        }));
+        settle(&mut app, task);
+        let chinese = |voice: &Voice| voice.texts().contains(&"总数是所有价格的和。".to_string());
+        assert!(
+            !chinese(&voice),
+            "{case}: not over Try, nor over the reader"
+        );
+        assert!(app.voice.speech.has_put_off(), "{case}: put off");
+        match case {
+            "tried" => {
+                for _ in 0..4 {
+                    if app.voice.speech.is_speaking() {
+                        all_played(&mut app, &output);
+                    }
+                }
+            }
+            "stopped" => {
+                // Stopping Try stops nothing of the answer.
+                let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+                let task = app.update(Message::Voice(VoiceMsg::Tick));
+                settle(&mut app, task);
+            }
+            "keyed" => {
+                app.voice.forget_last_press();
+                let task = app.update(Message::Voice(VoiceMsg::Toggle));
+                settle(&mut app, task);
+                let task = app.update(Message::Voice(VoiceMsg::Tick));
+                settle(&mut app, task);
+                assert!(!chinese(&voice), "the reader has the floor");
+                assert!(!app.voice.speech.has_put_off());
+                assert!(app.voice.mic_on);
+                continue;
+            }
+            "talked" => {
+                talk(Some(0.1));
+                voice_tick(&mut app);
+                assert!(app.voice.speech.held(), "Try held for the words");
+                TALK.with(|t| t.set(Some(crate::app::voice::END_SILENCE + 0.1)));
+                let task = app.update(Message::Voice(VoiceMsg::Tick));
+                TALK.with(|t| t.set(None));
+                settle(&mut app, task);
+                let task = app.update(Message::Voice(VoiceMsg::Tick));
+                settle(&mut app, task);
+                assert!(!app.voice.speech.trying(), "Try stopped");
+                assert!(!chinese(&voice), "the reader has the floor");
+                assert!(!app.voice.speech.has_put_off());
+                assert!(app.voice.mic_on);
+                continue;
+            }
+            _ => {
+                TALK.with(|t| t.set(None));
+                let task = app.update(Message::Voice(VoiceMsg::Tick));
+                settle(&mut app, task);
+            }
+        }
+        assert!(
+            chinese(&voice),
+            "{case}: said once Clew may {:?}",
+            voice.texts()
+        );
+        assert!(!app.voice.speech.has_put_off());
+        let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    }
+}
+
+/// A voice downloaded says which answers it reads — none of those in the
+/// language spoken, when it does not speak it: Supertonic 3, to a reader
+/// who speaks Chinese, is only ready.
+#[test]
+fn a_voice_downloaded_says_what_it_reads() {
+    let (mut app, _voice, _) = speech_app("speech-ready-says");
+    let supertonic = speech::find("supertonic-3").unwrap();
+    let store = app.voice.store.clone().unwrap();
+    let downloaded = |app: &mut App, language: &str| {
+        app.voice.prefs.language = Some(language.into());
+        let _ = speech::remove(&store, supertonic);
+        let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("supertonic-3")));
+        install(app, supertonic);
+        let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+            id: "supertonic-3",
+            result: Ok(()),
+        }));
+        settle(app, task);
+        app.status.clone()
+    };
+    assert_eq!(
+        downloaded(&mut app, "en"),
+        "Supertonic 3 is ready — answers to what you ask by voice are read aloud"
+    );
+    assert_eq!(downloaded(&mut app, "zh"), "Supertonic 3 is ready");
+}
+
+/// Held before anything plays — called as an answer is on its way: what
+/// comes opens held, and plays once Clew goes on.
+#[test]
+fn what_comes_while_clew_is_held_waits() {
+    let (mut app, _, output) = speech_app("speech-held-first");
+    asked(&mut app, 1, true);
+    app.voice.speech.hold();
+    assert!(app.voice.speech.held() && !app.voice.speech.is_speaking());
+    delta(&mut app, 1, "The total adds every price. Then");
+    assert_eq!(output.lock().unwrap().opened, 1);
+    assert!(output.lock().unwrap().paused, "opened held");
+    app.voice.speech.go_on();
+    assert!(!output.lock().unwrap().paused);
+}
+
+/// The Ask card speaks of answers only: Settings' Try failing is said on
+/// the status line, where Try was pressed, not on the card; and reading
+/// aloud turned off in another window puts the card's notice away in this
+/// one too.
+#[test]
+fn the_ask_card_speaks_only_of_answers() {
+    let (mut app, voice, _) = speech_app("speech-try-fails");
+    let ended = || SayError::Voice("the voice ended unexpectedly".into());
+    *voice.fail.lock().unwrap() = Some(ended());
+    let task = app.update(Message::Voice(VoiceMsg::TrySpeech("qwen3-tts")));
+    settle(&mut app, task);
+    assert!(app.status.contains("ended unexpectedly"), "{}", app.status);
+    assert_eq!(app.voice.speech.blocked, None);
+    *voice.fail.lock().unwrap() = Some(ended());
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "This is. Second");
+    assert!(
+        matches!(app.voice.speech.blocked, Some(Blocked::Failed { .. })),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    // Try heard — perhaps another voice — does not say the answer's works.
+    let task = app.update(Message::Voice(VoiceMsg::TrySpeech("qwen3-tts")));
+    settle(&mut app, task);
+    assert!(
+        matches!(app.voice.speech.blocked, Some(Blocked::Failed { .. })),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    // An answer asked while Try is heard stops it, and is an answer: its
+    // voice failing is said on the card.
+    assert!(app.voice.speech.is_speaking(), "Try still heard");
+    *voice.fail.lock().unwrap() = Some(ended());
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "This is. Second");
+    assert!(
+        matches!(
+            app.voice.speech.blocked,
+            Some(Blocked::Failed { stream: 2, .. })
+        ),
+        "{:?}",
+        app.voice.speech.blocked
+    );
+    let mut prefs = app.voice.prefs.clone();
+    prefs.read_aloud = ReadAloud::Never;
+    app.adopt_voice_prefs(prefs);
+    assert_eq!(app.voice.speech.blocked, None);
+}
+
+/// Asked by voice while the voice that would read the answer downloads in
+/// this window, the Ask card says so, with how far it has come — not
+/// nothing; and the download finished, the notice goes.
+#[test]
+fn an_answer_heard_while_its_voice_downloads_says_so() {
+    let (mut app, voice, _) = speech_app("speech-while-downloading");
+    let store = app.voice.store.clone().unwrap();
+    speech::remove(&store, speech::find("qwen3-tts").unwrap()).unwrap();
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("qwen3-tts")));
+    assert!(app.voice.speech.downloads.contains_key("qwen3-tts"));
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "This is. Second");
+    assert!(voice.texts().is_empty());
+    assert_eq!(
+        app.voice.speech.blocked,
+        Some(Blocked::Missing {
+            model: "qwen3-tts",
+            lang: "en",
+            stream: 1,
+        })
+    );
+    assert!(
+        app.blocked_now().is_some(),
+        "said, with how far it has come"
+    );
+    install(&app, speech::find("qwen3-tts").unwrap());
+    let task = app.update(Message::Voice(VoiceMsg::SpeechDownloaded {
+        id: "qwen3-tts",
+        result: Ok(()),
+    }));
+    settle(&mut app, task);
+    assert_eq!(app.voice.speech.blocked, None);
+    // What went unsaid of it is read now, the rest still coming.
+    assert_eq!(voice.texts(), ["This is."]);
+}
+
+/// A reader with Supertonic alone — the voice that read their answers in
+/// English before Qwen3-TTS came — hears them still: each sentence is read
+/// by the best voice here that speaks its language. Chinese, which only
+/// Qwen3-TTS speaks, is not heard, and Qwen3-TTS is what is said to get;
+/// once it is here, it reads all it speaks.
+#[test]
+fn the_best_voice_here_reads_each_sentence() {
+    let (mut app, voice, _) = speech_app("speech-best-here");
+    let store = app.voice.store.clone().unwrap();
+    speech::remove(&store, speech::find("qwen3-tts").unwrap()).unwrap();
+    install(&app, speech::find("supertonic-3").unwrap());
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "The total adds every price. Then");
+    let said = voice.said.lock().unwrap().clone();
+    assert_eq!(
+        said.iter()
+            .map(|s| (s.model, s.lang.as_str()))
+            .collect::<Vec<_>>(),
+        [("supertonic-3", "en")]
+    );
+    assert_eq!(app.voice.speech.blocked, None);
+    ended(&mut app, 1, StreamOutcome::Done);
+    let said = voice.said.lock().unwrap().len();
+    // Chinese: no voice here speaks it.
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "总数是所有价格的和。然后");
+    assert_eq!(voice.said.lock().unwrap().len(), said, "nothing more said");
+    assert_eq!(
+        app.voice.speech.blocked,
+        Some(Blocked::Missing {
+            model: "qwen3-tts",
+            lang: "zh",
+            stream: 2,
+        })
+    );
+    // An answer in English after it is heard, and what kept the Chinese one
+    // from being heard is not said of it.
+    ended(&mut app, 2, StreamOutcome::Done);
+    asked(&mut app, 3, true);
+    delta(&mut app, 3, "The total adds every price. Then");
+    let said = voice.said.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((said.model, said.lang.as_str()), ("supertonic-3", "en"));
+    assert_eq!(app.voice.speech.blocked, None);
+    // Qwen3-TTS here: it reads English as well as Chinese.
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    install(&app, speech::find("qwen3-tts").unwrap());
+    asked(&mut app, 4, true);
+    delta(&mut app, 4, "The total adds every price. Then");
+    let said = voice.said.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((said.model, said.lang.as_str()), ("qwen3-tts", "en"));
 }
 
 /// Try says a sentence in the interface's language with the model asked
@@ -745,12 +1433,16 @@ fn what_cannot_be_said_says_why() {
 #[test]
 fn try_says_a_sample_in_the_readers_language() {
     use crate::i18n::{Lang, with_lang};
-    let (mut app, voice, _) = speech_app("speech-try");
+    let (mut app, voice, output) = speech_app("speech-try");
     let task = app.update(Message::Voice(VoiceMsg::TrySpeech("qwen3-tts")));
     settle(&mut app, task);
     let said = voice.said.lock().unwrap().last().cloned().unwrap();
     assert_eq!(said.lang, "en");
     assert!(said.text.contains("Clew"), "{}", said.text);
+    // Tried, until all is said.
+    assert!(app.voice.speech.trying());
+    all_played(&mut app, &output);
+    assert!(!app.voice.speech.trying());
     with_lang(Lang::Fr, || {
         let task = app.update(Message::Voice(VoiceMsg::PickSpeechVoice {
             model: "qwen3-tts",
@@ -764,8 +1456,8 @@ fn try_says_a_sample_in_the_readers_language() {
         said.text,
         "This is how Clew sounds when it reads an answer aloud."
     );
-    // In Chinese, Qwen3-TTS says it in Chinese; Supertonic, which speaks
-    // none of the interface's languages, in one it does.
+    // In Chinese, Qwen3-TTS says it in Chinese; Supertonic, which does not
+    // speak Chinese, in English.
     install(&app, speech::find("supertonic-3").unwrap());
     with_lang(Lang::Zh, || {
         let task = app.update(Message::Voice(VoiceMsg::TrySpeech("qwen3-tts")));
@@ -775,7 +1467,14 @@ fn try_says_a_sample_in_the_readers_language() {
         let task = app.update(Message::Voice(VoiceMsg::TrySpeech("supertonic-3")));
         settle(&mut app, task);
         let said = voice.said.lock().unwrap().last().cloned().unwrap();
-        assert_eq!((said.model, said.lang.as_str()), ("supertonic-3", "nl"));
+        assert_eq!((said.model, said.lang.as_str()), ("supertonic-3", "en"));
+    });
+    // In Korean, Supertonic says it in Korean.
+    with_lang(Lang::Ko, || {
+        let task = app.update(Message::Voice(VoiceMsg::TrySpeech("supertonic-3")));
+        settle(&mut app, task);
+        let said = voice.said.lock().unwrap().last().cloned().unwrap();
+        assert_eq!((said.model, said.lang.as_str()), ("supertonic-3", "ko"));
     });
     // A voice the model does not have is not taken.
     let before = app.voice.prefs.voices.clone();
@@ -1399,6 +2098,7 @@ fn nothing_is_said_with_a_model_being_removed() {
     delta(&mut app, 1, "This is. That is. Third");
     assert!(voice.texts().is_empty());
     assert!(!app.status.contains("download"), "{}", app.status);
+    assert_eq!(app.voice.speech.blocked, None, "no Download for it either");
     drop(claim);
     // Removing a model being downloaded is refused, saying so.
     let claim = Claim::take(speech::dir(&store, model), ClaimedFor::Download).unwrap();
@@ -1577,6 +2277,15 @@ impl crate::app::voice::Transcriber for Hears {
 /// Clew reading an answer aloud with the microphone on, to be talked over;
 /// what the reader is heard to say is `heard`.
 fn talked_over(tag: &str, heard: &str) -> (App, Arc<Mutex<OutputScript>>) {
+    let (mut app, output) = reading_with_mic(tag, heard);
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert!(app.voice.speech.is_speaking());
+    (app, output)
+}
+
+/// An answer read aloud, still coming, the microphone listening through
+/// it — the reader may talk over Clew — and hearing `heard`.
+fn reading_with_mic(tag: &str, heard: &str) -> (App, Arc<Mutex<OutputScript>>) {
     let (mut app, _voice, output) = speech_app(tag);
     let model = app.voice.prefs.model();
     let store = app.voice.store.clone().unwrap();
@@ -1606,8 +2315,6 @@ fn talked_over(tag: &str, heard: &str) -> (App, Arc<Mutex<OutputScript>>) {
         "listening while Clew speaks: {:?}",
         app.voice.phase
     );
-    ended(&mut app, 1, StreamOutcome::Done);
-    assert!(app.voice.speech.is_speaking());
     (app, output)
 }
 
@@ -1661,6 +2368,102 @@ fn talking_over_clew_holds_it_then_stops_it() {
     assert!(!app.voice.speech.held());
 }
 
+/// "Bye, Clew" said over Clew is said to it, but ends listening, not what
+/// Clew says: held for it, Clew goes on, and the microphone is off.
+#[test]
+fn bye_clew_said_over_clew_lets_it_go_on() {
+    let (mut app, output) = talked_over("speech-talk-bye", "Bye, Clew.");
+    talk(Some(0.1));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.held());
+    talk(Some(crate::app::voice::END_SILENCE + 0.1));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.is_speaking(), "it goes on");
+    assert!(!app.voice.speech.held());
+    assert!(!output.lock().unwrap().paused, "faded back in");
+    assert!(!app.voice.mic_on, "{}", app.status);
+    assert_eq!(app.proj.ask_turns.len(), 1, "nothing asked");
+}
+
+/// "Stop listening" said over Clew only says what does stop listening: Clew
+/// goes on, and the microphone listens on.
+#[test]
+fn the_microphones_label_said_over_clew_lets_it_go_on() {
+    let (mut app, _output) = talked_over("speech-talk-label", "Stop listening.");
+    talk(Some(0.1));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.held());
+    talk(Some(crate::app::voice::END_SILENCE + 0.1));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.is_speaking(), "it goes on");
+    assert!(app.voice.mic_on);
+    assert_eq!(app.status, "Say “Bye, Clew” to stop listening");
+}
+
+/// A new answer read aloud while the last is still being said: what is
+/// left of the last is not said — what waits to be said is only ever of
+/// the newest.
+#[test]
+fn a_new_answer_takes_over_what_was_left_to_say() {
+    let (mut app, voice, output) = speech_app("speech-newest");
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "One. Two. Three. Four. Five. Six.");
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert!(app.voice.speech.is_speaking());
+    let opened = output.lock().unwrap().opened;
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "Other.");
+    ended(&mut app, 2, StreamOutcome::Done);
+    assert!(
+        output.lock().unwrap().opened > opened,
+        "what was left of the last stopped, the new one heard afresh"
+    );
+    assert_eq!(
+        voice.texts().last().map(String::as_str),
+        Some("Other."),
+        "{:?}",
+        voice.texts()
+    );
+}
+
+/// "Bye, Clew" said with Clew quiet, worked out only once Clew has begun
+/// reading and been talked over: what was said over it, dropped with the
+/// goodbye, holds it no more — it goes on.
+#[test]
+fn bye_clew_lets_go_of_what_it_drops_holding_clew() {
+    let (mut app, _voice, _output) = speech_app("speech-bye-drops-hold");
+    let model = app.voice.prefs.model();
+    let store = app.voice.store.clone().unwrap();
+    std::fs::create_dir_all(store.dir()).unwrap();
+    std::fs::write(store.path(model), b"a model").unwrap();
+    app.voice.open_mic = talking_mic;
+    app.voice.transcriber = Arc::new(Hears("Bye, Clew.".into()));
+    app.ask_view = AskView::Compact;
+    TALK.with(|t| t.set(None));
+    OVER.with(|o| o.set(None));
+    GONE.with(|g| g.set(false));
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    // "Bye, Clew", said with Clew quiet: worked out meanwhile.
+    TALK.with(|t| t.set(Some(crate::app::voice::END_SILENCE + 0.1)));
+    let bye = app.update(Message::Voice(VoiceMsg::Tick));
+    TALK.with(|t| t.set(None));
+    // An answer is read, and talked over: held for what is said over it,
+    // which ends, and waits to be worked out.
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "The total adds every price. Then it rounds.");
+    assert!(app.voice.speech.is_speaking());
+    talk(Some(0.1));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.held(), "held for what is said over it");
+    TALK.with(|t| t.set(Some(crate::app::voice::END_SILENCE + 0.1)));
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    // The goodbye worked out: what was said after it is let go of.
+    settle(&mut app, bye);
+    assert!(!app.voice.mic_on, "{}", app.status);
+    assert!(!app.voice.speech.held(), "not held for what was let go of");
+    assert!(app.voice.speech.is_speaking());
+}
+
 /// What is left of Clew's own voice once its echo is taken out — bursts
 /// the looser test takes for speech, but no unbroken run — neither holds
 /// Clew nor ends anything, however long it lasts: nothing is worked out of
@@ -1700,6 +2503,151 @@ fn what_was_said_over_clew_is_worked_out_from_where_it_began() {
     let given = given("wait for me").expect("worked out");
     assert!((given - 1.75).abs() < 0.05, "{given} s");
     assert!(!app.voice.speech.is_speaking(), "the reader's: Clew stops");
+}
+
+/// Words said as Clew waits, silent, for more of an answer — all of it so
+/// far said, the rest still coming — are said over Clew as the window shows
+/// it speaking: "close" stops it, and nothing more. But no voice of Clew's
+/// is in them: words that repeat Clew's are the reader's, not its echo;
+/// and nothing heard in them — a cough — lets Clew go on. Said just as
+/// Clew fell quiet, its voice may still be in them: words that repeat its
+/// own are its echo, and Clew goes on.
+#[test]
+fn words_said_as_clew_waits_for_more_hold_none_of_its_voice() {
+    let quiet = std::time::Duration::from_secs(2);
+    let just = std::time::Duration::from_millis(100);
+    for (tag, said, ago) in [
+        ("speech-talk-quiet", "Close.", quiet),
+        (
+            "speech-talk-quiet-echo",
+            "The total adds every price.",
+            quiet,
+        ),
+        ("speech-talk-quiet-cough", "", quiet),
+        (
+            "speech-talk-just-quiet",
+            "The total adds every price.",
+            just,
+        ),
+    ] {
+        let (mut app, output) = reading_with_mic(tag, said);
+        output.lock().unwrap().idle = true;
+        app.voice.speech.last_heard_for_test(ago);
+        assert!(app.voice.speech.is_speaking(), "{tag}: waiting for more");
+        assert_eq!(
+            app.voice.speech.heard_within(std::time::Duration::ZERO),
+            ago == just,
+            "{tag}"
+        );
+        app.proj.find.open = true;
+        talk(Some(0.1));
+        voice_tick(&mut app);
+        assert!(app.voice.speech.held(), "{tag}: held while it is said");
+        talk(Some(crate::app::voice::END_SILENCE + 0.1));
+        voice_tick(&mut app);
+        assert!(app.proj.find.open, "{tag}: {}", app.status);
+        match (said, ago == just) {
+            ("Close.", _) => {
+                assert!(!app.voice.speech.is_speaking(), "{tag}: not stopped");
+                assert_eq!(app.status, "Stopped speaking", "{tag}");
+            }
+            ("", _) | (_, true) => {
+                assert!(app.voice.speech.is_speaking(), "{tag}: stopped");
+                assert!(!app.voice.speech.held(), "{tag}: still held");
+                assert_ne!(app.status, "Stopped speaking", "{tag}");
+            }
+            _ => assert!(
+                !app.voice.speech.is_speaking(),
+                "{tag}: taken for Clew's own"
+            ),
+        }
+    }
+}
+
+/// "Stop" talked over Clew as the answer it reads is still being written
+/// stops that too, and is not asked of Ask; "cancel" only stops Clew — as
+/// does "stop" while the agent writing the answer asks the reader
+/// something: its question stays to be answered.
+#[test]
+fn stop_talked_over_clew_stops_the_answer_being_written() {
+    for (tag, said, asks, stops) in [
+        ("speech-talk-stop-writing", "Stop.", false, true),
+        ("speech-talk-cancel-writing", "Cancel.", false, false),
+        ("speech-talk-stop-asking", "Stop.", true, false),
+    ] {
+        let (mut app, _output) = reading_with_mic(tag, said);
+        app.proj.asking = true;
+        if asks {
+            app.proj.ask_turns[0]
+                .extras
+                .approvals
+                .push(crate::app::model::Approval {
+                    key: crate::app::model::ApprovalKey::Mcp { call: 1 },
+                    mark: None,
+                    title: "files wants to write".into(),
+                    detail: String::new(),
+                    options: vec![crate::app::model::ApprovalOption {
+                        id: "allow".into(),
+                        label: "Allow".into(),
+                        allows: true,
+                        always: false,
+                    }],
+                });
+            assert!(app.first_approval().is_some(), "{tag}");
+            // Put away: it comes back for the question.
+            app.ask_view = crate::app::model::AskView::Hidden;
+        }
+        talk(Some(0.1));
+        voice_tick(&mut app);
+        assert!(app.voice.speech.held(), "{tag}");
+        talk(Some(crate::app::voice::END_SILENCE + 0.1));
+        voice_tick(&mut app);
+        assert!(!app.voice.speech.is_speaking(), "{tag}: Clew not stopped");
+        assert_eq!(app.proj.asking, !stops, "{tag}: the answer stopped or not");
+        assert!(app.proj.ask_queue.is_empty(), "{tag}: asked of Ask");
+        assert_eq!(app.proj.ask_turns.len(), 1, "{tag}: asked of Ask");
+        if asks {
+            assert!(app.first_approval().is_some(), "{tag}: its question lost");
+            assert!(app.ask_view.is_open(), "{tag}: its question not shown");
+        }
+        assert_eq!(app.status, "Stopped speaking", "{tag}");
+    }
+}
+
+/// A word that puts away, talked over Clew as it reads ("close"), stops it
+/// and does nothing more: the find bar under it stays open. A command
+/// waiting for a yes is declined with it, as Esc declines it. So does a
+/// word that stops Clew ("stop", "别说了"): it is not asked of Ask.
+#[test]
+fn a_word_that_closes_talked_over_clew_only_stops_it() {
+    for (tag, said, waiting) in [
+        ("speech-talk-close", "Close.", false),
+        ("speech-talk-close-asked", "Close it.", true),
+        ("speech-talk-stop", "Stop.", false),
+        ("speech-talk-stop-zh", "别说了。", false),
+        ("speech-talk-stop-asked", "That's enough.", true),
+    ] {
+        let (mut app, _output) = talked_over(tag, said);
+        app.proj.find.open = true;
+        if waiting {
+            app.voice.confirm = Some(crate::app::voice::Waiting::Command("Settings".into()));
+        }
+        talk(Some(0.1));
+        voice_tick(&mut app);
+        assert!(app.voice.speech.held(), "{tag}");
+        talk(Some(crate::app::voice::END_SILENCE + 0.1));
+        voice_tick(&mut app);
+        assert!(!app.voice.speech.is_speaking(), "{tag}: Clew not stopped");
+        assert!(app.proj.find.open, "{tag}: the find bar closed");
+        assert!(app.voice.confirm.is_none(), "{tag}: still asked");
+        assert_eq!(app.proj.ask_turns.len(), 1, "{tag}: asked of Ask");
+        let status = if waiting {
+            "Didn't run Settings"
+        } else {
+            "Stopped speaking"
+        };
+        assert_eq!(app.status, status, "{tag}");
+    }
 }
 
 /// Where words said over Clew began is of what that microphone heard: one
@@ -1870,4 +2818,285 @@ fn what_is_said_over_clew_is_told_from_its_echo() {
     let chinese = vec!["总价把每个价格加起来。".to_string()];
     assert!(!said_over("每个价格加起来", &chinese));
     assert!(said_over("打开购物车文件", &chinese));
+}
+
+/// What the system's output was given to play: how many seconds, and
+/// how loud.
+#[derive(Default)]
+struct Heard {
+    seconds: f64,
+    squares: f64,
+    samples: u64,
+}
+
+/// The system's output, passed through, counting what it is given.
+struct Counted(Box<dyn Playing>, Arc<Mutex<Heard>>);
+
+impl Playing for Counted {
+    fn play(&self, samples: &[f32], rate: u32) {
+        {
+            let mut heard = self.1.lock().unwrap();
+            heard.seconds += samples.len() as f64 / f64::from(rate.max(1));
+            heard.squares += samples.iter().map(|s| f64::from(s * s)).sum::<f64>();
+            heard.samples += samples.len() as u64;
+        }
+        self.0.play(samples, rate);
+    }
+    fn rate(&self) -> u32 {
+        self.0.rate()
+    }
+    fn queued_seconds(&self) -> f32 {
+        self.0.queued_seconds()
+    }
+    fn played(&self) -> u64 {
+        self.0.played()
+    }
+    fn take_rest(&self) -> (Vec<f32>, u32) {
+        self.0.take_rest()
+    }
+    fn idle(&self) -> bool {
+        self.0.idle()
+    }
+    fn level(&self) -> f32 {
+        self.0.level()
+    }
+    fn error(&self) -> Option<String> {
+        self.0.error()
+    }
+    fn pause(&self) {
+        self.0.pause();
+    }
+    fn resume(&self) {
+        self.0.resume();
+    }
+}
+
+/// The app reading an answer aloud as it does on the reader's computer —
+/// neither a test's voice nor its speaker: `clew-speak` found as Clew finds
+/// it (beside it, or on PATH), the voice in `CLEW_SPEAK_MODEL` — Qwen3-TTS,
+/// or the one `CLEW_SPEAK_VOICE` names, as clew-voice's own test takes
+/// them — and the system's default audio output. An answer to a question
+/// said aloud is read through to its end — both its sentences given to the
+/// output, as speech, not silence — and nothing is said to keep it from
+/// being heard; what the output played is for whatever listens to it to
+/// hear — a person, or a recording of the output. Without
+/// `CLEW_SPEAK_MODEL`, it says so and passes.
+#[cfg(unix)]
+#[test]
+#[ignore = "needs clew-speak on PATH, CLEW_SPEAK_MODEL and an audio output"]
+fn a_real_answer_is_read_aloud() {
+    let Some(from) = std::env::var_os("CLEW_SPEAK_MODEL") else {
+        eprintln!("skipped: CLEW_SPEAK_MODEL names no voice's folder");
+        return;
+    };
+    let from = std::path::PathBuf::from(from);
+    let mut app = scanned_app("speech-real");
+    let dir = test_dir("speech-real-models");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = clew_voice::models::Store::new(dir.clone());
+    app.voice.store = Some(store.clone());
+    app.voice.prefs = VoicePrefs::default();
+    let model = std::env::var("CLEW_SPEAK_VOICE").map_or(&speech::VOICE_MODELS[0], |id| {
+        speech::find(&id).expect("CLEW_SPEAK_VOICE names a voice")
+    });
+    for file in model.files {
+        let to = speech::path(&store, model, file);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        // A file, as a download leaves it: a link is not taken for one.
+        let real = from.join(file.path).canonicalize().unwrap();
+        if std::fs::hard_link(&real, &to).is_err() {
+            std::fs::copy(&real, &to).unwrap();
+        }
+    }
+    let heard = Arc::new(Mutex::new(Heard::default()));
+    let system = app.voice.speech.open_output.clone();
+    app.voice.speech.open_output = Arc::new({
+        let heard = heard.clone();
+        move || system().map(|out| Box::new(Counted(out, heard.clone())) as Box<dyn Playing>)
+    });
+    asked(&mut app, 1, true);
+    delta(
+        &mut app,
+        1,
+        "The total adds every price. Then it rounds the sum to whole cents.",
+    );
+    ended(&mut app, 1, StreamOutcome::Done);
+    let started = std::time::Instant::now();
+    let mut spoke = false;
+    while started.elapsed() < std::time::Duration::from_secs(60) {
+        spoke |= app.voice.speech.is_speaking();
+        // Done — or kept from being heard, which will not change.
+        if (spoke && !app.voice.speech.is_speaking()) || app.voice.speech.blocked.is_some() {
+            break;
+        }
+        let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
+        settle(&mut app, task);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(app.voice.speech.blocked, None, "{}", app.status);
+    assert!(spoke, "{}", app.status);
+    assert!(!app.voice.speech.is_speaking(), "read through");
+    // Both sentences made, and played: thirteen words, some seconds of
+    // them, as speech.
+    let made = app.voice.speech.said_lately();
+    for sentence in [
+        "The total adds every price.",
+        "Then it rounds the sum to whole cents.",
+    ] {
+        assert!(
+            made.iter().any(|m| m == sentence),
+            "{sentence:?} in {made:?}"
+        );
+    }
+    let heard = heard.lock().unwrap();
+    let rms = (heard.squares / heard.samples.max(1) as f64).sqrt();
+    assert!(heard.seconds > 2.5, "{:.2} s played", heard.seconds);
+    assert!(rms > 0.01, "speech, not silence: rms {rms:.4}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What the microphone may hear back of Clew's own voice is what was
+/// played lately: the sentence playing, however many are made ahead of it
+/// — not those still wholly to be played. Once played, a sentence is
+/// forgotten only when ten seconds were played since.
+#[test]
+fn what_was_played_lately_may_be_heard_back() {
+    const WORDS: [&str; 10] = [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet",
+    ];
+    let (mut app, voice, output) = speech_app("speech-said-lately");
+    // Fifteen seconds yet to play, less than is made ahead: all ten
+    // sentences, 1.6 seconds each, are made — the first playing, the rest
+    // still to be played.
+    output.lock().unwrap().queued = 15.0;
+    asked(&mut app, 1, true);
+    let ahead: Vec<String> = WORDS
+        .iter()
+        .map(|w| format!("The word is {w}, and it is said here once more so that it lasts long."))
+        .collect();
+    delta(&mut app, 1, &ahead.join(" "));
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert_eq!(voice.texts(), ahead);
+    assert_eq!(app.voice.speech.said_lately(), ahead[..1]);
+    // The second playing too.
+    output.lock().unwrap().queued = 14.0;
+    assert_eq!(app.voice.speech.said_lately(), ahead[..2]);
+    output.lock().unwrap().queued = 0.0;
+    all_played(&mut app, &output);
+    // Nothing yet to play: thirty half-second sentences, each played as it
+    // is made. Kept are the last and the twenty before it, ten seconds of
+    // them.
+    asked(&mut app, 2, true);
+    let played: Vec<String> = (0..30)
+        .map(|n| format!("Now it is {} {}.", WORDS[n % 10], WORDS[n / 10]))
+        .collect();
+    delta(&mut app, 2, &played.join(" "));
+    ended(&mut app, 2, StreamOutcome::Done);
+    assert_eq!(app.voice.speech.said_lately(), played[9..]);
+}
+
+/// What Clew may have been heard saying over a moment — as a call was
+/// said — is what it was heard saying in it: not what it said before,
+/// however little it has said since, nor what is still all to play.
+#[test]
+fn what_was_heard_over_a_moment_is_what_was_said_in_it() {
+    let (mut app, _voice, output) = speech_app("speech-said-within");
+    let speech = &mut app.voice.speech;
+    for (sentence, ago) in [
+        ("A minute ago.", 60),
+        ("Three seconds ago.", 3),
+        ("A second ago.", 1),
+    ] {
+        speech.said_lasting_for_test(sentence, 2.0);
+        speech.last_heard_for_test(std::time::Duration::from_secs(ago));
+    }
+    let within = |speech: &crate::app::speech::Speech, s| {
+        speech.said_within(std::time::Duration::from_secs(s))
+    };
+    assert!(within(speech, 0).is_empty());
+    assert_eq!(within(speech, 1), ["A second ago."]);
+    assert_eq!(within(speech, 3), ["Three seconds ago.", "A second ago."]);
+    assert_eq!(within(speech, 600).len(), 3);
+    // A new sentence queued, none of it played yet, Clew looked at as it
+    // plays: the last heard keeps when it was.
+    speech.speak_for_test(Box::new(Output(output.clone())), 0.3);
+    output.lock().unwrap().queued = 2.0;
+    output.lock().unwrap().idle = false;
+    speech.said_lasting_for_test("Not played yet.", 2.0);
+    let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
+    settle(&mut app, task);
+    let speech = &mut app.voice.speech;
+    assert!(within(speech, 0).is_empty());
+    assert_eq!(within(speech, 1), ["A second ago."]);
+    // Half of it played, and the next queued: it is heard now — marked so
+    // as Clew is looked at, playing.
+    output.lock().unwrap().queued = 3.0;
+    speech.said_lasting_for_test("Still to play.", 2.0);
+    let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
+    settle(&mut app, task);
+    let speech = &app.voice.speech;
+    assert_eq!(within(speech, 0), ["Not played yet."]);
+}
+
+/// The speaker stopping, and no other opening in its place: what was left
+/// to play was never heard, and is not taken for Clew's words heard back.
+#[test]
+fn what_a_failed_speaker_never_played_is_not_heard_back() {
+    const WORDS: [&str; 4] = ["alpha", "bravo", "charlie", "delta"];
+    let (mut app, voice, output) = speech_app("speech-said-failed");
+    output.lock().unwrap().queued = 6.0;
+    asked(&mut app, 1, true);
+    let ahead: Vec<String> = WORDS
+        .iter()
+        .map(|w| format!("The word is {w}, and it is said here once more so that it lasts long."))
+        .collect();
+    delta(&mut app, 1, &ahead.join(" "));
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert_eq!(voice.texts(), ahead);
+    // The second playing, half of it played — four seconds left to play,
+    // as the speaker gives them back — when it plays no more, and no other
+    // opens.
+    {
+        let mut o = output.lock().unwrap();
+        o.queued = 4.0;
+        o.rest = vec![0.0; 4_000];
+        o.error = Some("the speaker failed".into());
+        o.absent = true;
+    }
+    for _ in 0..2 {
+        let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
+        settle(&mut app, task);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+    assert!(!app.voice.speech.is_speaking(), "{}", app.status);
+    assert_eq!(app.voice.speech.said_lately(), ahead[..2]);
+}
+
+/// Clew stopped with sentences made ahead still to play: they were never
+/// heard, and are not taken for its words heard back — nor what was not
+/// played of the one cut off.
+#[test]
+fn what_clew_never_played_is_not_heard_back() {
+    const WORDS: [&str; 4] = ["alpha", "bravo", "charlie", "delta"];
+    let (mut app, voice, output) = speech_app("speech-said-stopped");
+    output.lock().unwrap().queued = 6.0;
+    asked(&mut app, 1, true);
+    let ahead: Vec<String> = WORDS
+        .iter()
+        .map(|w| format!("The word is {w}, and it is said here once more so that it lasts long."))
+        .collect();
+    delta(&mut app, 1, &ahead.join(" "));
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert_eq!(voice.texts(), ahead);
+    // The second playing, half of it played.
+    output.lock().unwrap().queued = 4.0;
+    assert_eq!(app.voice.speech.said_lately(), ahead[..2]);
+    app.stop_speaking();
+    assert_eq!(app.voice.speech.said_lately(), ahead[..2]);
+    assert_eq!(
+        app.voice
+            .speech
+            .said_within(std::time::Duration::from_secs(60)),
+        ahead[..2]
+    );
 }

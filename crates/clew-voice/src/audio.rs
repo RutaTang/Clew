@@ -283,6 +283,13 @@ pub fn speech(samples: &[f32]) -> Option<Range<usize>> {
     Some(first.saturating_sub(PAD_BEFORE)..(last + PAD_AFTER).min(samples.len()))
 }
 
+/// Whether `samples`, heard at `rate`, hold speech as listening hears it
+/// ([`speech`]): what waiting asks of the phrase it heard, so that it does
+/// not start listening that would hear nothing said at that level.
+pub fn holds_speech(samples: &[f32], rate: u32) -> bool {
+    speech(&resample(samples, rate, WHISPER_RATE)).is_some()
+}
+
 /// Length of a level frame, in seconds: what [`speech`] and
 /// [`trailing_silence`] read, at any rate.
 pub const FRAME_SECONDS: f32 = FRAME as f32 / WHISPER_RATE as f32;
@@ -371,6 +378,21 @@ mod tests {
         (0..n)
             .map(|i| amp * (2.0 * PI * freq * i as f32 / rate as f32).sin())
             .collect()
+    }
+
+    /// Speech is told by listening's own measure at the microphone's rate:
+    /// a voice at about −23 dBFS heard at 48 kHz is speech; at −63 dBFS,
+    /// under what listening hears, it is not.
+    #[test]
+    fn speech_is_held_at_any_rate() {
+        let rate = 48_000;
+        let said = |amp: f32| {
+            let mut heard = vec![0.0; rate as usize];
+            heard.extend(tone(180.0, rate, 1.0, amp));
+            heard
+        };
+        assert!(holds_speech(&said(0.1), rate));
+        assert!(!holds_speech(&said(0.001), rate));
     }
 
     /// The amplitude of `freq` in `x` (sampled at `rate`), by correlation

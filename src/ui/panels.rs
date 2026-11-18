@@ -1818,7 +1818,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     let talk = super::toolbar::tip_at(
         round(Glyph::Mic, super::askfloat::talk_tint(app, theme::fg()))
             .style(theme::round_button(false))
-            .on_press(super::heard::said(
+            .on_press(super::heard::named_only(
                 tr!("Talk"),
                 Message::Voice(crate::VoiceMsg::Toggle),
             )),
@@ -2150,14 +2150,20 @@ pub(crate) fn approval_card<'a>(
             })
             .height(Length::Fixed(APPROVE_BUTTON_H))
             .padding([0.0, if option.allows { 12.0 } else { 10.0 }])
-            .on_press_maybe((ready || !option.allows).then(|| {
-                // "Yes" allows this call, "no" declines it — never one
-                // that answers every such call from now on, which is
-                // pressed by its own words ("Always allow…") alone.
-                if option.always {
-                    super::heard::said(&option.label, answer)
+            // "Yes" allows this call, "no" declines it — never one that
+            // answers every such call from now on, which is pressed by its
+            // own words ("Always allow…") alone. What allows waits until it
+            // may be pressed, what is said for it with it.
+            .on_press_maybe({
+                let ready = ready || !option.allows;
+                if option.always && option.allows {
+                    super::heard::said_when(ready, &option.label, answer)
+                } else if option.always {
+                    // "Always reject": declines, at once.
+                    Some(super::heard::said(&option.label, answer))
                 } else {
-                    super::heard::answer(
+                    super::heard::answer_when(
+                        ready,
                         &option.label,
                         if option.allows {
                             super::heard::Answer::Yes
@@ -2167,7 +2173,7 @@ pub(crate) fn approval_card<'a>(
                         answer,
                     )
                 }
-            }));
+            });
             if option.allows {
                 crate::ui::fresh::allow(ready, shown)
             } else {

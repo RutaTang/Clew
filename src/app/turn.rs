@@ -278,7 +278,7 @@ impl App {
                     Ok(()) => {
                         self.voice.turn.error = None;
                         self.status = tr!(
-                            "{model} is ready — listening now ends when you have finished",
+                            "{model} is ready — Clew can now tell when you have finished speaking",
                             model = MODEL.name
                         );
                     }
@@ -298,7 +298,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.voice.turn.error = None;
-                        self.status = tr!("{model} removed", model = MODEL.name);
+                        self.status = tr!("Removed {model}", model = MODEL.name);
                     }
                     Err(e) => {
                         self.status = tr!(

@@ -13,7 +13,7 @@ use crate::app::message::{Message, ProjectMsg};
 use crate::app::setup::{ProjectSetup, SetupMode, explain_line, servers_line};
 use crate::app::state::App;
 use crate::theme;
-use crate::{tr, trn};
+use crate::{tr, tr_noop, trn};
 
 /// Room under a tick for what it takes, lined up with its label.
 const DETAIL_INDENT: f32 = 26.0;
@@ -46,6 +46,16 @@ pub(crate) fn servers_row(
         Some(list) => Some((setup.is_some_and(|s| s.servers), true, servers_line(list))),
     }
 }
+
+/// Why the sheet's main button waits while the project is looked at: said
+/// where the pointer rests, and to what is said for it.
+const LOOKING: &str = tr_noop!("Ready once the project is checked");
+/// Why Apply or Explain has nothing to do: said under it, and to what is
+/// said for it.
+const NOTHING_SET_UP: &str = tr_noop!("Nothing to apply: the language servers are already set up.");
+const NOTHING_TO_EXPLAIN: &str = tr_noop!("Nothing is left to explain.");
+const NO_CODE: &str = tr_noop!("There is no code here to explain.");
+const TICK_SOMETHING: &str = tr_noop!("Nothing to apply: tick what to set up.");
 
 /// The sheet for `root`: `setup` as it stands (a first open's before its
 /// look at the project is in may not have one yet). `asked` holds back a
@@ -84,10 +94,9 @@ pub(crate) fn setup_sheet<'a>(
         // A folder with no code in it says so: "Nothing left to explain"
         // read as if all of it had been explained. The sheet's folder, as
         // its look found it — on a first open, not the project open now.
-        None if counted == Some(0) && setup.is_some_and(|s| s.no_code) => (
-            tr!("There is no code here to explain.").to_string(),
-            String::new(),
-        ),
+        None if counted == Some(0) && setup.is_some_and(|s| s.no_code) => {
+            (crate::i18n::lookup(NO_CODE).to_string(), String::new())
+        }
         None => (
             explain_line(app.llm_available, calls.flatten(), app.embed_available),
             String::new(),
@@ -405,25 +414,58 @@ pub(crate) fn setup_sheet<'a>(
     // above it is still settling.
     let looking = setup.is_some() && census.is_none();
     let ready = (!gated || asked.ready) && something && !looking;
+    // Why Apply or Explain has nothing to do, once the look is in.
+    let idle: Option<&'static str> = (!something && !looking).then(|| match (mode, setup) {
+        (SetupMode::Manage, Some(s))
+            if !s.explain && census.is_some_and(|c| c.servers.is_empty()) =>
+        {
+            NOTHING_SET_UP
+        }
+        // "Nothing left to explain" read as if all of it had been.
+        (SetupMode::Explain, Some(s)) if s.explain && s.no_code && counted == Some(0) => NO_CODE,
+        (SetupMode::Explain, Some(s)) if s.explain => NOTHING_TO_EXPLAIN,
+        _ => TICK_SOMETHING,
+    });
     let accept_button = button(text(accept).size(ts::BASE))
         .style(theme::primary_button)
         .padding([6, 16])
-        .on_press_maybe(
-            ready.then(|| super::heard::answer(accept, super::heard::Answer::Yes, accept_msg)),
-        );
+        // A first open's Open answers its question: waiting for the
+        // project to be looked at, or for the sheet to be read, what is said
+        // for it waits too, told which ([`super::heard::answer_unless`]).
+        // Apply and Explain answer none: pressed once there is something to
+        // do — said before, told why not (the look still on its way, or
+        // nothing ticked to do), and not sent on to Ask behind the sheet.
+        .on_press_maybe(if gated {
+            let why = if looking {
+                Some(LOOKING)
+            } else {
+                (!asked.ready).then_some(crate::app::onscreen::TOO_SOON)
+            };
+            super::heard::answer_unless(why, accept, super::heard::Answer::Yes, accept_msg)
+        } else if let Some(why) = if looking { Some(LOOKING) } else { idle } {
+            super::heard::answer_held(why, accept, super::heard::Answer::Yes, accept_msg)
+        } else {
+            Some(super::heard::answer(
+                accept,
+                super::heard::Answer::Yes,
+                accept_msg,
+            ))
+        });
     let decline_ready = !decline_gated || asked.ready;
     let decline_button = button(text(decline_label).size(ts::BASE))
         .style(theme::toolbar_button)
         .padding([6, 16])
-        .on_press_maybe(decline_ready.then(|| {
-            // Open without setup opens the project: no "no" to opening it, which
-            // the × is; Cancel is.
-            if decline_gated {
-                super::heard::said(decline_label, decline)
-            } else {
-                super::heard::answer(decline_label, super::heard::Answer::No, decline)
-            }
-        }));
+        // Open without setup opens the project: no "no" to opening it, which
+        // the × is; Cancel is. Gated, it waits as the Open does.
+        .on_press_maybe(if decline_gated {
+            super::heard::said_when(decline_ready, decline_label, decline)
+        } else {
+            Some(super::heard::answer(
+                decline_label,
+                super::heard::Answer::No,
+                decline,
+            ))
+        });
     // A first open of a folder with no code, nothing to set up for it: the
     // two buttons did the same — Open alone.
     let nothing_to_set_up = mode == SetupMode::Open
@@ -449,7 +491,7 @@ pub(crate) fn setup_sheet<'a>(
     let accept_button = if looking {
         super::toolbar::tip_at(
             accept_button,
-            tr!("Ready once the project is checked"),
+            crate::i18n::lookup(LOOKING),
             None,
             iced::widget::tooltip::Position::Top,
         )
@@ -468,22 +510,11 @@ pub(crate) fn setup_sheet<'a>(
     };
     // Why its main button waits, said beside it: greyed with nothing said,
     // Apply read as broken.
-    let why_not: Option<&str> = (!something && !looking).then_some(()).and_then(|()| {
-        match (mode, setup) {
-            (SetupMode::Manage, Some(s))
-                if !s.explain && census.is_some_and(|c| c.servers.is_empty()) =>
-            {
-                Some(tr!(
-                    "Nothing to apply: the language servers are already set up."
-                ))
-            }
-            // Said once: the line about explaining above says it already
-            // ("Nothing left to explain." twice, a line apart).
-            (SetupMode::Explain, Some(s)) if s.explain && counted == Some(0) => None,
-            (SetupMode::Explain, Some(s)) if s.explain => Some(tr!("Nothing is left to explain.")),
-            _ => Some(tr!("Nothing to apply: tick what to set up.")),
-        }
-    });
+    // Said once: the line about explaining above says it already ("Nothing
+    // left to explain." twice, a line apart).
+    let said_above =
+        matches!((mode, setup), (SetupMode::Explain, Some(s)) if s.explain) && counted == Some(0);
+    let why_not: Option<&str> = idle.filter(|_| !said_above).map(crate::i18n::lookup);
     let left: Element<'a, Message> = match why_not {
         Some(why) => text(why)
             .size(ts::SMALL)

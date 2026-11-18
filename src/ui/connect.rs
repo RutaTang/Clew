@@ -2116,15 +2116,14 @@ pub(crate) fn trust_host_prompt<'a>(
                 button(text(tr!("Trust and connect")).size(ts::BODY))
                     .style(theme::primary_button)
                     .padding([6, 14])
-                    .on_press_maybe(ready.then(|| {
-                        super::heard::answer(
-                            tr!("Trust and connect"),
-                            super::heard::Answer::Yes,
-                            Message::Connect(ConnectMsg::TrustHost {
-                                fingerprint: key.fingerprint.clone(),
-                            }),
-                        )
-                    }))
+                    .on_press_maybe(super::heard::answer_when(
+                        ready,
+                        tr!("Trust and connect"),
+                        super::heard::Answer::Yes,
+                        Message::Connect(ConnectMsg::TrustHost {
+                            fingerprint: key.fingerprint.clone(),
+                        }),
+                    ))
             ),
         ]
         .spacing(8)
@@ -2190,15 +2189,14 @@ pub(crate) fn host_key_changed_prompt<'a>(
                 button(text(tr!("Forget the old key")).size(ts::BODY))
                     .style(theme::toolbar_button)
                     .padding([6, 14])
-                    .on_press_maybe(ready.then(|| {
-                        super::heard::answer(
-                            tr!("Forget the old key"),
-                            super::heard::Answer::Yes,
-                            Message::Connect(ConnectMsg::ForgetHostKey {
-                                host: forget_host.to_string(),
-                            }),
-                        )
-                    }))
+                    .on_press_maybe(super::heard::answer_when(
+                        ready,
+                        tr!("Forget the old key"),
+                        super::heard::Answer::Yes,
+                        Message::Connect(ConnectMsg::ForgetHostKey {
+                            host: forget_host.to_string(),
+                        }),
+                    ))
             ),
         ]
         .spacing(8)

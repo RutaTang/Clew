@@ -265,7 +265,7 @@ impl Judge {
         let request = serde_json::json!({ "turn": { "id": id, "audio": audio } });
         writeln!(self.stdin, "{request}")
             .and_then(|()| self.stdin.flush())
-            .map_err(|e| Process(format!("{} stopped taking audio: {e}", MODEL.name)))?;
+            .map_err(|e| Process(format!("{} stopped accepting audio: {e}", MODEL.name)))?;
         let deadline = Instant::now() + JUDGE_TIMEOUT;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());

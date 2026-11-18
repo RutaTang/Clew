@@ -190,8 +190,8 @@ fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a
     } else {
         let label = tr!("Download ({size} MB)", size = model.size_mb());
         let msg = Some(Message::Voice(VoiceMsg::DownloadSpeech(model.id)));
-        // The voice of every language but one: the first to get.
-        if model.speaks("en") {
+        // The voice that reads English best: the first to get.
+        if clew_voice::speech::for_language("en").is_some_and(|m| m.id == model.id) {
             form::primary(&label, msg).into()
         } else {
             form::action(&label, msg).into()
@@ -235,8 +235,6 @@ fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a
     rows
 }
 
-/// A download under way: how far it is, and its Cancel. The share is said
-/// in a slot as wide as "100%" reads, so its bar does not move as it grows.
 /// Whether model `id` finished downloading a moment ago: its row says so
 /// where its Cancel was, before Remove takes the place.
 fn just_downloaded(app: &App, id: &str) -> bool {
@@ -246,6 +244,8 @@ fn just_downloaded(app: &App, id: &str) -> bool {
         .is_some_and(|at| at.elapsed() < crate::app::embedding::JUST_DOWNLOADED)
 }
 
+/// A download under way: how far it is, and its Cancel. The share is said
+/// in a slot as wide as "100%" reads, so its bar does not move as it grows.
 pub(crate) fn getting<'a>(done: u64, total: u64, cancel: Message) -> Element<'a, Message> {
     let share = (done as f32 / total.max(1) as f32).clamp(0.0, 1.0);
     let percent = |share: f64| tr!("{percent}%", percent = crate::i18n::decimal(share, 0));
@@ -298,7 +298,7 @@ fn turn_rows_of(app: &App) -> Vec<Element<'_, Message>> {
         .into()
     };
     let about = tr!(
-        "Hears when you have finished speaking: a finished sentence is acted on at once, and a pause to think is waited through."
+        "Knows when you have finished speaking: a finished sentence is acted on at once, and a pause to think is waited through."
     );
     let mut rows = vec![form::item(MODEL.name, Some(about.to_string()), state)];
     let warning = |said: String| {
@@ -328,7 +328,7 @@ fn wake_rows(app: &App) -> Vec<Element<'_, Message>> {
         tr!("Start listening when you say “Hey, Clew”"),
         Some(
             tr!(
-                "Say “Bye, Clew” or “Stop listening” to stop listening. While Clew waits, the microphone stays on, but what it hears goes only to a small model on this computer."
+                "Say “Bye, Clew” to stop listening. While Clew waits, the microphone stays on, but what it hears goes only to a small model on this computer."
             )
             .into(),
         ),
@@ -379,6 +379,28 @@ fn wake_model_rows(app: &App) -> Vec<Element<'_, Message>> {
     }
     if let Some(e) = &app.voice.wake.error {
         rows.push(warning(crate::i18n::message(e)));
+    }
+    // Waiting ended by failing, its switch still on: said so — the switch,
+    // on, said nothing of it — and begun again from here, where only off
+    // and on again began it.
+    if let Some(why) = &app.voice.wake.failed
+        && app.voice.prefs.wake
+    {
+        let said = text(tr!(
+            "Stopped waiting for “Hey, Clew”: {error}",
+            error = crate::i18n::message(why)
+        ))
+        .size(ts::SMALL)
+        .color(theme::warn())
+        .wrapping(Wrapping::WordOrGlyph)
+        .width(Fill);
+        let again = form::action(
+            tr!("Try again"),
+            Some(Message::Voice(VoiceMsg::SetWake(true))),
+        );
+        rows.push(form::plain(
+            row![said, again].spacing(8).align_y(iced::Center),
+        ));
     }
     rows
 }

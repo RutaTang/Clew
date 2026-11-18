@@ -40,7 +40,8 @@ enum Kind {
 
 /// What says yes to a command that waits for one, and what says no: the
 /// English words, and the reader's.
-const YES: &str = tr_noop!("yes, yeah, yep, sure, okay, ok, run, run it, do it, go ahead, confirm");
+const YES: &str =
+    tr_noop!("yes, yeah, yep, sure, okay, ok, run, run it, do it, go ahead, confirm, allow");
 const NO: &str = tr_noop!("no, nope, cancel, don't, do not, never mind, not now");
 
 /// Whether `said` answers a command waiting for a yes: `Some(true)` for a
@@ -115,32 +116,280 @@ pub(crate) fn only_yes_or_no(said: &str) -> Option<bool> {
     }
 }
 
-/// What says to stop listening, Clew waiting again for its name: the
-/// English words, and the reader's. "Bye, Clew" with its name: a "bye" said
-/// to someone else in the room is not for Clew.
-const STOP_LISTENING: &str =
-    tr_noop!("stop listening, bye clew, bye bye clew, goodbye clew, good bye clew");
-/// What Clew is called by, before what is said to it: the English words,
-/// and the reader's.
-const CALLED: &str = tr_noop!("hey, hi, hello, ok, okay");
-/// Clew's name, as it is heard: the English spellings, and the reader's.
-const NAME: &str = tr_noop!("clew, clue");
-
-/// The phrases of a list, lower-cased: the English list's, and the
-/// reader's.
-fn phrases(list: &'static str) -> Vec<String> {
-    [list, crate::i18n::lookup(list)]
-        .into_iter()
-        .flat_map(|l| l.split([',', '，', '、']))
-        .map(|p| p.trim().to_lowercase())
-        .filter(|p| !p.is_empty())
-        .collect()
+/// Whether `said` was said as a question ("Allow?", "对？"): a yes, but
+/// asked — no answer that allows, which wants one said plainly.
+pub(crate) fn asked(said: &str) -> bool {
+    said.trim_end().ends_with(['?', '？'])
 }
+
+/// Clew's name as whisper writes it: "Clew", the words it is heard as
+/// ("clue", French "clou"), and how it is written in Chinese, Korean and
+/// Japanese. "Hey, Clew" and "Bye, Clew" are said as they are in every
+/// language — these are only how they come out written.
+const NAMES: &[&str] = &[
+    "clew",
+    "clue",
+    "clou",
+    "克鲁",
+    "克卢",
+    "克露",
+    "클루",
+    "클류",
+    "클로",
+    "クルー",
+    "クリュー",
+];
+/// Clew's name as whisper writes it in Latin letters when it is said in
+/// a Japanese sentence — "Crew 設定を": Japanese says "crew" as it says
+/// "Clew", "クルー". Taken for the name only in such a sentence
+/// ([`in_japanese`]): "Hey crew, let's go", said to a team, is no call,
+/// nor is Korean, which tells "크루" (crew) from "클루".
+const NAMES_BEFORE_JAPANESE: &[&str] = &["crew"];
+/// What Japanese says straight after a name it says something of —
+/// "Clewのグラフ", "Clew って何", "Clew だよ", "Clew とは": not a call.
+const JAPANESE_PARTICLES: &[&str] = &[
+    "の",
+    "が",
+    "は",
+    "を",
+    "に",
+    "へ",
+    "で",
+    "って",
+    "から",
+    "まで",
+    "より",
+    "だ",
+    "じゃ",
+    "とは",
+    "とか",
+    "として",
+];
+/// Particles that begin as many words said to Clew ("もう一回", "やめて",
+/// "とめて"): particles only with no hiragana after them ("Clew も落ちた",
+/// "Clew と比べて", "Clew や VS Code").
+const JAPANESE_SHORT_PARTICLES: &[char] = &['と', 'も', 'や'];
+/// What a Japanese sentence says to many by: after the name, it was said
+/// to a crew, not to Clew, who is one ("Crew 全員集まって", "ヘイクルー
+/// みんな聞いて") — but not with a particle after it that makes the many
+/// what the sentence is about rather than whom it is said to ("Clew
+/// みんなのファイルを開いて", "Hey Clew、みんなに共有して"
+/// [`JAPANESE_ABOUT_MANY`]). Not "皆" alone, which begins other words
+/// ("皆既日食").
+const JAPANESE_TO_MANY: &[&str] = &[
+    "全員",
+    "みんな",
+    "皆さん",
+    "皆様",
+    "みなさん",
+    "各自",
+    "お前ら",
+    "君たち",
+    "あなたたち",
+];
+/// The particles after a word for many ([`JAPANESE_TO_MANY`]) that make
+/// it what is spoken of — whose, who does, to whom, what, where, with,
+/// from or than whom — not whom the sentence is said to, as "で", "は" and
+/// "も" leave it ("Crew みんなで行こう").
+const JAPANESE_ABOUT_MANY: &[&str] = &["の", "が", "に", "を", "へ", "と", "から", "より"];
+/// Words said to many that begin as a particle does: after a word for
+/// many, they are no particle ("みんながんばって", "みんなとりあえず集合").
+const JAPANESE_WORDS_AFTER_MANY: &[&str] = &[
+    "がんば",
+    "頑張",
+    "がっかり",
+    "とりあえず",
+    "とにかく",
+    "ともかく",
+    "とても",
+    "ところで",
+];
+/// How a Japanese request ends: "開いて", "移動して", "ください".
+const JAPANESE_REQUEST_ENDS: &[&str] = &["て", "で", "ください", "下さい"];
+/// The "Hey" of "Hey, Clew", as whisper writes it.
+const HEY: &[&str] = &["hey", "hi", "hé", "嘿", "嗨", "헤이", "ヘイ"];
+/// The "Hey" of "Hey, Clew" as whisper writes it when it hears another
+/// word in it, said with what follows in another language — French "Et
+/// Clew, ouvre…", Japanese "ネークルー" — or said in English: a word of its
+/// own elsewhere, it is the call only first in its sentence
+/// ([`named_in`]).
+const HEY_HEARD_AS: &[&str] = &["et", "eh", "hay", "hei", "ネー", "ねえ", "ネイ"];
+/// What is said around "Bye, Clew" to be polite, or added by whisper
+/// ("Bye, Clew. Thank you."): "Okay, bye, Clew" ends listening too.
+const COURTESY: &[&str] = &[
+    "ok",
+    "okay",
+    "alright",
+    "all right",
+    "thanks",
+    "thank you",
+    "cheers",
+    "好",
+    "好的",
+    "谢谢",
+    "고마워",
+    "고마워요",
+    "감사합니다",
+    "じゃあ",
+    "ありがとう",
+    "ありがとうございます",
+    "ありがとうございました",
+    "merci",
+    "d’accord",
+];
+/// The "Bye" of "Bye, Clew", as whisper writes it.
+const BYE: &[&str] = &[
+    "bye",
+    "bye bye",
+    "goodbye",
+    "good bye",
+    "拜",
+    "拜拜",
+    "바이",
+    "바이바이",
+    "バイ",
+    "バイバイ",
+];
 
 /// Whether `c` is of a script written without spaces between its words —
 /// Chinese, Japanese — or with its syllables run together, as Korean is.
-fn cjk(c: char) -> bool {
+pub(crate) fn cjk(c: char) -> bool {
     matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF)
+}
+
+/// Whether `c` is a Chinese character, as Japanese writes them too.
+fn han(c: char) -> bool {
+    matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF)
+}
+
+/// Whether `c` is Japanese kana: hiragana or katakana.
+fn kana(c: char) -> bool {
+    matches!(c as u32, 0x3040..=0x30FF)
+}
+
+/// Whether `c` is hiragana.
+fn hiragana(c: char) -> bool {
+    matches!(c as u32, 0x3041..=0x309F)
+}
+
+/// Whether `rest`, what follows a name, is a Japanese sentence: kana in
+/// it before it ends, past the marks and spaces at its start
+/// ("Crew、設定を開いて", not "Clew 又卡住了。ちょっと見て").
+fn japanese_follows(rest: &str) -> bool {
+    first_sentence(unmarked(rest)).chars().any(kana)
+}
+
+/// The first sentence of `said`, up to its end — not a dot in a name
+/// ("main.rs を開いて", "v1.2"), one a Latin letter or a number follows
+/// straight after.
+fn first_sentence(said: &str) -> &str {
+    let mut chars = said.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let in_name = c == '.'
+            && chars
+                .peek()
+                .is_some_and(|&(_, next)| next.is_ascii_alphanumeric());
+        if sentence_end(c) && !in_name {
+            return &said[..i];
+        }
+    }
+    said
+}
+
+/// Whether a name said after `before` and before `rest` is said in a
+/// Japanese sentence — one with kana, Japanese's own letters, in it:
+/// before the name ("ヘイ、Crew 設定"), or after it, past the marks and
+/// spaces after it but not past a sentence's end in Latin letters ("Crew
+/// 設定を", not "Hey crew! 準備はいい？"); or Chinese characters after a
+/// Japanese comma ("Hey Crew、設定"), or after a space with the window
+/// shown in Japanese ("Hey Crew 続行"). Shown in another language, Chinese
+/// characters after a space may as well be Chinese ("Hey crew 开会了"),
+/// which does not write Clew so: they are not taken.
+fn in_japanese(before: &str, rest: &str) -> bool {
+    if last_sentence(before).chars().any(kana) {
+        return true;
+    }
+    let after = unmarked(rest);
+    let between = &rest[..rest.len() - after.len()];
+    let japanese_window = crate::i18n::current() == crate::i18n::Lang::Ja;
+    !between.contains(['.', '!', '?'])
+        && (japanese_follows(after)
+            || ((between.contains('、') || japanese_window) && after.starts_with(han)))
+}
+
+/// Where Clew's name ends, said from the start of `at`, after `before`
+/// ([`name_at`]) — or written "crew" in a Japanese sentence
+/// ([`NAMES_BEFORE_JAPANESE`], [`in_japanese`]) — not said to many
+/// ([`JAPANESE_TO_MANY`]).
+fn called_name_at(at: &str, before: &str) -> Option<usize> {
+    let end = name_at(at).or_else(|| {
+        let end = NAMES_BEFORE_JAPANESE
+            .iter()
+            .find_map(|name| begins(at, name))?;
+        in_japanese(before, &at[end..]).then_some(end)
+    })?;
+    let next = unmarked(&at[end..]);
+    let to_many = JAPANESE_TO_MANY.iter().any(|many| {
+        next.strip_prefix(many).is_some_and(|rest| {
+            let about = JAPANESE_ABOUT_MANY
+                .iter()
+                .any(|particle| rest.starts_with(particle))
+                && !JAPANESE_WORDS_AFTER_MANY
+                    .iter()
+                    .any(|word| rest.starts_with(word));
+            !about
+        })
+    });
+    (!to_many).then_some(end)
+}
+
+/// Whether Clew's name, `name` as written, is set apart from `rest`, what
+/// follows it, as a call sets it: by a mark ("Clew, …") or nothing at all
+/// — or, written in Latin letters, by a pause and then a Japanese
+/// sentence ("Crew 設定を", "Crew もう一回"), not one that goes on from the
+/// name ("Clewのグラフ", "Clew のグラフ", "Clew だよ", "Clew も落ちた"); one
+/// that begins in Latin letters or numbers, only as a request ("Crew
+/// README を開いて", not "Clew VS Code より速い？"). Not by a pause alone
+/// before Chinese or Korean, where it may as well be said of Clew ("Clew
+/// 又卡住了"): a call there is written with a mark or a "Hey" — or in
+/// Korean, "야" or "아" after the name, which a pause after it sets apart
+/// ("클루야 설정 열어줘"). A pause is no sure sign: "Crew 集合して"
+/// ("crew, gather"), said to others, is taken for a call too — no words
+/// tell it from one; only the many it is said to, named after it, do
+/// ([`JAPANESE_TO_MANY`]).
+fn set_apart(name: &str, rest: &str) -> bool {
+    let after = rest.trim_start();
+    // Korean calls with "야" or "아" after the name ([`name_at`]): a pause
+    // after it sets it apart ("클루야 설정 열어줘").
+    let called = name.ends_with(['야', '아']) && rest.starts_with(char::is_whitespace);
+    if called || after.chars().next().is_none_or(mark) {
+        return true;
+    }
+    if name.chars().any(cjk) || !rest.starts_with(char::is_whitespace) || !japanese_follows(rest) {
+        return false;
+    }
+    let particle = JAPANESE_PARTICLES.iter().any(|p| after.starts_with(p))
+        || after
+            .strip_prefix(JAPANESE_SHORT_PARTICLES)
+            .is_some_and(|word| !word.starts_with(hiragana));
+    !particle && (after.starts_with(cjk) || japanese_request(after))
+}
+
+/// Whether the sentence `said` begins with is a Japanese request —
+/// "…を開いて", "…移動して", "…ください" — or one of the phrases Clew is
+/// told a value with, as the window says them ("{text}を検索",
+/// [`PHRASES`]), the value a name or a number — katakana in it too
+/// ("READMEファイル") — not a Japanese clause, which hiragana tell
+/// ("2 回同じファイルを開く", "go to definition が効かない").
+fn japanese_request(said: &str) -> bool {
+    let sentence = first_sentence(said).trim_end_matches(|c: char| c.is_whitespace() || mark(c));
+    JAPANESE_REQUEST_ENDS
+        .iter()
+        .any(|end| sentence.ends_with(end))
+        || PHRASES.iter().any(|&(_, phrase)| {
+            value_in(crate::i18n::lookup(phrase), sentence)
+                .is_some_and(|value| !value.chars().any(hiragana))
+        })
 }
 
 /// What sets one part of what was said from the next.
@@ -161,7 +410,56 @@ fn mark(c: char) -> bool {
             | '？'
             | '、'
             | '：'
+            | '・'
     )
+}
+
+/// What ends a sentence.
+pub(crate) fn sentence_end(c: char) -> bool {
+    matches!(c, '.' | '!' | '?' | '。' | '！' | '？')
+}
+
+/// Sounds a Chinese transliteration goes on with after 克鲁 — "克鲁斯"
+/// (Cruz), "克鲁兹", "克鲁格" (Kruger), "克鲁尼" (Clooney): another name.
+const NAME_GOES_ON_IN_CHINESE: &str = "斯兹泽格尼姆";
+
+/// Where Clew's name ends, said from the start of `at`, if it is said
+/// there as a word of its own: not the start of a longer word — "clueless",
+/// Japanese "クルーズ" (cruise), Korean "클로이" (Chloe), Chinese "克鲁斯"
+/// (Cruz). Korean may call it with "야" or "아" after it ("클루야", or
+/// "Clew야" as whisper may write it, told the name): the name, called
+/// so, ends after it. Whisper writes a call with a mark or a
+/// space after the name ("ネークルー、", "嘿，克鲁，", "헤이클루 호출"):
+/// one run straight on into more of its script is taken for a longer word
+/// — the cost, a call written "嘿克鲁格式化…", is missed, and said again.
+fn name_at(at: &str) -> Option<usize> {
+    NAMES.iter().find_map(|name| {
+        let end = begins(at, name)?;
+        let last = name.chars().last()?;
+        let next = at[end..].chars().next();
+        if let Some(called @ ('야' | '아')) = next
+            && (matches!(last as u32, 0xAC00..=0xD7AF) || last.is_ascii_alphabetic())
+        {
+            return Some(end + called.len_utf8());
+        }
+        // "Clew's graph", "Clew’s slow": said of Clew, not to it.
+        if last.is_ascii_alphabetic()
+            && at[end..]
+                .strip_prefix(['\'', '’'])
+                .is_some_and(|rest| rest.starts_with(char::is_alphabetic))
+        {
+            return None;
+        }
+        let goes_on = next.is_some_and(|c| match last as u32 {
+            // Katakana, and its long vowel mark: "クルーズ" (cruise),
+            // "クルーネック" (crew-neck).
+            0x30A1..=0x30FC => matches!(c as u32, 0x30A1..=0x30FA | 0x30FC),
+            0xAC00..=0xD7AF => matches!(c as u32, 0xAC00..=0xD7AF),
+            0x4E00..=0x9FFF => NAME_GOES_ON_IN_CHINESE.contains(c),
+            _ => false,
+        });
+        (!goes_on).then_some(end)
+    })
 }
 
 /// `said` without the marks and spaces at its start.
@@ -189,77 +487,130 @@ fn begins(said: &str, phrase: &str) -> Option<usize> {
     Some(end)
 }
 
-/// Whether `said` is nothing but a word to stop listening: "Stop
-/// listening", "Bye, Clew", "Bye, Clew! Stop listening." — not "stop
-/// listening to the test output", which is something else. Matched with
-/// its spaces and marks left out, so that Chinese and Japanese, written
-/// without them, are heard too ("再见克鲁").
+/// Whether `said` is nothing but "Bye, Clew" — once or more, "Bye-bye,
+/// Clew", "Goodbye, Clew", with an "okay" or "thank you" around it
+/// ([`COURTESY`]) — not a "bye" said to someone else in the room, nor "say
+/// bye to Clew", nor "Thanks, Clew". Matched with its spaces and marks
+/// left out, so that Chinese and Japanese, written without them, are heard
+/// too ("拜拜克鲁").
 pub(crate) fn stops_listening(said: &str) -> bool {
-    let names = phrases(NAME);
-    let compact = |text: &str| {
+    let compact = |text: &str| -> String {
         let mut text: String = text
             .chars()
             .filter(|c| c.is_alphanumeric())
             .flat_map(char::to_lowercase)
             .collect();
-        for name in &names {
-            let name: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
-            if !name.is_empty() && name != "clew" {
-                text = text.replace(&name, "clew");
-            }
+        // "Bye, Crew" too, as whisper may write it said by a Japanese
+        // speaker ([`NAMES_BEFORE_JAPANESE`]): said to a team, it only
+        // ends listening.
+        for name in NAMES.iter().chain(NAMES_BEFORE_JAPANESE) {
+            text = text.replace(name, "clew");
         }
-        text
+        // Korean's calling "야" or "아" after it ("바이 클루야").
+        text.replace("clew야", "clew").replace("clew아", "clew")
     };
     let said: Vec<char> = compact(said).chars().collect();
     if said.is_empty() {
         return false;
     }
-    let phrases: Vec<Vec<char>> = phrases(STOP_LISTENING)
+    let byes: Vec<Vec<char>> = BYE
         .iter()
-        .map(|p| compact(p).chars().collect::<Vec<_>>())
-        .filter(|p| !p.is_empty())
+        .map(|bye| compact(&format!("{bye} clew")).chars().collect())
         .collect();
-    // Made, from its start, of nothing but those phrases.
-    let mut made = vec![false; said.len() + 1];
-    made[0] = true;
+    let courtesies: Vec<Vec<char>> = COURTESY
+        .iter()
+        .map(|c| compact(c).chars().collect())
+        .collect();
+    // Made, from its start, of nothing but those phrases: up to each
+    // place, whether it can be (`Some`), and whether with a goodbye.
+    let mut made: Vec<Option<bool>> = vec![None; said.len() + 1];
+    made[0] = Some(false);
     for i in 0..said.len() {
-        if made[i] {
-            for p in &phrases {
+        let Some(bye) = made[i] else { continue };
+        for (phrases, is_bye) in [(&byes, true), (&courtesies, false)] {
+            for p in phrases {
                 if said[i..].starts_with(p) {
-                    made[i + p.len()] = true;
+                    let next = &mut made[i + p.len()];
+                    *next = Some(next.unwrap_or(false) || bye || is_bye);
                 }
             }
         }
     }
-    made[said.len()]
+    made[said.len()] == Some(true)
+}
+
+/// What words heard say to Clew: those after its name, when they `call` it
+/// — what was said before the call is not what was asked
+/// ([`after_name`]) — else the words without its name before them
+/// ([`without_name`]).
+pub(crate) fn what_is_said(text: &str, call: bool) -> &str {
+    if call {
+        after_name(text)
+    } else {
+        without_name(text)
+    }
+}
+
+/// Whether words heard say "Bye, Clew" ([`stops_listening`]): all of
+/// them, or all that is said to Clew ([`what_is_said`]) — "Hey, Clew.
+/// Bye, Clew." What they do to Clew's speech and to the microphone is
+/// decided by this alone, wherever they are heard.
+pub(crate) fn says_bye(text: &str, call: bool) -> bool {
+    stops_listening(text) || stops_listening(what_is_said(text, call))
+}
+
+/// Whether words heard, said over Clew, leave it speaking: "Bye, Clew",
+/// which ends listening, not what Clew says — or the microphone's label,
+/// which only says what does ([`says_stop_listening`]).
+pub(crate) fn leaves_clew_speaking(text: &str, call: bool) -> bool {
+    says_bye(text, call) || says_stop_listening(what_is_said(text, call))
+}
+
+/// The microphone button's label while it listens.
+const STOP_LISTENING: &str = tr_noop!("Stop listening");
+
+/// Whether `said` is nothing but the microphone button's label while it
+/// listens — "Stop listening", in English or as the window shows it —
+/// which is not how listening is stopped: "Bye, Clew" is.
+pub(crate) fn says_stop_listening(said: &str) -> bool {
+    // Its name said after it too: "Stop listening, Clew."
+    let said = plain(said);
+    let said = NAMES
+        .iter()
+        .find_map(|name| {
+            said.strip_suffix(name)
+                .filter(|rest| rest.ends_with(' ') || rest.chars().last().is_some_and(cjk))
+        })
+        .map_or(said.as_str(), str::trim_end);
+    !said.is_empty()
+        && [STOP_LISTENING, crate::i18n::lookup(STOP_LISTENING)]
+            .iter()
+            .any(|label| plain(label) == said)
 }
 
 /// `said` without Clew called by its name before it: "Hey, Clew, open
 /// Settings" is "open Settings", "Clew, what does this do?" is "what does
 /// this do?" — what was said as it was said, its case and marks kept. The
-/// name alone is a call only with a mark after it, as one is written: "Clue
-/// me in" is not one.
+/// name alone is a call only set apart from what follows as a call is
+/// ([`set_apart`]): with a mark after it, or a pause before a Japanese
+/// sentence — "Clue me in" is not one.
 pub(crate) fn without_name(said: &str) -> &str {
-    let names = phrases(NAME);
     let start = said.trim_start();
-    fn named<'a>(names: &[String], at: &'a str) -> Option<&'a str> {
-        names
-            .iter()
-            .find_map(|n| begins(at, n).map(|end| &at[end..]))
-    }
-    // Called, then named.
-    for call in phrases(CALLED) {
-        if let Some(end) = begins(start, &call)
-            && let Some(rest) = named(&names, unmarked(&start[end..]))
-        {
-            return unmarked(rest);
+    // Called, then named — the "Hey" as whisper may have heard it too
+    // ("Et Clew, ouvre…").
+    for hey in HEY.iter().chain(HEY_HEARD_AS) {
+        if let Some(end) = begins(start, hey) {
+            let at = unmarked(&start[end..]);
+            if let Some(name) = called_name_at(at, &start[..end]) {
+                return unmarked(&at[name..]);
+            }
         }
     }
-    // Named alone, a mark after it.
-    if let Some(rest) = named(&names, start)
-        && rest.trim_start().chars().next().is_none_or(mark)
+    // Named alone, set apart from what follows.
+    if let Some(end) = called_name_at(start, "")
+        && set_apart(&start[..end], &start[end..])
     {
-        return unmarked(rest);
+        return unmarked(&start[end..]);
     }
     said
 }
@@ -268,17 +619,91 @@ pub(crate) fn without_name(said: &str) -> &str {
 /// what was heard just before the call is not what was asked; `said` as
 /// [`without_name`] leaves it when the name is not in it.
 pub(crate) fn after_name(said: &str) -> &str {
-    let names = phrases(NAME);
+    named_in(said).unwrap_or_else(|| without_name(said))
+}
+
+/// What follows Clew's name in `said`, if Clew is called by it there —
+/// the name a word of its own ([`name_at`]: "clueless" holds no "clue",
+/// nor "クルーズ" "クルー"), said as a call is: after the "Hey" of "Hey,
+/// Clew" in its sentence ("hey", "嘿"), or first in its sentence with a
+/// mark after it ("Clew, …", not "Clew keeps crashing"), or as a Japanese
+/// sentence may write it ([`set_apart`], [`called_name_at`]: "Crew
+/// 設定を"); else first in a sentence after a "Hey" whisper wrote as
+/// another word ("Et Clew, ouvre…" for "Hey,
+/// Clew" said in French, "ネークルー") — a call the first way, later in
+/// `said`, wins over one heard this way ("Et clou. Hey, Clew, run it").
+/// Not after other words: "the clue is", "this is Clew's graph", "a
+/// clue", nor after a "hi" that ended the sentence before ("I said hi.
+/// Clew crashed again").
+pub(crate) fn named_in(said: &str) -> Option<&str> {
+    let mut heard_as_another: Option<&str> = None;
     let mut last: Option<char> = None;
     for (i, c) in said.char_indices() {
-        // A name begins a word, or is in a run of Chinese or Japanese.
         let at_word = last.is_none_or(|l| !l.is_alphanumeric() || cjk(l) || cjk(c));
-        if at_word && let Some(end) = names.iter().find_map(|n| begins(&said[i..], n)) {
-            return unmarked(&said[i + end..]);
-        }
         last = Some(c);
+        if !at_word {
+            continue;
+        }
+        let Some(end) = called_name_at(&said[i..], &said[..i]) else {
+            continue;
+        };
+        let rest = &said[i + end..];
+        let apart = set_apart(&said[i..i + end], rest);
+        // What was said before it in its sentence: a sentence ended just
+        // before it is not its call — "I said hi. Clew crashed" — unless
+        // the call was all that sentence said ("Hey. Clew, …").
+        let ended = said[..i].trim_end().ends_with(sentence_end);
+        let before = said[..i].trim_end_matches(|c: char| c.is_whitespace() || mark(c));
+        let sentence = last_sentence(before).to_lowercase();
+        let first = before.is_empty() || ended;
+        let after_hey = HEY.iter().any(|hey| {
+            if ended {
+                sentence == *hey
+            } else {
+                ends_with_word(before, hey)
+            }
+        });
+        if (first && apart) || after_hey {
+            return Some(unmarked(rest));
+        }
+        if heard_as_another.is_none() && call_word_heard_as_another(before) {
+            heard_as_another = Some(unmarked(rest));
+        }
     }
-    without_name(said)
+    heard_as_another
+}
+
+/// The last sentence of `text`, without the marks and spaces around it.
+fn last_sentence(text: &str) -> &str {
+    text.rsplit(sentence_end)
+        .next()
+        .unwrap_or(text)
+        .trim_matches(|c: char| c.is_whitespace() || mark(c))
+}
+
+/// Whether `before`, what was said before Clew's name, is nothing but the
+/// "Hey" of "Hey, Clew" as whisper writes it when it hears another word in
+/// it ([`HEY_HEARD_AS`]), first in its sentence — "Et" said in a sentence,
+/// as in "Paul et Clew", is no call.
+fn call_word_heard_as_another(before: &str) -> bool {
+    HEY_HEARD_AS.contains(&last_sentence(before).to_lowercase().as_str())
+}
+
+/// Whether `text` ends with `word` (lower-cased), case aside, as a word of
+/// its own.
+fn ends_with_word(text: &str, word: &str) -> bool {
+    let text = text.to_lowercase();
+    let Some(start) = text.len().checked_sub(word.len()) else {
+        return false;
+    };
+    if !text.is_char_boundary(start) || text[start..] != *word {
+        return false;
+    }
+    let first = word.chars().next().is_some_and(cjk);
+    text[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|c| first || cjk(c) || !c.is_alphanumeric())
 }
 
 /// The phrases said with a value, in the order they are tried — after the
@@ -645,7 +1070,9 @@ fn said_form(text: &str, mend: bool) -> String {
         .replace('’', "'")
         .chars()
         .map(|c| {
-            if matches!(c, ',' | '，' | '、') {
+            // A comma, or a sentence's end where no space follows it, as
+            // Chinese and Japanese write it ("はい。お願いします").
+            if matches!(c, ',' | '，' | '、' | '。' | '！' | '？') {
                 ' '
             } else {
                 c
@@ -659,7 +1086,16 @@ fn said_form(text: &str, mend: bool) -> String {
                 '.' | '!' | '?' | '。' | '！' | '？' | '"' | '“' | '”' | '…'
             )
     };
-    let said: Vec<&str> = text.trim_matches(ends).split_whitespace().collect();
+    // A sentence's end before a space ends its word too ("Yes. Go
+    // ahead."): not a dot in a name ("main.rs", "v1.2").
+    let said: Vec<&str> = text
+        .trim_matches(ends)
+        .split_whitespace()
+        .map(|word| match word.trim_end_matches(['.', '!', '?']) {
+            "" => word,
+            trimmed => trimmed,
+        })
+        .collect();
     let mut words: Vec<&str> = Vec::with_capacity(said.len());
     let mut i = 0;
     while i < said.len() {
@@ -820,50 +1256,111 @@ fn squeezed(name: &str) -> String {
 mod tests {
     use super::*;
 
-    /// "Stop listening" and "Bye, Clew" stop it, alone or together, and
-    /// Clew heard as "Clue"; a "bye" without its name, or the words in
-    /// something else said, do not.
+    /// "Bye, Clew" stops it, once or twice, and Clew heard as "Clue"; a
+    /// "bye" without its name, "Stop listening", or the words in something
+    /// else said, do not.
     #[test]
     fn stopping_listening_is_said() {
         for said in [
-            "Stop listening.",
             "Bye, Clew!",
-            "Bye, Clew! Stop listening.",
+            "Bye, Clew! Bye, Clew.",
             "goodbye clue",
             "Bye-bye, Clew.",
             "Good bye, Clew",
+            "Bye, Clou.",
+            "Okay, bye, Clew.",
+            "Thanks, bye Clew",
+            "Bye, Clew. Thank you.",
+            "All right. Bye-bye, Clew!",
+            "好的，拜拜 Clew",
+            "バイバイ、クルー。ありがとう",
+            "バイバイ、クルー。ありがとうございました。",
+            "Bye, Clew. Merci.",
+            "D’accord, bye Clew !",
         ] {
             assert!(stops_listening(said), "{said}");
         }
         for said in [
             "",
             "bye",
+            "Stop listening.",
+            "Bye, Clew! Stop listening.",
             "Stop listening to the test output",
             "say bye to Clew",
             "Clew",
+            "Hey, Clew",
             "stop",
+            "Thanks, Clew",
+            "Okay",
+            "Thank you.",
+            "Okay, bye.",
+            "Bye, Clew. Thank you so much.",
         ] {
             assert!(!stops_listening(said), "{said}");
         }
     }
 
-    /// The words Settings gives to stop listening stop it, in each
-    /// language, as whisper writes them.
+    /// "Bye, Clew" said after the call, in one breath, is a goodbye too.
     #[test]
-    fn the_words_given_to_stop_listening_stop_it_in_each_language() {
+    fn a_goodbye_after_the_call_is_one() {
+        assert!(says_bye("Hey, Clew. Bye, Clew.", true));
+        assert!(says_bye("Bye, Clew.", false));
+        assert!(!says_bye("Hey, Clew, open settings.", true));
+        assert_eq!(what_is_said("Hey, Clew, open it", true), "open it");
+        assert_eq!(what_is_said("Clew, open it", false), "open it");
+    }
+
+    /// The microphone's label said, alone, in English or as the window
+    /// shows it — not words it is part of.
+    #[test]
+    fn the_microphones_label_is_heard_as_itself() {
         use crate::i18n::{Lang, with_lang};
-        for (lang, said) in [
-            (Lang::Fr, ["Au revoir, Clew.", "Arrête d'écouter."]),
-            (Lang::Zh, ["再见，Clew。", "停止聆听。"]),
-            (Lang::Ja, ["バイバイ、Clew。", "聞き取りを停止。"]),
-            (Lang::Ko, ["잘 가, Clew.", "듣기 중지."]),
-        ] {
+        assert!(says_stop_listening("Stop listening."));
+        assert!(says_stop_listening("stop listening"));
+        assert!(says_stop_listening("Stop listening, Clew."));
+        assert!(!says_stop_listening("Clew"));
+        assert!(!says_stop_listening("Stop listening to the test output"));
+        assert!(!says_stop_listening("Bye, Clew"));
+        assert!(!says_stop_listening(""));
+        with_lang(Lang::Zh, || {
+            assert!(says_stop_listening("停止聆听。"));
+            assert!(says_stop_listening("Stop listening"));
+        });
+    }
+
+    /// "Bye, Clew" is said as it is in every language, whichever Clew is
+    /// shown in: as whisper writes it in each, it stops listening — and a
+    /// goodbye in the language's own words does not.
+    #[test]
+    fn bye_clew_stops_listening_in_each_language() {
+        use crate::i18n::{Lang, with_lang};
+        for lang in Lang::ALL {
             with_lang(lang, || {
-                for said in said {
-                    assert!(stops_listening(said), "{said}");
+                for said in [
+                    "Bye, Clew.",
+                    "拜拜，克鲁。",
+                    "拜拜Clew！",
+                    "バイバイ、クルー。",
+                    "バイ、Clew。",
+                    "바이 클루.",
+                    "바이 클루야.",
+                    "Bye, Clew야.",
+                    "Bye, Crew.",
+                ] {
+                    assert!(stops_listening(said), "{lang:?}: {said}");
                 }
-                // Hey, in the reader's words, is not goodbye.
-                assert!(!stops_listening(crate::i18n::lookup(CALLED)));
+                for said in [
+                    "再见，Clew。",
+                    "停止聆听。",
+                    "Au revoir, Clew.",
+                    "잘 가, Clew.",
+                    "さようなら、クルー。",
+                    "拜拜",
+                    "Bye, Clew. 아, 잠깐",
+                    "바이 클루 아니야",
+                ] {
+                    assert!(!stops_listening(said), "{lang:?}: {said}");
+                }
             });
         }
     }
@@ -879,7 +1376,23 @@ mod tests {
         );
         assert_eq!(without_name("Clew, go to line 30"), "go to line 30");
         assert_eq!(without_name("Hey, Clew."), "");
-        assert_eq!(without_name("okay Clew — next"), "next");
+        assert_eq!(without_name("Hi Clew — next"), "next");
+        // A "Hey" whisper heard as another word.
+        assert_eq!(
+            without_name("Et Clew, ouvre les paramètres"),
+            "ouvre les paramètres"
+        );
+        assert_eq!(without_name("Hay Clew, open settings"), "open settings");
+        assert_eq!(without_name("Paul et Clew"), "Paul et Clew");
+        // Set apart as a call to it is, in a Japanese sentence too.
+        assert_eq!(without_name("Crew 設定を開いて"), "設定を開いて");
+        assert_eq!(without_name("Clew、設定を開いて"), "設定を開いて");
+        assert_eq!(without_name("Clewのグラフが遅い"), "Clewのグラフが遅い");
+        assert_eq!(without_name("Clew 又卡住了"), "Clew 又卡住了");
+        assert_eq!(without_name("ヘイ、Crew 設定"), "設定");
+        assert_eq!(without_name("ヘイ、Crew。"), "");
+        assert_eq!(without_name("Clew とは何ですか？"), "Clew とは何ですか？");
+        assert_eq!(without_name("Hey crew, let's go"), "Hey crew, let's go");
         // Not called: left as it is.
         assert_eq!(without_name("Hey, look at this"), "Hey, look at this");
         assert_eq!(without_name("Open the clew file"), "Open the clew file");
@@ -888,19 +1401,12 @@ mod tests {
         assert_eq!(without_name("Clew!"), "");
         // Chinese and Japanese, written without spaces: the name heard in
         // them, call and all.
-        use crate::i18n::{Lang, with_lang};
-        with_lang(Lang::Zh, || {
-            assert_eq!(without_name("嘿克鲁，打开设置"), "打开设置");
-            assert_eq!(without_name("嘿 Clew 打开设置"), "打开设置");
-            assert_eq!(without_name("克鲁是什么"), "克鲁是什么", "no mark: no call");
-            assert!(stops_listening("再见克鲁"));
-            assert!(stops_listening("再见Clew！"));
-            assert!(!stops_listening("再见"));
-        });
-        with_lang(Lang::Ja, || {
-            assert!(stops_listening("バイバイクルー"));
-            assert_eq!(without_name("ねえクルー、設定を開いて"), "設定を開いて");
-        });
+        assert_eq!(without_name("嘿克鲁，打开设置"), "打开设置");
+        assert_eq!(without_name("嘿 Clew 打开设置"), "打开设置");
+        assert_eq!(without_name("克鲁是什么"), "克鲁是什么", "no mark: no call");
+        assert_eq!(without_name("ヘイクルー、設定を開いて"), "設定を開いて");
+        assert!(stops_listening("拜拜克鲁"));
+        assert!(stops_listening("バイバイクルー"));
     }
 
     /// What was said once Clew was called is what follows its name, wherever
@@ -911,7 +1417,11 @@ mod tests {
             after_name("So anyway. Hey, Clew, open Settings."),
             "open Settings."
         );
-        assert_eq!(after_name("A clue, go to line 30"), "go to line 30");
+        assert_eq!(after_name("Hi clue, go to line 30"), "go to line 30");
+        // A "Hey" whisper wrote as another word.
+        assert_eq!(after_name("Hay clue, go to line 30"), "go to line 30");
+        // "Clue" said as anything but a call is no call.
+        assert_eq!(after_name("A clue, go to line 30"), "A clue, go to line 30");
         assert_eq!(after_name("Hey Clew"), "");
         // Not in a word, and nothing to cut without it.
         assert_eq!(
@@ -922,13 +1432,300 @@ mod tests {
         assert_eq!(after_name("Maclew, next"), "Maclew, next", "not in a word");
     }
 
+    /// Whether Clew's name was heard at all — what the spotter took for the
+    /// call was it, or only something like it ("Hey, cool").
+    #[test]
+    fn the_name_is_heard_or_not() {
+        use crate::i18n::{Lang, with_lang};
+        assert_eq!(
+            named_in("Hey, Clew, open Settings."),
+            Some("open Settings.")
+        );
+        assert_eq!(named_in("Hey, Clew."), Some(""));
+        assert_eq!(named_in("Hey clue."), Some(""));
+        assert_eq!(named_in("Clue, open settings"), Some("open settings"));
+        // A call word whisper wrote as another, first in the sentence.
+        assert_eq!(
+            named_in("Et Clew ouvre les paramètres."),
+            Some("ouvre les paramètres.")
+        );
+        assert_eq!(named_in("Eh Clew, go to line 30"), Some("go to line 30"));
+        assert_eq!(
+            named_in("ネークルー、呼び出しグラフを開いて"),
+            Some("呼び出しグラフを開いて")
+        );
+        assert_eq!(named_in("So that's it. Hay Clew, run it"), Some("run it"));
+        // Written in Latin letters, a pause, then a Japanese sentence —
+        // and "crew", as Japanese says "Clew", only before one.
+        assert_eq!(named_in("Crew 設定を"), Some("設定を"));
+        assert_eq!(named_in("Clew 設定を開いて"), Some("設定を開いて"));
+        assert_eq!(named_in("ヘイ、Crew 設定を開いて"), Some("設定を開いて"));
+        assert_eq!(named_in("ヘイ、Crew、設定を開いて"), Some("設定を開いて"));
+        assert_eq!(named_in("Crew、設定を開いて"), Some("設定を開いて"));
+        // A Japanese sentence before it, or Chinese characters after it.
+        assert_eq!(named_in("ヘイ、Crew 設定"), Some("設定"));
+        assert_eq!(named_in("ヘイ、Crew、検索"), Some("検索"));
+        assert_eq!(named_in("ヘイ、Crew。"), Some(""));
+        assert_eq!(named_in("ヘイ、Crew。設定を開いて"), Some("設定を開いて"));
+        // Words that begin as particles do.
+        assert_eq!(named_in("Crew やめて"), Some("やめて"));
+        assert_eq!(named_in("Crew もう一回"), Some("もう一回"));
+        assert_eq!(named_in("Crew とめて"), Some("とめて"));
+        // A Japanese sentence beginning with numbers or Latin letters.
+        assert_eq!(named_in("Crew 30行目に移動して"), Some("30行目に移動して"));
+        assert_eq!(named_in("Crew README を開いて"), Some("README を開いて"));
+        assert_eq!(named_in("Crew README を読んで"), Some("README を読んで"));
+        assert_eq!(
+            named_in("Crew README を開いてください"),
+            Some("README を開いてください")
+        );
+        assert_eq!(
+            named_in("Crew README を開いて下さい"),
+            Some("README を開いて下さい")
+        );
+        assert_eq!(named_in("Crew README を開いて…"), Some("README を開いて…"));
+        // A dot in a name ends no sentence.
+        assert_eq!(
+            named_in("Hey Crew main.rs を開いて"),
+            Some("main.rs を開いて")
+        );
+        // A Japanese comma after it.
+        assert_eq!(named_in("Hey Crew、設定"), Some("設定"));
+        // Everyone's, to everyone, what everyone uses: said to Clew.
+        assert_eq!(
+            named_in("Hey Clew、みんなのファイルを開いて"),
+            Some("みんなのファイルを開いて")
+        );
+        assert_eq!(
+            named_in("Hey Clew、みんなに共有して"),
+            Some("みんなに共有して")
+        );
+        assert_eq!(
+            named_in("Clew、みんなが使うファイルを開いて"),
+            Some("みんなが使うファイルを開いて")
+        );
+        // All together, said to a crew — and words that begin with a
+        // particle's kana.
+        assert_eq!(named_in("Crew、みんなで行こう"), None);
+        assert_eq!(named_in("Crew、みんながんばって"), None);
+        assert_eq!(named_in("ヘイクルー みんなとりあえず集合"), None);
+        assert_eq!(
+            named_in("Hey Clew、みんなと共有して"),
+            Some("みんなと共有して")
+        );
+        // Particles with kana after them are particles still.
+        assert_eq!(
+            named_in("Clew、みんながよく使うファイルを開いて"),
+            Some("みんながよく使うファイルを開いて")
+        );
+        assert_eq!(
+            named_in("Hey Clew、みんなとのチャットを開いて"),
+            Some("みんなとのチャットを開いて")
+        );
+        // Or as Clew's own Japanese phrases say a value, shown in Japanese.
+        with_lang(Lang::Ja, || {
+            assert_eq!(named_in("Clew 30行目へ移動"), Some("30行目へ移動"));
+            assert_eq!(named_in("Clew README を開く"), Some("README を開く"));
+            assert_eq!(named_in("Clew TODO を検索"), Some("TODO を検索"));
+            assert_eq!(without_name("Clew TODO を検索"), "TODO を検索");
+            assert_eq!(named_in("Clew VS Code より速い？"), None);
+            // Said of Clew, ending as a phrase of its own would.
+            assert_eq!(named_in("Clew 2 回同じファイルを開く"), None);
+            assert_eq!(named_in("Clew 2 回落ちた件を検索"), None);
+            // Shown in Japanese, Chinese characters after "crew" are
+            // Japanese: a command's name alone.
+            assert_eq!(named_in("Hey Crew 続行"), Some("続行"));
+            assert_eq!(named_in("Hey Crew 設定"), Some("設定"));
+            // Said to many, it is no call.
+            assert_eq!(named_in("Hey Crew 全員集合"), None);
+            // Korean after it is not Japanese.
+            assert_eq!(named_in("Hey Crew 가자"), None);
+            // Names with katakana in them are names.
+            assert_eq!(
+                named_in("Clew READMEファイルを開く"),
+                Some("READMEファイルを開く")
+            );
+            assert_eq!(
+                named_in("Clew TODOコメントを検索"),
+                Some("TODOコメントを検索")
+            );
+        });
+        // Korean's calling "야", then a pause.
+        assert_eq!(named_in("클루야 설정 열어줘"), Some("설정 열어줘"));
+        assert_eq!(without_name("클루야 설정 열어줘"), "설정 열어줘");
+        assert_eq!(named_in("클루야말로 최고야"), None);
+        // The name in Latin letters, as whisper may write it.
+        assert_eq!(named_in("Clew야 설정 열어줘"), Some("설정 열어줘"));
+        assert_eq!(named_in("Clew야, 설정 열어줘"), Some("설정 열어줘"));
+        assert_eq!(named_in("헤이 Clew야 설정 열어줘"), Some("설정 열어줘"));
+        assert_eq!(without_name("헤이 Clew야 설정 열어줘"), "설정 열어줘");
+        assert_eq!(named_in("Clew야말로 최고야"), None);
+        assert_eq!(named_in("그게 Clew야 맞아"), None);
+        assert_eq!(named_in("Clew go to definition が効かない"), None);
+        assert_eq!(named_in("Clew crashed. ちょっと見て"), None);
+        assert_eq!(named_in("Clew crashed.ちょっと見て"), None);
+        assert_eq!(named_in("Hey crew、let's go"), None);
+        for said in [
+            "Crew, get ready.",
+            "Crew members are here",
+            "Hey Crew 가자",
+            "Crew 설정 열어줘",
+            "Crew 打开设置",
+            "The crew 設定を",
+            // Said of Clew in Japanese, Chinese or Korean: the name goes
+            // on into its sentence — or, before Chinese or Korean, only a
+            // pause sets it apart, which a call is not written with.
+            "Clewのグラフが遅い",
+            "Clewが落ちた",
+            "Clew設定が開かない",
+            "Clew って何？",
+            "Clew だよ",
+            "Clew 又卡住了。ちょっと見て",
+            "Hey crew! 準備はいい？",
+            "準備できた？ Hey crew, let's go",
+            // "crew" before Chinese, which does not write Clew so — nor,
+            // shown in another language than Japanese, Japanese kanji alone.
+            "Hey crew 打开设置",
+            "Hey Crew 続行",
+            "嘿 crew 开会了",
+            "Crew，大家过来一下",
+            // Particles, and words that go on from the name.
+            "Clew とは何ですか",
+            "Clew とか使ってる？",
+            "Clew として使う",
+            "Clew も落ちた",
+            "Clew と比べて遅い",
+            "Clew や VS Code みたいなツール",
+            "Clew もバグってる",
+            // Latin letters or numbers after the pause: only a request.
+            "Clew VS Code より速い？",
+            "Clew 2 回落ちたけど、なぜ？",
+            "Clew 2 回落ちた。直して",
+            "Clew のグラフが遅い",
+            "Clew 的图很慢",
+            "Clew 又卡住了",
+            "Clew가 또 멈췄어",
+            "Clew 설정 열어줘",
+            // Written in its own script, the name is set apart only by a
+            // mark: "crew, everyone gather".
+            "クルー 全員集合",
+            "クルー 全員集まって",
+            // Said to many: to a crew, not to Clew.
+            "Crew 全員集まって",
+            "Hey Crew 全員集合",
+            "ヘイ、クルー、全員集合",
+            "ヘイクルー みんな聞いて",
+            "Hey Clew、皆さん、こちらへ",
+        ] {
+            assert_eq!(named_in(said), None, "{said:?}");
+        }
+        // Said of Clew, not to it.
+        for said in [
+            "Clew keeps crashing on my machine.",
+            "Clew's graph is slow",
+            "Hey, Clew's graph is slow",
+            "Hey Clew’s not answering",
+            "this is Clew's graph",
+            "the clue is here",
+            "The clue, I think",
+            "No clue why it broke",
+            "A clue is in the log",
+            "Paul et Clew, ouvre les paramètres",
+            "Hey crew, let's go",
+        ] {
+            assert_eq!(named_in(said), None, "{said:?}");
+        }
+        // What was said before the call was not said to Clew.
+        assert_eq!(
+            named_in("and then I said hey Clew, open settings"),
+            Some("open settings")
+        );
+        assert_eq!(named_in("No clue why. Hey Clew, run it"), Some("run it"));
+        // A call heard plainly wins over one heard in another word before it.
+        assert_eq!(named_in("Et clou. Hey Clew, run it"), Some("run it"));
+        // A sentence of its own: the call, or the name with a mark after it.
+        assert_eq!(named_in("Hey. Clew, open settings"), Some("open settings"));
+        assert_eq!(
+            named_in("Right. Clew, open settings"),
+            Some("open settings")
+        );
+        // The start of a longer word, in any script: no name.
+        for said in [
+            "I said hi. Clew crashed again.",
+            "헤이 클로이, 뭐 해?",
+            "헤이 크루, 가자",
+            "ねえ、クルーズ行こう",
+            "嘿，克鲁斯来了",
+            "Hey, Clewless people",
+        ] {
+            assert_eq!(named_in(said), None, "{said:?}");
+        }
+        for said in [
+            "Hey cool it works now.",
+            "Hey Kyle, look at this.",
+            "Open the clueless file",
+            "Hey, cool — no clue why it broke",
+            "Hey, cool — no Clew why it broke",
+            "and then I said Clew, open settings",
+            "Clue me in",
+        ] {
+            assert_eq!(named_in(said), None, "{said:?}");
+        }
+        // In the language it is said in, whichever Clew is shown in.
+        for lang in Lang::ALL {
+            with_lang(lang, || {
+                assert_eq!(named_in("嘿，克鲁，打开设置"), Some("打开设置"));
+                assert_eq!(
+                    named_in("Hé, Clou, ouvre les paramètres"),
+                    Some("ouvre les paramètres")
+                );
+                assert_eq!(named_in("헤이 클루, 설정 열어"), Some("설정 열어"));
+                assert_eq!(named_in("클루야, 설정 열어"), Some("설정 열어"));
+                assert_eq!(named_in("ヘイ・クルー、設定を開いて"), Some("設定を開いて"));
+                assert_eq!(named_in("嘿，克鲁，索引一下"), Some("索引一下"));
+                assert_eq!(named_in("嘿克鲁打开设置"), Some("打开设置"));
+                assert_eq!(
+                    named_in("ヘイ、クルー、ファイルを開いて"),
+                    Some("ファイルを開いて")
+                );
+                // Longer words the name begins.
+                assert_eq!(named_in("ねえ、クルーネックどこ？"), None);
+                assert_eq!(named_in("嗨，克鲁格先生"), None);
+                assert_eq!(named_in("헤이클로 설정 열어"), Some("설정 열어"));
+                assert_eq!(named_in("ヘイ、クルー、設定を開いて"), Some("設定を開いて"));
+                assert_eq!(named_in("这条线索是克鲁斯给的"), None, "{lang:?}");
+                assert_eq!(named_in("ヘイ、Clew、設定を開いて"), Some("設定を開いて"));
+                assert_eq!(named_in("嗨，克鲁，打开设置"), Some("打开设置"));
+            });
+        }
+    }
+
     /// A question on screen is answered only by what is all a yes or all
     /// a no: what merely opens with one ("run the tests") is not.
     #[test]
     fn a_question_is_answered_by_a_yes_alone() {
-        for said in ["yes", "Yes, do it.", "ok", "go ahead please", "run it"] {
+        use crate::i18n::{Lang, with_lang};
+        with_lang(Lang::Zh, || {
+            assert_eq!(only_yes_or_no("不是"), Some(false));
+            assert_eq!(yes_or_no("好的，为什么要那个文件？"), Some(true));
+        });
+        with_lang(Lang::Ja, || {
+            assert_eq!(only_yes_or_no("ううん"), Some(false))
+        });
+        for said in [
+            "yes",
+            "Yes, do it.",
+            "ok",
+            "go ahead please",
+            "run it",
+            "Yes. Go ahead.",
+            "Allow.",
+            "Allow?",
+        ] {
             assert_eq!(only_yes_or_no(said), Some(true), "{said:?}");
         }
+        // A yes, but asked: what allows wants it said plainly.
+        assert!(asked("Allow?") && asked("对？ ") && !asked("Allow."));
         for said in ["no", "No.", "cancel", "not now", "never mind"] {
             assert_eq!(only_yes_or_no(said), Some(false), "{said:?}");
         }
@@ -1048,6 +1845,14 @@ mod tests {
         });
         crate::i18n::with_lang(crate::i18n::Lang::Ja, || {
             assert_eq!(yes_or_no("はい、お願いします。"), Some(true));
+            assert_eq!(only_yes_or_no("はい。お願いします。"), Some(true));
+            assert_eq!(only_yes_or_no("実行する"), Some(true));
+        });
+        crate::i18n::with_lang(crate::i18n::Lang::Zh, || {
+            assert_eq!(only_yes_or_no("对，允许。"), Some(true));
+        });
+        crate::i18n::with_lang(crate::i18n::Lang::Ko, || {
+            assert_eq!(only_yes_or_no("좋아요"), Some(true));
         });
     }
 

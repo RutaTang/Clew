@@ -487,6 +487,69 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
     Some(overlay)
 }
 
+/// What every question waiting on the user offers ([`App::questions_waiting`]),
+/// drawn or not: the project's sheet under Settings, the connect sheet
+/// under another, an approval card in an Ask put away — its answers on
+/// every page. What is said for them while they are out of reach is held
+/// (`App::said_to_question`): sent on to Ask, a "yes" would read to the
+/// agent asking as consent, and a "no" would wait there on the question.
+pub(crate) fn answers_waiting(app: &App) -> Vec<heard::Target> {
+    heard::gather_of(|| {
+        let mut parts: Vec<Element<'_, Message>> = Vec::new();
+        for question in app.questions_waiting() {
+            match question {
+                Question::Project(_) => {
+                    if let Some(root) = app.pending_consent.as_deref() {
+                        parts.push(consent_sheet(app, root, false));
+                    }
+                }
+                Question::LspCommand(_) => {
+                    if let Some((number, pending)) = app.proj.pending_lsp_command.on_screen() {
+                        parts.push(lsp_command_modal(pending, number, 0, false));
+                    }
+                }
+                Question::LspConsent(_) => {
+                    if let Some((number, consent)) = app.proj.pending_lsp_consent.on_screen() {
+                        parts.push(lsp_consent_modal(consent, number, 0, false));
+                    }
+                }
+                Question::TrustHost(_) | Question::ForgetHostKey(_) => {
+                    parts.push(connect_modal(app));
+                }
+                Question::Approval { .. } => {
+                    if let Some((turn, approval)) = app.first_approval() {
+                        let (_, pages) = panels::shown_answers(&approval.options, 0);
+                        for page in 0..pages {
+                            parts.push(panels::approval_card(
+                                turn.stream,
+                                approval,
+                                false,
+                                f32::INFINITY,
+                                page,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        parts
+    })
+}
+
+/// The sheet a first open asks on, about the folder at `root`: with the
+/// look at the project it shows, once that is under way.
+fn consent_sheet<'a>(
+    app: &'a App,
+    root: &'a std::path::Path,
+    asked: impl Into<crate::ui::placed::Asked>,
+) -> Element<'a, Message> {
+    let setup = app
+        .setup
+        .as_ref()
+        .filter(|s| s.root == root && s.mode == crate::app::setup::SetupMode::Open);
+    setup::setup_sheet(app, root, setup, asked)
+}
+
 impl<'a> ActiveOverlay<'a> {
     /// Which overlay it is, when it holds the keys yet takes none to a
     /// field of its own: every one but the hover peek (no keys), the
@@ -592,14 +655,9 @@ impl<'a> ActiveOverlay<'a> {
         match self {
             // Each Allow is drawn enabled once its question has been within
             // reach long enough to be read, where it is (`App::asked`).
-            Self::Consent(root) => setup::setup_sheet(
-                app,
-                root,
-                app.setup
-                    .as_ref()
-                    .filter(|s| s.root == root && s.mode == crate::app::setup::SetupMode::Open),
-                app.asked(Question::Project(root.to_path_buf())),
-            ),
+            Self::Consent(root) => {
+                consent_sheet(app, root, app.asked(Question::Project(root.to_path_buf())))
+            }
             Self::Setup(s) => setup::setup_sheet(app, &s.root, Some(s), true),
             Self::LspCommand(pending, number, waiting) => lsp_command_modal(
                 pending,

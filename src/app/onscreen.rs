@@ -9,6 +9,35 @@ use crate::app::voice::{Heard, HeardOutcome, Waiting};
 use crate::ui::heard::{Answer, Layer, Target};
 use crate::*;
 
+/// Why an answer is held ([`App::hold_answer`]): its question was not
+/// read yet — not in view, covered, or just come — and its Allow cannot be
+/// pressed.
+pub(crate) const TOO_SOON: &str = tr_noop!(
+    "Too soon to answer — say it again once the question has been in view, uncovered, for a moment, with the window in front"
+);
+/// … it allows, and was said as a question ("Allow?").
+pub(crate) const ASKED: &str = tr_noop!("To answer, say it plainly — not as a question");
+/// … more was said after a yes or a no ("yes, allow it", "okay, why that
+/// file?"), which answers nothing: the question waits for a plain answer
+/// before anything else is said.
+pub(crate) const ALONE: &str =
+    tr_noop!("A question is waiting — answer it first with a plain “yes” or “no”");
+/// … a plain yes or no, where the question has none to give ("Always
+/// reject" its only way to decline), or a word that also puts away what is
+/// on top ("cancel"): its answer wants its own words.
+pub(crate) const BY_NAME: &str = tr_noop!("Say the answer you mean by the words on its button");
+/// … spoken commands are off: voice presses nothing.
+pub(crate) const COMMANDS_OFF: &str =
+    tr_noop!("Spoken commands are off — answer the question with its buttons");
+
+/// What was said to a question waiting ([`App::said_to_question`]).
+pub(crate) enum ToQuestion {
+    /// A yes or a no, alone or opening more.
+    YesOrNo,
+    /// The name of something it offers.
+    Answer(Box<Target>),
+}
+
 /// What is said before or after a thing's name to press it — "click on
 /// Download", "the Retry button" — and means nothing more: the English
 /// words, and each language's.
@@ -19,6 +48,19 @@ const PRESS: &str = tr_noop!("click, click on, press, tap, hit, select, choose, 
 const DISMISS: &str = tr_noop!(
     "close, close it, close this, close that, cancel, never mind, dismiss, escape, exit, go away, hide it, hide this"
 );
+
+/// What stops Clew speaking — and an answer still being written, as Ask's
+/// Stop does ([`hushes`]): the English words, and each language's.
+const HUSH: &str = tr_noop!(
+    "stop, stop it, stop talking, stop speaking, stop reading, be quiet, quiet, enough, that's enough, shut up, shh, shush, hush"
+);
+
+/// What is said with a word that stops Clew and means nothing more: said
+/// to anyone ("okay", "please"), its name ("Stop, Clew"), the word again
+/// ("Stop, stop").
+const AROUND_A_HUSH: &[&str] = &[
+    "okay", "ok", "oh", "no", "please", "hey", "now", "just", "clew", "clue", "non", "bon", "stp",
+];
 
 /// The words a list's place is said with, around its number: "open the
 /// third result", "number 4", "第三个", "3番目", "세 번째".
@@ -271,11 +313,28 @@ fn bare(said: &str) -> Vec<String> {
 
 /// Whether `said` is only a word that puts away what is on top.
 pub(crate) fn dismisses(said: &str) -> bool {
-    use crate::app::choices::units;
+    only_one_of(said, DISMISS, crate::app::choices::units)
+}
+
+/// Whether `said` is only a word that stops Clew ("stop", "okay, be
+/// quiet"): said while it speaks, or while an answer is being written, it
+/// stops them — never a question for Ask.
+pub(crate) fn hushes(said: &str) -> bool {
+    only_one_of(said, HUSH, |text| {
+        let mut words = crate::app::choices::units(text);
+        words.retain(|w| !AROUND_A_HUSH.contains(&w.as_str()));
+        words.dedup();
+        words
+    })
+}
+
+/// Whether `said` is only one of `words` — a list, split at its commas —
+/// or of any language's words for them: both told by their `units`.
+fn only_one_of(said: &str, words: &str, units: fn(&str) -> Vec<String>) -> bool {
     let said = units(said);
     !said.is_empty()
         && crate::i18n::Lang::ALL.into_iter().any(|l| {
-            crate::i18n::lookup_in(l, DISMISS)
+            crate::i18n::lookup_in(l, words)
                 .split([',', '，', '、'])
                 .any(|w| units(w) == said)
         })
@@ -362,8 +421,12 @@ fn only_one<'a>(found: &[&'a Target]) -> Option<&'a Target> {
 }
 
 /// The row of a list on screen `said` asks for by its place: of the first
-/// list drawn (the sidebar's before the margin's).
+/// list drawn (the sidebar's before the margin's). Never for a yes or a no
+/// said alone: Korean's 네 is "yes" before it is "four".
 pub(crate) fn row(said: &str, targets: &[Target]) -> Option<Target> {
+    if crate::app::spoken::only_yes_or_no(said).is_some() {
+        return None;
+    }
     let asked = row_asked(said)?;
     let list = targets.iter().find_map(|t| t.row.map(|(list, _)| list))?;
     let rows: Vec<&Target> = targets
@@ -426,6 +489,12 @@ impl App {
         first: bool,
     ) -> Option<Task<Message>> {
         if first {
+            // A drop-down open, or jump mode's codes up: what Esc puts away
+            // before anything else — a dialog's Close or Cancel under the
+            // drop-down is not pressed for it.
+            if dismisses(said) && (self.picker.is_some() || self.jump.is_some()) {
+                return self.dismiss_heard(said, targets);
+            }
             // A question on screen answered. A word that also puts away
             // what is on top ("cancel", "never mind") answers only a
             // question that is on top: said with a card in Ask, it closes
@@ -448,7 +517,7 @@ impl App {
                 return Some(self.press_heard(said, t));
             }
             if dismisses(said) {
-                return self.dismiss_heard(said);
+                return self.dismiss_heard(said, targets);
             }
             // What is on top put away by its name: "close the call graph"
             // went to Ask as a question about the call graph.
@@ -498,10 +567,26 @@ impl App {
 
     /// Press `target`, as `said` asked — or, when it undoes or costs
     /// something, ask first ([`asks_first`]).
-    fn press_heard(&mut self, said: &str, target: Target) -> Task<Message> {
+    pub(crate) fn press_heard(&mut self, said: &str, target: Target) -> Task<Message> {
         let text = said.to_string();
+        // An answer whose question was not read yet, or a button waiting
+        // on something ([`Target::waiting`]): what was said for it waits,
+        // told why — sent on to Ask, a "yes" would read to the agent asking
+        // as consent.
+        if let Some(why) = target.waiting {
+            return self.hold_answer(text, why);
+        }
+        // "Allow?", "Always allow read_file?": asked, not answered — what
+        // allows wants to be said plainly.
+        if target.allows && crate::app::spoken::asked(said) && self.question_pending().is_some() {
+            return self.hold_answer(text, ASKED);
+        }
         if asks_first(&target) {
-            self.status = tr!("“{text}” → {command}?", text = text, command = target.shown);
+            self.status = tr!(
+                "{command}? Say yes or no — “{text}”",
+                text = text,
+                command = target.shown
+            );
             self.voice.hear(Heard {
                 text,
                 outcome: HeardOutcome::Confirm(target.shown.clone()),
@@ -520,20 +605,150 @@ impl App {
         self.press(target.message)
     }
 
-    /// Put away what is on top, as Esc does, for `said`: the tutorial, a
-    /// dialog or menu, the large Ask, Time Travel, the find bar, the Ask
-    /// card, a page over the code. `None` when nothing is.
-    fn dismiss_heard(&mut self, said: &str) -> Option<Task<Message>> {
-        let task = if self.tutorial.is_some() {
+    /// What `said` says to a question waiting ([`App::question_pending`])
+    /// that nothing within reach took — the name of something it offers
+    /// ([`App::answer_named`]: "Trust and connect", "Always reject"),
+    /// or anything that opens with a yes or a no ("yes", "allow it", "okay,
+    /// why that file?", "don't run it") — wherever that question is:
+    /// covered, not yet ready to answer, in an Ask put away, a page further
+    /// on its card. Held ([`App::hold_for_question`]), it goes nowhere else:
+    /// the question is answered first, plainly, and what else is to be said
+    /// is said after.
+    pub(crate) fn said_to_question(&self, said: &str) -> Option<ToQuestion> {
+        self.question_pending()?;
+        let drawn = crate::ui::heard::gather_heard(self);
+        if let Some((target, _)) = self.answer_named(said, &drawn, |_| true) {
+            return Some(ToQuestion::Answer(Box::new(target)));
+        }
+        crate::app::spoken::yes_or_no(said).map(|_| ToQuestion::YesOrNo)
+    }
+
+    /// Hold `text`, said to a question waiting (`to`, from
+    /// [`App::said_to_question`]), saying why — spoken commands off, a yes
+    /// or a no the question has no answer for, more said than a yes or a
+    /// no, asked rather than answered, or said before the question could
+    /// be read — and bring that question into view where it can be: an
+    /// approval's Ask put away comes back, on the page of the answer meant.
+    pub(crate) fn hold_for_question(&mut self, text: String, to: ToQuestion) -> Task<Message> {
+        let more = matches!(to, ToQuestion::YesOrNo)
+            && crate::app::spoken::only_yes_or_no(&text).is_none();
+        // The answer meant: the one named, or the question's own yes or
+        // no — not for a word that also puts away what is on top
+        // ("cancel"), which, said again, would close the question instead.
+        let meant = match to {
+            ToQuestion::Answer(target) => Some(*target),
+            ToQuestion::YesOrNo => crate::app::spoken::yes_or_no(&text)
+                .filter(|_| !dismisses(&text))
+                .and_then(|yes| {
+                    let answer = Some(if yes { Answer::Yes } else { Answer::No });
+                    crate::ui::answers_waiting(self)
+                        .into_iter()
+                        .find(|t| t.answer == answer)
+                }),
+        };
+        match meant.as_ref().map(|t| &t.message) {
+            Some(Message::Ask(AskMsg::Approve { option, .. })) => {
+                let option = option.clone();
+                self.show_approval_answer(&option);
+            }
+            None if matches!(
+                self.question_pending(),
+                Some(crate::app::model::Question::Approval { .. })
+            ) =>
+            {
+                self.reveal_ask();
+            }
+            _ => {}
+        }
+        let why = if !self.voice.prefs.run_commands {
+            COMMANDS_OFF
+        } else if meant.is_none() {
+            BY_NAME
+        } else if more {
+            ALONE
+        } else if crate::app::spoken::asked(&text) && meant.as_ref().is_some_and(|t| t.allows) {
+            // Only what allows wants it said plainly: a decline is taken
+            // asked too, once in view.
+            ASKED
+        } else {
+            TOO_SOON
+        };
+        self.hold_answer(text, why)
+    }
+
+    /// Bring the approval waiting into view on the page of its answer
+    /// `option`: Ask, put away, comes back, and the card turns to it.
+    fn show_approval_answer(&mut self, option: &str) {
+        let Some((stream, key, page)) = self.first_approval().and_then(|(turn, approval)| {
+            let (_, pages) = crate::ui::shown_answers(&approval.options, 0);
+            (0..pages)
+                .find(|&page| {
+                    crate::ui::shown_answers(&approval.options, page)
+                        .0
+                        .iter()
+                        .any(|o| o.id == option)
+                })
+                .map(|page| (turn.stream, approval.key, page))
+        }) else {
+            return;
+        };
+        self.reveal_ask();
+        let question = crate::app::model::Question::Approval { stream, key };
+        let shown = match &self.asking.answers_page {
+            Some((on, page)) if *on == question => *page,
+            _ => 0,
+        };
+        if shown != page {
+            let _ = self.on_answers_page(stream, key, page);
+        }
+    }
+
+    /// An answer said (`text`), held, saying `why` ([`TOO_SOON`], [`ASKED`],
+    /// [`ALONE`], [`BY_NAME`], [`COMMANDS_OFF`], or a button's own reason): it presses
+    /// nothing, and goes nowhere else — sent on to Ask, a "yes" would read
+    /// to the agent asking as consent.
+    pub(crate) fn hold_answer(&mut self, text: String, why: &'static str) -> Task<Message> {
+        self.status = crate::i18n::lookup(why).into();
+        self.voice.hear(Heard {
+            text,
+            outcome: HeardOutcome::Failed(why.into()),
+        });
+        Task::none()
+    }
+
+    /// Put away what is on top, in the order Esc does, for `said`: jump
+    /// mode's codes, a drop-down, the tutorial, a dialog or menu, the large Ask, Time
+    /// Travel, the find bar, Ask's menu of sessions, the Ask card, a page
+    /// over the code. `None` when nothing is. Where it would put Ask itself
+    /// away, an answer of the agent's card called by the very words said
+    /// ("Cancel", an agent's own name for declining) is given instead —
+    /// put away, the card came back held, and went again said again —
+    /// while anything Esc takes first still goes first, the card's answer
+    /// left alone.
+    fn dismiss_heard(&mut self, said: &str, targets: &[Target]) -> Option<Task<Message>> {
+        let task = if self.jump.take().is_some() {
+            Task::none()
+        } else if self.picker.is_some() {
+            self.picker = None;
+            Task::none()
+        } else if self.tutorial.is_some() {
             self.on_tutorial_exit()
         } else if let Some(message) = ui::escape_message(self) {
             self.update(message)
+        } else if self.ask_view == AskView::Expanded
+            && let Some(answer) = self.card_answer_named(said, targets)
+        {
+            return Some(self.give_card_answer(said, answer));
         } else if self.ask_view == AskView::Expanded && self.step_ask_down() {
             Task::none()
         } else if ui::time_travel_on_screen(self).is_some() {
             self.update(Message::TimeTravel(TimeTravelMsg::Exit))
         } else if self.proj.find.open {
             self.update(Message::Editor(EditorMsg::FindClosed))
+        } else if self.ask_view.is_open()
+            && let Some(answer) = self.card_answer_named(said, targets)
+        {
+            return Some(self.give_card_answer(said, answer));
         } else if (self.ask_view.is_open() && self.step_ask_down())
             || (ui::pane_cover(self).is_some_and(|c| c.is_page()) && self.put_away_page())
         {
@@ -542,6 +757,62 @@ impl App {
             return None;
         };
         Some(self.closed_as_said(said, task))
+    }
+
+    /// The answer of the agent's card `said` names, and whether it is
+    /// drawn (`targets`) or a page further: any of its answers, those
+    /// given by their words alone ("Always reject") too. None while Ask's
+    /// menu of sessions is open over the card: Esc takes that first.
+    fn card_answer_named(&self, said: &str, targets: &[Target]) -> Option<(Target, bool)> {
+        if self.ask_sessions_menu {
+            return None;
+        }
+        // Named among the card's own answers: another "Cancel" on screen —
+        // an update's download — made the name stand for neither.
+        self.answer_named(said, targets, |t| {
+            matches!(t.message, Message::Ask(AskMsg::Approve { .. }))
+        })
+    }
+
+    /// The answer of a question waiting that `said` names, of those `of`
+    /// keeps, and whether its button is drawn (`targets`): named among all
+    /// its answers — a card's every page, so the "Stop" on the next is not
+    /// the page in view's "Stop (keep edits)" — else, two of them named
+    /// alike, among those in view.
+    pub(crate) fn answer_named(
+        &self,
+        said: &str,
+        targets: &[Target],
+        of: impl Fn(&Target) -> bool,
+    ) -> Option<(Target, bool)> {
+        let does = |t: &Target| format!("{:?}", t.message);
+        let waiting: Vec<Target> = crate::ui::answers_waiting(self)
+            .into_iter()
+            .filter(|t| of(t))
+            .collect();
+        let answers: std::collections::HashSet<String> = waiting.iter().map(does).collect();
+        let drawn: Vec<Target> = targets
+            .iter()
+            .filter(|t| answers.contains(&does(t)))
+            .cloned()
+            .collect();
+        let answer = named(said, &waiting).or_else(|| named(said, &drawn))?;
+        let it = does(&answer);
+        Some(match drawn.into_iter().find(|t| does(t) == it) {
+            Some(drawn) => (drawn, true),
+            None => (answer, false),
+        })
+    }
+
+    /// Give the card's answer `said` named: pressed where it is drawn,
+    /// else held and the card turned to its page
+    /// ([`App::hold_for_question`]).
+    fn give_card_answer(&mut self, said: &str, (answer, drawn): (Target, bool)) -> Task<Message> {
+        if drawn {
+            self.press_heard(said, answer)
+        } else {
+            self.hold_for_question(said.to_string(), ToQuestion::Answer(Box::new(answer)))
+        }
     }
 
     /// `said` put something away, by `task`: said so on the status line and
@@ -621,6 +892,32 @@ mod tests {
         }
     }
 
+    /// A yes or a no said alone is no row's place: Korean's 네 is "yes"
+    /// before it is "four" — 네 번째 is the fourth.
+    #[test]
+    fn a_yes_said_alone_picks_no_row() {
+        use crate::i18n::{Lang, with_lang};
+        let rows: Vec<Target> = (1..=5)
+            .map(|i| Target {
+                row: Some((0, i)),
+                ..target(&format!("file {i}"), Message::Noop)
+            })
+            .collect();
+        with_lang(Lang::Ko, || {
+            for said in ["네", "네.", "네, 네"] {
+                assert!(row(said, &rows).is_none(), "{said:?}");
+            }
+            assert_eq!(
+                row("네 번째", &rows).map(|t| t.title),
+                Some("file 4".to_string())
+            );
+            assert_eq!(
+                row("세 번째", &rows).map(|t| t.title),
+                Some("file 3".to_string())
+            );
+        });
+    }
+
     fn target(title: &str, message: Message) -> Target {
         Target {
             title: title.into(),
@@ -630,6 +927,8 @@ mod tests {
             row: None,
             answer: None,
             typing: None,
+            waiting: None,
+            allows: false,
         }
     }
 
@@ -690,6 +989,46 @@ mod tests {
         }
         for said in ["close the minimap", "close the file", ""] {
             assert!(!dismisses(said), "{said:?}");
+        }
+    }
+
+    /// What stops Clew is said alone too, in any language — what is said
+    /// to anyone with it aside, its name, or the word again: "stop the run"
+    /// is a command of its own.
+    #[test]
+    fn stop_alone_stops_clew_speaking() {
+        for said in [
+            "stop",
+            "Stop.",
+            "Okay, stop.",
+            "No, stop!",
+            "Stop, stop.",
+            "Stop please.",
+            "Stop, Clew.",
+            "That's enough.",
+            "Be quiet!",
+            "Shut up.",
+            "arrête",
+            "Arrête de parler.",
+            "别说了。",
+            "停下来",
+            "静かに",
+            "もういい",
+            "読まないで",
+            "그만해",
+            "그만 읽어",
+        ] {
+            assert!(hushes(said), "{said:?}");
+        }
+        for said in [
+            "stop the run",
+            "stop watching total",
+            "quiet mode",
+            "no",
+            "okay, please",
+            "",
+        ] {
+            assert!(!hushes(said), "{said:?}");
         }
     }
 }

@@ -4467,11 +4467,11 @@ mod tests {
         assert!(clew.windows[&other].voice.wake.is_waiting());
         // A window in front that cannot wait — its waiting failed — takes
         // nothing from the one that does.
-        clew.windows.get_mut(&waits).unwrap().voice.wake.failed = true;
+        clew.windows.get_mut(&waits).unwrap().voice.wake.failed = Some("broken".into());
         let _ = update(&mut clew, focus(waits));
         assert!(clew.windows[&other].voice.wake.is_waiting());
         assert!(!clew.windows[&waits].voice.wake.is_waiting());
-        clew.windows.get_mut(&waits).unwrap().voice.wake.failed = false;
+        clew.windows.get_mut(&waits).unwrap().voice.wake.failed = None;
         // Closed, the window in front waits instead, with its microphone.
         let opened = OPENED.load(Ordering::Relaxed);
         clew.focused = Some(waits);

@@ -268,7 +268,7 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
         .padding(0)
         .width(Length::Fixed(26.0))
         .height(Length::Fixed(26.0))
-        .on_press(super::heard::said(
+        .on_press(super::heard::named_only(
             if listening {
                 tr!("Stop listening")
             } else {
@@ -277,7 +277,7 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
             Message::Voice(VoiceMsg::Toggle),
         )),
         if listening {
-            tr!("Stop listening")
+            stop_listening_tip()
         } else {
             talk_tip(app)
         },
@@ -381,6 +381,13 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
     // answer most of all, which is in it.
     if let Some(bar) = voice_confirm(app) {
         return Some(inset(bar));
+    }
+    // Heard while Clew speaks on — "Bye, Clew" — it says what came of it a
+    // moment before it says Clew is speaking again.
+    if app.voice.speech.is_speaking()
+        && let Some(line) = pill_heard(app)
+    {
+        return Some(opens_ask(line));
     }
     if let Some(line) = speaking_line(app) {
         return Some(opens_ask(line));
@@ -1188,6 +1195,12 @@ pub(crate) fn talk_tip(app: &App) -> &'static str {
     }
 }
 
+/// The microphone's tip while it listens: "Bye, Clew" turns it off too —
+/// or, called by its name, has it wait for it again.
+pub(crate) fn stop_listening_tip() -> &'static str {
+    tr!("Stop listening — or say “Bye, Clew”")
+}
+
 /// The voice key's round button, `side` across, lit in the accent while
 /// the microphone is on — the microphone, which turns it off — or Clew
 /// speaks — a stop. `None` otherwise: the microphone as it is at rest.
@@ -1200,7 +1213,7 @@ pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, M
             true,
         )
     } else if app.voice.mic_on {
-        (Glyph::Mic, VoiceMsg::Toggle, tr!("Stop listening"), true)
+        (Glyph::Mic, VoiceMsg::Toggle, stop_listening_tip(), true)
     } else {
         return None;
     };
@@ -1215,49 +1228,163 @@ pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, M
         .padding(0)
         .width(Length::Fixed(side))
         .height(Length::Fixed(side))
-        .on_press(super::heard::said(tip, Message::Voice(message)));
+        .on_press(if matches!(message, VoiceMsg::Toggle) {
+            super::heard::named_only(tr!("Stop listening"), Message::Voice(message))
+        } else {
+            super::heard::said(tip, Message::Voice(message))
+        });
 
     Some(tip_at(lit, tip, chord, tooltip::Position::Top))
 }
 
 /// Voice on the card, under its header: what was last heard and what came
-/// of it, as the microphone listens on. A command waiting for a yes is over
-/// the composer ([`voice_confirm`]), and Clew speaking beside it
-/// ([`voice_meter`]). `None` when there is nothing to say.
+/// of it, as the microphone listens on — not while a command waits for a
+/// yes, which says it over the composer ([`voice_confirm`]); and what keeps
+/// answers from being heard ([`blocked_line`]). Both stay while Clew speaks
+/// ([`voice_meter`], beside the composer): taken away as it began and put
+/// back as it ended, they made the answer under them jump twice an answer
+/// — and once a sentence, where only some of an answer's sentences are
+/// read. `None` when there is nothing to say.
 pub(crate) fn voice_strip(app: &App) -> Option<Element<'_, Message>> {
-    if app.voice.confirm.is_some() || app.voice.speech.is_speaking() {
+    let lines: Vec<Element<'_, Message>> = heard_line(app)
+        .filter(|_| app.voice.confirm.is_none())
+        .into_iter()
+        .chain(blocked_line(app))
+        .collect();
+    if lines.is_empty() {
         return None;
     }
-    let line: Element<'_, Message> = {
-        {
-            let heard = app.voice.heard.as_ref()?;
-            let (said, color) = match &heard.outcome {
-                HeardOutcome::Ran(title) => (
-                    format!("→ {}", crate::i18n::lookup(title)),
-                    theme::fg_muted(),
-                ),
-                HeardOutcome::Confirm(title) => (
-                    format!(
-                        "→ {}",
-                        tr!("{command}?", command = crate::i18n::lookup(title))
-                    ),
-                    theme::fg_muted(),
-                ),
-                HeardOutcome::Asked => (format!("→ {}", tr!("asked")), theme::fg_muted()),
-                HeardOutcome::Failed(e) => (crate::i18n::message(e), theme::warn()),
-            };
-            let mut line = row![].spacing(6).align_y(iced::Center);
-            if !heard.text.is_empty() {
-                line = line.push(
-                    text(format!("“{}”", heard.text))
-                        .size(ts::SMALL)
-                        .color(theme::fg()),
-                );
-            }
-            line.push(text(said).size(ts::SMALL).color(color)).into()
-        }
+    Some(
+        container(column(lines).spacing(6))
+            .padding([6, 12])
+            .width(Fill)
+            .into(),
+    )
+}
+
+/// What was last heard, and what came of it.
+fn heard_line(app: &App) -> Option<Element<'_, Message>> {
+    let heard = app.voice.heard.as_ref()?;
+    let (said, color) = match &heard.outcome {
+        HeardOutcome::Ran(title) => (
+            format!("→ {}", crate::i18n::lookup(title)),
+            theme::fg_muted(),
+        ),
+        HeardOutcome::Confirm(title) => (
+            format!(
+                "→ {}",
+                tr!("{command}?", command = crate::i18n::lookup(title))
+            ),
+            theme::fg_muted(),
+        ),
+        HeardOutcome::Asked => (format!("→ {}", tr!("asked")), theme::fg_muted()),
+        HeardOutcome::Failed(e) => (crate::i18n::message(e), theme::warn()),
     };
-    Some(container(line).padding([6, 12]).width(Fill).into())
+    let mut line = row![].spacing(6).align_y(iced::Center);
+    if !heard.text.is_empty() {
+        line = line.push(
+            text(format!("“{}”", heard.text))
+                .size(ts::SMALL)
+                .color(theme::fg()),
+        );
+    }
+    Some(line.push(text(said).size(ts::SMALL).color(color)).into())
+}
+
+/// What keeps answers from being heard — no voice here for their language,
+/// with its download; or the voice failing, why, and Settings, where
+/// voices are tried — until it is put right or put away. Said where the
+/// answer is, not only on the status line, which is soon said over: what
+/// is wrong and a small ✕ to hide it on one line — not the header's Close
+/// a few lines up, which it is not, nor named as it is — and what puts it
+/// right under it.
+fn blocked_line(app: &App) -> Option<Element<'_, Message>> {
+    use crate::app::speech::Blocked;
+    use clew_voice::speech;
+    let (blocked, voice_here) = app.blocked_now()?;
+    let said = |line: String, color| {
+        text(line)
+            .size(ts::SMALL)
+            .color(color)
+            .wrapping(Wrapping::WordOrGlyph)
+            .width(Fill)
+    };
+    let hide = tr!("Hide this notice");
+    let dismiss = button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
+        .style(theme::icon_button(false))
+        .padding([5, 7])
+        .on_press(super::heard::said(
+            hide,
+            Message::Voice(VoiceMsg::DismissBlocked(blocked.clone())),
+        ));
+    // Under it, as the header's buttons have theirs: over them, it hid
+    // the card's Close.
+    let dismiss = tip_at(dismiss, hide, None, tooltip::Position::Bottom);
+    match blocked {
+        Blocked::Missing { model, .. } => {
+            let model = speech::find(model)?;
+            let name = crate::i18n::lookup(model.name);
+            let getting_here = app.voice.speech.downloads.get(model.id);
+            // With a voice here, this answer — or the part of it in a
+            // language that voice does not speak — needs this one. With
+            // none, any voice that speaks the language would do: this one
+            // is the best of them — and once it is being got, that is
+            // what is said, not to get it.
+            let line = if voice_here {
+                tr!("{model} is needed to read this answer aloud", model = name)
+            } else if getting_here.is_some() {
+                tr!(
+                    "Downloading {model} ({size} MB)…",
+                    model = name,
+                    size = model.size_mb()
+                )
+            } else {
+                tr!("To hear answers read aloud, download {model}", model = name)
+            };
+            // Its buttons named by the model they get, as Settings' are.
+            let getting: Element<'_, Message> = super::heard::about(name, || match getting_here {
+                Some(d) => super::voice::getting(
+                    d.done,
+                    d.total.unwrap_or(model.bytes()),
+                    Message::Voice(VoiceMsg::CancelSpeechDownload(model.id)),
+                ),
+                None => form::action(
+                    &tr!("Download ({size} MB)", size = model.size_mb()),
+                    Some(Message::Voice(VoiceMsg::DownloadSpeech(model.id))),
+                )
+                .into(),
+            });
+            let mut lines = column![
+                row![said(line, theme::fg_muted()), dismiss]
+                    .spacing(8)
+                    .align_y(iced::Center),
+                getting,
+            ]
+            .spacing(4);
+            // Its download failed: why, where it was asked for.
+            if getting_here.is_none()
+                && let Some(e) = app.voice.speech.download_errors.get(model.id)
+            {
+                lines = lines.push(said(crate::i18n::message(e), theme::warn()));
+            }
+            Some(lines.into())
+        }
+        Blocked::Failed { why, .. } => Some(
+            column![
+                row![said(why.clone(), theme::warn()), dismiss]
+                    .spacing(8)
+                    .align_y(iced::Center),
+                form::action(
+                    tr!("Settings"),
+                    Some(Message::Settings(crate::SettingsMsg::OpenAt(
+                        crate::SettingsPage::Voice
+                    ))),
+                ),
+            ]
+            .spacing(4)
+            .into(),
+        ),
+    }
 }
 
 #[cfg(test)]

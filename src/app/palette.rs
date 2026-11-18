@@ -180,6 +180,18 @@ impl PaletteCommand {
         }
     }
 
+    /// Whether it is the voice key's own "Talk", which turns the
+    /// microphone on or off: never matched to what is said — said, the
+    /// microphone is already on, and it is let go of by "Bye, Clew" alone.
+    pub(crate) fn is_the_voice_key(&self) -> bool {
+        matches!(
+            self.action,
+            PaletteAction::Send(Message::Editor(EditorMsg::RunAction(
+                crate::keymap::Action::Voice
+            )))
+        )
+    }
+
     /// Whether the agent, running it, asks the user first: what costs
     /// something ([`Self::costly`]), and a setting that changes what the
     /// microphone takes in and what is done with it, where the project's
@@ -197,18 +209,18 @@ impl PaletteCommand {
         let (PaletteAction::Send(message) | PaletteAction::AtCaret(message)) = &self.action else {
             return false;
         };
-        matches!(
-            message,
-            Message::Voice(
-                VoiceMsg::SetSendQuestions(_)
-                    | VoiceMsg::SetRunCommands(_)
-                    | VoiceMsg::SetTalkOver(_)
-                    | VoiceMsg::SetWake(_)
-                    | VoiceMsg::PickModel(_)
-            ) | Message::Editor(EditorMsg::RunAction(crate::keymap::Action::Voice))
-                | Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
-                | Message::Updater(UpdaterMsg::SetAuto(_))
-        )
+        self.is_the_voice_key()
+            || matches!(
+                message,
+                Message::Voice(
+                    VoiceMsg::SetSendQuestions(_)
+                        | VoiceMsg::SetRunCommands(_)
+                        | VoiceMsg::SetTalkOver(_)
+                        | VoiceMsg::SetWake(_)
+                        | VoiceMsg::PickModel(_)
+                ) | Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
+                    | Message::Updater(UpdaterMsg::SetAuto(_))
+            )
     }
 
     /// Whether the reader, saying it, is asked first: what [`Self::costly`]

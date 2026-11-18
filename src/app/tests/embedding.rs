@@ -8,18 +8,6 @@ use clew_core::embed::local::{self, MODEL};
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 
-/// Feed `task`'s messages back, and theirs, until there are none.
-fn settle(app: &mut App, task: Task<Message>) {
-    let mut pending = run_task(task);
-    while !pending.is_empty() {
-        let mut next = Vec::new();
-        for message in pending {
-            next.extend(run_task(app.update(message)));
-        }
-        pending = next;
-    }
-}
-
 /// A private data directory for one test.
 fn data(tag: &str) -> (PathBuf, DataDirOverride) {
     let dir = test_dir(tag);

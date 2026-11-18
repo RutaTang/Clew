@@ -10,7 +10,11 @@
 //!
 //! What is offered is the reader's to press by voice, never the agent's:
 //! a question's Allow, a host key's Trust, an approval's Run it are among
-//! them, and only the person at the window may answer those.
+//! them, and only the person at the window may answer those. Such an
+//! answer is offered even before it can be pressed ([`answer_when`]): said
+//! then, it is known to be said for it and waits, and is not taken for
+//! anything else — a "yes" sent on to the agent asking would read as
+//! consent.
 
 use std::cell::RefCell;
 
@@ -57,6 +61,18 @@ pub(crate) struct Target {
     /// A field what is said is typed into: what it holds, and what typing
     /// in it sends.
     pub typing: Option<Typing>,
+    /// Not to be pressed yet, and why: an answer whose question is not
+    /// within the reader's reach long enough to be read (`App::may_allow`,
+    /// [`crate::app::onscreen::TOO_SOON`]), or a button waiting on what its
+    /// tip says. Only voice is offered it ([`gather_heard`]): what is said
+    /// for it is held, and told why.
+    pub waiting: Option<&'static str>,
+    /// It allows, runs or trusts what a question waiting on the user asks
+    /// — its "yes" ([`answer_when`]), or what answers every such question
+    /// from now on ("Always allow…", [`said_when`]): said as a question, it
+    /// is not pressed. A dialog's plain "yes" ([`answer`]) — Save, Update
+    /// now — answers no such question, and is not.
+    pub allows: bool,
 }
 
 /// A field's text, and what typing in it sends.
@@ -131,6 +147,19 @@ pub(crate) fn gathering() -> bool {
 }
 
 fn push(title: String, shown: String, message: &Message, answer: Option<Answer>, row: bool) {
+    push_as(title, shown, message, answer, row, (None, false));
+}
+
+/// [`push`], `(waiting, allows)` as given ([`Target::waiting`],
+/// [`Target::allows`]).
+fn push_as(
+    title: String,
+    shown: String,
+    message: &Message,
+    answer: Option<Answer>,
+    row: bool,
+    (waiting, allows): (Option<&'static str>, bool),
+) {
     GATHERING.with(|g| {
         if let Some(g) = g.borrow_mut().as_mut() {
             let row = row.then(|| {
@@ -148,6 +177,8 @@ fn push(title: String, shown: String, message: &Message, answer: Option<Answer>,
                     row: None,
                     answer,
                     typing: None,
+                    waiting,
+                    allows,
                 });
             }
             g.targets.push(Target {
@@ -158,6 +189,8 @@ fn push(title: String, shown: String, message: &Message, answer: Option<Answer>,
                 row,
                 answer,
                 typing: None,
+                waiting,
+                allows,
             });
         }
     });
@@ -181,6 +214,15 @@ pub(crate) fn offer(shown: &str, message: &Message) {
 /// press is wrapped in, where it is built.
 pub(crate) fn said(shown: &str, message: Message) -> Message {
     offer(shown, &message);
+    message
+}
+
+/// `message`, named `shown` for the keyboard's jump badges but not offered
+/// to be said: the microphone's own button, which while it listens could
+/// only stop listening — said "Bye, Clew" in every language, not its label
+/// ("Stop listening", "Talk").
+pub(crate) fn named_only(shown: &str, message: Message) -> Message {
+    note(shown, &message);
     message
 }
 
@@ -254,6 +296,96 @@ pub(crate) fn answer(shown: &str, answer: Answer, message: Message) -> Message {
     message
 }
 
+/// [`answer`] once the question it answers may be answered (`ready`:
+/// `App::may_allow`) — the press to put on the button, `None` until then.
+/// Until then it is offered as waiting ([`Target::waiting`]): a "yes", or
+/// its name, said for it waits, and goes nowhere else.
+pub(crate) fn answer_when(
+    ready: bool,
+    shown: &str,
+    answer: Answer,
+    message: Message,
+) -> Option<Message> {
+    answer_unless(too_soon(ready), shown, answer, message)
+}
+
+/// [`answer_when`], held for `why` when there is a reason it cannot be
+/// pressed yet — the question not read yet, or what its tip says (the
+/// project still checked) — and what is said for it told that reason.
+pub(crate) fn answer_unless(
+    why: Option<&'static str>,
+    shown: &str,
+    answer: Answer,
+    message: Message,
+) -> Option<Message> {
+    if gathering() {
+        push_as(
+            title_of(shown),
+            shown.to_string(),
+            &message,
+            Some(answer),
+            false,
+            (why, answer == Answer::Yes),
+        );
+    }
+    if why.is_none() {
+        note(shown, &message);
+        return Some(message);
+    }
+    None
+}
+
+/// [`answer`] for a button that cannot be pressed yet, and says `why` where
+/// the pointer rests: no press to put on it, and what is said for it is
+/// held, told `why` ([`Target::waiting`]) — not sent on to Ask as a
+/// question, behind the dialog it was said to.
+pub(crate) fn answer_held(
+    why: &'static str,
+    shown: &str,
+    answer: Answer,
+    message: Message,
+) -> Option<Message> {
+    if gathering() {
+        push_as(
+            title_of(shown),
+            shown.to_string(),
+            &message,
+            Some(answer),
+            false,
+            (Some(why), false),
+        );
+    }
+    None
+}
+
+/// Why an answer whose question cannot be answered yet (not `ready`) is
+/// held ([`Target::waiting`]).
+fn too_soon(ready: bool) -> Option<&'static str> {
+    (!ready).then_some(crate::app::onscreen::TOO_SOON)
+}
+
+/// [`said`] once it may be pressed (`ready`), as [`answer_when`] — for an
+/// answer that allows but that no "yes" gives, only its own words
+/// ("Always allow…"): said as a question, it is not pressed
+/// ([`Target::allows`]).
+pub(crate) fn said_when(ready: bool, shown: &str, message: Message) -> Option<Message> {
+    if gathering() {
+        push_as(
+            title_of(shown),
+            shown.to_string(),
+            &message,
+            None,
+            false,
+            (too_soon(ready), true),
+        );
+    }
+    if ready {
+        note(shown, &message);
+        return Some(message);
+    }
+    None
+}
+
 /// A field that holds `value`, `on_input` sending what it is changed to:
 /// what is said, when nothing else is meant, is typed into it while it is
 /// on top (a note, a breakpoint's condition, the command bar's query).
@@ -268,6 +400,8 @@ pub(crate) fn field(value: &str, on_input: fn(String) -> Message) {
                 row: None,
                 answer: None,
                 typing: Some((value.to_string(), on_input)),
+                waiting: None,
+                allows: false,
             });
         }
     });
@@ -353,6 +487,14 @@ pub(crate) fn layer(layer: Layer) {
 /// (top to bottom, as a list reads) — of the layer on top only, as a
 /// dialog over the window leaves nothing under it to press.
 pub(crate) fn gather(app: &App) -> Vec<Target> {
+    let mut targets = gather_heard(app);
+    targets.retain(|t| t.waiting.is_none());
+    targets
+}
+
+/// [`gather`], with the answers still waiting to be pressable
+/// ([`Target::waiting`]): what voice hears said for them.
+pub(crate) fn gather_heard(app: &App) -> Vec<Target> {
     let (targets, _) = gather_all(app);
     on_top(targets, app.ask_view == crate::AskView::Expanded)
 }
@@ -360,6 +502,20 @@ pub(crate) fn gather(app: &App) -> Vec<Target> {
 /// Every target the view offers, of every layer, and every press it marks
 /// for jump mode ([`marked`]).
 pub(crate) fn gather_all(app: &App) -> (Vec<Target>, Vec<(String, Layer)>) {
+    gather_all_of(|| crate::ui::view(app))
+}
+
+/// What building `build` offers, all of it — one part of the view,
+/// gathered as [`gather`] gathers the whole.
+pub(crate) fn gather_of<T>(build: impl FnOnce() -> T) -> Vec<Target> {
+    gather_all_of(build).0
+}
+
+/// [`gather_of`], with every press it marks for jump mode too: what
+/// [`gather_all`] gives for the whole view.
+pub(crate) fn gather_all_of<T>(build: impl FnOnce() -> T) -> (Vec<Target>, Vec<(String, Layer)>) {
+    // Gathering ends however building does: a panic in it left every view
+    // built after gathering for no one.
     struct Stop;
     impl Drop for Stop {
         fn drop(&mut self) {
@@ -368,36 +524,12 @@ pub(crate) fn gather_all(app: &App) -> (Vec<Target>, Vec<(String, Layer)>) {
     }
     GATHERING.with(|g| *g.borrow_mut() = Some(Gathering::default()));
     let stop = Stop;
-    drop(crate::ui::view(app));
+    drop(build());
     let gathered = GATHERING
         .with(|g| g.borrow_mut().take())
         .unwrap_or_default();
     drop(stop);
     (gathered.targets, gathered.marks)
-}
-
-/// What building `build` offers, all of it — one part of the view,
-/// gathered as [`gather`] gathers the whole.
-#[cfg(test)]
-pub(crate) fn gather_of<T>(build: impl FnOnce() -> T) -> Vec<Target> {
-    GATHERING.with(|g| *g.borrow_mut() = Some(Gathering::default()));
-    drop(build());
-    GATHERING
-        .with(|g| g.borrow_mut().take())
-        .map(|g| g.targets)
-        .unwrap_or_default()
-}
-
-/// [`gather_of`], with every press it marks for jump mode too: what
-/// [`gather_all`] gives for the whole view.
-#[cfg(test)]
-pub(crate) fn gather_all_of<T>(build: impl FnOnce() -> T) -> (Vec<Target>, Vec<(String, Layer)>) {
-    GATHERING.with(|g| *g.borrow_mut() = Some(Gathering::default()));
-    drop(build());
-    GATHERING
-        .with(|g| g.borrow_mut().take())
-        .map(|g| (g.targets, g.marks))
-        .unwrap_or_default()
 }
 
 /// Of `targets`, those a press can reach: the tutorial's while it runs, a
@@ -420,6 +552,43 @@ fn on_top(targets: Vec<Target>, ask_large: bool) -> Vec<Target> {
 mod tests {
     use super::*;
 
+    /// What allows is marked so, each kind of target ([`Target::allows`]),
+    /// and what waits for its question to be read ([`Target::waiting`]).
+    #[test]
+    fn what_allows_and_what_waits_is_marked() {
+        let targets = gather_of(|| {
+            answer_when(true, "Allow", Answer::Yes, Message::Noop);
+            answer_when(true, "Decline", Answer::No, Message::Noop);
+            // A dialog's own yes, which answers no question waiting.
+            answer("Save", Answer::Yes, Message::Noop);
+            answer_when(false, "Trust and connect", Answer::Yes, Message::Noop);
+            said_when(true, "Always allow", Message::Noop);
+            said_when(false, "Download", Message::Noop);
+            said("Open", Message::Noop);
+            row(|| "README.md".to_string(), Message::Noop);
+        });
+        let kind = |shown: &str| {
+            let t = targets
+                .iter()
+                .find(|t| t.shown == shown)
+                .unwrap_or_else(|| panic!("{shown} offered: {targets:?}"));
+            (t.allows, t.waiting.is_some())
+        };
+        assert_eq!(kind("Allow"), (true, false));
+        assert_eq!(kind("Decline"), (false, false));
+        assert_eq!(kind("Save"), (false, false));
+        assert_eq!(kind("Trust and connect"), (true, true));
+        assert_eq!(kind("Always allow"), (true, false));
+        assert_eq!(kind("Download"), (true, true));
+        assert_eq!(kind("Open"), (false, false));
+        assert!(
+            targets
+                .iter()
+                .filter(|t| t.row.is_some())
+                .all(|t| !t.allows)
+        );
+    }
+
     fn target(title: &str, layer: Layer) -> Target {
         Target {
             title: title.into(),
@@ -429,6 +598,8 @@ mod tests {
             row: None,
             answer: None,
             typing: None,
+            waiting: None,
+            allows: false,
         }
     }
 
