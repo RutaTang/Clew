@@ -2565,24 +2565,48 @@ fn words_said_as_clew_waits_for_more_hold_none_of_its_voice() {
 }
 
 /// "Stop" talked over Clew as the answer it reads is still being written
-/// stops that too, as Ask's Stop does, and is not asked of Ask; "cancel"
-/// only stops Clew.
+/// stops that too, and is not asked of Ask; "cancel" only stops Clew — as
+/// does "stop" while the agent writing the answer asks the reader
+/// something: its question stays to be answered.
 #[test]
 fn stop_talked_over_clew_stops_the_answer_being_written() {
-    for (tag, said, stops) in [
-        ("speech-talk-stop-writing", "Stop.", true),
-        ("speech-talk-cancel-writing", "Cancel.", false),
+    for (tag, said, asks, stops) in [
+        ("speech-talk-stop-writing", "Stop.", false, true),
+        ("speech-talk-cancel-writing", "Cancel.", false, false),
+        ("speech-talk-stop-asking", "Stop.", true, false),
     ] {
         let (mut app, _output) = reading_with_mic(tag, said);
         app.proj.asking = true;
+        if asks {
+            app.proj.ask_turns[0]
+                .extras
+                .approvals
+                .push(crate::app::model::Approval {
+                    key: crate::app::model::ApprovalKey::Mcp { call: 1 },
+                    mark: None,
+                    title: "files wants to write".into(),
+                    detail: String::new(),
+                    options: vec![crate::app::model::ApprovalOption {
+                        id: "allow".into(),
+                        label: "Allow".into(),
+                        allows: true,
+                        always: false,
+                    }],
+                });
+            assert!(app.first_approval().is_some(), "{tag}");
+        }
         talk(Some(0.1));
         voice_tick(&mut app);
         assert!(app.voice.speech.held(), "{tag}");
         talk(Some(crate::app::voice::END_SILENCE + 0.1));
         voice_tick(&mut app);
         assert!(!app.voice.speech.is_speaking(), "{tag}: Clew not stopped");
-        assert_eq!(app.proj.ask_queue_held, stops, "{tag}: Stop pressed or not");
+        assert_eq!(app.proj.asking, !stops, "{tag}: the answer stopped or not");
+        assert!(app.proj.ask_queue.is_empty(), "{tag}: asked of Ask");
         assert_eq!(app.proj.ask_turns.len(), 1, "{tag}: asked of Ask");
+        if asks {
+            assert!(app.first_approval().is_some(), "{tag}: its question lost");
+        }
         assert_eq!(app.status, "Stopped speaking", "{tag}");
     }
 }
@@ -2990,14 +3014,55 @@ fn what_was_heard_over_a_moment_is_what_was_said_in_it() {
     assert_eq!(within(speech, 1), ["A second ago."]);
     assert_eq!(within(speech, 3), ["Three seconds ago.", "A second ago."]);
     assert_eq!(within(speech, 600).len(), 3);
-    // Playing, two seconds of what is made still to play: the sentence
-    // being made is not heard yet; the one playing is, now.
+    // A new sentence queued, none of it played yet, Clew looked at as it
+    // plays: the last heard keeps when it was.
     speech.speak_for_test(Box::new(Output(output.clone())), 0.3);
     output.lock().unwrap().queued = 2.0;
     output.lock().unwrap().idle = false;
-    speech.said_lasting_for_test("Playing now.", 2.0);
+    speech.said_lasting_for_test("Not played yet.", 2.0);
+    let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
+    settle(&mut app, task);
+    let speech = &mut app.voice.speech;
+    assert!(within(speech, 0).is_empty());
+    assert_eq!(within(speech, 1), ["A second ago."]);
+    // Half of it played, and the next queued: it is heard now.
+    output.lock().unwrap().queued = 3.0;
     speech.said_lasting_for_test("Still to play.", 2.0);
-    assert_eq!(within(speech, 0), ["Playing now."]);
+    assert_eq!(within(speech, 0), ["Not played yet."]);
+}
+
+/// The speaker stopping, and no other opening in its place: what was left
+/// to play was never heard, and is not taken for Clew's words heard back.
+#[test]
+fn what_a_failed_speaker_never_played_is_not_heard_back() {
+    const WORDS: [&str; 4] = ["alpha", "bravo", "charlie", "delta"];
+    let (mut app, voice, output) = speech_app("speech-said-failed");
+    output.lock().unwrap().queued = 6.0;
+    asked(&mut app, 1, true);
+    let ahead: Vec<String> = WORDS
+        .iter()
+        .map(|w| format!("The word is {w}, and it is said here once more so that it lasts long."))
+        .collect();
+    delta(&mut app, 1, &ahead.join(" "));
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert_eq!(voice.texts(), ahead);
+    // The second playing, half of it played — four seconds left to play,
+    // as the speaker gives them back — when it plays no more, and no other
+    // opens.
+    {
+        let mut o = output.lock().unwrap();
+        o.queued = 4.0;
+        o.rest = vec![0.0; 4_000];
+        o.error = Some("the speaker failed".into());
+        o.absent = true;
+    }
+    for _ in 0..2 {
+        let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
+        settle(&mut app, task);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+    assert!(!app.voice.speech.is_speaking(), "{}", app.status);
+    assert_eq!(app.voice.speech.said_lately(), ahead[..2]);
 }
 
 /// Clew stopped with sentences made ahead still to play: they were never

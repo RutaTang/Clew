@@ -313,24 +313,24 @@ fn bare(said: &str) -> Vec<String> {
 
 /// Whether `said` is only a word that puts away what is on top.
 pub(crate) fn dismisses(said: &str) -> bool {
-    only_one_of(said, DISMISS)
+    only_one_of(said, DISMISS, crate::app::choices::units)
 }
 
 /// Whether `said` is only a word that stops Clew ("stop", "okay, be
 /// quiet"): said while it speaks, or while an answer is being written, it
 /// stops them — never a question for Ask.
 pub(crate) fn hushes(said: &str) -> bool {
-    use crate::app::choices::units;
-    let mut words = units(said);
-    words.retain(|w| !AROUND_A_HUSH.contains(&w.as_str()));
-    words.dedup();
-    only_one_of(&words.join(" "), HUSH)
+    only_one_of(said, HUSH, |text| {
+        let mut words = crate::app::choices::units(text);
+        words.retain(|w| !AROUND_A_HUSH.contains(&w.as_str()));
+        words.dedup();
+        words
+    })
 }
 
 /// Whether `said` is only one of `words` — a list, split at its commas —
-/// or of any language's words for them.
-fn only_one_of(said: &str, words: &str) -> bool {
-    use crate::app::choices::units;
+/// or of any language's words for them: both told by their `units`.
+fn only_one_of(said: &str, words: &str, units: fn(&str) -> Vec<String>) -> bool {
     let said = units(said);
     !said.is_empty()
         && crate::i18n::Lang::ALL.into_iter().any(|l| {
@@ -1003,6 +1003,7 @@ mod tests {
             "别说了。",
             "停下来",
             "静かに",
+            "もういい",
             "読まないで",
             "그만해",
             "그만 읽어",

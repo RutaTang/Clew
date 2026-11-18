@@ -393,6 +393,11 @@ pub(crate) struct Speech {
 /// least.
 const SAID_LATELY: usize = 6;
 
+/// What the output counts as still to play may be a little apart from
+/// what was counted as made of it — another rate, sums rounded otherwise:
+/// less than this of a sentence is none of it.
+const SLACK: f32 = 0.05;
+
 /// A sentence made to be said, kept for its words to be told from the
 /// reader's when the microphone hears them back.
 struct SaidLately {
@@ -405,23 +410,24 @@ struct SaidLately {
     heard: Option<Instant>,
 }
 
-/// Clew heard `at`, `queued` seconds still to play: the sentence playing
-/// marked heard then, and any played since they were last looked at; those
-/// played before keep when they were. Returns `at`.
+/// Clew heard `at`, `queued` seconds still to play: the sentence playing —
+/// some of it played, some still to play — marked heard then, and any
+/// played to their end since they were last looked at; those played to
+/// their end before keep when they were, though nothing of what is queued
+/// after them has played yet. Returns `at`.
 fn heard_saying(said: &mut VecDeque<SaidLately>, queued: f32, at: Instant) -> Instant {
     let mut to_play = queued;
-    let mut newest = true;
     for sentence in said.iter_mut().rev() {
-        let played = sentence.seconds > to_play;
+        let playing = to_play > SLACK;
+        let played = sentence.seconds > to_play + SLACK;
         to_play = (to_play - sentence.seconds).max(0.0);
         if !played {
             continue;
         }
-        if !newest && sentence.heard.is_some() {
+        if !playing && sentence.heard.is_some() {
             break;
         }
         sentence.heard = Some(at);
-        newest = false;
     }
     at
 }
@@ -572,7 +578,7 @@ impl Speech {
         let mut to_play = self.output.as_ref().map_or(0.0, |o| o.queued_seconds());
         let mut said: Vec<String> = Vec::new();
         for sentence in self.said_lately.iter().rev() {
-            if said.is_empty() && sentence.seconds <= to_play {
+            if said.is_empty() && sentence.seconds <= to_play + SLACK {
                 to_play -= sentence.seconds;
                 continue;
             }
@@ -593,7 +599,7 @@ impl Speech {
         let mut to_play = self.output.as_ref().map_or(0.0, |o| o.queued_seconds());
         let mut said = Vec::new();
         for sentence in self.said_lately.iter().rev() {
-            let played = sentence.seconds > to_play;
+            let played = sentence.seconds > to_play + SLACK;
             to_play = (to_play - sentence.seconds).max(0.0);
             if !played {
                 continue;
@@ -1696,6 +1702,10 @@ impl App {
                 output.play(&rest, rate);
                 speech.opened(output);
                 return self.speak_next();
+            }
+            // Not opened again: what was left to play was never heard.
+            if rate > 0 {
+                speech.never_heard(rest.len() as f32 / rate as f32);
             }
         }
         self.give_up_speaking(tr!(

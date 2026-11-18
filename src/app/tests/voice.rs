@@ -340,9 +340,10 @@ fn a_question_heard_goes_to_ask() {
 }
 
 /// "Stop" said with nothing on screen named by it is not a question for
-/// Ask: an answer being written stops, as Ask's Stop stops it — and with
-/// nothing being said or written, the status line says so. A command that
-/// asked first takes it as a "no".
+/// Ask: an answer being written stops — only it, what was asked after it
+/// still to be asked — and with nothing being said or written, the status
+/// line says Clew is not speaking. A command that asked first takes it as
+/// a "no" — "Okay, stop" too, though it opens with a yes.
 #[test]
 fn stop_said_is_never_asked() {
     for (tag, writing) in [("voice-stop-nothing", false), ("voice-stop-writing", true)] {
@@ -350,18 +351,28 @@ fn stop_said_is_never_asked() {
         app.proj.asking = writing;
         say(&mut app, &script);
         assert!(app.proj.ask_turns.is_empty(), "{tag}: asked");
+        assert!(app.proj.ask_queue.is_empty(), "{tag}: queued");
         assert_eq!(app.proj.ask_input, "", "{tag}");
-        assert_eq!(app.proj.ask_queue_held, writing, "{tag}: Stop not pressed");
+        assert!(
+            !app.proj.asking,
+            "{tag}: the answer being written not stopped"
+        );
+        assert!(
+            !app.proj.ask_queue_held,
+            "{tag}: what was asked after it held"
+        );
         if !writing {
-            assert_eq!(app.status, "Nothing to stop", "{tag}");
+            assert_eq!(app.status, "Clew isn't speaking", "{tag}");
         }
     }
-    let (mut app, script, _) = voice_app("voice-stop-asked", "Stop.");
-    app.voice.confirm = Some(crate::app::voice::Waiting::Command("Settings".into()));
-    say(&mut app, &script);
-    assert!(app.voice.confirm.is_none(), "still asked");
-    assert!(!app.settings.open, "run");
-    assert_eq!(app.status, "Didn't run Settings");
+    for said in ["Stop.", "Okay, stop."] {
+        let (mut app, script, _) = voice_app("voice-stop-asked", said);
+        app.voice.confirm = Some(crate::app::voice::Waiting::Command("Settings".into()));
+        say(&mut app, &script);
+        assert!(app.voice.confirm.is_none(), "{said}: still asked");
+        assert!(!app.settings.open, "{said}: run");
+        assert_eq!(app.status, "Didn't run Settings", "{said}");
+    }
 }
 
 /// A question said aloud is asked without the card opening over the code
