@@ -376,12 +376,11 @@ pub(crate) struct Speech {
     /// last looked at, held, or stopped — not while it makes what it says
     /// next, nor waits for more of an answer, its speaker open and silent.
     last_heard: Option<Instant>,
-    /// The last sentences made to be said, each with the seconds of it
-    /// made so far: what the microphone may still hear of Clew's own voice,
-    /// its echo not all taken out — all still to be played, however many
-    /// [`AHEAD_SECONDS`] holds, and those played lately
-    /// ([`Speech::forget_said`]).
-    said_lately: VecDeque<(String, f32)>,
+    /// The last sentences made to be said: what the microphone may still
+    /// hear of Clew's own voice, its echo not all taken out — all still to
+    /// be played, however many [`AHEAD_SECONDS`] holds, and those played
+    /// lately ([`Speech::forget_said`]).
+    said_lately: VecDeque<SaidLately>,
     /// Why an answer was not heard: said on the Ask card while it is so of
     /// the answer there ([`App::blocked_now`]).
     pub(crate) blocked: Option<Blocked>,
@@ -393,6 +392,39 @@ pub(crate) struct Speech {
 /// How many of the sentences last made [`Speech::said_lately`] keeps at
 /// least.
 const SAID_LATELY: usize = 6;
+
+/// A sentence made to be said, kept for its words to be told from the
+/// reader's when the microphone hears them back.
+struct SaidLately {
+    text: String,
+    /// The seconds of it made so far — each counted as it is queued to
+    /// play.
+    seconds: f32,
+    /// When Clew was last heard saying it: none while it was still all to
+    /// play.
+    heard: Option<Instant>,
+}
+
+/// Clew heard `at`, `queued` seconds still to play: the sentence playing
+/// marked heard then, and any played since they were last looked at; those
+/// played before keep when they were. Returns `at`.
+fn heard_saying(said: &mut VecDeque<SaidLately>, queued: f32, at: Instant) -> Instant {
+    let mut to_play = queued;
+    let mut newest = true;
+    for sentence in said.iter_mut().rev() {
+        let played = sentence.seconds > to_play;
+        to_play = (to_play - sentence.seconds).max(0.0);
+        if !played {
+            continue;
+        }
+        if !newest && sentence.heard.is_some() {
+            break;
+        }
+        sentence.heard = Some(at);
+        newest = false;
+    }
+    at
+}
 
 /// How long after a sentence was played it may still be heard back: what
 /// the microphone heard is told from Clew's own voice once it is worked
@@ -474,7 +506,7 @@ impl Speech {
     pub(crate) fn hold(&mut self) {
         if self.barged.is_none() {
             if self.playing() {
-                self.last_heard = Some(Instant::now());
+                self.heard_now();
             }
             if let Some(output) = &self.output {
                 output.pause();
@@ -518,7 +550,10 @@ impl Speech {
     /// Last heard `ago`.
     #[cfg(test)]
     pub(crate) fn last_heard_for_test(&mut self, ago: Duration) {
-        self.last_heard = Instant::now().checked_sub(ago);
+        let queued = self.output.as_ref().map_or(0.0, |o| o.queued_seconds());
+        self.last_heard = Instant::now()
+            .checked_sub(ago)
+            .map(|at| heard_saying(&mut self.said_lately, queued, at));
     }
 
     /// Held as if since `ago`.
@@ -536,61 +571,86 @@ impl Speech {
     pub(crate) fn said_lately(&self) -> Vec<String> {
         let mut to_play = self.output.as_ref().map_or(0.0, |o| o.queued_seconds());
         let mut said: Vec<String> = Vec::new();
-        for (text, seconds) in self.said_lately.iter().rev() {
-            if said.is_empty() && *seconds <= to_play {
-                to_play -= seconds;
+        for sentence in self.said_lately.iter().rev() {
+            if said.is_empty() && sentence.seconds <= to_play {
+                to_play -= sentence.seconds;
                 continue;
             }
-            said.push(text.clone());
+            said.push(sentence.text.clone());
         }
         said.reverse();
         said
     }
 
-    /// The sentences played within `lag`, as [`Speech::heard_within`]
-    /// tells it, the device's own tail ([`TAIL`]) aside — newest last: what
-    /// of Clew's voice the microphone may have heard over that time. Not
-    /// those played before it, nor those still wholly to play.
+    /// The sentences Clew was heard saying within `lag`, as
+    /// [`Speech::heard_within`] tells it, the device's own tail ([`TAIL`])
+    /// aside — newest last: what of its voice the microphone may have heard
+    /// over that time. Not those heard only before it, however little was
+    /// played since — the last answer's, a pause ago — nor those still
+    /// wholly to play.
     pub(crate) fn said_within(&self, lag: Duration) -> Vec<String> {
-        let since = if self.playing() {
-            Duration::ZERO
-        } else {
-            match self.last_heard {
-                Some(at) => at.elapsed(),
-                None => return Vec::new(),
-            }
-        };
-        let Some(window) = (TAIL + lag).checked_sub(since) else {
-            return Vec::new();
-        };
-        let mut left = window.as_secs_f32();
+        let from = Instant::now().checked_sub(TAIL + lag);
         let mut to_play = self.output.as_ref().map_or(0.0, |o| o.queued_seconds());
         let mut said = Vec::new();
-        for (text, seconds) in self.said_lately.iter().rev() {
-            if left <= 0.0 {
+        for sentence in self.said_lately.iter().rev() {
+            let played = sentence.seconds > to_play;
+            to_play = (to_play - sentence.seconds).max(0.0);
+            if !played {
+                continue;
+            }
+            // Heard before that time: so were those before it. Not yet
+            // marked heard, it is playing now.
+            if sentence
+                .heard
+                .is_some_and(|at| from.is_some_and(|from| at < from))
+            {
                 break;
             }
-            let played = seconds - to_play.min(*seconds);
-            to_play -= to_play.min(*seconds);
-            if played > 0.0 {
-                said.push(text.clone());
-                left -= played;
-            }
+            said.push(sentence.text.clone());
         }
         said.reverse();
         said
+    }
+
+    /// Clew heard as it is now — playing, or the moment it is held or
+    /// stopped: when it was last heard, and the sentences it was heard
+    /// saying ([`heard_saying`]).
+    fn heard_now(&mut self) {
+        let queued = self.output.as_ref().map_or(0.0, |o| o.queued_seconds());
+        self.last_heard = Some(heard_saying(&mut self.said_lately, queued, Instant::now()));
+    }
+
+    /// Clew stopped with `unplayed` seconds still to play: the sentences
+    /// they were of were never heard, and their words are not Clew's to be
+    /// heard back — nor what was not played of the one cut off.
+    fn never_heard(&mut self, mut unplayed: f32) {
+        while unplayed > 0.0
+            && let Some(last) = self.said_lately.back_mut()
+        {
+            if last.seconds <= unplayed {
+                unplayed -= last.seconds;
+                self.said_lately.pop_back();
+            } else {
+                last.seconds -= unplayed;
+                unplayed = 0.0;
+            }
+        }
     }
 
     /// `sentence` is being made to be said: its words may be heard back.
     fn making_said(&mut self, sentence: &str) {
-        self.said_lately.push_back((sentence.to_string(), 0.0));
+        self.said_lately.push_back(SaidLately {
+            text: sentence.to_string(),
+            seconds: 0.0,
+            heard: None,
+        });
         self.forget_said();
     }
 
     /// `seconds` more of the sentence being made were made.
     fn made_said(&mut self, seconds: f32) {
-        if let Some((_, made)) = self.said_lately.back_mut() {
-            *made += seconds;
+        if let Some(sentence) = self.said_lately.back_mut() {
+            sentence.seconds += seconds;
         }
         self.forget_said();
     }
@@ -604,7 +664,7 @@ impl Speech {
     fn forget_said(&mut self) {
         let queued = self.output.as_ref().map_or(0.0, |o| o.queued_seconds());
         while self.said_lately.len() > SAID_LATELY {
-            let after: f32 = self.said_lately.iter().skip(1).map(|(_, s)| s).sum();
+            let after: f32 = self.said_lately.iter().skip(1).map(|s| s.seconds).sum();
             if after - queued <= HEARD_BACK_SECONDS {
                 break;
             }
@@ -675,7 +735,7 @@ impl Speech {
     /// Stop: nothing more is said of what was being said.
     fn hush(&mut self) {
         if self.playing() {
-            self.last_heard = Some(Instant::now());
+            self.heard_now();
         }
         if let Some((stream, _)) = self.reading.take() {
             self.hushed.insert(stream);
@@ -686,6 +746,7 @@ impl Speech {
         self.current
             .store(self.round, std::sync::atomic::Ordering::Relaxed);
         if let Some(output) = self.output.take() {
+            self.never_heard(output.queued_seconds());
             close_later(output);
         }
         self.quiet_since = None;
@@ -1561,7 +1622,11 @@ impl App {
             return Task::none();
         }
         if !output.idle() {
-            speech.last_heard = Some(Instant::now());
+            speech.last_heard = Some(heard_saying(
+                &mut speech.said_lately,
+                output.queued_seconds(),
+                Instant::now(),
+            ));
         }
         match speech.progress {
             // Nothing played since, though there was something to play.

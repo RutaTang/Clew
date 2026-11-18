@@ -49,12 +49,18 @@ const DISMISS: &str = tr_noop!(
     "close, close it, close this, close that, cancel, never mind, dismiss, escape, exit, go away, hide it, hide this"
 );
 
-/// What stops Clew speaking, said while it speaks — as Esc does then, and
-/// a word that puts away ([`DISMISS`]): the English words, and each
-/// language's.
+/// What stops Clew speaking — and an answer still being written, as Ask's
+/// Stop does ([`hushes`]): the English words, and each language's.
 const HUSH: &str = tr_noop!(
-    "stop, stop it, stop now, please stop, stop talking, stop speaking, stop reading, be quiet, quiet, enough, that's enough, shh, shush, hush"
+    "stop, stop it, stop talking, stop speaking, stop reading, be quiet, quiet, enough, that's enough, shut up, shh, shush, hush"
 );
+
+/// What is said with a word that stops Clew and means nothing more: said
+/// to anyone ("okay", "please"), its name ("Stop, Clew"), the word again
+/// ("Stop, stop").
+const AROUND_A_HUSH: &[&str] = &[
+    "okay", "ok", "oh", "no", "please", "hey", "now", "just", "clew", "clue", "non", "bon", "stp",
+];
 
 /// The words a list's place is said with, around its number: "open the
 /// third result", "number 4", "第三个", "3番目", "세 번째".
@@ -310,10 +316,15 @@ pub(crate) fn dismisses(said: &str) -> bool {
     only_one_of(said, DISMISS)
 }
 
-/// Whether `said` is only a word that stops Clew speaking ("stop", "be
-/// quiet"): said while it speaks, it stops it, as Esc does.
+/// Whether `said` is only a word that stops Clew ("stop", "okay, be
+/// quiet"): said while it speaks, or while an answer is being written, it
+/// stops them — never a question for Ask.
 pub(crate) fn hushes(said: &str) -> bool {
-    only_one_of(said, HUSH)
+    use crate::app::choices::units;
+    let mut words = units(said);
+    words.retain(|w| !AROUND_A_HUSH.contains(&w.as_str()));
+    words.dedup();
+    only_one_of(&words.join(" "), HUSH)
 }
 
 /// Whether `said` is only one of `words` — a list, split at its commas —
@@ -971,23 +982,41 @@ mod tests {
         }
     }
 
-    /// What stops Clew speaking is said alone too, in any language: "stop
-    /// the run" is a command of its own.
+    /// What stops Clew is said alone too, in any language — what is said
+    /// to anyone with it aside, its name, or the word again: "stop the run"
+    /// is a command of its own.
     #[test]
     fn stop_alone_stops_clew_speaking() {
         for said in [
             "stop",
             "Stop.",
+            "Okay, stop.",
+            "No, stop!",
+            "Stop, stop.",
+            "Stop please.",
+            "Stop, Clew.",
             "That's enough.",
             "Be quiet!",
+            "Shut up.",
             "arrête",
+            "Arrête de parler.",
             "别说了。",
+            "停下来",
             "静かに",
+            "読まないで",
             "그만해",
+            "그만 읽어",
         ] {
             assert!(hushes(said), "{said:?}");
         }
-        for said in ["stop the run", "stop watching total", "quiet mode", ""] {
+        for said in [
+            "stop the run",
+            "stop watching total",
+            "quiet mode",
+            "no",
+            "okay, please",
+            "",
+        ] {
             assert!(!hushes(said), "{said:?}");
         }
     }

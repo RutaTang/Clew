@@ -2110,21 +2110,27 @@ impl App {
         // A word that puts away, or one that stops Clew, said over it
         // ("cancel", "Hey, Clew, stop"), stops it, and declines a command
         // waiting for a yes — and nothing more: said to stop Clew reading,
-        // it declined the agent's tool call too, put Ask away, or was asked
-        // of Ask, whose answer Clew would read.
-        if over_clew
-            && result.as_ref().is_ok_and(|text| {
-                let said = crate::app::spoken::what_is_said(text.trim(), call);
-                crate::app::onscreen::dismisses(said) || crate::app::onscreen::hushes(said)
-            })
-        {
+        // it declined the agent's tool call too, or put Ask away. One that
+        // stops Clew stops an answer still being written too, as Ask's
+        // Stop does — never asked of Ask, whose answer Clew would read.
+        let said = result
+            .as_ref()
+            .ok()
+            .map(|text| crate::app::spoken::what_is_said(text.trim(), call));
+        let hush = said.is_some_and(crate::app::onscreen::hushes);
+        if over_clew && (hush || said.is_some_and(crate::app::onscreen::dismisses)) {
             self.stop_for_the_reader();
             self.status = match self.voice.confirm.take() {
                 Some(waiting) => tr!("Didn't run {command}", command = waiting.said()),
                 None => tr!("Stopped speaking").into(),
             };
             self.voice.heard = None;
-            return self.transcribe_next();
+            let stop = if hush && self.ask_stream_active() {
+                self.on_agent_stop()
+            } else {
+                Task::none()
+            };
+            return Task::batch([stop, self.transcribe_next()]);
         }
         let task = self.on_words(result, call);
         Task::batch([task, self.transcribe_next()])
@@ -2180,7 +2186,10 @@ impl App {
         // The answer to a command waiting for a yes; anything else said
         // instead puts it away and is read as itself.
         if let Some(waiting) = self.voice.confirm.take() {
-            match crate::app::spoken::yes_or_no(&text) {
+            // "Stop" is a no too.
+            let answer = crate::app::spoken::yes_or_no(&text)
+                .or_else(|| crate::app::onscreen::hushes(&text).then_some(false));
+            match answer {
                 Some(true) => {
                     self.status = tr!(
                         "“{text}” → {command}",
@@ -2217,6 +2226,11 @@ impl App {
         if let Some(to) = self.said_to_question(&text) {
             return self.hold_for_question(text, to);
         }
+        // A word that stops Clew, nothing on screen named by it ("stop",
+        // said after "Hey, Clew" and a pause): not a question for Ask.
+        if crate::app::onscreen::hushes(&text) {
+            return self.hush_for_the_reader();
+        }
         // A question: to Ask. Sent, it is answered where Ask is — the card
         // is not opened over the code for it: the pill says it is being
         // answered, and the answer is read aloud. Kept for the reader to
@@ -2243,6 +2257,28 @@ impl App {
             operation::focus(ui::ask_input_id()),
             operation::move_cursor_to_end(ui::ask_input_id()),
         ])
+    }
+
+    /// A word that stops Clew said, not over it, nothing on screen named by
+    /// it: what Clew says, or is about to, stops — and an answer still
+    /// being written, as Ask's Stop stops it. With nothing of either, the
+    /// status line says so.
+    fn hush_for_the_reader(&mut self) -> Task<Message> {
+        self.voice.heard = None;
+        let speaking = self.voice.speech.is_speaking() || self.answer_read_aloud_coming();
+        let writing = self.ask_stream_active();
+        if !speaking && !writing {
+            self.status = tr!("Nothing to stop").into();
+            return Task::none();
+        }
+        self.stop_for_the_reader();
+        if speaking {
+            self.status = tr!("Stopped speaking").into();
+        }
+        if writing {
+            return self.on_agent_stop();
+        }
+        Task::none()
     }
 
     /// Do the command `text` names, if it names one: the question on

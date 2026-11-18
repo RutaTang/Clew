@@ -2564,6 +2564,29 @@ fn words_said_as_clew_waits_for_more_hold_none_of_its_voice() {
     }
 }
 
+/// "Stop" talked over Clew as the answer it reads is still being written
+/// stops that too, as Ask's Stop does, and is not asked of Ask; "cancel"
+/// only stops Clew.
+#[test]
+fn stop_talked_over_clew_stops_the_answer_being_written() {
+    for (tag, said, stops) in [
+        ("speech-talk-stop-writing", "Stop.", true),
+        ("speech-talk-cancel-writing", "Cancel.", false),
+    ] {
+        let (mut app, _output) = reading_with_mic(tag, said);
+        app.proj.asking = true;
+        talk(Some(0.1));
+        voice_tick(&mut app);
+        assert!(app.voice.speech.held(), "{tag}");
+        talk(Some(crate::app::voice::END_SILENCE + 0.1));
+        voice_tick(&mut app);
+        assert!(!app.voice.speech.is_speaking(), "{tag}: Clew not stopped");
+        assert_eq!(app.proj.ask_queue_held, stops, "{tag}: Stop pressed or not");
+        assert_eq!(app.proj.ask_turns.len(), 1, "{tag}: asked of Ask");
+        assert_eq!(app.status, "Stopped speaking", "{tag}");
+    }
+}
+
 /// A word that puts away, talked over Clew as it reads ("close"), stops it
 /// and does nothing more: the find bar under it stays open. A command
 /// waiting for a yes is declined with it, as Esc declines it. So does a
@@ -2908,8 +2931,7 @@ fn a_real_answer_is_read_aloud() {
 /// What the microphone may hear back of Clew's own voice is what was
 /// played lately: the sentence playing, however many are made ahead of it
 /// — not those still wholly to be played. Once played, a sentence is
-/// forgotten only when ten seconds were played since. What it may have
-/// heard over a moment, as a call was said, is what was played in it.
+/// forgotten only when ten seconds were played since.
 #[test]
 fn what_was_played_lately_may_be_heard_back() {
     const WORDS: [&str; 10] = [
@@ -2932,15 +2954,6 @@ fn what_was_played_lately_may_be_heard_back() {
     // The second playing too.
     output.lock().unwrap().queued = 14.0;
     assert_eq!(app.voice.speech.said_lately(), ahead[..2]);
-    // Of it, less than half a second played: over a moment, only it was
-    // heard; over a second, the first too.
-    let within = |app: &App, ms| {
-        app.voice
-            .speech
-            .said_within(std::time::Duration::from_millis(ms))
-    };
-    assert_eq!(within(&app, 0), ahead[1..2]);
-    assert_eq!(within(&app, 1000), ahead[..2]);
     output.lock().unwrap().queued = 0.0;
     all_played(&mut app, &output);
     // Nothing yet to play: thirty half-second sentences, each played as it
@@ -2953,13 +2966,65 @@ fn what_was_played_lately_may_be_heard_back() {
     delta(&mut app, 2, &played.join(" "));
     ended(&mut app, 2, StreamOutcome::Done);
     assert_eq!(app.voice.speech.said_lately(), played[9..]);
-    // All played, two seconds ago: over two seconds, the last; over two
-    // and a half, the one before it too — none over less.
-    output.lock().unwrap().idle = true;
-    app.voice
-        .speech
-        .last_heard_for_test(std::time::Duration::from_secs(2));
-    assert!(within(&app, 1000).is_empty());
-    assert_eq!(within(&app, 2000), played[29..]);
-    assert_eq!(within(&app, 2500), played[28..]);
+}
+
+/// What Clew may have been heard saying over a moment — as a call was
+/// said — is what it was heard saying in it: not what it said before,
+/// however little it has said since, nor what is still all to play.
+#[test]
+fn what_was_heard_over_a_moment_is_what_was_said_in_it() {
+    let (mut app, _voice, output) = speech_app("speech-said-within");
+    let speech = &mut app.voice.speech;
+    for (sentence, ago) in [
+        ("A minute ago.", 60),
+        ("Three seconds ago.", 3),
+        ("A second ago.", 1),
+    ] {
+        speech.said_lasting_for_test(sentence, 2.0);
+        speech.last_heard_for_test(std::time::Duration::from_secs(ago));
+    }
+    let within = |speech: &crate::app::speech::Speech, s| {
+        speech.said_within(std::time::Duration::from_secs(s))
+    };
+    assert!(within(speech, 0).is_empty());
+    assert_eq!(within(speech, 1), ["A second ago."]);
+    assert_eq!(within(speech, 3), ["Three seconds ago.", "A second ago."]);
+    assert_eq!(within(speech, 600).len(), 3);
+    // Playing, two seconds of what is made still to play: the sentence
+    // being made is not heard yet; the one playing is, now.
+    speech.speak_for_test(Box::new(Output(output.clone())), 0.3);
+    output.lock().unwrap().queued = 2.0;
+    output.lock().unwrap().idle = false;
+    speech.said_lasting_for_test("Playing now.", 2.0);
+    speech.said_lasting_for_test("Still to play.", 2.0);
+    assert_eq!(within(speech, 0), ["Playing now."]);
+}
+
+/// Clew stopped with sentences made ahead still to play: they were never
+/// heard, and are not taken for its words heard back — nor what was not
+/// played of the one cut off.
+#[test]
+fn what_clew_never_played_is_not_heard_back() {
+    const WORDS: [&str; 4] = ["alpha", "bravo", "charlie", "delta"];
+    let (mut app, voice, output) = speech_app("speech-said-stopped");
+    output.lock().unwrap().queued = 6.0;
+    asked(&mut app, 1, true);
+    let ahead: Vec<String> = WORDS
+        .iter()
+        .map(|w| format!("The word is {w}, and it is said here once more so that it lasts long."))
+        .collect();
+    delta(&mut app, 1, &ahead.join(" "));
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert_eq!(voice.texts(), ahead);
+    // The second playing, half of it played.
+    output.lock().unwrap().queued = 4.0;
+    assert_eq!(app.voice.speech.said_lately(), ahead[..2]);
+    app.stop_speaking();
+    assert_eq!(app.voice.speech.said_lately(), ahead[..2]);
+    assert_eq!(
+        app.voice
+            .speech
+            .said_within(std::time::Duration::from_secs(60)),
+        ahead[..2]
+    );
 }

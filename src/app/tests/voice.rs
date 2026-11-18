@@ -339,6 +339,24 @@ fn a_question_heard_goes_to_ask() {
     assert_eq!(app.proj.ask_input, "open the call graph");
 }
 
+/// "Stop" said with nothing on screen named by it is not a question for
+/// Ask: an answer being written stops, as Ask's Stop stops it — and with
+/// nothing being said or written, the status line says so.
+#[test]
+fn stop_said_is_never_asked() {
+    for (tag, writing) in [("voice-stop-nothing", false), ("voice-stop-writing", true)] {
+        let (mut app, script, _) = voice_app(tag, "Okay, stop.");
+        app.proj.asking = writing;
+        say(&mut app, &script);
+        assert!(app.proj.ask_turns.is_empty(), "{tag}: asked");
+        assert_eq!(app.proj.ask_input, "", "{tag}");
+        assert_eq!(app.proj.ask_queue_held, writing, "{tag}: Stop not pressed");
+        if !writing {
+            assert_eq!(app.status, "Nothing to stop", "{tag}");
+        }
+    }
+}
+
 /// A question said aloud is asked without the card opening over the code
 /// (someone finding their way by voice does not want it over what they
 /// went to): it is answered where Ask is, and an answer that comes with the
@@ -4478,10 +4496,11 @@ fn bye_clew_after_clews_sentence_ends_listening() {
     drop(turn);
 }
 
-/// Clew taught the call — "Say “Hey, Clew, stop”, or press Esc." — and
-/// went on to its next sentence; said over that one, the reader's "Hey,
-/// Clew, stop" is a call, every word of it Clew's: the phrase was not in
-/// what Clew played as it was said.
+/// Clew taught the call at the end of its last answer — "Say “Hey, Clew,
+/// stop”, or press Esc." — a minute ago, and has said a second of its next;
+/// said over it, the reader's "Hey, Clew, stop" is a call, every word of it
+/// Clew's: the phrase was not in what Clew was heard saying as it was said,
+/// however little it has said since.
 #[test]
 fn a_call_clew_taught_before_its_sentence_is_the_readers() {
     let (turn, mut app, script, _, _) = wake_app("wake-taught-before", "Hey, Clew, stop.", 1);
@@ -4492,10 +4511,13 @@ fn a_call_clew_taught_before_its_sentence_is_the_readers() {
     app.voice
         .speech
         .said_lasting_for_test("Say Hey Clew, stop, or press Esc.", 3.0);
-    // Five seconds of it played, one still to play.
     app.voice
         .speech
-        .said_lasting_for_test("It goes on where it paused, for as long as you like.", 6.0);
+        .last_heard_for_test(std::time::Duration::from_secs(60));
+    // One second of it played, one still to play.
+    app.voice
+        .speech
+        .said_lasting_for_test("It goes on where it paused.", 2.0);
     assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app));
     assert!(app.voice.speech.held());
