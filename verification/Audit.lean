@@ -61,3 +61,13 @@ the kernel did not check.
 #print axioms Clew.VoiceRoute.hush_stops_the_answer_first
 #print axioms Clew.VoiceRoute.ends_in_one_act
 #print axioms Clew.VoiceRoute.steps_have_their_subject
+-- Shell words, ssh's arguments, known_hosts
+#print axioms Clew.Ssh.readWord_quote
+#print axioms Clew.Ssh.readWords_shellCommand
+#print axioms Clew.Ssh.readWords_shC
+#print axioms Clew.Ssh.parseSshArgs_sshArgs
+#print axioms Clew.Ssh.sshEndpoint_sshArgs
+#print axioms Clew.Ssh.clewSshLabel_sshArgs
+#print axioms Clew.Ssh.plainHostField_literal
+#print axioms Clew.Ssh.knownHostsPattern_plain
+#print axioms Clew.Ssh.knownHostsPattern_injective

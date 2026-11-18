@@ -8,6 +8,7 @@ Some of Clew's rules are proved, not only tested. For each rule, `verification/`
 - which server binary may be deployed to a remote;
 - what a recorded approval covers;
 - how messages are framed on a stream;
+- what Clew hands to a shell or to ssh;
 - where spoken words go.
 
 ## What is proved
@@ -48,6 +49,13 @@ The user, host and port in a key are the ones ssh connects with. With `CLEW_SSH`
 - Every frame read consumes input, so the reader always makes progress.
 - The cap on Clew's own protocol applies to a line's content, not its newline. A line of text exactly at the cap is read; a longer one is refused, never read in part, and so is one that is not UTF-8.
 
+**What Clew hands to a shell or to ssh** — `shell_command` and `sh_c` in `src/backend/server.rs`, `quote` in `src/macos/install.rs`, and `ssh_args`, `ssh_endpoint`, `known_hosts_pattern` and `plain_host_field` in `src/backend/connect.rs`, modelled in `Ssh.lean`.
+- A command Clew writes for a shell — one it shows you to paste, every path in the macOS updater's swap script — is read by a POSIX shell as exactly the words meant. This holds whatever the words hold: spaces, quotes, `$`, backticks, newlines.
+- A command Clew runs on a remote, `sh -c '<script>'`, is read as `sh`, `-c` and the script.
+- No field of a saved connection ever reaches ssh as an option, whatever it holds. ssh reads exactly the options Clew wrote, and the destination exactly `user@host`. So a host typed as `-oProxyCommand=…` is a host, not a command.
+- A machine has one label, whether it is reached as a saved connection or through `CLEW_SSH` with the same arguments, for any user name that is not itself an `ssh://` address. So approvals given through either are filed under one name.
+- The known_hosts field Clew writes a host key under names one host and one port. It holds none of the pattern syntax (`*`, `?`, `!`, `,`, a hashed `|1|` name) that would let one key vouch for other hosts.
+
 **Where spoken words go** — `route` in `src/app/voice.rs`, modelled in `VoiceRoute.lean`.
 - "Bye, Clew" is always heard first.
 - A word that stops Clew is never sent to Ask. If the question waiting offers an answer by that name, the word is that answer.
@@ -63,6 +71,7 @@ A theorem is about a model. What connects each model to the code:
 
 - **The model reads like the code.** It takes the same steps in the same order. Every Rust standard-library function it relies on, down to what `char::is_whitespace` means, is spelled out in `Text.lean`. Those are tested through the functions that use them: every `White_Space` code point and its neighbours are among the test inputs.
 - **Test cases.** `lake exe vectors` runs each model on a fixed set of inputs and writes the answers to `verification/vectors/*.json`. The inputs are every short input over an alphabet chosen to reach every branch, plus the edge cases each file names. `cargo test` runs the real Rust functions on the same inputs and requires the same answers. If the code and the model ever disagree, a test fails.
+- **The shell model is checked against a real shell.** Every shell test case is also run through `/bin/sh`, which must read it back as the same words.
 - **For the voice routing, the inputs are every possible input**: all 1,152 combinations of facts. The Rust `route` is therefore the model, and the theorems hold of it outright. For the other rules the inputs are a large sample, not all possible inputs.
 
 `verification/check.sh` checks three things:
@@ -78,7 +87,41 @@ CI runs it in the `verification` job. The Lean toolchain is pinned in `verificat
 - SHA-256 being collision resistant. The theorems about approvals and server digests are about the bytes that are hashed. That different bytes give different hashes is SHA-256's own promise.
 - What the operating system does with a path. Symlinks and canonicalization are not modelled. `confine` checks the resolved path again at run time, against the canonical root.
 - The test cases. Outside the voice routing they are a sample of inputs, not all of them.
+- A POSIX shell. A login shell that is not one (fish, csh) is outside the model; the scripts Clew runs remotely avoid what those read differently, and a test checks that they do.
 - What ssh's own configuration does. A key's user, host and port are the ones on ssh's command line. What `~/.ssh/config`, `-F` or `-o HostName=` maps them to is not read: a `Host` alias is known by its name.
+
+## Every decision, and how it is checked
+
+These are the places where Clew decides who may do what, or what to trust. Each is proved where a rule can be stated and modelled. Otherwise the table says what it rests on.
+
+| Decision | Code | How it is checked |
+|---|---|---|
+| Which paths a request or a tool may name | `confine::check_lexical` | Proved |
+| That a resolved path is still inside the project | `confine::confine` | Tested: symlinks and canonical paths are the file system's |
+| Whether an update is newer | `update::ensure_upgrade` | Proved |
+| Where an update may be downloaded from | `updater::validate_dmg_url` | Tested: it rests on the `url` crate's URL parser |
+| Whether a downloaded update is genuine (macOS) | `macos::install::verify` | Rests on Apple's code signing, which Clew calls |
+| Which server binary may be deployed | `server_dist` | Proved |
+| What an approval covers | `trust` fingerprints | Proved |
+| Which machine and project an approval is filed under | `derived::project_key`, `scope_label`, `ssh_endpoint` | Proved |
+| Whether a project's language server may run | `lsp_gate::lsp_command_allowed` | The rule, that its fingerprint was approved, rests on the proved fingerprints. Running exactly the bytes that were hashed is file-system work, tested |
+| Whether a folder may hold a program Clew runs unstaged | `trust::trusted_location` | Tested: it reads file ownership and modes |
+| How messages are framed | `framing` | Proved |
+| What Clew hands to a shell | `shell_command`, `sh_c`, `quote` | Proved, and checked against `/bin/sh` |
+| What Clew hands to ssh | `SavedConnection::ssh_args` | Proved |
+| Which host a recorded host key vouches for | `known_hosts_pattern`, `plain_host_field` | Proved |
+| Where spoken words go | `voice::route` | Proved |
+| Whether hovering may run the debugged program's code | `dap::hover_eval_allowed` | Tested: one `or` of the debugger's promise and your choice |
+| An MCP server's request headers | `mcp::config::check_headers` | Tested |
+| Signing in to an MCP server | `mcp` OAuth | Tested: a network protocol |
+
+## Why the models are written by hand
+
+Aeneas, with Charon, translates Rust into Lean, so a model would be the code itself rather than a copy of it. It was considered and not used, for two reasons:
+- Its Lean library depends on Mathlib. The check would take tens of minutes and gigabytes, where it now takes seconds.
+- The functions here lean on parts of Rust that Aeneas models only in part: `str` methods, iterators and closures, and async I/O.
+
+So each model is written step for step after the code, and the test cases tie the two together. If Aeneas comes to cover these, an extracted model can replace a hand-written one, and the theorems stay as they are.
 
 ## What is not verified, and why
 

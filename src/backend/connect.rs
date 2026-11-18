@@ -2323,4 +2323,74 @@ mod env_target_tests {
             Some(("example.com".to_string(), Some(2222)))
         );
     }
+
+    /// ssh's arguments, the endpoint ssh is told and the label approvals
+    /// are filed under, on every input the Lean model was run on
+    /// (`verification/Clew/Ssh.lean`), whose theorems say no field of a saved
+    /// connection is ever an option to ssh, and that a machine has one label
+    /// whether it is reached as a saved connection or through `CLEW_SSH`. And
+    /// the known_hosts field a key is written under names one host and port,
+    /// with none of the pattern syntax that would let it vouch for others.
+    #[test]
+    fn ssh_arguments_and_known_hosts_are_the_proven_model() {
+        use serde_json::{Value, json};
+        let vectors = include_str!("../../verification/vectors/ssh.json");
+        let cases = |f| clew_core::testutil::lean_cases(vectors, f);
+        let strings = |v: &Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        };
+        let endpoint =
+            |e: Option<SshEndpoint>| e.map_or(Value::Null, |e| json!([e.user, e.host, e.port]));
+        for (input, want) in cases("ssh_endpoint") {
+            let args = strings(&input);
+            let got = ssh_endpoint(&args).map_or(Value::Null, |e| {
+                let label = scope_label(
+                    e.user.as_deref(),
+                    &e.host,
+                    label_port(e.port.as_deref()).as_deref(),
+                );
+                json!([e.user, e.host, e.port, label])
+            });
+            assert_eq!(got, want, "ssh_endpoint({args:?})");
+        }
+        for (input, want) in cases("saved_connection") {
+            let c = SavedConnection {
+                name: String::new(),
+                user: input[0].as_str().unwrap().into(),
+                host: input[1].as_str().unwrap().into(),
+                port: input[2].as_u64().unwrap() as u16,
+                identity: input[3].as_str().unwrap().into(),
+                send_ai_keys: false,
+            };
+            let args = c.ssh_args();
+            assert_eq!(args, strings(&want[0]), "ssh_args of {c:?}");
+            assert_eq!(
+                c.target().approval_host(),
+                want[1].as_str(),
+                "label of {c:?}"
+            );
+            assert_eq!(endpoint(ssh_endpoint(&args)), want[2], "endpoint of {c:?}");
+        }
+        for (input, want) in cases("known_hosts_pattern") {
+            let host = input[0].as_str().unwrap();
+            let port = input[1].as_u64().map(|p| p as u16);
+            assert_eq!(
+                known_hosts_pattern(host, port),
+                want.as_str().unwrap(),
+                "known_hosts_pattern({host:?}, {port:?})"
+            );
+        }
+        for (input, want) in cases("plain_host_field") {
+            let field = input.as_str().unwrap();
+            assert_eq!(
+                plain_host_field(field),
+                want.as_bool().unwrap(),
+                "plain_host_field({field:?})"
+            );
+        }
+    }
 }

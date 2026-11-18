@@ -324,9 +324,71 @@ def voiceRoute : Json :=
   Json.mkObj [("route", Json.arr facts.toArray)]
 
 /-- Every model's vectors, by file name. -/
+def optJson : Option (List Char) → Json
+  | some s => str s
+  | none => Json.null
+
+def ssh : Json :=
+  -- Words a shell must read back: empty, spaces, quotes, `$`, a backslash,
+  -- a newline, a glob, a tilde, non-ASCII, a leading dash.
+  let words : List String := ["", "a", "a b", "'", "a'b", "''", "$HOME", "\\", "\n", "*", "~",
+    "é", "-p", "a\"b", "#", "x;y", "`id`", "a@b:c"]
+  let lists := (allUpTo words 2).map (·.map String.toList)
+  let commands := lists.map fun ws =>
+    pair (Json.arr (ws.map str).toArray) (str (Clew.Ssh.shellCommand ws))
+  let quotes := words.map fun w => pair (Json.str w) (str (Clew.Ssh.quote w.toList))
+  let scripts : List String := ["true", "echo hi", "a'b", "", "x\ny", "printf \"%s\\n\" x", "'"]
+  let shcs := scripts.map fun t => pair (Json.str t) (optJson (Clew.Ssh.shC t.toList))
+  -- ssh's arguments: every list of up to three of these words, and shaped ones.
+  let tokens : List String := ["-l", "a", "-p", "22", "2222", "-o", "User=b", "Port=7", "u@h",
+    "ssh://c@h:3", "--", "-v", "-lx", "-p9", "h", "-oUser=d"]
+  let argLists : List (List String) := allUpTo tokens 3 ++
+    [["ssh://h"], ["ssh://r@h:2222/"], ["ssh://r;x=1@h"], ["ssh://a%40b+c@h"], ["ssh://r@h."],
+      ["ssh://r@[h]:2222"], ["ssh://r@h:2222/srv"], ["ssh://@h"], ["ssh://r@"], ["ssh://r@a..b"],
+      ["ssh://r@[2001:db8::1]"], ["ssh://r@h:"], ["ssh://a%zz@h"], ["ssh://a%00@h"],
+      ["ssh://r@[h]x"], ["ssh://a%c3%a9@h"], ["ssh://a%ff@h"], ["-p", "http", "h"],
+      ["-p", "02222", "u@h"], ["a@b@h"], ["-l", "a", "-o", "User=c", "h"],
+      ["-o", "port = 5", "h"], ["-o", "PORT=6", "h"], ["h", "uptime", "-p", "9"]]
+  let endpoints := argLists.map fun args =>
+    let a := args.map String.toList
+    pair (Json.arr (args.map Json.str).toArray) (match Clew.Ssh.sshEndpoint a with
+      | some (u, h, p) => Json.arr #[optJson u, str h, optJson p,
+          str (Clew.Trust.scopeLabel u h (Clew.Ssh.labelPort p))]
+      | none => Json.null)
+  -- Saved connections, hostile fields among them.
+  let users := ["root", "a b", "ssh:/x", "-oProxyCommand=x", "é", "a%b"]
+  let hosts := ["example.com", "2001:db8::1", "-oProxyCommand=touch x", "h.", "[x]"]
+  let ports := [22, 2222, 1, 65535]
+  let identities := ["", "/keys/id", "-x", "a b"]
+  let saved := users.flatMap fun u => hosts.flatMap fun h => ports.flatMap fun p =>
+    identities.map fun i =>
+      let args := Clew.Ssh.sshArgs u.toList h.toList p i.toList
+      pair (Json.arr #[Json.str u, Json.str h, toJson p, Json.str i])
+        (Json.arr #[Json.arr (args.map str).toArray,
+          str (Clew.Ssh.savedLabel u.toList h.toList p),
+          match Clew.Ssh.sshEndpoint args with
+          | some (eu, eh, ep) => Json.arr #[optJson eu, str eh, optJson ep]
+          | none => Json.null])
+  -- known_hosts: the field written for a host and port, and fields judged.
+  let khHosts := ["example.com", "2001:db8::1", "a_b-c.d", "h"]
+  let khPorts : List (Option Nat) := [none, some 22, some 2222, some 1, some 65535]
+  let patterns := khHosts.flatMap fun h => khPorts.map fun p =>
+    pair (Json.arr #[Json.str h, (match p with | some n => toJson n | none => Json.null)])
+      (str (Clew.Ssh.knownHostsPattern h.toList p))
+  let fields : List String := ["example.com", "[example.com]:2222", "[h]:0", "[h]:65536", "[h]:+22",
+    "*.example.com", "a,b", "!h", "|1|abc", "@revoked", "h h", "", "[]:22", "[h]", "[h]:22:1",
+    "2001:db8::1", "[2001:db8::1]:2222", "h?", String.ofList (List.replicate 256 'a'),
+    String.ofList (List.replicate 255 'a'), "[a]:b]:22", "é"]
+  let plains := fields.map fun f => pair (Json.str f) (Json.bool (Clew.Ssh.plainHostField f.toList))
+  Json.mkObj [("shell_command", Json.arr commands.toArray), ("quote", Json.arr quotes.toArray),
+    ("sh_c", Json.arr shcs.toArray), ("ssh_endpoint", Json.arr endpoints.toArray),
+    ("saved_connection", Json.arr saved.toArray),
+    ("known_hosts_pattern", Json.arr patterns.toArray),
+    ("plain_host_field", Json.arr plains.toArray)]
+
 def all : List (String × Json) :=
   [("confine.json", confine), ("update.json", update), ("server_dist.json", serverDist),
-    ("trust.json", trust), ("framing.json", framing), ("voice_route.json", voiceRoute)]
+    ("trust.json", trust), ("framing.json", framing), ("voice_route.json", voiceRoute), ("ssh.json", ssh)]
 
 end Vectors
 
