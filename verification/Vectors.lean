@@ -30,6 +30,16 @@ def allUpTo {α : Type} (alphabet : List α) : Nat → List (List α)
 
 def str (s : List Char) : Json := Json.str (String.ofList s)
 
+/-- Every `White_Space` code point, the code points either side of each run
+of them, and two that look like spaces and are not (U+180E, which left the
+property in Unicode 6.3, and the byte-order mark): where `Text.isWhitespace`
+could part from `char::is_whitespace`, a vector sits. -/
+def spaceEdges : List Char :=
+  [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x1F, 0x20, 0x21, 0x84, 0x85, 0x86, 0x9F, 0xA0,
+    0xA1, 0x167F, 0x1680, 0x1681, 0x180E, 0x1FFF, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
+    0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x200B, 0x2027, 0x2028, 0x2029, 0x202A, 0x202E,
+    0x202F, 0x2030, 0x205E, 0x205F, 0x2060, 0x2FFF, 0x3000, 0x3001, 0xFEFF].map Char.ofNat
+
 /-- A `(input, output)` pair. -/
 def pair (a b : Json) : Json := Json.arr #[a, b]
 
@@ -37,7 +47,9 @@ def confine : Json :=
   let alphabet := ['a', '.', '/', ' ', ' ']
   let extra := ["../x", "a/..", "..a", ".../", "src/", "src/.", ".", "./a", "a/./b",
     " ", "a ", "\t", "\n", "\u0085", "​", " /a", "//", "a//b", "..", "a/../b"]
-  let inputs : List (List Char) := allUpTo alphabet 5 ++ extra.map String.toList
+  let spaced : List (List Char) := spaceEdges.flatMap fun w =>
+    [[w], [w, 'a'], ['a', w], [w, '/', 'a'], [w, '.', '.'], ['a', w, '/', '.', '.']]
+  let inputs : List (List Char) := allUpTo alphabet 5 ++ extra.map String.toList ++ spaced
   let lexical := inputs.map fun s =>
     pair (str s) (Json.str <| match Clew.Confine.checkLexical s with
       | .ok () => "ok"
@@ -64,7 +76,10 @@ def update : Json :=
       (p ++ a ++ "." ++ b ++ "." ++ c ++ x).toList
   let edge : List (List Char) := ["18446744073709551615.0.0", "1.2", "1.2.3.4", "x1.2.3",
     "V1.2.3", "\u00A01.2.3\u2003", "1 .2.3", "1.2.3 -beta"].map String.toList
-  let parses := (tiny ++ shaped ++ edge).map fun s =>
+  let spaced : List (List Char) := spaceEdges.flatMap fun w =>
+    [w :: "1.2.3".toList, "1.2.3".toList ++ [w], "1.".toList ++ w :: "2.3".toList,
+      'v' :: w :: "1.2.3".toList]
+  let parses := (tiny ++ shaped ++ edge ++ spaced).map fun s =>
     pair (str s) (match Clew.Update.parse s with
       | some v => version v
       | none => Json.null)
@@ -86,12 +101,25 @@ def update : Json :=
     ("ensure_upgrade", Json.arr upgrades.toArray)]
 
 /-- `char::to_lowercase` on the characters the slug vectors use: ASCII, and
-three whose lower case is not themselves in one character or not ASCII. -/
-def rustLower (c : Char) : List Char :=
+some whose lower case is not themselves in one character or not ASCII. -/
+def rustLowerChar (c : Char) : List Char :=
   if c == '\u212A' then ['k']                -- KELVIN SIGN
   else if c == '\u0130' then ['i', '\u0307']  -- I WITH DOT ABOVE
   else if c == '\u00C9' then ['\u00E9']       -- E WITH ACUTE
+  else if c == '\u0391' then ['\u03B1']       -- ALPHA
   else [Clew.Text.toAsciiLowercase c]
+
+/-- `str::to_lowercase` on those strings: each character's lower case, but a
+`Σ` after a letter and before none is the final `ς`. -/
+def rustLower (s : List Char) : List Char :=
+  let letter := fun (c : Char) => c.isAlpha || c == '\u0391' || c == '\u03A3'
+  let rec go : List Char → List Char → List Char
+    | _, [] => []
+    | before, c :: after =>
+      (if c == '\u03A3' then
+        (if before.head?.any letter && !(after.head?.any letter) then ['\u03C2'] else ['\u03C3'])
+      else rustLowerChar c) ++ go (c :: before) after
+  go [] s
 
 def optStr : Option (List Char) → Json
   | some s => str s
@@ -101,7 +129,10 @@ def serverDist : Json :=
   let alphabet := ['L', 'x', ' ', '-', '/', '.', '_', '8']
   let platforms : List (List Char) := allUpTo alphabet 3 ++ ["Linux x86_64", "Darwin arm64",
     " linux aarch64 ", "../etc", "linux/x86", "Linux\tx86", "LINUX X86_64", "linux.x86",
-    "li_nux-1", "Linux\u00A0x86", "\u212A", "\u0130", "\u00C9", "x86%2F", "a?b", "a#b"].map String.toList
+    "li_nux-1", "Linux\u00A0x86", "\u212A", "\u0130", "\u00C9", "x86%2F", "a?b", "a#b", "\u0391\u03A3", "\u03A3",
+    "\u0391\u03A3\u0391", "x\u03A3 y"].map String.toList
+  let platforms := platforms ++ spaceEdges.flatMap fun w =>
+    ["Linux".toList ++ w :: "x86".toList, w :: "Linux".toList]
   let slugs := platforms.map fun p => pair (str p) (optStr (Clew.ServerDist.slug rustLower p))
   let assets := [("linux-x86_64", 27), ("a", 0), ("a-p1", 2), ("x", 1234567)].map fun (sl, k) =>
     pair (Json.arr #[Json.str sl, toJson k]) (str (Clew.ServerDist.assetName sl.toList k))
@@ -117,8 +148,11 @@ def serverDist : Json :=
     "clew-server-linux-x86_64-p27=" ++ String.ofList (List.replicate 64 'a')]
   let seps := ["\n", ";", ",", "\r\n"]
   let pairs := good.flatMap fun a => good.flatMap fun b => seps.map fun sep => a ++ sep ++ b
+  let spacedEntries : List (List Char) := spaceEdges.flatMap fun w =>
+    [d1.toList ++ w :: "clew-server-x".toList, "clew-server-x=".toList ++ d1.toList ++ [w],
+      w :: "clew-server-x=".toList ++ d1.toList]
   let texts : List (List Char) := (entries ++ pairs ++
-    [String.join (good.map (· ++ "\n")), "", "\n\n;,"]).map String.toList
+    [String.join (good.map (· ++ "\n")), "", "\n\n;,"]).map String.toList ++ spacedEntries
   -- The map `parse_digest_list` returns: each name's last digest.
   let asMap (l : List (List Char × List Char)) : List (List Char × List Char) :=
     l.foldl (fun acc e => (acc.filter (·.1 != e.1)) ++ [e]) []
@@ -137,6 +171,8 @@ def serverDist : Json :=
         | .error () => Json.str "refused")
   let sidecars : List (List Char) := (digests.map (· ++ "  clew-server-linux-x86_64-p27\n") ++
     digests ++ ["", "  ", "abc " ++ d1, d1.toUpper ++ " x", "x y z"]).map String.toList
+  let sidecars := sidecars ++ spaceEdges.flatMap fun w =>
+    [d1.toList ++ w :: "x".toList, w :: d1.toList, d1.toList ++ [w]]
   let sums := sidecars.map fun t => pair (str t) (optStr (Clew.ServerDist.parseSha256 t))
   -- `verify` of the bytes `abc`, whose SHA-256 is `d1`, against each expected digest.
   let verifies := (digests ++ ["", d1 ++ " "]).map fun e =>
@@ -166,14 +202,17 @@ def trust : Json :=
     some "a@b", some "[r]"]
   let hosts := ["h", "example.com", "::1", "2001:db8::1:2222", "2001:db8::1", "a/b", "h%25", "[x]",
     "a@b", ""]
-  let ports := [22, 2222, 1]
+  let ports : List (Option String) := [none, some "2222", some "1", some "http", some "a]b/c",
+    some ""]
+  let opt : Option String → Json := fun | some t => Json.str t | none => Json.null
   let labels := users.flatMap fun u => hosts.flatMap fun h => ports.map fun p =>
-    pair (Json.arr #[(match u with | some u => Json.str u | none => Json.null), Json.str h, toJson p])
-      (str (Clew.Trust.scopeLabel (u.map String.toList) h.toList p))
-  let roots := ["/srv/p", "/b:/c", "/"]
-  let someLabels := [Clew.Trust.scopeLabel (some "u".toList) "h".toList 22,
-    Clew.Trust.scopeLabel (some "u".toList) "2001:db8::1".toList 2222,
-    Clew.Trust.scopeLabel none "a/b".toList 1]
+    pair (Json.arr #[opt u, Json.str h, opt p])
+      (str (Clew.Trust.scopeLabel (u.map String.toList) h.toList (p.map String.toList)))
+  let roots := ["/srv/p", "/b:/c", "/", "p", "2222:/srv/p", "./p", ".", "", "a/b"]
+  let someLabels := [Clew.Trust.scopeLabel (some "u".toList) "h".toList none,
+    Clew.Trust.scopeLabel (some "u".toList) "h".toList (some "2222".toList),
+    Clew.Trust.scopeLabel (some "u".toList) "2001:db8::1".toList (some "2222".toList),
+    Clew.Trust.scopeLabel none "a/b".toList (some "1".toList)]
   let keys := someLabels.flatMap fun l => roots.map fun r =>
     pair (Json.arr #[str l, Json.str r]) (str (Clew.Trust.approvalKey l r.toList))
   Json.mkObj [("args_part", Json.arr argsParts.toArray),
@@ -233,8 +272,26 @@ def framing : Json :=
     pair (Json.arr #[toJson cap, ascii bs]) (match Clew.Framing.readLineCapped cap bs with
       | (some l, rest) => Json.arr #[ascii l, toJson rest.length]
       | (none, rest) => Json.arr #[Json.null, toJson rest.length])
+  -- UTF-8: every one- and two-byte sequence over the bytes at the edges of
+  -- the table, then the three- and four-byte leads with every edge of a
+  -- continuation byte after them, as whole lines and cut off by the cap.
+  let edges := [0x00, 0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xC1, 0xC2, 0xDF,
+    0xE0, 0xE1, 0xEC, 0xED, 0xEE, 0xEF, 0xF0, 0xF1, 0xF3, 0xF4, 0xF5, 0xFF]
+  let conts := [0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0]
+  let short := [[]] ++ edges.map ([·]) ++ edges.flatMap fun a => edges.map fun b => [a, b]
+  let three := [0xE0, 0xE1, 0xED, 0xEF, 0xC2].flatMap fun a => conts.flatMap fun b =>
+    conts.map fun c => [a, b, c]
+  let four := [0xF0, 0xF1, 0xF4, 0xF5].flatMap fun a => conts.flatMap fun b =>
+    [0x80, 0xBF, 0x41].flatMap fun c => [0x80, 0xBF, 0x41].map fun d => [a, b, c, d]
+  let texts := short ++ three ++ four
+  let utf8Lines := texts.flatMap fun t => [(8, t ++ [10]), (8, t), (2, t ++ [10])]
+  let cappedBytes := utf8Lines.map fun (cap, bs) =>
+    pair (Json.arr #[toJson cap, bytesJson bs]) (match Clew.Framing.readLineCapped cap bs with
+      | (some l, rest) => Json.arr #[bytesJson l, toJson rest.length]
+      | (none, rest) => Json.arr #[Json.null, toJson rest.length])
   Json.mkObj [("read_frame", Json.arr frames.toArray), ("encode", Json.arr encodes.toArray),
-    ("read_json_line", Json.arr jsonLines.toArray), ("read_line_capped", Json.arr capped.toArray)]
+    ("read_json_line", Json.arr jsonLines.toArray), ("read_line_capped", Json.arr capped.toArray),
+    ("read_line_capped_bytes", Json.arr cappedBytes.toArray)]
 
 def stepName : Clew.VoiceRoute.Step → String
   | .bye => "bye"

@@ -13,13 +13,14 @@ round finding a path the last had missed. Here they are theorems, over
 every combination of facts:
 
 * "Bye, Clew" is always heard first, whatever else is true;
-* a word that stops Clew is never sent to Ask — unless the question waiting
-  offers an answer by that name, which it then is;
+* a word that stops Clew is never sent to Ask; when the question waiting
+  offers an answer by that name, it is held as that answer;
 * nor is it ever taken for a yes ("okay, stop" opens with one);
 * a command waiting for a yes runs only on a yes;
 * what is said to a question waiting is never sent to Ask;
 * while an answer is being written, a stop word stops it before any command
-  of its name is tried;
+  of its name is tried — unless a command waits for a yes, which the stop
+  word declines, or the question waiting has an answer by that name;
 * every route ends in exactly one step that acts, after at most one `Try`,
   and never takes a step whose subject is not there (a waiting command, a
   question).
@@ -114,10 +115,17 @@ theorem forall_facts (p : Facts → Prop) [DecidablePred p]
 theorem bye_first : ∀ f : Facts, f.bye = true → route f = [.bye] :=
   forall_facts _ (by decide +kernel)
 
-/-- **A stop word is never asked of Ask** — unless the question waiting
-offers an answer of its name. -/
-theorem hush_never_asked :
-    ∀ f : Facts, f.hush = true → f.toQuestion ≠ some .answer → .ask ∉ route f :=
+/-- **A stop word is never asked of Ask.** -/
+theorem hush_never_asked : ∀ f : Facts, f.hush = true → .ask ∉ route f :=
+  forall_facts _ (by decide +kernel)
+
+/-- **A stop word the question waiting has an answer of is that answer**:
+like any word said to the question, it is tried as a command, then held
+for the question — nothing is stopped. -/
+theorem hush_answers_the_question : ∀ f : Facts,
+    f.bye = false → f.stopListeningSaid = false → f.empty = false → f.confirmWaiting = false →
+      f.hush = true → f.toQuestion = some QuestionWord.answer →
+        route f = [if f.runCommands then .tryCommand else .tryCommandsBackOn, .hold] :=
   forall_facts _ (by decide +kernel)
 
 /-- **"Okay, stop" is not a yes**: a stop word never runs the command

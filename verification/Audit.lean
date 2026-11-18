@@ -15,7 +15,12 @@ the kernel did not check.
 #print axioms Clew.Confine.accepted_never_leaves
 #print axioms Clew.Confine.checkLexical_spec
 -- No downgrade
+#print axioms Clew.Update.lt_irrefl
+#print axioms Clew.Update.lt_trans
+#print axioms Clew.Update.lt_asymm
+#print axioms Clew.Update.lt_total
 #print axioms Clew.Update.accepted_is_newer
+#print axioms Clew.Update.installAll_chain
 #print axioms Clew.Update.installs_never_repeat
 #print axioms Clew.Update.parse_display
 #print axioms Clew.Update.parse_tag
@@ -49,6 +54,7 @@ the kernel did not check.
 -- Voice routing
 #print axioms Clew.VoiceRoute.bye_first
 #print axioms Clew.VoiceRoute.hush_never_asked
+#print axioms Clew.VoiceRoute.hush_answers_the_question
 #print axioms Clew.VoiceRoute.hush_never_yes
 #print axioms Clew.VoiceRoute.runs_only_on_yes
 #print axioms Clew.VoiceRoute.question_words_never_asked

@@ -38,10 +38,11 @@ open Clew.Text
 /-- A slug character: `is_ascii_alphanumeric`, `-` or `_`. -/
 def slugChar (c : Char) : Bool := isAsciiAlphanumeric c || c == '-' || c == '_'
 
-/-- `slug`, for a lower-casing `lower` (`char::to_lowercase`; it is a
-parameter because what is proved holds whatever it is). -/
-def slug (lower : Char → List Char) (platform : List Char) : Option (List Char) :=
-  let s := ((trim platform).flatMap lower).map (fun c => if c == ' ' then '-' else c)
+/-- `slug`, for a lower-casing `lower` of the whole string
+(`str::to_lowercase`, which looks at a character's neighbours for a final
+`Σ`; it is a parameter because what is proved holds whatever it is). -/
+def slug (lower : List Char → List Char) (platform : List Char) : Option (List Char) :=
+  let s := (lower (trim platform)).map (fun c => if c == ' ' then '-' else c)
   if s.isEmpty || !s.all slugChar then none else some s
 
 /-- `asset_name`: `clew-server-<slug>-p<protocol>`. -/
@@ -127,7 +128,7 @@ theorem slug_check {t s : List Char}
 /-- **A slug is a plain token.** Whatever the remote reports and however
 characters lower-case, a slug is non-empty and made only of ASCII letters,
 digits, `-` and `_`. -/
-theorem slug_is_a_token (lower : Char → List Char) (platform s : List Char)
+theorem slug_is_a_token (lower : List Char → List Char) (platform s : List Char)
     (h : slug lower platform = some s) : s ≠ [] ∧ ∀ c ∈ s, slugChar c = true := by
   unfold slug at h
   dsimp only at h
@@ -135,7 +136,7 @@ theorem slug_is_a_token (lower : Char → List Char) (platform s : List Char)
 
 /-- So a slug holds no `/` (no path separator, no URL path), no `.` (never
 `.` or `..`), and nothing a URL reads as syntax (`?`, `#`, `%`, `:`, `@`). -/
-theorem slug_has_no_path_or_url_syntax (lower : Char → List Char) (platform s : List Char)
+theorem slug_has_no_path_or_url_syntax (lower : List Char → List Char) (platform s : List Char)
     (h : slug lower platform = some s) :
     ∀ c ∈ s, c ≠ '/' ∧ c ≠ '.' ∧ c ≠ '?' ∧ c ≠ '#' ∧ c ≠ '%' ∧ c ≠ ':' ∧ c ≠ '@' := by
   intro c hc

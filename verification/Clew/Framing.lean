@@ -206,14 +206,46 @@ def readJsonLineAux (cap : Nat) : Nat → List Nat → Except Error (Option (Lis
 def readJsonLine (cap : Nat) (s : List Nat) : Except Error (Option (List Nat)) × List Nat :=
   readJsonLineAux cap (s.length + 1) s
 
-/-- `read_line_capped`: one line, its content at most `cap` bytes. `none` at
-the end of the stream or past the cap (the UTF-8 check aside). -/
+/-- A continuation byte, `10xxxxxx`. -/
+def cont (b : Nat) : Bool := 0x80 ≤ b && b ≤ 0xBF
+
+/-- Whether bytes are UTF-8 as `String::from_utf8` accepts it: the
+well-formed sequences of the Unicode standard's table 3-7 — no overlong
+form, no surrogate, nothing past U+10FFFF, nothing cut off. -/
+def utf8Valid : List Nat → Bool
+  | [] => true
+  | b :: r =>
+    if b < 0x80 then utf8Valid r
+    else if 0xC2 ≤ b && b ≤ 0xDF then
+      match r with
+      | c :: r => cont c && utf8Valid r
+      | [] => false
+    else if 0xE0 ≤ b && b ≤ 0xEF then
+      match r with
+      | c1 :: c2 :: r =>
+        (if b == 0xE0 then 0xA0 ≤ c1 && c1 ≤ 0xBF
+          else if b == 0xED then 0x80 ≤ c1 && c1 ≤ 0x9F
+          else cont c1) && cont c2 && utf8Valid r
+      | _ => false
+    else if 0xF0 ≤ b && b ≤ 0xF4 then
+      match r with
+      | c1 :: c2 :: c3 :: r =>
+        (if b == 0xF0 then 0x90 ≤ c1 && c1 ≤ 0xBF
+          else if b == 0xF4 then 0x80 ≤ c1 && c1 ≤ 0x8F
+          else cont c1) && cont c2 && cont c3 && utf8Valid r
+      | _ => false
+    else false
+
+/-- `read_line_capped`: one line, its content at most `cap` bytes and
+UTF-8. `none` at the end of the stream, past the cap, or for bytes that are
+not text — the line consumed all the same. -/
 def readLineCapped (cap : Nat) (s : List Nat) : Option (List Nat) × List Nat :=
   let (line, rest) := readLine (cap + 1) s
+  let text := fun l : List Nat => if utf8Valid l then some l else none
   if line.isEmpty then (none, rest)
-  else if line.getLast? == some NL then (some line.dropLast, rest)
+  else if line.getLast? == some NL then (text line.dropLast, rest)
   else if line.length > cap then (none, rest)
-  else (some line, rest)
+  else (text line, rest)
 
 /-! ## Lemmas -/
 
@@ -565,14 +597,15 @@ theorem readJsonLine_line (cap : Nat) (msg rest : List Nat) (hnl : NL ∉ msg)
   have hcr' : (msg.getLast? == some CR) = false := by simpa using hcr
   simp [hcr', hws, show ¬ msg.length > cap by omega]
 
-/-- **The clew protocol's cap is on content.** A line of at most `cap`
-bytes, newline after it, is read; the stream is left after the newline. -/
+/-- **The clew protocol's cap is on content.** A line of text of at most
+`cap` bytes, newline after it, is read; the stream is left after the
+newline. -/
 theorem readLineCapped_within (cap : Nat) (line rest : List Nat) (hnl : NL ∉ line)
-    (hcap : line.length ≤ cap) :
+    (hcap : line.length ≤ cap) (htext : utf8Valid line = true) :
     readLineCapped cap (line ++ NL :: rest) = (some line, rest) := by
   unfold readLineCapped
   rw [readLine_append (cap + 1) line rest hnl (by omega)]
-  simp
+  simp [htext]
 
 /-- **And past the cap, nothing.** A line whose first `cap + 1` bytes hold
 no newline is refused, not read in part. -/

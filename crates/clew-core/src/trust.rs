@@ -1069,16 +1069,17 @@ mod tests {
         }
     }
 
-    /// The fingerprints hash exactly the modelled encoding: a leave-to-build
-    /// record is the SHA-256 of its two length-prefixed fields.
+    /// The fingerprints hash exactly the modelled encoding: leave to build
+    /// rust-analyzer is the SHA-256 of its two length-prefixed fields, a
+    /// digest worked out apart from this code (Python's `hashlib` over
+    /// `struct.pack('<Q', len) + part` for each part) and the same one 0.2.4
+    /// recorded — so no approval already given changes its fingerprint.
     #[test]
     fn a_build_fingerprint_hashes_its_length_prefixed_fields() {
-        use sha2::{Digest, Sha256};
-        let want: String = Sha256::digest(length_prefixed(&[BUILD_DOMAIN, "rust-analyzer"]))
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        assert_eq!(build_fingerprint("rust-analyzer"), want);
+        assert_eq!(
+            build_fingerprint("rust-analyzer"),
+            "7e500c2cf82da5a078e52c17eee597b286057d3daa0e5823fe1674188013152f"
+        );
     }
 
     /// Run `f` with `CLEW_DATA_DIR` at a fresh directory, restored afterwards
@@ -1108,6 +1109,37 @@ mod tests {
             let mut again = back;
             again.trust_root(None, &project);
             assert_eq!(again.roots().len(), 1);
+        });
+    }
+
+    /// A project whose path is not UTF-8 is trusted under its own key and
+    /// read back from `trust.toml` as that key — its sibling with another
+    /// byte where the first is not UTF-8 is not trusted with it.
+    #[test]
+    #[cfg(unix)]
+    fn a_path_that_is_not_utf8_is_trusted_alone() {
+        use std::os::unix::ffi::OsStrExt;
+        with_data_dir("clew-trust-bytes", |dir| {
+            let named = |last: u8| {
+                let mut bytes = dir.as_os_str().as_bytes().to_vec();
+                bytes.extend_from_slice(b"/proj");
+                bytes.push(last);
+                std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&bytes))
+            };
+            let (ff, fe) = (named(0xff), named(0xfe));
+            std::fs::create_dir_all(&ff).unwrap();
+            std::fs::create_dir_all(&fe).unwrap();
+            Trust::load()
+                .update(|t| {
+                    t.trust_root(None, &ff);
+                    t.trust_root(Some("u@h"), &ff);
+                })
+                .unwrap();
+            let back = Trust::load_checked().unwrap();
+            assert!(back.is_root_trusted(None, &ff));
+            assert!(back.is_root_trusted(Some("u@h"), &ff));
+            assert!(!back.is_root_trusted(None, &fe));
+            assert!(!back.is_root_trusted(Some("u@h"), &fe));
         });
     }
 

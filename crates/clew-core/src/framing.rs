@@ -1607,6 +1607,20 @@ mod tests {
                 "read_line_capped({cap}, {text:?})"
             );
         }
+        // The same on bytes, most of them not UTF-8: a line that is not
+        // text is no line, and is consumed all the same.
+        for (input, want) in cases("read_line_capped_bytes") {
+            let (cap, stream) = (input[0].as_u64().unwrap() as usize, bytes(&input[1]));
+            let mut reader: &[u8] = &stream;
+            let got = read_line_capped(&mut reader, cap)
+                .await
+                .map(String::into_bytes);
+            assert_eq!(
+                serde_json::json!([got, reader.len()]),
+                want,
+                "read_line_capped({cap}, {stream:x?})"
+            );
+        }
     }
 
     /// A protocol frame's cap is on its content: a line of exactly the cap

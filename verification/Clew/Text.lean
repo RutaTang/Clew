@@ -5,9 +5,11 @@ Each model works on a `List Char` — a Rust `&str` as its `chars()` — or on a
 `List UInt8` where the Rust code works on bytes. The functions here are the
 `str` methods the verified Rust code calls, written down with the semantics
 the Rust standard library documents for them, so a model reads like the code
-it models. Every one of them is exercised against the real Rust method by
-the conformance vectors (see `Vectors.lean`), so a mistake here shows up
-as a failing `cargo test`, not as a silently wrong proof.
+it models. None is tested alone: the ones the models run are exercised
+through the Rust functions that use them, on inputs chosen to reach them —
+every `White_Space` code point and its neighbours among them (see
+`Vectors.lean`) — so a mistake here shows up as a failing `cargo test`, not
+as a silently wrong proof.
 -/
 
 namespace Clew.Text

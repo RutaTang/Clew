@@ -22,11 +22,13 @@ alike. Everything else is proved here, about the inputs:
   hash disjoint inputs, so an approval of one is never an approval of
   another;
 * the key an approval is filed under names one machine and one project:
-  `user@host`, the port when it is not 22, and the root never run
-  together. (They did, before this model: a host may hold `:`, so
-  `u@2001:db8::1:2222` on port 22 and `u@2001:db8::1` on port 2222 shared one
-  key. The host is now bracketed when it holds a `:`, and `%`, `/`, `[`,
-  `]` and `@` are escaped.)
+  `user@host`, the port when one other than 22 is given, and the root never
+  run together, whatever the root. (They did, before this model: a host may
+  hold `:`, so `u@2001:db8::1:2222` on port 22 and `u@2001:db8::1` on port
+  2222 shared one key, and so did `2222:/srv/p`, a relative root, on `u@h`
+  and `/srv/p` on `u@h:2222`. The host is now bracketed when it holds a
+  `:`, `%`, `/`, `[`, `]` and `@` are escaped, and a relative root is
+  written after `./`.)
 
 Byte strings are lists of `Nat`s, each a byte.
 -/
@@ -416,26 +418,37 @@ so a port after it can never be read as part of it. -/
 def hostPart (host : List Char) : List Char :=
   if host.contains ':' then '[' :: (esc host ++ [']']) else esc host
 
-def portPart (port : Nat) : List Char := if port == 22 then [] else ':' :: decimal port
+/-- `scope_label`'s port: `:port` as ssh was given it, escaped, when it was
+given one other than 22; nothing when ssh picks it. -/
+def portPart : Option (List Char) → List Char
+  | none => []
+  | some t => ':' :: esc t
 
 /-- `scope_label`: `user@host`, the user left out when ssh is given none,
-`:port` when the port is not 22. -/
-def scopeLabel (user : Option (List Char)) (host : List Char) (port : Nat) : List Char :=
+`:port` when a port other than 22 is. -/
+def scopeLabel (user : Option (List Char)) (host : List Char) (port : Option (List Char)) :
+    List Char :=
   (match user with
     | some u => esc u ++ ['@']
     | none => []) ++ (hostPart host ++ portPart port)
 
+/-- The root as a remote's key holds it: an absolute one as it is, a
+relative one after `./`, so it never starts where the label could go on. -/
+def rootPart (root : List Char) : List Char :=
+  if root.head? = some '/' then root else '.' :: '/' :: root
+
 /-- `project_key` for a remote: `ssh://<label>:<root>`. -/
-def approvalKey (label root : List Char) : List Char := "ssh://".toList ++ label ++ ':' :: root
+def approvalKey (label root : List Char) : List Char :=
+  "ssh://".toList ++ label ++ ':' :: rootPart root
 
 /-- The port read back. -/
-def readPort : List Char → Option Nat
-  | [] => some 22
-  | ':' :: ds => if !ds.isEmpty && ds.all isAsciiDigit then some (digitsValue ds) else none
+def readPort : List Char → Option (Option (List Char))
+  | [] => some none
+  | ':' :: e => (unesc e).map some
   | _ => none
 
 /-- A host part read back. -/
-def readHost (r : List Char) : Option (List Char × Nat) :=
+def readHost (r : List Char) : Option (List Char × Option (List Char)) :=
   match r with
   | '[' :: rest =>
     match splitOnce ']' rest with
@@ -452,10 +465,10 @@ def readHost (r : List Char) : Option (List Char × Nat) :=
       pure (h, p)
     | none => do
       let h ← unesc r
-      pure (h, 22)
+      pure (h, none)
 
 /-- A label read back: the user (if there is an `@`), the host, the port. -/
-def readLabel (l : List Char) : Option (Option (List Char) × List Char × Nat) :=
+def readLabel (l : List Char) : Option (Option (List Char) × List Char × Option (List Char)) :=
   match splitOnce '@' l with
   | some (eu, r) => do
     let u ← unesc eu
@@ -465,14 +478,15 @@ def readLabel (l : List Char) : Option (Option (List Char) × List Char × Nat) 
     let (h, p) ← readHost l
     pure (none, h, p)
 
-/-- A key read back: the label is everything up to the `:` before the
-first `/`, which starts the root. -/
+/-- A key read back. The label has no `/`, so it ends at the first one,
+which starts an absolute root or ends the `./` before a relative one. -/
 def readKey (k : List Char) : Option (List Char × List Char) :=
   let body := k.drop 6
   let front := body.takeWhile (· != '/')
   let root := body.dropWhile (· != '/')
   match front.reverse with
   | ':' :: l => some (l.reverse, root)
+  | '.' :: ':' :: l => some (l.reverse, root.drop 1)
   | _ => none
 
 theorem splitOnce_append {c : Char} (xs ys : List Char) (hx : c ∉ xs) :
@@ -494,37 +508,30 @@ theorem splitOnce_absent {c : Char} (xs : List Char) (hx : c ∉ xs) : splitOnce
       simpa using this
     simp [splitOnce, hne, ih (fun h => hx (by simp [h]))]
 
-theorem readPort_portPart (port : Nat) : readPort (portPart port) = some port := by
-  unfold portPart
-  by_cases h : port = 22
-  · subst h; rfl
-  · have hd : (decimal port).all isAsciiDigit = true := List.all_eq_true.mpr (decimal_digits port)
-    have hne : (decimal port).isEmpty = false := by
-      cases he : decimal port with
-      | nil => exact absurd he (decimal_ne_nil port)
-      | cons _ _ => rfl
-    simp [h, readPort, hd, hne, digitsValue_decimal]
+theorem readPort_portPart (port : Option (List Char)) : readPort (portPart port) = some port := by
+  cases port with
+  | none => rfl
+  | some t => simp [portPart, readPort, unesc_esc]
 
-theorem portPart_free (port : Nat) : ∀ c ∈ portPart port, c ≠ '/' ∧ c ≠ '@' ∧ c ≠ ']' := by
+theorem portPart_free (port : Option (List Char)) :
+    ∀ c ∈ portPart port, c ≠ '/' ∧ c ≠ '@' ∧ c ≠ ']' := by
   intro c hc
-  unfold portPart at hc
-  split at hc
-  · simp at hc
-  · simp only [List.mem_cons] at hc
+  cases port with
+  | none => simp [portPart] at hc
+  | some t =>
+    simp only [portPart, List.mem_cons] at hc
     rcases hc with rfl | hc
     · decide
-    · have := decimal_digits port c hc
-      simp only [isAsciiDigit, Bool.and_eq_true, decide_eq_true_eq] at this
-      refine ⟨?_, ?_, ?_⟩ <;> (intro he; subst he; simp at this)
+    · exact ⟨(esc_free t c hc).1, (esc_free t c hc).2.2.2.1, (esc_free t c hc).2.2.1⟩
 
-theorem portPart_head (port : Nat) : ∀ c, (portPart port).head? = some c → c = ':' := by
+theorem portPart_head (port : Option (List Char)) :
+    ∀ c, (portPart port).head? = some c → c = ':' := by
   intro c hc
-  unfold portPart at hc
-  split at hc
-  · simp at hc
-  · simp at hc; exact hc.symm
+  cases port with
+  | none => simp [portPart] at hc
+  | some t => simp [portPart] at hc; exact hc.symm
 
-theorem readHost_hostPart (host : List Char) (port : Nat) :
+theorem readHost_hostPart (host : List Char) (port : Option (List Char)) :
     readHost (hostPart host ++ portPart port) = some (host, port) := by
   have hfree := esc_free host
   unfold hostPart
@@ -554,22 +561,19 @@ theorem readHost_hostPart (host : List Char) (port : Nat) :
     split
     · rename_i rest heq
       exact absurd rfl (hhead '[' (by rw [heq]; rfl))
-    · unfold portPart
-      by_cases hp : port = 22
-      · subst hp
-        simp only [beq_self_eq_true, ite_true, List.append_nil]
+    · cases port with
+      | none =>
+        simp only [portPart, List.append_nil]
         rw [splitOnce_absent _ hnoc]
         simp [unesc_esc]
-      · have hp' : (port == 22) = false := by simpa using hp
-        simp only [hp', Bool.false_eq_true, ite_false]
+      | some t =>
+        simp only [portPart]
         rw [splitOnce_append _ _ hnoc]
-        have := readPort_portPart port
-        unfold portPart at this
-        simp only [hp', Bool.false_eq_true, ite_false] at this
-        simp [unesc_esc, this]
+        simp [readPort, unesc_esc]
 
 /-- **A label names one user, host and port.** -/
-theorem readLabel_scopeLabel (user : Option (List Char)) (host : List Char) (port : Nat) :
+theorem readLabel_scopeLabel (user : Option (List Char)) (host : List Char)
+    (port : Option (List Char)) :
     readLabel (scopeLabel user host port) = some (user, host, port) := by
   have hnoat : '@' ∉ hostPart host ++ portPart port := by
     intro h
@@ -597,7 +601,8 @@ theorem readLabel_scopeLabel (user : Option (List Char)) (host : List Char) (por
     rw [splitOnce_append _ _ hnu]
     simp [unesc_esc, readHost_hostPart]
 
-theorem scopeLabel_free (user : Option (List Char)) (host : List Char) (port : Nat) :
+theorem scopeLabel_free (user : Option (List Char)) (host : List Char)
+    (port : Option (List Char)) :
     ∀ c ∈ scopeLabel user host port, c ≠ '/' := by
   intro c hc
   simp only [scopeLabel, List.mem_append] at hc
@@ -620,34 +625,52 @@ theorem scopeLabel_free (user : Option (List Char)) (host : List Char) (port : N
   · exact (portPart_free port c hc).1
 
 /-- **The key splits back into its label and root**, for an absolute root. -/
-theorem readKey_approvalKey (label root : List Char) (hl : ∀ c ∈ label, c ≠ '/')
-    (hr : root.head? = some '/') : readKey (approvalKey label root) = some (label, root) := by
+theorem readKey_approvalKey (label root : List Char) (hl : ∀ c ∈ label, c ≠ '/') :
+    readKey (approvalKey label root) = some (label, root) := by
   unfold readKey approvalKey
   dsimp only
-  have hdrop : ("ssh://".toList ++ label ++ ':' :: root).drop 6 = label ++ ':' :: root := by
+  have hdrop : ("ssh://".toList ++ label ++ ':' :: rootPart root).drop 6 =
+      label ++ ':' :: rootPart root := by
     simp
   rw [hdrop]
-  have hfront : ∀ c ∈ label ++ [':'], (c != '/') = true := by
-    intro c hc
-    simp only [List.mem_append, List.mem_singleton] at hc
-    rcases hc with hc | rfl
-    · simpa using hl c hc
-    · decide
-  have hstop : ∀ c, root.head? = some c → (c != '/') = false := by
-    intro c hc; rw [hr] at hc; cases hc; decide
-  have e : label ++ ':' :: root = (label ++ [':']) ++ root := by simp
-  rw [e, takeWhile_append_all _ _ hfront hstop, dropWhile_append_all _ _ hfront hstop]
-  simp
+  have hlabel : ∀ c ∈ label, (c != '/') = true := fun c hc => by simpa using hl c hc
+  unfold rootPart
+  by_cases hr : root.head? = some '/'
+  · simp only [hr, ite_true]
+    have hfront : ∀ c ∈ label ++ [':'], (c != '/') = true := by
+      intro c hc
+      simp only [List.mem_append, List.mem_singleton] at hc
+      rcases hc with hc | rfl
+      · exact hlabel c hc
+      · decide
+    have hstop : ∀ c, root.head? = some c → (c != '/') = false := by
+      intro c hc; rw [hr] at hc; cases hc; decide
+    have e : label ++ ':' :: root = (label ++ [':']) ++ root := by simp
+    rw [e, takeWhile_append_all _ _ hfront hstop, dropWhile_append_all _ _ hfront hstop]
+    simp
+  · simp only [hr, ite_false]
+    have hfront : ∀ c ∈ label ++ [':', '.'], (c != '/') = true := by
+      intro c hc
+      simp only [List.mem_append, List.mem_cons, List.not_mem_nil, or_false] at hc
+      rcases hc with hc | rfl | rfl
+      · exact hlabel c hc
+      · decide
+      · decide
+    have hstop : ∀ c, ('/' :: root).head? = some c → (c != '/') = false := by
+      intro c hc; cases hc; decide
+    have e : label ++ ':' :: '.' :: '/' :: root = (label ++ [':', '.']) ++ ('/' :: root) := by simp
+    rw [e, takeWhile_append_all _ _ hfront hstop, dropWhile_append_all _ _ hfront hstop]
+    simp
 
 /-- **One key, one machine and one project.** Two remotes — user, host and
-port — and two absolute roots share an approval key only if they are the
-same: an approval granted for one machine's project never covers another's. -/
-theorem approvalKey_injective {u u' : Option (List Char)} {h h' r r' : List Char} {p p' : Nat}
-    (hr : r.head? = some '/') (hr' : r'.head? = some '/')
+port — and two roots share an approval key only if they are the same: an
+approval granted for one machine's project never covers another's. -/
+theorem approvalKey_injective {u u' : Option (List Char)} {h h' r r' : List Char}
+    {p p' : Option (List Char)}
     (heq : approvalKey (scopeLabel u h p) r = approvalKey (scopeLabel u' h' p') r') :
     u = u' ∧ h = h' ∧ p = p' ∧ r = r' := by
-  have k := readKey_approvalKey _ r (scopeLabel_free u h p) hr
-  have k' := readKey_approvalKey _ r' (scopeLabel_free u' h' p') hr'
+  have k := readKey_approvalKey _ r (scopeLabel_free u h p)
+  have k' := readKey_approvalKey _ r' (scopeLabel_free u' h' p')
   rw [heq, k'] at k
   simp only [Option.some.injEq, Prod.mk.injEq] at k
   obtain ⟨hl, hroot⟩ := k
@@ -657,12 +680,13 @@ theorem approvalKey_injective {u u' : Option (List Char)} {h h' r r' : List Char
   simp only [Option.some.injEq, Prod.mk.injEq] at l
   exact ⟨l.1.symm, l.2.1.symm, l.2.2.symm, hroot.symm⟩
 
-/-- **A remote approval is never a local one**: a local project's key is its
-canonical (absolute) path, a remote's starts `ssh://`. -/
-theorem local_ne_remote (path label root : List Char) (hp : path.head? = some '/') :
+/-- **A remote approval is never a local one**: a local project's key is an
+absolute path, which never begins `ssh://`, as a remote's always does. -/
+theorem local_ne_remote (path label root : List Char) (hp : path.take 6 ≠ "ssh://".toList) :
     path ≠ approvalKey label root := by
   intro h
-  rw [h] at hp
-  simp [approvalKey] at hp
+  apply hp
+  rw [h]
+  simp [approvalKey]
 
 end Clew.Trust
