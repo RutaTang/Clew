@@ -61,10 +61,12 @@ pub(crate) struct Target {
     /// A field what is said is typed into: what it holds, and what typing
     /// in it sends.
     pub typing: Option<Typing>,
-    /// Not to be pressed yet: an answer whose question is not within the
-    /// reader's reach long enough to be read (`App::may_allow`). Only
-    /// voice is offered it ([`gather_heard`]), to wait when it is said.
-    pub waiting: bool,
+    /// Not to be pressed yet, and why: an answer whose question is not
+    /// within the reader's reach long enough to be read (`App::may_allow`,
+    /// [`crate::app::onscreen::TOO_SOON`]), or a button waiting on what its
+    /// tip says. Only voice is offered it ([`gather_heard`]): what is said
+    /// for it is held, and told why.
+    pub waiting: Option<&'static str>,
     /// It allows, runs or trusts what a question waiting on the user asks
     /// — its "yes" ([`answer_when`]), or what answers every such question
     /// from now on ("Always allow…", [`said_when`]): said as a question, it
@@ -145,7 +147,7 @@ pub(crate) fn gathering() -> bool {
 }
 
 fn push(title: String, shown: String, message: &Message, answer: Option<Answer>, row: bool) {
-    push_as(title, shown, message, answer, row, (false, false));
+    push_as(title, shown, message, answer, row, (None, false));
 }
 
 /// [`push`], `(waiting, allows)` as given ([`Target::waiting`],
@@ -156,7 +158,7 @@ fn push_as(
     message: &Message,
     answer: Option<Answer>,
     row: bool,
-    (waiting, allows): (bool, bool),
+    (waiting, allows): (Option<&'static str>, bool),
 ) {
     GATHERING.with(|g| {
         if let Some(g) = g.borrow_mut().as_mut() {
@@ -311,7 +313,7 @@ pub(crate) fn answer_when(
             &message,
             Some(answer),
             false,
-            (!ready, answer == Answer::Yes),
+            (too_soon(ready), answer == Answer::Yes),
         );
     }
     if ready {
@@ -319,6 +321,35 @@ pub(crate) fn answer_when(
         return Some(message);
     }
     None
+}
+
+/// [`answer`] for a button that cannot be pressed yet, and says `why` where
+/// the pointer rests: no press to put on it, and what is said for it is
+/// held, told `why` ([`Target::waiting`]) — not sent on to Ask as a
+/// question, behind the dialog it was said to.
+pub(crate) fn answer_held(
+    why: &'static str,
+    shown: &str,
+    answer: Answer,
+    message: Message,
+) -> Option<Message> {
+    if gathering() {
+        push_as(
+            title_of(shown),
+            shown.to_string(),
+            &message,
+            Some(answer),
+            false,
+            (Some(why), false),
+        );
+    }
+    None
+}
+
+/// Why an answer whose question cannot be answered yet (not `ready`) is
+/// held ([`Target::waiting`]).
+fn too_soon(ready: bool) -> Option<&'static str> {
+    (!ready).then_some(crate::app::onscreen::TOO_SOON)
 }
 
 /// [`said`] once it may be pressed (`ready`), as [`answer_when`] — for an
@@ -333,7 +364,7 @@ pub(crate) fn said_when(ready: bool, shown: &str, message: Message) -> Option<Me
             &message,
             None,
             false,
-            (!ready, true),
+            (too_soon(ready), true),
         );
     }
     if ready {
@@ -357,7 +388,7 @@ pub(crate) fn field(value: &str, on_input: fn(String) -> Message) {
                 row: None,
                 answer: None,
                 typing: Some((value.to_string(), on_input)),
-                waiting: false,
+                waiting: None,
                 allows: false,
             });
         }
@@ -445,7 +476,7 @@ pub(crate) fn layer(layer: Layer) {
 /// dialog over the window leaves nothing under it to press.
 pub(crate) fn gather(app: &App) -> Vec<Target> {
     let mut targets = gather_heard(app);
-    targets.retain(|t| !t.waiting);
+    targets.retain(|t| t.waiting.is_none());
     targets
 }
 
@@ -529,7 +560,7 @@ mod tests {
                 .iter()
                 .find(|t| t.shown == shown)
                 .unwrap_or_else(|| panic!("{shown} offered: {targets:?}"));
-            (t.allows, t.waiting)
+            (t.allows, t.waiting.is_some())
         };
         assert_eq!(kind("Allow"), (true, false));
         assert_eq!(kind("Decline"), (false, false));
@@ -555,7 +586,7 @@ mod tests {
             row: None,
             answer: None,
             typing: None,
-            waiting: false,
+            waiting: None,
             allows: false,
         }
     }

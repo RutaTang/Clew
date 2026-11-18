@@ -2073,20 +2073,14 @@ impl App {
         } else if let Some(task) = self.heard_commands_back_on(&text) {
             return task;
         }
-        // A yes, or an allowing answer's words, with a question waiting —
-        // its answer covered, not offered yet, or spoken commands off: held
-        // (`App::hold_answer`), never a question for Ask, which the agent
-        // asking would read as consent. A yes with no question waiting
+        // A yes or a no, or an answer's words, with a question waiting —
+        // that question covered, not ready to answer, put away, or spoken
+        // commands off: held (`App::hold_for_question`), never a question
+        // for Ask, where the agent asking would read a yes as consent and a
+        // no would wait on the question. With no question waiting, it
         // answers what the agent asked in words, and goes on.
-        if self.answers_question(&text) {
-            let why = if !self.voice.prefs.run_commands {
-                crate::app::onscreen::COMMANDS_OFF
-            } else if crate::app::spoken::asked(&text) {
-                crate::app::onscreen::ASKED
-            } else {
-                crate::app::onscreen::TOO_SOON
-            };
-            return self.hold_answer(text, why);
+        if let Some(to) = self.said_to_question(&text) {
+            return self.hold_for_question(text, to);
         }
         // A question: to Ask. Sent, it is answered where Ask is — the card
         // is not opened over the code for it: the pill says it is being

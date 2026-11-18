@@ -2267,9 +2267,13 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
     assert!(
         crate::ui::heard::gather_heard(&app)
             .iter()
-            .any(|t| t.waiting && t.shown == "Allow")
+            .any(|t| t.waiting.is_some() && t.shown == "Allow")
     );
-    assert!(crate::ui::heard::gather(&app).iter().all(|t| !t.waiting));
+    assert!(
+        crate::ui::heard::gather(&app)
+            .iter()
+            .all(|t| t.waiting.is_none())
+    );
     held(&mut app, &script, "Yes.");
     held(&mut app, &script, "Allow");
     held(&mut app, &script, "Yes. Go ahead.");
@@ -2292,8 +2296,25 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
     app.settings.open = true;
     held(&mut app, &script, "Yes.");
     app.settings.open = false;
-    // Asked, not answered: held, and told to say it plainly.
+    // Ready, a yes or a no with more said after it answers nothing — and
+    // is not sent to Ask: told to say it on its own.
     app.asking.delay = std::time::Duration::ZERO;
+    for said in ["Yes, and run the tests too.", "No, use the other file."] {
+        say_words(&mut app, &script, said);
+        assert!(
+            app.proj.ask_input.is_empty(),
+            "{said}: {}",
+            app.proj.ask_input
+        );
+        assert!(
+            app.status
+                .starts_with("To answer, say “yes” or “no” on its own"),
+            "{said}: {}",
+            app.status
+        );
+    }
+    assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1);
+    // Asked, not answered: held, and told to say it plainly.
     for said in ["Allow?", "Yes?", "Always allow?"] {
         say_words(&mut app, &script, said);
         assert!(
@@ -2393,13 +2414,12 @@ fn a_yes_for_a_question_not_drawn_is_held() {
     app.settings.open = false;
     app.pending_consent = None;
     // The connect sheet asking to trust a host, under Settings.
-    let target = crate::backend::connect::ConnTarget::Ssh {
-        label: "root@devbox".into(),
-        args: vec!["root@devbox".into()],
-    };
-    app.connect = Some(crate::ConnectUi {
+    let trust = || crate::ConnectUi {
         stage: crate::ConnectStage::TrustHost {
-            target,
+            target: crate::backend::connect::ConnTarget::Ssh {
+                label: "root@devbox".into(),
+                args: vec!["root@devbox".into()],
+            },
             reason: "devbox is not a known host".into(),
             key: crate::backend::connect::ScannedHostKey {
                 host: "devbox".into(),
@@ -2409,7 +2429,8 @@ fn a_yes_for_a_question_not_drawn_is_held() {
             },
         },
         ..crate::ConnectUi::default()
-    });
+    };
+    app.connect = Some(trust());
     app.settings.open = true;
     for said in ["Yes.", "Trust and connect"] {
         held(&mut app, &script, said);
@@ -2451,6 +2472,10 @@ fn a_yes_for_a_question_not_drawn_is_held() {
                 ..option("always", "Always allow read_file", true)
             },
             option("deny", "Decline", false),
+            ApprovalOption {
+                always: true,
+                ..option("reject_always", "Always reject", false)
+            },
         ],
     });
     assert_eq!(
@@ -2458,8 +2483,31 @@ fn a_yes_for_a_question_not_drawn_is_held() {
         2,
         "the always a page further"
     );
+    // A yes, a no, an answer by name — one that declines too: each waits
+    // for the question, and brings it into view.
+    for said in ["Yes.", "No.", "Always reject"] {
+        app.hide_ask();
+        held(&mut app, &script, said);
+        assert!(app.ask_view.is_open(), "{said}: not brought into view");
+    }
+    // Named a page further: the card turns to it.
+    app.hide_ask();
     held(&mut app, &script, "Always allow read_file");
     assert!(app.ask_view.is_open(), "the question brought into view");
+    let approval = crate::app::model::Question::Approval {
+        stream: 3,
+        key: ApprovalKey::Mcp { call: 1 },
+    };
+    assert_eq!(app.asking.answers_page, Some((approval.clone(), 1)));
+    // Brought into view behind another question put first — the connect
+    // sheet's, on top.
+    app.hide_ask();
+    app.asking.answers_page = None;
+    app.connect = Some(trust());
+    held(&mut app, &script, "Always allow read_file");
+    assert!(app.ask_view.is_open(), "the approval not brought into view");
+    assert_eq!(app.asking.answers_page, Some((approval, 1)));
+    app.connect = None;
     assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1);
     // A note over the window, the approval still waiting in Ask put away:
     // the note takes its words, and its Save — asked or not.
@@ -2485,6 +2533,17 @@ fn a_yes_for_a_question_not_drawn_is_held() {
     );
     assert!(app.proj.ask_input.is_empty(), "{}", app.proj.ask_input);
     assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1);
+    // In view, read, on its page: said again, it answers.
+    app.reveal_ask();
+    // In view, read, on its page: said again, it answers.
+    app.asking.delay = std::time::Duration::ZERO;
+    say_words(&mut app, &script, "Always allow read_file");
+    assert!(
+        app.proj.ask_turns[0].extras.approvals.is_empty(),
+        "{}",
+        app.status
+    );
+    assert!(app.proj.ask_input.is_empty(), "{}", app.proj.ask_input);
 }
 
 /// A dialog's main button that answers no question waiting — Update now,
@@ -2519,8 +2578,8 @@ fn on_screen(
         row: None,
         answer,
         typing: None,
-        waiting: false,
-        allows: answer == Some(crate::ui::heard::Answer::Yes),
+        waiting: None,
+        allows: false,
     }
 }
 

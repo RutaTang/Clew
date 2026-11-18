@@ -17,9 +17,20 @@ pub(crate) const TOO_SOON: &str = tr_noop!(
 );
 /// … it allows, and was said as a question ("Allow?").
 pub(crate) const ASKED: &str = tr_noop!("To answer, say “yes” or “no” — not as a question");
+/// … a yes or a no opened more that was said ("yes, allow it"): what only
+/// opens with a yes answers nothing.
+pub(crate) const ALONE: &str = tr_noop!("To answer, say “yes” or “no” on its own");
 /// … spoken commands are off: voice presses nothing.
 pub(crate) const COMMANDS_OFF: &str =
-    tr_noop!("Spoken commands are off — answer the question on screen with its buttons");
+    tr_noop!("Spoken commands are off — answer the question with its buttons");
+
+/// What was said to a question waiting ([`App::said_to_question`]).
+pub(crate) enum ToQuestion {
+    /// A yes or a no, alone or opening more.
+    YesOrNo,
+    /// The name of something it offers.
+    Answer(Box<Target>),
+}
 
 /// What is said before or after a thing's name to press it — "click on
 /// Download", "the Retry button" — and means nothing more: the English
@@ -516,11 +527,12 @@ impl App {
     /// something, ask first ([`asks_first`]).
     fn press_heard(&mut self, said: &str, target: Target) -> Task<Message> {
         let text = said.to_string();
-        // An answer whose question was not read yet ([`Target::waiting`]):
-        // what was said for it waits — sent on to Ask, a "yes" would read
-        // to the agent asking as consent.
-        if target.waiting {
-            return self.hold_answer(text, TOO_SOON);
+        // An answer whose question was not read yet, or a button waiting
+        // on something ([`Target::waiting`]): what was said for it waits,
+        // told why — sent on to Ask, a "yes" would read to the agent asking
+        // as consent.
+        if let Some(why) = target.waiting {
+            return self.hold_answer(text, why);
         }
         // "Allow?", "Always allow read_file?": asked, not answered — what
         // allows wants to be said plainly.
@@ -551,31 +563,91 @@ impl App {
         self.press(target.message)
     }
 
-    /// Whether `said` answers the question waiting ([`App::question_pending`])
-    /// — a yes, or an allowing answer's own words ("Trust and connect",
-    /// "Always allow read_file"), plainly or asked — wherever that answer
-    /// is: not yet pressable, covered, or not drawn at all
-    /// ([`crate::ui::allowing_answers`]).
-    pub(crate) fn answers_question(&self, said: &str) -> bool {
-        self.question_pending().is_some()
-            && (crate::app::spoken::only_yes_or_no(said) == Some(true)
-                || named(said, &crate::ui::allowing_answers(self)).is_some())
+    /// What `said` says to a question waiting ([`App::question_pending`])
+    /// that nothing within reach took — the name of something it offers
+    /// ([`crate::ui::answers_waiting`]: "Trust and connect", "Always reject"),
+    /// or a yes or a no, alone or opening more ("yes, allow it") — wherever
+    /// that question is: covered, not yet ready to answer, in an Ask put
+    /// away, a page further on its card. Held ([`App::hold_for_question`]),
+    /// it goes nowhere else.
+    pub(crate) fn said_to_question(&self, said: &str) -> Option<ToQuestion> {
+        self.question_pending()?;
+        if let Some(target) = named(said, &crate::ui::answers_waiting(self)) {
+            return Some(ToQuestion::Answer(Box::new(target)));
+        }
+        crate::app::spoken::yes_or_no(said).map(|_| ToQuestion::YesOrNo)
     }
 
-    /// An answer said (`text`) for the question on screen, held, saying
-    /// `why` ([`TOO_SOON`], [`ASKED`], [`COMMANDS_OFF`]): it presses
+    /// Hold `text`, said to a question waiting (`to`, from
+    /// [`App::said_to_question`]), saying why — spoken commands off, asked
+    /// rather than answered, more said than a yes or a no to a question
+    /// ready for one, or said before the question could be read — and
+    /// bring that question into view where it can be: an approval's Ask
+    /// put away comes back, on the page of its answer named.
+    pub(crate) fn hold_for_question(&mut self, text: String, to: ToQuestion) -> Task<Message> {
+        let ready = || {
+            self.question_on_screen()
+                .is_some_and(|question| self.may_allow(&question))
+        };
+        let why = if !self.voice.prefs.run_commands {
+            COMMANDS_OFF
+        } else if crate::app::spoken::asked(&text) {
+            ASKED
+        } else if matches!(to, ToQuestion::YesOrNo) && ready() {
+            ALONE
+        } else {
+            TOO_SOON
+        };
+        match to {
+            ToQuestion::Answer(target) => {
+                if let Message::Ask(AskMsg::Approve { option, .. }) = target.message {
+                    self.show_approval_answer(&option);
+                }
+            }
+            ToQuestion::YesOrNo => {
+                if matches!(
+                    self.question_pending(),
+                    Some(crate::app::model::Question::Approval { .. })
+                ) {
+                    self.reveal_ask();
+                }
+            }
+        }
+        self.hold_answer(text, why)
+    }
+
+    /// Bring the approval waiting into view on the page of its answer
+    /// `option`: Ask, put away, comes back, and the card turns to it.
+    fn show_approval_answer(&mut self, option: &str) {
+        let Some((stream, key, page)) = self.first_approval().and_then(|(turn, approval)| {
+            let (_, pages) = crate::ui::shown_answers(&approval.options, 0);
+            (0..pages)
+                .find(|&page| {
+                    crate::ui::shown_answers(&approval.options, page)
+                        .0
+                        .iter()
+                        .any(|o| o.id == option)
+                })
+                .map(|page| (turn.stream, approval.key, page))
+        }) else {
+            return;
+        };
+        self.reveal_ask();
+        let question = crate::app::model::Question::Approval { stream, key };
+        let shown = match &self.asking.answers_page {
+            Some((on, page)) if *on == question => *page,
+            _ => 0,
+        };
+        if shown != page {
+            let _ = self.on_answers_page(stream, key, page);
+        }
+    }
+
+    /// An answer said (`text`), held, saying `why` ([`TOO_SOON`], [`ASKED`],
+    /// [`ALONE`], [`COMMANDS_OFF`], or a button's own reason): it presses
     /// nothing, and goes nowhere else — sent on to Ask, a "yes" would read
     /// to the agent asking as consent.
     pub(crate) fn hold_answer(&mut self, text: String, why: &'static str) -> Task<Message> {
-        // An approval waiting in an Ask put away comes into view, to be
-        // read and answered there: the status asks for the answer again
-        // once it has been, and nothing else would show it.
-        if matches!(
-            self.question_pending(),
-            Some(crate::app::model::Question::Approval { .. })
-        ) {
-            self.reveal_ask();
-        }
         self.status = crate::i18n::lookup(why).into();
         self.voice.hear(Heard {
             text,
@@ -720,7 +792,7 @@ mod tests {
             row: None,
             answer: None,
             typing: None,
-            waiting: false,
+            waiting: None,
             allows: false,
         }
     }

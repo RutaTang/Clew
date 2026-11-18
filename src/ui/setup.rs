@@ -13,7 +13,7 @@ use crate::app::message::{Message, ProjectMsg};
 use crate::app::setup::{ProjectSetup, SetupMode, explain_line, servers_line};
 use crate::app::state::App;
 use crate::theme;
-use crate::{tr, trn};
+use crate::{tr, tr_noop, trn};
 
 /// Room under a tick for what it takes, lined up with its label.
 const DETAIL_INDENT: f32 = 26.0;
@@ -51,6 +51,10 @@ pub(crate) fn servers_row(
 /// look at the project is in may not have one yet). `asked` holds back a
 /// first open's Open until it can have been read, as every question's
 /// Allow is.
+/// Why the sheet's main button waits while the project is looked at: said
+/// where the pointer rests, and to what is said for it.
+const LOOKING: &str = tr_noop!("Ready once the project is checked");
+
 pub(crate) fn setup_sheet<'a>(
     app: &'a App,
     root: &'a std::path::Path,
@@ -411,9 +415,13 @@ pub(crate) fn setup_sheet<'a>(
         // A first open's Open answers its question: waiting for it to be
         // read, or the project to be looked at, what is said for it waits
         // too ([`super::heard::answer_when`]). Apply and Explain answer
-        // none — they are pressed once there is something to do.
+        // none: pressed once there is something to do — said while the
+        // project is looked at (what there is to do not known yet), told
+        // to wait for it, not sent on to Ask.
         .on_press_maybe(if gated {
             super::heard::answer_when(ready, accept, super::heard::Answer::Yes, accept_msg)
+        } else if looking {
+            super::heard::answer_held(LOOKING, accept, super::heard::Answer::Yes, accept_msg)
         } else {
             ready.then(|| super::heard::answer(accept, super::heard::Answer::Yes, accept_msg))
         });
@@ -457,7 +465,7 @@ pub(crate) fn setup_sheet<'a>(
     let accept_button = if looking {
         super::toolbar::tip_at(
             accept_button,
-            tr!("Ready once the project is checked"),
+            crate::i18n::lookup(LOOKING),
             None,
             iced::widget::tooltip::Position::Top,
         )

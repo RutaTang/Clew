@@ -6138,7 +6138,7 @@ fn the_download_question_offers_the_program_already_here() {
     let waiting: Vec<String> =
         crate::ui::heard::gather_of(|| super::lsp_consent_modal(&consent, 4, 0, false))
             .into_iter()
-            .filter(|t| t.waiting)
+            .filter(|t| t.waiting.is_some())
             .map(|t| t.shown)
             .collect();
     assert!(
@@ -6312,10 +6312,10 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     ));
 }
 
-/// Set up project's Apply answers no question: while the project is
-/// looked at it is not offered at all — said then, it is nothing the sheet
-/// has, not an answer held as said too soon — and once looked at it is
-/// pressed as any button is, never held as one that allows.
+/// Set up project's Apply answers no question: said while the project is
+/// looked at, it is held with the reason its tip gives — not as an answer
+/// said too soon, nor sent on to Ask behind the sheet — and once looked at
+/// it is pressed as any button is, never held as one that allows.
 #[test]
 fn the_setup_sheets_apply_answers_no_question() {
     use crate::app::setup::{Census, Fetch, ProjectSetup, SetupMode, SetupServer};
@@ -6330,7 +6330,7 @@ fn the_setup_sheets_apply_answers_no_question() {
         no_code: false,
         census: None,
     });
-    let apply = |app: &crate::app::state::App| -> Vec<(bool, bool)> {
+    let apply = |app: &crate::app::state::App| -> Vec<(Option<&'static str>, bool)> {
         crate::ui::heard::gather_of(|| {
             super::setup::setup_sheet(app, &root, app.setup.as_ref(), true)
         })
@@ -6339,7 +6339,11 @@ fn the_setup_sheets_apply_answers_no_question() {
         .map(|t| (t.waiting, t.allows))
         .collect()
     };
-    assert_eq!(apply(&app), [], "offered while the project is looked at");
+    assert_eq!(
+        apply(&app),
+        [(Some("Ready once the project is checked"), false)],
+        "held for the look"
+    );
     app.setup.as_mut().unwrap().census = Some(Census {
         servers: vec![SetupServer {
             language: "rust".into(),
@@ -6349,7 +6353,7 @@ fn the_setup_sheets_apply_answers_no_question() {
         }],
         calls: Some(40),
     });
-    assert_eq!(apply(&app), [(false, false)]);
+    assert_eq!(apply(&app), [(None, false)]);
 }
 
 /// The first-open sheet holds still while it looks at the project: the

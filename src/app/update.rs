@@ -222,19 +222,42 @@ impl App {
     /// The question waiting on the user's answer, shown or not — under
     /// Settings or a menu, behind a tour, in an Ask panel put away: what a
     /// "yes" said now may be meant for, and must never be sent on to Ask
-    /// as a question ([`App::question_shown`]).
+    /// as a question. The one shown ([`App::question_shown`]), else the
+    /// first of [`App::questions_waiting`].
     pub(crate) fn question_pending(&self) -> Option<crate::app::model::Question> {
-        use crate::app::model::Question;
         self.question_shown()
-            .or_else(|| self.pending_consent.clone().map(Question::Project))
-            .or_else(|| self.connect_question())
-            .or_else(|| {
-                self.first_approval()
-                    .map(|(turn, approval)| Question::Approval {
-                        stream: turn.stream,
-                        key: approval.key,
-                    })
-            })
+            .or_else(|| self.questions_waiting().into_iter().next())
+    }
+
+    /// Every question waiting on the user's answer, shown or not, in the
+    /// order they are put: the project's sheet, a language server's command,
+    /// then its download or build, the connect sheet's, then the agent's
+    /// tool call — each queue's first, the one it asks now.
+    pub(crate) fn questions_waiting(&self) -> Vec<crate::app::model::Question> {
+        use crate::app::model::Question;
+        let mut waiting = Vec::new();
+        waiting.extend(self.pending_consent.clone().map(Question::Project));
+        waiting.extend(
+            self.proj
+                .pending_lsp_command
+                .asked()
+                .map(Question::LspCommand),
+        );
+        waiting.extend(
+            self.proj
+                .pending_lsp_consent
+                .asked()
+                .map(Question::LspConsent),
+        );
+        waiting.extend(self.connect_question());
+        waiting.extend(
+            self.first_approval()
+                .map(|(turn, approval)| Question::Approval {
+                    stream: turn.stream,
+                    key: approval.key,
+                }),
+        );
+        waiting
     }
 
     /// The question connecting asks, if it asks one: trust a new host, or
