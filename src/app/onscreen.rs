@@ -567,7 +567,7 @@ impl App {
 
     /// Press `target`, as `said` asked — or, when it undoes or costs
     /// something, ask first ([`asks_first`]).
-    fn press_heard(&mut self, said: &str, target: Target) -> Task<Message> {
+    pub(crate) fn press_heard(&mut self, said: &str, target: Target) -> Task<Message> {
         let text = said.to_string();
         // An answer whose question was not read yet, or a button waiting
         // on something ([`Target::waiting`]): what was said for it waits,

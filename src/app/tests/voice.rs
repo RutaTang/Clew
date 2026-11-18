@@ -466,21 +466,7 @@ fn stop_said_keeps_the_agents_question() {
             ],
         });
         app.ask_view = view;
-        app.debug.session = Some(DebugSession {
-            client: None,
-            status: DebugStatus::Stopped,
-            exit_code: None,
-            thread_id: Some(1),
-            frames: Vec::new(),
-            scopes: Vec::new(),
-            watches: Vec::new(),
-            output: Vec::new(),
-            current: None,
-            program: PathBuf::from("/bin/true"),
-            args: Vec::new(),
-            cwd: PathBuf::from("/"),
-            addr: None,
-        });
+        app.debug.session = Some(paused_program());
         say(&mut app, &script);
         assert!(app.ask_view.is_open(), "{tag}: its question not shown");
         assert!(app.proj.asking, "{tag}: the answer being written stopped");
@@ -505,6 +491,109 @@ fn stop_said_keeps_the_agents_question() {
     assert!(app.proj.ask_queue_held, "not Ask's Stop");
 }
 
+/// A program paused in the debugger, as one stopped at a breakpoint is.
+fn paused_program() -> DebugSession {
+    DebugSession {
+        client: None,
+        status: DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    }
+}
+
+/// An answer the agent's question offers, said by its name: that very
+/// answer — not a command of its name ("Continue", the debugger's), nor
+/// one the card's page in view names alike ("Stop (keep edits)" for
+/// "Stop", on its next page): pressed in view, else held for it and its
+/// page brought into view.
+#[test]
+fn an_answer_said_by_name_is_that_answer() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption};
+    let option = |id: &str, label: &str, allows: bool| ApprovalOption {
+        id: id.into(),
+        label: label.into(),
+        allows,
+        always: false,
+    };
+    let asking = |app: &mut App, options: Vec<ApprovalOption>| {
+        app.proj.asking = true;
+        app.proj.ask_turns.push(crate::app::model::AskTurn {
+            stream: 3,
+            question: "tidy the imports".into(),
+            streaming: true,
+            ..Default::default()
+        });
+        app.proj.ask_turns[0].extras.approvals.push(Approval {
+            key: ApprovalKey::Mcp { call: 1 },
+            mark: None,
+            title: "files wants to write".into(),
+            detail: String::new(),
+            options,
+        });
+    };
+    let too_soon = crate::i18n::lookup(crate::app::onscreen::TOO_SOON);
+    // "Continue", a program paused: the agent's answer, not the debugger's.
+    for (tag, view) in [
+        ("voice-answer-continue-open", AskView::Compact),
+        ("voice-answer-continue-away", AskView::Hidden),
+    ] {
+        let (mut app, script, _) = voice_app(tag, "Continue.");
+        asking(
+            &mut app,
+            vec![
+                option("allow", "Allow", true),
+                option("go", "Continue", false),
+            ],
+        );
+        app.debug.session = Some(paused_program());
+        app.ask_view = view;
+        say(&mut app, &script);
+        assert_ne!(ran(&app), Some("Debug: Continue"), "{tag}: {}", app.status);
+        assert!(app.ask_view.is_open(), "{tag}: its question not shown");
+        if view == AskView::Compact {
+            assert!(app.first_approval().is_none(), "{tag}: not answered");
+        } else {
+            assert!(app.first_approval().is_some(), "{tag}: answered unseen");
+            assert_eq!(app.status, too_soon, "{tag}");
+        }
+    }
+    // "Stop", on the card's second page, the first showing "Stop (keep
+    // edits)": nothing pressed — the page with "Stop" brought into view.
+    let (mut app, script, _) = voice_app("voice-answer-next-page", "Stop.");
+    asking(
+        &mut app,
+        vec![
+            option("allow", "Allow", true),
+            option("keep", "Stop (keep edits)", false),
+            option("reject", "Reject", false),
+            option("skip", "Skip", false),
+            option("halt", "Stop", false),
+        ],
+    );
+    app.ask_view = AskView::Compact;
+    say(&mut app, &script);
+    assert!(
+        app.first_approval().is_some(),
+        "answered with another: {}",
+        app.status
+    );
+    assert_eq!(app.status, too_soon);
+    assert_eq!(
+        app.asking.answers_page.as_ref().map(|(_, page)| *page),
+        Some(1),
+        "its page not brought into view"
+    );
+}
+
 /// "Stop" said as an answer is written, a program paused in the debugger:
 /// the answer stops — the debugger's Stop is not asked about. With no
 /// answer being written, it is heard as any command is: the debugger's
@@ -513,21 +602,7 @@ fn stop_said_keeps_the_agents_question() {
 fn stop_said_stops_the_answer_before_the_debugger() {
     for (tag, writing) in [("voice-stop-over-debug", true), ("voice-stop-debug", false)] {
         let (mut app, script, _) = voice_app(tag, "Stop.");
-        app.debug.session = Some(DebugSession {
-            client: None,
-            status: DebugStatus::Stopped,
-            exit_code: None,
-            thread_id: Some(1),
-            frames: Vec::new(),
-            scopes: Vec::new(),
-            watches: Vec::new(),
-            output: Vec::new(),
-            current: None,
-            program: PathBuf::from("/bin/true"),
-            args: Vec::new(),
-            cwd: PathBuf::from("/"),
-            addr: None,
-        });
+        app.debug.session = Some(paused_program());
         app.proj.asking = writing;
         say(&mut app, &script);
         assert!(!app.proj.asking, "{tag}: the answer not stopped");
