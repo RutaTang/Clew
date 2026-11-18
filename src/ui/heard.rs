@@ -10,7 +10,11 @@
 //!
 //! What is offered is the reader's to press by voice, never the agent's:
 //! a question's Allow, a host key's Trust, an approval's Run it are among
-//! them, and only the person at the window may answer those.
+//! them, and only the person at the window may answer those. Such an
+//! answer is offered even before it can be pressed ([`answer_when`]): said
+//! then, it is known to be said for it and waits, and is not taken for
+//! anything else — a "yes" sent on to the agent asking would read as
+//! consent.
 
 use std::cell::RefCell;
 
@@ -57,6 +61,10 @@ pub(crate) struct Target {
     /// A field what is said is typed into: what it holds, and what typing
     /// in it sends.
     pub typing: Option<Typing>,
+    /// Not to be pressed yet: an answer whose question is not within the
+    /// reader's reach long enough to be read (`App::may_allow`). Only
+    /// voice is offered it ([`gather_heard`]), to wait when it is said.
+    pub waiting: bool,
 }
 
 /// A field's text, and what typing in it sends.
@@ -131,6 +139,17 @@ pub(crate) fn gathering() -> bool {
 }
 
 fn push(title: String, shown: String, message: &Message, answer: Option<Answer>, row: bool) {
+    push_as(title, shown, message, answer, row, false);
+}
+
+fn push_as(
+    title: String,
+    shown: String,
+    message: &Message,
+    answer: Option<Answer>,
+    row: bool,
+    waiting: bool,
+) {
     GATHERING.with(|g| {
         if let Some(g) = g.borrow_mut().as_mut() {
             let row = row.then(|| {
@@ -148,6 +167,7 @@ fn push(title: String, shown: String, message: &Message, answer: Option<Answer>,
                     row: None,
                     answer,
                     typing: None,
+                    waiting,
                 });
             }
             g.targets.push(Target {
@@ -158,6 +178,7 @@ fn push(title: String, shown: String, message: &Message, answer: Option<Answer>,
                 row,
                 answer,
                 typing: None,
+                waiting,
             });
         }
     });
@@ -263,6 +284,51 @@ pub(crate) fn answer(shown: &str, answer: Answer, message: Message) -> Message {
     message
 }
 
+/// [`answer`] once the question it answers may be answered (`ready`:
+/// `App::may_allow`) — the press to put on the button, `None` until then.
+/// Until then it is offered as waiting ([`Target::waiting`]): a "yes", or
+/// its name, said for it waits, and goes nowhere else.
+pub(crate) fn answer_when(
+    ready: bool,
+    shown: &str,
+    answer: Answer,
+    message: Message,
+) -> Option<Message> {
+    if ready {
+        return Some(self::answer(shown, answer, message));
+    }
+    if gathering() {
+        push_as(
+            title_of(shown),
+            shown.to_string(),
+            &message,
+            Some(answer),
+            false,
+            true,
+        );
+    }
+    None
+}
+
+/// [`said`] once it may be pressed (`ready`), as [`answer_when`] — for an
+/// answer that no "yes" gives, only its own words ("Always allow…").
+pub(crate) fn said_when(ready: bool, shown: &str, message: Message) -> Option<Message> {
+    if ready {
+        return Some(said(shown, message));
+    }
+    if gathering() {
+        push_as(
+            title_of(shown),
+            shown.to_string(),
+            &message,
+            None,
+            false,
+            true,
+        );
+    }
+    None
+}
+
 /// A field that holds `value`, `on_input` sending what it is changed to:
 /// what is said, when nothing else is meant, is typed into it while it is
 /// on top (a note, a breakpoint's condition, the command bar's query).
@@ -277,6 +343,7 @@ pub(crate) fn field(value: &str, on_input: fn(String) -> Message) {
                 row: None,
                 answer: None,
                 typing: Some((value.to_string(), on_input)),
+                waiting: false,
             });
         }
     });
@@ -362,6 +429,14 @@ pub(crate) fn layer(layer: Layer) {
 /// (top to bottom, as a list reads) — of the layer on top only, as a
 /// dialog over the window leaves nothing under it to press.
 pub(crate) fn gather(app: &App) -> Vec<Target> {
+    let mut targets = gather_heard(app);
+    targets.retain(|t| !t.waiting);
+    targets
+}
+
+/// [`gather`], with the answers still waiting to be pressable
+/// ([`Target::waiting`]): what voice hears said for them.
+pub(crate) fn gather_heard(app: &App) -> Vec<Target> {
     let (targets, _) = gather_all(app);
     on_top(targets, app.ask_view == crate::AskView::Expanded)
 }
@@ -438,6 +513,7 @@ mod tests {
             row: None,
             answer: None,
             typing: None,
+            waiting: false,
         }
     }
 

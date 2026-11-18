@@ -40,7 +40,8 @@ enum Kind {
 
 /// What says yes to a command that waits for one, and what says no: the
 /// English words, and the reader's.
-const YES: &str = tr_noop!("yes, yeah, yep, sure, okay, ok, run, run it, do it, go ahead, confirm");
+const YES: &str =
+    tr_noop!("yes, yeah, yep, sure, okay, ok, run, run it, do it, go ahead, confirm, allow");
 const NO: &str = tr_noop!("no, nope, cancel, don't, do not, never mind, not now");
 
 /// Whether `said` answers a command waiting for a yes: `Some(true)` for a
@@ -181,12 +182,22 @@ const JAPANESE_TO_MANY: &[&str] = &[
     "あなたたち",
 ];
 /// The particles after a word for many ([`JAPANESE_TO_MANY`]) that make
-/// it what is spoken of — whose, to whom, what, where, from or than whom
-/// — not whom the sentence is said to, as "で", "は" and "も" leave it
-/// ("Crew みんなで行こう"); "が" and "と" too, who does and with whom, but
-/// only with no hiragana after them: they begin words ("みんながんばって",
-/// "みんなとりあえず").
-const JAPANESE_ABOUT_MANY: &[&str] = &["の", "に", "を", "へ", "から", "より"];
+/// it what is spoken of — whose, who does, to whom, what, where, with,
+/// from or than whom — not whom the sentence is said to, as "で", "は" and
+/// "も" leave it ("Crew みんなで行こう").
+const JAPANESE_ABOUT_MANY: &[&str] = &["の", "が", "に", "を", "へ", "と", "から", "より"];
+/// Words said to many that begin as a particle does: after a word for
+/// many, they are no particle ("みんながんばって", "みんなとりあえず集合").
+const JAPANESE_WORDS_AFTER_MANY: &[&str] = &[
+    "がんば",
+    "頑張",
+    "がっかり",
+    "とりあえず",
+    "とにかく",
+    "ともかく",
+    "とても",
+    "ところで",
+];
 /// How a Japanese request ends: "開いて", "移動して", "ください".
 const JAPANESE_REQUEST_ENDS: &[&str] = &["て", "で", "ください", "下さい"];
 /// The "Hey" of "Hey, Clew", as whisper writes it.
@@ -317,9 +328,9 @@ fn called_name_at(at: &str, before: &str) -> Option<usize> {
             let about = JAPANESE_ABOUT_MANY
                 .iter()
                 .any(|particle| rest.starts_with(particle))
-                || rest
-                    .strip_prefix(['が', 'と'])
-                    .is_some_and(|word| !word.starts_with(hiragana));
+                && !JAPANESE_WORDS_AFTER_MANY
+                    .iter()
+                    .any(|word| rest.starts_with(word));
             !about
         })
     });
@@ -1053,7 +1064,9 @@ fn said_form(text: &str, mend: bool) -> String {
         .replace('’', "'")
         .chars()
         .map(|c| {
-            if matches!(c, ',' | '，' | '、') {
+            // A comma, or a sentence's end where no space follows it, as
+            // Chinese and Japanese write it ("はい。お願いします").
+            if matches!(c, ',' | '，' | '、' | '。' | '！' | '？') {
                 ' '
             } else {
                 c
@@ -1067,7 +1080,16 @@ fn said_form(text: &str, mend: bool) -> String {
                 '.' | '!' | '?' | '。' | '！' | '？' | '"' | '“' | '”' | '…'
             )
     };
-    let said: Vec<&str> = text.trim_matches(ends).split_whitespace().collect();
+    // A sentence's end before a space ends its word too ("Yes. Go
+    // ahead."): not a dot in a name ("main.rs", "v1.2").
+    let said: Vec<&str> = text
+        .trim_matches(ends)
+        .split_whitespace()
+        .map(|word| match word.trim_end_matches(['.', '!', '?']) {
+            "" => word,
+            trimmed => trimmed,
+        })
+        .collect();
     let mut words: Vec<&str> = Vec::with_capacity(said.len());
     let mut i = 0;
     while i < said.len() {
@@ -1485,6 +1507,15 @@ mod tests {
             named_in("Hey Clew、みんなと共有して"),
             Some("みんなと共有して")
         );
+        // Particles with kana after them are particles still.
+        assert_eq!(
+            named_in("Clew、みんながよく使うファイルを開いて"),
+            Some("みんながよく使うファイルを開いて")
+        );
+        assert_eq!(
+            named_in("Hey Clew、みんなとのチャットを開いて"),
+            Some("みんなとのチャットを開いて")
+        );
         // Or as Clew's own Japanese phrases say a value, shown in Japanese.
         with_lang(Lang::Ja, || {
             assert_eq!(named_in("Clew 30行目へ移動"), Some("30行目へ移動"));
@@ -1667,7 +1698,15 @@ mod tests {
     /// a no: what merely opens with one ("run the tests") is not.
     #[test]
     fn a_question_is_answered_by_a_yes_alone() {
-        for said in ["yes", "Yes, do it.", "ok", "go ahead please", "run it"] {
+        for said in [
+            "yes",
+            "Yes, do it.",
+            "ok",
+            "go ahead please",
+            "run it",
+            "Yes. Go ahead.",
+            "Allow.",
+        ] {
             assert_eq!(only_yes_or_no(said), Some(true), "{said:?}");
         }
         for said in ["no", "No.", "cancel", "not now", "never mind"] {
@@ -1789,6 +1828,14 @@ mod tests {
         });
         crate::i18n::with_lang(crate::i18n::Lang::Ja, || {
             assert_eq!(yes_or_no("はい、お願いします。"), Some(true));
+            assert_eq!(only_yes_or_no("はい。お願いします。"), Some(true));
+            assert_eq!(only_yes_or_no("実行する"), Some(true));
+        });
+        crate::i18n::with_lang(crate::i18n::Lang::Zh, || {
+            assert_eq!(only_yes_or_no("对，允许。"), Some(true));
+        });
+        crate::i18n::with_lang(crate::i18n::Lang::Ko, || {
+            assert_eq!(only_yes_or_no("좋아요"), Some(true));
         });
     }
 

@@ -2150,14 +2150,17 @@ pub(crate) fn approval_card<'a>(
             })
             .height(Length::Fixed(APPROVE_BUTTON_H))
             .padding([0.0, if option.allows { 12.0 } else { 10.0 }])
-            .on_press_maybe((ready || !option.allows).then(|| {
-                // "Yes" allows this call, "no" declines it — never one
-                // that answers every such call from now on, which is
-                // pressed by its own words ("Always allow…") alone.
+            // "Yes" allows this call, "no" declines it — never one that
+            // answers every such call from now on, which is pressed by its
+            // own words ("Always allow…") alone. What allows waits until it
+            // may be pressed, what is said for it with it.
+            .on_press_maybe({
+                let ready = ready || !option.allows;
                 if option.always {
-                    super::heard::said(&option.label, answer)
+                    super::heard::said_when(ready, &option.label, answer)
                 } else {
-                    super::heard::answer(
+                    super::heard::answer_when(
+                        ready,
                         &option.label,
                         if option.allows {
                             super::heard::Answer::Yes
@@ -2167,7 +2170,7 @@ pub(crate) fn approval_card<'a>(
                         answer,
                     )
                 }
-            }));
+            });
             if option.allows {
                 crate::ui::fresh::allow(ready, shown)
             } else {

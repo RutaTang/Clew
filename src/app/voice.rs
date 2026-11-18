@@ -2070,27 +2070,24 @@ impl App {
             if let Some(task) = self.heard_command(&text) {
                 return task;
             }
-            // A yes for the question on screen, said before its Allow can
-            // be pressed (`App::may_allow`), is no question for Ask: sent
-            // to the agent waiting on that question, it would read as
-            // consent to what it said last. A yes with no question on
-            // screen answers what the agent asked in words, and goes on.
-            if crate::app::spoken::only_yes_or_no(&text) == Some(true)
-                && self.question_on_screen().is_some()
-            {
-                let why: String = tr!(
-                    "The question can't be answered yet — say yes again once all of it is in view"
-                )
-                .into();
-                self.status = why.clone();
-                self.voice.hear(Heard {
-                    text,
-                    outcome: HeardOutcome::Failed(why),
-                });
-                return Task::none();
-            }
         } else if let Some(task) = self.heard_commands_back_on(&text) {
             return task;
+        } else if crate::app::spoken::only_yes_or_no(&text) == Some(true)
+            && self.question_shown().is_some()
+        {
+            // Commands off, a yes for the question on screen answers
+            // nothing — and is no question for Ask: sent to the agent
+            // asking, it would read as consent. A yes with no question on
+            // screen answers what the agent asked in words, and goes on.
+            let say = tr_noop!(
+                "Spoken commands are off — answer the question on screen with its buttons"
+            );
+            self.status = crate::i18n::lookup(say).into();
+            self.voice.hear(Heard {
+                text,
+                outcome: HeardOutcome::Failed(say.into()),
+            });
+            return Task::none();
         }
         // A question: to Ask. Sent, it is answered where Ask is — the card
         // is not opened over the code for it: the pill says it is being
@@ -2138,7 +2135,7 @@ impl App {
             _ => false,
         };
         // What is on screen, as it is drawn now.
-        let mut targets = crate::ui::heard::gather(self);
+        let mut targets = crate::ui::heard::gather_heard(self);
         targets.retain(|t| !turns_the_microphone(&t.message));
         // A dialog takes the voice before anything, as it takes the pointer.
         if let Some(task) = self.heard_on_screen(text, &targets, true) {

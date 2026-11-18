@@ -180,14 +180,21 @@ impl App {
     /// [`crate::app::model::Asking`]): the overlay on top, with no tour over
     /// it, in the window that has the focus.
     pub(crate) fn question_on_screen(&self) -> Option<crate::app::model::Question> {
-        use crate::app::model::Question;
-        use crate::ui::ActiveOverlay as O;
         // A widget's own overlay — a picker's menu, a tooltip — is drawn
         // over everything, modals and the tour included, and may hide any
         // question: none is within reach until it goes, and each waits anew.
         if self.tutorial.is_some() || !self.window_focused || self.overlay_open {
             return None;
         }
+        self.question_shown()
+    }
+
+    /// The question the window shows — within the user's reach or not
+    /// ([`App::question_on_screen`]): the overlay on top, or the approval
+    /// card in the Ask panel.
+    pub(crate) fn question_shown(&self) -> Option<crate::app::model::Question> {
+        use crate::app::model::Question;
+        use crate::ui::ActiveOverlay as O;
         match ui::active_overlay(self) {
             Some(O::Consent(root)) => Some(Question::Project(root.to_path_buf())),
             Some(O::LspCommand(_, number, _)) => Some(Question::LspCommand(number)),

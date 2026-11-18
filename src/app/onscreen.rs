@@ -500,6 +500,20 @@ impl App {
     /// something, ask first ([`asks_first`]).
     fn press_heard(&mut self, said: &str, target: Target) -> Task<Message> {
         let text = said.to_string();
+        // An answer whose question was not read yet ([`Target::waiting`]):
+        // what was said for it waits — sent on to Ask, a "yes" would read
+        // to the agent asking as consent.
+        if target.waiting {
+            let wait = tr_noop!(
+                "Too soon to answer — say it again once the question has been in view for a moment"
+            );
+            self.status = crate::i18n::lookup(wait).into();
+            self.voice.hear(Heard {
+                text,
+                outcome: HeardOutcome::Failed(wait.into()),
+            });
+            return Task::none();
+        }
         if asks_first(&target) {
             self.status = tr!(
                 "{command}? Say yes or no — “{text}”",
@@ -634,6 +648,7 @@ mod tests {
             row: None,
             answer: None,
             typing: None,
+            waiting: false,
         }
     }
 

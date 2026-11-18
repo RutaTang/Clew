@@ -1121,11 +1121,12 @@ pub(crate) fn lsp_consent_modal(
                     button(text(tr!("Use that one")).size(ts::BASE))
                         .style(theme::primary_button)
                         .padding([6, 16])
-                        .on_press_maybe(ready.then(|| heard::answer(
+                        .on_press_maybe(heard::answer_when(
+                            ready,
                             tr!("Use that one"),
                             heard::Answer::Yes,
                             Message::Lsp(LspMsg::ConsentUsePath(number))
-                        )))
+                        ))
                 )),
             ]
             .spacing(10)
@@ -1264,11 +1265,12 @@ pub(crate) fn lsp_command_modal(
                     button(text(accept).size(ts::BASE))
                         .style(theme::toolbar_button)
                         .padding([6, 16])
-                        .on_press_maybe(ready.then(|| heard::answer(
+                        .on_press_maybe(heard::answer_when(
+                            ready,
                             accept,
                             heard::Answer::Yes,
                             Message::Lsp(LspMsg::CommandAllowed(number))
-                        )))
+                        ))
                 ),
             ]
             .spacing(10)

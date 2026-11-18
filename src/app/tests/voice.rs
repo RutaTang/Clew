@@ -2229,15 +2229,57 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
             option("deny", "Decline", false),
         ],
     });
-    say_words(&mut app, &script, "Yes.");
-    assert!(app.proj.ask_queue.is_empty(), "{:?}", app.proj.ask_queue);
-    assert!(app.proj.ask_input.is_empty(), "{}", app.proj.ask_input);
-    assert_eq!(app.proj.ask_turns.len(), 1);
+    // Said as a yes, by its name, a sentence apart, with the window not
+    // in front: each waits, and nothing goes to Ask.
+    let held = |app: &mut App, script: &Arc<Mutex<MicScript>>, said: &str| {
+        say_words(app, script, said);
+        assert!(
+            app.proj.ask_queue.is_empty(),
+            "{said}: {:?}",
+            app.proj.ask_queue
+        );
+        assert!(
+            app.proj.ask_input.is_empty(),
+            "{said}: {}",
+            app.proj.ask_input
+        );
+        assert_eq!(app.proj.ask_turns.len(), 1);
+        assert!(
+            app.status.starts_with("Too soon to answer"),
+            "{said}: {}",
+            app.status
+        );
+        assert!(
+            app.proj.ask_turns[0].extras.approvals.len() == 1,
+            "{said}: not answered"
+        );
+    };
+    // The Allow waits for voice alone: the palette and the keys never
+    // see it.
     assert!(
-        app.status.starts_with("The question can't be answered yet"),
+        crate::ui::heard::gather_heard(&app)
+            .iter()
+            .any(|t| t.waiting && t.shown == "Allow")
+    );
+    assert!(crate::ui::heard::gather(&app).iter().all(|t| !t.waiting));
+    held(&mut app, &script, "Yes.");
+    held(&mut app, &script, "Allow");
+    held(&mut app, &script, "Yes. Go ahead.");
+    app.window_focused = false;
+    app.asking.delay = std::time::Duration::ZERO;
+    held(&mut app, &script, "Yes.");
+    app.window_focused = true;
+    app.asking.delay = std::time::Duration::from_secs(60);
+    // Spoken commands off: a yes answers nothing — and is not asked.
+    app.voice.prefs.run_commands = false;
+    say_words(&mut app, &script, "Yes.");
+    assert!(app.proj.ask_input.is_empty(), "{}", app.proj.ask_input);
+    assert!(
+        app.status.starts_with("Spoken commands are off"),
         "{}",
         app.status
     );
+    app.voice.prefs.run_commands = true;
     // No question on screen: the yes answers the agent in words, and goes
     // to Ask (kept in its input here, with no key to ask with).
     app.proj.ask_turns[0].extras.approvals.clear();
@@ -2266,6 +2308,7 @@ fn on_screen(
         row: None,
         answer,
         typing: None,
+        waiting: false,
     }
 }
 

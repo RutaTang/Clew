@@ -408,9 +408,13 @@ pub(crate) fn setup_sheet<'a>(
     let accept_button = button(text(accept).size(ts::BASE))
         .style(theme::primary_button)
         .padding([6, 16])
-        .on_press_maybe(
-            ready.then(|| super::heard::answer(accept, super::heard::Answer::Yes, accept_msg)),
-        );
+        // Waiting only for the question to be read: what is said for it
+        // waits too ([`super::heard::answer_when`]).
+        .on_press_maybe(if ready || (something && !looking) {
+            super::heard::answer_when(ready, accept, super::heard::Answer::Yes, accept_msg)
+        } else {
+            None
+        });
     let decline_ready = !decline_gated || asked.ready;
     let decline_button = button(text(decline_label).size(ts::BASE))
         .style(theme::toolbar_button)
