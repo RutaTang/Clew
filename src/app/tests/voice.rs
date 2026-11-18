@@ -2728,12 +2728,13 @@ fn a_no_the_question_has_no_answer_for_asks_for_its_words() {
     // An agent's own name for declining that also puts away ("Cancel"):
     // put away, the card is brought back by it, and said again it is that
     // answer, not Ask put away once more.
+    // An "always" answer, given by its words alone, too.
     let mut cancels = approval(3);
     cancels.options[1] = ApprovalOption {
         id: "reject".into(),
         label: "Cancel".into(),
         allows: false,
-        always: false,
+        always: true,
     };
     app.proj.ask_turns[0].extras.approvals.push(cancels);
     app.hide_ask();
@@ -2827,12 +2828,17 @@ fn a_word_that_closes_answers_only_the_question_on_top() {
     let dialog = [deny(Layer::Overlay)];
     assert!(app.heard_on_screen("never mind", &dialog, true).is_some());
     assert!(app.status.contains("Deny"), "{}", app.status);
-    // An agent's answer called "Cancel": the find bar open over the card
-    // goes first, the answer left alone; said again, with nothing left
-    // over the card but Ask itself to put away, it is that answer.
+    // An agent's answer called "Cancel": what Esc takes first — a
+    // drop-down, the find bar, Ask's menu of sessions — goes first, the
+    // answer left alone; said again, with nothing left but Ask itself to
+    // put away, it is that answer.
     let cancel = [on_screen(
         "Cancel",
-        Message::Window(WindowMsg::OpenShortcuts),
+        Message::Ask(AskMsg::Approve {
+            stream: 1,
+            key: crate::app::model::ApprovalKey::Mcp { call: 1 },
+            option: "reject".into(),
+        }),
         Layer::Ask,
         Some(Answer::No),
     )];
@@ -2844,9 +2850,26 @@ fn a_word_that_closes_answers_only_the_question_on_top() {
     }
     app.ask_view = AskView::Compact;
     app.proj.find.open = true;
+    app.ask_sessions_menu = true;
+    app.picker = Some(crate::app::pickers::Picker {
+        key: 1,
+        picks: Vec::new(),
+        at: 0,
+        chosen: None,
+        owner: None,
+        built: 0,
+    });
+    assert!(app.heard_on_screen("cancel", &cancel, true).is_some());
+    assert!(app.picker.is_none(), "{}", app.status);
+    assert!(app.proj.find.open, "the find bar before the drop-down");
+    assert!(app.status.ends_with("→ Closed"), "{}", app.status);
     assert!(app.heard_on_screen("cancel", &cancel, true).is_some());
     assert!(!app.proj.find.open, "{}", app.status);
     assert!(app.status.ends_with("→ Closed"), "{}", app.status);
+    assert!(app.heard_on_screen("cancel", &cancel, true).is_some());
+    assert!(!app.ask_sessions_menu, "{}", app.status);
+    assert!(app.status.ends_with("→ Closed"), "{}", app.status);
+    assert!(app.ask_view.is_open(), "the card put away with its menu");
     assert!(app.heard_on_screen("cancel", &cancel, true).is_some());
     assert!(app.status.ends_with("→ Cancel"), "{}", app.status);
     assert!(app.ask_view.is_open(), "Ask put away instead");

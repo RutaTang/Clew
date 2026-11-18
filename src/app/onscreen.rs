@@ -679,25 +679,27 @@ impl App {
         Task::none()
     }
 
-    /// Put away what is on top, as Esc does, for `said`: the tutorial, a
-    /// dialog or menu, the large Ask, Time Travel, the find bar, the Ask
-    /// card, a page over the code. `None` when nothing is. Where it would
-    /// put Ask away, an answer of its card called by the very words said
-    /// ("Cancel", an agent's own name for declining) is pressed instead:
+    /// Put away what is on top, in the order Esc does, for `said`: a
+    /// drop-down, the tutorial, a dialog or menu, the large Ask, Time
+    /// Travel, the find bar, Ask's menu of sessions, the Ask card, a page
+    /// over the code. `None` when nothing is. Where it would put Ask itself
+    /// away, an answer of the agent's card called by the very words said
+    /// ("Cancel", an agent's own name for declining) is given instead —
     /// put away, the card came back held, and went again said again —
-    /// while what is open over it, the find bar or a peek, still goes
-    /// first, the card's answer left alone.
+    /// while anything Esc takes first still goes first, the card's answer
+    /// left alone.
     fn dismiss_heard(&mut self, said: &str, targets: &[Target]) -> Option<Task<Message>> {
-        let ask_answer =
-            || named(said, targets).filter(|t| t.answer.is_some() && t.layer == Layer::Ask);
-        let task = if self.tutorial.is_some() {
+        let task = if self.picker.is_some() {
+            self.picker = None;
+            Task::none()
+        } else if self.tutorial.is_some() {
             self.on_tutorial_exit()
         } else if let Some(message) = ui::escape_message(self) {
             self.update(message)
         } else if self.ask_view == AskView::Expanded
-            && let Some(answer) = ask_answer()
+            && let Some(answer) = self.card_answer_named(said, targets)
         {
-            return Some(self.press_heard(said, answer));
+            return Some(self.give_card_answer(said, answer));
         } else if self.ask_view == AskView::Expanded && self.step_ask_down() {
             Task::none()
         } else if ui::time_travel_on_screen(self).is_some() {
@@ -705,9 +707,9 @@ impl App {
         } else if self.proj.find.open {
             self.update(Message::Editor(EditorMsg::FindClosed))
         } else if self.ask_view.is_open()
-            && let Some(answer) = ask_answer()
+            && let Some(answer) = self.card_answer_named(said, targets)
         {
-            return Some(self.press_heard(said, answer));
+            return Some(self.give_card_answer(said, answer));
         } else if (self.ask_view.is_open() && self.step_ask_down())
             || (ui::pane_cover(self).is_some_and(|c| c.is_page()) && self.put_away_page())
         {
@@ -716,6 +718,36 @@ impl App {
             return None;
         };
         Some(self.closed_as_said(said, task))
+    }
+
+    /// The answer of the agent's card `said` names, and whether it is
+    /// drawn (`targets`) or a page further: any of its answers, those
+    /// given by their words alone ("Always reject") too. None while Ask's
+    /// menu of sessions is open over the card: Esc takes that first.
+    fn card_answer_named(&self, said: &str, targets: &[Target]) -> Option<(Target, bool)> {
+        if self.ask_sessions_menu {
+            return None;
+        }
+        let approves = |t: &Target| matches!(t.message, Message::Ask(AskMsg::Approve { .. }));
+        named(said, targets)
+            .filter(|t| t.layer == Layer::Ask && approves(t))
+            .map(|t| (t, true))
+            .or_else(|| {
+                named(said, &crate::ui::answers_waiting(self))
+                    .filter(approves)
+                    .map(|t| (t, false))
+            })
+    }
+
+    /// Give the card's answer `said` named: pressed where it is drawn,
+    /// else held and the card turned to its page
+    /// ([`App::hold_for_question`]).
+    fn give_card_answer(&mut self, said: &str, (answer, drawn): (Target, bool)) -> Task<Message> {
+        if drawn {
+            self.press_heard(said, answer)
+        } else {
+            self.hold_for_question(said.to_string(), ToQuestion::Answer(Box::new(answer)))
+        }
     }
 
     /// `said` put something away, by `task`: said so on the status line and
