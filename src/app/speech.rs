@@ -499,12 +499,22 @@ impl Speech {
         }
     }
 
-    /// The sentences last made to be said.
+    /// The sentences last made to be said that may have been heard: not
+    /// those still wholly to play — what the microphone heard cannot hold
+    /// their words, which would only make the reader's own words look like
+    /// Clew's.
     pub(crate) fn said_lately(&self) -> Vec<String> {
-        self.said_lately
-            .iter()
-            .map(|(text, _)| text.clone())
-            .collect()
+        let mut to_play = self.output.as_ref().map_or(0.0, |o| o.queued_seconds());
+        let mut said: Vec<String> = Vec::new();
+        for (text, seconds) in self.said_lately.iter().rev() {
+            if said.is_empty() && *seconds <= to_play {
+                to_play -= seconds;
+                continue;
+            }
+            said.push(text.clone());
+        }
+        said.reverse();
+        said
     }
 
     /// `sentence` is being made to be said: its words may be heard back.
@@ -578,7 +588,10 @@ impl Speech {
     /// A sentence Clew said a moment ago, for its words to be heard back.
     #[cfg(test)]
     pub(crate) fn said_for_test(&mut self, sentence: &str) {
+        // Played in part: longer than what is still to play.
+        let to_play = self.output.as_ref().map_or(0.0, |o| o.queued_seconds());
         self.making_said(sentence);
+        self.made_said(to_play + 1.0);
     }
 
     /// Speaking, onto `output`, as loud as `level`: as when a sentence has

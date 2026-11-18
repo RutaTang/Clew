@@ -1654,9 +1654,11 @@ impl App {
             self.voice.mic_on = false;
             self.close_mic();
             // It waits for "Hey, Clew" again, on a microphone opened anew —
-            // one failing too says so, as waiting does.
+            // one failing now says so, as waiting does; waiting failed
+            // before, listening stopping is what is said.
             self.voice.wake.listening_ended();
-            if self.resume_waiting() || self.voice.wake.failed.is_none() {
+            let failed_before = self.voice.wake.failed.is_some();
+            if self.resume_waiting() || failed_before || self.voice.wake.failed.is_none() {
                 self.status = tr!("Stopped listening: {error}", error = e);
             }
             return Task::none();
@@ -2136,7 +2138,7 @@ impl App {
             };
             if command.asks_when_said() {
                 self.status = tr!(
-                    "“{text}” → {command}? Say yes or no",
+                    "{command}? Say yes or no — “{text}”",
                     text = text,
                     command = crate::i18n::lookup(&said).trim_end_matches('…')
                 );

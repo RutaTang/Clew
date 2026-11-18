@@ -2803,17 +2803,19 @@ fn a_real_answer_is_read_aloud() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// What the microphone may hear back of Clew's own voice is every
-/// sentence still to be played, however many are made ahead of it; once
-/// played, a sentence is forgotten only when ten seconds were played since.
+/// What the microphone may hear back of Clew's own voice is what was
+/// played lately: the sentence playing, however many are made ahead of it
+/// — not those still wholly to be played. Once played, a sentence is
+/// forgotten only when ten seconds were played since.
 #[test]
-fn every_sentence_still_to_be_played_may_be_heard_back() {
+fn what_was_played_lately_may_be_heard_back() {
     const WORDS: [&str; 10] = [
         "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet",
     ];
     let (mut app, voice, output) = speech_app("speech-said-lately");
     // Fifteen seconds yet to play, less than is made ahead: all ten
-    // sentences, 1.6 seconds each, are made, none of them played yet.
+    // sentences, 1.6 seconds each, are made — the first playing, the rest
+    // still to be played.
     output.lock().unwrap().queued = 15.0;
     asked(&mut app, 1, true);
     let ahead: Vec<String> = WORDS
@@ -2823,7 +2825,10 @@ fn every_sentence_still_to_be_played_may_be_heard_back() {
     delta(&mut app, 1, &ahead.join(" "));
     ended(&mut app, 1, StreamOutcome::Done);
     assert_eq!(voice.texts(), ahead);
-    assert_eq!(app.voice.speech.said_lately(), ahead);
+    assert_eq!(app.voice.speech.said_lately(), ahead[..1]);
+    // The second playing too.
+    output.lock().unwrap().queued = 14.0;
+    assert_eq!(app.voice.speech.said_lately(), ahead[..2]);
     output.lock().unwrap().queued = 0.0;
     all_played(&mut app, &output);
     // Nothing yet to play: thirty half-second sentences, each played as it

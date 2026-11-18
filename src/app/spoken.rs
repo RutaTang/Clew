@@ -164,8 +164,11 @@ const JAPANESE_PARTICLES: &[&str] = &[
 const JAPANESE_SHORT_PARTICLES: &[char] = &['と', 'も', 'や'];
 /// What a Japanese sentence says to many by: after the name, it was said
 /// to a crew, not to Clew, who is one ("Crew 全員集まって", "ヘイクルー
-/// みんな聞いて") — but not as whose something is ("Clew みんなのファイル
-/// を開いて"). Not "皆" alone, which begins other words ("皆既日食").
+/// みんな聞いて") — but not with a particle after it that makes the many
+/// what the sentence is about rather than whom it is said to ("Clew
+/// みんなのファイルを開いて", "Hey Clew、みんなに共有して"
+/// [`JAPANESE_ABOUT_MANY`]). Not "皆" alone, which begins other words
+/// ("皆既日食").
 const JAPANESE_TO_MANY: &[&str] = &[
     "全員",
     "みんな",
@@ -177,6 +180,11 @@ const JAPANESE_TO_MANY: &[&str] = &[
     "君たち",
     "あなたたち",
 ];
+/// The particles after a word for many ([`JAPANESE_TO_MANY`]) that make
+/// it what is spoken of — whose, who does, to whom, what, with whom —
+/// not whom the sentence is said to, as "で", "は" and "も" leave it
+/// ("Crew みんなで行こう").
+const JAPANESE_ABOUT_MANY: &[&str] = &["の", "が", "に", "を", "へ", "と", "から", "より"];
 /// How a Japanese request ends: "開いて", "移動して", "ください".
 const JAPANESE_REQUEST_ENDS: &[&str] = &["て", "で", "ください", "下さい"];
 /// The "Hey" of "Hey, Clew", as whisper writes it.
@@ -205,6 +213,10 @@ const COURTESY: &[&str] = &[
     "감사합니다",
     "じゃあ",
     "ありがとう",
+    "ありがとうございます",
+    "ありがとうございました",
+    "merci",
+    "d’accord",
 ];
 /// The "Bye" of "Bye, Clew", as whisper writes it.
 const BYE: &[&str] = &[
@@ -299,8 +311,11 @@ fn called_name_at(at: &str, before: &str) -> Option<usize> {
     })?;
     let next = unmarked(&at[end..]);
     let to_many = JAPANESE_TO_MANY.iter().any(|many| {
-        next.strip_prefix(many)
-            .is_some_and(|rest| !rest.starts_with('の'))
+        next.strip_prefix(many).is_some_and(|rest| {
+            !JAPANESE_ABOUT_MANY
+                .iter()
+                .any(|particle| rest.starts_with(particle))
+        })
     });
     (!to_many).then_some(end)
 }
@@ -1225,6 +1240,9 @@ mod tests {
             "All right. Bye-bye, Clew!",
             "好的，拜拜 Clew",
             "バイバイ、クルー。ありがとう",
+            "バイバイ、クルー。ありがとうございました。",
+            "Bye, Clew. Merci.",
+            "D’accord, bye Clew !",
         ] {
             assert!(stops_listening(said), "{said}");
         }
@@ -1439,11 +1457,21 @@ mod tests {
         );
         // A Japanese comma after it.
         assert_eq!(named_in("Hey Crew、設定"), Some("設定"));
-        // Everyone's, said to Clew.
+        // Everyone's, to everyone, what everyone uses: said to Clew.
         assert_eq!(
             named_in("Hey Clew、みんなのファイルを開いて"),
             Some("みんなのファイルを開いて")
         );
+        assert_eq!(
+            named_in("Hey Clew、みんなに共有して"),
+            Some("みんなに共有して")
+        );
+        assert_eq!(
+            named_in("Clew、みんなが使うファイルを開いて"),
+            Some("みんなが使うファイルを開いて")
+        );
+        // All together, said to a crew.
+        assert_eq!(named_in("Crew、みんなで行こう"), None);
         // Or as Clew's own Japanese phrases say a value, shown in Japanese.
         with_lang(Lang::Ja, || {
             assert_eq!(named_in("Clew 30行目へ移動"), Some("30行目へ移動"));

@@ -502,7 +502,7 @@ impl App {
         let text = said.to_string();
         if asks_first(&target) {
             self.status = tr!(
-                "“{text}” → {command}? Say yes or no",
+                "{command}? Say yes or no — “{text}”",
                 text = text,
                 command = target.shown
             );

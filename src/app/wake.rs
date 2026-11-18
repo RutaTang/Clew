@@ -904,7 +904,7 @@ impl App {
                         // What failed with it is gone too.
                         self.voice.wake.error = None;
                         self.voice.wake.failed = None;
-                        self.status = tr!("{model} removed", model = name);
+                        self.status = tr!("Removed {model}", model = name);
                     }
                     Err(e) => {
                         self.status =

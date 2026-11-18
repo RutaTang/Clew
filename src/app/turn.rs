@@ -298,7 +298,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.voice.turn.error = None;
-                        self.status = tr!("{model} removed", model = MODEL.name);
+                        self.status = tr!("Removed {model}", model = MODEL.name);
                     }
                     Err(e) => {
                         self.status = tr!(

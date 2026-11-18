@@ -1877,7 +1877,7 @@ fn smart_turn_downloads_verified_and_is_removed() {
     }
     assert!(!clew_voice::turn::installed(&store));
     assert_eq!(*judge.stopped.lock().unwrap(), 1);
-    assert!(app.status.contains("removed"), "{}", app.status);
+    assert!(app.status.starts_with("Removed "), "{}", app.status);
 }
 
 /// Spoken again after a pause was sent to be judged, before any tick has
@@ -3732,6 +3732,10 @@ fn the_voice_key_takes_a_call_over() {
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
     assert!(!app.voice.speech.is_speaking());
     assert!(
+        app.voice.wake.held.is_none(),
+        "Clew stopped: no call holds it"
+    );
+    assert!(
         !app.voice.wake.called,
         "the reader's: no going back to wait"
     );
@@ -4181,8 +4185,6 @@ fn junk_wake_fetch(
     Ok(13)
 }
 
-/// The keyword spotter is downloaded checked, and removed with the
-/// microphone no longer waiting and the spotter let go of first.
 /// The keyword spotter downloaded with no speech model to hear what is
 /// said after "Hey, Clew": it cannot wait yet, and the status line says
 /// what it still needs — not that all is ready.
@@ -4234,6 +4236,25 @@ fn a_microphone_lost_while_listening_waits_for_the_call_again() {
     assert_eq!(script.lock().unwrap().opened, opened + 1, "opened anew");
 }
 
+/// The microphone lost while it listens, waiting having failed before —
+/// not tried again until the reader turns it on again: the status line
+/// says that listening stopped, not that it still listens.
+#[test]
+fn a_microphone_lost_after_waiting_failed_says_listening_stopped() {
+    let (_turn, mut app, script, _, _) = wake_app("wake-mic-lost-failed", "open settings", 0);
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening(), "{}", app.status);
+    app.voice.wake.failed = Some("the microphone could not be opened".into());
+    script.lock().unwrap().error = Some("the device was unplugged".into());
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    script.lock().unwrap().error = None;
+    assert!(!app.voice.is_listening());
+    assert!(!app.voice.wake.is_waiting());
+    assert_eq!(app.status, "Stopped listening: the device was unplugged");
+}
+
+/// The keyword spotter is downloaded checked, and removed with the
+/// microphone no longer waiting and the spotter let go of first.
 #[test]
 fn the_keyword_spotter_downloads_verified_and_is_removed() {
     let (_turn, mut app, script, _, spots) = wake_app("wake-download", "open settings", 0);
@@ -4247,7 +4268,7 @@ fn the_keyword_spotter_downloads_verified_and_is_removed() {
     assert!(!clew_voice::wake::installed(&store));
     assert_eq!(*spots.stops.lock().unwrap(), 1);
     assert!(
-        app.status.contains("Keyword Spotter removed"),
+        app.status.contains("Removed Keyword Spotter"),
         "{}",
         app.status
     );
