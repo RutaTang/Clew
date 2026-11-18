@@ -436,7 +436,7 @@ fn stop_said_keeps_the_agents_question() {
     }
     // An answer the agent names "Stop": that answer — given with its card
     // in view, brought into view with it put away — not a word that stops
-    // Clew.
+    // Clew, nor the debugger's Stop of a program paused.
     for (tag, view) in [
         ("voice-stop-the-answer-open", AskView::Compact),
         ("voice-stop-the-answer-away", AskView::Hidden),
@@ -466,8 +466,25 @@ fn stop_said_keeps_the_agents_question() {
             ],
         });
         app.ask_view = view;
+        app.debug.session = Some(DebugSession {
+            client: None,
+            status: DebugStatus::Stopped,
+            exit_code: None,
+            thread_id: Some(1),
+            frames: Vec::new(),
+            scopes: Vec::new(),
+            watches: Vec::new(),
+            output: Vec::new(),
+            current: None,
+            program: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            cwd: PathBuf::from("/"),
+            addr: None,
+        });
         say(&mut app, &script);
         assert!(app.ask_view.is_open(), "{tag}: its question not shown");
+        assert!(app.proj.asking, "{tag}: the answer being written stopped");
+        assert!(app.voice.confirm.is_none(), "{tag}: {}", app.status);
         if view == AskView::Compact {
             assert!(app.first_approval().is_none(), "{tag}: not answered");
         } else {

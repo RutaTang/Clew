@@ -2366,6 +2366,23 @@ impl App {
         if let Some(task) = self.heard_on_screen(text, &targets, true) {
             return Some(task);
         }
+        // A word that stops Clew naming an answer the agent's question
+        // offers ("Stop"): that answer, before any command of its name
+        // (the debugger's Stop) — given if its card is in view, else held
+        // for it, brought into view ([`App::hold_for_question`]).
+        if crate::app::onscreen::hushes(text)
+            && matches!(
+                self.said_to_question(text),
+                Some(crate::app::onscreen::ToQuestion::Answer(_))
+            )
+        {
+            let answers: Vec<_> = targets
+                .iter()
+                .filter(|t| matches!(t.message, Message::Ask(AskMsg::Approve { .. })))
+                .cloned()
+                .collect();
+            return self.heard_on_screen(text, &answers, false);
+        }
         // Said in English, or as the palette shows it in the reader's
         // language.
         let found = crate::app::palette::command_said(text, &commands).or_else(|| {
