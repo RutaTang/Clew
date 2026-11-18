@@ -1093,7 +1093,8 @@ pub(crate) fn said_over(heard: &str, said: &[String]) -> bool {
 /// open settings”." — is not what the reader said. Whole sentences only,
 /// the run since the last one left out judged on its own, and only before a
 /// call: the reader's own words are kept. What is done is decided by this;
-/// whether it was a call at all, by all that was heard ([`clews_own`]).
+/// whether Clew's own voice made the call, by all that was heard
+/// ([`clews_own`]).
 pub(crate) fn past_clews_words<'a>(heard: &'a str, said: &[String]) -> &'a str {
     if said.is_empty() {
         return heard;
@@ -1125,12 +1126,23 @@ pub(crate) fn past_clews_words<'a>(heard: &'a str, said: &[String]) -> &'a str {
 /// Whether a call is Clew's own voice, heard back (`said`, its last
 /// sentences): only if Clew named itself in them as a call is ("…just say
 /// “Hey, Clew”") — else the phrase the spotter woke on was not Clew's to
-/// say, and the call is the reader's, whatever was left of Clew's voice
-/// is heard with it — and what was heard is mostly its words, all of it.
+/// say, whatever was left of Clew's voice is heard with it — and no more
+/// often than what was heard calls it: a call more is the reader's, said
+/// after Clew taught it. And what was heard is mostly its words.
 pub(crate) fn clews_own(heard: &str, said: &[String]) -> bool {
-    said.iter()
-        .any(|sentence| crate::app::spoken::named_in(sentence).is_some())
-        && !said_over(heard, said)
+    let named: usize = said.iter().map(|sentence| calls_in(sentence)).sum();
+    named > 0 && calls_in(heard) <= named && !said_over(heard, said)
+}
+
+/// How many times `text` calls Clew ([`named_in`](crate::app::spoken::named_in)).
+fn calls_in(text: &str) -> usize {
+    let mut calls = 0;
+    let mut rest = text;
+    while let Some(after) = crate::app::spoken::named_in(rest) {
+        calls += 1;
+        rest = after;
+    }
+    calls
 }
 
 /// Fewest words an echo of Clew is taken to be: anything shorter said over

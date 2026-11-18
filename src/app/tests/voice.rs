@@ -4332,12 +4332,44 @@ fn clews_own_voice_needs_it_to_have_named_itself() {
     ] {
         assert!(clews_own(heard, &own), "{heard}");
     }
+    // A call more than Clew made is the reader's, said after Clew taught
+    // it — even word for word; Clew's own, named twice, heard back is not.
     let taught = vec!["Just say Hey Clew, open settings.".to_string()];
-    assert!(!clews_own(
-        "Just say Hey Clew, open settings. Hey, Clew, what does total do?",
-        &taught
-    ));
+    for heard in [
+        "Just say Hey Clew, open settings. Hey, Clew, stop.",
+        "Just say Hey Clew, open settings. Hey, Clew, open settings.",
+    ] {
+        assert!(!clews_own(heard, &taught), "{heard}");
+    }
+    let twice = vec!["Say Hey Clew. Hey Clew, then, listens.".to_string()];
+    assert!(clews_own("Say Hey Clew. Hey Clew, then, listens.", &twice));
     assert!(!clews_own("Hey, Clew, open settings.", &[]));
+}
+
+/// The reader's call said just after Clew taught it, Clew's sentence heard
+/// with it, Clew's voice in it: a call more than Clew made — the reader's.
+#[test]
+fn a_call_just_after_clew_taught_it_is_the_readers() {
+    let (turn, mut app, script, _, _) = wake_app(
+        "wake-taught-echo",
+        "Just say Hey Clew, open settings. Hey, Clew, open settings.",
+        1,
+    );
+    app.voice.prefs.talk_over = true;
+    app.voice
+        .speech
+        .said_for_test("Just say Hey Clew, open settings.");
+    app.voice
+        .speech
+        .last_heard_for_test(std::time::Duration::from_millis(500));
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(&mut app, task);
+    assert!(app.settings.open, "{}", app.status);
+    drop(app);
+    drop(turn);
 }
 
 /// "Bye, Clew" after Clew's own sentence, an answer on its way to being
