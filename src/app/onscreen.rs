@@ -17,9 +17,11 @@ pub(crate) const TOO_SOON: &str = tr_noop!(
 );
 /// … it allows, and was said as a question ("Allow?").
 pub(crate) const ASKED: &str = tr_noop!("To answer, say “yes” or “no” — not as a question");
-/// … a yes or a no opened more that was said ("yes, allow it"): what only
-/// opens with a yes answers nothing.
-pub(crate) const ALONE: &str = tr_noop!("To answer, say “yes” or “no” on its own");
+/// … more was said after a yes or a no ("yes, allow it", "okay, why that
+/// file?"), which answers nothing: the question waits for a plain answer
+/// before anything else is said.
+pub(crate) const ALONE: &str =
+    tr_noop!("A question is waiting — answer it first with a plain “yes” or “no”");
 /// … a plain yes or no, where the question has none to give ("Always
 /// reject" its only way to decline), or a word that also puts away what is
 /// on top ("cancel"): its answer wants its own words.
@@ -479,6 +481,13 @@ impl App {
                 return Some(self.press_heard(said, t));
             }
             if dismisses(said) {
+                // An answer drawn under the very words said ("Cancel", an
+                // agent's own name for declining) is that answer: put away
+                // instead, its card came back held and went again, said
+                // again, round and round.
+                if let Some(t) = named(said, targets).filter(|t| t.answer.is_some()) {
+                    return Some(self.press_heard(said, t));
+                }
                 return self.dismiss_heard(said);
             }
             // What is on top put away by its name: "close the call graph"
@@ -570,41 +579,42 @@ impl App {
     /// What `said` says to a question waiting ([`App::question_pending`])
     /// that nothing within reach took — the name of something it offers
     /// ([`crate::ui::answers_waiting`]: "Trust and connect", "Always reject"),
-    /// a yes or a no said alone, or more opened by a word that only answers
-    /// ("yes, allow it"; [`crate::app::spoken::opens_with_answer`]) —
-    /// wherever that question is: covered, not yet ready to answer, in an
-    /// Ask put away, a page further on its card. Held
-    /// ([`App::hold_for_question`]), it goes nowhere else. What only opens
-    /// with "okay" or "don't" goes on to the agent, as words for it.
+    /// or anything that opens with a yes or a no ("yes", "allow it", "okay,
+    /// why that file?", "don't run it") — wherever that question is:
+    /// covered, not yet ready to answer, in an Ask put away, a page further
+    /// on its card. Held ([`App::hold_for_question`]), it goes nowhere else:
+    /// the question is answered first, plainly, and what else is to be said
+    /// is said after.
     pub(crate) fn said_to_question(&self, said: &str) -> Option<ToQuestion> {
         self.question_pending()?;
         if let Some(target) = named(said, &crate::ui::answers_waiting(self)) {
             return Some(ToQuestion::Answer(Box::new(target)));
         }
-        (crate::app::spoken::only_yes_or_no(said).is_some()
-            || crate::app::spoken::opens_with_answer(said))
-        .then_some(ToQuestion::YesOrNo)
+        crate::app::spoken::yes_or_no(said).map(|_| ToQuestion::YesOrNo)
     }
 
     /// Hold `text`, said to a question waiting (`to`, from
-    /// [`App::said_to_question`]), saying why — spoken commands off, asked
-    /// rather than answered, more said than a yes or a no, a yes or a no
-    /// the question has no answer for, or said before the question could
+    /// [`App::said_to_question`]), saying why — spoken commands off, a yes
+    /// or a no the question has no answer for, more said than a yes or a
+    /// no, asked rather than answered, or said before the question could
     /// be read — and bring that question into view where it can be: an
     /// approval's Ask put away comes back, on the page of the answer meant.
     pub(crate) fn hold_for_question(&mut self, text: String, to: ToQuestion) -> Task<Message> {
-        let alone = crate::app::spoken::only_yes_or_no(&text);
+        let more = matches!(to, ToQuestion::YesOrNo)
+            && crate::app::spoken::only_yes_or_no(&text).is_none();
         // The answer meant: the one named, or the question's own yes or
         // no — not for a word that also puts away what is on top
         // ("cancel"), which, said again, would close the question instead.
         let meant = match to {
             ToQuestion::Answer(target) => Some(*target),
-            ToQuestion::YesOrNo => alone.filter(|_| !dismisses(&text)).and_then(|yes| {
-                let answer = Some(if yes { Answer::Yes } else { Answer::No });
-                crate::ui::answers_waiting(self)
-                    .into_iter()
-                    .find(|t| t.answer == answer)
-            }),
+            ToQuestion::YesOrNo => crate::app::spoken::yes_or_no(&text)
+                .filter(|_| !dismisses(&text))
+                .and_then(|yes| {
+                    let answer = Some(if yes { Answer::Yes } else { Answer::No });
+                    crate::ui::answers_waiting(self)
+                        .into_iter()
+                        .find(|t| t.answer == answer)
+                }),
         };
         match meant.as_ref().map(|t| &t.message) {
             Some(Message::Ask(AskMsg::Approve { option, .. })) => {
@@ -622,14 +632,14 @@ impl App {
         }
         let why = if !self.voice.prefs.run_commands {
             COMMANDS_OFF
+        } else if meant.is_none() {
+            BY_NAME
+        } else if more {
+            ALONE
         } else if crate::app::spoken::asked(&text) {
             ASKED
-        } else if meant.is_some() {
-            TOO_SOON
-        } else if alone.is_none() {
-            ALONE
         } else {
-            BY_NAME
+            TOO_SOON
         };
         self.hold_answer(text, why)
     }

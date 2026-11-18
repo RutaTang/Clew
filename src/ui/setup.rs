@@ -54,6 +54,7 @@ const LOOKING: &str = tr_noop!("Ready once the project is checked");
 /// said for it.
 const NOTHING_SET_UP: &str = tr_noop!("Nothing to apply: the language servers are already set up.");
 const NOTHING_TO_EXPLAIN: &str = tr_noop!("Nothing is left to explain.");
+const NO_CODE: &str = tr_noop!("There is no code here to explain.");
 const TICK_SOMETHING: &str = tr_noop!("Nothing to apply: tick what to set up.");
 
 /// The sheet for `root`: `setup` as it stands (a first open's before its
@@ -93,10 +94,9 @@ pub(crate) fn setup_sheet<'a>(
         // A folder with no code in it says so: "Nothing left to explain"
         // read as if all of it had been explained. The sheet's folder, as
         // its look found it — on a first open, not the project open now.
-        None if counted == Some(0) && setup.is_some_and(|s| s.no_code) => (
-            tr!("There is no code here to explain.").to_string(),
-            String::new(),
-        ),
+        None if counted == Some(0) && setup.is_some_and(|s| s.no_code) => {
+            (crate::i18n::lookup(NO_CODE).to_string(), String::new())
+        }
         None => (
             explain_line(app.llm_available, calls.flatten(), app.embed_available),
             String::new(),
@@ -421,6 +421,8 @@ pub(crate) fn setup_sheet<'a>(
         {
             NOTHING_SET_UP
         }
+        // "Nothing left to explain" read as if all of it had been.
+        (SetupMode::Explain, Some(s)) if s.explain && s.no_code && counted == Some(0) => NO_CODE,
         (SetupMode::Explain, Some(s)) if s.explain => NOTHING_TO_EXPLAIN,
         _ => TICK_SOMETHING,
     });

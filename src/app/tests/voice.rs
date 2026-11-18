@@ -2299,34 +2299,32 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
     // Ready, a yes or a no with more said after it answers nothing — and
     // is not sent to Ask: told to say it on its own.
     app.asking.delay = std::time::Duration::ZERO;
-    for said in ["Yes, and run the tests too.", "No, use the other file."] {
+    // Whatever opens with a yes or a no — an answer with more, an
+    // answer's own phrasing, words meant for the agent after — waits for
+    // the question to be answered first, plainly; asked, too.
+    for said in [
+        "Yes, and run the tests too.",
+        "No, use the other file.",
+        "Allow it.",
+        "Go ahead and run it.",
+        "Okay, why do you need that file?",
+        "Don't touch the tests.",
+    ] {
         say_words(&mut app, &script, said);
         assert!(
             app.proj.ask_input.is_empty(),
             "{said}: {}",
             app.proj.ask_input
         );
+        assert!(app.proj.ask_queue.is_empty(), "{said}");
         assert!(
             app.status
-                .starts_with("To answer, say “yes” or “no” on its own"),
+                .starts_with("A question is waiting — answer it first with a plain “yes” or “no”"),
             "{said}: {}",
             app.status
         );
     }
     assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1);
-    // What only opens with "okay" or "don't" is words for the agent: it
-    // goes on to Ask (kept in its input here, with no key to ask with).
-    for said in ["Okay, why do you need that file?", "Don't touch the tests."] {
-        say_words(&mut app, &script, said);
-        assert_eq!(
-            app.voice.heard.as_ref().map(|h| &h.outcome),
-            Some(&HeardOutcome::Asked),
-            "{said}: {}",
-            app.status
-        );
-        assert_eq!(app.proj.ask_input, said);
-        app.proj.ask_input.clear();
-    }
     // Asked, not answered: held, and told to say it plainly.
     for said in ["Allow?", "Yes?", "Always allow?"] {
         say_words(&mut app, &script, said);
@@ -2684,6 +2682,8 @@ fn a_no_the_question_has_no_answer_for_asks_for_its_words() {
         assert_eq!(app.proj.ask_turns[0].extras.approvals.len(), 1, "{said}");
     };
     by_name(&mut app, &script, "No.");
+    // More said after it: no plain "no" to answer with first either.
+    by_name(&mut app, &script, "No, not that one.");
     say_words(&mut app, &script, "Always reject");
     assert!(
         app.proj.ask_turns[0].extras.approvals.is_empty(),
@@ -2723,6 +2723,37 @@ fn a_no_the_question_has_no_answer_for_asks_for_its_words() {
         "{}",
         app.status
     );
+    // An agent's own name for declining that also puts away ("Cancel"):
+    // put away, the card is brought back by it, and said again it is that
+    // answer, not Ask put away once more.
+    let mut cancels = approval(3);
+    cancels.options[1] = ApprovalOption {
+        id: "reject".into(),
+        label: "Cancel".into(),
+        allows: false,
+        always: false,
+    };
+    app.proj.ask_turns[0].extras.approvals.push(cancels);
+    app.hide_ask();
+    for _ in 0..3 {
+        say_words(&mut app, &script, "Cancel.");
+        if !app.status.ends_with("→ Closed") {
+            break;
+        }
+    }
+    assert!(
+        app.status.starts_with("Too soon to answer"),
+        "{}",
+        app.status
+    );
+    assert!(app.ask_view.is_open(), "the question not brought into view");
+    say_words(&mut app, &script, "Cancel.");
+    assert!(
+        app.proj.ask_turns[0].extras.approvals.is_empty(),
+        "{}",
+        app.status
+    );
+    assert!(app.ask_view.is_open(), "Ask put away instead");
 }
 
 /// A target of the window, as `ui::heard` offers one.

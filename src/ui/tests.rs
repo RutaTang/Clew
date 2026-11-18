@@ -6354,6 +6354,26 @@ fn the_setup_sheets_apply_answers_no_question() {
         calls: Some(40),
     });
     assert_eq!(apply(&app), [(None, false)]);
+    // Explain All on a folder with no code: held, saying so — not that
+    // all of it is explained.
+    let mut explain = app.setup.clone().unwrap();
+    explain.mode = SetupMode::Explain;
+    explain.explain = true;
+    explain.no_code = true;
+    explain.census = Some(Census {
+        servers: Vec::new(),
+        calls: Some(0),
+    });
+    let mut no_code = reader_app();
+    no_code.setup = Some(explain);
+    let held: Vec<Option<&'static str>> = crate::ui::heard::gather_of(|| {
+        super::setup::setup_sheet(&no_code, &root, no_code.setup.as_ref(), true)
+    })
+    .into_iter()
+    .filter(|t| t.shown == "Explain")
+    .map(|t| t.waiting)
+    .collect();
+    assert_eq!(held, [Some("There is no code here to explain.")]);
     // Nothing to do: held, saying so.
     app.setup.as_mut().unwrap().census = Some(Census {
         servers: Vec::new(),

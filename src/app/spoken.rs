@@ -43,11 +43,6 @@ enum Kind {
 const YES: &str =
     tr_noop!("yes, yeah, yep, sure, okay, ok, run, run it, do it, go ahead, confirm, allow");
 const NO: &str = tr_noop!("no, nope, cancel, don't, do not, never mind, not now");
-/// The words that answer a question and do nothing else — "yes" and
-/// "no", and the reader's: what opens with one, said while a question
-/// waits ("yes, allow it"), is meant for it. What opens with "okay", "sure"
-/// or "don't" may as well be words for the agent ("okay, why that file?").
-const ANSWERS: &str = tr_noop!("yes, yeah, yep, no, nope");
 
 /// Whether `said` answers a command waiting for a yes: `Some(true)` for a
 /// yes, `Some(false)` for a no, `None` when it says something else. What it
@@ -119,21 +114,6 @@ pub(crate) fn only_yes_or_no(said: &str) -> Option<bool> {
         (false, true) => Some(false),
         _ => None,
     }
-}
-
-/// Whether `said` opens with a word that only answers ([`ANSWERS`]):
-/// "yes, allow it", "no, the other one", "是，再跑一遍测试".
-pub(crate) fn opens_with_answer(said: &str) -> bool {
-    let said = plain(said);
-    [ANSWERS, crate::i18n::lookup(ANSWERS)]
-        .into_iter()
-        .flat_map(|l| l.split([',', '，', '、']))
-        .map(plain)
-        .filter(|p| !p.is_empty())
-        .any(|word| {
-            said.strip_prefix(word.as_str())
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
-        })
 }
 
 /// Whether `said` was said as a question ("Allow?", "对？"): a yes, but
@@ -1720,37 +1700,18 @@ mod tests {
         }
     }
 
-    /// What opens with a word that only answers is meant for a question
-    /// waiting; what opens with "okay", "sure" or "don't" may be words for
-    /// the agent — in English and in the reader's language.
-    #[test]
-    fn what_opens_with_a_plain_answer_is_told_apart() {
-        use crate::i18n::{Lang, with_lang};
-        for said in ["Yes, allow it.", "yes", "No, the other one.", "Nope."] {
-            assert!(opens_with_answer(said), "{said:?}");
-        }
-        for said in [
-            "Okay, why do you need that file?",
-            "Don't touch the tests.",
-            "Sure thing",
-            "Yesterday's build broke",
-            "Nobody calls it",
-            "",
-        ] {
-            assert!(!opens_with_answer(said), "{said:?}");
-        }
-        with_lang(Lang::Zh, || {
-            assert!(opens_with_answer("是，再把测试也跑了"));
-            assert!(opens_with_answer("不，用另一个文件"));
-            assert!(!opens_with_answer("好的，为什么要那个文件？"));
-            assert!(!opens_with_answer("不要动测试"));
-        });
-    }
-
     /// A question on screen is answered only by what is all a yes or all
     /// a no: what merely opens with one ("run the tests") is not.
     #[test]
     fn a_question_is_answered_by_a_yes_alone() {
+        use crate::i18n::{Lang, with_lang};
+        with_lang(Lang::Zh, || {
+            assert_eq!(only_yes_or_no("不是"), Some(false));
+            assert_eq!(yes_or_no("好的，为什么要那个文件？"), Some(true));
+        });
+        with_lang(Lang::Ja, || {
+            assert_eq!(only_yes_or_no("ううん"), Some(false))
+        });
         for said in [
             "yes",
             "Yes, do it.",
