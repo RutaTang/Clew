@@ -2594,6 +2594,8 @@ fn stop_talked_over_clew_stops_the_answer_being_written() {
                     }],
                 });
             assert!(app.first_approval().is_some(), "{tag}");
+            // Put away: it comes back for the question.
+            app.ask_view = crate::app::model::AskView::Hidden;
         }
         talk(Some(0.1));
         voice_tick(&mut app);
@@ -2606,6 +2608,7 @@ fn stop_talked_over_clew_stops_the_answer_being_written() {
         assert_eq!(app.proj.ask_turns.len(), 1, "{tag}: asked of Ask");
         if asks {
             assert!(app.first_approval().is_some(), "{tag}: its question lost");
+            assert!(app.ask_view.is_open(), "{tag}: its question not shown");
         }
         assert_eq!(app.status, "Stopped speaking", "{tag}");
     }

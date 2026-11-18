@@ -349,26 +349,27 @@ fn stop_said_is_never_asked() {
     for (tag, writing) in [("voice-stop-nothing", false), ("voice-stop-writing", true)] {
         let (mut app, script, _) = voice_app(tag, "Okay, stop.");
         app.proj.asking = writing;
-        // Asked after the answer being written: still to be asked once it
-        // has stopped, not held.
+        // Asked after the answer being written: asked once it has stopped,
+        // not held out of sight.
         let next = ("why that file?".to_string(), true);
         if writing {
             app.proj.ask_queue.push(next.clone());
         }
         say(&mut app, &script);
         assert!(app.proj.ask_turns.is_empty(), "{tag}: asked");
-        let queued = if writing { vec![next] } else { Vec::new() };
-        assert_eq!(app.proj.ask_queue, queued, "{tag}: queued");
         assert_eq!(app.proj.ask_input, "", "{tag}");
         assert!(
             !app.proj.asking,
             "{tag}: the answer being written not stopped"
         );
-        assert!(
-            !app.proj.ask_queue_held,
-            "{tag}: what was asked after it held"
-        );
-        if !writing {
+        if writing {
+            // Asked at once — here with no model to ask it, so it waits at
+            // the head of the queue, held, the status line saying why.
+            assert_eq!(app.proj.ask_queue, vec![next], "{tag}: queued");
+            assert_eq!(app.status, "Add an API key in Settings", "{tag}");
+        } else {
+            assert!(app.proj.ask_queue.is_empty(), "{tag}: queued");
+            assert!(!app.proj.ask_queue_held, "{tag}");
             assert_eq!(app.status, "Clew isn't speaking", "{tag}");
         }
     }
