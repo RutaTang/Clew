@@ -140,15 +140,13 @@ impl ConnTarget {
                 let host = ssh_destination(&args)
                     .map(str::to_string)
                     .unwrap_or_else(|| ssh.trim().to_string());
-                // The label is also the approval-scoping identity, so a
-                // non-default port belongs in it exactly as it does for an
-                // in-app connection: `host:2222` can be a different machine
-                // (or container) than `host:22`, and trust granted for one
-                // must not silently cover the other.
-                let label = match ssh_port(&args) {
-                    Some(port) if port != 22 => format!("{host}:{port}"),
-                    _ => host,
+                // The label is also the approval-scoping identity, made as
+                // an in-app connection's is (see [`scope_label`]).
+                let (user, host) = match host.rsplit_once('@') {
+                    Some((user, host)) => (Some(user), host),
+                    None => (None, host.as_str()),
                 };
+                let label = scope_label(user, host, ssh_port(&args).unwrap_or(22));
                 ConnTarget::Ssh { label, args }
             }
             _ => ConnTarget::Local,
@@ -346,20 +344,57 @@ impl SavedConnection {
     }
 
     pub fn target(&self) -> ConnTarget {
-        // The label doubles as the approval-scoping host identity, so a
-        // non-default port is part of it: `host:2222` can be a different
-        // machine (or container) than `host:22`, and trust granted for one
-        // must not cover the other.
-        let label = if self.port == 22 {
-            self.user_host()
-        } else {
-            format!("{}:{}", self.user_host(), self.port)
-        };
         ConnTarget::Ssh {
-            label,
+            label: scope_label(Some(self.user.trim()), self.host.trim(), self.port),
             args: self.ssh_args(),
         }
     }
+}
+
+/// The label a remote is known by — `user@host`, with `:port` after it when
+/// the port is not 22 — which is also the identity its approvals are filed
+/// under ([`ConnTarget::approval_host`]), so it must name one machine.
+/// `host:2222` can be a different machine (or container) than `host:22`, so
+/// the port is part of it; a host holding a `:` (an IPv6 address) is
+/// bracketed, `[2001:db8::1]:2222`, so a port is never read as part of it —
+/// `2001:db8::1:2222` on port 22 and `2001:db8::1` on port 2222 once shared
+/// one label, and with it their approvals; and `%`, `/`, `[`, `]` and `@`
+/// are escaped, so no part runs into the next or into the project root that
+/// follows it in the approval key. What it gives an ordinary `user@host`
+/// is `user@host`.
+///
+/// That the label, with an absolute project root after it, names exactly
+/// one user, host, port and project is proved in
+/// `verification/Clew/Trust.lean`.
+pub(crate) fn scope_label(user: Option<&str>, host: &str, port: u16) -> String {
+    fn esc(text: &str, out: &mut String) {
+        for c in text.chars() {
+            match c {
+                '%' => out.push_str("%25"),
+                '/' => out.push_str("%2F"),
+                '[' => out.push_str("%5B"),
+                ']' => out.push_str("%5D"),
+                '@' => out.push_str("%40"),
+                c => out.push(c),
+            }
+        }
+    }
+    let mut label = String::new();
+    if let Some(user) = user {
+        esc(user, &mut label);
+        label.push('@');
+    }
+    if host.contains(':') {
+        label.push('[');
+        esc(host, &mut label);
+        label.push(']');
+    } else {
+        esc(host, &mut label);
+    }
+    if port != 22 {
+        label.push_str(&format!(":{port}"));
+    }
+    label
 }
 
 /// On-disk shape of `connections.toml`: `[[connection]]` tables.
@@ -1243,6 +1278,46 @@ mod tests {
                 "the user's file must be left exactly as it was"
             );
         });
+    }
+
+    /// `scope_label` computes, on every input the Lean model was run on,
+    /// what the model computes — the model whose theorem says the label,
+    /// with a project root after it, names one user, host, port and project
+    /// (`verification/Clew/Trust.lean`).
+    #[test]
+    fn the_scope_label_is_the_proven_model() {
+        let vectors = include_str!("../../verification/vectors/trust.json");
+        for (input, want) in clew_core::testutil::lean_cases(vectors, "scope_label") {
+            let user = input[0].as_str();
+            let host = input[1].as_str().unwrap();
+            let port = input[2].as_u64().unwrap() as u16;
+            assert_eq!(
+                scope_label(user, host, port),
+                want.as_str().unwrap(),
+                "scope_label({user:?}, {host:?}, {port})"
+            );
+        }
+    }
+
+    /// Two machines never share an approval scope: an IPv6 host whose last
+    /// group reads like a port, on 22, and the address before it on that
+    /// port used to be labelled alike.
+    #[test]
+    fn an_ipv6_host_and_a_port_are_never_one_label() {
+        let at = |host: &str, port: u16| SavedConnection {
+            host: host.into(),
+            port,
+            ..conn(22, "")
+        };
+        let a = at("2001:db8::1:2222", 22).target();
+        let b = at("2001:db8::1", 2222).target();
+        assert_ne!(a.approval_host(), b.approval_host());
+        assert_eq!(b.approval_host(), Some("root@[2001:db8::1]:2222"));
+        // An ordinary host keeps the label it always had.
+        assert_eq!(
+            at("example.com", 2222).target().approval_host(),
+            Some("root@example.com:2222")
+        );
     }
 
     #[test]

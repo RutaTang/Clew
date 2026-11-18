@@ -146,28 +146,6 @@ theorem slug_has_no_path_or_url_syntax (lower : Char → List Char) (platform s 
 
 /-! ## Asset names -/
 
-theorem takeWhile_append_of_all {p : Char → Bool} (xs ys : List Char) (hx : ∀ c ∈ xs, p c = true)
-    (hy : ∀ c, ys.head? = some c → p c = false) : (xs ++ ys).takeWhile p = xs := by
-  induction xs with
-  | nil =>
-    cases ys with
-    | nil => rfl
-    | cons y ys => simp [hy y rfl]
-  | cons x xs ih =>
-    have : p x = true := hx x (by simp)
-    simp [this, ih (fun c hc => hx c (by simp [hc]))]
-
-theorem dropWhile_append_of_all {p : Char → Bool} (xs ys : List Char) (hx : ∀ c ∈ xs, p c = true)
-    (hy : ∀ c, ys.head? = some c → p c = false) : (xs ++ ys).dropWhile p = ys := by
-  induction xs with
-  | nil =>
-    cases ys with
-    | nil => rfl
-    | cons y ys => simp [hy y rfl]
-  | cons x xs ih =>
-    have : p x = true := hx x (by simp)
-    simp [this, ih (fun c hc => hx c (by simp [hc]))]
-
 theorem decimal_injective {m n : Nat} (h : decimal m = decimal n) : m = n := by
   have := congrArg digitsValue h
   simpa [digitsValue_decimal] using this
@@ -190,14 +168,14 @@ theorem assetName_injective {s₁ s₂ : List Char} {p₁ p₂ : Nat}
     subst hc
     decide
   have htake := congrArg (List.takeWhile isAsciiDigit) hrev
-  rw [takeWhile_append_of_all _ _ (hd p₁) (hstop _),
-    takeWhile_append_of_all _ _ (hd p₂) (hstop _)] at htake
+  rw [takeWhile_append_all _ _ (hd p₁) (hstop _),
+    takeWhile_append_all _ _ (hd p₂) (hstop _)] at htake
   have hp : p₁ = p₂ := decimal_injective (List.reverse_inj.mp htake)
   subst hp
   refine ⟨?_, rfl⟩
   have hdrop := congrArg (List.dropWhile isAsciiDigit) hrev
-  rw [dropWhile_append_of_all _ _ (hd p₁) (hstop _),
-    dropWhile_append_of_all _ _ (hd p₁) (hstop _)] at hdrop
+  rw [dropWhile_append_all _ _ (hd p₁) (hstop _),
+    dropWhile_append_all _ _ (hd p₁) (hstop _)] at hdrop
   simp only [List.append_cancel_left_eq, List.append_cancel_right_eq] at hdrop
   exact List.reverse_inj.mp hdrop
 

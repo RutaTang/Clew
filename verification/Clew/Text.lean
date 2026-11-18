@@ -201,4 +201,30 @@ theorem parseU64_decimal (n : Nat) (h : n < 2 ^ 64) : parseU64 (decimal n) = som
     | cons _ _ => rfl
   simp [hall, hemp, digitsValue_decimal, h]
 
+/-! ## Lists -/
+
+theorem takeWhile_append_all {α : Type} {p : α → Bool} (xs ys : List α)
+    (hx : ∀ c ∈ xs, p c = true) (hy : ∀ c, ys.head? = some c → p c = false) :
+    (xs ++ ys).takeWhile p = xs := by
+  induction xs with
+  | nil =>
+    cases ys with
+    | nil => rfl
+    | cons y ys => simp [hy y rfl]
+  | cons x xs ih =>
+    have : p x = true := hx x (by simp)
+    simp [this, ih (fun c hc => hx c (by simp [hc]))]
+
+theorem dropWhile_append_all {α : Type} {p : α → Bool} (xs ys : List α)
+    (hx : ∀ c ∈ xs, p c = true) (hy : ∀ c, ys.head? = some c → p c = false) :
+    (xs ++ ys).dropWhile p = ys := by
+  induction xs with
+  | nil =>
+    cases ys with
+    | nil => rfl
+    | cons y ys => simp [hy y rfl]
+  | cons x xs ih =>
+    have : p x = true := hx x (by simp)
+    simp [this, ih (fun c hc => hx c (by simp [hc]))]
+
 end Clew.Text

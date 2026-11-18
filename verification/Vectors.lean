@@ -145,9 +145,45 @@ def serverDist : Json :=
     ("parse_digest_list", Json.arr lists.toArray), ("embedded_digest", Json.arr embedded.toArray),
     ("parse_sha256", Json.arr sums.toArray), ("verify_abc", Json.arr verifies.toArray)]
 
+/-- A string's UTF-8 bytes, as the trust model's byte lists. -/
+def utf8 (s : String) : List Nat := s.toUTF8.toList.map (·.toNat)
+
+def bytesJson (bs : List Nat) : Json := Json.arr (bs.map toJson).toArray
+
+def trust : Json :=
+  let words := ["", "a", ";", ":", "1"]
+  let argLists : List (List String) := [[]] ++ words.map ([·]) ++
+    (words.flatMap fun a => words.map fun b => [a, b]) ++
+    [["a;1:b"], ["é"], ["12345678901"], ["-p", "2222", "x y"]]
+  let argsParts := argLists.map fun args =>
+    pair (Json.arr (args.map Json.str).toArray) (bytesJson (Clew.Trust.argsPart (args.map utf8)))
+  let partLists : List (List String) := [[], [""], ["", ""], ["a"], ["é"],
+    ["clew.lsp.build.v1", "rust-analyzer"], ["/usr/bin/x", "1;0:", "s", "1.0", ""],
+    ["clew.lsp.init-options.v1", "0", "pyright", "1.1", "{\"a\":1}"]]
+  let prefixed := partLists.map fun parts =>
+    pair (Json.arr (parts.map Json.str).toArray) (bytesJson (Clew.Trust.fields (parts.map utf8)))
+  let users : List (Option String) := [none, some "u", some "a:b", some "x/y", some "p%q",
+    some "a@b", some "[r]"]
+  let hosts := ["h", "example.com", "::1", "2001:db8::1:2222", "2001:db8::1", "a/b", "h%25", "[x]",
+    "a@b", ""]
+  let ports := [22, 2222, 1]
+  let labels := users.flatMap fun u => hosts.flatMap fun h => ports.map fun p =>
+    pair (Json.arr #[(match u with | some u => Json.str u | none => Json.null), Json.str h, toJson p])
+      (str (Clew.Trust.scopeLabel (u.map String.toList) h.toList p))
+  let roots := ["/srv/p", "/b:/c", "/"]
+  let someLabels := [Clew.Trust.scopeLabel (some "u".toList) "h".toList 22,
+    Clew.Trust.scopeLabel (some "u".toList) "2001:db8::1".toList 2222,
+    Clew.Trust.scopeLabel none "a/b".toList 1]
+  let keys := someLabels.flatMap fun l => roots.map fun r =>
+    pair (Json.arr #[str l, Json.str r]) (str (Clew.Trust.approvalKey l r.toList))
+  Json.mkObj [("args_part", Json.arr argsParts.toArray),
+    ("length_prefixed", Json.arr prefixed.toArray), ("scope_label", Json.arr labels.toArray),
+    ("project_key", Json.arr keys.toArray)]
+
 /-- Every model's vectors, by file name. -/
 def all : List (String × Json) :=
-  [("confine.json", confine), ("update.json", update), ("server_dist.json", serverDist)]
+  [("confine.json", confine), ("update.json", update), ("server_dist.json", serverDist),
+    ("trust.json", trust)]
 
 end Vectors
 

@@ -251,11 +251,24 @@ const BUILD_DOMAIN: &str = "clew.lsp.build.v1";
 pub fn build_fingerprint(server: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    for part in [BUILD_DOMAIN, server] {
-        h.update((part.len() as u64).to_le_bytes());
-        h.update(part.as_bytes());
-    }
+    h.update(length_prefixed(&[BUILD_DOMAIN, server]));
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The parts of a fingerprint as the bytes it hashes: each part's length as
+/// eight little-endian bytes, then its bytes. Every fingerprint is a SHA-256
+/// of this (the command's also of its content digest after it), so no
+/// rearrangement of parts reads the same, and the three kinds — command,
+/// options alone, leave to build — differ in their first part (a canonical
+/// path, [`OPTIONS_DOMAIN`], [`BUILD_DOMAIN`]): proved of exactly this
+/// encoding in `verification/Clew/Trust.lean`.
+fn length_prefixed(parts: &[&str]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(parts.iter().map(|p| p.len() + 8).sum());
+    for part in parts {
+        out.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        out.extend_from_slice(part.as_bytes());
+    }
+    out
 }
 
 /// The absolute form of a (possibly project-relative) lsp.toml `command`.
@@ -372,10 +385,13 @@ pub fn lsp_options_fingerprint(
         serde_json::to_string(init_options).map_err(|e| format!("lsp.toml init_options: {e}"))?;
     let mut h = Sha256::new();
     // Length-prefix each field so no rearrangement of the parts collides.
-    for part in [OPTIONS_DOMAIN, &args_part(args), server, version, &options] {
-        h.update((part.len() as u64).to_le_bytes());
-        h.update(part.as_bytes());
-    }
+    h.update(length_prefixed(&[
+        OPTIONS_DOMAIN,
+        &args_part(args),
+        server,
+        version,
+        &options,
+    ]));
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -456,16 +472,13 @@ fn hash_command(
 
     let mut h = Sha256::new();
     // Length-prefix each field so no rearrangement of the parts collides.
-    for part in [
+    h.update(length_prefixed(&[
         real.to_string_lossy().as_ref(),
         &args_part(args),
         server,
         version,
         &options,
-    ] {
-        h.update((part.len() as u64).to_le_bytes());
-        h.update(part.as_bytes());
-    }
+    ]));
     h.update(content);
     let fingerprint = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
     Ok(Hashed {
@@ -1005,6 +1018,68 @@ fn sweep_exec_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bytes every fingerprint hashes — `args_part`, the length-prefixed
+    /// fields — and the key a remote approval is filed under are, on every
+    /// input the Lean model was run on, what the model computes: the model
+    /// whose theorems say no two argument lists or field lists read alike,
+    /// the three kinds of fingerprint hash disjoint inputs, and a key names
+    /// one machine and one project (`verification/Clew/Trust.lean`).
+    #[test]
+    fn fingerprint_inputs_and_approval_keys_are_the_proven_model() {
+        let vectors = include_str!("../../../verification/vectors/trust.json");
+        let cases = |f| crate::testutil::lean_cases(vectors, f);
+        let strings = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        };
+        let bytes = |v: &serde_json::Value| -> Vec<u8> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b.as_u64().unwrap() as u8)
+                .collect()
+        };
+        for (input, want) in cases("args_part") {
+            let args = strings(&input);
+            assert_eq!(
+                args_part(&args).into_bytes(),
+                bytes(&want),
+                "args_part({args:?})"
+            );
+        }
+        for (input, want) in cases("length_prefixed") {
+            let parts = strings(&input);
+            let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+            assert_eq!(
+                length_prefixed(&parts),
+                bytes(&want),
+                "length_prefixed({parts:?})"
+            );
+        }
+        for (input, want) in cases("project_key") {
+            let (label, root) = (input[0].as_str().unwrap(), input[1].as_str().unwrap());
+            assert_eq!(
+                crate::derived::project_key(Some(label), Path::new(root)),
+                want.as_str().unwrap()
+            );
+        }
+    }
+
+    /// The fingerprints hash exactly the modelled encoding: a leave-to-build
+    /// record is the SHA-256 of its two length-prefixed fields.
+    #[test]
+    fn a_build_fingerprint_hashes_its_length_prefixed_fields() {
+        use sha2::{Digest, Sha256};
+        let want: String = Sha256::digest(length_prefixed(&[BUILD_DOMAIN, "rust-analyzer"]))
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(build_fingerprint("rust-analyzer"), want);
+    }
 
     /// Run `f` with `CLEW_DATA_DIR` at a fresh directory, restored afterwards
     /// (a failing test included) — see [`crate::testutil::DataDir`].
