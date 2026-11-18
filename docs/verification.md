@@ -9,6 +9,7 @@ Some of Clew's rules are proved, not only tested. For each rule, `verification/`
 - what a recorded approval covers;
 - how messages are framed on a stream;
 - what Clew hands to a shell or to ssh;
+- which programs Clew runs where they are, and which headers it sends;
 - where spoken words go.
 
 ## What is proved
@@ -55,6 +56,10 @@ The user, host and port in a key are the ones ssh connects with. With `CLEW_SSH`
 - No field of a saved connection ever reaches ssh as an option, whatever it holds. ssh reads exactly the options Clew wrote, and the destination exactly `user@host`. So a host typed as `-oProxyCommand=…` is a host, not a command.
 - A machine has one label, whether it is reached as a saved connection or through `CLEW_SSH` with the same arguments, for any user name that is not itself an `ssh://` address. So approvals given through either are filed under one name.
 - The known_hosts field Clew writes a host key under names one host and one port. It holds none of the pattern syntax (`*`, `?`, `!`, `,`, a hashed `|1|` name) that would let one key vouch for other hosts.
+
+**Two guards** — `trusted_by` in `crates/clew-core/src/trust.rs` and `check_headers` in `crates/clew-core/src/mcp/config.rs`, modelled in `Guards.lean`.
+- A language server a project names runs from Clew's own copy of the approved bytes, unless it sits where nobody but you or root can change it. When `trusted_by` lets it run in place, no other user can write it or replace any directory entry on the way to it. This uses the Unix permission rules, and counts every user as possibly in the file's group.
+- The headers `check_headers` accepts for an MCP server are read back from the request as exactly those headers, one line each, under their own names. This holds however leniently the server splits lines: at a CR, an LF or a NUL. No value can start a header of its own.
 
 **Where spoken words go** — `route` in `src/app/voice.rs`, modelled in `VoiceRoute.lean`.
 - "Bye, Clew" is always heard first.
@@ -105,14 +110,14 @@ These are the places where Clew decides who may do what, or what to trust. Each 
 | What an approval covers | `trust` fingerprints | Proved |
 | Which machine and project an approval is filed under | `derived::project_key`, `scope_label`, `ssh_endpoint` | Proved |
 | Whether a project's language server may run | `lsp_gate::lsp_command_allowed` | The rule, that its fingerprint was approved, rests on the proved fingerprints. Running exactly the bytes that were hashed is file-system work, tested |
-| Whether a folder may hold a program Clew runs unstaged | `trust::trusted_location` | Tested: it reads file ownership and modes |
+| Whether a folder may hold a program Clew runs unstaged | `trust::trusted_by` | Proved. Reading the owners and modes it decides from is the file system's |
 | How messages are framed | `framing` | Proved |
 | What Clew hands to a shell | `shell_command`, `sh_c`, `quote` | Proved, and checked against `/bin/sh` |
 | What Clew hands to ssh | `SavedConnection::ssh_args` | Proved |
 | Which host a recorded host key vouches for | `known_hosts_pattern`, `plain_host_field` | Proved |
 | Where spoken words go | `voice::route` | Proved |
 | Whether hovering may run the debugged program's code | `dap::hover_eval_allowed` | Tested: one `or` of the debugger's promise and your choice |
-| An MCP server's request headers | `mcp::config::check_headers` | Tested |
+| An MCP server's request headers | `mcp::config::check_headers` | Proved |
 | Signing in to an MCP server | `mcp` OAuth | Tested: a network protocol |
 
 ## Why the models are written by hand

@@ -9,6 +9,7 @@ Clew 的一部分规则不只是经过测试，而是经过证明的。对每条
 - 一条已记录的许可涵盖什么；
 - 消息在数据流上如何分帧；
 - Clew 交给 shell 或 ssh 的内容；
+- Clew 直接运行哪些程序，以及发送哪些请求头；
 - 说出的话交给哪里处理。
 
 ## 证明了什么
@@ -55,6 +56,10 @@ Clew 的一部分规则不只是经过测试，而是经过证明的。对每条
 - 已保存连接的任何字段，无论内容是什么，都绝不会成为 ssh 的选项。ssh 读到的选项恰好是 Clew 写下的那些，目标恰好是 `user@host`。所以填成 `-oProxyCommand=…` 的主机名只是主机名，不是命令。
 - 一台机器只有一个标签，无论是通过已保存的连接，还是通过参数相同的 `CLEW_SSH` 连接（只要用户名本身不是 `ssh://` 地址）。所以从任一途径给出的许可都登记在同一个名字下。
 - Clew 记录主机密钥时用的 known_hosts 字段，恰好对应一台主机和一个端口。它不含任何会让一个密钥替其他主机担保的模式语法（`*`、`?`、`!`、`,`、哈希形式的 `|1|` 名字）。
+
+**两道关卡**：`crates/clew-core/src/trust.rs` 中的 `trusted_by` 和 `crates/clew-core/src/mcp/config.rs` 中的 `check_headers`，模型在 `Guards.lean`。
+- 项目指定的语言服务器，从 Clew 自己保存的、已获许可的字节副本运行，除非它所在的位置只有你或 root 能修改。`trusted_by` 允许它原地运行时，其他用户既不能写它，也不能替换通往它的路径上的任何目录项。这基于 Unix 权限规则，并把每个用户都当作可能属于该文件的组。
+- `check_headers` 接受的 MCP 服务器请求头，从请求中读回时恰好就是这些请求头，每个一行，名字不变。无论服务器多么宽松地分行（在 CR、LF 或 NUL 处），都成立。任何值都不能另起一个请求头。
 
 **说出的话交给哪里**：`src/app/voice.rs` 中的 `route`，模型在 `VoiceRoute.lean`。
 - “Bye, Clew”永远最先处理。
@@ -105,14 +110,14 @@ CI 在 `verification` 任务中运行它。Lean 工具链固定在 `verification
 | 一条许可涵盖什么 | `trust` 指纹 | 已证明 |
 | 许可登记在哪台机器、哪个项目下 | `derived::project_key`、`scope_label`、`ssh_endpoint` | 已证明 |
 | 项目的语言服务器能否运行 | `lsp_gate::lsp_command_allowed` | 规则（它的指纹已获许可）依赖已证明的指纹。运行的正是被哈希的那些字节，这属于文件系统，有测试 |
-| 某个文件夹能否存放 Clew 不经暂存就运行的程序 | `trust::trusted_location` | 有测试：它读取文件的所有者和权限 |
+| 某个文件夹能否存放 Clew 不经暂存就运行的程序 | `trust::trusted_by` | 已证明。读取它所依据的所有者和权限属于文件系统 |
 | 消息如何分帧 | `framing` | 已证明 |
 | Clew 交给 shell 的内容 | `shell_command`、`sh_c`、`quote` | 已证明，并对照 `/bin/sh` 检查 |
 | Clew 交给 ssh 的内容 | `SavedConnection::ssh_args` | 已证明 |
 | 记录下的主机密钥为哪台主机担保 | `known_hosts_pattern`、`plain_host_field` | 已证明 |
 | 说出的话交给哪里 | `voice::route` | 已证明 |
 | 鼠标悬停时能否运行被调试程序的代码 | `dap::hover_eval_allowed` | 有测试：调试器的承诺和你的选择取“或” |
-| MCP 服务器的请求头 | `mcp::config::check_headers` | 有测试 |
+| MCP 服务器的请求头 | `mcp::config::check_headers` | 已证明 |
 | 登录 MCP 服务器 | `mcp` OAuth | 有测试：这是网络协议 |
 
 ## 为什么模型是手写的

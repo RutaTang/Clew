@@ -71,3 +71,6 @@ the kernel did not check.
 #print axioms Clew.Ssh.plainHostField_literal
 #print axioms Clew.Ssh.knownHostsPattern_plain
 #print axioms Clew.Ssh.knownHostsPattern_injective
+-- Programs run in place, MCP headers
+#print axioms Clew.Guards.trusted_means_private
+#print axioms Clew.Guards.readHeaders_headerBlock

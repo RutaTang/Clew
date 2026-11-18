@@ -386,9 +386,44 @@ def ssh : Json :=
     ("known_hosts_pattern", Json.arr patterns.toArray),
     ("plain_host_field", Json.arr plains.toArray)]
 
+def guards : Json :=
+  let me := 1000
+  let node : Clew.Guards.Node → Json := fun n =>
+    Json.arr #[toJson n.uid, toJson n.mode, Json.bool n.kindOk]
+  -- Owners (root, you, someone else), and modes at every bit the rule reads.
+  let uids := [0, 1000, 1001]
+  let fileModes := [0o644, 0o664, 0o646, 0o600, 0o755, 0o775, 0o757, 0o4755, 0o1644, 0o622]
+  let dirModes := [0o755, 0o775, 0o757, 0o777, 0o1777, 0o1775, 0o1757, 0o700, 0o2775, 0o570]
+  let files := uids.flatMap fun u => fileModes.flatMap fun m =>
+    [true, false].map fun k => (⟨u, m, k⟩ : Clew.Guards.Node)
+  let dirs := uids.flatMap fun u => dirModes.flatMap fun m =>
+    [true, false].map fun k => (⟨u, m, k⟩ : Clew.Guards.Node)
+  let good : Clew.Guards.Node := ⟨1000, 0o755, true⟩
+  let cases := (files.flatMap fun f => ([] :: dirs.map ([·])).map fun ds => (f, ds)) ++
+    (dirs.flatMap fun d1 => dirs.map fun d2 => (good, [d1, d2]))
+  let trusted := cases.map fun (f, ds) =>
+    pair (Json.arr #[toJson me, node f, Json.arr (ds.map node).toArray])
+      (Json.bool (Clew.Guards.trustedBy me f ds))
+  -- Header names and values at every edge of the rule.
+  let names : List String := ["Authorization", "X-A", "", "a b", "a:b", "é", "x!#$%&'*+-.^_`|~",
+    "Bearer x", "\r", "a\nb", "X-Key9"]
+  let values : List String := ["", "x", "a\r\nX: y", "a\nb", "a\rb", "a\u0000b", "é", " lead",
+    "Bearer abc:def", "\t"]
+  let single := names.flatMap fun n => values.map fun v => [(n, v)]
+  let pairs := [("X-A", "1"), ("a b", "x"), ("X-B", "a\nb"), ("", "")].flatMap fun a =>
+    [("X-C", "2"), ("é", "1"), ("X-D", "\r")].map fun b => [a, b]
+  let headerCases : List (List (String × String)) := [[]] ++ single ++ pairs
+  let checks := headerCases.map fun hs =>
+    pair (Json.arr (hs.map fun (n, v) => Json.arr #[Json.str n, Json.str v]).toArray)
+      (Json.str (match Clew.Guards.checkHeaders (hs.map fun (n, v) => (n.toList, v.toList)) with
+        | none => "ok"
+        | some .name => "name"
+        | some .value => "value"))
+  Json.mkObj [("trusted_by", Json.arr trusted.toArray), ("check_headers", Json.arr checks.toArray)]
+
 def all : List (String × Json) :=
   [("confine.json", confine), ("update.json", update), ("server_dist.json", serverDist),
-    ("trust.json", trust), ("framing.json", framing), ("voice_route.json", voiceRoute), ("ssh.json", ssh)]
+    ("trust.json", trust), ("framing.json", framing), ("voice_route.json", voiceRoute), ("ssh.json", ssh), ("guards.json", guards)]
 
 end Vectors
 

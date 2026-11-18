@@ -695,25 +695,52 @@ pub fn stage_lsp_command(
 pub fn trusted_location(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let me = unsafe { libc::geteuid() };
-    let owned = |m: &std::fs::Metadata| m.uid() == me || m.uid() == 0;
+    let node = |m: &std::fs::Metadata, kind_ok: bool| Node {
+        uid: m.uid(),
+        mode: m.mode(),
+        kind_ok,
+    };
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
-    if !meta.is_file() || !owned(&meta) || meta.mode() & 0o022 != 0 {
-        return false;
-    }
+    let file = node(&meta, meta.is_file());
+    let mut dirs = Vec::new();
     let mut dir = path.parent();
     while let Some(d) = dir {
         let Ok(m) = std::fs::symlink_metadata(d) else {
             return false;
         };
-        let sticky = m.mode() & 0o1000 != 0;
-        if !m.is_dir() || !owned(&m) || (m.mode() & 0o022 != 0 && !sticky) {
-            return false;
-        }
+        dirs.push(node(&m, m.is_dir()));
         dir = d.parent();
     }
-    true
+    trusted_by(me, file, &dirs)
+}
+
+/// What [`trusted_location`] reads of the file, and of each directory above
+/// it: its owner, its mode bits, and whether it is the right kind (a regular
+/// file, a directory).
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Node {
+    pub uid: u32,
+    pub mode: u32,
+    pub kind_ok: bool,
+}
+
+/// [`trusted_location`]'s decision, from what it read: the file and every
+/// directory above it the right kind and owned by `me` or root, the file
+/// writable by neither group nor others, and each directory too unless it
+/// is sticky. That a yes leaves no other user able to write the file or
+/// replace an entry on its path is proved in `verification/Clew/Guards.lean`.
+#[cfg(unix)]
+pub(crate) fn trusted_by(me: u32, file: Node, dirs: &[Node]) -> bool {
+    let owned = |n: &Node| n.uid == me || n.uid == 0;
+    file.kind_ok
+        && owned(&file)
+        && file.mode & 0o022 == 0
+        && dirs
+            .iter()
+            .all(|d| d.kind_ok && owned(d) && (d.mode & 0o1000 != 0 || d.mode & 0o022 == 0))
 }
 
 /// Without POSIX ownership and modes there is no cheap way to prove a
@@ -1110,6 +1137,30 @@ mod tests {
             again.trust_root(None, &project);
             assert_eq!(again.roots().len(), 1);
         });
+    }
+
+    /// `trusted_by` decides what the Lean model decides, on every input it
+    /// was run on (`verification/Clew/Guards.lean`), whose theorem says a yes
+    /// leaves no other user able to change the program or its path.
+    #[test]
+    #[cfg(unix)]
+    fn trusted_locations_are_the_proven_model() {
+        let vectors = include_str!("../../../verification/vectors/guards.json");
+        let node = |v: &serde_json::Value| Node {
+            uid: v[0].as_u64().unwrap() as u32,
+            mode: v[1].as_u64().unwrap() as u32,
+            kind_ok: v[2].as_bool().unwrap(),
+        };
+        for (input, want) in crate::testutil::lean_cases(vectors, "trusted_by") {
+            let me = input[0].as_u64().unwrap() as u32;
+            let file = node(&input[1]);
+            let dirs: Vec<Node> = input[2].as_array().unwrap().iter().map(node).collect();
+            assert_eq!(
+                trusted_by(me, file, &dirs),
+                want.as_bool().unwrap(),
+                "trusted_by({me}, {file:?}, {dirs:?})"
+            );
+        }
     }
 
     /// A project whose path is not UTF-8 is trusted under its own key and
