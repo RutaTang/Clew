@@ -380,6 +380,9 @@ pub(crate) enum ActiveOverlay<'a> {
     /// Whether to install a plugin: the question on screen, its number, and
     /// how many more wait behind it.
     PluginInstall(&'a crate::app::plugins::PendingInstall, u64, usize),
+    /// Asked before it is done: a web address a plugin's page links to, a
+    /// Remove in Settings → Plugins (over Settings).
+    PluginConfirm(&'a crate::app::plugins::Confirm),
     /// "Set up project…", or Explain All asking first (a first open's
     /// sheet is `Consent`).
     Setup(&'a crate::app::setup::ProjectSetup),
@@ -437,6 +440,8 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::LspConsent(consent, number, app.proj.pending_lsp_consent.len() - 1)
     } else if let Some((number, pending)) = app.plugins.install.on_screen() {
         O::PluginInstall(pending, number, app.plugins.install.len() - 1)
+    } else if let Some(confirm) = &app.plugins.confirm {
+        O::PluginConfirm(confirm)
     } else if let Some(setup) = app
         .setup
         .as_ref()
@@ -579,6 +584,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::LspCommand(..) => "lsp-command",
             Self::LspConsent(..) => "lsp-consent",
             Self::PluginInstall(..) => "plugin-install",
+            Self::PluginConfirm(_) => "plugin-confirm",
             Self::Setup(_) => "setup",
             Self::UpdateNotes => "update-notes",
             Self::Settings => "settings",
@@ -698,6 +704,7 @@ impl<'a> ActiveOverlay<'a> {
                 app.asked(Question::Plugin(number)),
             ),
             Self::PluginPrompt(prompt) => plugin_prompt_modal(prompt),
+            Self::PluginConfirm(confirm) => plugins::plugin_confirm_modal(confirm),
             Self::UpdateNotes => update_notes_modal(app),
             Self::Settings => settings_modal(app),
             Self::Connect => connect_modal(app),
@@ -752,6 +759,9 @@ impl<'a> ActiveOverlay<'a> {
                 Message::Plugin(crate::app::plugins::PluginMsg::InstallDismissed(*number))
             }
             Self::PluginPrompt(_) => Message::Plugin(crate::app::plugins::PluginMsg::PromptCancel),
+            Self::PluginConfirm(_) => {
+                Message::Plugin(crate::app::plugins::PluginMsg::ConfirmDismissed)
+            }
             Self::Setup(_) => Message::Project(ProjectMsg::SetupClose),
             Self::UpdateNotes => Message::Updater(UpdaterMsg::CloseNotes),
             Self::Settings => Message::Settings(SettingsMsg::Close),

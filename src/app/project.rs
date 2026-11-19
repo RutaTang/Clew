@@ -623,6 +623,11 @@ impl App {
         // debug run of the next — a remote project with the same paths as a
         // local one drew, and sent its debugger, the local one's.
         self.debug.breakpoints.clear();
+        // A plugin command run on it, and one asking what to run with (at
+        // one of its lines, perhaps): the run's end is dropped by its
+        // stamp, and left set, "still running" refused every command after.
+        self.plugins.running = None;
+        self.plugins.prompt = None;
         // So does the sheet asking about it ("Set Up Project…", Explain All
         // asking first): left up, its Apply acted on whatever project was
         // open by then, at a cost the user had not seen. A first open's sheet

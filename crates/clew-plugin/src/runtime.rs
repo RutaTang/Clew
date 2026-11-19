@@ -159,6 +159,29 @@ impl Runtime {
     /// ready to run with the permissions `granted` (`clew_rules::plugin`
     /// bits). Refused when its code needs a permission not granted.
     pub fn load(&self, bytes: &[u8], inspected: &Inspected, granted: u8) -> Result<Loaded, String> {
+        self.load_as(bytes, inspected, granted, true)
+    }
+
+    /// `bytes` made ready to try, as [`Runtime::load`] does, but as a
+    /// plugin not installed: its store is its own, empty, and gone after
+    /// (not the store of an installed plugin of the same id), and its
+    /// compiled code is not kept.
+    pub fn load_trial(
+        &self,
+        bytes: &[u8],
+        inspected: &Inspected,
+        granted: u8,
+    ) -> Result<Loaded, String> {
+        self.load_as(bytes, inspected, granted, false)
+    }
+
+    fn load_as(
+        &self,
+        bytes: &[u8],
+        inspected: &Inspected,
+        granted: u8,
+        installed: bool,
+    ) -> Result<Loaded, String> {
         if !clew_rules::plugin::may_link(inspected.needs, granted) {
             let missing = inspected.needs & !granted;
             return Err(format!(
@@ -166,7 +189,12 @@ impl Runtime {
                 permission_names(missing).join(", ")
             ));
         }
-        let component = self.compile(bytes, &inspected.sha256)?;
+        let component = if installed {
+            self.compile(bytes, &inspected.sha256)?
+        } else {
+            Component::new(&self.engine, bytes)
+                .map_err(|e| format!("could not compile the plugin: {e}"))?
+        };
         let mut linker = Linker::<State>::new(&self.engine);
         link(&mut linker, granted).map_err(|e| format!("could not link the plugin: {e}"))?;
         let pre = linker
@@ -174,12 +202,15 @@ impl Runtime {
             .map_err(|e| format!("could not link the plugin: {e}"))?;
         let pre = bindings::PluginPre::new(pre)
             .map_err(|e| format!("the plugin does not export what Clew calls: {e}"))?;
+        let store = match (&self.data, installed) {
+            (Some(data), true) => store_dir(data, &inspected.manifest.plugin.id).ok(),
+            (Some(data), false) => Some(trial_dir(data)),
+            (None, _) => None,
+        };
         Ok(Loaded {
             pre,
-            store: self
-                .data
-                .as_ref()
-                .and_then(|d| store_dir(d, &inspected.manifest.plugin.id).ok()),
+            store,
+            trial: !installed,
         })
     }
 
@@ -286,6 +317,32 @@ pub struct Loaded {
     pre: bindings::PluginPre<State>,
     /// Its own store's folder.
     store: Option<PathBuf>,
+    /// Loaded to be tried: its store goes with it.
+    trial: bool,
+}
+
+impl Drop for Loaded {
+    fn drop(&mut self) {
+        if self.trial
+            && let Some(store) = &self.store
+        {
+            let _ = std::fs::remove_dir_all(store);
+        }
+    }
+}
+
+/// A store of its own for a plugin being tried, in `<data>/plugins/tries`:
+/// a folder no other run names.
+fn trial_dir(data: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    crate::store::plugins_dir(data)
+        .join("tries")
+        .join(format!("{}-{now}-{n}", std::process::id()))
 }
 
 impl Loaded {
@@ -347,6 +404,9 @@ impl Loaded {
             host: host.clone(),
             store: self.store.clone(),
             read: 0,
+            logged: 0,
+            logged_bytes: 0,
+            log_dropped: 0,
         };
         let mut store = Store::new(self.pre.engine(), state);
         store.limiter(|s| &mut s.limiter);
@@ -360,6 +420,13 @@ impl Loaded {
             .and_then(|plugin| f(&plugin, &mut store));
         forward_output(host.as_ref(), Level::Info, &stdout);
         forward_output(host.as_ref(), Level::Warning, &stderr);
+        let dropped = store.data().log_dropped;
+        if dropped > 0 {
+            host.log(
+                Level::Warning,
+                &format!("{dropped} more log lines were left out: a run keeps {LOG_LINES_PER_CALL} lines at most"),
+            );
+        }
         match result {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(why)) => Err(Failure::Plugin(capped(&why, 4096))),
@@ -415,6 +482,12 @@ fn forward_output(host: &dyn Host, level: Level, capture: &Capture) {
     }
 }
 
+/// The most of a plugin's log one call passes on, in lines and in bytes:
+/// past them a loop writing to it would fill the window's memory, not
+/// the plugin's, which is limited.
+const LOG_LINES_PER_CALL: usize = 1000;
+const LOG_BYTES_PER_CALL: usize = 256 * 1024;
+
 /// What one call's instance holds.
 struct State {
     wasi: WasiCtx,
@@ -425,6 +498,10 @@ struct State {
     store: Option<PathBuf>,
     /// The bytes of the project read so far.
     read: u64,
+    /// The log lines passed on so far, their bytes, and those left out.
+    logged: usize,
+    logged_bytes: usize,
+    log_dropped: usize,
 }
 
 impl WasiView for State {
@@ -484,7 +561,16 @@ impl bindings::clew::plugin::types::Host for State {}
 
 impl bindings::clew::plugin::host::Host for State {
     fn log(&mut self, level: Level, message: String) {
-        self.host.log(level, &capped(&message, 4096));
+        let message = capped(&message, 4096);
+        if self.logged >= LOG_LINES_PER_CALL
+            || self.logged_bytes + message.len() > LOG_BYTES_PER_CALL
+        {
+            self.log_dropped += 1;
+            return;
+        }
+        self.logged += 1;
+        self.logged_bytes += message.len();
+        self.host.log(level, &message);
     }
 
     fn progress(&mut self, done: u32, total: u32) {
@@ -822,6 +908,80 @@ pub fn store_dir(data: &Path, id: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host that only counts the log lines it is given.
+    #[derive(Default)]
+    struct Counting(std::sync::Mutex<Vec<String>>);
+
+    impl Host for Counting {
+        fn info(&self) -> ProjectInfo {
+            ProjectInfo {
+                name: String::new(),
+                files: 0,
+                partial: false,
+                remote: false,
+            }
+        }
+        fn files(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn read(&self, _: &str) -> Result<String, String> {
+            Err(String::new())
+        }
+        fn outline(&self, _: &str) -> Result<Vec<Symbol>, String> {
+            Ok(Vec::new())
+        }
+        fn search(&self, _: &Query) -> Result<Vec<Hit>, String> {
+            Ok(Vec::new())
+        }
+        fn git_log(&self, _: Option<&str>, _: u32) -> Result<Vec<Commit>, String> {
+            Ok(Vec::new())
+        }
+        fn git_blame(&self, _: &str) -> Result<Vec<BlameLine>, String> {
+            Ok(Vec::new())
+        }
+        fn log(&self, _: Level, message: &str) {
+            self.0.lock().unwrap().push(message.to_string());
+        }
+    }
+
+    /// A plugin logging in a loop fills no more of the window's memory
+    /// than a run's share: the lines past it are counted, not kept.
+    #[test]
+    fn a_run_passes_on_a_bounded_log() {
+        use bindings::clew::plugin::host::Host as _;
+        let counting = Arc::new(Counting::default());
+        let mut state = State {
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+            limiter: Limiter {
+                memory: 0,
+                used: 0,
+                hit: false,
+            },
+            host: counting.clone(),
+            store: None,
+            read: 0,
+            logged: 0,
+            logged_bytes: 0,
+            log_dropped: 0,
+        };
+        for i in 0..5000 {
+            state.log(Level::Info, format!("line {i}"));
+        }
+        assert_eq!(counting.0.lock().unwrap().len(), LOG_LINES_PER_CALL);
+        assert_eq!(state.log_dropped, 5000 - LOG_LINES_PER_CALL);
+        // Long lines meet the byte budget first.
+        let counting = Arc::new(Counting::default());
+        state.host = counting.clone();
+        (state.logged, state.logged_bytes, state.log_dropped) = (0, 0, 0);
+        for _ in 0..200 {
+            state.log(Level::Info, "x".repeat(10_000));
+        }
+        let kept = counting.0.lock().unwrap();
+        assert_eq!(kept.len(), LOG_BYTES_PER_CALL / 4096);
+        assert!(kept.iter().map(String::len).sum::<usize>() <= LOG_BYTES_PER_CALL);
+    }
 
     #[test]
     fn text_is_cut_at_a_character_boundary() {

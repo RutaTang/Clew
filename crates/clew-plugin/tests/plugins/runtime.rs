@@ -319,6 +319,40 @@ fn a_plugin_keeps_its_own_store_between_calls() {
             .unwrap()
             .is_dir()
     );
+    // Tried, a build of the same id has a store of its own: it starts
+    // empty, does not see or change the installed plugin's, and is gone
+    // with the trial. Nor is its compiled code kept.
+    let compiled = |dir: &std::path::Path| {
+        std::fs::read_dir(dir.join("plugins/compiled"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    };
+    let before = compiled(&dir);
+    let (bytes, inspected) = fixture("views");
+    let trial = runtime.load_trial(&bytes, &inspected, READ).unwrap();
+    for n in 1..=2 {
+        assert_eq!(
+            trial
+                .run(host.clone(), "store", &at(None, None), quick())
+                .unwrap(),
+            Outcome::Say(format!("run {n}"))
+        );
+    }
+    drop(trial);
+    assert!(
+        std::fs::read_dir(dir.join("plugins/tries"))
+            .map(|d| d.count() == 0)
+            .unwrap_or(true),
+        "the trial's store is gone"
+    );
+    assert_eq!(compiled(&dir), before, "no compiled copy kept");
+    assert_eq!(
+        loaded
+            .run(host.clone(), "store", &at(None, None), quick())
+            .unwrap(),
+        Outcome::Say("run 4".into()),
+        "the installed plugin's store was not touched"
+    );
     // Without a data folder there is nowhere to keep it, and the plugin is told.
     let bare = Runtime::new(None).unwrap();
     let refused = views(&bare)

@@ -14,7 +14,7 @@ use iced::widget::{column, row};
 
 use clew_plugin::runtime::{Block, Level, Location, View};
 
-use crate::app::plugins::{Installed, PendingInstall, PluginMsg, PluginPage, Prompt};
+use crate::app::plugins::{Confirm, Installed, PendingInstall, PluginMsg, PluginPage, Prompt};
 use clew_plugin::store::Origin;
 
 /// The prompt's field, focused as it opens.
@@ -148,7 +148,7 @@ pub(crate) fn plugin_page(page: &PluginPage) -> Element<'_, Message> {
                 .into(),
             Block::Text(_) => match page.markdown.get(&b) {
                 Some(items) => iced::widget::markdown::view(items, theme::markdown_settings())
-                    .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string()))),
+                    .map(|url| Message::Plugin(PluginMsg::Link(url.to_string()))),
                 None => space().height(0).into(),
             },
             Block::Notice(notice) => container(
@@ -446,6 +446,76 @@ pub(crate) fn plugin_install_modal(
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }
 
+/// Something asked before it is done: a web address a plugin's page links
+/// to, shown whole; a Remove.
+pub(crate) fn plugin_confirm_modal(confirm: &Confirm) -> Element<'_, Message> {
+    let no = tr!("Cancel");
+    let yes = confirm.yes.as_str();
+    let detail = text(confirm.detail.clone()).size(ts::BODY);
+    let detail: Element<'_, Message> =
+        if matches!(confirm.then, crate::app::plugins::Then::OpenLink(_)) {
+            // A long address breaks anywhere, so all of it is seen.
+            container(
+                detail
+                    .font(crate::fonts::CODE)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::WordOrGlyph),
+            )
+            .padding([8, 10])
+            .width(Fill)
+            .style(theme::trough)
+            .into()
+        } else {
+            detail.color(theme::dim()).into()
+        };
+    let panel = container(
+        column![
+            text(confirm.title.clone())
+                .size(ts::EMPHASIS)
+                .color(theme::fg()),
+            detail,
+            row![
+                space().width(Fill),
+                button(text(no).size(ts::BASE))
+                    .style(theme::toolbar_button)
+                    .padding([6, 16])
+                    .on_press(heard::answer(
+                        no,
+                        heard::Answer::No,
+                        Message::Plugin(PluginMsg::ConfirmDismissed)
+                    )),
+                button(
+                    text(yes)
+                        .size(ts::BASE)
+                        .color_maybe(confirm.destructive.then(theme::danger))
+                )
+                .style(if confirm.destructive {
+                    theme::toolbar_button
+                } else {
+                    theme::primary_button
+                })
+                .padding([6, 16])
+                .on_press(heard::answer(
+                    yes,
+                    heard::Answer::Yes,
+                    Message::Plugin(PluginMsg::Confirmed)
+                )),
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+        ]
+        .spacing(14),
+    )
+    .width(DIALOG_W)
+    .padding(CONFIRM_PAD)
+    .style(theme::modal_panel);
+    modal(
+        panel,
+        Placement::Center,
+        Backdrop::Dim(Some(Message::Plugin(PluginMsg::ConfirmDismissed))),
+    )
+}
+
 /// The line of text a command asks for before it runs.
 pub(crate) fn plugin_prompt_modal(prompt: &Prompt) -> Element<'_, Message> {
     super::chrome::prompt_modal(super::chrome::Prompt {
@@ -500,7 +570,7 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
             ),
             form::action(
                 tr!("Remove"),
-                Some(Message::Plugin(PluginMsg::Remove(id.clone())))
+                Some(Message::Plugin(PluginMsg::AskRemove(id.clone())))
             ),
         ]
         .spacing(12)
@@ -658,7 +728,7 @@ fn building_group(app: &App) -> Element<'_, Message> {
                 .into(),
                 false => tr!("Not in use: your own Rust is ready. Removing it frees about 700 MB.").into(),
             }),
-            form::action(tr!("Remove"), Some(Message::Plugin(PluginMsg::RemoveOwnRust))),
+            form::action(tr!("Remove"), Some(Message::Plugin(PluginMsg::AskRemoveOwnRust))),
         ));
     }
     form::group(

@@ -200,6 +200,31 @@ pub struct Prompt {
     pub(crate) at: Option<Spot>,
 }
 
+/// Something asked before it is done: what it is, said whole, and what
+/// doing it does.
+#[derive(Debug, Clone)]
+pub struct Confirm {
+    pub(crate) title: String,
+    /// What it is about, in full: the address a link goes to.
+    pub(crate) detail: String,
+    /// The button that does it.
+    pub(crate) yes: String,
+    /// It takes something away.
+    pub(crate) destructive: bool,
+    pub(crate) then: Then,
+}
+
+/// What a [`Confirm`] does when the user says yes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Then {
+    /// Open a web address a plugin's page links to.
+    OpenLink(String),
+    /// Remove an installed plugin, by id.
+    Remove(String),
+    /// Remove the Rust Clew installed for itself.
+    RemoveOwnRust,
+}
+
 /// A page a plugin's command showed, over the code.
 #[derive(Debug, Clone)]
 pub struct PluginPage {
@@ -257,6 +282,8 @@ pub struct Plugins {
     pub(crate) running: Option<String>,
     pub(crate) install: Questions<PendingInstall>,
     pub(crate) prompt: Option<Prompt>,
+    /// What is being asked before it is done.
+    pub(crate) confirm: Option<Confirm>,
     /// What each plugin wrote to its log, by id, the latest last.
     pub(crate) log: HashMap<String, VecDeque<(Level, String)>>,
     /// Why the last install from a file, or the last change, failed.
@@ -443,6 +470,15 @@ pub enum PluginMsg {
     },
     InstallAllowed(u64),
     InstallDismissed(u64),
+    /// A link on a plugin's page: a place in the project opens; a web
+    /// address is shown whole and asked about first.
+    Link(String),
+    /// Settings: Remove, asked about first.
+    AskRemove(String),
+    AskRemoveOwnRust,
+    /// The question asked first: yes, or not.
+    Confirmed,
+    ConfirmDismissed,
     /// An install written, or why not.
     Installed {
         id: String,
@@ -826,7 +862,18 @@ impl App {
             .filter(|p| p.record.enabled && p.record.fingerprint == fingerprint)
             .and_then(|p| map_of(&map).and_then(|(_, g)| p.manifest.graph(g)).cloned());
         let Some(decl) = decl else {
-            // The plugin was turned off, removed or replaced meanwhile.
+            // The plugin was turned off, removed or replaced meanwhile: its
+            // result is not shown, and the build is over all the same.
+            // Left marked building, turned on again the graph waited for a
+            // build no one would start, and could not be rebuilt.
+            if let Some(entry) = self
+                .proj
+                .plugin_maps
+                .get_mut(&map)
+                .filter(|m| m.fingerprint == fingerprint)
+            {
+                entry.building = false;
+            }
             return Task::none();
         };
         let Some(entry) = self
@@ -1080,18 +1127,28 @@ impl App {
     }
 
     /// Ask the user whether to install `prepared`.
-    fn offer_install(&mut self, prepared: Prepared, origin: Source, reply: Reply) {
+    pub(crate) fn offer_install(&mut self, prepared: Prepared, origin: Source, reply: Reply) {
         let previous = self
             .plugins
             .get(&prepared.inspected.manifest.plugin.id)
             .cloned();
-        self.plugins.install.offer(PendingInstall {
+        let replaced = self.plugins.install.offer(PendingInstall {
             bytes: prepared.bytes,
             inspected: prepared.inspected,
             origin,
             previous,
             reply,
         });
+        // The build asked about before, of the same plugin, is not asked
+        // about any more: its asker is told so, not left waiting for an
+        // answer that would never come (an Ask turn hung on it).
+        if let Some(replaced) = replaced {
+            self.answer_install(
+                &replaced.reply,
+                Err("A newer build of this plugin was offered to the user in its place: install that one, or build and install again.".into()),
+                false,
+            );
+        }
     }
 
     /// Tell whoever asked for an install how it went: installed with this
@@ -1172,7 +1229,9 @@ impl App {
                 let handle = tokio::runtime::Handle::current();
                 tokio::task::spawn_blocking(move || {
                     let host = Arc::new(host(handle));
-                    let loaded = runtime.load(&built.bytes, &built.inspected, granted)?;
+                    // Tried, not installed: a store of its own, emptied
+                    // after, and no compiled copy kept.
+                    let loaded = runtime.load_trial(&built.bytes, &built.inspected, granted)?;
                     let outcome = loaded.run(host.clone(), &command, &invocation, Limits::COMMAND);
                     let log: Vec<String> = host
                         .take_events()
@@ -1548,6 +1607,72 @@ impl App {
                     self.plugins.failure = Some(why);
                 }
                 self.reload_plugins()
+            }
+            PluginMsg::Link(url) => {
+                // A plugin read the project and wrote this page: a web
+                // address can carry what it read away, so it is shown in
+                // full before anything opens it.
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    self.plugins.confirm = Some(Confirm {
+                        title: tr!("Open this address in your browser?").to_string(),
+                        detail: url.clone(),
+                        yes: tr!("Open").to_string(),
+                        destructive: false,
+                        then: Then::OpenLink(url),
+                    });
+                    return Task::none();
+                }
+                self.on_open_link(url)
+            }
+            PluginMsg::AskRemove(id) => {
+                let name = self
+                    .plugins
+                    .get(&id)
+                    .map(Installed::name)
+                    .unwrap_or_default();
+                self.plugins.confirm = Some(Confirm {
+                    title: tr!("Remove “{plugin}”?", plugin = name),
+                    detail: tr!(
+                        "Its commands and graphs go, and what it kept between runs. Installing it again asks you again."
+                    )
+                    .to_string(),
+                    yes: tr!("Remove").to_string(),
+                    destructive: true,
+                    then: Then::Remove(id),
+                });
+                Task::none()
+            }
+            PluginMsg::AskRemoveOwnRust => {
+                self.plugins.confirm = Some(Confirm {
+                    title: tr!("Remove the Rust Clew installed?").to_string(),
+                    detail: tr!(
+                        "Plugins already installed keep working. Building a new one needs Rust again."
+                    )
+                    .to_string(),
+                    yes: tr!("Remove").to_string(),
+                    destructive: true,
+                    then: Then::RemoveOwnRust,
+                });
+                Task::none()
+            }
+            PluginMsg::Confirmed => {
+                let Some(confirm) = self.plugins.confirm.take() else {
+                    return Task::none();
+                };
+                match confirm.then {
+                    Then::OpenLink(url) => {
+                        if let Err(why) = crate::app::content::open_in_browser(&url) {
+                            self.status = why;
+                        }
+                        Task::none()
+                    }
+                    Then::Remove(id) => self.update_plugins(PluginMsg::Remove(id)),
+                    Then::RemoveOwnRust => self.update_plugins(PluginMsg::RemoveOwnRust),
+                }
+            }
+            PluginMsg::ConfirmDismissed => {
+                self.plugins.confirm = None;
+                Task::none()
             }
             PluginMsg::Remove(id) => {
                 let removed = data().and_then(|d| {

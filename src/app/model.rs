@@ -1800,12 +1800,16 @@ impl<T> Questions<T> {
     /// Ask `question`, in place of the waiting one it is the `same` question
     /// as, if any — under a number of its own either way: a question replaced
     /// asks about what would run now, and is read again before it is
-    /// answered.
-    fn ask(&mut self, question: T, same: impl Fn(&T, &T) -> bool) {
+    /// answered. The one replaced, given back: whoever asked it is owed an
+    /// answer.
+    fn ask(&mut self, question: T, same: impl Fn(&T, &T) -> bool) -> Option<T> {
         let number = LAST_QUESTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         match self.waiting.iter().position(|(_, q)| same(q, &question)) {
-            Some(at) => self.waiting[at] = (number, question),
-            None => self.waiting.push_back((number, question)),
+            Some(at) => Some(std::mem::replace(&mut self.waiting[at], (number, question)).1),
+            None => {
+                self.waiting.push_back((number, question));
+                None
+            }
         }
     }
 
@@ -1864,17 +1868,21 @@ impl CommandQueue {
     /// Queue `pending`. A newer question for a language already waiting
     /// replaces that one in place: it asks about what would run now.
     pub fn offer(&mut self, pending: PendingLspCommand) {
-        self.ask(pending, |waiting, new| waiting.language == new.language);
+        let _ = self.ask(pending, |waiting, new| waiting.language == new.language);
     }
 }
 
 impl Questions<crate::app::plugins::PendingInstall> {
     /// Queue `pending`. A newer build of a plugin already waiting replaces
     /// that one in place: the question asks about what would be installed.
-    pub(crate) fn offer(&mut self, pending: crate::app::plugins::PendingInstall) {
+    /// The one replaced is given back, for its asker to be told.
+    pub(crate) fn offer(
+        &mut self,
+        pending: crate::app::plugins::PendingInstall,
+    ) -> Option<crate::app::plugins::PendingInstall> {
         self.ask(pending, |waiting, new| {
             waiting.inspected.manifest.plugin.id == new.inspected.manifest.plugin.id
-        });
+        })
     }
 }
 
@@ -1885,7 +1893,7 @@ impl ConsentQueue {
     /// newer description (and, for a remote install, the newer digest the
     /// server will check), a new debug run the newer session.
     pub fn offer(&mut self, consent: LspConsent) {
-        self.ask(consent, LspConsent::same_request);
+        let _ = self.ask(consent, LspConsent::same_request);
     }
 }
 
@@ -2248,11 +2256,12 @@ mod tests {
     #[test]
     fn an_answer_counts_for_the_question_it_names() {
         let mut questions = Questions::default();
-        questions.ask("a", |_, _| false);
-        questions.ask("b", |_, _| false);
+        let _ = questions.ask("a", |_, _| false);
+        let _ = questions.ask("b", |_, _| false);
         let a = questions.asked().unwrap();
-        // "a" asked again, about something else: under a new number.
-        questions.ask("a2", |q, _| q.starts_with('a'));
+        // "a" asked again, about something else: under a new number, the
+        // one replaced given back for its asker to be told.
+        assert_eq!(questions.ask("a2", |q, _| q.starts_with('a')), Some("a"));
         let a2 = questions.asked().unwrap();
         assert_ne!(a, a2);
         assert_eq!(questions.answer(a), None, "an answer to the replaced one");

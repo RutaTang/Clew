@@ -31836,11 +31836,13 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::Hover(_) => "hover",
             O::PluginInstall(..) => "plugin install",
             O::PluginPrompt(_) => "plugin prompt",
+            O::PluginConfirm(_) => "plugin confirm",
         }
     }
     fn clear(app: &mut App) {
         app.plugins.install = Default::default();
         app.plugins.prompt = None;
+        app.plugins.confirm = None;
         app.pending_consent = None;
         app.proj.pending_lsp_command = Default::default();
         app.proj.pending_lsp_consent = Default::default();
@@ -31982,9 +31984,10 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             })
         }),
         Box::new(|a| {
-            a.plugins
+            let _ = a
+                .plugins
                 .install
-                .offer(pending_plugin_install("word-count", 1, None))
+                .offer(pending_plugin_install("word-count", 1, None));
         }),
         Box::new(|a| {
             a.plugins.prompt = Some(crate::app::plugins::Prompt {
@@ -31994,6 +31997,15 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 asks: "Which word?".into(),
                 text: String::new(),
                 at: None,
+            })
+        }),
+        Box::new(|a| {
+            a.plugins.confirm = Some(crate::app::plugins::Confirm {
+                title: "Open this address in your browser?".into(),
+                detail: "https://example.com".into(),
+                yes: "Open".into(),
+                destructive: false,
+                then: crate::app::plugins::Then::OpenLink("https://example.com".into()),
             })
         }),
     ];
@@ -32017,7 +32029,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (25, 25),
+        (26, 26),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 
@@ -39142,7 +39154,7 @@ fn an_agents_install_is_answered_as_the_user_decides() {
     };
 
     let declined = filed();
-    app.plugins.install.offer(pending_plugin_install(
+    let _ = app.plugins.install.offer(pending_plugin_install(
         "word-count",
         clew_rules::plugin::READ,
         Some(Reply::Request(declined.clone())),
@@ -39164,7 +39176,7 @@ fn an_agents_install_is_answered_as_the_user_decides() {
     assert_eq!(answered(&declined), Some(Answer::Declined));
 
     let allowed = filed();
-    app.plugins.install.offer(pending_plugin_install(
+    let _ = app.plugins.install.offer(pending_plugin_install(
         "word-count",
         clew_rules::plugin::READ,
         Some(Reply::Request(allowed.clone())),
@@ -39193,6 +39205,29 @@ fn an_agents_install_is_answered_as_the_user_decides() {
     );
     assert!(app.status.contains("installed"), "{}", app.status);
     assert!(app.plugins.handling.is_empty());
+
+    // A newer build offered while one is asked about takes its place, and
+    // the agent that asked for the first is told so: it waited for good.
+    let first = filed();
+    let offer = |app: &mut App, nonce: &str| {
+        let pending = pending_plugin_install("word-count", 0, None);
+        app.offer_install(
+            crate::app::plugins::Prepared {
+                bytes: pending.bytes,
+                inspected: pending.inspected,
+            },
+            clew_plugin::store::Origin::Agent("Claude Code".into()),
+            Reply::Request(nonce.to_string()),
+        );
+    };
+    offer(&mut app, &first);
+    let second = filed();
+    offer(&mut app, &second);
+    assert_eq!(app.plugins.install.len(), 1, "one question for the plugin");
+    match answered(&first) {
+        Some(Answer::Failed { why }) => assert!(why.contains("newer build"), "{why}"),
+        other => panic!("the first asker is answered: {other:?}"),
+    }
 }
 
 /// Plugin `word-count`, installed, on or off.
@@ -39315,6 +39350,83 @@ fn a_plugins_code_command_is_in_the_code_menu_and_runs_at_the_line_clicked() {
     assert_eq!(run.input.as_deref(), Some("origin"));
     // From the palette, the caret's line.
     assert_eq!(app.invocation(None, None).line, Some(1));
+}
+
+/// A plugin command still running, or asking what to run with, when another
+/// project opens is the old project's: its end is dropped by its stamp,
+/// and left marked running, every command after said "still running".
+#[test]
+fn a_plugin_run_does_not_outlive_its_project() {
+    let mut app = scanned_app("plugin-run-project");
+    app.plugins.installed = vec![installed_plugin(true)];
+    app.plugins.running = Some("Count words".into());
+    app.plugins.prompt = Some(crate::app::plugins::Prompt {
+        id: "word-count".into(),
+        command: "count".into(),
+        title: "Count words".into(),
+        asks: "Which word?".into(),
+        text: String::new(),
+        at: Some(crate::app::plugins::Spot { pane: 0, line: 4 }),
+    });
+    let other = fixture_project("plugin-run-project-other");
+    scan_synchronously(&mut app, other);
+    assert!(app.plugins.running.is_none());
+    assert!(app.plugins.prompt.is_none());
+}
+
+/// A link on a plugin's page to a web address is shown whole and asked
+/// about before anything opens it: the plugin read the project, and the
+/// address could carry what it read away. A link to a place in the project
+/// opens at once. Remove, in Settings, asks first too, and acts on yes.
+#[test]
+fn a_plugins_web_link_and_a_remove_are_asked_about_first() {
+    use crate::app::plugins::{PluginMsg, Then};
+    let data = clew_core::testutil::TempDir::new("plugin-confirm");
+    let _env = data_dir_override(data.path());
+    let mut app = scanned_app("plugin-confirm");
+    app.plugins.installed = vec![installed_plugin(true)];
+    let leak = "https://example.com/collect?data=c2VjcmV0cw";
+    let _ = app.update(Message::Plugin(PluginMsg::Link(leak.into())));
+    let confirm = app.plugins.confirm.as_ref().expect("asked first");
+    assert_eq!(confirm.detail, leak, "the whole address is shown");
+    assert_eq!(confirm.then, Then::OpenLink(leak.into()));
+    assert!(matches!(
+        crate::ui::active_overlay(&app),
+        Some(crate::ui::ActiveOverlay::PluginConfirm(_))
+    ));
+    let _ = app.update(Message::Plugin(PluginMsg::ConfirmDismissed));
+    assert!(app.plugins.confirm.is_none());
+
+    // A place in the project opens without a question.
+    let _ = app.update(Message::Plugin(PluginMsg::Link("src/lib.rs".into())));
+    assert!(app.plugins.confirm.is_none());
+    let abs = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");
+    land_active_load(&mut app, abs, None);
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.as_str()),
+        Some("src/lib.rs")
+    );
+
+    // Remove: asked, named; done only on yes.
+    app.plugins
+        .log
+        .entry("word-count".into())
+        .or_default()
+        .push_back((clew_plugin::runtime::Level::Info, "kept".into()));
+    let _ = app.update(Message::Plugin(PluginMsg::AskRemove("word-count".into())));
+    let confirm = app.plugins.confirm.as_ref().expect("asked first");
+    assert!(confirm.title.contains("Word count"), "{}", confirm.title);
+    assert!(confirm.destructive);
+    assert!(
+        app.plugins.log.contains_key("word-count"),
+        "not removed yet"
+    );
+    let _ = app.update(Message::Plugin(PluginMsg::Confirmed));
+    assert!(app.plugins.confirm.is_none());
+    assert!(
+        !app.plugins.log.contains_key("word-count"),
+        "removed on yes"
+    );
 }
 
 /// A plugin's page draws every kind of block in Clew's own widgets, and a
@@ -39470,6 +39582,23 @@ fn a_plugins_graph_is_built_when_shown_in_project_graphs() {
     // A failure says why and offers Try again, which builds it anew.
     app.proj.plugin_maps.get_mut(&id).unwrap().failed = Some("it was stopped".into());
     assert!(says(&app, "Try again"));
+    let retried = app.update(Message::Plugin(PluginMsg::RebuildGraph));
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Building));
+    settle(&mut app, retried);
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
+
+    // Turned off while its graph builds, and on again: the build that ended
+    // meanwhile is not shown, and the graph does not wait for good on it.
+    let rebuilding = app.update(Message::Plugin(PluginMsg::RebuildGraph));
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Building));
+    let set = |app: &mut App, on: bool| {
+        let task = app.update(Message::Plugin(PluginMsg::SetEnabled("views".into(), on)));
+        settle(app, task);
+    };
+    set(&mut app, false);
+    settle(&mut app, rebuilding);
+    set(&mut app, true);
+    assert_ne!(app.plugin_map_status(), Some(PluginMapStatus::Building));
     let retried = app.update(Message::Plugin(PluginMsg::RebuildGraph));
     assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Building));
     settle(&mut app, retried);
