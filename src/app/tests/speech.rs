@@ -2822,6 +2822,7 @@ fn what_is_said_over_clew_is_told_from_its_echo() {
 
 /// What the system's output was given to play: how many seconds, and
 /// how loud.
+#[cfg(unix)]
 #[derive(Default)]
 struct Heard {
     seconds: f64,
@@ -2830,8 +2831,10 @@ struct Heard {
 }
 
 /// The system's output, passed through, counting what it is given.
+#[cfg(unix)]
 struct Counted(Box<dyn Playing>, Arc<Mutex<Heard>>);
 
+#[cfg(unix)]
 impl Playing for Counted {
     fn play(&self, samples: &[f32], rate: u32) {
         {
