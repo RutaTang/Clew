@@ -135,14 +135,14 @@ CI 在 `extracted` 任务中运行它，所用的 Charon 和 Aeneas 来自一个
 
 大多数模型是照着代码逐步写成的，再由测试用例把两者联系起来。`route`、`trusted_by`、分帧的 `header` 一步、MCP 请求头检查、shell 引号、known_hosts 检查、slug 检查、指纹编码和许可键则没有副本：定理所针对的 Lean，就是实际运行的 Rust。
 
-- **`crates/clew-rules`** 存放这九个决定。它没有任何依赖，只有纯代码，而且只用 Aeneas 能翻译的那部分 Rust：`match`、`while`、切片、`Vec`、带溢出检查的整数运算和位掩码。应用和 `clew-core` 都调用它。
+- **`crates/clew-rules`** 存放这九个决定。它没有任何依赖，只有纯代码，而且只用 Aeneas 能翻译的那部分 Rust：`match`、`while`、递归、切片和可选的切片、`Vec`、带溢出检查的整数运算和位掩码。应用和 `clew-core` 都调用它。
 - **`verification/extracted/extract.sh`** 在这个 crate 上运行 Charon 和 Aeneas，写出 `ClewRules.lean`。这个文件不手工修改。
 - **`Equal.lean`** 证明翻译出的函数等于 `verification/Clew` 中的模型，具体如[证明如何落实到代码](#证明如何落实到代码)所述。
 - **独立的项目。** Aeneas 的 Lean 库需要 Mathlib，所以这是一个单独的 Lake 项目；`verification/` 中的证明依然只需要 Lean 本身。第一次构建会编译 Aeneas 和它用到的约 1500 个 Mathlib 模块；CI 从 Mathlib 的构建缓存获取。
 
 改动 `crates/clew-rules` 会被两道检查拦下：翻译结果不再与 `ClewRules.lean` 一致；重新生成后，如果新代码算出的结果与模型不同，证明就会失败。把 `trusted_by` 的掩码从 `0o022` 放宽到 `0o002`，两道检查都会失败；让恰好等于上限的消息通过，让 shell 词里的空格不加引号，或让 known_hosts 主机名里出现 `*`，也一样。
 
-其他规则仍然是由测试用例检查的模型，因为它们的代码用到了 Aeneas 不能翻译的东西。Aeneas 把 `str` 读作字节，不对逐字符遍历、字符串格式化、传给迭代器的闭包、`char` 的分类、SHA-256 或异步 I/O 建模。一条规则一旦能不用这些写出来，就可以移进 `clew-rules`。
+其他规则仍然是由测试用例检查的模型，因为它们的代码用到了 Aeneas 不能翻译的东西。Aeneas 把 `str` 读作字节，不对逐字符遍历、字符串格式化、传给迭代器的闭包、`char` 的分类、SHA-256 或异步 I/O 建模。路径限定依赖标准库 `Path` 的路径分段，以及操作系统自己对路径的解读；更新版本、ssh 参数列表和服务端摘要列表都要去掉字符串两端的 Unicode 空白；分帧读取各行的循环是 I/O。一条规则一旦能不用这些写出来，就可以移进 `clew-rules`，上面九条就是这样移进去的。
 
 ## 哪些没有验证，为什么
 

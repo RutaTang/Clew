@@ -135,14 +135,14 @@ These are the places where Clew decides who may do what, or what to trust. Each 
 
 Most models are written step for step after the code, and test cases tie the two together. For `route`, `trusted_by`, the framing `header` step, the MCP header checks, the shell quoting, the known_hosts check, the slug check, the fingerprint encodings and the approval key there is no copy: the Lean that the theorems reach is the Rust that runs.
 
-- **`crates/clew-rules`** holds these nine decisions. It has no dependencies and only pure code, in the part of Rust that Aeneas translates: `match`, `while`, slices, `Vec`, integers with their overflow checks, and bit masks. The app and `clew-core` call it.
+- **`crates/clew-rules`** holds these nine decisions. It has no dependencies and only pure code, in the part of Rust that Aeneas translates: `match`, `while`, recursion, slices and optional slices, `Vec`, integers with their overflow checks, and bit masks. The app and `clew-core` call it.
 - **`verification/extracted/extract.sh`** runs Charon and Aeneas on that crate and writes `ClewRules.lean`. Nobody edits that file by hand.
 - **`Equal.lean`** proves the translated functions equal the models in `verification/Clew`, as stated in [How the proofs reach the code](#how-the-proofs-reach-the-code).
 - **A project apart.** Aeneas's Lean library needs Mathlib, so this is a Lake project of its own. The proofs in `verification/` still need nothing beyond Lean. Its first build compiles Aeneas and the 1,500 Mathlib modules it uses; CI takes Mathlib from its build cache.
 
 A change to `crates/clew-rules` is caught twice. The translation no longer matches `ClewRules.lean`, and once it is rewritten the proof fails if the new code no longer computes what the model does. Weakening `trusted_by`'s mask from `0o022` to `0o002` fails both, and so does letting a frame of exactly the cap through, a space stand unquoted in a shell word, or a `*` into a known_hosts host name.
 
-The other rules stay as models checked by test cases, because their code leans on what Aeneas does not translate. Aeneas reads a `str` as bytes and does not model iterating over its characters, string formatting, closures passed to iterators, `char` classes, SHA-256 or async I/O. A rule moves into `clew-rules` once it can be written without them.
+The other rules stay as models checked by test cases, because their code leans on what Aeneas does not translate. Aeneas reads a `str` as bytes and does not model iterating over its characters, string formatting, closures passed to iterators, `char` classes, SHA-256 or async I/O. Path confinement rests on the standard library's `Path` components and the OS's own reading of a path; update versions, the ssh argument list and the server digest list each trim Unicode whitespace from strings; framing's reading loop is I/O. A rule moves into `clew-rules` once it can be written without them, as the nine above were.
 
 ## What is not verified, and why
 
