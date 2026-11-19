@@ -1,0 +1,284 @@
+// The contract between Clew and its plugins: what a plugin may ask of Clew
+// (the interfaces it imports) and what Clew asks of a plugin (the ones it
+// exports). docs/plugins.md says how it is used; GUIDE.md beside this file is
+// what an agent reads to write a plugin.
+//
+// What a plugin imports is what it may do, and nothing else is linked: a
+// plugin that does not import `project` cannot read a file however it tries,
+// for the function to call is not there. Clew reads a plugin's permissions
+// from its imports (`clew_rules::plugin`), and asks the user for exactly
+// those.
+//
+// Stable within 0.x as far as already-built plugins go: an interface or a
+// function is added in a later version of this package, never changed in
+// place.
+package clew:plugin@0.1.0;
+
+/// What plugins and Clew say to each other about: places in the project,
+/// what a plugin shows, and what it is asked.
+interface types {
+    /// A file of the project: its path from the project's root, `/` between
+    /// folders, as `project.files` lists it.
+    type path = string;
+
+    /// A place in the project. `line` counts from 1; 0 means the file as a
+    /// whole.
+    record location {
+        path: path,
+        line: u32,
+    }
+
+    /// How much a notice or an item matters.
+    enum level {
+        info,
+        warning,
+        error,
+    }
+
+    /// A row that may open the code it is about.
+    record item {
+        title: string,
+        /// A second, quieter line.
+        detail: option<string>,
+        /// Where a click, Return or "open the third one" goes.
+        at: option<location>,
+        /// A short label at the row's end: a count, a kind, a name.
+        tag: option<string>,
+        level: option<level>,
+    }
+
+    /// A row of a tree: `depth` 0 is the top, each row a child of the
+    /// nearest row above it that is one less deep.
+    record tree-row {
+        depth: u32,
+        title: string,
+        detail: option<string>,
+        at: option<location>,
+        tag: option<string>,
+    }
+
+    record row {
+        cells: list<string>,
+        at: option<location>,
+    }
+
+    record table {
+        columns: list<string>,
+        rows: list<row>,
+    }
+
+    /// A name and its value, as "Files: 120".
+    record fact {
+        name: string,
+        value: string,
+    }
+
+    record code {
+        /// The language to colour it as (`rust`, `python`, …).
+        language: option<string>,
+        text: string,
+        at: option<location>,
+    }
+
+    record notice {
+        level: level,
+        text: string,
+    }
+
+    /// One part of a view, drawn by Clew in its own style: the theme's
+    /// colours and fonts, the keyboard, jump badges and voice all work on it
+    /// as on Clew's own views.
+    variant block {
+        heading(string),
+        /// Markdown.
+        text(string),
+        notice(notice),
+        items(list<item>),
+        tree(list<tree-row>),
+        table(table),
+        facts(list<fact>),
+        code(code),
+    }
+
+    record view {
+        title: string,
+        blocks: list<block>,
+    }
+
+    /// What a command leaves for the user.
+    variant outcome {
+        /// A page over the code.
+        show(view),
+        /// The code at a place.
+        open(location),
+        /// A line in the status bar.
+        say(string),
+        nothing,
+    }
+
+    /// Where a command was run from.
+    record invocation {
+        /// The file shown, if one is.
+        file: option<path>,
+        /// The caret's line in it, from 1.
+        line: option<u32>,
+        /// The text selected, if any.
+        selection: option<string>,
+        /// What the user typed when the command asks for something
+        /// (`input` in plugin.toml).
+        input: option<string>,
+    }
+
+    /// A thing on a graph.
+    record graph-node {
+        label: string,
+        /// What it is (`topic`, `handler`, `table`, …): nodes are grouped
+        /// and coloured by it.
+        kind: string,
+        at: option<location>,
+        /// More to say of it, shown when it is picked.
+        detail: string,
+    }
+
+    /// An arrow from one node to another, by their places in `nodes`.
+    record graph-edge {
+        %from: u32,
+        to: u32,
+        label: string,
+    }
+
+    record graph {
+        nodes: list<graph-node>,
+        edges: list<graph-edge>,
+    }
+
+    /// A definition in a file, as the outline shows it.
+    record symbol {
+        name: string,
+        /// `function`, `struct`, `class`, `method`, …
+        kind: string,
+        line: u32,
+        end-line: u32,
+    }
+
+    record query {
+        query: string,
+        /// `query` is a regular expression, not text.
+        regex: bool,
+        case-sensitive: bool,
+        whole-word: bool,
+        /// Globs a file must match, if any are given (`src/**/*.rs`).
+        %include: list<string>,
+        /// Globs that leave a file out.
+        exclude: list<string>,
+    }
+
+    record hit {
+        path: path,
+        line: u32,
+        /// The line's text.
+        text: string,
+    }
+
+    record commit {
+        id: string,
+        author: string,
+        /// Seconds since 1970, UTC.
+        time: s64,
+        subject: string,
+    }
+
+    /// Who last changed a line.
+    record blame-line {
+        line: u32,
+        author: string,
+        time: s64,
+        commit: string,
+    }
+}
+
+/// What every plugin may use: it touches nothing of the user's.
+interface host {
+    use types.{level};
+
+    /// A line in the plugin's log (Settings → Plugins shows it).
+    log: func(level: level, message: string);
+
+    /// How far a long task has come, shown in the status bar.
+    progress: func(done: u32, total: u32);
+
+    /// What the plugin saved under `key`, in its own small store (1 MiB in
+    /// all), kept between runs.
+    load: func(key: string) -> option<list<u8>>;
+    save: func(key: string, value: list<u8>) -> result<_, string>;
+}
+
+/// The open project's files and what Clew knows of them. Permission: read
+/// the project's files.
+interface project {
+    use types.{path, symbol, query, hit};
+
+    record project-info {
+        /// The project folder's name.
+        name: string,
+        /// How many files `files` lists.
+        files: u32,
+        /// The project is larger than Clew lists in full.
+        partial: bool,
+        /// It is on another machine, reached over SSH: reading is slower.
+        remote: bool,
+    }
+
+    info: func() -> project-info;
+
+    /// Every file of the project Clew lists (what `.gitignore` leaves out
+    /// is not among them).
+    files: func() -> list<path>;
+
+    /// A file's text. Files that are not text, or larger than 4 MiB, are
+    /// refused.
+    read: func(path: path) -> result<string, string>;
+
+    /// The definitions in a file.
+    outline: func(path: path) -> result<list<symbol>, string>;
+
+    /// Lines that match, across the project (2000 at most).
+    search: func(query: query) -> result<list<hit>, string>;
+}
+
+/// The project's git history. Permission: read the project's history.
+interface git {
+    use types.{path, commit, blame-line};
+
+    /// The latest commits, newest first: of the project, or of one file.
+    log: func(path: option<path>, limit: u32) -> result<list<commit>, string>;
+
+    /// Who last changed each line of a file.
+    blame: func(path: path) -> result<list<blame-line>, string>;
+}
+
+/// The commands a plugin adds, as its plugin.toml lists them.
+interface commands {
+    use types.{invocation, outcome};
+
+    /// Run the command `command` (its `id` in plugin.toml).
+    run: func(command: string, context: invocation) -> result<outcome, string>;
+}
+
+/// The graphs a plugin adds to Project graphs, as its plugin.toml lists
+/// them.
+interface graphs {
+    use types.{graph};
+
+    /// Build the graph `graph` (its `id` in plugin.toml).
+    build: func(graph: string) -> result<graph, string>;
+}
+
+world plugin {
+    import host;
+    import project;
+    import git;
+
+    export commands;
+    export graphs;
+}
