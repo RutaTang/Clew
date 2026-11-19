@@ -4328,4 +4328,140 @@ theorem upgrade_newer (running : clew_rules.version.Version) (cs : List Char) (s
 
 end Version
 
+/-! ## What Clew hands ssh — `clew_rules::ssh`
+
+`ssh_args` writes a saved connection's argument list: Clew's fixed options,
+`-p` unless the port is 22, `-i` unless there is no identity file, then `--`
+and `user@host`. The model in `../Clew/Ssh.lean` proves ssh reads that list
+as exactly Clew's options and the destination, whatever the fields hold
+(`parseSshArgs_sshArgs`). Proved here: on the UTF-8 bytes of any user, host
+and identity, and any port, `ssh_args` returns, and writes the model's list
+(`ssh_reads_as_meant`). -/
+
+namespace SshArgs
+
+open clew_rules.ssh
+open Shell (bs push_ok extend_ok)
+open Headers (utf8)
+
+theorem push_small {α : Type} (v : alloc.vec.Vec α) (x : α) (h : v.val.length + 1 ≤ 4294967295) :
+    alloc.vec.Vec.push v x = ok (alloc.vec.Vec.from (v.val ++ [x]) (by simp; scalar_tac)) := by
+  unfold alloc.vec.Vec.push
+  dsimp only
+  split
+  · simp
+  · rename_i hn; exfalso; apply hn; simp [U32.max_eq]; omega
+
+/-- The fixed options' bytes. -/
+def fixedB : List (List Nat) := [[45, 111], [67, 111, 110, 110, 101, 99, 116, 84, 105, 109, 101, 111, 117, 116, 61, 49, 48], [45, 111], [83, 116, 114, 105, 99, 116, 72, 111, 115, 116, 75, 101, 121, 67, 104, 101, 99, 107, 105, 110, 103, 61, 121, 101, 115], [45, 111], [83, 101, 114, 118, 101, 114, 65, 108, 105, 118, 101, 73, 110, 116, 101, 114, 118, 97, 108, 61, 49, 53], [45, 111], [83, 101, 114, 118, 101, 114, 65, 108, 105, 118, 101, 67, 111, 117, 110, 116, 77, 97, 120, 61, 51], [45, 111], [78, 117, 109, 98, 101, 114, 79, 102, 80, 97, 115, 115, 119, 111, 114, 100, 80, 114, 111, 109, 112, 116, 115, 61, 49]]
+
+theorem utf8_fixed : Clew.Ssh.fixedOptions.map utf8 = fixedB := by decide
+
+theorem word_ok (bytes : Slice Std.U8) : ∃ w, word bytes = ok w ∧ w.val = bytes.val := by
+  obtain ⟨w, hw, ew⟩ := extend_ok (alloc.vec.Vec.new Std.U8) bytes (by simp)
+  exact ⟨w, hw, by simpa using ew⟩
+
+theorem digits_len (n k : Nat) (h : n < 10 ^ (k + 1)) : (Clew.Trust.digits n).length ≤ k + 1 := by
+  induction k generalizing n with
+  | zero => rw [Fingerprint.digits_eq]; split <;> simp_all
+  | succ k ih =>
+    rw [Fingerprint.digits_eq]
+    split
+    · simp
+    · have := ih (n / 10) (by rw [pow_succ] at h; omega)
+      simp; omega
+
+set_option maxRecDepth 20000 in
+theorem ssh_args_ok (user host identity : Slice Std.U8) (port : Std.U16)
+    (room : user.val.length + host.val.length + 1 ≤ Usize.max) :
+    ∃ r, ssh_args user host port identity = ok r ∧ r.val.map (fun w => bs w.val) =
+      fixedB ++ ((if port.val = 22 then [] else [[45, 112], Clew.Trust.digits port.val]) ++
+        ((if identity.val = [] then [] else [[45, 105], bs identity.val]) ++
+          [[45, 45], bs user.val ++ 64 :: bs host.val])) := by
+  obtain ⟨wu, hwu, ewu⟩ := word_ok user
+  obtain ⟨wu2, hwu2, ewu2⟩ := push_ok wu 64#u8 (by rw [ewu]; omega)
+  obtain ⟨dest, hdest, edest⟩ := extend_ok wu2 host (by rw [ewu2, ewu]; simp; omega)
+  obtain ⟨wi, hwi, ewi⟩ := word_ok identity
+  have hpv : (UScalar.cast UScalarTy.Usize port).val = port.val := by
+    rw [UScalar.cast_val_eq]; have := port.hBounds; simp at this ⊢
+    apply Nat.mod_eq_of_lt
+    rcases System.Platform.numBits_eq with h | h <;> rw [h] <;> omega
+  have hdl : (Clew.Trust.digits (UScalar.cast UScalarTy.Usize port).val).length ≤ 5 := by
+    rw [hpv]; apply digits_len port.val 4; have := port.hBounds; simp at this ⊢; omega
+  obtain ⟨d, hd, ed⟩ := Fingerprint.with_decimal_ok (UScalar.cast UScalarTy.Usize port)
+    (alloc.vec.Vec.new Std.U8) (by simp; scalar_tac)
+  have hie : core.slice.Slice.is_empty identity = ok (decide (identity.val = [])) := by
+    simp [core.slice.Slice.is_empty]
+  have hpv' : port.val = 22 ↔ port = 22#u16 := ⟨fun h => UScalar.eq_of_val_eq (by simpa using h), fun h => by simp [h]⟩
+  have edig : bs d.val = Clew.Trust.digits port.val := by rw [ed, hpv]; simp [bs]
+  by_cases hp : port = 22#u16
+  · have hp' : port.val = 22 := hpv'.mpr hp
+    by_cases hi : identity.val = []
+    · simp [ssh_args, with_option, push_small, hp, hi, hwu, hwu2, hdest]
+      simp only [edest, ewu2, ewu]; simp [bs, fixedB]
+    · simp [ssh_args, with_option, push_small, hp, hi, hwu, hwu2, hdest, hwi]
+      simp only [edest, ewu2, ewu, ewi]; simp [bs, fixedB]
+  · have hp' : ¬ port.val = 22 := fun h => hp (hpv'.mp h)
+    by_cases hi : identity.val = []
+    · simp [ssh_args, with_option, push_small, hp, hi, hwu, hwu2, hdest, hd, lift]
+      simp only [edest, ewu2, ewu]; simp [bs, fixedB, hp'] at edig ⊢; exact edig
+    · simp [ssh_args, with_option, push_small, hp, hi, hwu, hwu2, hdest, hwi, hd, lift]
+      simp only [edest, ewu2, ewu, ewi]; simp [bs, fixedB, hp'] at edig ⊢; exact edig
+
+theorem utf8_decimal (n : Nat) : utf8 (Clew.Text.decimal n) = Clew.Trust.digits n := by
+  rw [KnownHosts.utf8_of_ascii]
+  · rfl
+  · intro c hc
+    have := Clew.Text.decimal_digits n c hc
+    rw [KnownHosts.isAsciiDigit_eq] at this
+    simp [KnownHosts.isDigitB] at this; omega
+
+/-- **`ssh_args` is the model**: on the UTF-8 bytes of any user, host and
+identity file, and any port, it returns, and writes the UTF-8 bytes of
+`Clew.Ssh.sshArgs` — the list `parseSshArgs_sshArgs` proves ssh reads as
+exactly Clew's options and `user@host`. -/
+theorem ssh_args_is_the_model (u h i : List Char) (user host identity : Slice Std.U8) (port : Std.U16)
+    (hu : bs user.val = utf8 u) (hh : bs host.val = utf8 h) (hi : bs identity.val = utf8 i)
+    (room : user.val.length + host.val.length + 1 ≤ Usize.max) :
+    ∃ r, ssh_args user host port identity = ok r ∧
+      r.val.map (fun w => bs w.val) = (Clew.Ssh.sshArgs u h port.val i).map utf8 := by
+  obtain ⟨r, hr, er⟩ := ssh_args_ok user host identity port room
+  refine ⟨r, hr, ?_⟩
+  rw [er]
+  have hie : (identity.val = []) ↔ i.isEmpty = true := by
+    rw [← Shell.utf8_isEmpty, ← hi]
+    simp [bs]
+  have e_dd : utf8 ['-', '-'] = [45, 45] := rfl
+  have e_dp : utf8 ['-', 'p'] = [45, 112] := rfl
+  have e_di : utf8 ['-', 'i'] = [45, 105] := rfl
+  have e_at : utf8 ('@' :: h) = 64 :: utf8 h := by rw [Shell.utf8_cons]; rfl
+  unfold Clew.Ssh.sshArgs
+  simp only [List.map_append, utf8_fixed]
+  congr 1
+  by_cases hp : port.val = 22
+  · by_cases hii : identity.val = []
+    · have : i.isEmpty = true := hie.mp hii
+      simp [hp, hii, this, hu, hh, Shell.utf8_append, e_dd, e_at]
+    · have : i.isEmpty = false := by simpa using (mt hie.mpr hii)
+      simp [hp, hii, this, hu, hh, hi, Shell.utf8_append, e_dd, e_di, e_at]
+  · by_cases hii : identity.val = []
+    · have : i.isEmpty = true := hie.mp hii
+      simp [hp, hii, this, hu, hh, Shell.utf8_append, e_dd, e_dp, e_at, utf8_decimal]
+    · have : i.isEmpty = false := by simpa using (mt hie.mpr hii)
+      simp [hp, hii, this, hu, hh, hi, Shell.utf8_append, e_dd, e_dp, e_di, e_at, utf8_decimal]
+/-- **ssh reads the code's list as meant**: the words `ssh_args` writes are
+the UTF-8 bytes of a list ssh parses as exactly Clew's options, `-p` and
+`-i`, with `user@host` as the destination (`Clew.Ssh.parseSshArgs_sshArgs`),
+whatever the fields hold. -/
+theorem ssh_reads_as_meant (u h i : List Char) (user host identity : Slice Std.U8) (port : Std.U16)
+    (hu : bs user.val = utf8 u) (hh : bs host.val = utf8 h) (hi : bs identity.val = utf8 i)
+    (room : user.val.length + host.val.length + 1 ≤ Usize.max) :
+    ∃ r ws, ssh_args user host port identity = ok r ∧ r.val.map (fun w => bs w.val) = ws.map utf8 ∧
+      Clew.Ssh.parseSshArgs ws = ⟨Clew.Ssh.intended port.val i, some (u ++ '@' :: h),
+        (Clew.Ssh.intended port.val i).length⟩ := by
+  obtain ⟨r, hr, er⟩ := ssh_args_is_the_model u h i user host identity port hu hh hi room
+  exact ⟨r, _, hr, er, Clew.Ssh.parseSshArgs_sshArgs u h port.val i⟩
+
+end SshArgs
+
 end Clew.Extracted

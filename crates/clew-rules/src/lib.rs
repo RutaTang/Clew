@@ -15,6 +15,7 @@ pub mod known_hosts;
 pub mod location;
 pub mod server_dist;
 pub mod shell;
+pub mod ssh;
 pub mod text;
 pub mod version;
 pub mod voice;

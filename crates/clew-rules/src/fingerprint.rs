@@ -9,7 +9,7 @@
 
 /// `out` with `n` in decimal after it: most significant digit first, no
 /// leading zero, as `format!("{n}")` writes it.
-fn with_decimal(mut out: Vec<u8>, n: usize) -> Vec<u8> {
+pub(crate) fn with_decimal(mut out: Vec<u8>, n: usize) -> Vec<u8> {
     if n >= 10 {
         out = with_decimal(out, n / 10);
     }

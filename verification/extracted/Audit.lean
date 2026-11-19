@@ -27,3 +27,5 @@ does not model (the code proved here calls none of them). -/
 #print axioms Clew.Extracted.Version.is_newer_is_the_model
 #print axioms Clew.Extracted.Version.upgrade_is_the_model
 #print axioms Clew.Extracted.Version.upgrade_newer
+#print axioms Clew.Extracted.SshArgs.ssh_args_is_the_model
+#print axioms Clew.Extracted.SshArgs.ssh_reads_as_meant

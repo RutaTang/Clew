@@ -2454,6 +2454,177 @@ def shell.sh_c
     let out8 ← alloc.vec.Vec.push out7 39#u8
     ok (some out8)
 
+/-- [clew_rules::ssh::with_option]:
+    Source: 'crates/clew-rules/src/ssh.rs', lines 29:0-33:1 -/
+def ssh.with_option
+  (args : alloc.vec.Vec (alloc.vec.Vec Std.U8)) (value : alloc.vec.Vec Std.U8)
+  :
+  Result (alloc.vec.Vec (alloc.vec.Vec Std.U8))
+  := do
+  let word ← alloc.vec.Vec.push (alloc.vec.Vec.new Std.U8) 45#u8
+  let word1 ← alloc.vec.Vec.push word 111#u8
+  let args1 ← alloc.vec.Vec.push args word1
+  alloc.vec.Vec.push args1 value
+
+/-- [clew_rules::ssh::word]:
+    Source: 'crates/clew-rules/src/ssh.rs', lines 36:0-40:1 -/
+def ssh.word (bytes : Slice Std.U8) : Result (alloc.vec.Vec Std.U8) := do
+  alloc.vec.Vec.extend_from_slice core.clone.CloneU8 (alloc.vec.Vec.new Std.U8)
+    bytes
+
+/-- [clew_rules::ssh::ssh_args]:
+    Source: 'crates/clew-rules/src/ssh.rs', lines 46:0-86:1
+    Visibility: public -/
+def ssh.ssh_args
+  (user : Slice Std.U8) (host : Slice Std.U8) (port : Std.U16)
+  (identity : Slice Std.U8) :
+  Result (alloc.vec.Vec (alloc.vec.Vec Std.U8))
+  := do
+  let word ← alloc.vec.Vec.push (alloc.vec.Vec.new Std.U8) 67#u8
+  let word1 ← alloc.vec.Vec.push word 111#u8
+  let word2 ← alloc.vec.Vec.push word1 110#u8
+  let word3 ← alloc.vec.Vec.push word2 110#u8
+  let word4 ← alloc.vec.Vec.push word3 101#u8
+  let word5 ← alloc.vec.Vec.push word4 99#u8
+  let word6 ← alloc.vec.Vec.push word5 116#u8
+  let word7 ← alloc.vec.Vec.push word6 84#u8
+  let word8 ← alloc.vec.Vec.push word7 105#u8
+  let word9 ← alloc.vec.Vec.push word8 109#u8
+  let word10 ← alloc.vec.Vec.push word9 101#u8
+  let word11 ← alloc.vec.Vec.push word10 111#u8
+  let word12 ← alloc.vec.Vec.push word11 117#u8
+  let word13 ← alloc.vec.Vec.push word12 116#u8
+  let word14 ← alloc.vec.Vec.push word13 61#u8
+  let word15 ← alloc.vec.Vec.push word14 49#u8
+  let word16 ← alloc.vec.Vec.push word15 48#u8
+  let args ←
+    ssh.with_option (alloc.vec.Vec.new (alloc.vec.Vec Std.U8)) word16
+  let word17 ← alloc.vec.Vec.push (alloc.vec.Vec.new Std.U8) 83#u8
+  let word18 ← alloc.vec.Vec.push word17 116#u8
+  let word19 ← alloc.vec.Vec.push word18 114#u8
+  let word20 ← alloc.vec.Vec.push word19 105#u8
+  let word21 ← alloc.vec.Vec.push word20 99#u8
+  let word22 ← alloc.vec.Vec.push word21 116#u8
+  let word23 ← alloc.vec.Vec.push word22 72#u8
+  let word24 ← alloc.vec.Vec.push word23 111#u8
+  let word25 ← alloc.vec.Vec.push word24 115#u8
+  let word26 ← alloc.vec.Vec.push word25 116#u8
+  let word27 ← alloc.vec.Vec.push word26 75#u8
+  let word28 ← alloc.vec.Vec.push word27 101#u8
+  let word29 ← alloc.vec.Vec.push word28 121#u8
+  let word30 ← alloc.vec.Vec.push word29 67#u8
+  let word31 ← alloc.vec.Vec.push word30 104#u8
+  let word32 ← alloc.vec.Vec.push word31 101#u8
+  let word33 ← alloc.vec.Vec.push word32 99#u8
+  let word34 ← alloc.vec.Vec.push word33 107#u8
+  let word35 ← alloc.vec.Vec.push word34 105#u8
+  let word36 ← alloc.vec.Vec.push word35 110#u8
+  let word37 ← alloc.vec.Vec.push word36 103#u8
+  let word38 ← alloc.vec.Vec.push word37 61#u8
+  let word39 ← alloc.vec.Vec.push word38 121#u8
+  let word40 ← alloc.vec.Vec.push word39 101#u8
+  let word41 ← alloc.vec.Vec.push word40 115#u8
+  let args1 ← ssh.with_option args word41
+  let word42 ← alloc.vec.Vec.push word17 101#u8
+  let word43 ← alloc.vec.Vec.push word42 114#u8
+  let word44 ← alloc.vec.Vec.push word43 118#u8
+  let word45 ← alloc.vec.Vec.push word44 101#u8
+  let word46 ← alloc.vec.Vec.push word45 114#u8
+  let word47 ← alloc.vec.Vec.push word46 65#u8
+  let word48 ← alloc.vec.Vec.push word47 108#u8
+  let word49 ← alloc.vec.Vec.push word48 105#u8
+  let word50 ← alloc.vec.Vec.push word49 118#u8
+  let word51 ← alloc.vec.Vec.push word50 101#u8
+  let word52 ← alloc.vec.Vec.push word51 73#u8
+  let word53 ← alloc.vec.Vec.push word52 110#u8
+  let word54 ← alloc.vec.Vec.push word53 116#u8
+  let word55 ← alloc.vec.Vec.push word54 101#u8
+  let word56 ← alloc.vec.Vec.push word55 114#u8
+  let word57 ← alloc.vec.Vec.push word56 118#u8
+  let word58 ← alloc.vec.Vec.push word57 97#u8
+  let word59 ← alloc.vec.Vec.push word58 108#u8
+  let word60 ← alloc.vec.Vec.push word59 61#u8
+  let word61 ← alloc.vec.Vec.push word60 49#u8
+  let word62 ← alloc.vec.Vec.push word61 53#u8
+  let args2 ← ssh.with_option args1 word62
+  let word63 ← alloc.vec.Vec.push word17 101#u8
+  let word64 ← alloc.vec.Vec.push word63 114#u8
+  let word65 ← alloc.vec.Vec.push word64 118#u8
+  let word66 ← alloc.vec.Vec.push word65 101#u8
+  let word67 ← alloc.vec.Vec.push word66 114#u8
+  let word68 ← alloc.vec.Vec.push word67 65#u8
+  let word69 ← alloc.vec.Vec.push word68 108#u8
+  let word70 ← alloc.vec.Vec.push word69 105#u8
+  let word71 ← alloc.vec.Vec.push word70 118#u8
+  let word72 ← alloc.vec.Vec.push word71 101#u8
+  let word73 ← alloc.vec.Vec.push word72 67#u8
+  let word74 ← alloc.vec.Vec.push word73 111#u8
+  let word75 ← alloc.vec.Vec.push word74 117#u8
+  let word76 ← alloc.vec.Vec.push word75 110#u8
+  let word77 ← alloc.vec.Vec.push word76 116#u8
+  let word78 ← alloc.vec.Vec.push word77 77#u8
+  let word79 ← alloc.vec.Vec.push word78 97#u8
+  let word80 ← alloc.vec.Vec.push word79 120#u8
+  let word81 ← alloc.vec.Vec.push word80 61#u8
+  let word82 ← alloc.vec.Vec.push word81 51#u8
+  let args3 ← ssh.with_option args2 word82
+  let word83 ← alloc.vec.Vec.push (alloc.vec.Vec.new Std.U8) 78#u8
+  let word84 ← alloc.vec.Vec.push word83 117#u8
+  let word85 ← alloc.vec.Vec.push word84 109#u8
+  let word86 ← alloc.vec.Vec.push word85 98#u8
+  let word87 ← alloc.vec.Vec.push word86 101#u8
+  let word88 ← alloc.vec.Vec.push word87 114#u8
+  let word89 ← alloc.vec.Vec.push word88 79#u8
+  let word90 ← alloc.vec.Vec.push word89 102#u8
+  let word91 ← alloc.vec.Vec.push word90 80#u8
+  let word92 ← alloc.vec.Vec.push word91 97#u8
+  let word93 ← alloc.vec.Vec.push word92 115#u8
+  let word94 ← alloc.vec.Vec.push word93 115#u8
+  let word95 ← alloc.vec.Vec.push word94 119#u8
+  let word96 ← alloc.vec.Vec.push word95 111#u8
+  let word97 ← alloc.vec.Vec.push word96 114#u8
+  let word98 ← alloc.vec.Vec.push word97 100#u8
+  let word99 ← alloc.vec.Vec.push word98 80#u8
+  let word100 ← alloc.vec.Vec.push word99 114#u8
+  let word101 ← alloc.vec.Vec.push word100 111#u8
+  let word102 ← alloc.vec.Vec.push word101 109#u8
+  let word103 ← alloc.vec.Vec.push word102 112#u8
+  let word104 ← alloc.vec.Vec.push word103 116#u8
+  let word105 ← alloc.vec.Vec.push word104 115#u8
+  let word106 ← alloc.vec.Vec.push word105 61#u8
+  let word107 ← alloc.vec.Vec.push word106 49#u8
+  let args4 ← ssh.with_option args3 word107
+  let args5 ←
+    if port != 22#u16
+    then
+      do
+      let word108 ← alloc.vec.Vec.push (alloc.vec.Vec.new Std.U8) 45#u8
+      let word109 ← alloc.vec.Vec.push word108 112#u8
+      let args6 ← alloc.vec.Vec.push args4 word109
+      let i ← lift (UScalar.cast .Usize port)
+      let v ← fingerprint.with_decimal (alloc.vec.Vec.new Std.U8) i
+      alloc.vec.Vec.push args6 v
+    else ok args4
+  let b ← core.slice.Slice.is_empty identity
+  let args6 ←
+    if b
+    then ok args5
+    else
+      do
+      let word108 ← alloc.vec.Vec.push (alloc.vec.Vec.new Std.U8) 45#u8
+      let word109 ← alloc.vec.Vec.push word108 105#u8
+      let args7 ← alloc.vec.Vec.push args5 word109
+      let v ← ssh.word identity
+      alloc.vec.Vec.push args7 v
+  let word108 ← alloc.vec.Vec.push (alloc.vec.Vec.new Std.U8) 45#u8
+  let word109 ← alloc.vec.Vec.push word108 45#u8
+  let args7 ← alloc.vec.Vec.push args6 word109
+  let destination ← ssh.word user
+  let destination1 ← alloc.vec.Vec.push destination 64#u8
+  let destination2 ←
+    alloc.vec.Vec.extend_from_slice core.clone.CloneU8 destination1 host
+  alloc.vec.Vec.push args7 destination2
+
 /-- [clew_rules::version::Version]
     Source: 'crates/clew-rules/src/version.rs', lines 21:0-25:1
     Visibility: public -/

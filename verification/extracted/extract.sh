@@ -41,6 +41,7 @@ trap 'rm -rf "$out"' EXIT
   --start-from crate::version::parse \
   --start-from crate::version::is_newer \
   --start-from crate::version::upgrade \
+  --start-from crate::ssh::ssh_args \
   --dest "$out" -- --target-dir "$out/target" -q) >"$out/charon.log" 2>&1 || {
   cat "$out/charon.log" >&2
   exit 1

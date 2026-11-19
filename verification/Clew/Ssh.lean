@@ -530,7 +530,10 @@ def fixedOptions : List (List Char) :=
     ['-', 'o'], "ServerAliveInterval=15".toList, ['-', 'o'], "ServerAliveCountMax=3".toList,
     ['-', 'o'], "NumberOfPasswordPrompts=1".toList]
 
-/-- `SavedConnection::ssh_args`. -/
+/-- `SavedConnection::ssh_args`, of its trimmed user, host and identity file.
+It runs as `clew_rules::ssh::ssh_args`, proved in
+`verification/extracted/Equal.lean` to write this list, for the UTF-8 bytes
+of any fields. -/
 def sshArgs (user host : List Char) (port : Nat) (identity : List Char) : List (List Char) :=
   fixedOptions ++ ((if port == 22 then [] else [['-', 'p'], decimal port]) ++
     ((if identity.isEmpty then [] else [['-', 'i'], identity]) ++

@@ -456,31 +456,17 @@ impl SavedConnection {
     /// `--` ends ssh's options before the destination, so no field value can
     /// be parsed as one.
     pub fn ssh_args(&self) -> Vec<String> {
-        let mut args: Vec<String> = [
-            "-o",
-            "ConnectTimeout=10",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            "ServerAliveInterval=15",
-            "-o",
-            "ServerAliveCountMax=3",
-            "-o",
-            "NumberOfPasswordPrompts=1",
-        ]
-        .map(String::from)
-        .to_vec();
-        if self.port != 22 {
-            args.push("-p".into());
-            args.push(self.port.to_string());
-        }
-        if !self.identity.trim().is_empty() {
-            args.push("-i".into());
-            args.push(self.identity.trim().to_string());
-        }
-        args.push("--".into());
-        args.push(format!("{}@{}", self.user.trim(), self.host.trim()));
-        args
+        // The list `verification/` proves ssh reads as meant, whatever the
+        // fields hold: `clew_rules::ssh::ssh_args` is that model, of the code.
+        clew_rules::ssh::ssh_args(
+            self.user.trim().as_bytes(),
+            self.host.trim().as_bytes(),
+            self.port,
+            self.identity.trim().as_bytes(),
+        )
+        .iter()
+        .map(|word| String::from_utf8_lossy(word).into_owned())
+        .collect()
     }
 
     pub fn target(&self) -> ConnTarget {
