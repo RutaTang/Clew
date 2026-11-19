@@ -1149,6 +1149,11 @@ mod tests {
     /// A project whose path is not UTF-8 is trusted under its own key and
     /// read back from `trust.toml` as that key — its sibling with another
     /// byte where the first is not UTF-8 is not trusted with it.
+    ///
+    /// A remote project's path is the remote host's bytes, whatever this
+    /// machine's file system allows. A local one exists only where the file
+    /// system takes such a name: APFS (macOS) refuses it (`EILSEQ`), so
+    /// there no local project can have one, and only the remote is tried.
     #[test]
     #[cfg(unix)]
     fn a_path_that_is_not_utf8_is_trusted_alone() {
@@ -1161,18 +1166,26 @@ mod tests {
                 std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&bytes))
             };
             let (ff, fe) = (named(0xff), named(0xfe));
-            std::fs::create_dir_all(&ff).unwrap();
-            std::fs::create_dir_all(&fe).unwrap();
+            let local =
+                match std::fs::create_dir_all(&ff).and_then(|()| std::fs::create_dir_all(&fe)) {
+                    Ok(()) => true,
+                    Err(e) if e.raw_os_error() == Some(libc::EILSEQ) => false,
+                    Err(e) => panic!("{}: {e}", ff.display()),
+                };
             Trust::load()
                 .update(|t| {
-                    t.trust_root(None, &ff);
+                    if local {
+                        t.trust_root(None, &ff);
+                    }
                     t.trust_root(Some("u@h"), &ff);
                 })
                 .unwrap();
             let back = Trust::load_checked().unwrap();
-            assert!(back.is_root_trusted(None, &ff));
+            if local {
+                assert!(back.is_root_trusted(None, &ff));
+                assert!(!back.is_root_trusted(None, &fe));
+            }
             assert!(back.is_root_trusted(Some("u@h"), &ff));
-            assert!(!back.is_root_trusted(None, &fe));
             assert!(!back.is_root_trusted(Some("u@h"), &fe));
         });
     }
