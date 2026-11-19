@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use clew_plugin::runtime::{Failure, Invocation, Level, Limits, Loaded, Outcome, Runtime, View};
+use clew_plugin::runtime::{
+    Failure, Graph, Invocation, Level, Limits, Loaded, Outcome, Runtime, View,
+};
 use clew_plugin::store::{Origin as Source, Record, Store};
 use clew_plugin::{Inspected, Manifest};
 
@@ -85,6 +87,76 @@ impl PendingInstall {
     pub(crate) fn new_permissions(&self) -> u8 {
         let before = self.previous.as_ref().map_or(0, |p| p.record.granted());
         self.inspected.needs & !before
+    }
+}
+
+/// What a plugin graph built to, for which files and which copy of the
+/// plugin. A graph built is kept while it is built again.
+#[derive(Debug, Clone, Default)]
+pub struct PluginMap {
+    /// The file registry's revision it was asked for at.
+    pub(crate) rev: u64,
+    /// The copy of the plugin it was asked of.
+    pub(crate) fingerprint: String,
+    pub(crate) building: bool,
+    /// The last graph it built.
+    pub(crate) built: Option<clew_protocol::ProjectMap>,
+    /// Why the last build gave nothing, in the reader's language.
+    pub(crate) failed: Option<String>,
+}
+
+/// Where a plugin graph stands, for Project Graphs to say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PluginMapStatus {
+    /// Asked for, and not back yet.
+    Building,
+    /// The last build gave nothing; why.
+    Failed(String),
+    /// Built: drawn as any other graph.
+    Built,
+}
+
+/// The map id of plugin `plugin`'s graph `graph`, as Project Graphs keeps
+/// it.
+pub(crate) fn map_id(plugin: &str, graph: &str) -> String {
+    format!("plugin:{plugin}/{graph}")
+}
+
+/// The plugin and graph a map id names, if a plugin's graph.
+pub(crate) fn map_of(id: &str) -> Option<(&str, &str)> {
+    id.strip_prefix("plugin:")?.split_once('/')
+}
+
+/// A graph a plugin built, as Project Graphs draws a map.
+fn project_map(
+    id: String,
+    decl: &clew_plugin::manifest::GraphDecl,
+    graph: Graph,
+) -> clew_protocol::ProjectMap {
+    clew_protocol::ProjectMap {
+        id,
+        title: decl.title.clone(),
+        description: decl.description.clone(),
+        nodes: graph
+            .nodes
+            .into_iter()
+            .map(|n| clew_protocol::MapNode {
+                label: n.label,
+                kind: n.kind,
+                file: n.at.as_ref().map(|at| at.path.clone()).unwrap_or_default(),
+                line: n.at.map_or(0, |at| at.line as usize),
+                detail: n.detail,
+            })
+            .collect(),
+        edges: graph
+            .edges
+            .into_iter()
+            .map(|e| clew_protocol::MapEdge {
+                from: e.from as usize,
+                to: e.to as usize,
+                label: e.label,
+            })
+            .collect(),
     }
 }
 
@@ -230,6 +302,24 @@ pub struct Ran {
     pub(crate) log: Vec<HostEvent>,
 }
 
+/// What came of a graph's build.
+pub struct GraphRan {
+    pub(crate) outcome: Result<Graph, Failure>,
+    /// The plugin, ready to run again, by its fingerprint.
+    pub(crate) loaded: Option<(String, Arc<Loaded>)>,
+    pub(crate) log: Vec<HostEvent>,
+}
+
+impl std::fmt::Debug for GraphRan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphRan")
+            .field("outcome", &self.outcome.as_ref().map(|g| g.nodes.len()))
+            .field("loaded", &self.loaded.as_ref().map(|(fp, _)| fp))
+            .field("log", &self.log.len())
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for Ran {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Ran")
@@ -307,13 +397,26 @@ pub enum PluginMsg {
         reply: Reply,
         answer: Result<String, String>,
     },
+    /// A plugin graph's build ended: the map, the files and the copy of
+    /// the plugin it was asked for.
+    GraphBuilt {
+        stamp: Stamp,
+        map: String,
+        rev: u64,
+        fingerprint: String,
+        ran: Arc<std::sync::Mutex<Option<GraphRan>>>,
+    },
+    /// Build the plugin graph shown again, whatever came of the last build.
+    RebuildGraph,
 }
 
 impl PluginMsg {
     /// Where the message comes from, for `dispatch`'s ownership check.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            PluginMsg::Ran { stamp, .. } => Some(Origin::Stamped(stamp)),
+            PluginMsg::Ran { stamp, .. } | PluginMsg::GraphBuilt { stamp, .. } => {
+                Some(Origin::Stamped(stamp))
+            }
             _ => None,
         }
     }
@@ -354,7 +457,7 @@ impl App {
     }
 
     /// Read the installed plugins again (after an install, a change).
-    pub(crate) fn reload_plugins(&mut self) {
+    pub(crate) fn reload_plugins(&mut self) -> Task<Message> {
         self.plugins.installed = Plugins::read_installed();
         let keep: HashSet<&str> = self
             .plugins
@@ -375,6 +478,241 @@ impl App {
                 .collect();
             runtime.sweep_compiled(&keep);
         }
+        // The graphs offered follow the plugins: one turned off or removed
+        // takes its own away, one installed brings its own.
+        self.compose_maps()
+    }
+
+    /// The graphs the plugins on now add: each plugin with its declaration.
+    fn plugin_graphs(&self) -> Vec<(&Installed, &clew_plugin::manifest::GraphDecl)> {
+        self.plugins
+            .installed
+            .iter()
+            .filter(|p| p.record.enabled)
+            .flat_map(|p| p.manifest.graphs.iter().map(move |g| (p, g)))
+            .collect()
+    }
+
+    /// Project Graphs' list: the project's own maps, then — once they were
+    /// read, so the first shown is the project's — the plugins' graphs, as
+    /// built by the copy installed now, or empty until they are.
+    pub(crate) fn compose_maps(&mut self) -> Task<Message> {
+        let mut maps = (*self.proj.core_maps).clone();
+        let read = self.proj.maps_rev.is_some() || self.proj.maps_error.is_some();
+        if read {
+            for (plugin, decl) in self.plugin_graphs() {
+                let id = map_id(&plugin.id, &decl.id);
+                let built = self
+                    .proj
+                    .plugin_maps
+                    .get(&id)
+                    .filter(|m| m.fingerprint == plugin.record.fingerprint)
+                    .and_then(|m| m.built.clone());
+                maps.push(built.unwrap_or_else(|| clew_protocol::ProjectMap {
+                    id,
+                    title: decl.title.clone(),
+                    description: decl.description.clone(),
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                }));
+            }
+        }
+        let retired = std::mem::replace(&mut self.proj.maps, Arc::new(maps));
+        crate::app::graph::free_off_thread(retired)
+    }
+
+    /// The plugin graph Project Graphs shows, and its plugin, if the map
+    /// shown is a plugin's.
+    fn shown_plugin_graph(
+        &self,
+    ) -> Option<(String, &Installed, &clew_plugin::manifest::GraphDecl)> {
+        let at = self.selected_map_index()?;
+        let id = self.proj.maps.get(at)?.id.clone();
+        let (plugin, graph) = map_of(&id)?;
+        let installed = self.plugins.get(plugin).filter(|p| p.record.enabled)?;
+        let decl = installed.manifest.graph(graph)?;
+        Some((id, installed, decl))
+    }
+
+    /// Where the plugin graph shown stands; `None` for a map of the
+    /// project's own.
+    pub(crate) fn plugin_map_status(&self) -> Option<PluginMapStatus> {
+        let (id, plugin, _) = self.shown_plugin_graph()?;
+        let entry = self
+            .proj
+            .plugin_maps
+            .get(&id)
+            .filter(|m| m.fingerprint == plugin.record.fingerprint);
+        Some(match entry {
+            Some(m) if m.building => PluginMapStatus::Building,
+            Some(PluginMap {
+                failed: Some(why), ..
+            }) => PluginMapStatus::Failed(why.clone()),
+            Some(PluginMap { built: Some(_), .. }) => PluginMapStatus::Built,
+            // Not asked yet: it is, as soon as it is shown.
+            _ => PluginMapStatus::Building,
+        })
+    }
+
+    /// The plugin that adds the graph shown, by its name.
+    pub(crate) fn shown_graph_plugin(&self) -> Option<String> {
+        self.shown_plugin_graph().map(|(_, p, _)| p.name())
+    }
+
+    /// Build the plugin graph Project Graphs shows if what it was built
+    /// from moved: the project's files, or the copy of the plugin. Never
+    /// twice at once.
+    pub(crate) fn ensure_plugin_map(&mut self) -> Task<Message> {
+        if self.proj.overlay != Some(Overlay::ProjectMaps) {
+            return Task::none();
+        }
+        let Some((id, plugin, decl)) = self.shown_plugin_graph() else {
+            return Task::none();
+        };
+        let rev = self.proj.registry.revision();
+        let fingerprint = plugin.record.fingerprint.clone();
+        if let Some(m) = self.proj.plugin_maps.get(&id)
+            && m.fingerprint == fingerprint
+            && (m.building || m.rev == rev)
+        {
+            return Task::none();
+        }
+        let graph = decl.id.clone();
+        let record = plugin.record.clone();
+        let entry = self.proj.plugin_maps.entry(id.clone()).or_default();
+        if entry.fingerprint != fingerprint {
+            // Another copy of the plugin: what the last one built is not
+            // this one's.
+            *entry = PluginMap {
+                fingerprint: fingerprint.clone(),
+                ..Default::default()
+            };
+        }
+        entry.rev = rev;
+        let prepared = match (self.project_host(), self.plugin_runtime(), data()) {
+            (Some(host), Ok(runtime), Ok(data)) => Ok((host, runtime, data)),
+            (None, ..) => Err(tr!("open a project to build it").to_string()),
+            (_, Err(why), _) | (_, _, Err(why)) => Err(why),
+        };
+        let entry = self.proj.plugin_maps.get_mut(&id).expect("just made");
+        let (host, runtime, data) = match prepared {
+            Ok(prepared) => prepared,
+            Err(why) => {
+                entry.failed = Some(why);
+                return Task::none();
+            }
+        };
+        entry.building = true;
+        let loaded = self.plugins.loaded.get(&fingerprint).cloned();
+        let stamp = self.stamp();
+        let done_fp = fingerprint.clone();
+        Task::perform(
+            async move {
+                let handle = tokio::runtime::Handle::current();
+                tokio::task::spawn_blocking(move || {
+                    let host = Arc::new(host(handle));
+                    let (loaded, fresh) = match loaded {
+                        Some(loaded) => (loaded, false),
+                        None => match load(&runtime, &data, &record) {
+                            Ok(loaded) => (Arc::new(loaded), true),
+                            Err(why) => {
+                                return GraphRan {
+                                    outcome: Err(Failure::Stopped(why)),
+                                    loaded: None,
+                                    log: Vec::new(),
+                                };
+                            }
+                        },
+                    };
+                    let outcome = loaded.graph(host.clone(), &graph, Limits::GRAPH);
+                    GraphRan {
+                        outcome,
+                        loaded: fresh.then(|| (record.fingerprint.clone(), loaded)),
+                        log: host.take_events(),
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| GraphRan {
+                    outcome: Err(Failure::Stopped(
+                        tr!("the plugin's run failed unexpectedly").to_string(),
+                    )),
+                    loaded: None,
+                    log: Vec::new(),
+                })
+            },
+            move |ran| {
+                Message::Plugin(PluginMsg::GraphBuilt {
+                    stamp: stamp.clone(),
+                    map: id.clone(),
+                    rev,
+                    fingerprint: done_fp.clone(),
+                    ran: Arc::new(std::sync::Mutex::new(Some(ran))),
+                })
+            },
+        )
+    }
+
+    /// A plugin graph's build ended: kept if it is still for the copy of
+    /// the plugin installed, drawn if it is the map shown, and built again
+    /// if the project moved while it ran.
+    fn on_plugin_graph_built(
+        &mut self,
+        map: String,
+        rev: u64,
+        fingerprint: String,
+        ran: GraphRan,
+    ) -> Task<Message> {
+        let plugin = map_of(&map).map(|(plugin, _)| plugin.to_string());
+        if let Some(plugin) = &plugin {
+            for HostEvent::Log(level, line) in ran.log {
+                self.plugins.note(plugin, level, line);
+            }
+        }
+        if let Some((fp, loaded)) = ran.loaded {
+            self.plugins.loaded.insert(fp, loaded);
+        }
+        let decl = plugin
+            .as_deref()
+            .and_then(|p| self.plugins.get(p))
+            .filter(|p| p.record.enabled && p.record.fingerprint == fingerprint)
+            .and_then(|p| map_of(&map).and_then(|(_, g)| p.manifest.graph(g)).cloned());
+        let Some(decl) = decl else {
+            // The plugin was turned off, removed or replaced meanwhile.
+            return Task::none();
+        };
+        let Some(entry) = self
+            .proj
+            .plugin_maps
+            .get_mut(&map)
+            .filter(|m| m.fingerprint == fingerprint)
+        else {
+            return Task::none();
+        };
+        entry.building = false;
+        entry.rev = rev;
+        match ran.outcome {
+            Ok(graph) => {
+                entry.built = Some(project_map(map.clone(), &decl, graph));
+                entry.failed = None;
+            }
+            Err(failure) => {
+                if let Some(plugin) = &plugin {
+                    self.plugins.note(plugin, Level::Error, failure.to_string());
+                }
+                let entry = self.proj.plugin_maps.get_mut(&map).expect("kept above");
+                entry.failed = Some(failure_words(&failure));
+            }
+        }
+        let composed = self.compose_maps();
+        let shown = self
+            .selected_map_index()
+            .and_then(|at| self.proj.maps.get(at))
+            .is_some_and(|m| m.id == map);
+        let relayout = match shown && self.proj.overlay == Some(Overlay::ProjectMaps) {
+            true => self.refresh_graph_layout(),
+            false => Task::none(),
+        };
+        Task::batch([composed, relayout, self.ensure_plugin_map()])
     }
 
     /// The open project, as plugins see it; `None` with none open.
@@ -981,7 +1319,7 @@ impl App {
                 Task::none()
             }
             PluginMsg::Installed { id, reply, result } => {
-                self.reload_plugins();
+                let composed = self.reload_plugins();
                 let name = self
                     .plugins
                     .get(&id)
@@ -1022,15 +1360,14 @@ impl App {
                     }
                 };
                 self.answer_install(&reply, answer, false);
-                Task::none()
+                composed
             }
             PluginMsg::SetEnabled(id, on) => {
                 if let Err(why) = data().and_then(|d| clew_plugin::store::set_enabled(&d, &id, on))
                 {
                     self.plugins.failure = Some(why);
                 }
-                self.reload_plugins();
-                Task::none()
+                self.reload_plugins()
             }
             PluginMsg::Remove(id) => {
                 let removed = data().and_then(|d| {
@@ -1047,8 +1384,7 @@ impl App {
                     self.proj.plugin_page = None;
                 }
                 self.plugins.log.remove(&id);
-                self.reload_plugins();
-                Task::none()
+                self.reload_plugins()
             }
             PluginMsg::Requests(found) => self.on_requests(&found),
             PluginMsg::ToolAnswered {
@@ -1095,6 +1431,30 @@ impl App {
                         Task::none()
                     }
                 }
+            }
+            PluginMsg::GraphBuilt {
+                map,
+                rev,
+                fingerprint,
+                ran,
+                ..
+            } => {
+                let Some(ran) = ran.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+                    return Task::none();
+                };
+                self.on_plugin_graph_built(map, rev, fingerprint, ran)
+            }
+            PluginMsg::RebuildGraph => {
+                // What the last build gave, forgotten: the graph shown is
+                // asked for again.
+                if let Some((id, ..)) = self.shown_plugin_graph()
+                    && let Some(entry) = self.proj.plugin_maps.get_mut(&id)
+                    && !entry.building
+                {
+                    entry.failed = None;
+                    entry.rev = u64::MAX;
+                }
+                self.ensure_plugin_map()
             }
             PluginMsg::Tried { reply, answer } => {
                 match &reply {

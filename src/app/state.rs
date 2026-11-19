@@ -2256,6 +2256,12 @@ pub struct ProjectSession {
     pub maps_error: Option<String>,
     /// The id of the map shown (`ProjectMap::id`), kept across rebuilds.
     pub maps_selected: Option<String>,
+    /// The project's own maps as last read; `maps` is these, then the
+    /// graphs the plugins add (`App::compose_maps`).
+    pub core_maps: Arc<Vec<clew_protocol::ProjectMap>>,
+    /// What each plugin graph built to, by its map id
+    /// (`plugins::map_id`).
+    pub plugin_maps: HashMap<String, crate::app::plugins::PluginMap>,
     /// The Imports overlay's counts and rankings, computed by the import job
     /// (off the UI thread) whenever the graph's structure changed.
     pub(crate) import_ranks: crate::ui::ImportRanks,
@@ -2800,6 +2806,8 @@ impl Default for ProjectSession {
             maps_building: false,
             maps_error: None,
             maps_selected: None,
+            core_maps: Arc::default(),
+            plugin_maps: HashMap::new(),
             import_ranks: Default::default(),
             remote_import_meta: Default::default(),
             remote_manifests: Default::default(),

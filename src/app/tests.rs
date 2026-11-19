@@ -39340,3 +39340,77 @@ fn a_plugin_page_draws_every_block_and_its_rows_open_the_code() {
     let _open = app.update(open);
     assert!(app.proj.plugin_page.is_none(), "the page is put away");
 }
+
+/// A plugin's graph is offered in Project Graphs after the project's own,
+/// built by the plugin when it is shown, drawn like any other, built again
+/// on Try again after a failure, and offered no more once the plugin is
+/// turned off.
+#[test]
+fn a_plugins_graph_is_built_when_shown_in_project_graphs() {
+    use crate::app::plugins::{PluginMapStatus, PluginMsg};
+    let data = clew_core::testutil::TempDir::new("plugin-graph");
+    let _env = data_dir_override(data.path());
+    let mut app = scanned_app("plugin-graph");
+    let bytes = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/clew-plugin/fixtures/views.wasm"),
+    )
+    .unwrap();
+    let inspected = clew_plugin::inspect(&bytes).unwrap();
+    clew_plugin::store::install(
+        data.path(),
+        &bytes,
+        &inspected,
+        clew_plugin::store::Origin::Ask,
+    )
+    .unwrap();
+    let reloaded = app.reload_plugins();
+    settle(&mut app, reloaded);
+    let opened = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
+    settle(&mut app, opened);
+    let id = crate::app::plugins::map_id("views", "pair");
+    assert!(
+        app.proj.maps.iter().any(|m| m.id == id),
+        "the plugin's graph is offered"
+    );
+
+    let picked = app.update(Message::Graph(GraphMsg::SelectMap(id.clone())));
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Building));
+    settle(&mut app, picked);
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
+    let map = app.proj.maps.iter().find(|m| m.id == id).unwrap();
+    assert_eq!(map.title, "A pair");
+    let labels: Vec<&str> = map.nodes.iter().map(|n| n.label.as_str()).collect();
+    assert_eq!(labels, ["a", "b"]);
+    assert_eq!((map.nodes[0].file.as_str(), map.nodes[0].line), ("a.rs", 1));
+    assert_eq!(map.edges.len(), 1, "the arrow to no node is dropped");
+    let says = |app: &App, words: &str| {
+        iced_test::simulator(crate::ui::project_maps_body(app))
+            .find(words)
+            .is_ok()
+    };
+    assert!(says(&app, "Added by the plugin Views"));
+
+    // Shown again with nothing moved: not built again.
+    let again = app.update(Message::Graph(GraphMsg::SelectMap(id.clone())));
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
+    settle(&mut app, again);
+
+    // A failure says why and offers Try again, which builds it anew.
+    app.proj.plugin_maps.get_mut(&id).unwrap().failed = Some("it was stopped".into());
+    assert!(says(&app, "Try again"));
+    let retried = app.update(Message::Plugin(PluginMsg::RebuildGraph));
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Building));
+    settle(&mut app, retried);
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
+
+    let off = app.update(Message::Plugin(PluginMsg::SetEnabled(
+        "views".into(),
+        false,
+    )));
+    settle(&mut app, off);
+    assert!(
+        !app.proj.maps.iter().any(|m| m.id == id),
+        "a plugin turned off offers no graph"
+    );
+    assert_eq!(app.plugin_map_status(), None);
+}

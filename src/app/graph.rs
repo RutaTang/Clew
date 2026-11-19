@@ -248,7 +248,7 @@ fn function_languages(
 /// Free `value` on the blocking pool, not on the thread that serves every
 /// window: what an import job leaves behind (a graph, a resolver, a batch) is
 /// a map per file, a key per entry, a set of every path.
-fn free_off_thread(value: impl Send + 'static) -> Task<Message> {
+pub(crate) fn free_off_thread(value: impl Send + 'static) -> Task<Message> {
     #[cfg(test)]
     HANDED_OFF.with(|n| n.set(n.get() + 1));
     Task::future(async move {
@@ -639,7 +639,8 @@ impl App {
         }
         if which == Overlay::ProjectMaps {
             // Read when stale; the map shown until then is the last one read.
-            task = Task::batch([task, self.ensure_maps()]);
+            // A plugin's graph chosen is built again if the project moved.
+            task = Task::batch([task, self.ensure_maps(), self.ensure_plugin_map()]);
         }
         if which == Overlay::ProjectCalls {
             // The call graph is brought up to date on demand
@@ -1488,20 +1489,27 @@ impl App {
         match maps {
             Ok(maps) => {
                 let retired =
-                    free_off_thread(std::mem::replace(&mut self.proj.maps, Arc::new(maps)));
+                    free_off_thread(std::mem::replace(&mut self.proj.core_maps, Arc::new(maps)));
                 self.proj.maps_rev = Some(rev);
                 self.proj.maps_error = None;
+                // With the plugins' graphs after them; the one chosen, if a
+                // plugin's, built now that the project's are read.
+                let composed = self.compose_maps();
+                let plugin = self.ensure_plugin_map();
                 let relayout = match self.proj.overlay == Some(Overlay::ProjectMaps) {
                     true => self.refresh_graph_layout(),
                     false => Task::none(),
                 };
-                Task::batch([retired, relayout])
+                Task::batch([retired, composed, plugin, relayout])
             }
             Err(e) => {
                 // Not read: nothing is current, and the overlay says why.
+                // The plugins' graphs are still offered.
                 self.proj.maps_rev = None;
                 self.proj.maps_error = Some(e);
-                Task::none()
+                let composed = self.compose_maps();
+                let plugin = self.ensure_plugin_map();
+                Task::batch([composed, plugin])
             }
         }
     }
@@ -2781,7 +2789,8 @@ impl App {
             GraphMsg::MapsBuilt { rev, maps, .. } => self.on_maps_built(rev, maps),
             GraphMsg::SelectMap(id) => {
                 self.proj.maps_selected = Some(id);
-                self.refresh_graph_layout()
+                let built = self.ensure_plugin_map();
+                Task::batch([built, self.refresh_graph_layout()])
             }
             GraphMsg::ChurnLoaded { result, .. } => self.on_churn_loaded(result),
             GraphMsg::ToggleHeat => {

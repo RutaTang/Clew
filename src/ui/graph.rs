@@ -598,6 +598,19 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
         tr!("Building call graph…")
     } else if app.scanning || app.proj.indexing {
         tr!("Indexing the project…")
+    } else if overlay == Some(crate::Overlay::ProjectMaps)
+        && app.plugin_map_status() == Some(crate::app::plugins::PluginMapStatus::Building)
+    {
+        // A plugin's graph, asked of the plugin: the list says whose.
+        tr!("Building this graph…")
+    } else if overlay == Some(crate::Overlay::ProjectMaps)
+        && matches!(
+            app.plugin_map_status(),
+            Some(crate::app::plugins::PluginMapStatus::Failed(_))
+        )
+    {
+        // Why, and Try again, are in the list.
+        tr!("This graph could not be built. Switch to List to see why.")
     } else if app.proj.graph_layout_pending {
         // Laid out off the UI thread (`App::refresh_graph_layout`).
         tr!("Laying out the graph…")
@@ -3393,6 +3406,52 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
                 .color(theme::warning())
                 .into(),
         );
+    }
+    // A plugin's graph: whose it is, and how its build stands.
+    if let Some(plugin) = app.shown_graph_plugin() {
+        use crate::app::plugins::{PluginMapStatus, PluginMsg};
+        rows.push(
+            text(tr!("Added by the plugin {plugin}", plugin = plugin))
+                .size(ts::CAPTION)
+                .color(theme::dim())
+                .into(),
+        );
+        match app.plugin_map_status() {
+            Some(PluginMapStatus::Building) if map.nodes.is_empty() => {
+                rows.push(hint(tr!("Building this graph…").into()));
+            }
+            Some(PluginMapStatus::Failed(why)) => {
+                let said = match map.nodes.is_empty() {
+                    true => tr!("This graph could not be built: {reason}", reason = why),
+                    false => tr!(
+                        "This graph could not be built again, so it shows the last build: {reason}",
+                        reason = why
+                    ),
+                };
+                rows.push(
+                    row![
+                        text(said)
+                            .size(ts::CAPTION)
+                            .color(theme::warning())
+                            .width(Fill),
+                        button(text(tr!("Try again")).size(ts::SMALL))
+                            .style(theme::secondary_button)
+                            .padding([3, 10])
+                            .on_press(super::heard::said(
+                                tr!("Try again"),
+                                Message::Plugin(PluginMsg::RebuildGraph),
+                            )),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Center)
+                    .into(),
+                );
+            }
+            Some(PluginMapStatus::Built) if map.nodes.is_empty() => {
+                rows.push(hint(tr!("The plugin found nothing to draw.").into()));
+            }
+            _ => {}
+        }
     }
     let mut out_edges: Vec<Vec<(usize, &str)>> = vec![Vec::new(); map.nodes.len()];
     for e in &map.edges {
