@@ -20,6 +20,799 @@ set_option maxRecDepth 2048
 
 namespace clew_rules
 
+/-- [clew_rules::framing::MAX_FRAME_BYTES]
+    Source: 'crates/clew-rules/src/framing.rs', lines 12:0-12:50
+    Visibility: public -/
+@[global_simps, irreducible]
+def framing.MAX_FRAME_BYTES : Result Std.U64 := do
+  let i ← 64#u64 * 1024#u64
+  i * 1024#u64
+
+/-- [clew_rules::framing::HeaderError]
+    Source: 'crates/clew-rules/src/framing.rs', lines 16:0-25:1
+    Visibility: public -/
+@[discriminant isize]
+inductive framing.HeaderError where
+| Malformed : framing.HeaderError
+| InvalidLength : framing.HeaderError
+| Conflicting : framing.HeaderError
+| TooLarge : Std.U64 → framing.HeaderError
+
+/-- [clew_rules::framing::is_token_byte]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 29:0-48:1 -/
+def framing.is_token_byte (b : Std.U8) : Result Bool := do
+  if b >= 48#u8
+  then
+    if b <= 57#u8
+    then ok true
+    else
+      if b >= 65#u8
+      then
+        if b <= 90#u8
+        then ok true
+        else
+          if b >= 97#u8
+          then
+            if b <= 122#u8
+            then ok true
+            else
+              if b = 33#u8
+              then ok true
+              else
+                if b = 35#u8
+                then ok true
+                else
+                  if b = 36#u8
+                  then ok true
+                  else
+                    if b = 37#u8
+                    then ok true
+                    else
+                      if b = 38#u8
+                      then ok true
+                      else
+                        if b = 39#u8
+                        then ok true
+                        else
+                          if b = 42#u8
+                          then ok true
+                          else
+                            if b = 43#u8
+                            then ok true
+                            else
+                              if b = 45#u8
+                              then ok true
+                              else
+                                if b = 46#u8
+                                then ok true
+                                else
+                                  if b = 94#u8
+                                  then ok true
+                                  else
+                                    if b = 95#u8
+                                    then ok true
+                                    else
+                                      if b = 96#u8
+                                      then ok true
+                                      else
+                                        if b = 124#u8
+                                        then ok true
+                                        else ok (b = 126#u8)
+          else
+            if b = 33#u8
+            then ok true
+            else
+              if b = 35#u8
+              then ok true
+              else
+                if b = 36#u8
+                then ok true
+                else
+                  if b = 37#u8
+                  then ok true
+                  else
+                    if b = 38#u8
+                    then ok true
+                    else
+                      if b = 39#u8
+                      then ok true
+                      else
+                        if b = 42#u8
+                        then ok true
+                        else
+                          if b = 43#u8
+                          then ok true
+                          else
+                            if b = 45#u8
+                            then ok true
+                            else
+                              if b = 46#u8
+                              then ok true
+                              else
+                                if b = 94#u8
+                                then ok true
+                                else
+                                  if b = 95#u8
+                                  then ok true
+                                  else
+                                    if b = 96#u8
+                                    then ok true
+                                    else
+                                      if b = 124#u8
+                                      then ok true
+                                      else ok (b = 126#u8)
+      else
+        if b >= 97#u8
+        then
+          if b <= 122#u8
+          then ok true
+          else
+            if b = 33#u8
+            then ok true
+            else
+              if b = 35#u8
+              then ok true
+              else
+                if b = 36#u8
+                then ok true
+                else
+                  if b = 37#u8
+                  then ok true
+                  else
+                    if b = 38#u8
+                    then ok true
+                    else
+                      if b = 39#u8
+                      then ok true
+                      else
+                        if b = 42#u8
+                        then ok true
+                        else
+                          if b = 43#u8
+                          then ok true
+                          else
+                            if b = 45#u8
+                            then ok true
+                            else
+                              if b = 46#u8
+                              then ok true
+                              else
+                                if b = 94#u8
+                                then ok true
+                                else
+                                  if b = 95#u8
+                                  then ok true
+                                  else
+                                    if b = 96#u8
+                                    then ok true
+                                    else
+                                      if b = 124#u8
+                                      then ok true
+                                      else ok (b = 126#u8)
+        else
+          if b = 33#u8
+          then ok true
+          else
+            if b = 35#u8
+            then ok true
+            else
+              if b = 36#u8
+              then ok true
+              else
+                if b = 37#u8
+                then ok true
+                else
+                  if b = 38#u8
+                  then ok true
+                  else
+                    if b = 39#u8
+                    then ok true
+                    else
+                      if b = 42#u8
+                      then ok true
+                      else
+                        if b = 43#u8
+                        then ok true
+                        else
+                          if b = 45#u8
+                          then ok true
+                          else
+                            if b = 46#u8
+                            then ok true
+                            else
+                              if b = 94#u8
+                              then ok true
+                              else
+                                if b = 95#u8
+                                then ok true
+                                else
+                                  if b = 96#u8
+                                  then ok true
+                                  else
+                                    if b = 124#u8
+                                    then ok true
+                                    else ok (b = 126#u8)
+  else
+    if b >= 65#u8
+    then
+      if b <= 90#u8
+      then ok true
+      else
+        if b >= 97#u8
+        then
+          if b <= 122#u8
+          then ok true
+          else
+            if b = 33#u8
+            then ok true
+            else
+              if b = 35#u8
+              then ok true
+              else
+                if b = 36#u8
+                then ok true
+                else
+                  if b = 37#u8
+                  then ok true
+                  else
+                    if b = 38#u8
+                    then ok true
+                    else
+                      if b = 39#u8
+                      then ok true
+                      else
+                        if b = 42#u8
+                        then ok true
+                        else
+                          if b = 43#u8
+                          then ok true
+                          else
+                            if b = 45#u8
+                            then ok true
+                            else
+                              if b = 46#u8
+                              then ok true
+                              else
+                                if b = 94#u8
+                                then ok true
+                                else
+                                  if b = 95#u8
+                                  then ok true
+                                  else
+                                    if b = 96#u8
+                                    then ok true
+                                    else
+                                      if b = 124#u8
+                                      then ok true
+                                      else ok (b = 126#u8)
+        else
+          if b = 33#u8
+          then ok true
+          else
+            if b = 35#u8
+            then ok true
+            else
+              if b = 36#u8
+              then ok true
+              else
+                if b = 37#u8
+                then ok true
+                else
+                  if b = 38#u8
+                  then ok true
+                  else
+                    if b = 39#u8
+                    then ok true
+                    else
+                      if b = 42#u8
+                      then ok true
+                      else
+                        if b = 43#u8
+                        then ok true
+                        else
+                          if b = 45#u8
+                          then ok true
+                          else
+                            if b = 46#u8
+                            then ok true
+                            else
+                              if b = 94#u8
+                              then ok true
+                              else
+                                if b = 95#u8
+                                then ok true
+                                else
+                                  if b = 96#u8
+                                  then ok true
+                                  else
+                                    if b = 124#u8
+                                    then ok true
+                                    else ok (b = 126#u8)
+    else
+      if b >= 97#u8
+      then
+        if b <= 122#u8
+        then ok true
+        else
+          if b = 33#u8
+          then ok true
+          else
+            if b = 35#u8
+            then ok true
+            else
+              if b = 36#u8
+              then ok true
+              else
+                if b = 37#u8
+                then ok true
+                else
+                  if b = 38#u8
+                  then ok true
+                  else
+                    if b = 39#u8
+                    then ok true
+                    else
+                      if b = 42#u8
+                      then ok true
+                      else
+                        if b = 43#u8
+                        then ok true
+                        else
+                          if b = 45#u8
+                          then ok true
+                          else
+                            if b = 46#u8
+                            then ok true
+                            else
+                              if b = 94#u8
+                              then ok true
+                              else
+                                if b = 95#u8
+                                then ok true
+                                else
+                                  if b = 96#u8
+                                  then ok true
+                                  else
+                                    if b = 124#u8
+                                    then ok true
+                                    else ok (b = 126#u8)
+      else
+        if b = 33#u8
+        then ok true
+        else
+          if b = 35#u8
+          then ok true
+          else
+            if b = 36#u8
+            then ok true
+            else
+              if b = 37#u8
+              then ok true
+              else
+                if b = 38#u8
+                then ok true
+                else
+                  if b = 39#u8
+                  then ok true
+                  else
+                    if b = 42#u8
+                    then ok true
+                    else
+                      if b = 43#u8
+                      then ok true
+                      else
+                        if b = 45#u8
+                        then ok true
+                        else
+                          if b = 46#u8
+                          then ok true
+                          else
+                            if b = 94#u8
+                            then ok true
+                            else
+                              if b = 95#u8
+                              then ok true
+                              else
+                                if b = 96#u8
+                                then ok true
+                                else
+                                  if b = 124#u8
+                                  then ok true
+                                  else ok (b = 126#u8)
+
+/-- [clew_rules::framing::is_ascii_ws]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 51:0-53:1 -/
+def framing.is_ascii_ws (b : Std.U8) : Result Bool := do
+  if b = 32#u8
+  then ok true
+  else
+    if b = 9#u8
+    then ok true
+    else
+      if b = 10#u8
+      then ok true
+      else if b = 12#u8
+           then ok true
+           else ok (b = 13#u8)
+
+/-- [clew_rules::framing::lower]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 56:0-58:1 -/
+def framing.lower (b : Std.U8) : Result Std.U8 := do
+  if b >= 65#u8
+  then if b <= 90#u8
+       then b + 32#u8
+       else ok b
+  else ok b
+
+/-- [clew_rules::framing::CONTENT_LENGTH]
+    Source: 'crates/clew-rules/src/framing.rs', lines 60:0-60:52 -/
+@[global_simps, irreducible]
+def framing.CONTENT_LENGTH : Array Std.U8 14#usize :=
+  Array.make 14#usize [
+    99#u8, 111#u8, 110#u8, 116#u8, 101#u8, 110#u8, 116#u8, 45#u8, 108#u8,
+    101#u8, 110#u8, 103#u8, 116#u8, 104#u8
+    ]
+
+/-- [clew_rules::framing::is_content_length]: loop body 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 68:4-75:1 -/
+@[rust_loop_body]
+def framing.is_content_length_loop.body
+  (line : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  if i < 14#usize
+  then
+    let i1 ← Slice.index_usize line i
+    let i2 ← framing.lower i1
+    let i3 ← Array.index_usize framing.CONTENT_LENGTH i
+    if i2 != i3
+    then ok (done false)
+    else let i4 ← i + 1#usize
+         ok (cont i4)
+  else ok (done true)
+
+/-- [clew_rules::framing::is_content_length]: loop 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 68:4-75:1 -/
+@[rust_loop]
+def framing.is_content_length_loop
+  (line : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => framing.is_content_length_loop.body line i1)
+    i
+
+/-- [clew_rules::framing::is_content_length]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 63:0-75:1 -/
+def framing.is_content_length
+  (line : Slice Std.U8) («end» : Std.Usize) : Result Bool := do
+  if «end» != 14#usize
+  then ok false
+  else framing.is_content_length_loop line 0#usize
+
+/-- [clew_rules::framing::all_ascii]: loop body 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 80:4-87:1 -/
+@[rust_loop_body]
+def framing.all_ascii_loop.body
+  (line : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len line
+  if i < i1
+  then
+    let i2 ← Slice.index_usize line i
+    if i2 >= 128#u8
+    then ok (done false)
+    else let i3 ← i + 1#usize
+         ok (cont i3)
+  else ok (done true)
+
+/-- [clew_rules::framing::all_ascii]: loop 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 80:4-87:1 -/
+@[rust_loop]
+def framing.all_ascii_loop
+  (line : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => framing.all_ascii_loop.body line i1)
+    i
+
+/-- [clew_rules::framing::all_ascii]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 78:0-87:1 -/
+@[reducible]
+def framing.all_ascii (line : Slice Std.U8) : Result Bool := do
+  framing.all_ascii_loop line 0#usize
+
+/-- [clew_rules::framing::find_colon]: loop body 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 92:4-94:5 -/
+@[rust_loop_body]
+def framing.find_colon_loop.body
+  (line : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Std.Usize)
+  := do
+  let i1 := Slice.len line
+  if i < i1
+  then
+    let i2 ← Slice.index_usize line i
+    if i2 != 58#u8
+    then let i3 ← i + 1#usize
+         ok (cont i3)
+    else ok (done i)
+  else ok (done i)
+
+/-- [clew_rules::framing::find_colon]: loop 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 92:4-94:5 -/
+@[rust_loop]
+def framing.find_colon_loop
+  (line : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
+  loop
+    (fun i1 => framing.find_colon_loop.body line i1)
+    i
+
+/-- [clew_rules::framing::find_colon]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 90:0-96:1 -/
+@[reducible]
+def framing.find_colon (line : Slice Std.U8) : Result Std.Usize := do
+  framing.find_colon_loop line 0#usize
+
+/-- [clew_rules::framing::all_token]: loop body 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 101:4-108:1 -/
+@[rust_loop_body]
+def framing.all_token_loop.body
+  (line : Slice Std.U8) («end» : Std.Usize) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  if i < «end»
+  then
+    let i1 ← Slice.index_usize line i
+    let b ← framing.is_token_byte i1
+    if b
+    then let i2 ← i + 1#usize
+         ok (cont i2)
+    else ok (done false)
+  else ok (done true)
+
+/-- [clew_rules::framing::all_token]: loop 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 101:4-108:1 -/
+@[rust_loop]
+def framing.all_token_loop
+  (line : Slice Std.U8) («end» : Std.Usize) (i : Std.Usize) :
+  Result Bool
+  := do
+  loop
+    (fun i1 => framing.all_token_loop.body line «end» i1)
+    i
+
+/-- [clew_rules::framing::all_token]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 99:0-108:1 -/
+@[reducible]
+def framing.all_token
+  (line : Slice Std.U8) («end» : Std.Usize) : Result Bool := do
+  framing.all_token_loop line «end» 0#usize
+
+/-- [clew_rules::framing::skip_ws]: loop body 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 113:4-115:5 -/
+@[rust_loop_body]
+def framing.skip_ws_loop.body
+  (line : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Std.Usize)
+  := do
+  let i1 := Slice.len line
+  if i < i1
+  then
+    let i2 ← Slice.index_usize line i
+    let b ← framing.is_ascii_ws i2
+    if b
+    then let i3 ← i + 1#usize
+         ok (cont i3)
+    else ok (done i)
+  else ok (done i)
+
+/-- [clew_rules::framing::skip_ws]: loop 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 113:4-115:5 -/
+@[rust_loop]
+def framing.skip_ws_loop
+  (line : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
+  loop
+    (fun i1 => framing.skip_ws_loop.body line i1)
+    i
+
+/-- [clew_rules::framing::skip_ws]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 111:0-117:1 -/
+@[reducible]
+def framing.skip_ws
+  (line : Slice Std.U8) («from» : Std.Usize) : Result Std.Usize := do
+  framing.skip_ws_loop line «from»
+
+/-- [clew_rules::framing::trim_end]: loop body 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 122:4-124:5 -/
+@[rust_loop_body]
+def framing.trim_end_loop.body
+  (line : Slice Std.U8) («from» : Std.Usize) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Std.Usize)
+  := do
+  if i > «from»
+  then
+    let i1 ← i - 1#usize
+    let i2 ← Slice.index_usize line i1
+    let b ← framing.is_ascii_ws i2
+    if b
+    then ok (cont i1)
+    else ok (done i)
+  else ok (done i)
+
+/-- [clew_rules::framing::trim_end]: loop 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 122:4-124:5 -/
+@[rust_loop]
+def framing.trim_end_loop
+  (line : Slice Std.U8) («from» : Std.Usize) (i : Std.Usize) :
+  Result Std.Usize
+  := do
+  loop
+    (fun i1 => framing.trim_end_loop.body line «from» i1)
+    i
+
+/-- [clew_rules::framing::trim_end]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 120:0-126:1 -/
+@[reducible]
+def framing.trim_end
+  (line : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
+  Result Std.Usize
+  := do
+  framing.trim_end_loop line «from» «to»
+
+/-- [clew_rules::framing::all_digits]: loop body 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 131:4-138:1 -/
+@[rust_loop_body]
+def framing.all_digits_loop.body
+  (line : Slice Std.U8) («to» : Std.Usize) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  if i < «to»
+  then
+    let i1 ← Slice.index_usize line i
+    if i1 < 48#u8
+    then ok (done false)
+    else
+      if i1 > 57#u8
+      then ok (done false)
+      else let i2 ← i + 1#usize
+           ok (cont i2)
+  else ok (done true)
+
+/-- [clew_rules::framing::all_digits]: loop 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 131:4-138:1 -/
+@[rust_loop]
+def framing.all_digits_loop
+  (line : Slice Std.U8) («to» : Std.Usize) (i : Std.Usize) :
+  Result Bool
+  := do
+  loop
+    (fun i1 => framing.all_digits_loop.body line «to» i1)
+    i
+
+/-- [clew_rules::framing::all_digits]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 129:0-138:1 -/
+@[reducible]
+def framing.all_digits
+  (line : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
+  Result Bool
+  := do
+  framing.all_digits_loop line «to» «from»
+
+/-- [clew_rules::framing::decimal]: loop body 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 144:4-153:1 -/
+@[rust_loop_body]
+def framing.decimal_loop.body
+  (line : Slice Std.U8) («to» : Std.Usize) (n : Std.U64) (i : Std.Usize) :
+  Result (ControlFlow (Std.U64 × Std.Usize) (Option Std.U64))
+  := do
+  if i < «to»
+  then
+    let i1 ← Slice.index_usize line i
+    let i2 ← i1 - 48#u8
+    let digit ← lift (UScalar.cast .U64 i2)
+    let i3 ← core.num.U64.MAX - digit
+    let i4 ← i3 / 10#u64
+    if n > i4
+    then ok (done none)
+    else
+      let i5 ← n * 10#u64
+      let n1 ← i5 + digit
+      let i6 ← i + 1#usize
+      ok (cont (n1, i6))
+  else ok (done (some n))
+
+/-- [clew_rules::framing::decimal]: loop 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 144:4-153:1 -/
+@[rust_loop]
+def framing.decimal_loop
+  (line : Slice Std.U8) («to» : Std.Usize) (n : Std.U64) (i : Std.Usize) :
+  Result (Option Std.U64)
+  := do
+  loop
+    (fun (n1, i1) => framing.decimal_loop.body line «to» n1 i1)
+    (n, i)
+
+/-- [clew_rules::framing::decimal]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 141:0-153:1 -/
+@[reducible]
+def framing.decimal
+  (line : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
+  Result (Option Std.U64)
+  := do
+  framing.decimal_loop line «to» 0#u64 «from»
+
+/-- [clew_rules::framing::parse_length]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 158:0-163:1 -/
+def framing.parse_length
+  (line : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
+  Result (Option Std.U64)
+  := do
+  if «from» >= «to»
+  then ok none
+  else
+    let i ← «to» - «from»
+    if i > 20#usize
+    then ok none
+    else
+      let b ← framing.all_digits line «from» «to»
+      if b
+      then framing.decimal line «from» «to»
+      else ok none
+
+/-- [clew_rules::framing::header]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 175:0-201:1
+    Visibility: public -/
+def framing.header
+  (length : Option Std.U64) (line : Slice Std.U8) :
+  Result (core.result.Result (Option Std.U64) framing.HeaderError)
+  := do
+  let b ← framing.all_ascii line
+  if b
+  then
+    let colon ← framing.find_colon line
+    let i := Slice.len line
+    if colon = i
+    then ok (core.result.Result.Err framing.HeaderError.Malformed)
+    else
+      if colon = 0#usize
+      then ok (core.result.Result.Err framing.HeaderError.Malformed)
+      else
+        let b1 ← framing.all_token line colon
+        if b1
+        then
+          let b2 ← framing.is_content_length line colon
+          if b2
+          then
+            let i1 ← colon + 1#usize
+            let «from» ← framing.skip_ws line i1
+            let i2 := Slice.len line
+            let «to» ← framing.trim_end line «from» i2
+            let o ← framing.parse_length line «from» «to»
+            match o with
+            | none =>
+              ok (core.result.Result.Err framing.HeaderError.InvalidLength)
+            | some n =>
+              match length with
+              | none =>
+                let i3 ← framing.MAX_FRAME_BYTES
+                if n > i3
+                then
+                  ok (core.result.Result.Err (framing.HeaderError.TooLarge n))
+                else ok (core.result.Result.Ok o)
+              | some prev =>
+                if prev != n
+                then
+                  ok (core.result.Result.Err framing.HeaderError.Conflicting)
+                else
+                  let i3 ← framing.MAX_FRAME_BYTES
+                  if n > i3
+                  then
+                    ok (core.result.Result.Err (framing.HeaderError.TooLarge
+                      n))
+                  else ok (core.result.Result.Ok o)
+          else ok (core.result.Result.Ok length)
+        else ok (core.result.Result.Err framing.HeaderError.Malformed)
+  else ok (core.result.Result.Err framing.HeaderError.Malformed)
+
 /-- [clew_rules::location::Node]
     Source: 'crates/clew-rules/src/location.rs', lines 6:0-10:1
     Visibility: public -/

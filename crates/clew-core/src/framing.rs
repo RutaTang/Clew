@@ -37,6 +37,7 @@
 //! A peer that stops reading can therefore neither wedge the actor nor hold
 //! up the stop that is meant to get rid of it.
 
+use clew_rules::framing::HeaderError;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -172,25 +173,8 @@ fn preview(bytes: &[u8]) -> String {
     format!("{text:?}{more}")
 }
 
-/// An RFC 7230 `token` byte — what a header field name is made of. No
-/// whitespace, so `Content-Length :` is malformed rather than guessed at.
-fn is_token_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
-}
-
-/// Parse a `Content-Length` value: ASCII digits only. `str::parse` would also
-/// take a leading `+`, which no conforming peer sends and which therefore
-/// says the stream is not what it claims to be.
-fn parse_length(value: &[u8]) -> Result<u64, FrameError> {
-    let invalid = || FrameError::InvalidContentLength(preview(value));
-    if value.is_empty() || value.len() > 20 || !value.iter().all(u8::is_ascii_digit) {
-        return Err(invalid());
-    }
-    std::str::from_utf8(value)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(invalid)
-}
+// The cap the proved header step checks against is this one.
+const _: () = assert!(MAX_FRAME_BYTES as u64 == clew_rules::framing::MAX_FRAME_BYTES);
 
 /// Read one frame's body. `Ok(None)` is a clean end of stream between frames;
 /// an end anywhere inside a frame is [`FrameError::Truncated`].
@@ -246,26 +230,21 @@ where
             break; // the blank line that ends the headers
         }
         headers += 1;
-        let malformed = || FrameError::MalformedHeader(preview(&line));
-        if !line.is_ascii() {
-            return Err(malformed());
-        }
-        let colon = line.iter().position(|&b| b == b':').ok_or_else(malformed)?;
-        let (name, value) = (&line[..colon], &line[colon + 1..]);
-        if name.is_empty() || !name.iter().all(|&b| is_token_byte(b)) {
-            return Err(malformed());
-        }
-        if name.eq_ignore_ascii_case(b"content-length") {
-            let value = value.trim_ascii();
-            let len = parse_length(value)?;
-            if content_length.is_some_and(|prev| prev != len) {
-                return Err(FrameError::ConflictingContentLength);
+        // The line's decision — `clew_rules::framing::header`, whose
+        // translation to Lean is proved to be the model `read_frame`'s
+        // theorems are about.
+        content_length = match clew_rules::framing::header(content_length, &line) {
+            Ok(length) => length,
+            Err(HeaderError::Malformed) => return Err(FrameError::MalformedHeader(preview(&line))),
+            Err(HeaderError::InvalidLength) => {
+                let value = line.splitn(2, |&b| b == b':').nth(1).unwrap_or_default();
+                return Err(FrameError::InvalidContentLength(preview(
+                    value.trim_ascii(),
+                )));
             }
-            if len > MAX_FRAME_BYTES as u64 {
-                return Err(FrameError::TooLarge(len));
-            }
-            content_length = Some(len);
-        }
+            Err(HeaderError::Conflicting) => return Err(FrameError::ConflictingContentLength),
+            Err(HeaderError::TooLarge(len)) => return Err(FrameError::TooLarge(len)),
+        };
     }
     let len = content_length.ok_or(FrameError::MissingContentLength)? as usize;
     let mut body = Vec::with_capacity(len.min(INITIAL_BODY_CAPACITY));

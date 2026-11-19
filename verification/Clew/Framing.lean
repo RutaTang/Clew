@@ -24,6 +24,10 @@ This file models the readers byte for byte — `read_frame`
   two ends once disagreed by that byte, and the largest frame one end would
   send was the frame the other dropped the connection on).
 
+What `read_frame` decides from one header line is `header`; the Rust
+function it models (`clew_rules::framing::header`), translated to Lean by
+Charon and Aeneas, is proved to be it in `verification/extracted/Equal.lean`.
+
 Bytes are `Nat`s.
 -/
 

@@ -23,6 +23,7 @@ trap 'rm -rf "$out"' EXIT
 (cd "$crate" && charon cargo --preset=aeneas \
   --start-from crate::voice::route \
   --start-from crate::location::trusted_by \
+  --start-from crate::framing::header \
   --dest "$out" -- --target-dir "$out/target" -q) >"$out/charon.log" 2>&1 || {
   cat "$out/charon.log" >&2
   exit 1
