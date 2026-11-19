@@ -16,4 +16,5 @@ pub mod location;
 pub mod server_dist;
 pub mod shell;
 pub mod text;
+pub mod version;
 pub mod voice;

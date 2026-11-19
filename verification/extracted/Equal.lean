@@ -6,6 +6,7 @@ import Clew.Ssh
 import Clew.ServerDist
 import Clew.Trust
 import Clew.Confine
+import Clew.Update
 
 /-!
 # The code that runs is the model
@@ -3784,5 +3785,547 @@ theorem names_a_folder_is_the_model (cs : List Char) (rel : Slice Std.U8) (h : b
     split <;> simp_all
 
 end Confine
+
+/-! ## Which updates may be installed — `clew_rules::version`
+
+`parse` reads the version an update declares (trimmed, leading `v`s
+dropped, a `-` or `+` suffix ignored, three `.`-separated numbers, each
+trimmed), `is_newer` orders two versions field by field, and `upgrade` is
+`ensure_upgrade`'s decision. The model in `../Clew/Update.lean` proves an
+accepted update is strictly newer and that the order is strict and total, so
+updates only climb. Proved here: on the UTF-8 bytes of any string, the three
+return, and decide what the model decides (`upgrade_newer`: what `upgrade`
+lets through is newer, of the code). On the way, a separator that is one
+ASCII byte splits a string's bytes where it splits its characters
+(`split_first`). -/
+
+namespace Version
+
+open clew_rules.version
+open Shell (bs)
+open Headers (utf8)
+open Clew.Extracted.Text (enc)
+open KnownHosts (isDigitB foldN foldN_ge stripB stripPlus utf8_stripPlus isAsciiDigit_eq isDigitB_high
+  parseDigits parseU64_eq toNat_ne)
+
+/-- The bytes `s[x..y]`. -/
+abbrev sg (s : Slice Std.U8) (x y : Nat) : List Nat := ((bs s.val).drop x).take (y - x)
+
+theorem sg_split (s : Slice Std.U8) (x y z : Nat) (hxy : x ≤ y) (hyz : y ≤ z) :
+    sg s x z = sg s x y ++ sg s y z := by
+  simp only [sg]
+  rw [show z - x = (y - x) + (z - y) by omega, List.take_add, List.drop_drop]
+  congr 3; omega
+
+theorem sg_cons (s : Slice Std.U8) (y z : Nat) (hyz : y < z) (hz : z ≤ s.val.length) :
+    sg s y z = (s.val[y]'(by omega)).val :: sg s (y + 1) z := by
+  simp only [sg]
+  have hy : y < (bs s.val).length := by simp [bs]; omega
+  rw [List.drop_eq_getElem_cons hy, show z - y = (z - (y + 1)) + 1 by omega, List.take_succ_cons]
+  simp [bs]
+
+theorem sg_self (s : Slice Std.U8) (x : Nat) : sg s x x = [] := by simp [sg]
+
+theorem sg_snoc (s : Slice Std.U8) (x i : Nat) (hx : x ≤ i) (hi : i < s.val.length) :
+    sg s x (i + 1) = sg s x i ++ [(s.val[i]'hi).val] := by
+  rw [sg_split s x i (i + 1) hx (by omega), sg_cons s i (i + 1) (by omega) (by omega), sg_self]
+
+theorem sg_length (s : Slice Std.U8) (x y : Nat) (_hxy : x ≤ y) (hy : y ≤ s.val.length) :
+    (sg s x y).length = y - x := by
+  simp [sg, bs]; omega
+
+theorem find_ok (s : Slice Std.U8) (f t : Std.Usize) (a b : Std.U8) (h1 : f.val ≤ t.val)
+    (h2 : t.val ≤ s.val.length) :
+    ∃ j, find s f t a b = ok j ∧ f.val ≤ j.val ∧ j.val ≤ t.val ∧
+      (∀ x ∈ sg s f.val j.val, x ≠ a.val ∧ x ≠ b.val) ∧
+      (j.val < t.val → ∃ k, sg s j.val t.val = k :: sg s (j.val + 1) t.val ∧ (k = a.val ∨ k = b.val)) := by
+  obtain ⟨r, hr, hq⟩ := loop_spec (fun i => find_loop.body s t a b i)
+    (fun i => f.val ≤ i.val ∧ i.val ≤ t.val ∧ ∀ x ∈ sg s f.val i.val, x ≠ a.val ∧ x ≠ b.val)
+    (fun _ r => f.val ≤ r.val ∧ r.val ≤ t.val ∧ (∀ x ∈ sg s f.val r.val, x ≠ a.val ∧ x ≠ b.val) ∧
+      (r.val < t.val → ∃ k, sg s r.val t.val = k :: sg s (r.val + 1) t.val ∧ (k = a.val ∨ k = b.val)))
+    (fun i => t.val - i.val)
+    (by
+      rintro i ⟨hi1, hi2, hno⟩
+      by_cases hlt : i.val < t.val
+      · have hil : i.val < s.val.length := by omega
+        have hc := sg_cons s i.val t.val hlt h2
+        by_cases ha : s.val[i.val] = a
+        · left
+          refine ⟨i, by simp [find_loop.body, UScalar.lt_equiv, hlt, index_ok s i hil, ha],
+            hi1, hi2, hno, fun _ => ⟨_, hc, Or.inl (by rw [ha])⟩⟩
+        · by_cases hb : s.val[i.val] = b
+          · left
+            refine ⟨i, by simp [find_loop.body, UScalar.lt_equiv, hlt, index_ok s i hil, hb],
+              hi1, hi2, hno, fun _ => ⟨_, hc, Or.inr (by rw [hb])⟩⟩
+          · right
+            obtain ⟨j, hj, hjv⟩ := succ_ok s i hil
+            refine ⟨j, by simp [find_loop.body, UScalar.lt_equiv, hlt, index_ok s i hil, ha, hb, hj],
+              ⟨by omega, by omega, ?_⟩, by omega, fun r hr => hr⟩
+            rw [hjv, sg_snoc s f.val i.val hi1 hil]
+            intro x hx
+            rcases List.mem_append.mp hx with hx | hx
+            · exact hno x hx
+            · simp only [List.mem_singleton] at hx
+              subst hx
+              exact ⟨fun e => ha (UScalar.eq_of_val_eq e), fun e => hb (UScalar.eq_of_val_eq e)⟩
+      · left
+        have hit : i.val = t.val := by omega
+        refine ⟨t, by simp [find_loop.body, UScalar.lt_equiv, hlt], h1, le_refl _,
+          by rw [← hit]; exact hno, fun h => absurd h (by omega)⟩)
+    f ⟨le_refl _, h1, by simp⟩
+  exact ⟨r, by unfold find find_loop; exact hr, hq⟩
+
+theorem skip_v_ok (s : Slice Std.U8) (f t : Std.Usize) (h1 : f.val ≤ t.val) (h2 : t.val ≤ s.val.length) :
+    ∃ j, skip_v s f t = ok j ∧ f.val ≤ j.val ∧ j.val ≤ t.val ∧ (∀ x ∈ sg s f.val j.val, x = 118) ∧
+      (j.val < t.val → ∃ k, sg s j.val t.val = k :: sg s (j.val + 1) t.val ∧ k ≠ 118) := by
+  obtain ⟨r, hr, hq⟩ := loop_spec (fun i => skip_v_loop.body s t i)
+    (fun i => f.val ≤ i.val ∧ i.val ≤ t.val ∧ ∀ x ∈ sg s f.val i.val, x = 118)
+    (fun _ r => f.val ≤ r.val ∧ r.val ≤ t.val ∧ (∀ x ∈ sg s f.val r.val, x = 118) ∧
+      (r.val < t.val → ∃ k, sg s r.val t.val = k :: sg s (r.val + 1) t.val ∧ k ≠ 118))
+    (fun i => t.val - i.val)
+    (by
+      rintro i ⟨hi1, hi2, hno⟩
+      by_cases hlt : i.val < t.val
+      · have hil : i.val < s.val.length := by omega
+        have hc := sg_cons s i.val t.val hlt h2
+        by_cases hv : s.val[i.val] = 118#u8
+        · right
+          obtain ⟨j, hj, hjv⟩ := succ_ok s i hil
+          refine ⟨j, by simp [skip_v_loop.body, UScalar.lt_equiv, hlt, index_ok s i hil, hv, hj],
+            ⟨by omega, by omega, ?_⟩, by omega, fun r hr => hr⟩
+          rw [hjv, sg_snoc s f.val i.val hi1 hil]
+          intro x hx
+          rcases List.mem_append.mp hx with hx | hx
+          · exact hno x hx
+          · simp only [List.mem_singleton] at hx; rw [hx, hv]; rfl
+        · left
+          refine ⟨i, by simp [skip_v_loop.body, UScalar.lt_equiv, hlt, index_ok s i hil, hv],
+            hi1, hi2, hno, fun _ => ⟨_, hc, fun e => hv (UScalar.eq_of_val_eq (by rw [e]; rfl))⟩⟩
+      · left
+        refine ⟨i, by simp [skip_v_loop.body, UScalar.lt_equiv, hlt], hi1, hi2, hno,
+          fun h => absurd h hlt⟩)
+    f ⟨le_refl _, h1, by simp⟩
+  exact ⟨r, by unfold skip_v skip_v_loop; exact hr, hq⟩
+
+/-! ### Characters and their bytes -/
+
+theorem mem_utf8 (c : Char) (cs : List Char) (hc : c ∈ cs) (x : Nat) (hx : x ∈ enc c) :
+    x ∈ utf8 cs := by
+  simp only [Headers.utf8, enc, List.mem_map, List.mem_flatMap] at hx ⊢
+  obtain ⟨b, hb, rfl⟩ := hx
+  exact ⟨b, ⟨c, hc, hb⟩, rfl⟩
+
+/-- A separator test on characters and one on bytes agree: a separator is
+one byte, which passes; no byte of any other character passes. -/
+def Agree (Q : Char → Bool) (P : Nat → Bool) : Prop :=
+  (∀ c, Q c = true → enc c = [c.toNat] ∧ P c.toNat = true) ∧
+    (∀ c, Q c = false → ∀ x ∈ enc c, P x = false)
+
+theorem split_none (Q : Char → Bool) (P : Nat → Bool) (hag : Agree Q P) (cs : List Char)
+    (h : ∀ x ∈ utf8 cs, P x = false) : Clew.Text.split Q cs = [cs] := by
+  apply Clew.Text.split_none
+  intro c hc
+  cases hq : Q c
+  · rfl
+  · exfalso
+    obtain ⟨he, hp⟩ := hag.1 c hq
+    have := h _ (mem_utf8 c cs hc c.toNat (by rw [he]; simp))
+    rw [hp] at this; exact absurd this (by simp)
+
+theorem split_first (Q : Char → Bool) (P : Nat → Bool) (hag : Agree Q P) :
+    ∀ (cs : List Char) (pre : List Nat) (k : Nat) (rest : List Nat),
+      utf8 cs = pre ++ k :: rest → (∀ x ∈ pre, P x = false) → P k = true →
+      ∃ a zs, utf8 a = pre ∧ utf8 zs = rest ∧ Clew.Text.split Q cs = a :: Clew.Text.split Q zs := by
+  intro cs
+  induction cs with
+  | nil => intro pre k rest h; simp [Headers.utf8] at h
+  | cons c cs ih =>
+    intro pre k rest h hpre hk
+    rw [Shell.utf8_cons] at h
+    cases hq : Q c
+    · have hno := hag.2 c hq
+      obtain ⟨pre', hpre', hcs⟩ : ∃ pre', pre = enc c ++ pre' ∧ utf8 cs = pre' ++ k :: rest := by
+        rcases List.append_eq_append_iff.mp h with ⟨a', h1, h2⟩ | ⟨c', h1, h2⟩
+        · exact ⟨a', h1, h2⟩
+        · cases c' with
+          | nil => exact ⟨[], by simp at h1; rw [← h1]; simp, by simpa using h2.symm⟩
+          | cons y c'' =>
+            simp only [List.cons_append, List.cons.injEq] at h2
+            have : P k = false := hno k (by rw [show enc c = _ from h1, h2.1]; simp)
+            rw [hk] at this; exact absurd this (by simp)
+      obtain ⟨a, zs, ha, hz, hs⟩ := ih pre' k rest hcs (fun x hx => hpre x (by rw [hpre']; simp [hx])) hk
+      refine ⟨c :: a, zs, by rw [Shell.utf8_cons, ha, hpre'], hz, ?_⟩
+      simp only [Clew.Text.split, hq, Bool.false_eq_true, ↓reduceIte, hs]
+    · obtain ⟨he, hp⟩ := hag.1 c hq
+      rw [show (String.utf8EncodeChar c).map (·.toNat) = [c.toNat] from he] at h
+      cases pre with
+      | nil =>
+        simp only [List.nil_append, List.singleton_append, List.cons.injEq] at h
+        refine ⟨[], cs, rfl, h.2, ?_⟩
+        simp [Clew.Text.split, hq]
+      | cons p pre =>
+        simp only [List.cons_append, List.cons.injEq] at h
+        have := hpre p (by simp)
+        rw [← h.1, hp] at this; exact absurd this (by simp)
+
+theorem utf8_dropWhile_v : ∀ (cs : List Char) (pre rest : List Nat), utf8 cs = pre ++ rest →
+    (∀ x ∈ pre, x = 118) → rest.head? ≠ some 118 → utf8 (cs.dropWhile (· == 'v')) = rest := by
+  intro cs
+  induction cs with
+  | nil =>
+    intro pre rest h _ _
+    have : pre ++ rest = [] := h.symm
+    simp at this; simp [this.2]; rfl
+  | cons c cs ih =>
+    intro pre rest h hpre hr
+    by_cases hc : c = 'v'
+    · subst hc
+      rw [show utf8 ('v' :: cs) = 118 :: utf8 cs from by rw [Shell.utf8_cons]; rfl] at h
+      cases pre with
+      | nil => simp at h; rw [← h] at hr; simp at hr
+      | cons p pre' =>
+        simp only [List.cons_append, List.cons.injEq] at h
+        rw [List.dropWhile_cons_of_pos (by simp)]
+        exact ih pre' rest h.2 (fun x hx => hpre x (by simp [hx])) hr
+    · obtain ⟨b, tl, hbt, hb⟩ := KnownHosts.utf8_cons_head c cs 118 (by omega) (toNat_ne c 'v' hc)
+      cases pre with
+      | nil =>
+        rw [List.dropWhile_cons_of_neg (by simpa using hc)]
+        simpa using h
+      | cons p pre' =>
+        rw [hbt] at h
+        simp only [List.cons_append, List.cons.injEq] at h
+        exact absurd (h.1 ▸ hpre p (by simp)) hb
+
+theorem agree_dot : Agree (· == '.') (fun x => x == 46 || x == 46) := by
+  constructor
+  · intro c hc
+    have : c = '.' := by simpa using hc
+    subst this; exact ⟨rfl, rfl⟩
+  · intro c hc x hx
+    have hne : c ≠ '.' := by simpa using hc
+    have := KnownHosts.bytes_ne c 46 (by omega) (toNat_ne c '.' hne) x hx
+    simp [this]
+
+theorem agree_sign : Agree (fun c => c == '-' || c == '+') (fun x => x == 45 || x == 43) := by
+  constructor
+  · intro c hc
+    simp only [Bool.or_eq_true, beq_iff_eq] at hc
+    rcases hc with rfl | rfl <;> exact ⟨rfl, rfl⟩
+  · intro c hc x hx
+    simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne] at hc
+    have h1 := KnownHosts.bytes_ne c 45 (by omega) (toNat_ne c '-' hc.1) x hx
+    have h2 := KnownHosts.bytes_ne c 43 (by omega) (toNat_ne c '+' hc.2) x hx
+    simp [h1, h2]
+
+/-! ### Numbers -/
+
+/-- `digits_u64` on bytes. -/
+def digitsB (ds : List Nat) : Option Nat :=
+  if ds.isEmpty || !ds.all isDigitB then none
+  else if foldN 0 ds < 2 ^ 64 then some (foldN 0 ds) else none
+
+theorem digitsB_utf8 (ds : List Char) : digitsB (utf8 ds) = parseDigits ds := by
+  unfold digitsB parseDigits
+  rw [Shell.utf8_isEmpty, KnownHosts.utf8_all isDigitB Clew.Text.isAsciiDigit isAsciiDigit_eq isDigitB_high]
+  cases hall : ds.all Clew.Text.isAsciiDigit
+  · simp
+  · have hascii : ∀ c ∈ ds, c.toNat < 128 := by
+      intro c hc
+      have := List.all_eq_true.mp hall c hc
+      rw [isAsciiDigit_eq] at this
+      by_contra h
+      rw [isDigitB_high _ (by omega)] at this
+      exact absurd this (by simp)
+    have hv : foldN 0 (utf8 ds) = Clew.Text.digitsValue ds := by
+      rw [KnownHosts.utf8_of_ascii ds hascii]
+      unfold foldN Clew.Text.digitsValue
+      rw [List.foldl_map]
+      rfl
+    simp [hv]
+
+theorem parseU64_utf8 (t : List Char) : digitsB (stripB (utf8 t)) = Clew.Text.parseU64 t := by
+  rw [parseU64_eq, ← utf8_stripPlus, digitsB_utf8]
+
+/-- What `digits_u64`'s loop computes after `v` from the bytes it reads. -/
+def digitsFrom (v : Nat) (ds : List Nat) : Option Nat :=
+  if ds.all isDigitB then (if foldN v ds < 2 ^ 64 then some (foldN v ds) else none) else none
+
+theorem digits_u64_loop_ok (s : Slice Std.U8) (t : Std.Usize) (ht : t.val ≤ s.val.length)
+    (v : Std.U128) (i : Std.Usize) (hv : v.val < 2 ^ 64) (hi : i.val ≤ t.val) :
+    ∃ r, digits_u64_loop s t v i = ok r ∧
+      r.map (·.val) = digitsFrom v.val (sg s i.val t.val) := by
+  obtain ⟨r, hl, hq⟩ := loop_spec (fun p : Std.U128 × Std.Usize => digits_u64_loop.body s t p.1 p.2)
+    (fun p => p.1.val < 2 ^ 64 ∧ p.2.val ≤ t.val)
+    (fun p r => r.map (·.val) = digitsFrom p.1.val (sg s p.2.val t.val))
+    (fun p => t.val - p.2.val)
+    (by
+      rintro ⟨v, i⟩ ⟨hv, hi⟩
+      dsimp only at hv hi ⊢
+      by_cases hlt : i.val < t.val
+      · have hil : i.val < s.val.length := by omega
+        have hc := sg_cons s i.val t.val hlt ht
+        set x := s.val[i.val] with hxdef
+        by_cases hlo : x.val < 48
+        · left
+          refine ⟨none, by simp [digits_u64_loop.body, UScalar.lt_equiv, hlt, index_ok s i hil,
+            ← hxdef, hlo], ?_⟩
+          rw [hc]; simp [digitsFrom, isDigitB, hlo]
+        · by_cases hhi : 57 < x.val
+          · left
+            refine ⟨none, by simp [digits_u64_loop.body, UScalar.lt_equiv, hlt, index_ok s i hil,
+              ← hxdef, hlo, hhi], ?_⟩
+            rw [hc]; simp [digitsFrom, isDigitB]; omega
+          · obtain ⟨d8, hd8, hd8v⟩ := ok_of_spec (UScalar.sub_spec (x := x) (y := 48#u8) (by simp; omega))
+            simp only [U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq] at hd8v
+            set d := UScalar.cast UScalarTy.U128 d8 with hddef
+            have hdv : d.val = x.val - 48 := by rw [hddef, UScalar.cast_val_eq]; simp; omega
+            obtain ⟨m1, hm1, hm1v⟩ := ok_of_spec (UScalar.mul_spec (x := v) (y := 10#u128)
+              (by scalar_tac))
+            obtain ⟨m2, hm2, hm2v⟩ := ok_of_spec (UScalar.add_spec (x := m1) (y := d)
+              (by scalar_tac))
+            have hm2v' : m2.val = v.val * 10 + (x.val - 48) := by rw [hm2v, hm1v, hdv]; simp
+            have hstep : digitsFrom v.val (sg s i.val t.val) =
+                digitsFrom (v.val * 10 + (x.val - 48)) (sg s (i.val + 1) t.val) := by
+              rw [hc]
+              have hd : isDigitB x.val = true := by simp [isDigitB]; omega
+              simp only [digitsFrom, List.all_cons, hd, Bool.true_and]
+              rfl
+            by_cases hover : 18446744073709551615 < m2.val
+            · left
+              refine ⟨none, by simp [digits_u64_loop.body, UScalar.lt_equiv, hlt, index_ok s i hil,
+                ← hxdef, hlo, hhi, hd8, lift, ← hddef, hm1, hm2, hover], ?_⟩
+              rw [hstep]
+              unfold digitsFrom
+              have := foldN_ge (v.val * 10 + (x.val - 48)) (sg s (i.val + 1) t.val)
+              split_ifs with h1 h2
+              · omega
+              · rfl
+              · rfl
+            · right
+              obtain ⟨j, hj, hjv⟩ := succ_ok s i hil
+              refine ⟨(m2, j), by simp [digits_u64_loop.body, UScalar.lt_equiv, hlt, index_ok s i hil,
+                ← hxdef, hlo, hhi, hd8, lift, ← hddef, hm1, hm2, hover, hj],
+                ⟨by dsimp only; omega, by dsimp only; omega⟩,
+                by dsimp only; omega, ?_⟩
+              intro r hr
+              dsimp only at hr
+              rw [hstep, ← hm2v', ← hjv]
+              exact hr
+      · left
+        have hit : i.val = t.val := by omega
+        refine ⟨some (UScalar.cast UScalarTy.U64 v), by simp [digits_u64_loop.body, UScalar.lt_equiv,
+          hlt, lift], ?_⟩
+        rw [hit, sg_self]
+        have h' : v.val < 18446744073709551616 := hv
+        simp [digitsFrom, foldN, UScalar.cast_val_eq, h', Nat.mod_eq_of_lt h'])
+    (v, i) ⟨hv, hi⟩
+  exact ⟨r, by unfold digits_u64_loop; exact hl, hq⟩
+
+theorem digits_u64_ok (s : Slice Std.U8) (f t : Std.Usize) (h1 : f.val ≤ t.val)
+    (h2 : t.val ≤ s.val.length) :
+    ∃ r, digits_u64 s f t = ok r ∧ r.map (·.val) = digitsB (sg s f.val t.val) := by
+  by_cases hft : t.val ≤ f.val
+  · refine ⟨none, by simp [digits_u64, UScalar.le_equiv, hft], ?_⟩
+    rw [show t.val = f.val by omega, sg_self]; rfl
+  · obtain ⟨r, hr, hq⟩ := digits_u64_loop_ok s t h2 0#u128 f (by simp) h1
+    refine ⟨r, by simp only [digits_u64, ge_iff_le, UScalar.le_equiv, hft, ↓reduceIte, hr], ?_⟩
+    rw [hq]
+    have hne : (sg s f.val t.val).isEmpty = false := by
+      rw [sg_cons s f.val t.val (by omega) h2]; rfl
+    unfold digitsFrom digitsB
+    rw [hne]
+    cases (sg s f.val t.val).all isDigitB <;> simp
+
+theorem parse_u64_ok (s : Slice Std.U8) (f t : Std.Usize) (h1 : f.val ≤ t.val)
+    (h2 : t.val ≤ s.val.length) :
+    ∃ r, parse_u64 s f t = ok r ∧ r.map (·.val) = digitsB (stripB (sg s f.val t.val)) := by
+  by_cases hft : f.val < t.val
+  · have hfl : f.val < s.val.length := by omega
+    have hc := sg_cons s f.val t.val hft h2
+    by_cases hp : s.val[f.val] = 43#u8
+    · obtain ⟨f1, hf1, hf1v⟩ := succ_ok s f hfl
+      obtain ⟨r, hr, hq⟩ := digits_u64_ok s f1 t (by omega) h2
+      refine ⟨r, by simp [parse_u64, UScalar.lt_equiv, hft, index_ok s f hfl, hp, hf1, hr], ?_⟩
+      rw [hq, hc, hp, ← hf1v]; rfl
+    · obtain ⟨r, hr, hq⟩ := digits_u64_ok s f t h1 h2
+      refine ⟨r, by simp [parse_u64, UScalar.lt_equiv, hft, index_ok s f hfl, hp, hr], ?_⟩
+      rw [hq, hc]
+      have : (s.val[f.val]).val ≠ 43 := fun e => hp (UScalar.eq_of_val_eq (by rw [e]; rfl))
+      simp [stripB, this]
+  · obtain ⟨r, hr, hq⟩ := digits_u64_ok s f t h1 h2
+    refine ⟨r, by simp [parse_u64, UScalar.lt_equiv, hft, hr], ?_⟩
+    rw [hq, show t.val = f.val by omega, sg_self]; rfl
+
+theorem parse_field_ok (s : Slice Std.U8) (f t : Std.Usize) (h1 : f.val ≤ t.val)
+    (h2 : t.val ≤ s.val.length) (piece : List Char) (hp : sg s f.val t.val = utf8 piece) :
+    ∃ r, parse_field s f t = ok r ∧
+      r.map (·.val) = Clew.Text.parseU64 (Clew.Text.trim piece) := by
+  have hlen : ((s.val.drop f.val).take (t.val - f.val)).length ≤ Usize.max := by
+    have := Slice.length_ineq s; simp; omega
+  set field : Slice Std.U8 := Slice.from ((s.val.drop f.val).take (t.val - f.val)) hlen with hfield
+  have hidx : core.slice.index.Slice.index (core.slice.index.SliceIndexRangeUsizeSlice Std.U8) s
+      { start := f, «end» := t } = ok field := by
+    rw [Slice.index_SliceIndexRangeUsizeSliceInst]
+    simp [core.slice.index.SliceIndexRangeUsizeSlice.index, Slice.length, h1, h2, hfield, List.slice]
+  have hbs : bs field.val = utf8 piece := by
+    rw [← hp, hfield, Slice.from_val]; simp [bs, List.map_take, List.map_drop]
+  obtain ⟨st, en, htb, he1, he2, he3⟩ := Text.trim_bounds_is_the_model field piece hbs
+  obtain ⟨r, hr, hq⟩ := parse_u64_ok field st en he1 he2
+  refine ⟨r, by simp only [parse_field, hidx, bind_ok, htb]; exact hr, ?_⟩
+  rw [hq, show sg field st.val en.val = utf8 (Clew.Text.trim piece) from he3, parseU64_utf8]
+
+/-! ### The version -/
+
+/-- A version the code holds, as the model's. -/
+def toModel (v : clew_rules.version.Version) : Clew.Update.Version := ⟨v.major.val, v.minor.val, v.patch.val⟩
+
+/-- **`is_newer` is the model's order**: for any two versions, it returns,
+and says what `Clew.Update.Version.lt` says. -/
+theorem is_newer_is_the_model (running v : clew_rules.version.Version) :
+    is_newer running v = ok ((toModel running).lt (toModel v)) := by
+  unfold is_newer toModel Clew.Update.Version.lt
+  have e : ∀ x y : Std.U64, (x = y) ↔ x.val = y.val := fun x y => ⟨fun h => h ▸ rfl, UScalar.eq_of_val_eq⟩
+  by_cases h1 : v.major.val = running.major.val
+  · by_cases h2 : v.minor.val = running.minor.val
+    · simp [bne_iff_ne, e, h1, h2, UScalar.lt_equiv]
+    · have : ¬ running.minor.val = v.minor.val := fun h => h2 h.symm
+      simp [bne_iff_ne, e, h1, h2, this, UScalar.lt_equiv]
+  · have : ¬ running.major.val = v.major.val := fun h => h1 h.symm
+    simp [bne_iff_ne, e, h1, this, UScalar.lt_equiv]
+
+theorem no_sep (a b : Std.U8) (L : List Nat) (h : ∀ x ∈ L, x ≠ a.val ∧ x ≠ b.val) :
+    ∀ x ∈ L, (x == a.val || x == b.val) = false := by
+  intro x hx
+  obtain ⟨h1, h2⟩ := h x hx
+  simp [h1, h2]
+
+/-- **`parse` is the model**: on the UTF-8 bytes of any string, it returns,
+and reads the version `Clew.Update.parse` reads, or none when that reads none. -/
+theorem parse_is_the_model (cs : List Char) (s : Slice Std.U8) (h : bs s.val = utf8 cs) :
+    ∃ r, parse s = ok r ∧ r.map toModel = Clew.Update.parse cs := by
+  unfold Clew.Update.parse
+  dsimp only
+  obtain ⟨st, en, htb, h1, h2, h3⟩ := Text.trim_bounds_is_the_model s cs h
+  have h3' : sg s st.val en.val = utf8 (Clew.Text.trim cs) := h3
+  obtain ⟨fr, hfr, hf1, hf2, hfv, hfk⟩ := skip_v_ok s st en h1 h2
+  set s1 := (Clew.Text.trim cs).dropWhile (· == 'v') with hs1def
+  have hs1 : sg s fr.val en.val = utf8 s1 := by
+    symm
+    apply utf8_dropWhile_v _ (sg s st.val fr.val) (sg s fr.val en.val)
+    · rw [← sg_split s _ _ _ hf1 hf2]; exact h3'.symm
+    · exact hfv
+    · by_cases hlt : fr.val < en.val
+      · obtain ⟨k, hk, hk2⟩ := hfk hlt
+        rw [hk]; simpa using hk2
+      · rw [show en.val = fr.val by omega, sg_self]; simp
+  obtain ⟨tt, hto, ht1, ht2, htno, htk⟩ := find_ok s fr en 45#u8 43#u8 hf2 h2
+  set core := (Clew.Text.split (fun c => c == '-' || c == '+') s1).headD [] with hcoredef
+  have hcore : sg s fr.val tt.val = utf8 core := by
+    by_cases hlt : tt.val < en.val
+    · obtain ⟨k, hk, hk2⟩ := htk hlt
+      obtain ⟨a, zs, ha, _, hsp⟩ := split_first _ _ agree_sign s1 (sg s fr.val tt.val) k
+        (sg s (tt.val + 1) en.val) (by rw [← hs1, sg_split s _ _ _ ht1 ht2, hk])
+        (by simpa using no_sep _ _ _ htno) (by simp at hk2 ⊢; omega)
+      rw [hcoredef, hsp]; simpa using ha.symm
+    · have hte : tt.val = en.val := by omega
+      have hsp := split_none _ _ agree_sign s1 (by rw [← hs1, ← hte]; simpa using no_sep _ _ _ htno)
+      rw [hcoredef, hsp]; simp [hte, hs1]
+  have hto_le : tt.val ≤ s.val.length := by omega
+  obtain ⟨d1, hd1, hd11, hd12, hd1no, hd1k⟩ := find_ok s fr tt 46#u8 46#u8 ht1 hto_le
+  by_cases e1 : d1.val = tt.val
+  · have hsp := split_none _ _ agree_dot core (by rw [← hcore, ← e1]; simpa using no_sep _ _ _ hd1no)
+    have : d1 = tt := UScalar.eq_of_val_eq e1
+    refine ⟨none, by simp [parse, htb, hfr, hto, hd1, this], ?_⟩
+    rw [hsp]; rfl
+  · have ne1 : ¬ d1 = tt := fun h => e1 (h ▸ rfl)
+    obtain ⟨k1, hk1, hk1'⟩ := hd1k (by omega)
+    obtain ⟨A, Z1, hA, hZ1, hspA⟩ := split_first _ _ agree_dot core (sg s fr.val d1.val) k1
+      (sg s (d1.val + 1) tt.val) (by rw [← hcore, sg_split s _ _ _ hd11 hd12, hk1])
+      (by simpa using no_sep _ _ _ hd1no) (by simp at hk1' ⊢; omega)
+    obtain ⟨i, hi, hiv⟩ := succ_ok s d1 (by omega)
+    obtain ⟨d2, hd2, hd21, hd22, hd2no, hd2k⟩ := find_ok s i tt 46#u8 46#u8 (by omega) hto_le
+    by_cases e2 : d2.val = tt.val
+    · have hspZ1 := split_none _ _ agree_dot Z1 (by
+        rw [hZ1, show d1.val + 1 = i.val by omega, ← e2]; simpa using no_sep _ _ _ hd2no)
+      have : d2 = tt := UScalar.eq_of_val_eq e2
+      refine ⟨none, by simp [parse, htb, hfr, hto, hd1, ne1, hi, hd2, this], ?_⟩
+      rw [hspA, hspZ1]; rfl
+    · have ne2 : ¬ d2 = tt := fun h => e2 (h ▸ rfl)
+      obtain ⟨k2, hk2, hk2'⟩ := hd2k (by omega)
+      obtain ⟨B, Z2, hB, hZ2, hspZ1⟩ := split_first _ _ agree_dot Z1 (sg s i.val d2.val) k2
+        (sg s (d2.val + 1) tt.val)
+        (by rw [hZ1, show d1.val + 1 = i.val by omega, sg_split s _ _ _ hd21 hd22, hk2])
+        (by simpa using no_sep _ _ _ hd2no) (by simp at hk2' ⊢; omega)
+      obtain ⟨i1, hi1, hi1v⟩ := succ_ok s d2 (by omega)
+      obtain ⟨d3, hd3, hd31, hd32, hd3no, hd3k⟩ := find_ok s i1 tt 46#u8 46#u8 (by omega) hto_le
+      obtain ⟨C, rest, hspZ2, hC⟩ : ∃ C rest, Clew.Text.split (· == '.') Z2 = C :: rest ∧
+          sg s i1.val d3.val = utf8 C := by
+        by_cases e3 : d3.val = tt.val
+        · refine ⟨Z2, [], split_none _ _ agree_dot Z2 ?_, ?_⟩
+          · rw [hZ2, show d2.val + 1 = i1.val by omega, ← e3]; simpa using no_sep _ _ _ hd3no
+          · rw [e3, hi1v, hZ2]
+        · obtain ⟨k3, hk3, hk3'⟩ := hd3k (by omega)
+          obtain ⟨C, Z3, hCv, _, hsp⟩ := split_first _ _ agree_dot Z2 (sg s i1.val d3.val) k3
+            (sg s (d3.val + 1) tt.val)
+            (by rw [hZ2, show d2.val + 1 = i1.val by omega, sg_split s _ _ _ hd31 hd32, hk3])
+            (by simpa using no_sep _ _ _ hd3no) (by simp at hk3' ⊢; omega)
+          exact ⟨C, _, hsp, hCv.symm⟩
+      obtain ⟨o, ho, hov⟩ := parse_field_ok s fr d1 hd11 (by omega) A hA.symm
+      obtain ⟨o1, ho1, ho1v⟩ := parse_field_ok s i d2 hd21 (by omega) B hB.symm
+      obtain ⟨o2, ho2, ho2v⟩ := parse_field_ok s i1 d3 hd31 (by omega) C hC
+      rw [hspA, hspZ1, hspZ2]
+      dsimp only
+      rw [← hov, ← ho1v, ← ho2v]
+      cases o with
+      | none =>
+        exact ⟨none, by simp [parse, htb, hfr, hto, hd1, ne1, hi, hd2, ne2, hi1, hd3, ho], rfl⟩
+      | some n =>
+        cases o1 with
+        | none =>
+          exact ⟨none, by simp [parse, htb, hfr, hto, hd1, ne1, hi, hd2, ne2, hi1, hd3, ho, ho1], rfl⟩
+        | some n1 =>
+          cases o2 with
+          | none =>
+            exact ⟨none, by simp [parse, htb, hfr, hto, hd1, ne1, hi, hd2, ne2, hi1, hd3, ho, ho1,
+              ho2], rfl⟩
+          | some n2 =>
+            exact ⟨some ⟨n, n1, n2⟩, by simp [parse, htb, hfr, hto, hd1, ne1, hi, hd2, ne2, hi1, hd3,
+              ho, ho1, ho2], rfl⟩
+
+/-- `upgrade`'s answer, read as the model's `ensureUpgrade`. -/
+def upgradeOf : clew_rules.version.Upgrade → Except Clew.Update.Refusal Clew.Update.Version
+  | .Unreadable => .error .unreadable
+  | .NotNewer _ => .error .notNewer
+  | .Newer v => .ok (toModel v)
+
+/-- **`upgrade` is the model**: for the running version and the UTF-8 bytes
+of any version text, it returns, and decides what `Clew.Update.ensureUpgrade`
+decides. -/
+theorem upgrade_is_the_model (running : clew_rules.version.Version) (cs : List Char)
+    (s : Slice Std.U8) (h : bs s.val = utf8 cs) :
+    ∃ u, upgrade running s = ok u ∧ upgradeOf u = Clew.Update.ensureUpgrade (toModel running) cs := by
+  obtain ⟨r, hr, hq⟩ := parse_is_the_model cs s h
+  unfold Clew.Update.ensureUpgrade
+  rw [← hq]
+  cases r with
+  | none => exact ⟨.Unreadable, by simp [upgrade, hr], rfl⟩
+  | some v =>
+    by_cases hn : (toModel running).lt (toModel v) = true
+    · exact ⟨.Newer v, by simp [upgrade, hr, is_newer_is_the_model, hn], by simp [upgradeOf, hn]⟩
+    · exact ⟨.NotNewer v, by simp [upgrade, hr, is_newer_is_the_model, hn], by simp [upgradeOf, hn]⟩
+
+/-- **No downgrade, of the code.** A version `upgrade` lets through is
+strictly newer than the running one (`Clew.Update.accepted_is_newer`). -/
+theorem upgrade_newer (running : clew_rules.version.Version) (cs : List Char) (s : Slice Std.U8)
+    (h : bs s.val = utf8 cs) (v : clew_rules.version.Version)
+    (hu : upgrade running s = ok (.Newer v)) : (toModel running).lt (toModel v) = true := by
+  obtain ⟨u, hu', heq⟩ := upgrade_is_the_model running cs s h
+  rw [hu] at hu'
+  have hu2 : u = .Newer v := by simpa using hu'.symm
+  subst hu2
+  exact Clew.Update.accepted_is_newer _ cs _ heq.symm
+
+end Version
 
 end Clew.Extracted

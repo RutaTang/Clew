@@ -2454,6 +2454,234 @@ def shell.sh_c
     let out8 ← alloc.vec.Vec.push out7 39#u8
     ok (some out8)
 
+/-- [clew_rules::version::Version]
+    Source: 'crates/clew-rules/src/version.rs', lines 21:0-25:1
+    Visibility: public -/
+structure version.Version where
+  major : Std.U64
+  minor : Std.U64
+  patch : Std.U64
+
+/-- [clew_rules::version::is_newer]:
+    Source: 'crates/clew-rules/src/version.rs', lines 29:0-37:1
+    Visibility: public -/
+def version.is_newer
+  (running : version.Version) (v : version.Version) : Result Bool := do
+  if v.major != running.major
+  then ok (v.major > running.major)
+  else
+    if v.minor != running.minor
+    then ok (v.minor > running.minor)
+    else ok (v.patch > running.patch)
+
+/-- [clew_rules::version::find]: loop body 0:
+    Source: 'crates/clew-rules/src/version.rs', lines 43:4-50:1 -/
+@[rust_loop_body]
+def version.find_loop.body
+  (s : Slice Std.U8) («to» : Std.Usize) (a : Std.U8) (b : Std.U8)
+  (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Std.Usize)
+  := do
+  if i < «to»
+  then
+    let i1 ← Slice.index_usize s i
+    if i1 = a
+    then ok (done i)
+    else if i1 = b
+         then ok (done i)
+         else let i2 ← i + 1#usize
+              ok (cont i2)
+  else ok (done «to»)
+
+/-- [clew_rules::version::find]: loop 0:
+    Source: 'crates/clew-rules/src/version.rs', lines 43:4-50:1 -/
+@[rust_loop]
+def version.find_loop
+  (s : Slice Std.U8) («to» : Std.Usize) (a : Std.U8) (b : Std.U8)
+  (i : Std.Usize) :
+  Result Std.Usize
+  := do
+  loop
+    (fun i1 => version.find_loop.body s «to» a b i1)
+    i
+
+/-- [clew_rules::version::find]:
+    Source: 'crates/clew-rules/src/version.rs', lines 41:0-50:1 -/
+@[reducible]
+def version.find
+  (s : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) (a : Std.U8)
+  (b : Std.U8) :
+  Result Std.Usize
+  := do
+  version.find_loop s «to» a b «from»
+
+/-- [clew_rules::version::skip_v]: loop body 0:
+    Source: 'crates/clew-rules/src/version.rs', lines 55:4-57:5 -/
+@[rust_loop_body]
+def version.skip_v_loop.body
+  (s : Slice Std.U8) («to» : Std.Usize) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Std.Usize)
+  := do
+  if i < «to»
+  then
+    let i1 ← Slice.index_usize s i
+    if i1 = 118#u8
+    then let i2 ← i + 1#usize
+         ok (cont i2)
+    else ok (done i)
+  else ok (done i)
+
+/-- [clew_rules::version::skip_v]: loop 0:
+    Source: 'crates/clew-rules/src/version.rs', lines 55:4-57:5 -/
+@[rust_loop]
+def version.skip_v_loop
+  (s : Slice Std.U8) («to» : Std.Usize) (i : Std.Usize) :
+  Result Std.Usize
+  := do
+  loop
+    (fun i1 => version.skip_v_loop.body s «to» i1)
+    i
+
+/-- [clew_rules::version::skip_v]:
+    Source: 'crates/clew-rules/src/version.rs', lines 53:0-59:1 -/
+@[reducible]
+def version.skip_v
+  (s : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
+  Result Std.Usize
+  := do
+  version.skip_v_loop s «to» «from»
+
+/-- [clew_rules::version::digits_u64]: loop body 0:
+    Source: 'crates/clew-rules/src/version.rs', lines 69:4-81:1 -/
+@[rust_loop_body]
+def version.digits_u64_loop.body
+  (s : Slice Std.U8) («to» : Std.Usize) (value : Std.U128) (i : Std.Usize) :
+  Result (ControlFlow (Std.U128 × Std.Usize) (Option Std.U64))
+  := do
+  if i < «to»
+  then
+    let b ← Slice.index_usize s i
+    if b < 48#u8
+    then ok (done none)
+    else
+      if b > 57#u8
+      then ok (done none)
+      else
+        let i1 ← value * 10#u128
+        let i2 ← b - 48#u8
+        let i3 ← lift (UScalar.cast .U128 i2)
+        let value1 ← i1 + i3
+        if value1 > 18446744073709551615#u128
+        then ok (done none)
+        else let i4 ← i + 1#usize
+             ok (cont (value1, i4))
+  else let i1 ← lift (UScalar.cast .U64 value)
+       ok (done (some i1))
+
+/-- [clew_rules::version::digits_u64]: loop 0:
+    Source: 'crates/clew-rules/src/version.rs', lines 69:4-81:1 -/
+@[rust_loop]
+def version.digits_u64_loop
+  (s : Slice Std.U8) («to» : Std.Usize) (value : Std.U128) (i : Std.Usize) :
+  Result (Option Std.U64)
+  := do
+  loop
+    (fun (value1, i1) => version.digits_u64_loop.body s «to» value1 i1)
+    (value, i)
+
+/-- [clew_rules::version::digits_u64]:
+    Source: 'crates/clew-rules/src/version.rs', lines 63:0-81:1 -/
+def version.digits_u64
+  (s : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
+  Result (Option Std.U64)
+  := do
+  if «from» >= «to»
+  then ok none
+  else version.digits_u64_loop s «to» 0#u128 «from»
+
+/-- [clew_rules::version::parse_u64]:
+    Source: 'crates/clew-rules/src/version.rs', lines 84:0-90:1 -/
+def version.parse_u64
+  (s : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
+  Result (Option Std.U64)
+  := do
+  if «from» < «to»
+  then
+    let i ← Slice.index_usize s «from»
+    if i = 43#u8
+    then let i1 ← «from» + 1#usize
+         version.digits_u64 s i1 «to»
+    else version.digits_u64 s «from» «to»
+  else version.digits_u64 s «from» «to»
+
+/-- [clew_rules::version::parse_field]:
+    Source: 'crates/clew-rules/src/version.rs', lines 93:0-97:1 -/
+def version.parse_field
+  (s : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
+  Result (Option Std.U64)
+  := do
+  let field ←
+    core.slice.index.Slice.index (core.slice.index.SliceIndexRangeUsizeSlice
+      Std.U8) s { start := «from», «end» := «to» }
+  let (start, «end») ← text.trim_bounds field
+  version.parse_u64 field start «end»
+
+/-- [clew_rules::version::parse]:
+    Source: 'crates/clew-rules/src/version.rs', lines 106:0-136:1
+    Visibility: public -/
+def version.parse (s : Slice Std.U8) : Result (Option version.Version) := do
+  let (start, «end») ← text.trim_bounds s
+  let «from» ← version.skip_v s start «end»
+  let «to» ← version.find s «from» «end» 45#u8 43#u8
+  let dot1 ← version.find s «from» «to» 46#u8 46#u8
+  if dot1 = «to»
+  then ok none
+  else
+    let i ← dot1 + 1#usize
+    let dot2 ← version.find s i «to» 46#u8 46#u8
+    if dot2 = «to»
+    then ok none
+    else
+      let i1 ← dot2 + 1#usize
+      let dot3 ← version.find s i1 «to» 46#u8 46#u8
+      let o ← version.parse_field s «from» dot1
+      match o with
+      | none => ok none
+      | some n =>
+        let o1 ← version.parse_field s i dot2
+        match o1 with
+        | none => ok none
+        | some n1 =>
+          let o2 ← version.parse_field s i1 dot3
+          match o2 with
+          | none => ok none
+          | some n2 => ok (some { major := n, minor := n1, patch := n2 })
+
+/-- [clew_rules::version::Upgrade]
+    Source: 'crates/clew-rules/src/version.rs', lines 140:0-147:1
+    Visibility: public -/
+@[discriminant isize]
+inductive version.Upgrade where
+| Unreadable : version.Upgrade
+| NotNewer : version.Version → version.Upgrade
+| Newer : version.Version → version.Upgrade
+
+/-- [clew_rules::version::upgrade]:
+    Source: 'crates/clew-rules/src/version.rs', lines 151:0-162:1
+    Visibility: public -/
+def version.upgrade
+  (running : version.Version) (candidate : Slice Std.U8) :
+  Result version.Upgrade
+  := do
+  let o ← version.parse candidate
+  match o with
+  | none => ok version.Upgrade.Unreadable
+  | some v =>
+    let b ← version.is_newer running v
+    if b
+    then ok (version.Upgrade.Newer v)
+    else ok (version.Upgrade.NotNewer v)
+
 /-- [clew_rules::voice::QuestionWord]
     Source: 'crates/clew-rules/src/voice.rs', lines 28:0-31:1
     Visibility: public -/

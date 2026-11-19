@@ -38,6 +38,9 @@ trap 'rm -rf "$out"' EXIT
   --start-from crate::text::trim_bounds \
   --start-from crate::confine::check_lexical \
   --start-from crate::confine::names_a_folder \
+  --start-from crate::version::parse \
+  --start-from crate::version::is_newer \
+  --start-from crate::version::upgrade \
   --dest "$out" -- --target-dir "$out/target" -q) >"$out/charon.log" 2>&1 || {
   cat "$out/charon.log" >&2
   exit 1

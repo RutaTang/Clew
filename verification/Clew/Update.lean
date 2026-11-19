@@ -17,6 +17,12 @@ This file models `Version::parse`, the order `#[derive(Ord)]` gives
   and no version is ever installed twice, the running one included;
 * the version Clew writes (`Display`, `x.y.z`) and the tag it publishes
   (`vx.y.z`) read back as that version.
+
+`Version::parse`, the order and `ensure_upgrade`'s decision run as
+`clew_rules::version::{parse, is_newer, upgrade}`, on the UTF-8 bytes of the
+version text; that code, as Charon and Aeneas translate it, is proved in
+`verification/extracted/Equal.lean` to decide what `parse`, `Version.lt`
+and `ensureUpgrade` here decide, for every string.
 -/
 
 namespace Clew.Update

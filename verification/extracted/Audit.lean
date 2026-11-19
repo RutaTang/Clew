@@ -23,3 +23,7 @@ does not model (the code proved here calls none of them). -/
 #print axioms Clew.Extracted.Text.trim_bounds_is_the_model
 #print axioms Clew.Extracted.Confine.check_lexical_is_the_model
 #print axioms Clew.Extracted.Confine.names_a_folder_is_the_model
+#print axioms Clew.Extracted.Version.parse_is_the_model
+#print axioms Clew.Extracted.Version.is_newer_is_the_model
+#print axioms Clew.Extracted.Version.upgrade_is_the_model
+#print axioms Clew.Extracted.Version.upgrade_newer
