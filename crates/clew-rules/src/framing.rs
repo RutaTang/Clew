@@ -1,5 +1,8 @@
-//! What one header line of a framed message says (`read_frame` in
-//! `crates/clew-core/src/framing.rs` reads the lines and calls [`header`]).
+//! What each line a framed reader reads means. `read_frame`,
+//! `read_json_line` and `read_line_capped` in `crates/clew-core/src/framing.rs`
+//! read a line from the stream and hand it to [`frame_line`], [`json_line`]
+//! or [`capped_line`], which decide everything about it; [`header`] is what
+//! a header line says.
 //!
 //! Each loop is a function of its own: Aeneas translates a `return` from
 //! inside a loop only when nothing follows the loop.
@@ -10,6 +13,12 @@
 
 /// The largest body a frame may announce: 64 MiB.
 pub const MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The longest header line, its end included: 8 KiB.
+pub const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
+
+/// The most header lines, blank separators included, one frame may have.
+pub const MAX_HEADER_LINES: usize = 32;
 
 /// Why a header line ends the stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,4 +207,202 @@ pub fn header(length: Option<u64>, line: &[u8]) -> Result<Option<u64>, HeaderErr
         return Err(HeaderError::TooLarge(len));
     }
     Ok(Some(len))
+}
+
+/// What `read_frame` does with a line it read (at most
+/// [`MAX_HEADER_LINE_BYTES`] of the stream, up to and including its first
+/// `\n`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameLine {
+    /// The stream ended between frames: there is no frame.
+    End,
+    /// The stream ended inside a frame.
+    Truncated,
+    /// A header line filled [`MAX_HEADER_LINE_BYTES`] without ending.
+    TooLong,
+    /// More than [`MAX_HEADER_LINES`] header lines.
+    TooManyLines,
+    /// A blank line ahead of the headers: read on.
+    Separator,
+    /// The blank line after the headers: the body comes next.
+    Body,
+    /// A header line, and what [`header`] makes of it.
+    Header(Result<Option<u64>, HeaderError>),
+}
+
+/// The decision on one line `read_frame` read, `length` being the
+/// `Content-Length` so far, `headers` the header lines and `lines` all the
+/// lines read before it.
+pub fn frame_line(length: Option<u64>, headers: usize, lines: usize, line: &[u8]) -> FrameLine {
+    if line.is_empty() {
+        if headers == 0 {
+            return FrameLine::End;
+        }
+        return FrameLine::Truncated;
+    }
+    if line[line.len() - 1] != b'\n' {
+        if line.len() >= MAX_HEADER_LINE_BYTES {
+            return FrameLine::TooLong;
+        }
+        return FrameLine::Truncated;
+    }
+    if lines >= MAX_HEADER_LINES {
+        return FrameLine::TooManyLines;
+    }
+    let mut end = line.len() - 1;
+    if end > 0 && line[end - 1] == b'\r' {
+        end -= 1;
+    }
+    if end == 0 {
+        if headers == 0 {
+            return FrameLine::Separator;
+        }
+        return FrameLine::Body;
+    }
+    FrameLine::Header(header(length, &line[0..end]))
+}
+
+/// Whether `line[..end]` is all ASCII white space.
+fn all_ws(line: &[u8], end: usize) -> bool {
+    let mut i = 0;
+    while i < end {
+        if !is_ascii_ws(line[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// What `read_json_line` does with a line it read (at most `cap + 2` bytes
+/// of the stream, up to and including its first `\n`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonLine {
+    /// The stream ended: there is no message.
+    End,
+    /// A line longer than the cap, this long.
+    TooLarge(usize),
+    /// A blank line, ended: read on.
+    Blank,
+    /// A message: the line's first this many bytes.
+    Line(usize),
+}
+
+/// The decision on one line `read_json_line` read: its `\n` or `\r\n` end
+/// taken off, longer than `cap` refused, a blank one skipped (or, unended,
+/// the end of the stream), anything else a message.
+pub fn json_line(line: &[u8], cap: usize) -> JsonLine {
+    if line.is_empty() {
+        return JsonLine::End;
+    }
+    let ended = line[line.len() - 1] == b'\n';
+    let mut end = line.len();
+    if ended {
+        end -= 1;
+        if end > 0 && line[end - 1] == b'\r' {
+            end -= 1;
+        }
+    }
+    if end > cap {
+        return JsonLine::TooLarge(end);
+    }
+    if all_ws(line, end) {
+        if ended {
+            return JsonLine::Blank;
+        }
+        return JsonLine::End;
+    }
+    JsonLine::Line(end)
+}
+
+/// The decision on the line `read_line_capped` read (at most `cap + 1`
+/// bytes of the stream, up to and including its first `\n`): where its text
+/// ends — its `\n` taken off — or none at the end of the stream and for a
+/// line over `cap` with no end in sight.
+pub fn capped_line(buf: &[u8], cap: usize) -> Option<usize> {
+    if buf.is_empty() {
+        return None;
+    }
+    if buf[buf.len() - 1] == b'\n' {
+        return Some(buf.len() - 1);
+    }
+    if buf.len() > cap {
+        return None;
+    }
+    Some(buf.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        FrameLine, HeaderError, JsonLine, MAX_HEADER_LINE_BYTES, MAX_HEADER_LINES, capped_line,
+        frame_line, json_line,
+    };
+
+    #[test]
+    fn frame_line_decides_each_line() {
+        assert_eq!(frame_line(None, 0, 0, b""), FrameLine::End);
+        assert_eq!(frame_line(None, 1, 1, b""), FrameLine::Truncated);
+        assert_eq!(
+            frame_line(None, 0, 0, b"Content-Length: 1"),
+            FrameLine::Truncated
+        );
+        let long = vec![b'a'; MAX_HEADER_LINE_BYTES];
+        assert_eq!(frame_line(None, 0, 0, &long), FrameLine::TooLong);
+        assert_eq!(frame_line(None, 0, 0, &long[1..]), FrameLine::Truncated);
+        assert_eq!(
+            frame_line(None, 0, MAX_HEADER_LINES, b"\n"),
+            FrameLine::TooManyLines
+        );
+        assert_eq!(
+            frame_line(None, 0, MAX_HEADER_LINES - 1, b"\r\n"),
+            FrameLine::Separator
+        );
+        assert_eq!(frame_line(None, 0, 3, b"\n"), FrameLine::Separator);
+        assert_eq!(frame_line(Some(2), 1, 1, b"\r\n"), FrameLine::Body);
+        assert_eq!(
+            frame_line(None, 0, 0, b"Content-Length: 12\r\n"),
+            FrameLine::Header(Ok(Some(12)))
+        );
+        assert_eq!(
+            frame_line(Some(3), 1, 1, b"Content-Type: x\n"),
+            FrameLine::Header(Ok(Some(3)))
+        );
+        assert_eq!(
+            frame_line(None, 0, 0, b"\r\r\n"),
+            FrameLine::Header(Err(HeaderError::Malformed))
+        );
+    }
+
+    #[test]
+    fn json_line_decides_each_line() {
+        assert_eq!(json_line(b"", 8), JsonLine::End);
+        assert_eq!(json_line(b" \t\r\n", 8), JsonLine::Blank);
+        assert_eq!(json_line(b"\n", 8), JsonLine::Blank);
+        assert_eq!(json_line(b"  ", 8), JsonLine::End);
+        assert_eq!(json_line(b"{}\r\n", 8), JsonLine::Line(2));
+        assert_eq!(json_line(b"{}\n", 8), JsonLine::Line(2));
+        assert_eq!(json_line(b"{}", 8), JsonLine::Line(2));
+        assert_eq!(json_line(b"12345678\r\n", 8), JsonLine::Line(8));
+        assert_eq!(json_line(b"123456789\n", 8), JsonLine::TooLarge(9));
+        assert_eq!(json_line(b"1234567890", 8), JsonLine::TooLarge(10));
+    }
+
+    #[test]
+    fn blank_is_std_ascii_white_space() {
+        for b in 0..=255u8 {
+            assert_eq!(super::all_ws(&[b], 1), b.is_ascii_whitespace(), "{b}");
+        }
+    }
+
+    #[test]
+    fn capped_line_finds_where_the_text_ends() {
+        assert_eq!(capped_line(b"", 4), None);
+        assert_eq!(capped_line(b"\n", 4), Some(0));
+        assert_eq!(capped_line(b"abc\n", 4), Some(3));
+        assert_eq!(capped_line(b"abcd\n", 4), Some(4));
+        assert_eq!(capped_line(b"abcd", 4), Some(4));
+        assert_eq!(capped_line(b"abcde", 4), None);
+        assert_eq!(capped_line(b"a\r\n", 4), Some(2));
+    }
 }

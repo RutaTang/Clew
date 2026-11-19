@@ -5615,4 +5615,370 @@ theorem sidecar_digest_is_the_model (cs : List Char) (file : Slice Std.U8) (h : 
 
 end Digests
 
+/-! ## Framing's reading loops
+
+`read_frame`, `read_json_line` and `read_line_capped` in
+`crates/clew-core/src/framing.rs` read a line from the stream and hand it to
+`frame_line`, `json_line` or `capped_line`, which decide everything about
+it; what is left in the reader is a `match` with one arm per decision. Each
+theorem here says that the decision, taken as that `match` takes it, is one
+turn of the model's loop on the same line. -/
+
+namespace FrameLoop
+
+open clew_rules.framing
+open Clew.Extracted.Framing (bytes toModel header_is_the_model is_ascii_ws_ok)
+open Digests (sub_ok)
+open Shell (bs)
+
+/-- `MAX_HEADER_LINE_BYTES` is the model's `maxHeaderLine`: 8 KiB. -/
+theorem max_line_ok : ∃ m, MAX_HEADER_LINE_BYTES = ok m ∧ m.val = 8192 := by
+  unfold MAX_HEADER_LINE_BYTES
+  obtain ⟨a, ha, hav⟩ := ok_of_spec (UScalar.mul_spec (x := 8#usize) (y := 1024#usize) (by scalar_tac))
+  exact ⟨a, ha, by rw [hav]; rfl⟩
+
+/-- What a reader returns: a message (`none` at a clean end of stream) or an
+error, and the bytes left after it. -/
+abbrev Out := Except Clew.Framing.Error (Option (List Nat)) × List Nat
+
+/-- What `read_frame` does with each of `frame_line`'s decisions on the line
+it read, `seen` being what it has seen before the line and `go` what its
+loop goes on to do with what it has seen after it: one arm per arm of the
+`match` in `crates/clew-core/src/framing.rs`. -/
+def frameStep (seen : Clew.Framing.Seen) (rest : List Nat) (go : Clew.Framing.Seen → Out) :
+    FrameLine → Out
+  | .End => (.ok none, rest)
+  | .Truncated => (.error .truncated, rest)
+  | .TooLong => (.error .headerLineTooLong, rest)
+  | .TooManyLines => (.error .tooManyHeaderLines, rest)
+  | .Separator => go { seen with lines := seen.lines + 1 }
+  | .Body => Clew.Framing.finish { seen with lines := seen.lines + 1 } rest
+  | .Header r =>
+    match toModel { seen with lines := seen.lines + 1 } r with
+    | .error e => (.error e, rest)
+    | .ok seen => go seen
+
+/-- A slice's first `k` bytes, one dropped from their end. -/
+theorem pre_dropLast (l : List Std.U8) (k : Nat) (hk : k ≤ l.length) :
+    ((l.take k).map (·.val)).dropLast = (l.take (k - 1)).map (·.val) := by
+  rw [List.dropLast_eq_take]
+  simp [List.take_take, List.map_take, Nat.min_eq_left hk]
+
+/-- The last of a slice's first `k` bytes. -/
+theorem pre_getLast (l : List Std.U8) (k : Nat) (hk : 0 < k) (hkl : k ≤ l.length) :
+    ((l.take k).map (·.val)).getLast? = some (l[k - 1]'(by omega)).val := by
+  rw [List.getLast?_eq_getElem?]
+  simp [Nat.min_eq_left hkl, show k - 1 < k by omega]
+
+/-- Where the line's text ends, its `\n` and then a `\r` taken off: the
+model's `stripEnd`. -/
+theorem end_ok (line : Slice Std.U8) (i1 : Std.Usize) (hi1 : i1.val = line.val.length - 1)
+    (hn : 0 < line.val.length) :
+    ∃ e : Std.Usize, (if i1 > 0#usize then do
+        let i4 ← i1 - 1#usize
+        let i5 ← Slice.index_usize line i4
+        if i5 = 13#u8 then ok i4 else ok i1
+      else ok i1) = ok e ∧
+      Clew.Framing.stripEnd (bytes line) = (line.val.take e.val).map (·.val) ∧
+      e.val ≤ line.val.length := by
+  have hbl : bytes line = (line.val.take line.val.length).map (·.val) := by simp [bytes]
+  have hd : (bytes line).dropLast = (line.val.take i1.val).map (·.val) := by
+    rw [hbl, pre_dropLast _ _ le_rfl, hi1]
+  unfold Clew.Framing.stripEnd
+  simp only [hd]
+  by_cases hpos : 0 < i1.val
+  · obtain ⟨i4, hi4, hi4v⟩ := ok_of_spec (UScalar.sub_spec (x := i1) (y := 1#usize)
+      (by simp; omega))
+    have hi4n : i4.val = i1.val - 1 := by simp at hi4v; omega
+    have hgt : i1 > 0#usize := by simp [UScalar.lt_equiv]; omega
+    have hgl : ((line.val.take i1.val).map (·.val)).getLast? =
+        some (line.val[i4.val]'(by omega)).val := by
+      rw [pre_getLast _ _ hpos (by omega)]; simp [hi4n]
+    by_cases hcr : (line.val[i4.val]'(by omega)).val = 13
+    · have h13 : line.val[i4.val]'(by omega) = 13#u8 := by rw [UScalar.eq_equiv]; simp [hcr]
+      refine ⟨i4, by simp [hgt, hi4, index_ok line i4 (by omega), h13], ?_, by omega⟩
+      rw [hgl, hcr]
+      simp only [Clew.Framing.CR, beq_self_eq_true, ↓reduceIte]
+      rw [pre_dropLast _ _ (show i1.val ≤ line.val.length by omega), hi4n]
+    · have h13 : ¬ line.val[i4.val]'(by omega) = 13#u8 := by
+        rw [UScalar.eq_equiv]; simpa using hcr
+      refine ⟨i1, by simp [hgt, hi4, index_ok line i4 (by omega), h13], ?_, by omega⟩
+      rw [hgl]
+      have : (some (line.val[i4.val]'(by omega)).val == some Clew.Framing.CR) = false := by
+        simp [Clew.Framing.CR, hcr]
+      simp only [this, Bool.false_eq_true, ↓reduceIte]
+  · have hz : i1.val = 0 := by omega
+    have hgt : ¬ i1 > 0#usize := by simp [UScalar.lt_equiv]; omega
+    refine ⟨i1, by simp [hgt], ?_, by omega⟩
+    simp [hz]
+
+/-- **`frame_line` is the model's loop step**: for every line `read_frame`
+reads (the model's `readLine` of what is left of the stream) and every
+count of lines and headers and `Content-Length` before it, the Rust
+function returns — no index out of bounds, no overflow — a decision that,
+taken as `read_frame` takes it, does what one turn of the model's header
+loop does: the same result, or the same next turn on what it has seen. -/
+theorem frame_line_is_the_model (length : Option Std.U64) (headers lines : Std.Usize)
+    (line : Slice Std.U8) (seen : Clew.Framing.Seen) (s : List Nat) (fuel : Nat)
+    (hs : seen.length = length.map (·.val)) (hh : seen.headers = headers.val)
+    (hl : seen.lines = lines.val)
+    (hline : bytes line = (Clew.Framing.readLine Clew.Framing.maxHeaderLine s).1) :
+    ∃ d, frame_line length headers lines line = ok d ∧
+      Clew.Framing.readFrameAux (fuel + 1) seen s =
+        frameStep seen (Clew.Framing.readLine Clew.Framing.maxHeaderLine s).2
+          (fun seen' => Clew.Framing.readFrameAux fuel seen'
+            (Clew.Framing.readLine Clew.Framing.maxHeaderLine s).2) d := by
+  rw [Clew.Framing.readFrameAux]
+  generalize Clew.Framing.readLine Clew.Framing.maxHeaderLine s = r at hline ⊢
+  obtain ⟨l, rest⟩ := r
+  dsimp only at hline ⊢
+  subst hline
+  unfold frame_line
+  by_cases he : line.val = []
+  · refine ⟨if headers = 0#usize then .End else .Truncated, ?_, ?_⟩
+    · by_cases h0 : headers = 0#usize <;> simp [core.slice.Slice.is_empty, he, h0]
+    · have : (bytes line).isEmpty = true := by simp [bytes, he]
+      simp only [this, ↓reduceIte, hh]
+      by_cases h0 : headers = 0#usize
+      · simp [h0, frameStep]
+      · have : headers.val ≠ 0 := by intro e; exact h0 (by rw [UScalar.eq_equiv]; simp [e])
+        simpa [h0, frameStep] using this
+  have hn : 0 < line.val.length := List.length_pos_iff.mpr he
+  have hbl : bytes line = (line.val.take line.val.length).map (·.val) := by simp [bytes]
+  obtain ⟨i1, hi1, hi1v⟩ := ok_of_spec (UScalar.sub_spec (x := Slice.len line) (y := 1#usize)
+    (by simp; omega))
+  have hi1n : i1.val = line.val.length - 1 := by simp at hi1v; omega
+  have hlast : (bytes line).getLast? = some (line.val[i1.val]'(by omega)).val := by
+    rw [hbl, pre_getLast _ _ hn le_rfl]; simp [hi1n]
+  have hne : (bytes line).isEmpty = false := by simp [bytes, he]
+  have hie : core.slice.Slice.is_empty line = ok false := by simp [core.slice.Slice.is_empty, he]
+  simp only [hie, bind_ok, Bool.false_eq_true, ↓reduceIte, hi1, index_ok line i1 (by omega), hne,
+    hlast]
+  by_cases hb : (line.val[i1.val]'(by omega)).val = 10
+  swap
+  · have hb' : ¬ line.val[i1.val]'(by omega) = 10#u8 := by rw [UScalar.eq_equiv]; simpa using hb
+    obtain ⟨m, hm, hmv⟩ := max_line_ok
+    have hlen : (bytes line).length = line.val.length := by simp [bytes]
+    by_cases hbig : 8192 ≤ line.val.length
+    · refine ⟨.TooLong, by simp [hb', hm, UScalar.le_equiv, hmv, hbig], ?_⟩
+      simp [hb, Clew.Framing.NL, Clew.Framing.unended, hlen, Clew.Framing.maxHeaderLine, hbig,
+        frameStep]
+    · refine ⟨.Truncated, by simp [hb', hm, UScalar.le_equiv, hmv, hbig], ?_⟩
+      simp [hb, Clew.Framing.NL, Clew.Framing.unended, hlen, Clew.Framing.maxHeaderLine, hbig,
+        frameStep]
+  have hb' : line.val[i1.val]'(by omega) = 10#u8 := by rw [UScalar.eq_equiv]; simp [hb]
+  have hnl : (some (line.val[i1.val]'(by omega)).val != some Clew.Framing.NL) = false := by
+    simp [hb, Clew.Framing.NL]
+  simp only [hnl]
+  simp only [hb', bne_self_eq_false, Bool.false_eq_true, ↓reduceIte]
+  by_cases hmany : 32 ≤ lines.val
+  · refine ⟨.TooManyLines, by simp [MAX_HEADER_LINES, UScalar.le_equiv, hmany], ?_⟩
+    simp [hl, Clew.Framing.maxHeaderLines, frameStep]; omega
+  have hmany' : ¬ lines ≥ MAX_HEADER_LINES := by simp [MAX_HEADER_LINES, UScalar.le_equiv]; omega
+  have hmany'' : ¬ seen.lines + 1 > Clew.Framing.maxHeaderLines := by
+    simp [Clew.Framing.maxHeaderLines]; omega
+  simp only [hmany', hmany'', ↓reduceIte]
+  obtain ⟨e, hE, hstrip, heL⟩ := end_ok line i1 hi1n hn
+  simp only [bind_ok, hE, hstrip]
+  by_cases hz : e.val = 0
+  · have hz' : e = 0#usize := by rw [UScalar.eq_equiv]; simp [hz]
+    by_cases h0 : headers = 0#usize
+    · have h0' : seen.headers = 0 := by rw [hh, h0]; rfl
+      refine ⟨.Separator, by simp [hz', h0], ?_⟩
+      simp [hz, h0', frameStep]
+    · have h0' : seen.headers ≠ 0 := by
+        rw [hh]; intro e; exact h0 (by rw [UScalar.eq_equiv]; simp [e])
+      refine ⟨.Body, by simp [hz', h0], ?_⟩
+      simp [hz, h0', frameStep]
+  have hz' : ¬ e = 0#usize := by rw [UScalar.eq_equiv]; simpa using hz
+  obtain ⟨t, ht, hbt, _⟩ := sub_ok line 0#usize e (by simp) heL
+  have hbytes : (line.val.take e.val).map (·.val) = bytes t := by
+    change _ = bs t.val
+    rw [hbt]; simp [Clew.Extracted.Version.sg, bs, List.map_take]
+  obtain ⟨r, hr, hm⟩ := header_is_the_model length t { seen with lines := seen.lines + 1 }
+    (by simpa using hs)
+  refine ⟨.Header r, by simp only [hz', ↓reduceIte, ht, bind_ok, hr], ?_⟩
+  have hne' : ((line.val.take e.val).map (·.val)).isEmpty = false := by
+    have hlen : ((line.val.take e.val).map (·.val)).length = e.val := by simp; omega
+    cases hl2 : (line.val.take e.val).map (·.val) with
+    | nil => rw [hl2] at hlen; simp at hlen; omega
+    | cons _ _ => rfl
+  rw [hne', hbytes, ← hm]
+  simp only [Bool.false_eq_true, ↓reduceIte, frameStep]
+  generalize toModel _ r = x
+  cases x <;> rfl
+
+/-- What `all_ws` decides: `line[..e]` is all ASCII white space. -/
+theorem all_ws_ok (line : Slice Std.U8) (e : Std.Usize) (he : e.val ≤ line.val.length) :
+    all_ws line e = ok ((line.val.take e.val).all fun b => Clew.Framing.isAsciiWs b.val) := by
+  obtain ⟨b, hl, hq⟩ := loop_spec (all_ws_loop.body line e) (fun _ => True)
+    (fun i b => b = ((line.val.take e.val).drop i.val).all fun b => Clew.Framing.isAsciiWs b.val)
+    (fun i => e.val - i.val) (by
+      intro i _
+      by_cases hi : i.val < e.val
+      · have hil : i.val < line.val.length := by omega
+        obtain ⟨j, hj, hjv⟩ := succ_ok line i hil
+        have hlen : i.val < (line.val.take e.val).length := by simp; omega
+        rw [List.drop_eq_getElem_cons hlen, List.getElem_take]
+        cases ht : Clew.Framing.isAsciiWs line.val[i.val].val
+        · left
+          exact ⟨false, by simp [all_ws_loop.body, hi, index_ok line i hil, is_ascii_ws_ok, ht],
+            by simp [ht]⟩
+        · right
+          refine ⟨j, by simp [all_ws_loop.body, hi, index_ok line i hil, is_ascii_ws_ok, ht, hj],
+            trivial, by omega, ?_⟩
+          intro b hb; rw [hb, hjv]; simp [ht]
+      · left
+        refine ⟨true, by simp [all_ws_loop.body, hi], ?_⟩
+        rw [List.drop_eq_nil_of_le (by simp; omega)]; rfl) 0#usize trivial
+  unfold all_ws all_ws_loop
+  rw [hl, hq]; simp
+
+/-- What `read_json_line` does with each of `json_line`'s decisions on the
+line it read, given what its loop goes on to do (`go`). -/
+def jsonStep (line rest : List Nat) (go : Out) : JsonLine → Out
+  | .End => (.ok none, rest)
+  | .TooLarge _ => (.error .tooLarge, rest)
+  | .Blank => go
+  | .Line e => (.ok (some (line.take e.val)), rest)
+
+/-- **`json_line` is the model's loop step**: for every line
+`read_json_line` reads and every cap, the decision, taken as
+`read_json_line` takes it, does what one turn of the model's loop does. -/
+theorem json_line_is_the_model (line : Slice Std.U8) (cap : Std.Usize) (s : List Nat) (fuel : Nat)
+    (hline : bytes line = (Clew.Framing.readLine (cap.val + 2) s).1) :
+    ∃ d, json_line line cap = ok d ∧
+      Clew.Framing.readJsonLineAux cap.val (fuel + 1) s =
+        jsonStep (bytes line) (Clew.Framing.readLine (cap.val + 2) s).2
+          (Clew.Framing.readJsonLineAux cap.val fuel (Clew.Framing.readLine (cap.val + 2) s).2) d := by
+  rw [Clew.Framing.readJsonLineAux]
+  generalize Clew.Framing.readLine (cap.val + 2) s = r at hline ⊢
+  obtain ⟨l, rest⟩ := r
+  dsimp only at hline ⊢
+  subst hline
+  unfold json_line
+  by_cases he : line.val = []
+  · refine ⟨.End, by simp [core.slice.Slice.is_empty, he], ?_⟩
+    have : (bytes line).isEmpty = true := by simp [bytes, he]
+    simp [this, jsonStep]
+  have hn : 0 < line.val.length := List.length_pos_iff.mpr he
+  have hbl : bytes line = (line.val.take line.val.length).map (·.val) := by simp [bytes]
+  obtain ⟨i1, hi1, hi1v⟩ := ok_of_spec (UScalar.sub_spec (x := Slice.len line) (y := 1#usize)
+    (by simp; omega))
+  have hi1n : i1.val = line.val.length - 1 := by simp at hi1v; omega
+  have hlast : (bytes line).getLast? = some (line.val[i1.val]'(by omega)).val := by
+    rw [hbl, pre_getLast _ _ hn le_rfl]; simp [hi1n]
+  have hne : (bytes line).isEmpty = false := by simp [bytes, he]
+  have hie : core.slice.Slice.is_empty line = ok false := by simp [core.slice.Slice.is_empty, he]
+  simp only [hie, bind_ok, Bool.false_eq_true, ↓reduceIte, hi1, index_ok line i1 (by omega), hne,
+    hlast]
+  have htake : ∀ k, (bytes line).take k = (line.val.take k).map (·.val) := by
+    intro k; simp [bytes, List.map_take]
+  by_cases hb : (line.val[i1.val]'(by omega)).val = 10
+  · have hb' : line.val[i1.val]'(by omega) = 10#u8 := by rw [UScalar.eq_equiv]; simp [hb]
+    have hnl : (some (line.val[i1.val]'(by omega)).val == some Clew.Framing.NL) = true := by
+      simp [hb, Clew.Framing.NL]
+    obtain ⟨e, hE, hstrip, heL⟩ := end_ok line i1 hi1n hn
+    simp only [hnl, ↓reduceIte, Bool.true_and]
+    simp only [hb', ↓reduceIte, hE, bind_ok]
+    rw [show (if ((bytes line).dropLast.getLast? == some Clew.Framing.CR) = true then
+        (bytes line).dropLast.dropLast else (bytes line).dropLast) =
+        Clew.Framing.stripEnd (bytes line) from rfl, hstrip]
+    have hlen : ((line.val.take e.val).map (·.val)).length = e.val := by simp; omega
+    by_cases hbig : cap.val < e.val
+    · refine ⟨.TooLarge e, by simp [UScalar.lt_equiv, hbig], ?_⟩
+      simp only [hlen, gt_iff_lt, hbig, ↓reduceIte, jsonStep]
+    have hbig' : ¬ e > cap := by simp [UScalar.lt_equiv]; omega
+    simp only [hbig', ↓reduceIte, all_ws_ok line e heL, bind_ok, hlen,
+      show ¬ e.val > cap.val by omega, List.all_map]
+    cases hw : (line.val.take e.val).all fun b => Clew.Framing.isAsciiWs b.val
+    · refine ⟨.Line e, by simp, ?_⟩
+      have : ((line.val.take e.val).all (Clew.Framing.isAsciiWs ∘ fun x => x.val)) = false := hw
+      simp [this, jsonStep, htake]
+    · refine ⟨.Blank, by simp, ?_⟩
+      have : ((line.val.take e.val).all (Clew.Framing.isAsciiWs ∘ fun x => x.val)) = true := hw
+      simp [this, jsonStep]
+  · have hb' : ¬ line.val[i1.val]'(by omega) = 10#u8 := by rw [UScalar.eq_equiv]; simpa using hb
+    have hnl : (some (line.val[i1.val]'(by omega)).val == some Clew.Framing.NL) = false := by
+      simp [hb, Clew.Framing.NL]
+    simp only [hnl, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
+    simp only [hb', ↓reduceIte, bind_ok]
+    have hlen : (bytes line).length = line.val.length := by simp [bytes]
+    by_cases hbig : cap.val < line.val.length
+    · refine ⟨.TooLarge (Slice.len line), by simp [UScalar.lt_equiv, hbig], ?_⟩
+      simp [hlen, hbig, jsonStep]
+    have hbig' : ¬ Slice.len line > cap := by simp [UScalar.lt_equiv]; omega
+    simp only [hbig', ↓reduceIte, all_ws_ok line (Slice.len line) (by simp), bind_ok, hlen,
+      show ¬ line.val.length > cap.val by omega]
+    have hall : (bytes line).all Clew.Framing.isAsciiWs =
+        ((line.val.take (Slice.len line).val).all fun b => Clew.Framing.isAsciiWs b.val) := by
+      simp [bytes, List.all_map]; rfl
+    rw [hall]
+    cases hw : (line.val.take (Slice.len line).val).all fun b => Clew.Framing.isAsciiWs b.val
+    · refine ⟨.Line (Slice.len line), by simp, ?_⟩
+      simp [jsonStep, bytes]
+    · refine ⟨.End, by simp, ?_⟩
+      simp [jsonStep]
+
+/-- What `read_line_capped` returns for `capped_line`'s decision on the line
+it read: the line's first `end` bytes if they are UTF-8 (as
+`String::from_utf8` accepts it), else nothing. -/
+def cappedStep (line : List Nat) : Option Std.Usize → Option (List Nat)
+  | none => none
+  | some e => if Clew.Framing.utf8Valid (line.take e.val) then some (line.take e.val) else none
+
+/-- **`capped_line` is the model**: for every line `read_line_capped` reads
+and every cap, the decision, taken as `read_line_capped` takes it, returns
+what the model's `readLineCapped` returns. That `String::from_utf8` accepts
+exactly what `utf8Valid` accepts is the standard library's, checked by the
+vectors in `framing.rs`. -/
+theorem capped_line_is_the_model (buf : Slice Std.U8) (cap : Std.Usize) (s : List Nat)
+    (hline : bytes buf = (Clew.Framing.readLine (cap.val + 1) s).1) :
+    ∃ d, capped_line buf cap = ok d ∧
+      Clew.Framing.readLineCapped cap.val s =
+        (cappedStep (bytes buf) d, (Clew.Framing.readLine (cap.val + 1) s).2) := by
+  unfold Clew.Framing.readLineCapped
+  generalize Clew.Framing.readLine (cap.val + 1) s = r at hline ⊢
+  obtain ⟨l, rest⟩ := r
+  dsimp only at hline ⊢
+  subst hline
+  unfold capped_line
+  by_cases he : buf.val = []
+  · refine ⟨none, by simp [core.slice.Slice.is_empty, he], ?_⟩
+    have : (bytes buf).isEmpty = true := by simp [bytes, he]
+    simp [this, cappedStep]
+  have hn : 0 < buf.val.length := List.length_pos_iff.mpr he
+  have hbl : bytes buf = (buf.val.take buf.val.length).map (·.val) := by simp [bytes]
+  obtain ⟨i1, hi1, hi1v⟩ := ok_of_spec (UScalar.sub_spec (x := Slice.len buf) (y := 1#usize)
+    (by simp; omega))
+  have hi1n : i1.val = buf.val.length - 1 := by simp at hi1v; omega
+  have hlast : (bytes buf).getLast? = some (buf.val[i1.val]'(by omega)).val := by
+    rw [hbl, pre_getLast _ _ hn le_rfl]; simp [hi1n]
+  have hne : (bytes buf).isEmpty = false := by simp [bytes, he]
+  have hie : core.slice.Slice.is_empty buf = ok false := by simp [core.slice.Slice.is_empty, he]
+  have hlen : (bytes buf).length = buf.val.length := by simp [bytes]
+  simp only [hie, bind_ok, Bool.false_eq_true, ↓reduceIte, hi1, index_ok buf i1 (by omega), hne,
+    hlast]
+  by_cases hb : (buf.val[i1.val]'(by omega)).val = 10
+  · have hb' : buf.val[i1.val]'(by omega) = 10#u8 := by rw [UScalar.eq_equiv]; simp [hb]
+    have hnl : (some (buf.val[i1.val]'(by omega)).val == some Clew.Framing.NL) = true := by
+      simp [hb, Clew.Framing.NL]
+    simp only [hnl, ↓reduceIte]
+    simp only [hb', ↓reduceIte]
+    refine ⟨some i1, rfl, ?_⟩
+    simp only [cappedStep, List.dropLast_eq_take, hlen, hi1n]
+  · have hb' : ¬ buf.val[i1.val]'(by omega) = 10#u8 := by rw [UScalar.eq_equiv]; simpa using hb
+    have hnl : (some (buf.val[i1.val]'(by omega)).val == some Clew.Framing.NL) = false := by
+      simp [hb, Clew.Framing.NL]
+    simp only [hnl, Bool.false_eq_true, ↓reduceIte]
+    simp only [hb', ↓reduceIte]
+    by_cases hbig : cap.val < buf.val.length
+    · refine ⟨none, by simp [UScalar.lt_equiv, hbig], ?_⟩
+      simp only [hlen, gt_iff_lt, hbig, ↓reduceIte, cappedStep]
+    · refine ⟨some (Slice.len buf), by simp [UScalar.lt_equiv]; omega, ?_⟩
+      simp only [hlen, gt_iff_lt, hbig, ↓reduceIte, cappedStep, Slice.len_val]
+      rw [List.take_of_length_le (by rw [hlen])]
+
+end FrameLoop
+
 end Clew.Extracted

@@ -44,6 +44,9 @@ trap 'rm -rf "$out"' EXIT
   --start-from crate::ssh::ssh_args \
   --start-from crate::server_dist::pinned_digest \
   --start-from crate::server_dist::sidecar_digest \
+  --start-from crate::framing::frame_line \
+  --start-from crate::framing::json_line \
+  --start-from crate::framing::capped_line \
   --dest "$out" -- --target-dir "$out/target" -q) >"$out/charon.log" 2>&1 || {
   cat "$out/charon.log" >&2
   exit 1

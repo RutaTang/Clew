@@ -705,15 +705,27 @@ def fingerprint.length_prefixed
   fingerprint.length_prefixed_loop parts (alloc.vec.Vec.new Std.U8) 0#usize
 
 /-- [clew_rules::framing::MAX_FRAME_BYTES]
-    Source: 'crates/clew-rules/src/framing.rs', lines 12:0-12:50
+    Source: 'crates/clew-rules/src/framing.rs', lines 15:0-15:50
     Visibility: public -/
 @[global_simps, irreducible]
 def framing.MAX_FRAME_BYTES : Result Std.U64 := do
   let i ← 64#u64 * 1024#u64
   i * 1024#u64
 
+/-- [clew_rules::framing::MAX_HEADER_LINE_BYTES]
+    Source: 'crates/clew-rules/src/framing.rs', lines 18:0-18:50
+    Visibility: public -/
+@[global_simps, irreducible]
+def framing.MAX_HEADER_LINE_BYTES : Result Std.Usize := 8#usize * 1024#usize
+
+/-- [clew_rules::framing::MAX_HEADER_LINES]
+    Source: 'crates/clew-rules/src/framing.rs', lines 21:0-21:39
+    Visibility: public -/
+@[global_simps, irreducible]
+def framing.MAX_HEADER_LINES : Std.Usize := 32#usize
+
 /-- [clew_rules::framing::HeaderError]
-    Source: 'crates/clew-rules/src/framing.rs', lines 16:0-25:1
+    Source: 'crates/clew-rules/src/framing.rs', lines 25:0-34:1
     Visibility: public -/
 @[discriminant isize]
 inductive framing.HeaderError where
@@ -723,7 +735,7 @@ inductive framing.HeaderError where
 | TooLarge : Std.U64 → framing.HeaderError
 
 /-- [clew_rules::framing::is_token_byte]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 29:0-48:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 38:0-57:1 -/
 def framing.is_token_byte (b : Std.U8) : Result Bool := do
   if b >= 48#u8
   then
@@ -1105,7 +1117,7 @@ def framing.is_token_byte (b : Std.U8) : Result Bool := do
                                   else ok (b = 126#u8)
 
 /-- [clew_rules::framing::is_ascii_ws]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 51:0-53:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 60:0-62:1 -/
 def framing.is_ascii_ws (b : Std.U8) : Result Bool := do
   if b = 32#u8
   then ok true
@@ -1120,7 +1132,7 @@ def framing.is_ascii_ws (b : Std.U8) : Result Bool := do
            else ok (b = 13#u8)
 
 /-- [clew_rules::framing::lower]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 56:0-58:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 65:0-67:1 -/
 def framing.lower (b : Std.U8) : Result Std.U8 := do
   if b >= 65#u8
   then if b <= 90#u8
@@ -1129,7 +1141,7 @@ def framing.lower (b : Std.U8) : Result Std.U8 := do
   else ok b
 
 /-- [clew_rules::framing::CONTENT_LENGTH]
-    Source: 'crates/clew-rules/src/framing.rs', lines 60:0-60:52 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 69:0-69:52 -/
 @[global_simps, irreducible]
 def framing.CONTENT_LENGTH : Array Std.U8 14#usize :=
   Array.make 14#usize [
@@ -1138,7 +1150,7 @@ def framing.CONTENT_LENGTH : Array Std.U8 14#usize :=
     ]
 
 /-- [clew_rules::framing::is_content_length]: loop body 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 68:4-75:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 77:4-84:1 -/
 @[rust_loop_body]
 def framing.is_content_length_loop.body
   (line : Slice Std.U8) (i : Std.Usize) :
@@ -1156,7 +1168,7 @@ def framing.is_content_length_loop.body
   else ok (done true)
 
 /-- [clew_rules::framing::is_content_length]: loop 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 68:4-75:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 77:4-84:1 -/
 @[rust_loop]
 def framing.is_content_length_loop
   (line : Slice Std.U8) (i : Std.Usize) : Result Bool := do
@@ -1165,7 +1177,7 @@ def framing.is_content_length_loop
     i
 
 /-- [clew_rules::framing::is_content_length]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 63:0-75:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 72:0-84:1 -/
 def framing.is_content_length
   (line : Slice Std.U8) («end» : Std.Usize) : Result Bool := do
   if «end» != 14#usize
@@ -1173,7 +1185,7 @@ def framing.is_content_length
   else framing.is_content_length_loop line 0#usize
 
 /-- [clew_rules::framing::all_ascii]: loop body 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 80:4-87:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 89:4-96:1 -/
 @[rust_loop_body]
 def framing.all_ascii_loop.body
   (line : Slice Std.U8) (i : Std.Usize) :
@@ -1190,7 +1202,7 @@ def framing.all_ascii_loop.body
   else ok (done true)
 
 /-- [clew_rules::framing::all_ascii]: loop 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 80:4-87:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 89:4-96:1 -/
 @[rust_loop]
 def framing.all_ascii_loop
   (line : Slice Std.U8) (i : Std.Usize) : Result Bool := do
@@ -1199,13 +1211,13 @@ def framing.all_ascii_loop
     i
 
 /-- [clew_rules::framing::all_ascii]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 78:0-87:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 87:0-96:1 -/
 @[reducible]
 def framing.all_ascii (line : Slice Std.U8) : Result Bool := do
   framing.all_ascii_loop line 0#usize
 
 /-- [clew_rules::framing::find_colon]: loop body 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 92:4-94:5 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 101:4-103:5 -/
 @[rust_loop_body]
 def framing.find_colon_loop.body
   (line : Slice Std.U8) (i : Std.Usize) :
@@ -1222,7 +1234,7 @@ def framing.find_colon_loop.body
   else ok (done i)
 
 /-- [clew_rules::framing::find_colon]: loop 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 92:4-94:5 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 101:4-103:5 -/
 @[rust_loop]
 def framing.find_colon_loop
   (line : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
@@ -1231,13 +1243,13 @@ def framing.find_colon_loop
     i
 
 /-- [clew_rules::framing::find_colon]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 90:0-96:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 99:0-105:1 -/
 @[reducible]
 def framing.find_colon (line : Slice Std.U8) : Result Std.Usize := do
   framing.find_colon_loop line 0#usize
 
 /-- [clew_rules::framing::all_token]: loop body 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 101:4-108:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 110:4-117:1 -/
 @[rust_loop_body]
 def framing.all_token_loop.body
   (line : Slice Std.U8) («end» : Std.Usize) (i : Std.Usize) :
@@ -1254,7 +1266,7 @@ def framing.all_token_loop.body
   else ok (done true)
 
 /-- [clew_rules::framing::all_token]: loop 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 101:4-108:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 110:4-117:1 -/
 @[rust_loop]
 def framing.all_token_loop
   (line : Slice Std.U8) («end» : Std.Usize) (i : Std.Usize) :
@@ -1265,14 +1277,14 @@ def framing.all_token_loop
     i
 
 /-- [clew_rules::framing::all_token]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 99:0-108:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 108:0-117:1 -/
 @[reducible]
 def framing.all_token
   (line : Slice Std.U8) («end» : Std.Usize) : Result Bool := do
   framing.all_token_loop line «end» 0#usize
 
 /-- [clew_rules::framing::skip_ws]: loop body 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 113:4-115:5 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 122:4-124:5 -/
 @[rust_loop_body]
 def framing.skip_ws_loop.body
   (line : Slice Std.U8) (i : Std.Usize) :
@@ -1290,7 +1302,7 @@ def framing.skip_ws_loop.body
   else ok (done i)
 
 /-- [clew_rules::framing::skip_ws]: loop 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 113:4-115:5 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 122:4-124:5 -/
 @[rust_loop]
 def framing.skip_ws_loop
   (line : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
@@ -1299,14 +1311,14 @@ def framing.skip_ws_loop
     i
 
 /-- [clew_rules::framing::skip_ws]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 111:0-117:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 120:0-126:1 -/
 @[reducible]
 def framing.skip_ws
   (line : Slice Std.U8) («from» : Std.Usize) : Result Std.Usize := do
   framing.skip_ws_loop line «from»
 
 /-- [clew_rules::framing::trim_end]: loop body 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 122:4-124:5 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 131:4-133:5 -/
 @[rust_loop_body]
 def framing.trim_end_loop.body
   (line : Slice Std.U8) («from» : Std.Usize) (i : Std.Usize) :
@@ -1323,7 +1335,7 @@ def framing.trim_end_loop.body
   else ok (done i)
 
 /-- [clew_rules::framing::trim_end]: loop 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 122:4-124:5 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 131:4-133:5 -/
 @[rust_loop]
 def framing.trim_end_loop
   (line : Slice Std.U8) («from» : Std.Usize) (i : Std.Usize) :
@@ -1334,7 +1346,7 @@ def framing.trim_end_loop
     i
 
 /-- [clew_rules::framing::trim_end]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 120:0-126:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 129:0-135:1 -/
 @[reducible]
 def framing.trim_end
   (line : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
@@ -1343,7 +1355,7 @@ def framing.trim_end
   framing.trim_end_loop line «from» «to»
 
 /-- [clew_rules::framing::all_digits]: loop body 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 131:4-138:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 140:4-147:1 -/
 @[rust_loop_body]
 def framing.all_digits_loop.body
   (line : Slice Std.U8) («to» : Std.Usize) (i : Std.Usize) :
@@ -1362,7 +1374,7 @@ def framing.all_digits_loop.body
   else ok (done true)
 
 /-- [clew_rules::framing::all_digits]: loop 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 131:4-138:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 140:4-147:1 -/
 @[rust_loop]
 def framing.all_digits_loop
   (line : Slice Std.U8) («to» : Std.Usize) (i : Std.Usize) :
@@ -1373,7 +1385,7 @@ def framing.all_digits_loop
     i
 
 /-- [clew_rules::framing::all_digits]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 129:0-138:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 138:0-147:1 -/
 @[reducible]
 def framing.all_digits
   (line : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
@@ -1382,7 +1394,7 @@ def framing.all_digits
   framing.all_digits_loop line «to» «from»
 
 /-- [clew_rules::framing::decimal]: loop body 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 144:4-153:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 153:4-162:1 -/
 @[rust_loop_body]
 def framing.decimal_loop.body
   (line : Slice Std.U8) («to» : Std.Usize) (n : Std.U64) (i : Std.Usize) :
@@ -1405,7 +1417,7 @@ def framing.decimal_loop.body
   else ok (done (some n))
 
 /-- [clew_rules::framing::decimal]: loop 0:
-    Source: 'crates/clew-rules/src/framing.rs', lines 144:4-153:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 153:4-162:1 -/
 @[rust_loop]
 def framing.decimal_loop
   (line : Slice Std.U8) («to» : Std.Usize) (n : Std.U64) (i : Std.Usize) :
@@ -1416,7 +1428,7 @@ def framing.decimal_loop
     (n, i)
 
 /-- [clew_rules::framing::decimal]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 141:0-153:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 150:0-162:1 -/
 @[reducible]
 def framing.decimal
   (line : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
@@ -1425,7 +1437,7 @@ def framing.decimal
   framing.decimal_loop line «to» 0#u64 «from»
 
 /-- [clew_rules::framing::parse_length]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 158:0-163:1 -/
+    Source: 'crates/clew-rules/src/framing.rs', lines 167:0-172:1 -/
 def framing.parse_length
   (line : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
   Result (Option Std.U64)
@@ -1443,7 +1455,7 @@ def framing.parse_length
       else ok none
 
 /-- [clew_rules::framing::header]:
-    Source: 'crates/clew-rules/src/framing.rs', lines 175:0-201:1
+    Source: 'crates/clew-rules/src/framing.rs', lines 184:0-210:1
     Visibility: public -/
 def framing.header
   (length : Option Std.U64) (line : Slice Std.U8) :
@@ -1496,6 +1508,181 @@ def framing.header
           else ok (core.result.Result.Ok length)
         else ok (core.result.Result.Err framing.HeaderError.Malformed)
   else ok (core.result.Result.Err framing.HeaderError.Malformed)
+
+/-- [clew_rules::framing::FrameLine]
+    Source: 'crates/clew-rules/src/framing.rs', lines 216:0-231:1
+    Visibility: public -/
+@[discriminant isize]
+inductive framing.FrameLine where
+| End : framing.FrameLine
+| Truncated : framing.FrameLine
+| TooLong : framing.FrameLine
+| TooManyLines : framing.FrameLine
+| Separator : framing.FrameLine
+| Body : framing.FrameLine
+| Header :
+  core.result.Result (Option Std.U64) framing.HeaderError →
+  framing.FrameLine
+
+/-- [clew_rules::framing::frame_line]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 236:0-263:1
+    Visibility: public -/
+def framing.frame_line
+  (length : Option Std.U64) (headers : Std.Usize) (lines : Std.Usize)
+  (line : Slice Std.U8) :
+  Result framing.FrameLine
+  := do
+  let b ← core.slice.Slice.is_empty line
+  if b
+  then
+    if headers = 0#usize
+    then ok framing.FrameLine.End
+    else ok framing.FrameLine.Truncated
+  else
+    let i := Slice.len line
+    let i1 ← i - 1#usize
+    let i2 ← Slice.index_usize line i1
+    if i2 != 10#u8
+    then
+      let i3 := Slice.len line
+      let i4 ← framing.MAX_HEADER_LINE_BYTES
+      if i3 >= i4
+      then ok framing.FrameLine.TooLong
+      else ok framing.FrameLine.Truncated
+    else
+      if lines >= framing.MAX_HEADER_LINES
+      then ok framing.FrameLine.TooManyLines
+      else
+        let i3 := Slice.len line
+        let «end» ← i3 - 1#usize
+        let end1 ←
+          if «end» > 0#usize
+          then
+            do
+            let i4 ← «end» - 1#usize
+            let i5 ← Slice.index_usize line i4
+            if i5 = 13#u8
+            then ok i4
+            else ok «end»
+          else ok «end»
+        if end1 = 0#usize
+        then
+          if headers = 0#usize
+          then ok framing.FrameLine.Separator
+          else ok framing.FrameLine.Body
+        else
+          let s ←
+            core.slice.index.Slice.index
+              (core.slice.index.SliceIndexRangeUsizeSlice Std.U8) line
+              { start := 0#usize, «end» := end1 }
+          let r ← framing.header length s
+          ok (framing.FrameLine.Header r)
+
+/-- [clew_rules::framing::all_ws]: loop body 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 268:4-275:1 -/
+@[rust_loop_body]
+def framing.all_ws_loop.body
+  (line : Slice Std.U8) («end» : Std.Usize) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  if i < «end»
+  then
+    let i1 ← Slice.index_usize line i
+    let b ← framing.is_ascii_ws i1
+    if b
+    then let i2 ← i + 1#usize
+         ok (cont i2)
+    else ok (done false)
+  else ok (done true)
+
+/-- [clew_rules::framing::all_ws]: loop 0:
+    Source: 'crates/clew-rules/src/framing.rs', lines 268:4-275:1 -/
+@[rust_loop]
+def framing.all_ws_loop
+  (line : Slice Std.U8) («end» : Std.Usize) (i : Std.Usize) :
+  Result Bool
+  := do
+  loop
+    (fun i1 => framing.all_ws_loop.body line «end» i1)
+    i
+
+/-- [clew_rules::framing::all_ws]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 266:0-275:1 -/
+@[reducible]
+def framing.all_ws
+  (line : Slice Std.U8) («end» : Std.Usize) : Result Bool := do
+  framing.all_ws_loop line «end» 0#usize
+
+/-- [clew_rules::framing::JsonLine]
+    Source: 'crates/clew-rules/src/framing.rs', lines 280:0-289:1
+    Visibility: public -/
+@[discriminant isize]
+inductive framing.JsonLine where
+| End : framing.JsonLine
+| TooLarge : Std.Usize → framing.JsonLine
+| Blank : framing.JsonLine
+| Line : Std.Usize → framing.JsonLine
+
+/-- [clew_rules::framing::json_line]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 294:0-316:1
+    Visibility: public -/
+def framing.json_line
+  (line : Slice Std.U8) (cap : Std.Usize) : Result framing.JsonLine := do
+  let b ← core.slice.Slice.is_empty line
+  if b
+  then ok framing.JsonLine.End
+  else
+    let i := Slice.len line
+    let i1 ← i - 1#usize
+    let i2 ← Slice.index_usize line i1
+    let «end» := Slice.len line
+    let end1 ←
+      if i2 = 10#u8
+      then
+        do
+        let end2 ← «end» - 1#usize
+        if end2 > 0#usize
+        then
+          let i3 ← end2 - 1#usize
+          let i4 ← Slice.index_usize line i3
+          if i4 = 13#u8
+          then ok i3
+          else ok end2
+        else ok end2
+      else ok «end»
+    if end1 > cap
+    then ok (framing.JsonLine.TooLarge end1)
+    else
+      let b1 ← framing.all_ws line end1
+      if b1
+      then
+        if i2 = 10#u8
+        then ok framing.JsonLine.Blank
+        else ok framing.JsonLine.End
+      else ok (framing.JsonLine.Line end1)
+
+/-- [clew_rules::framing::capped_line]:
+    Source: 'crates/clew-rules/src/framing.rs', lines 322:0-333:1
+    Visibility: public -/
+def framing.capped_line
+  (buf : Slice Std.U8) (cap : Std.Usize) : Result (Option Std.Usize) := do
+  let b ← core.slice.Slice.is_empty buf
+  if b
+  then ok none
+  else
+    let i := Slice.len buf
+    let i1 ← i - 1#usize
+    let i2 ← Slice.index_usize buf i1
+    if i2 = 10#u8
+    then let i3 := Slice.len buf
+         let i4 ← i3 - 1#usize
+         ok (some i4)
+    else
+      let i3 := Slice.len buf
+      if i3 > cap
+      then ok none
+      else let i4 := Slice.len buf
+           ok (some i4)
 
 /-- [clew_rules::headers::header_name_ok]: loop body 0:
     Source: 'crates/clew-rules/src/headers.rs', lines 12:4-19:1

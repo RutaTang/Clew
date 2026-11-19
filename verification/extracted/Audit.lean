@@ -31,3 +31,6 @@ does not model (the code proved here calls none of them). -/
 #print axioms Clew.Extracted.SshArgs.ssh_reads_as_meant
 #print axioms Clew.Extracted.Digests.pinned_digest_is_the_model
 #print axioms Clew.Extracted.Digests.sidecar_digest_is_the_model
+#print axioms Clew.Extracted.FrameLoop.frame_line_is_the_model
+#print axioms Clew.Extracted.FrameLoop.json_line_is_the_model
+#print axioms Clew.Extracted.FrameLoop.capped_line_is_the_model

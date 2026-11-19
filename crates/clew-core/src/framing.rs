@@ -37,7 +37,7 @@
 //! A peer that stops reading can therefore neither wedge the actor nor hold
 //! up the stop that is meant to get rid of it.
 
-use clew_rules::framing::HeaderError;
+use clew_rules::framing::{FrameLine, HeaderError, JsonLine};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -53,12 +53,12 @@ use tokio::time::Instant;
 
 /// Longest header line accepted, terminator included. Real headers are a few
 /// dozen bytes; a line this long is garbage or an attempt to balloon memory.
-pub const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
+pub const MAX_HEADER_LINE_BYTES: usize = clew_rules::framing::MAX_HEADER_LINE_BYTES;
 
 /// Most header lines one frame may carry (blank separator lines ahead of the
 /// headers included). Real peers send one or two; the cap keeps a peer from
 /// streaming headers forever without ever reaching a body.
-pub const MAX_HEADER_LINES: usize = 32;
+pub const MAX_HEADER_LINES: usize = clew_rules::framing::MAX_HEADER_LINES;
 
 /// Largest message body accepted. `Content-Length` is peer-chosen, so it is
 /// checked against this before a single body byte is read, and the body
@@ -194,57 +194,46 @@ where
     let mut line = Vec::with_capacity(64);
     loop {
         line.clear();
-        let n = (&mut *reader)
+        (&mut *reader)
             .take(MAX_HEADER_LINE_BYTES as u64)
             .read_until(b'\n', &mut line)
             .await
             .map_err(FrameError::Io)?;
-        if n == 0 {
-            // Between frames, EOF is the peer closing cleanly; after a
-            // header it cut a message short.
-            return if headers == 0 {
-                Ok(None)
-            } else {
-                Err(FrameError::Truncated)
-            };
-        }
-        if line.last() != Some(&b'\n') {
-            return Err(if line.len() >= MAX_HEADER_LINE_BYTES {
-                FrameError::HeaderLineTooLong
-            } else {
-                FrameError::Truncated
-            });
-        }
-        lines += 1;
-        if lines > MAX_HEADER_LINES {
-            return Err(FrameError::TooManyHeaderLines);
-        }
-        line.pop();
-        if line.last() == Some(&b'\r') {
-            line.pop();
-        }
-        if line.is_empty() {
-            if headers == 0 {
-                continue; // a separator ahead of the headers
+        // Everything about the line is decided by
+        // `clew_rules::framing::frame_line`, whose translation to Lean is
+        // proved to take the model's step: between frames, EOF is the peer
+        // closing cleanly, after a header it cut a message short; blank
+        // lines ahead of the first header are separators.
+        match clew_rules::framing::frame_line(content_length, headers, lines, &line) {
+            FrameLine::End => return Ok(None),
+            FrameLine::Truncated => return Err(FrameError::Truncated),
+            FrameLine::TooLong => return Err(FrameError::HeaderLineTooLong),
+            FrameLine::TooManyLines => return Err(FrameError::TooManyHeaderLines),
+            FrameLine::Separator => lines += 1,
+            FrameLine::Body => break,
+            FrameLine::Header(decision) => {
+                lines += 1;
+                headers += 1;
+                let content = line.strip_suffix(b"\n").unwrap_or(&line);
+                let content = content.strip_suffix(b"\r").unwrap_or(content);
+                content_length = match decision {
+                    Ok(length) => length,
+                    Err(HeaderError::Malformed) => {
+                        return Err(FrameError::MalformedHeader(preview(content)));
+                    }
+                    Err(HeaderError::InvalidLength) => {
+                        let value = content.splitn(2, |&b| b == b':').nth(1).unwrap_or_default();
+                        return Err(FrameError::InvalidContentLength(preview(
+                            value.trim_ascii(),
+                        )));
+                    }
+                    Err(HeaderError::Conflicting) => {
+                        return Err(FrameError::ConflictingContentLength);
+                    }
+                    Err(HeaderError::TooLarge(len)) => return Err(FrameError::TooLarge(len)),
+                };
             }
-            break; // the blank line that ends the headers
         }
-        headers += 1;
-        // The line's decision — `clew_rules::framing::header`, whose
-        // translation to Lean is proved to be the model `read_frame`'s
-        // theorems are about.
-        content_length = match clew_rules::framing::header(content_length, &line) {
-            Ok(length) => length,
-            Err(HeaderError::Malformed) => return Err(FrameError::MalformedHeader(preview(&line))),
-            Err(HeaderError::InvalidLength) => {
-                let value = line.splitn(2, |&b| b == b':').nth(1).unwrap_or_default();
-                return Err(FrameError::InvalidContentLength(preview(
-                    value.trim_ascii(),
-                )));
-            }
-            Err(HeaderError::Conflicting) => return Err(FrameError::ConflictingContentLength),
-            Err(HeaderError::TooLarge(len)) => return Err(FrameError::TooLarge(len)),
-        };
     }
     let len = content_length.ok_or(FrameError::MissingContentLength)? as usize;
     let mut body = Vec::with_capacity(len.min(INITIAL_BODY_CAPACITY));
@@ -298,31 +287,22 @@ where
 {
     loop {
         let mut line = Vec::new();
-        let n = (&mut *reader)
+        (&mut *reader)
             .take(cap as u64 + 2)
             .read_until(b'\n', &mut line)
             .await
             .map_err(FrameError::Io)?;
-        if n == 0 {
-            return Ok(None);
-        }
-        let ended = line.last() == Some(&b'\n');
-        if ended {
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
+        // The line's decision: `clew_rules::framing::json_line`, proved to
+        // be the model's step.
+        match clew_rules::framing::json_line(&line, cap) {
+            JsonLine::End => return Ok(None),
+            JsonLine::TooLarge(len) => return Err(FrameError::TooLarge(len as u64)),
+            JsonLine::Blank => continue,
+            JsonLine::Line(end) => {
+                line.truncate(end);
+                return Ok(Some(line));
             }
         }
-        if line.len() > cap {
-            return Err(FrameError::TooLarge(line.len() as u64));
-        }
-        if line.iter().all(u8::is_ascii_whitespace) {
-            if ended {
-                continue;
-            }
-            return Ok(None);
-        }
-        return Ok(Some(line));
     }
 }
 
@@ -359,19 +339,16 @@ where
     R: tokio::io::AsyncBufRead + Unpin,
 {
     let mut buf = Vec::new();
-    let n = reader
+    reader
         .take(cap as u64 + 1)
         .read_until(b'\n', &mut buf)
         .await
         .ok()?;
-    if n == 0 {
-        return None; // EOF
-    }
-    if buf.last() == Some(&b'\n') {
-        buf.pop();
-    } else if buf.len() > cap {
-        return None; // over the cap, and no end in sight: fail closed
-    }
+    // Where the line's text ends (`clew_rules::framing::capped_line`, proved
+    // to be the model): none at EOF, and none over the cap with no end in
+    // sight, failing closed. Then it must be UTF-8.
+    let end = clew_rules::framing::capped_line(&buf, cap)?;
+    buf.truncate(end);
     String::from_utf8(buf).ok()
 }
 
