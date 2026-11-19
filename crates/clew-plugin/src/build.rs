@@ -97,13 +97,16 @@ pub struct Toolchain {
     pub rustc: PathBuf,
     /// `rustc`'s version, as `1.95.0`.
     pub version: String,
+    /// Where cargo keeps what it downloads, for Clew's own Rust
+    /// (`toolchain::managed_dir`); the user's default otherwise.
+    pub cargo_home: Option<PathBuf>,
 }
 
 /// Why a build gave no plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildError {
-    /// No Rust that can build plugins: what is missing, and the command
-    /// that adds it if there is one.
+    /// No Rust that can build plugins: what is missing, and what fixes it
+    /// if anything does (a sentence that follows "To fix it: ").
     Toolchain {
         message: String,
         fix: Option<String>,
@@ -123,7 +126,7 @@ impl BuildError {
     pub fn report(&self) -> String {
         match self {
             BuildError::Toolchain { message, fix } => match fix {
-                Some(fix) => format!("{message}\nTo fix it, run: {fix}"),
+                Some(fix) => format!("{message}\nTo fix it: {fix}"),
                 None => message.clone(),
             },
             BuildError::Source(why) => format!("The plugin's source is not right: {why}"),
@@ -150,30 +153,6 @@ pub struct Built {
 
 // -- the toolchain -------------------------------------------------------------
 
-/// Find the Rust to build plugins with: rustup's default toolchain when
-/// rustup is installed, else `cargo` and `rustc` on PATH. It must be
-/// [`MIN_RUST`] or later and have the [`TARGET`] standard library.
-pub fn find_toolchain() -> Result<Toolchain, BuildError> {
-    let rustup = clew_core::lsp::store::find_on_path_unresolved("rustup");
-    let (cargo, rustc) = match &rustup {
-        Some(rustup) => (which(rustup, "cargo")?, which(rustup, "rustc")?),
-        None => {
-            let cargo = clew_core::lsp::store::find_on_path_unresolved("cargo");
-            let rustc = clew_core::lsp::store::find_on_path_unresolved("rustc");
-            match (cargo, rustc) {
-                (Some(cargo), Some(rustc)) => (cargo, rustc),
-                _ => {
-                    return Err(BuildError::Toolchain {
-                        message: "Building plugins needs Rust, and it is not installed. Install it from https://rustup.rs, then try again.".into(),
-                        fix: None,
-                    });
-                }
-            }
-        }
-    };
-    toolchain_from(cargo, rustc, rustup.is_some())
-}
-
 /// The toolchain whose programs are `cargo` and `rustc`, checked: recent
 /// enough, and with the [`TARGET`] standard library (`rustup`: whether
 /// rustup manages it, so the fix is a rustup command).
@@ -194,13 +173,14 @@ pub fn toolchain_from(
             message: format!(
                 "Rust {version} is installed, but not its {TARGET} target, which plugins are built for."
             ),
-            fix: rustup.then(|| format!("rustup target add {TARGET}")),
+            fix: rustup.then(|| format!("run `rustup target add {TARGET}`.")),
         });
     }
     Ok(Toolchain {
         cargo,
         rustc,
         version,
+        cargo_home: None,
     })
 }
 
@@ -208,46 +188,35 @@ fn toolchain(message: String) -> BuildError {
     BuildError::Toolchain { message, fix: None }
 }
 
-/// The program rustup's default toolchain runs as `tool`, by its path.
-fn which(rustup: &Path, tool: &str) -> Result<PathBuf, BuildError> {
-    let mut cmd = Command::new(rustup);
-    cmd.args(["which", tool])
-        .current_dir(clew_core::linerpc::neutral_dir())
-        .env_remove("RUSTUP_TOOLCHAIN");
-    let path = output(&mut cmd).map_err(|e| BuildError::Toolchain {
-        message: format!("rustup has no default Rust toolchain to build plugins with ({e})."),
-        fix: Some("rustup default stable".into()),
-    })?;
-    let path = PathBuf::from(path.trim());
-    if path.is_absolute() && path.is_file() {
-        Ok(path)
-    } else {
-        Err(toolchain(format!(
-            "rustup named no {tool} to build plugins with"
-        )))
-    }
-}
-
-/// `rustc`'s version, refused if older than [`MIN_RUST`].
-fn rustc_version(rustc: &Path) -> Result<String, BuildError> {
-    let out = output(Command::new(rustc).arg("-vV"))
-        .map_err(|e| toolchain(format!("could not run rustc: {e}")))?;
-    let version = out
-        .lines()
+/// `rustc`'s version (`1.95.0`), or why it said none.
+pub(crate) fn rustc_version_of(rustc: &Path) -> Result<String, String> {
+    let out =
+        output(Command::new(rustc).arg("-vV")).map_err(|e| format!("could not run rustc: {e}"))?;
+    out.lines()
         .find_map(|l| l.strip_prefix("release: "))
         .map(|v| v.trim().to_string())
-        .ok_or_else(|| toolchain("rustc did not say its version".into()))?;
+        .ok_or_else(|| "rustc did not say its version".into())
+}
+
+/// Whether Rust `version` is older than [`MIN_RUST`].
+pub(crate) fn too_old(version: &str) -> bool {
     let mut parts = version
         .split(['.', '-'])
         .map(|p| p.parse::<u32>().unwrap_or(0));
     let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
-    if (major, minor) < MIN_RUST {
+    (major, minor) < MIN_RUST
+}
+
+/// `rustc`'s version, refused if older than [`MIN_RUST`].
+fn rustc_version(rustc: &Path) -> Result<String, BuildError> {
+    let version = rustc_version_of(rustc).map_err(toolchain)?;
+    if too_old(&version) {
         return Err(BuildError::Toolchain {
             message: format!(
                 "Rust {version} is too old to build plugins; they need {}.{} or later.",
                 MIN_RUST.0, MIN_RUST.1
             ),
-            fix: Some("rustup update stable".into()),
+            fix: Some("run `rustup update stable`.".into()),
         });
     }
     Ok(version)
@@ -451,15 +420,18 @@ fn cargo(toolchain: &Toolchain, dir: &Path, target: &Path) -> Command {
         .env("CARGO_TARGET_DIR", target)
         .env("CARGO_TERM_COLOR", "never")
         .env("CARGO_TERM_PROGRESS_WHEN", "never");
+    if let Some(home) = &toolchain.cargo_home {
+        cmd.env("CARGO_HOME", home);
+    }
     cmd
 }
 
-/// What a finished run of cargo left.
-struct Ran {
-    success: bool,
-    stdout: String,
+/// What a finished run of a program left.
+pub(crate) struct Ran {
+    pub(crate) success: bool,
+    pub(crate) stdout: String,
     /// The end of its standard error.
-    stderr: String,
+    pub(crate) stderr: String,
 }
 
 /// The most of cargo's standard output kept, and of its error.
@@ -468,7 +440,11 @@ const STDERR_TAIL: usize = 64 * 1024;
 
 /// Run `cmd` to its end within `limit`, or until `cancel` is set: then it
 /// is stopped with all it started (its own process group).
-fn run(mut cmd: Command, limit: Duration, cancel: &AtomicBool) -> Result<Ran, BuildError> {
+pub(crate) fn run(
+    mut cmd: Command,
+    limit: Duration,
+    cancel: &AtomicBool,
+) -> Result<Ran, BuildError> {
     use std::io::Read;
     if cancel.load(Ordering::Relaxed) {
         return Err(BuildError::Failed("cancelled".into()));
@@ -481,9 +457,13 @@ fn run(mut cmd: Command, limit: Duration, cancel: &AtomicBool) -> Result<Ran, Bu
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    let program = Path::new(cmd.get_program())
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut child = cmd
         .spawn()
-        .map_err(|e| BuildError::Failed(format!("could not run cargo: {e}")))?;
+        .map_err(|e| BuildError::Failed(format!("could not run {program}: {e}")))?;
     #[cfg(windows)]
     let _job = clew_core::procgroup::adopt_scoped(&child);
     let read = |stream: Option<Box<dyn Read + Send>>, keep_tail: bool, cap: usize| {
@@ -922,7 +902,10 @@ mod tests {
             message: "no target".into(),
             fix: Some("rustup target add wasm32-wasip2".into()),
         };
-        assert!(e.report().contains("run: rustup target add wasm32-wasip2"));
+        assert!(
+            e.report()
+                .contains("To fix it: rustup target add wasm32-wasip2")
+        );
         let e = BuildError::Compile(vec!["error: one".into(), "error: two".into()]);
         assert!(e.report().contains("error: one\nerror: two"));
     }

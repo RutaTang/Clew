@@ -533,6 +533,141 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
     form::row_of(item)
 }
 
+/// Why plugins cannot be built here, in the reader's words.
+fn missing_words(why: &clew_plugin::toolchain::Why) -> String {
+    use clew_plugin::toolchain::Why;
+    match why {
+        Why::NoRust => tr!("Rust is not installed on this computer.").into(),
+        Why::NoDefault(_) => tr!("rustup is installed, but has no default Rust.").into(),
+        Why::NoTarget(version) => tr!(
+            "Rust {version} is installed, but not the WebAssembly target plugins are built for.",
+            version = version.clone()
+        ),
+        Why::TooOld(version) => tr!(
+            "Rust {version} is installed, but it is too old to build plugins.",
+            version = version.clone()
+        ),
+        Why::OwnBroken(_) => tr!("The Rust Clew installed does not work.").into(),
+        Why::Other(why) => tr!(
+            "Rust cannot build plugins here: {reason}",
+            reason = why.clone()
+        ),
+    }
+}
+
+/// Settings → Plugins: whether plugins can be built here, and the one
+/// step that makes it so.
+fn building_group(app: &App) -> Element<'_, Message> {
+    use crate::app::plugins::Building;
+    use clew_plugin::toolchain::{Setup, Stage};
+    let none = || -> Element<'_, Message> { space().width(0).into() };
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    match &app.plugins.building {
+        Building::Unknown | Building::Checking => {
+            rows.push(form::item(
+                tr!("Rust"),
+                Some(tr!("Checking…").into()),
+                none(),
+            ));
+        }
+        Building::Ready { version, own } => {
+            let said = match own {
+                true => tr!(
+                    "Ready: Rust {version}, installed by Clew",
+                    version = version.clone()
+                ),
+                false => tr!("Ready: Rust {version}", version = version.clone()),
+            };
+            rows.push(form::item(tr!("Rust"), Some(said), none()));
+        }
+        Building::Missing(missing) => {
+            let (action, about) = match &missing.setup {
+                Some(Setup::AddTarget { .. }) => (
+                    Some(tr!("Add the WebAssembly target")),
+                    tr!(
+                        "Runs “rustup target add wasm32-wasip2”, which adds about 100 MB to your Rust."
+                    ),
+                ),
+                Some(Setup::Install) => (
+                    Some(tr!("Install Rust for Clew")),
+                    tr!(
+                        "Installs Rust from rust-lang.org into Clew's own folder (about 700 MB). Nothing else on this computer changes."
+                    ),
+                ),
+                None => (
+                    None,
+                    tr!("Install Rust from rustup.rs, then open this page again."),
+                ),
+            };
+            let control: Element<'_, Message> = match action {
+                Some(action) => {
+                    form::primary(action, Some(Message::Plugin(PluginMsg::SetUpToolchain))).into()
+                }
+                None => none(),
+            };
+            rows.push(form::item_saying(
+                tr!("Rust"),
+                Some(missing_words(&missing.why)),
+                true,
+                control,
+            ));
+            rows.push(form::row_of(form::note(about)));
+        }
+        Building::SettingUp { stage, .. } => {
+            let said = match stage {
+                Stage::Downloading => tr!("Downloading Rust's installer…"),
+                Stage::Installing => {
+                    tr!("Installing Rust… This takes a few minutes.")
+                }
+                Stage::AddingTarget => tr!("Adding the WebAssembly target…"),
+            };
+            rows.push(form::item(
+                tr!("Rust"),
+                Some(said.into()),
+                form::action(
+                    tr!("Cancel"),
+                    Some(Message::Plugin(PluginMsg::CancelToolchainSetup)),
+                ),
+            ));
+        }
+    }
+    if let Some(why) = &app.plugins.setup_failure {
+        rows.push(form::row_of(
+            form::note(tr!(
+                "Setting up did not work: {reason}",
+                reason = why.clone()
+            ))
+            .color(theme::danger()),
+        ));
+    }
+    // Clew's own Rust, removable while nothing is being set up.
+    if app.plugins.own_rust
+        && !matches!(
+            app.plugins.building,
+            Building::SettingUp { .. } | Building::Checking
+        )
+    {
+        let used = matches!(app.plugins.building, Building::Ready { own: true, .. });
+        rows.push(form::item(
+            tr!("Clew's own Rust"),
+            Some(match used {
+                true => tr!(
+                    "Removing it frees about 700 MB. Plugins already installed keep working; building new ones needs Rust again."
+                )
+                .into(),
+                false => tr!("Not in use: your own Rust is ready. Removing it frees about 700 MB.").into(),
+            }),
+            form::action(tr!("Remove"), Some(Message::Plugin(PluginMsg::RemoveOwnRust))),
+        ));
+    }
+    form::group(
+        tr!("Building plugins"),
+        Some(tr!("Agents write plugins in Rust, and Clew builds them on this computer.").into()),
+        None,
+        rows,
+    )
+}
+
 /// Settings → Plugins.
 pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
     let install = form::action(
@@ -572,6 +707,7 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
     if let Some(why) = &app.plugins.failure {
         groups.push(form::note(why.clone()).color(theme::danger()).into());
     }
+    groups.push(building_group(app));
     groups.push(
         form::note(tr!(
             "Plugins run inside Clew, apart from everything else: each can do only what you allowed when you installed it, and never reach the network, other files, programs or your keys."

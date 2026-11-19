@@ -39414,3 +39414,103 @@ fn a_plugins_graph_is_built_when_shown_in_project_graphs() {
     );
     assert_eq!(app.plugin_map_status(), None);
 }
+
+/// Settings → Plugins says whether plugins can be built here: it looks as
+/// the page opens, offers the one step that fixes what is missing, says
+/// how a step goes with a way to stop it, says why one did not work, and
+/// offers to remove the Rust Clew installed.
+#[test]
+fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
+    use crate::app::plugins::{Building, Checked, PluginMsg};
+    use clew_plugin::toolchain::{Missing, Setup, Stage, Why};
+    let data = clew_core::testutil::TempDir::new("plugin-building");
+    let _env = data_dir_override(data.path());
+    let mut app = blank_app();
+    let says = |app: &App, words: &str| {
+        iced_test::simulator(crate::ui::plugins_settings(app))
+            .find(words)
+            .is_ok()
+    };
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        crate::SettingsPage::Plugins,
+    )));
+    assert!(
+        matches!(app.plugins.building, Building::Checking),
+        "looked at as the page opens"
+    );
+    assert!(says(&app, "Checking…"));
+
+    let checked = |app: &mut App, found, own_installed| {
+        let _ = app.update(Message::Plugin(PluginMsg::ToolchainChecked(Checked {
+            found,
+            own_installed,
+        })));
+    };
+    checked(
+        &mut app,
+        Err(Missing {
+            why: Why::NoRust,
+            setup: Some(Setup::Install),
+        }),
+        false,
+    );
+    assert!(says(&app, "Rust is not installed on this computer."));
+    assert!(says(&app, "Install Rust for Clew"));
+
+    checked(
+        &mut app,
+        Err(Missing {
+            why: Why::NoTarget("1.95.0".into()),
+            setup: Some(Setup::AddTarget {
+                rustup: "/usr/bin/rustup".into(),
+            }),
+        }),
+        false,
+    );
+    assert!(says(&app, "Add the WebAssembly target"));
+
+    // A step running: how it goes, and Cancel, which stops it.
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.plugins.building = Building::SettingUp {
+        stage: Stage::Downloading,
+        cancel: cancel.clone(),
+    };
+    let _ = app.update(Message::Plugin(PluginMsg::ToolchainStage(
+        Stage::Installing,
+    )));
+    assert!(says(&app, "Installing Rust… This takes a few minutes."));
+    assert!(says(&app, "Cancel"));
+    let _ = app.update(Message::Plugin(PluginMsg::CancelToolchainSetup));
+    assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+    // A check landing meanwhile does not end it.
+    checked(&mut app, Ok(("1.95.0".into(), true)), true);
+    assert!(matches!(app.plugins.building, Building::SettingUp { .. }));
+
+    // It did not work: why, with what is still missing and its fix.
+    let _ = app.update(Message::Plugin(PluginMsg::ToolchainSetUp(Err(
+        "cancelled".into()
+    ))));
+    assert!(matches!(app.plugins.building, Building::Checking));
+    checked(
+        &mut app,
+        Err(Missing {
+            why: Why::NoRust,
+            setup: Some(Setup::Install),
+        }),
+        false,
+    );
+    assert!(says(&app, "Setting up did not work: cancelled"));
+    assert!(says(&app, "Install Rust for Clew"));
+
+    // Ready with Clew's own: said so, and it can be removed.
+    checked(&mut app, Ok(("1.95.0".into(), true)), true);
+    assert!(says(&app, "Ready: Rust 1.95.0, installed by Clew"));
+    assert!(says(&app, "Clew's own Rust"));
+    assert!(
+        !says(&app, "Setting up did not work: cancelled"),
+        "a failure is forgotten once ready"
+    );
+    checked(&mut app, Ok(("1.95.0".into(), false)), false);
+    assert!(says(&app, "Ready: Rust 1.95.0"));
+    assert!(!says(&app, "Clew's own Rust"));
+}

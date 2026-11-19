@@ -967,12 +967,15 @@ impl App {
         }
     }
 
-    /// [`Self::usage_opened`], if Settings is on the Usage page.
+    /// What a Settings page asks for as it opens: the ledger for Usage
+    /// ([`Self::usage_opened`]), the toolchain check for Plugins.
     pub(crate) fn on_usage_page(&mut self) -> Task<Message> {
-        if self.settings.page == crate::SettingsPage::Usage {
-            self.usage_opened()
-        } else {
-            Task::none()
+        match self.settings.page {
+            crate::SettingsPage::Usage => self.usage_opened(),
+            // Whether plugins can be built here, looked at as their page
+            // opens: Rust may have been set up meanwhile.
+            crate::SettingsPage::Plugins => self.check_toolchain(),
+            _ => Task::none(),
         }
     }
 

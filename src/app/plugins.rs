@@ -235,6 +235,41 @@ pub struct Plugins {
     pub(crate) failure: Option<String>,
     /// The requests of `clew-server mcp` this window took on.
     pub(crate) handling: HashSet<String>,
+    /// Whether plugins can be built here, as Settings → Plugins says.
+    pub(crate) building: Building,
+    /// The Rust Clew installed is there, used or not.
+    pub(crate) own_rust: bool,
+    /// Why the last setup step did not work, until one works or another
+    /// starts.
+    pub(crate) setup_failure: Option<String>,
+}
+
+/// Whether plugins can be built on this computer.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum Building {
+    /// Not looked at yet.
+    #[default]
+    Unknown,
+    Checking,
+    /// Ready: the Rust version, and whether it is Clew's own.
+    Ready {
+        version: String,
+        own: bool,
+    },
+    Missing(clew_plugin::toolchain::Missing),
+    /// A setup step running, and how it goes.
+    SettingUp {
+        stage: clew_plugin::toolchain::Stage,
+        cancel: Arc<AtomicBool>,
+    },
+}
+
+/// What a check of the toolchain found.
+#[derive(Debug, Clone)]
+pub struct Checked {
+    pub(crate) found: Result<(String, bool), clew_plugin::toolchain::Missing>,
+    /// Clew's own Rust is installed, used or not.
+    pub(crate) own_installed: bool,
 }
 
 impl std::fmt::Debug for Plugins {
@@ -408,6 +443,17 @@ pub enum PluginMsg {
     },
     /// Build the plugin graph shown again, whatever came of the last build.
     RebuildGraph,
+    /// Settings → Plugins: whether plugins can be built here was checked.
+    ToolchainChecked(Checked),
+    /// Take the step that makes plugin building ready.
+    SetUpToolchain,
+    /// How the step goes.
+    ToolchainStage(clew_plugin::toolchain::Stage),
+    /// The step ended: ready with this Rust, or why not.
+    ToolchainSetUp(Result<String, String>),
+    CancelToolchainSetup,
+    /// Remove the Rust Clew installed.
+    RemoveOwnRust,
 }
 
 impl PluginMsg {
@@ -557,6 +603,76 @@ impl App {
     /// The plugin that adds the graph shown, by its name.
     pub(crate) fn shown_graph_plugin(&self) -> Option<String> {
         self.shown_plugin_graph().map(|(_, p, _)| p.name())
+    }
+
+    /// Look again at whether plugins can be built here, unless a setup
+    /// step is running (it looks when it ends).
+    pub(crate) fn check_toolchain(&mut self) -> Task<Message> {
+        if matches!(
+            self.plugins.building,
+            Building::Checking | Building::SettingUp { .. }
+        ) {
+            return Task::none();
+        }
+        let Ok(data) = data() else {
+            return Task::none();
+        };
+        self.plugins.building = Building::Checking;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || Checked {
+                    found: clew_plugin::toolchain::find(Some(&data))
+                        .map(|t| (t.version, t.cargo_home.is_some())),
+                    own_installed: clew_plugin::toolchain::managed_installed(&data),
+                })
+                .await
+                .unwrap_or_else(|_| Checked {
+                    found: Err(clew_plugin::toolchain::Missing {
+                        why: clew_plugin::toolchain::Why::Other(
+                            "the check failed unexpectedly".into(),
+                        ),
+                        setup: None,
+                    }),
+                    own_installed: false,
+                })
+            },
+            |checked| Message::Plugin(PluginMsg::ToolchainChecked(checked)),
+        )
+    }
+
+    /// Take the step the check offered, telling Settings how it goes.
+    fn set_up_toolchain(&mut self) -> Task<Message> {
+        use iced::futures::channel::mpsc;
+        let setup = match &self.plugins.building {
+            Building::Missing(missing) => missing.setup.clone(),
+            _ => None,
+        };
+        let (Some(setup), Ok(data)) = (setup, data()) else {
+            return Task::none();
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let first = match setup {
+            clew_plugin::toolchain::Setup::AddTarget { .. } => {
+                clew_plugin::toolchain::Stage::AddingTarget
+            }
+            clew_plugin::toolchain::Setup::Install => clew_plugin::toolchain::Stage::Downloading,
+        };
+        self.plugins.setup_failure = None;
+        self.plugins.building = Building::SettingUp {
+            stage: first,
+            cancel: cancel.clone(),
+        };
+        let (tx, rx) = mpsc::unbounded::<Message>();
+        std::thread::spawn(move || {
+            let stages = tx.clone();
+            let mut stage = move |stage| {
+                let _ = stages.unbounded_send(Message::Plugin(PluginMsg::ToolchainStage(stage)));
+            };
+            let done = clew_plugin::toolchain::set_up(&data, &setup, &cancel, &mut stage)
+                .map(|toolchain| toolchain.version);
+            let _ = tx.unbounded_send(Message::Plugin(PluginMsg::ToolchainSetUp(done)));
+        });
+        Task::run(rx, std::convert::identity)
     }
 
     /// Build the plugin graph Project Graphs shows if what it was built
@@ -1455,6 +1571,85 @@ impl App {
                     entry.rev = u64::MAX;
                 }
                 self.ensure_plugin_map()
+            }
+            PluginMsg::ToolchainChecked(checked) => {
+                if matches!(self.plugins.building, Building::SettingUp { .. }) {
+                    return Task::none();
+                }
+                self.plugins.own_rust = checked.own_installed;
+                self.plugins.building = match checked.found {
+                    Ok((version, own)) => {
+                        self.plugins.setup_failure = None;
+                        Building::Ready { version, own }
+                    }
+                    Err(missing) => Building::Missing(missing),
+                };
+                Task::none()
+            }
+            PluginMsg::SetUpToolchain => self.set_up_toolchain(),
+            PluginMsg::ToolchainStage(stage) => {
+                if let Building::SettingUp { stage: now, .. } = &mut self.plugins.building {
+                    *now = stage;
+                }
+                Task::none()
+            }
+            PluginMsg::ToolchainSetUp(done) => {
+                if !matches!(self.plugins.building, Building::SettingUp { .. }) {
+                    return Task::none();
+                }
+                // What there is now, looked at again; with why the step did
+                // not work if it did not.
+                self.plugins.building = Building::Unknown;
+                match done {
+                    Ok(version) => {
+                        self.plugins.setup_failure = None;
+                        self.status = tr!(
+                            "Plugins can be built now, with Rust {version}",
+                            version = version
+                        );
+                    }
+                    Err(why) => self.plugins.setup_failure = Some(why),
+                }
+                self.check_toolchain()
+            }
+            PluginMsg::CancelToolchainSetup => {
+                if let Building::SettingUp { cancel, .. } = &self.plugins.building {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Task::none()
+            }
+            PluginMsg::RemoveOwnRust => {
+                let Ok(data) = data() else {
+                    return Task::none();
+                };
+                if matches!(self.plugins.building, Building::SettingUp { .. }) {
+                    return Task::none();
+                }
+                self.plugins.building = Building::Checking;
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let dir = clew_plugin::toolchain::managed_dir(&data);
+                            let removed = std::fs::remove_dir_all(&dir);
+                            Checked {
+                                found: clew_plugin::toolchain::find(Some(&data))
+                                    .map(|t| (t.version, t.cargo_home.is_some())),
+                                own_installed: removed.is_err() && dir.exists(),
+                            }
+                        })
+                        .await
+                        .unwrap_or_else(|_| Checked {
+                            found: Err(clew_plugin::toolchain::Missing {
+                                why: clew_plugin::toolchain::Why::Other(
+                                    "the removal failed unexpectedly".into(),
+                                ),
+                                setup: None,
+                            }),
+                            own_installed: true,
+                        })
+                    },
+                    |checked| Message::Plugin(PluginMsg::ToolchainChecked(checked)),
+                )
             }
             PluginMsg::Tried { reply, answer } => {
                 match &reply {

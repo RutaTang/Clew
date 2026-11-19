@@ -123,3 +123,61 @@ fn build_the_fixtures() {
         let _ = std::fs::remove_file(source.join("Cargo.lock"));
     }
 }
+
+/// Rust of Clew's own, installed for real into a data folder of its own,
+/// builds a plugin. It downloads about 150 MB, so it runs only when asked:
+///
+///     CLEW_TEST_INSTALL_RUST=1 cargo test -p clew-plugin --test plugins \
+///         installs_rust -- --ignored --nocapture
+#[test]
+#[ignore = "installs Rust from rust-lang.org: needs the network and CLEW_TEST_INSTALL_RUST=1"]
+fn installs_rust_for_clew_and_builds_with_it() {
+    use clew_plugin::toolchain::{Setup, Stage};
+    if std::env::var_os("CLEW_TEST_INSTALL_RUST").is_none() {
+        eprintln!("skipped: set CLEW_TEST_INSTALL_RUST=1 to install Rust for real");
+        return;
+    }
+    let data = std::env::temp_dir().join(format!("clew-own-rust-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let mut stages = Vec::new();
+    let toolchain = clew_plugin::toolchain::set_up(
+        &data,
+        &Setup::Install,
+        &AtomicBool::new(false),
+        &mut |stage| stages.push(stage),
+    )
+    .unwrap_or_else(|why| panic!("{why}"));
+    assert_eq!(stages, [Stage::Downloading, Stage::Installing]);
+    let dir = clew_plugin::toolchain::managed_dir(&data);
+    assert!(
+        !dir.join(format!("rustup-init{}", std::env::consts::EXE_SUFFIX))
+            .exists(),
+        "the installer is not kept"
+    );
+    // The user's Rust here may be ready; Clew's own, found as Clew finds it
+    // when it is not, builds a plugin.
+    let own = clew_plugin::toolchain::find(Some(&data)).unwrap();
+    let own = match own.cargo_home {
+        Some(_) => own,
+        None => toolchain,
+    };
+    assert_eq!(own.cargo_home.as_deref(), Some(dir.join("cargo").as_path()));
+    let work = data.join("work");
+    let built = clew_plugin::build::build(
+        &here().join("fixtures").join("views"),
+        &work,
+        &own,
+        &AtomicBool::new(false),
+    )
+    .unwrap_or_else(|e| panic!("{}", e.report()));
+    assert_eq!(built.inspected.manifest.plugin.id, "views");
+    let size = std::process::Command::new("du")
+        .args(["-sh"])
+        .arg(&dir)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    eprintln!("Clew's own Rust {}: {}", own.version, size.trim());
+    let _ = std::fs::remove_dir_all(&data);
+}

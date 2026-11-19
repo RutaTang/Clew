@@ -230,7 +230,8 @@ fn build_report(data: &Path, id: &str, cancel: &AtomicBool) -> Result<String, St
             "there is no plugin \"{id}\"; make it first (plugin_new)"
         ));
     }
-    let toolchain = build::find_toolchain().map_err(|e| e.report())?;
+    let toolchain = crate::toolchain::find(Some(data))
+        .map_err(|missing| missing.into_build_error().report())?;
     let work = authoring::build_dir(data);
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let built = build::build(&source, &work, &toolchain, cancel).map_err(|e| e.report())?;
