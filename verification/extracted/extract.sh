@@ -29,6 +29,7 @@ trap 'rm -rf "$out"' EXIT
   --start-from crate::shell::shell_command \
   --start-from crate::shell::quote \
   --start-from crate::shell::sh_c \
+  --start-from crate::known_hosts::plain_host_field \
   --dest "$out" -- --target-dir "$out/target" -q) >"$out/charon.log" 2>&1 || {
   cat "$out/charon.log" >&2
   exit 1

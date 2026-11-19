@@ -1637,4 +1637,614 @@ theorem sh_c_is_the_model (s : List Char) (script : Slice Std.U8) (h : bs script
 
 end Shell
 
+/-! ## Which host a recorded ssh key vouches for — `clew_rules::known_hosts`
+
+Before Clew records a host key, `plain_host_field` checks the known_hosts
+host field it is to be recorded under, and nothing is recorded when it says
+no. The model in `../Clew/Ssh.lean` reads characters, and proves that a
+field it accepts names exactly one host and port, with none of known_hosts'
+pattern syntax (`plainHostField_literal`). Proved here: on the UTF-8 bytes
+of any field, the Rust function returns, and decides what the model decides
+of the field's characters. -/
+
+namespace KnownHosts
+
+open clew_rules.known_hosts
+open Shell (bs)
+
+/-- What `is_name_byte` lets a host name hold: ASCII letters and digits and
+`.-_:`. -/
+def nameB (n : Nat) : Bool :=
+  (48 ≤ n && n ≤ 57) || (65 ≤ n && n ≤ 90) || (97 ≤ n && n ≤ 122) ||
+    n == 46 || n == 45 || n == 95 || n == 58
+
+theorem is_name_byte_ok (b : Std.U8) : is_name_byte b = ok (nameB b.val) := by
+  unfold is_name_byte
+  simp only [ge_iff_le, UScalar.le_equiv, UScalar.eq_equiv, U8.ofNat, UScalar.ofNat,
+    UScalar.ofNatCore_val_eq, Framing.ite_ok, Result.ok.injEq]
+  have hb := Framing.u8_lt b
+  generalize b.val = v at hb ⊢
+  revert v; decide +kernel
+
+/-- The bytes `l[f..t]`. -/
+def seg (l : List Std.U8) (f t : Nat) : List Std.U8 := (l.drop f).take (t - f)
+
+theorem seg_cons (l : List Std.U8) (i t : Nat) (hi : i < t) (ht : t ≤ l.length) :
+    seg l i t = l[i]'(by omega) :: seg l (i + 1) t := by
+  simp only [seg]
+  rw [List.drop_eq_getElem_cons (by omega), show t - i = (t - (i + 1)) + 1 by omega, List.take_succ_cons]
+
+theorem all_name_ok (field : Slice Std.U8) (f t : Std.Usize) (ht : t.val ≤ field.val.length) :
+    all_name field f t = ok ((seg field.val f.val t.val).all fun b => nameB b.val) := by
+  obtain ⟨b, hl, hq⟩ := loop_spec (all_name_loop.body field t) (fun _ => True)
+    (fun i b => b = (seg field.val i.val t.val).all fun b => nameB b.val)
+    (fun i => t.val - i.val) (by
+      intro i _
+      by_cases hi : i.val < t.val
+      · have hil : i.val < field.val.length := by omega
+        obtain ⟨j, hj, hjv⟩ := succ_ok field i hil
+        rw [seg_cons _ _ _ hi ht]
+        cases hn : nameB field.val[i.val].val
+        · left
+          exact ⟨false, by simp [all_name_loop.body, hi, index_ok field i hil, is_name_byte_ok, hn],
+            by simp [hn]⟩
+        · right
+          refine ⟨j, by simp [all_name_loop.body, hi, index_ok field i hil, is_name_byte_ok, hn, hj],
+            trivial, by omega, ?_⟩
+          intro b hb; rw [hb, hjv, List.all_cons, hn, Bool.true_and]
+      · left
+        refine ⟨true, by simp [all_name_loop.body, hi], ?_⟩
+        simp [seg, show t.val - i.val = 0 by omega]) f trivial
+  unfold all_name all_name_loop
+  rw [hl, hq]
+
+/-- A host name: 1 to 255 bytes, each a name byte. -/
+def nameOkB (ns : List Nat) : Bool := !ns.isEmpty && ns.length ≤ 255 && ns.all nameB
+
+theorem name_ok_ok (field : Slice Std.U8) (f t : Std.Usize) (ht : t.val ≤ field.val.length) :
+    name_ok field f t = ok (nameOkB (bs (seg field.val f.val t.val))) := by
+  unfold name_ok
+  have hlen : (seg field.val f.val t.val).length = t.val - f.val := by simp [seg]; omega
+  by_cases h1 : t.val ≤ f.val
+  · have : seg field.val f.val t.val = [] := by simp [seg, show t.val - f.val = 0 by omega]
+    simp [UScalar.le_equiv, h1, nameOkB, this, bs]
+  · obtain ⟨d, hd, hdv⟩ := ok_of_spec (UScalar.sub_spec (x := t) (y := f) (by omega))
+    have hne : seg field.val f.val t.val ≠ [] := by intro h; rw [h] at hlen; simp at hlen; omega
+    by_cases h2 : 255 < t.val - f.val
+    · simp [UScalar.le_equiv, h1, hd, UScalar.lt_equiv, hdv, h2, nameOkB, bs, hlen]
+      omega
+    · simp [UScalar.le_equiv, h1, hd, UScalar.lt_equiv, hdv, h2, nameOkB, bs, hlen, all_name_ok field f t ht,
+        hne, List.all_map, Function.comp_def]
+      omega
+
+/-- `split_once("]:")` on bytes. -/
+def splitB : List Nat → Option (List Nat × List Nat)
+  | [] => none
+  | c :: r =>
+    match r with
+    | d :: r' => if c == 93 && d == 58 then some ([], r') else
+        (splitB r).map fun p => (c :: p.1, p.2)
+    | [] => none
+
+theorem splitB_skip (x : Nat) (r : List Nat) (h : x ≠ 93 ∨ r.head? ≠ some 58) :
+    splitB (x :: r) = (splitB r).map fun p => (x :: p.1, p.2) := by
+  cases r with
+  | nil => rfl
+  | cons d r' =>
+    simp only [List.head?_cons, ne_eq, Option.some.injEq] at h
+    have : ¬ (x == 93 && d == 58) = true := by
+      simp only [Bool.and_eq_true, beq_iff_eq]; omega
+    simp only [splitB, this, Bool.false_eq_true, ↓reduceIte]
+
+theorem bs_drop (l : List Std.U8) (i : Nat) (h : i < l.length) :
+    bs (l.drop i) = l[i].val :: bs (l.drop (i + 1)) := by
+  rw [List.drop_eq_getElem_cons h]; rfl
+
+theorem find_close_ok (field : Slice Std.U8) (f : Std.Usize) :
+    ∃ o, find_close field f = ok o ∧
+      match o with
+      | none => splitB (bs (field.val.drop f.val)) = none
+      | some c => f.val ≤ c.val ∧ c.val + 1 < field.val.length ∧
+          splitB (bs (field.val.drop f.val)) =
+            some (bs (seg field.val f.val c.val), bs (field.val.drop (c.val + 2))) := by
+  obtain ⟨o, hl, hq⟩ := loop_spec (find_close_loop.body field) (fun _ => True)
+    (fun (i : Std.Usize) (o : Option Std.Usize) => match o with
+      | none => splitB (bs (field.val.drop i.val)) = none
+      | some c => i.val ≤ c.val ∧ c.val + 1 < field.val.length ∧
+          splitB (bs (field.val.drop i.val)) =
+            some (bs (seg field.val i.val c.val), bs (field.val.drop (c.val + 2))))
+    (fun i => field.val.length - i.val) (by
+      intro i _
+      by_cases hi : i.val < field.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok field i hi
+        have hcont : ∀ o : Option Std.Usize, (match o with
+            | none => splitB (bs (field.val.drop j.val)) = none
+            | some c => j.val ≤ c.val ∧ c.val + 1 < field.val.length ∧
+                splitB (bs (field.val.drop j.val)) =
+                  some (bs (seg field.val j.val c.val), bs (field.val.drop (c.val + 2)))) →
+            ¬ (field.val[i.val].val = 93 ∧ (bs (field.val.drop (i.val + 1))).head? = some 58) →
+            (match o with
+            | none => splitB (bs (field.val.drop i.val)) = none
+            | some c => i.val ≤ c.val ∧ c.val + 1 < field.val.length ∧
+                splitB (bs (field.val.drop i.val)) =
+                  some (bs (seg field.val i.val c.val), bs (field.val.drop (c.val + 2)))) := by
+          intro o ho hn
+          rw [bs_drop _ _ hi, splitB_skip _ _ (not_and_or.mp hn)]
+          rw [hjv] at ho
+          cases o with
+          | none => simp only at ho ⊢; rw [ho]; rfl
+          | some c =>
+            obtain ⟨h1, h2, h3⟩ := ho
+            refine ⟨by omega, h2, ?_⟩
+            rw [h3, seg_cons field.val i.val c.val (by omega) (by omega)]; rfl
+        by_cases hb : field.val[i.val].val = 93
+        · have hb' : field.val[i.val] = 93#u8 := by
+            rw [UScalar.eq_equiv]; simp [hb, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq]
+          by_cases hn : i.val + 1 < field.val.length
+          · by_cases hc : field.val[i.val + 1].val = 58
+            · left
+              have hc' : field.val[j.val]'(by omega) = 58#u8 := by
+                rw [UScalar.eq_equiv]; simp [hjv, hc, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq]
+              refine ⟨some i, ?_, ?_⟩
+              · simp [find_close_loop.body, hi, index_ok field i hi, hb', hj, hjv ▸ hn,
+                  index_ok field j (by omega), hc']
+              · refine ⟨le_refl _, hn, ?_⟩
+                rw [bs_drop _ _ hi, bs_drop _ _ hn, hb, hc]
+                simp [splitB, seg, bs]
+            · right
+              have hc' : ¬ field.val[j.val]'(by omega) = 58#u8 := by
+                rw [UScalar.eq_equiv]; simp [hjv, hc, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq]
+              refine ⟨j, ?_, trivial, by omega, fun o ho => hcont o ho ?_⟩
+              · simp [find_close_loop.body, hi, index_ok field i hi, hb', hj, hjv ▸ hn,
+                  index_ok field j (by omega), hc']
+              · rw [bs_drop _ _ hn]; simp [hc]
+          · right
+            refine ⟨j, ?_, trivial, by omega, fun o ho => hcont o ho ?_⟩
+            · simp [find_close_loop.body, hi, index_ok field i hi, hb', hj, hjv, hn]
+            · rw [List.drop_eq_nil_of_le (by omega)]; simp [bs]
+        · right
+          have hb' : ¬ field.val[i.val] = 93#u8 := by
+            rw [UScalar.eq_equiv]; simp [hb, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq]
+          refine ⟨j, ?_, trivial, by omega, fun o ho => hcont o ho (by omega)⟩
+          simp [find_close_loop.body, hi, index_ok field i hi, hb', hj]
+      · left
+        refine ⟨none, by simp [find_close_loop.body, hi], ?_⟩
+        simp only
+        rw [List.drop_eq_nil_of_le (by omega)]; rfl) f trivial
+  unfold find_close find_close_loop
+  exact ⟨o, hl, hq⟩
+
+/-- An ASCII digit. -/
+def isDigitB (n : Nat) : Bool := 48 ≤ n && n ≤ 57
+
+/-- The value of decimal digits after `a`, as `u16::from_str` adds them up. -/
+def foldN (a : Nat) (ds : List Nat) : Nat := ds.foldl (fun acc d => acc * 10 + (d - 48)) a
+
+theorem foldN_ge (a : Nat) (ds : List Nat) : a ≤ foldN a ds := by
+  induction ds generalizing a with
+  | nil => simp [foldN]
+  | cons x xs ih =>
+    simp only [foldN, List.foldl_cons]
+    exact Nat.le_trans (by nlinarith) (ih _)
+
+/-- What `digits_port` decides of its bytes: digits, at least one, worth
+1 to 65535. -/
+def digitsPortB (ds : List Nat) : Bool :=
+  !ds.isEmpty && ds.all isDigitB && foldN 0 ds ≤ 65535 && foldN 0 ds != 0
+
+theorem digits_port_loop_ok (field : Slice Std.U8) (v : Std.U32) (i : Std.Usize)
+    (hv : v.val ≤ 65535) :
+    digits_port_loop field v i = ok ((bs (field.val.drop i.val)).all isDigitB &&
+      foldN v.val (bs (field.val.drop i.val)) ≤ 65535 &&
+      foldN v.val (bs (field.val.drop i.val)) != 0) := by
+  obtain ⟨r, hl, hq⟩ := loop_spec (fun (v, i) => digits_port_loop.body field v i)
+    (fun s : Std.U32 × Std.Usize => s.1.val ≤ 65535)
+    (fun s r => r = ((bs (field.val.drop s.2.val)).all isDigitB &&
+      foldN s.1.val (bs (field.val.drop s.2.val)) ≤ 65535 &&
+      foldN s.1.val (bs (field.val.drop s.2.val)) != 0))
+    (fun s => field.val.length - s.2.val) (by
+      rintro ⟨v, i⟩ hv
+      dsimp only at hv ⊢
+      by_cases hi : i.val < field.val.length
+      · rw [bs_drop _ _ hi]
+        set x := field.val[i.val] with hx
+        by_cases hlo : x.val < 48
+        · left
+          refine ⟨false, ?_, ?_⟩
+          · simp [digits_port_loop.body, hi, index_ok field i hi, ← hx, UScalar.lt_equiv, U8.ofNat,
+              UScalar.ofNat, UScalar.ofNatCore_val_eq, hlo]
+          · simp [isDigitB, show ¬ 48 ≤ x.val by omega]
+        by_cases hhi : 57 < x.val
+        · left
+          refine ⟨false, ?_, ?_⟩
+          · simp [digits_port_loop.body, hi, index_ok field i hi, ← hx, UScalar.lt_equiv, U8.ofNat,
+              UScalar.ofNat, UScalar.ofNatCore_val_eq, hlo, hhi]
+          · simp [isDigitB, show ¬ x.val ≤ 57 by omega]
+        obtain ⟨d8, hd8, hd8v⟩ := ok_of_spec (UScalar.sub_spec (x := x) (y := 48#u8) (by simp; omega))
+        simp only [U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq] at hd8v
+        set d := UScalar.cast UScalarTy.U32 d8 with hddef
+        have hdv : d.val = x.val - 48 := by rw [hddef, UScalar.cast_val_eq]; simp; omega
+        obtain ⟨m1, hm1, hm1v⟩ := ok_of_spec (UScalar.mul_spec (x := v) (y := 10#u32)
+          (by simp [U32.max_eq]; omega))
+        obtain ⟨m2, hm2, hm2v⟩ := ok_of_spec (UScalar.add_spec (x := m1) (y := d)
+          (by simp [U32.max_eq] at hm1v ⊢; omega))
+        have hm2v' : m2.val = v.val * 10 + (x.val - 48) := by
+          simp at hm1v; rw [hm2v, hm1v, hdv]
+        have hfold : foldN v.val (x.val :: bs (field.val.drop (i.val + 1))) =
+            foldN m2.val (bs (field.val.drop (i.val + 1))) := by
+          rw [hm2v']; rfl
+        have hdig : isDigitB x.val = true := by simp [isDigitB]; omega
+        by_cases hover : 65535 < m2.val
+        · left
+          refine ⟨false, ?_, ?_⟩
+          · simp [digits_port_loop.body, hi, index_ok field i hi, ← hx, UScalar.lt_equiv, U8.ofNat,
+              UScalar.ofNat, UScalar.ofNatCore_val_eq, hlo, hhi, hd8, lift, ← hddef, hm1, hm2, hover]
+          · rw [hfold]
+            have := foldN_ge m2.val (bs (field.val.drop (i.val + 1)))
+            simp only [List.all_cons, hdig, Bool.true_and]
+            simp; omega
+        · right
+          obtain ⟨j, hj, hjv⟩ := succ_ok field i hi
+          refine ⟨(m2, j), ?_, show m2.val ≤ 65535 by omega,
+            show field.val.length - j.val < field.val.length - i.val by omega, ?_⟩
+          · simp [digits_port_loop.body, hi, index_ok field i hi, ← hx, UScalar.lt_equiv, U8.ofNat,
+              UScalar.ofNat, UScalar.ofNatCore_val_eq, hlo, hhi, hd8, lift, ← hddef, hm1, hm2, hover, hj]
+          · intro r hr
+            dsimp only at hr
+            rw [hr, hfold, hjv, List.all_cons, hdig, Bool.true_and]
+      · left
+        refine ⟨v != 0#u32, by simp [digits_port_loop.body, hi], ?_⟩
+        rw [List.drop_eq_nil_of_le (by omega)]
+        have hz : (v != 0#u32) = (v.val != 0) := by
+          rw [Bool.eq_iff_iff]; simp [UScalar.eq_equiv]
+        simp [bs, foldN, hv, hz]) (v, i) hv
+  unfold digits_port_loop
+  exact hl.trans (congrArg ok hq)
+
+theorem digits_port_ok (field : Slice Std.U8) (f : Std.Usize) :
+    digits_port field f = ok (digitsPortB (bs (field.val.drop f.val))) := by
+  unfold digits_port
+  by_cases hf : field.val.length ≤ f.val
+  · simp [UScalar.le_equiv, hf, digitsPortB, bs]
+  · have hne : (bs (field.val.drop f.val)).isEmpty = false := by
+      rw [bs_drop _ _ (by omega)]; rfl
+    simp [UScalar.le_equiv, hf, digits_port_loop_ok field 0#u32 f (by simp), digitsPortB, hne]
+
+/-- What `port_ok` decides: an optional `+`, then what `digits_port` decides. -/
+def portB (ns : List Nat) : Bool :=
+  match ns with
+  | c :: rest => if c = 43 then digitsPortB rest else digitsPortB ns
+  | [] => digitsPortB []
+
+theorem port_ok_ok (field : Slice Std.U8) (f : Std.Usize) :
+    port_ok field f = ok (portB (bs (field.val.drop f.val))) := by
+  unfold port_ok
+  by_cases hf : f.val < field.val.length
+  · rw [bs_drop _ _ hf]
+    by_cases hp : field.val[f.val].val = 43
+    · have hp' : field.val[f.val] = 43#u8 := by
+        rw [UScalar.eq_equiv]; simp [hp, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq]
+      obtain ⟨g, hg, hgv⟩ := succ_ok field f hf
+      simp [hf, index_ok field f hf, hp', hg, digits_port_ok, hgv, portB]
+    · have hp' : ¬ field.val[f.val] = 43#u8 := by
+        rw [UScalar.eq_equiv]; simp [hp, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq]
+      simp [hf, index_ok field f hf, hp', digits_port_ok, portB, hp, bs_drop _ _ hf]
+  · simp [hf, digits_port_ok, List.drop_eq_nil_of_le (show field.val.length ≤ f.val by omega), portB, bs]
+
+/-- `plain_host_field` on bytes. -/
+def plainB (ns : List Nat) : Bool :=
+  match ns with
+  | c :: rest =>
+    if c = 91 then
+      match splitB rest with
+      | some (n, p) => nameOkB n && portB p
+      | none => false
+    else nameOkB ns
+  | [] => false
+
+theorem plain_host_field_ok (field : Slice Std.U8) :
+    plain_host_field field = ok (plainB (bs field.val)) := by
+  unfold plain_host_field
+  by_cases he : field.val = []
+  · have h0 : (Slice.len field).val = 0 := by simp [he]
+    simp [core.slice.Slice.is_empty, he, name_ok_ok field 0#usize (Slice.len field) (by simp),
+      plainB, bs, nameOkB, seg]
+  have hpos : 0 < field.val.length := List.length_pos_iff.mpr he
+  have hall : seg field.val 0 field.val.length = field.val := by simp [seg]
+  have hb : bs field.val = field.val[0].val :: bs (field.val.drop 1) := by
+    rw [← bs_drop _ _ hpos]; rfl
+  have hz : (0#usize).val = 0 := by simp
+  by_cases h91 : field.val[0].val = 91
+  · have h91' : field.val[0] = 91#u8 := by
+      rw [UScalar.eq_equiv]; simp [h91, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq]
+    obtain ⟨o, ho, hq⟩ := find_close_ok field 1#usize
+    simp only [show (1#usize).val = 1 by simp] at hq
+    have hidx : Slice.index_usize field 0#usize = ok field.val[0] := index_ok field 0#usize (by simp; omega)
+    cases o with
+    | none =>
+      simp only [List.drop_one] at hq
+      simp [core.slice.Slice.is_empty, he, hidx, h91', ho, hb, plainB, hq]
+    | some c =>
+      obtain ⟨h1, h2, h3⟩ := hq
+      simp only [List.drop_one] at h3
+      have := Slice.length_ineq field
+      obtain ⟨c2, hc2, hc2v⟩ := ok_of_spec (UScalar.add_spec (x := c) (y := 2#usize)
+        (by scalar_tac))
+      simp only [show (2#usize).val = 2 by simp] at hc2v
+      simp [core.slice.Slice.is_empty, he, hidx, h91', ho, hb, plainB, h3,
+        name_ok_ok field 1#usize c (by omega), hc2, port_ok_ok, hc2v]
+      split <;> simp_all
+  · have h91' : ¬ field.val[0] = 91#u8 := by
+      rw [UScalar.eq_equiv]; simp [h91, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq]
+    have hidx : Slice.index_usize field 0#usize = ok field.val[0] := index_ok field 0#usize (by simp; omega)
+    simp [core.slice.Slice.is_empty, he, hidx, h91', name_ok_ok field 0#usize (Slice.len field) (by simp),
+      hall, plainB, hb, h91]
+
+/-! ### From bytes to characters -/
+
+open Headers (utf8 utf8_ascii utf8_high)
+open Shell (utf8_cons utf8_append utf8_isEmpty)
+
+theorem toNat_ne (c d : Char) (h : c ≠ d) : c.toNat ≠ d.toNat :=
+  fun he => h (Char.ext (UInt32.toNat_inj.mp (show c.val.toNat = d.val.toNat from he)))
+
+/-- No byte of a character is an ASCII byte the character is not. -/
+theorem bytes_ne (c : Char) (k : Nat) (hk : k < 128) (hc : c.toNat ≠ k) :
+    ∀ b ∈ (String.utf8EncodeChar c).map (·.toNat), b ≠ k := by
+  by_cases h : c.toNat < 128
+  · rw [utf8_ascii c h]; simpa using hc
+  · obtain ⟨_, hhi⟩ := utf8_high c (by omega)
+    intro b hb
+    simp only [List.mem_map] at hb
+    obtain ⟨x, hx, rfl⟩ := hb
+    have := hhi x hx; omega
+
+theorem utf8_cons_head (c : Char) (r : List Char) (k : Nat) (hk : k < 128) (hc : c.toNat ≠ k) :
+    ∃ b tl, utf8 (c :: r) = b :: tl ∧ b ≠ k := by
+  rw [utf8_cons]
+  cases hl : (String.utf8EncodeChar c).map (·.toNat) with
+  | nil => exact absurd (List.map_eq_nil_iff.mp hl) (Headers.utf8EncodeChar_ne_nil c)
+  | cons b bs => exact ⟨b, bs ++ utf8 r, rfl, bytes_ne c k hk hc b (by rw [hl]; simp)⟩
+
+/-- A byte test no byte of 128 or more passes, which agrees with a character
+test on every character's number, agrees with it on UTF-8 bytes. -/
+theorem utf8_all (P : Nat → Bool) (Q : Char → Bool) (hq : ∀ c, Q c = P c.toNat)
+    (hp : ∀ n, 128 ≤ n → P n = false) (w : List Char) : (utf8 w).all P = w.all Q := by
+  induction w with
+  | nil => rfl
+  | cons c w ih =>
+    rw [utf8_cons, List.all_append, ih, List.all_cons, hq]
+    congr 1
+    by_cases h : c.toNat < 128
+    · rw [utf8_ascii c h]; simp
+    · obtain ⟨hne, hhi⟩ := utf8_high c (by omega)
+      rw [hp _ (by omega)]
+      cases hl : String.utf8EncodeChar c with
+      | nil => exact absurd hl hne
+      | cons b bs => simp [hp b.toNat (hhi b (by rw [hl]; simp))]
+
+theorem utf8_of_ascii (w : List Char) (h : ∀ c ∈ w, c.toNat < 128) : utf8 w = w.map Char.toNat := by
+  induction w with
+  | nil => rfl
+  | cons c w ih =>
+    rw [utf8_cons, utf8_ascii c (h c (by simp)), ih (fun d hd => h d (by simp [hd]))]; rfl
+
+theorem nameChar_eq (c : Char) : Clew.Ssh.nameChar c = nameB c.toNat := by
+  simp only [Clew.Ssh.nameChar, Clew.Text.isAsciiAlphanumeric, Clew.Text.isAsciiDigit, Shell.char_beq]
+  have h0 : ('0' : Char).val.toNat = 48 := rfl
+  have h9 : ('9' : Char).val.toNat = 57 := rfl
+  have ha : ('a' : Char).val.toNat = 97 := rfl
+  have hz : ('z' : Char).val.toNat = 122 := rfl
+  have hA : ('A' : Char).val.toNat = 65 := rfl
+  have hZ : ('Z' : Char).val.toNat = 90 := rfl
+  have e1 : ('.' : Char).val.toNat = 46 := rfl
+  have e2 : ('-' : Char).val.toNat = 45 := rfl
+  have e3 : ('_' : Char).val.toNat = 95 := rfl
+  have e4 : (':' : Char).val.toNat = 58 := rfl
+  simp only [Char.le_def, UInt32.le_iff_toNat_le, nameB]
+  unfold Char.toNat
+  rw [h0, h9, ha, hz, hA, hZ, e1, e2, e3, e4, Bool.eq_iff_iff]
+  simp only [Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq]
+  omega
+
+theorem nameB_high (n : Nat) (h : 128 ≤ n) : nameB n = false := by
+  simp only [nameB, Bool.or_eq_false_iff, Bool.and_eq_false_iff, decide_eq_false_iff_not,
+    beq_eq_false_iff_ne]
+  omega
+
+theorem nameOkB_utf8 (n : List Char) : nameOkB (utf8 n) = Clew.Ssh.nameOk n := by
+  unfold nameOkB Clew.Ssh.nameOk
+  rw [utf8_isEmpty, utf8_all nameB Clew.Ssh.nameChar nameChar_eq nameB_high]
+  cases hall : n.all Clew.Ssh.nameChar
+  · simp
+  · have hascii : ∀ c ∈ n, c.toNat < 128 := by
+      intro c hc
+      have := List.all_eq_true.mp hall c hc
+      rw [nameChar_eq] at this
+      by_contra h
+      rw [nameB_high _ (by omega)] at this
+      exact absurd this (by simp)
+    rw [utf8_of_ascii n hascii, List.length_map]
+
+theorem splitB_skip_list (xs ys : List Nat) (h : ∀ x ∈ xs, x ≠ 93) :
+    splitB (xs ++ ys) = (splitB ys).map fun p => (xs ++ p.1, p.2) := by
+  induction xs with
+  | nil => simp only [List.nil_append]; cases splitB ys <;> rfl
+  | cons x xs ih =>
+    rw [List.cons_append, splitB_skip x _ (Or.inl (h x (by simp))),
+      ih (fun y hy => h y (by simp [hy])), Option.map_map]
+    rfl
+
+theorem sBC_skip (c : Char) (r : List Char) (hc : c ≠ ']') :
+    Clew.Ssh.splitBracketColon (c :: r) =
+      (Clew.Ssh.splitBracketColon r).map fun p => (c :: p.1, p.2) := by
+  cases r with
+  | nil => rfl
+  | cons d r' =>
+    have : (c == ']' && d == ':') = false := by simp [hc]
+    simp only [Clew.Ssh.splitBracketColon, this, Bool.false_eq_true, ↓reduceIte]
+
+theorem splitB_utf8 (rest : List Char) :
+    splitB (utf8 rest) =
+      (Clew.Ssh.splitBracketColon rest).map fun p => (utf8 p.1, utf8 p.2) := by
+  induction rest with
+  | nil => rfl
+  | cons c r ih =>
+    by_cases hc : c = ']'
+    · subst hc
+      have e : utf8 (']' :: r) = 93 :: utf8 r := by rw [utf8_cons]; rfl
+      cases r with
+      | nil => rfl
+      | cons d r' =>
+        by_cases hd : d = ':'
+        · subst hd
+          have e2 : utf8 (':' :: r') = 58 :: utf8 r' := by rw [utf8_cons]; rfl
+          rw [e, e2]
+          simp [splitB, Clew.Ssh.splitBracketColon, utf8]
+        · obtain ⟨b, tl, hbt, hb⟩ := utf8_cons_head d r' 58 (by omega) (toNat_ne d ':' hd)
+          have hsk : splitB (93 :: utf8 (d :: r')) =
+              (splitB (utf8 (d :: r'))).map fun p => (93 :: p.1, p.2) :=
+            splitB_skip 93 _ (Or.inr (by rw [hbt]; simpa using hb))
+          have hm : (']' == ']' && d == ':') = false := by simp [hd]
+          have hs : Clew.Ssh.splitBracketColon (']' :: d :: r') =
+              (Clew.Ssh.splitBracketColon (d :: r')).map fun p => (']' :: p.1, p.2) := by
+            rw [Clew.Ssh.splitBracketColon.eq_2]
+            simp only [hm, Bool.false_eq_true, ↓reduceIte]
+          rw [e, hsk, ih, hs, Option.map_map, Option.map_map]
+          congr 1
+    · rw [utf8_cons, splitB_skip_list _ _ (bytes_ne c 93 (by omega) (toNat_ne c ']' hc)), ih,
+        sBC_skip c r hc, Option.map_map, Option.map_map]
+      congr 1
+      funext p
+      simp [utf8_cons]
+
+/-- After its optional `+`: digits, at least one, worth 1 to 65535 — what
+`plainHostField` asks of a port, through `parseU16`. -/
+def digitsOk (ds : List Char) : Bool :=
+  !ds.isEmpty && ds.all Clew.Text.isAsciiDigit && Clew.Text.digitsValue ds < 65536 &&
+    Clew.Text.digitsValue ds != 0
+
+/-- What `u64::from_str` reads digits from: after a leading `+`, if any. -/
+def stripPlus (s : List Char) : List Char :=
+  match s with
+  | '+' :: rest => rest
+  | _ => s
+
+/-- `parseU64` after `stripPlus`. -/
+def parseDigits (ds : List Char) : Option Nat :=
+  if ds.isEmpty || !ds.all Clew.Text.isAsciiDigit then none
+  else if Clew.Text.digitsValue ds < 2 ^ 64 then some (Clew.Text.digitsValue ds) else none
+
+theorem parseU64_eq (p : List Char) : Clew.Text.parseU64 p = parseDigits (stripPlus p) := by
+  rfl
+
+theorem port_check_eq (p : List Char) :
+    (match Clew.Ssh.parseU16 p with
+      | some n => n != 0
+      | none => false) = digitsOk (stripPlus p) := by
+  unfold Clew.Ssh.parseU16
+  rw [parseU64_eq]
+  generalize stripPlus p = ds
+  unfold parseDigits digitsOk
+  by_cases h1 : ds.isEmpty <;> by_cases h2 : ds.all Clew.Text.isAsciiDigit <;> simp [h1, h2]
+  by_cases h3 : Clew.Text.digitsValue ds < 65536
+  · have h64 : Clew.Text.digitsValue ds < 18446744073709551616 := by omega
+    simp [h3, h64]
+  · by_cases h64 : Clew.Text.digitsValue ds < 18446744073709551616 <;> simp [h3, h64]
+
+/-- `stripPlus` on bytes. -/
+def stripB (ns : List Nat) : List Nat :=
+  match ns with
+  | c :: rest => if c = 43 then rest else ns
+  | [] => []
+
+theorem portB_eq (ns : List Nat) : portB ns = digitsPortB (stripB ns) := by
+  cases ns with
+  | nil => rfl
+  | cons c r => simp only [portB, stripB]; split <;> rfl
+
+theorem utf8_stripPlus (p : List Char) : utf8 (stripPlus p) = stripB (utf8 p) := by
+  cases p with
+  | nil => rfl
+  | cons c r =>
+    by_cases hc : c = '+'
+    · subst hc
+      have e : utf8 ('+' :: r) = 43 :: utf8 r := by rw [utf8_cons]; rfl
+      rw [e]; rfl
+    · obtain ⟨b, tl, hbt, hb⟩ := utf8_cons_head c r 43 (by omega) (toNat_ne c '+' hc)
+      have hs : stripPlus (c :: r) = c :: r := by
+        unfold stripPlus; split
+        · rename_i h; exact absurd (List.cons.inj h).1 hc
+        · rfl
+      rw [hs, hbt]
+      simp [stripB, hb]
+
+theorem isAsciiDigit_eq (c : Char) : Clew.Text.isAsciiDigit c = isDigitB c.toNat := by
+  simp only [Clew.Text.isAsciiDigit, isDigitB]
+  have h0 : ('0' : Char).val.toNat = 48 := rfl
+  have h9 : ('9' : Char).val.toNat = 57 := rfl
+  simp only [Char.le_def, UInt32.le_iff_toNat_le]
+  unfold Char.toNat
+  rw [h0, h9]
+
+theorem isDigitB_high (n : Nat) (h : 128 ≤ n) : isDigitB n = false := by
+  simp only [isDigitB, Bool.and_eq_false_iff, decide_eq_false_iff_not]; omega
+
+theorem digitsPortB_utf8 (ds : List Char) : digitsPortB (utf8 ds) = digitsOk ds := by
+  unfold digitsPortB digitsOk
+  rw [utf8_isEmpty, utf8_all isDigitB Clew.Text.isAsciiDigit isAsciiDigit_eq isDigitB_high]
+  cases hall : ds.all Clew.Text.isAsciiDigit
+  · simp
+  · have hascii : ∀ c ∈ ds, c.toNat < 128 := by
+      intro c hc
+      have := List.all_eq_true.mp hall c hc
+      rw [isAsciiDigit_eq] at this
+      by_contra h
+      rw [isDigitB_high _ (by omega)] at this
+      exact absurd this (by simp)
+    have hv : foldN 0 (utf8 ds) = Clew.Text.digitsValue ds := by
+      rw [utf8_of_ascii ds hascii]
+      unfold foldN Clew.Text.digitsValue
+      rw [List.foldl_map]
+      rfl
+    rw [hv]
+    simp only [Bool.and_true]
+    congr 2
+
+theorem plainB_utf8 (f : List Char) : plainB (utf8 f) = Clew.Ssh.plainHostField f := by
+  cases f with
+  | nil => rfl
+  | cons c rest =>
+    by_cases hc : c = '['
+    · subst hc
+      have e : utf8 ('[' :: rest) = 91 :: utf8 rest := by rw [utf8_cons]; rfl
+      rw [e]
+      simp only [plainB, ↓reduceIte, splitB_utf8]
+      unfold Clew.Ssh.plainHostField
+      simp only [beq_self_eq_true, ↓reduceIte]
+      cases Clew.Ssh.splitBracketColon rest with
+      | none => rfl
+      | some q =>
+        obtain ⟨n, p⟩ := q
+        simp only [Option.map_some, nameOkB_utf8, portB_eq, ← utf8_stripPlus, digitsPortB_utf8]
+        rw [← port_check_eq p]
+        rfl
+    · obtain ⟨b, tl, hbt, hb⟩ := utf8_cons_head c rest 91 (by omega) (toNat_ne c '[' hc)
+      rw [hbt]
+      simp only [plainB, hb, ↓reduceIte]
+      rw [← hbt, nameOkB_utf8]
+      unfold Clew.Ssh.plainHostField
+      simp [hc]
+
+/-- **`plain_host_field` is the model**: on the UTF-8 bytes of any host
+field, it returns, and says what `Clew.Ssh.plainHostField` says of the
+field's characters — so a field it accepts names one host and port, and
+holds none of known_hosts' pattern syntax (`plainHostField_literal`). -/
+theorem plain_host_field_is_the_model (f : List Char) (field : Slice Std.U8)
+    (h : bs field.val = utf8 f) :
+    plain_host_field field = ok (Clew.Ssh.plainHostField f) := by
+  rw [plain_host_field_ok, h, plainB_utf8]
+
+end KnownHosts
+
 end Clew.Extracted

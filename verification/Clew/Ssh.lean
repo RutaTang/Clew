@@ -27,6 +27,9 @@ the parse decides what runs. Here that is proved, over every input:
 * **known_hosts.** A host field Clew writes a key under names one host and
   port, read back, and holds none of the pattern syntax (`*`, `?`, `!`,
   `,`, a hashed `|1|` name) that would let the key vouch for others.
+  The Rust check (`clew_rules::known_hosts`), translated to Lean by Charon
+  and Aeneas, is proved in `verification/extracted/Equal.lean` to decide
+  what `plainHostField` decides, on the UTF-8 bytes of any string.
 
 The shell is modelled as the POSIX rules for the words Clew writes: an
 unquoted character that is not special, a single-quoted run, and a

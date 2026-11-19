@@ -955,19 +955,7 @@ pub fn ssh_host_port(args: &[String]) -> Option<(String, Option<u16>)> {
 /// to that one name and nothing else. (`:` is allowed in a bare name for an
 /// IPv6 address on port 22.)
 pub(crate) fn plain_host_field(field: &str) -> bool {
-    let name_ok = |name: &str| {
-        !name.is_empty()
-            && name.len() <= 255
-            && name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
-    };
-    match field.strip_prefix('[') {
-        Some(rest) => rest
-            .split_once("]:")
-            .is_some_and(|(name, port)| name_ok(name) && port.parse::<u16>().is_ok_and(|p| p != 0)),
-        None => name_ok(field),
-    }
+    clew_rules::known_hosts::plain_host_field(field.as_bytes())
 }
 
 /// Split one `ssh-keyscan` line into `(key type, base64 key)` when it is a

@@ -892,6 +892,294 @@ def headers.header_value_ok_loop
 def headers.header_value_ok (value : Slice Std.U8) : Result Bool := do
   headers.header_value_ok_loop value 0#usize
 
+/-- [clew_rules::known_hosts::is_name_byte]:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 16:0-24:1 -/
+def known_hosts.is_name_byte (b : Std.U8) : Result Bool := do
+  if b >= 48#u8
+  then
+    if b <= 57#u8
+    then ok true
+    else
+      if b >= 65#u8
+      then
+        if b <= 90#u8
+        then ok true
+        else
+          if b >= 97#u8
+          then
+            if b <= 122#u8
+            then ok true
+            else
+              if b = 46#u8
+              then ok true
+              else
+                if b = 45#u8
+                then ok true
+                else if b = 95#u8
+                     then ok true
+                     else ok (b = 58#u8)
+          else
+            if b = 46#u8
+            then ok true
+            else
+              if b = 45#u8
+              then ok true
+              else if b = 95#u8
+                   then ok true
+                   else ok (b = 58#u8)
+      else
+        if b >= 97#u8
+        then
+          if b <= 122#u8
+          then ok true
+          else
+            if b = 46#u8
+            then ok true
+            else
+              if b = 45#u8
+              then ok true
+              else if b = 95#u8
+                   then ok true
+                   else ok (b = 58#u8)
+        else
+          if b = 46#u8
+          then ok true
+          else
+            if b = 45#u8
+            then ok true
+            else if b = 95#u8
+                 then ok true
+                 else ok (b = 58#u8)
+  else
+    if b >= 65#u8
+    then
+      if b <= 90#u8
+      then ok true
+      else
+        if b >= 97#u8
+        then
+          if b <= 122#u8
+          then ok true
+          else
+            if b = 46#u8
+            then ok true
+            else
+              if b = 45#u8
+              then ok true
+              else if b = 95#u8
+                   then ok true
+                   else ok (b = 58#u8)
+        else
+          if b = 46#u8
+          then ok true
+          else
+            if b = 45#u8
+            then ok true
+            else if b = 95#u8
+                 then ok true
+                 else ok (b = 58#u8)
+    else
+      if b >= 97#u8
+      then
+        if b <= 122#u8
+        then ok true
+        else
+          if b = 46#u8
+          then ok true
+          else
+            if b = 45#u8
+            then ok true
+            else if b = 95#u8
+                 then ok true
+                 else ok (b = 58#u8)
+      else
+        if b = 46#u8
+        then ok true
+        else
+          if b = 45#u8
+          then ok true
+          else if b = 95#u8
+               then ok true
+               else ok (b = 58#u8)
+
+/-- [clew_rules::known_hosts::all_name]: loop body 0:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 29:4-36:1 -/
+@[rust_loop_body]
+def known_hosts.all_name_loop.body
+  (field : Slice Std.U8) («to» : Std.Usize) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  if i < «to»
+  then
+    let i1 ← Slice.index_usize field i
+    let b ← known_hosts.is_name_byte i1
+    if b
+    then let i2 ← i + 1#usize
+         ok (cont i2)
+    else ok (done false)
+  else ok (done true)
+
+/-- [clew_rules::known_hosts::all_name]: loop 0:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 29:4-36:1 -/
+@[rust_loop]
+def known_hosts.all_name_loop
+  (field : Slice Std.U8) («to» : Std.Usize) (i : Std.Usize) :
+  Result Bool
+  := do
+  loop
+    (fun i1 => known_hosts.all_name_loop.body field «to» i1)
+    i
+
+/-- [clew_rules::known_hosts::all_name]:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 27:0-36:1 -/
+@[reducible]
+def known_hosts.all_name
+  (field : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
+  Result Bool
+  := do
+  known_hosts.all_name_loop field «to» «from»
+
+/-- [clew_rules::known_hosts::name_ok]:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 39:0-44:1 -/
+def known_hosts.name_ok
+  (field : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
+  Result Bool
+  := do
+  if «to» <= «from»
+  then ok false
+  else
+    let i ← «to» - «from»
+    if i > 255#usize
+    then ok false
+    else known_hosts.all_name field «from» «to»
+
+/-- [clew_rules::known_hosts::find_close]: loop body 0:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 50:4-57:1 -/
+@[rust_loop_body]
+def known_hosts.find_close_loop.body
+  (field : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize (Option Std.Usize))
+  := do
+  let i1 := Slice.len field
+  if i < i1
+  then
+    let i2 ← Slice.index_usize field i
+    if i2 = 93#u8
+    then
+      let i3 ← i + 1#usize
+      let i4 := Slice.len field
+      if i3 < i4
+      then
+        let i5 ← Slice.index_usize field i3
+        if i5 = 58#u8
+        then ok (done (some i))
+        else ok (cont i3)
+      else ok (cont i3)
+    else let i3 ← i + 1#usize
+         ok (cont i3)
+  else ok (done none)
+
+/-- [clew_rules::known_hosts::find_close]: loop 0:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 50:4-57:1 -/
+@[rust_loop]
+def known_hosts.find_close_loop
+  (field : Slice Std.U8) (i : Std.Usize) : Result (Option Std.Usize) := do
+  loop
+    (fun i1 => known_hosts.find_close_loop.body field i1)
+    i
+
+/-- [clew_rules::known_hosts::find_close]:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 48:0-57:1 -/
+@[reducible]
+def known_hosts.find_close
+  (field : Slice Std.U8) («from» : Std.Usize) :
+  Result (Option Std.Usize)
+  := do
+  known_hosts.find_close_loop field «from»
+
+/-- [clew_rules::known_hosts::digits_port]: loop body 0:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 67:4-79:1 -/
+@[rust_loop_body]
+def known_hosts.digits_port_loop.body
+  (field : Slice Std.U8) (value : Std.U32) (i : Std.Usize) :
+  Result (ControlFlow (Std.U32 × Std.Usize) Bool)
+  := do
+  let i1 := Slice.len field
+  if i < i1
+  then
+    let b ← Slice.index_usize field i
+    if b < 48#u8
+    then ok (done false)
+    else
+      if b > 57#u8
+      then ok (done false)
+      else
+        let i2 ← value * 10#u32
+        let i3 ← b - 48#u8
+        let i4 ← lift (UScalar.cast .U32 i3)
+        let value1 ← i2 + i4
+        if value1 > 65535#u32
+        then ok (done false)
+        else let i5 ← i + 1#usize
+             ok (cont (value1, i5))
+  else ok (done (value != 0#u32))
+
+/-- [clew_rules::known_hosts::digits_port]: loop 0:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 67:4-79:1 -/
+@[rust_loop]
+def known_hosts.digits_port_loop
+  (field : Slice Std.U8) (value : Std.U32) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun (value1, i1) => known_hosts.digits_port_loop.body field value1 i1)
+    (value, i)
+
+/-- [clew_rules::known_hosts::digits_port]:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 61:0-79:1 -/
+def known_hosts.digits_port
+  (field : Slice Std.U8) («from» : Std.Usize) : Result Bool := do
+  let i := Slice.len field
+  if «from» >= i
+  then ok false
+  else known_hosts.digits_port_loop field 0#u32 «from»
+
+/-- [clew_rules::known_hosts::port_ok]:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 83:0-89:1 -/
+def known_hosts.port_ok
+  (field : Slice Std.U8) («from» : Std.Usize) : Result Bool := do
+  let i := Slice.len field
+  if «from» < i
+  then
+    let i1 ← Slice.index_usize field «from»
+    if i1 = 43#u8
+    then let i2 ← «from» + 1#usize
+         known_hosts.digits_port field i2
+    else known_hosts.digits_port field «from»
+  else known_hosts.digits_port field «from»
+
+/-- [clew_rules::known_hosts::plain_host_field]:
+    Source: 'crates/clew-rules/src/known_hosts.rs', lines 94:0-103:1
+    Visibility: public -/
+def known_hosts.plain_host_field (field : Slice Std.U8) : Result Bool := do
+  let b ← core.slice.Slice.is_empty field
+  if b
+  then let i := Slice.len field
+       known_hosts.name_ok field 0#usize i
+  else
+    let i ← Slice.index_usize field 0#usize
+    if i = 91#u8
+    then
+      let o ← known_hosts.find_close field 1#usize
+      match o with
+      | none => ok false
+      | some close =>
+        let b1 ← known_hosts.name_ok field 1#usize close
+        if b1
+        then let i1 ← close + 2#usize
+             known_hosts.port_ok field i1
+        else ok false
+    else let i1 := Slice.len field
+         known_hosts.name_ok field 0#usize i1
+
 /-- [clew_rules::location::Node]
     Source: 'crates/clew-rules/src/location.rs', lines 6:0-10:1
     Visibility: public -/
