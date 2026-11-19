@@ -1149,7 +1149,7 @@ pub(crate) fn lsp_consent_modal(
 /// under the last, its line held empty. The dialog is centred: a line
 /// coming as more questions queued moved its buttons under the hand on its
 /// way to them.
-fn more_questions<'a>(waiting: usize) -> Element<'a, Message> {
+pub(crate) fn more_questions<'a>(waiting: usize) -> Element<'a, Message> {
     let said = match waiting {
         0 => String::new(),
         n => trn!("1 more after this", "{n} more after this", n),

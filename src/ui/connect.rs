@@ -287,6 +287,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         }
         SettingsPage::Voice => voice_section(app),
         SettingsPage::Integrations => integrations_section(app),
+        SettingsPage::Plugins => super::plugins::plugins_settings(app),
         SettingsPage::Languages if app.proj.project.is_none() => form::page(vec![
             form::note(tr!("Open a project to set up its languages.")).into(),
             installed_servers(app),
@@ -429,6 +430,7 @@ fn settings_glyph(page: SettingsPage) -> Glyph {
         SettingsPage::Embeddings => Glyph::FindMeaning,
         SettingsPage::Voice => Glyph::Mic,
         SettingsPage::Integrations => Glyph::Plug,
+        SettingsPage::Plugins => Glyph::Cube,
         SettingsPage::Languages => Glyph::Braces,
         SettingsPage::Shortcuts => Glyph::Shortcuts,
         SettingsPage::Usage => Glyph::Stats,

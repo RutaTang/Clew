@@ -110,6 +110,10 @@ pub enum Message {
     /// The weak spots page. Handled in `app::weakspots`
     /// (`App::update_weak`).
     Weak(WeakMsg),
+    /// Plugins: running their commands, the pages they show, installing
+    /// them, their tools in agent turns. Handled in `app::plugins`
+    /// (`App::update_plugins`).
+    Plugin(crate::app::plugins::PluginMsg),
     /// The drop-down open in the window. Handled in `app::pickers`
     /// (`App::update_picker`).
     Picker(crate::app::pickers::PickerMsg),
@@ -2521,6 +2525,7 @@ impl Message {
             Message::Tutorial(m) => m.origin(),
             Message::Voice(m) => m.origin(),
             Message::Fake(m) => m.origin(),
+            Message::Plugin(m) => m.origin(),
             Message::Proof(m) => m.origin(),
             Message::Weak(m) => m.origin(),
             Message::Picker(_) => None,

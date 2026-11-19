@@ -1054,6 +1054,7 @@ impl App {
                 tr_noop!("Settings: Integrations"),
                 SettingsPage::Integrations,
             ),
+            (tr_noop!("Settings: Plugins"), SettingsPage::Plugins),
             (
                 tr_noop!("Settings: Language Servers"),
                 SettingsPage::Languages,
@@ -1277,6 +1278,28 @@ impl App {
                 action: PaletteAction::Send(message),
                 shown_as: Some(tr!("Open Recent: {name}", name = name)),
             });
+        }
+        // Each enabled plugin's commands, by the plugin's name and the
+        // command's ("TODO Owners: List TODOs"), as the agent and the voice
+        // find them too.
+        for plugin in self.plugins.installed.iter().filter(|p| p.record.enabled) {
+            let name = plugin.name();
+            for command in &plugin.manifest.commands {
+                out.push(PaletteCommand {
+                    title: format!("{}: {}", plugin.manifest.plugin.name, command.title),
+                    keys: None,
+                    action: PaletteAction::Send(Message::Plugin(
+                        crate::app::plugins::PluginMsg::Run {
+                            id: plugin.id.clone(),
+                            command: command.id.clone(),
+                        },
+                    )),
+                    shown_as: Some(format!(
+                        "{name}: {}",
+                        crate::app::plugins::command_title(command)
+                    )),
+                });
+            }
         }
         if self.proj.project.is_some() {
             out.push(PaletteCommand {

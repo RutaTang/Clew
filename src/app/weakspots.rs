@@ -93,6 +93,7 @@ impl App {
         self.proj.stats.showing = false;
         self.proj.glossary.showing = false;
         self.proj.docs.page = None;
+        self.proj.plugin_page = None;
         let fresh =
             self.proj.weak.spots.is_some() && self.proj.weak.rev == self.proj.registry.revision();
         if fresh {

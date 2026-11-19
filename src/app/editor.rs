@@ -98,6 +98,7 @@ impl App {
         }
         self.proj.glossary.showing = false;
         self.proj.docs.page = None;
+        self.proj.plugin_page = None;
         if self.proj.time_travel.take().is_some() {
             self.forget_failure_of(crate::app::state::FailureOf::Summary);
             self.forget_failure_of(crate::app::state::FailureOf::Story);

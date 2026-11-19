@@ -9,7 +9,8 @@
 //! does it, and writes `<nonce>.answer.json`; the tool waits for that.
 //! A request names the build by its file's digest: the window runs, or asks
 //! about, exactly the bytes the agent built, read from Clew's own build
-//! folder.
+//! folder. A window that takes a request on [`claim`]s it first, by renaming
+//! it to `<nonce>.taken.json`: with several windows open, one does it.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -121,12 +122,26 @@ pub fn file(data: &Path, ask: Ask, agent: &str) -> Result<String, String> {
 }
 
 /// The requests waiting, oldest first. Ones older than [`STALE_AFTER`], and
-/// files that are not requests, are removed.
+/// files that are not requests, are removed; so are requests taken and
+/// never answered, once stale.
 pub fn pending(data: &Path) -> Vec<(String, Request)> {
     let dir = requests_dir(data);
     let mut found = Vec::new();
     for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(nonce) = name.strip_suffix(".taken.json") {
+            let stale = !is_nonce(nonce)
+                || entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_none_or(|age| age >= STALE_AFTER);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            continue;
+        }
         let Some(nonce) = name.strip_suffix(".request.json") else {
             continue;
         };
@@ -151,6 +166,20 @@ pub fn pending(data: &Path) -> Vec<(String, Request)> {
     found
 }
 
+/// Take request `nonce` on, if no one has: whether this caller has it now.
+/// The rename is atomic, so of several windows one wins.
+pub fn claim(data: &Path, nonce: &str) -> bool {
+    if !is_nonce(nonce) {
+        return false;
+    }
+    let dir = requests_dir(data);
+    std::fs::rename(
+        dir.join(format!("{nonce}.request.json")),
+        dir.join(format!("{nonce}.taken.json")),
+    )
+    .is_ok()
+}
+
 /// Answer the request `nonce`, and take it off the list.
 pub fn answer(data: &Path, nonce: &str, answer: &Answer) -> Result<(), String> {
     if !is_nonce(nonce) {
@@ -161,6 +190,7 @@ pub fn answer(data: &Path, nonce: &str, answer: &Answer) -> Result<(), String> {
     clew_core::statefile::write_atomic(&dir.join(format!("{nonce}.answer.json")), &json)
         .map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(dir.join(format!("{nonce}.request.json")));
+    let _ = std::fs::remove_file(dir.join(format!("{nonce}.taken.json")));
     Ok(())
 }
 
@@ -178,6 +208,9 @@ pub fn wait(data: &Path, nonce: &str, timeout: Duration, cancel: &AtomicBool) ->
         }
         if cancel.load(Ordering::Relaxed) || std::time::Instant::now() >= deadline {
             let _ = std::fs::remove_file(dir.join(format!("{nonce}.request.json")));
+            let _ = std::fs::remove_file(dir.join(format!("{nonce}.taken.json")));
+            // An answer written as the wait gave up is not left behind.
+            let _ = std::fs::remove_file(&answer_path);
             return None;
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -242,6 +275,31 @@ mod tests {
             })
         );
         assert!(pending(&data).is_empty());
+        assert_eq!(std::fs::read_dir(requests_dir(&data)).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn one_window_claims_a_request() {
+        let data = temp("claim");
+        let nonce = file(&data, install(), "agent").unwrap();
+        assert!(claim(&data, &nonce));
+        assert!(!claim(&data, &nonce), "a second window gets nothing");
+        assert!(
+            pending(&data).is_empty(),
+            "a taken request is not offered again"
+        );
+        assert!(!claim(&data, "../../x"));
+        answer(&data, &nonce, &Answer::Declined).unwrap();
+        assert_eq!(
+            wait(
+                &data,
+                &nonce,
+                Duration::from_secs(1),
+                &AtomicBool::new(false)
+            ),
+            Some(Answer::Declined)
+        );
         assert_eq!(std::fs::read_dir(requests_dir(&data)).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(&data);
     }

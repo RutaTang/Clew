@@ -168,6 +168,7 @@ impl App {
                 ..UpdateState::default()
             },
             usage: Default::default(),
+            plugins: crate::app::plugins::Plugins::new(),
             graph_mode: true,
             graph_3d: true,
             graph_spin: true,
@@ -341,6 +342,11 @@ impl App {
                 iced::time::every(crate::app::speech::SPEAK_TICK)
                     .map(|_| Message::Voice(crate::VoiceMsg::SpeakTick)),
             );
+        }
+        // What an agent outside Clew asks of the window through
+        // `clew-server mcp`: trying a plugin it built, installing one.
+        if let Some(data) = clew_core::lsp::store::data_root() {
+            subs.push(crate::app::plugins::requests_subscription(data));
         }
         // No per-frame clock for the graph maps: the canvas requests its own
         // redraws (`canvas::Action::request_redraw`) while its simulation

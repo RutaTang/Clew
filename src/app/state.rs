@@ -1147,6 +1147,7 @@ pub enum SettingsPage {
     Embeddings,
     Voice,
     Integrations,
+    Plugins,
     Languages,
     Shortcuts,
     Usage,
@@ -1156,12 +1157,13 @@ pub enum SettingsPage {
 impl SettingsPage {
     /// In the order the Settings list shows them: what a reader sets up
     /// first, Clew's own updates last.
-    pub const ALL: [SettingsPage; 9] = [
+    pub const ALL: [SettingsPage; 10] = [
         SettingsPage::Appearance,
         SettingsPage::LanguageModel,
         SettingsPage::Embeddings,
         SettingsPage::Voice,
         SettingsPage::Integrations,
+        SettingsPage::Plugins,
         SettingsPage::Languages,
         SettingsPage::Shortcuts,
         SettingsPage::Usage,
@@ -1177,6 +1179,7 @@ impl SettingsPage {
             SettingsPage::Embeddings => tr_noop!("Embeddings"),
             SettingsPage::Voice => tr_noop!("Voice"),
             SettingsPage::Integrations => tr_noop!("Integrations"),
+            SettingsPage::Plugins => tr_noop!("Plugins"),
             SettingsPage::Languages => tr_noop!("Language servers"),
             SettingsPage::Shortcuts => tr_noop!("Keyboard shortcuts"),
             SettingsPage::Usage => tr_noop!("Usage and cost"),
@@ -1669,6 +1672,9 @@ pub struct App {
     /// What the AI key spends: the ledger as last read, the balance, the
     /// prices being typed (`app::usage`).
     pub usage: crate::app::usage::UsageState,
+    /// The plugins installed, the one running, the install asked about
+    /// (`app::plugins`).
+    pub plugins: crate::app::plugins::Plugins,
     /// Overlay view: `true` shows the node-link map, `false` the list.
     pub graph_mode: bool,
     /// Map projection: `true` renders the force graph in 3D (orbit + depth),
@@ -2531,6 +2537,9 @@ pub struct ProjectSession {
     pub docs: DocsState,
     /// The Glossary page (`app::glossary`).
     pub glossary: crate::app::glossary::GlossaryState,
+    /// The page a plugin's command showed over the code
+    /// (`app::plugins`).
+    pub plugin_page: Option<crate::app::plugins::PluginPage>,
     /// Auto-refresh throttle: when the last refresh pass began (`None` until the
     /// first). A watched-file change starts a pass only once the cooldown has
     /// lifted; a manual refresh ignores it. Runtime-only (not persisted).
@@ -2883,6 +2892,7 @@ impl Default for ProjectSession {
             weak: Default::default(),
             docs: Default::default(),
             glossary: Default::default(),
+            plugin_page: None,
             last_auto_refresh: Default::default(),
             refresh_pending: Default::default(),
             embed_index: Default::default(),

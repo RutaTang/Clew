@@ -362,15 +362,17 @@ impl App {
 
 impl App {
     /// Put away the page covering the code — a doc page, the overview, the
-    /// statistics, the glossary — and say whether there was one: Esc, and
+    /// statistics, the glossary, a plugin's — and say whether there was one: Esc, and
     /// Back over a file, go to the code under it first.
     pub(crate) fn put_away_page(&mut self) -> bool {
         let covered = self.proj.docs.page.is_some()
             || self.proj.overview.showing
             || self.proj.stats.showing
             || self.proj.weak.showing
-            || self.proj.glossary.showing;
+            || self.proj.glossary.showing
+            || self.proj.plugin_page.is_some();
         self.proj.docs.page = None;
+        self.proj.plugin_page = None;
         self.proj.overview.showing = false;
         self.proj.stats.showing = false;
         self.proj.weak.showing = false;
@@ -393,6 +395,7 @@ impl App {
                 self.proj.weak.showing = false;
                 self.proj.glossary.showing = false;
                 self.proj.docs.page = None;
+                self.proj.plugin_page = None;
                 Task::none()
             }
             OverviewMsg::ShowStats => {
@@ -400,6 +403,7 @@ impl App {
                 self.proj.overview.showing = false;
                 self.proj.glossary.showing = false;
                 self.proj.docs.page = None;
+                self.proj.plugin_page = None;
                 // Compute on entry when there's nothing to show or the file set
                 // changed since the last run; otherwise the cached report stays.
                 self.start_stats(false)

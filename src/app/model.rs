@@ -1868,6 +1868,16 @@ impl CommandQueue {
     }
 }
 
+impl Questions<crate::app::plugins::PendingInstall> {
+    /// Queue `pending`. A newer build of a plugin already waiting replaces
+    /// that one in place: the question asks about what would be installed.
+    pub(crate) fn offer(&mut self, pending: crate::app::plugins::PendingInstall) {
+        self.ask(pending, |waiting, new| {
+            waiting.inspected.manifest.plugin.id == new.inspected.manifest.plugin.id
+        });
+    }
+}
+
 impl ConsentQueue {
     /// Queue `consent`. A request for what is already waiting — the same
     /// language, the same kind of provisioning, the same server — replaces
@@ -1909,6 +1919,9 @@ pub enum Question {
     /// Letting the agent turn `stream` run the tool call `key` asks for (an
     /// approval card in the Ask panel).
     Approval { stream: u64, key: ApprovalKey },
+    /// Installing the plugin asked about under this number
+    /// (`app::plugins::PendingInstall`).
+    Plugin(u64),
 }
 
 /// The question within the user's reach, and since when: on top of every

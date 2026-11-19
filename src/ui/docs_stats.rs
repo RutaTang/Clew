@@ -73,6 +73,8 @@ pub(crate) enum PaneCover<'a> {
     WeakSpots,
     /// The project glossary.
     Glossary,
+    /// The page a plugin's command showed.
+    Plugin(&'a crate::app::plugins::PluginPage),
 }
 
 impl PaneCover<'_> {
@@ -116,6 +118,8 @@ pub(crate) fn pane_cover(app: &App) -> Option<PaneCover<'_>> {
         PaneCover::WeakSpots
     } else if app.proj.glossary.showing {
         PaneCover::Glossary
+    } else if let Some(page) = &app.proj.plugin_page {
+        PaneCover::Plugin(page)
     } else {
         return None;
     })
@@ -131,6 +135,7 @@ pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
             PaneCover::Stats => stats_home(app),
             PaneCover::WeakSpots => super::weakspots::weak_home(app),
             PaneCover::Glossary => glossary_home(app),
+            PaneCover::Plugin(page) => super::plugins::plugin_page(page),
         };
         // The Ask pill floats over a page's foot at its right: the page
         // ends above it, so no row is under it, scrolled to its end or

@@ -1050,6 +1050,9 @@ impl App {
         // what it finds and run the window's commands (`app::windowtools`).
         let mut tools = tools;
         tools.extend(crate::app::windowtools::window_tools());
+        // And the plugin tools: the agent can write the user a plugin
+        // (`app::plugins`).
+        tools.extend(crate::app::plugins::plugin_tools());
         // Client-side grounding the server can't see: the paused debugger state
         // and any pinned selections travel verbatim.
         let mut context = String::new();

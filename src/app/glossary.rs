@@ -609,6 +609,7 @@ impl App {
                 self.proj.stats.showing = false;
                 self.proj.weak.showing = false;
                 self.proj.docs.page = None;
+                self.proj.plugin_page = None;
                 // The terms come from the docs index, which is only built
                 // on demand: bring it up to date for the page (single-flight,
                 // a no-op while it is fresh).

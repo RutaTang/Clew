@@ -86,6 +86,8 @@ pub(crate) mod navigation;
 pub(crate) use navigation::count_matches;
 mod overview;
 pub(crate) mod palette;
+pub(crate) mod plugin_host;
+pub(crate) mod plugins;
 mod project;
 mod reading;
 pub(crate) mod recent;

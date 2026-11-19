@@ -573,6 +573,20 @@ impl App {
         if crate::app::windowtools::is_window_tool(&tool) {
             return self.on_window_tool(stream, call, tool, args);
         }
+        // So do the plugin tools: writing, building and trying a plugin is
+        // Clew's own work, and installing one is asked of the user here.
+        if clew_plugin::tools::is_plugin_tool(&tool) {
+            if self.proj.link.agent_stream != Some(stream) {
+                let _ = self.send_to_server(clew_protocol::Request::AgentToolResult {
+                    stream,
+                    call,
+                    content: "This turn has ended.".into(),
+                    is_error: true,
+                });
+                return Task::none();
+            }
+            return self.on_plugin_tool(stream, call, tool, args);
+        }
         // A call of a turn the user stopped (it crossed the Cancel on its way)
         // is not run, nor asked about.
         let target = self

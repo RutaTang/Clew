@@ -885,6 +885,7 @@ dependencies = [
  "ab_glyph",
  "chrono",
  "clew-core",
+ "clew-plugin",
  "clew-protocol",
  "clew-rules",
  "clew-voice",

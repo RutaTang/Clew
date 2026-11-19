@@ -163,6 +163,7 @@ impl App {
         self.proj.stats.showing = false;
         self.proj.weak.showing = false;
         self.proj.glossary.showing = false;
+        self.proj.plugin_page = None;
     }
 
     /// Open the doc page for the symbol named `name` (from "View docs"). Switches

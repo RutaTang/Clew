@@ -94,6 +94,8 @@ mod notebook;
 pub(crate) use notebook::*;
 mod overlays;
 pub(crate) use overlays::*;
+mod plugins;
+pub(crate) use plugins::*;
 mod updater;
 mod usage;
 pub(crate) use updater::*;
@@ -375,6 +377,9 @@ pub(crate) enum ActiveOverlay<'a> {
     LspCommand(&'a crate::PendingLspCommand, u64, usize),
     /// The question on screen, its number, and how many more wait behind it.
     LspConsent(&'a crate::LspConsent, u64, usize),
+    /// Whether to install a plugin: the question on screen, its number, and
+    /// how many more wait behind it.
+    PluginInstall(&'a crate::app::plugins::PendingInstall, u64, usize),
     /// "Set up project…", or Explain All asking first (a first open's
     /// sheet is `Consent`).
     Setup(&'a crate::app::setup::ProjectSetup),
@@ -386,6 +391,8 @@ pub(crate) enum ActiveOverlay<'a> {
     BpCondition(&'a (std::path::PathBuf, usize, String)),
     /// Fake run's inputs sheet.
     FakeRun(&'a crate::app::fakerun::Sheet),
+    /// The line of text a plugin's command asks for.
+    PluginPrompt(&'a crate::app::plugins::Prompt),
     BookmarkNote(&'a (String, usize, String)),
     ReadingNote(&'a (String, String, String)),
     Why(&'a crate::BlameWhy),
@@ -428,6 +435,8 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         )
     } else if let Some((number, consent)) = app.proj.pending_lsp_consent.on_screen() {
         O::LspConsent(consent, number, app.proj.pending_lsp_consent.len() - 1)
+    } else if let Some((number, pending)) = app.plugins.install.on_screen() {
+        O::PluginInstall(pending, number, app.plugins.install.len() - 1)
     } else if let Some(setup) = app
         .setup
         .as_ref()
@@ -446,6 +455,8 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::BpCondition(edit)
     } else if let Some(sheet) = &app.proj.fake.sheet {
         O::FakeRun(sheet)
+    } else if let Some(prompt) = &app.plugins.prompt {
+        O::PluginPrompt(prompt)
     } else if let Some(edit) = &app.proj.note_edit {
         O::BookmarkNote(edit)
     } else if let Some(edit) = &app.proj.reading_note_edit {
@@ -513,6 +524,11 @@ pub(crate) fn answers_waiting(app: &App) -> Vec<heard::Target> {
                         parts.push(lsp_consent_modal(consent, number, 0, false));
                     }
                 }
+                Question::Plugin(_) => {
+                    if let Some((number, pending)) = app.plugins.install.on_screen() {
+                        parts.push(plugin_install_modal(pending, number, 0, false));
+                    }
+                }
                 Question::TrustHost(_) | Question::ForgetHostKey(_) => {
                     parts.push(connect_modal(app));
                 }
@@ -562,6 +578,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Consent(_) => "consent",
             Self::LspCommand(..) => "lsp-command",
             Self::LspConsent(..) => "lsp-consent",
+            Self::PluginInstall(..) => "plugin-install",
             Self::Setup(_) => "setup",
             Self::UpdateNotes => "update-notes",
             Self::Settings => "settings",
@@ -580,6 +597,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::TreeMenu(_) => "tree-menu",
             Self::BpCondition(_)
             | Self::FakeRun(_)
+            | Self::PluginPrompt(_)
             | Self::BookmarkNote(_)
             | Self::ReadingNote(_)
             | Self::Finder
@@ -594,6 +612,8 @@ impl<'a> ActiveOverlay<'a> {
         match self {
             Self::LspCommand(_, number, _) => format!("lsp-command#{number}"),
             Self::LspConsent(_, number, _) => format!("lsp-consent#{number}"),
+            Self::PluginInstall(_, number, _) => format!("plugin-install#{number}"),
+            Self::PluginPrompt(_) => "plugin-prompt".into(),
             Self::Graph(overlay) => format!("graph:{overlay:?}"),
             Self::BpCondition(_) => "bp-condition".into(),
             Self::FakeRun(_) => "fake-run".into(),
@@ -671,6 +691,13 @@ impl<'a> ActiveOverlay<'a> {
                 waiting,
                 app.asked(Question::LspConsent(number)),
             ),
+            Self::PluginInstall(pending, number, waiting) => plugin_install_modal(
+                pending,
+                number,
+                waiting,
+                app.asked(Question::Plugin(number)),
+            ),
+            Self::PluginPrompt(prompt) => plugin_prompt_modal(prompt),
             Self::UpdateNotes => update_notes_modal(app),
             Self::Settings => settings_modal(app),
             Self::Connect => connect_modal(app),
@@ -721,6 +748,10 @@ impl<'a> ActiveOverlay<'a> {
             Self::Consent(root) => Message::Project(ProjectMsg::ConsentDenied(root.to_path_buf())),
             Self::LspCommand(_, number, _) => Message::Lsp(LspMsg::CommandDismissed(*number)),
             Self::LspConsent(_, number, _) => Message::Lsp(LspMsg::ConsentDismissed(*number)),
+            Self::PluginInstall(_, number, _) => {
+                Message::Plugin(crate::app::plugins::PluginMsg::InstallDismissed(*number))
+            }
+            Self::PluginPrompt(_) => Message::Plugin(crate::app::plugins::PluginMsg::PromptCancel),
             Self::Setup(_) => Message::Project(ProjectMsg::SetupClose),
             Self::UpdateNotes => Message::Updater(UpdaterMsg::CloseNotes),
             Self::Settings => Message::Settings(SettingsMsg::Close),
