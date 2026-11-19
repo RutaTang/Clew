@@ -83,10 +83,23 @@ fn is_space_at(s: &[u8], i: usize) -> bool {
 
 /// Where the text from `i` on starts once its leading white space is
 /// skipped (`s.len()` when it is all white space).
-fn skip_space(s: &[u8], from: usize) -> usize {
+pub(crate) fn skip_space(s: &[u8], from: usize) -> usize {
     let mut i = from;
     while i < s.len() {
         if !is_space_at(s, i) {
+            return i;
+        }
+        i = next_char(s, i);
+    }
+    i
+}
+
+/// Where the word that starts at `from` ends: at its first white space, or
+/// at `s.len()`.
+pub(crate) fn skip_word(s: &[u8], from: usize) -> usize {
+    let mut i = from;
+    while i < s.len() {
+        if is_space_at(s, i) {
             return i;
         }
         i = next_char(s, i);

@@ -1114,7 +1114,7 @@ const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// release's `.sha256` sidecars concatenated — one `sha256sum` line per server
 /// asset, `<64 lowercase hex>  clew-server-<slug>-p<protocol>` (for example
 /// `3b0c…9f1e  clew-server-linux-x86_64-p13` at protocol 13). The parser,
-/// `server_dist::parse_digest_list`, also accepts `;` or `,` between entries,
+/// `server_dist::embedded_digest`, also accepts `;` or `,` between entries,
 /// a `*` before the name, and `<asset>=<hex>`. A build without it (a developer
 /// build) falls back to the sidecar published beside each asset, which only
 /// guards against a corrupted transfer.

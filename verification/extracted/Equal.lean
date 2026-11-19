@@ -4464,4 +4464,1155 @@ theorem ssh_reads_as_meant (u h i : List Char) (user host identity : Slice Std.U
 
 end SshArgs
 
+/-! ## Which digest a server binary must have — `clew_rules::server_dist`
+
+`pinned_digest` reads the digest list built into a release (entries
+separated by newlines, `;` or `,`; each `<asset>=<digest>` or `sha256sum`
+output) and gives the digest of the last entry naming the asset;
+`sidecar_digest` reads a `.sha256` file's first 64-hex-digit word. The model
+in `../Clew/ServerDist.lean` proves that with a list built in, only the
+digest it pins for the asset itself is ever accepted (`pinned_only`), and
+that an unlisted asset is refused. Proved here: on the UTF-8 bytes of any
+list, asset name and file, both return, and read what
+`lookup (parseDigestList list) asset` and `parseSha256` read. On the way:
+`str::split_whitespace` a word at a time (`sw_eq`), on bytes. -/
+
+namespace Digests
+
+open clew_rules.server_dist
+open Shell (bs push_ok extend_ok)
+open Headers (utf8)
+open Clew.Extracted.Version (sg sg_split sg_cons sg_self sg_snoc sg_length)
+open Clew.Text (isWhitespace)
+
+theorem sub_ok (s : Slice Std.U8) (a b : Std.Usize) (h1 : a.val ≤ b.val) (h2 : b.val ≤ s.val.length) :
+    ∃ t, core.slice.index.Slice.index (core.slice.index.SliceIndexRangeUsizeSlice Std.U8) s
+      { start := a, «end» := b } = ok t ∧ bs t.val = sg s a.val b.val ∧
+      t.val.length = b.val - a.val := by
+  have hlen : ((s.val.drop a.val).take (b.val - a.val)).length ≤ Usize.max := by
+    have := Slice.length_ineq s; simp; omega
+  refine ⟨Slice.from _ hlen, ?_, ?_, ?_⟩
+  · rw [Slice.index_SliceIndexRangeUsizeSliceInst]
+    simp [core.slice.index.SliceIndexRangeUsizeSlice.index, Slice.length, h1, h2, List.slice]
+  · rw [Slice.from_val]; simp [bs, List.map_take, List.map_drop]
+  · rw [Slice.from_val]; simp; omega
+
+theorem drop_bs (l : List Std.U8) (i : Nat) : (bs l).drop i = bs (l.drop i) := by
+  simp [bs, List.map_drop]
+
+/-- The bytes from `f` to `r`, when those from each on are the UTF-8 bytes of
+`ds` and of what `ds` is past its first run of `p`. -/
+theorem sg_takeWhile (s : Slice Std.U8) (f r : Nat) (p : Char → Bool) (ds : List Char)
+    (hfr : f ≤ r) (hr : r ≤ s.val.length)
+    (hf : bs (s.val.drop f) = utf8 ds) (hrd : bs (s.val.drop r) = utf8 (ds.dropWhile p)) :
+    sg s f r = utf8 (ds.takeWhile p) := by
+  have e := List.takeWhile_append_dropWhile (p := p) (l := ds)
+  have hl1 := congrArg List.length hf
+  have hl2 := congrArg List.length hrd
+  simp only [bs, List.length_map, List.length_drop] at hl1 hl2
+  have hsplit : utf8 ds = utf8 (ds.takeWhile p) ++ utf8 (ds.dropWhile p) := by
+    rw [← Shell.utf8_append, e]
+  rw [hsplit, List.length_append] at hl1
+  simp only [sg]
+  rw [drop_bs, hf, hsplit]
+  exact List.take_left' (by omega)
+
+theorem skip_word_ok (s : Slice Std.U8) (f : Std.Usize) (ds : List Char)
+    (hf : f.val ≤ s.val.length) (h : bs (s.val.drop f.val) = utf8 ds) :
+    ∃ r, clew_rules.text.skip_word s f = ok r ∧ f.val ≤ r.val ∧ r.val ≤ s.val.length ∧
+      bs (s.val.drop r.val) = utf8 (ds.dropWhile (fun c => !isWhitespace c)) := by
+  have key := loop_spec (fun i => clew_rules.text.skip_word_loop.body s i)
+    (fun i => f.val ≤ i.val ∧ i.val ≤ s.val.length ∧ ∃ ds, bs (s.val.drop i.val) = utf8 ds)
+    (fun i r => ∀ ds, bs (s.val.drop i.val) = utf8 ds →
+      i.val ≤ r.val ∧ r.val ≤ s.val.length ∧
+        bs (s.val.drop r.val) = utf8 (ds.dropWhile (fun c => !isWhitespace c)))
+    (fun i => s.val.length - i.val)
+    (by
+      rintro i ⟨hfi, hi, ds, hds⟩
+      by_cases hlt : i.val < s.val.length
+      · cases ds with
+        | nil =>
+          exfalso
+          have := Text.bs_drop_length s.val i.val
+          rw [hds, (Headers.utf8_nil []).mpr rfl] at this
+          simp at this; omega
+        | cons c ds' =>
+          rw [Shell.utf8_cons] at hds
+          have hsp : clew_rules.text.is_space_at s i = ok (isWhitespace c) := by
+            rw [Text.is_space_at_ok, hds, Text.spaceB_enc]
+          have hl : (Text.enc c).length + (utf8 ds').length = s.val.length - i.val := by
+            have := Text.bs_drop_length s.val i.val
+            rw [hds, List.length_append] at this; exact this
+          have hpos := Text.enc_pos c
+          obtain ⟨j, hj, hjv, hjd⟩ := Text.next_char_ok s i c _ hds
+          by_cases hw : isWhitespace c = true
+          · left
+            refine ⟨i, by simp [clew_rules.text.skip_word_loop.body, UScalar.lt_equiv, hlt, hsp, hw], ?_⟩
+            intro ds0 hds0
+            have e : ds0 = c :: ds' := Text.utf8_inj _ _ (by rw [← hds0, hds, Shell.utf8_cons])
+            subst e
+            rw [List.dropWhile_cons_of_neg (by simp [hw])]
+            exact ⟨le_refl _, hi, hds0⟩
+          · right
+            refine ⟨j, ?_, ⟨by omega, by omega, ds', hjd⟩, by omega, ?_⟩
+            · simp [clew_rules.text.skip_word_loop.body, UScalar.lt_equiv, hlt, hsp, hw, hj]
+            · intro r hq ds0 hds0
+              have e : ds0 = c :: ds' := Text.utf8_inj _ _ (by rw [← hds0, hds, Shell.utf8_cons])
+              subst e
+              rw [List.dropWhile_cons_of_pos (by simpa using hw)]
+              obtain ⟨h1, h2, h3⟩ := hq ds' hjd
+              exact ⟨by omega, h2, h3⟩
+      · left
+        refine ⟨i, by simp [clew_rules.text.skip_word_loop.body, UScalar.lt_equiv, hlt], ?_⟩
+        intro ds0 hds0
+        rw [Text.bs_drop_end _ _ (by omega)] at hds0
+        have e : ds0 = [] := (Headers.utf8_nil ds0).mp hds0.symm
+        subst e
+        exact ⟨le_refl _, hi, by rw [Text.bs_drop_end _ _ (by omega)]; rfl⟩)
+  obtain ⟨r, hr, hq⟩ := key f ⟨le_refl _, hf, ds, h⟩
+  obtain ⟨h1, h2, h3⟩ := hq ds h
+  exact ⟨r, hr, h1, h2, h3⟩
+
+theorem skip_space_ok' (s : Slice Std.U8) (f : Std.Usize) (ds : List Char)
+    (hf : f.val ≤ s.val.length) (h : bs (s.val.drop f.val) = utf8 ds) :
+    ∃ r, clew_rules.text.skip_space s f = ok r ∧ f.val ≤ r.val ∧ r.val ≤ s.val.length ∧
+      bs (s.val.drop r.val) = utf8 (ds.dropWhile isWhitespace) := by
+  obtain ⟨r, hr, h1, h2⟩ := Text.skip_space_ok s f ds hf h
+  refine ⟨r, hr, ?_, h1, h2⟩
+  have l1 := congrArg List.length h
+  have l2 := congrArg List.length h2
+  have l3 : (utf8 (ds.dropWhile isWhitespace)).length ≤ (utf8 ds).length := by
+    conv_rhs => rw [← List.takeWhile_append_dropWhile (p := isWhitespace) (l := ds)]
+    rw [Shell.utf8_append, List.length_append]; omega
+  simp only [bs, List.length_map, List.length_drop] at l1 l2
+  omega
+
+/-! ### Words between white space -/
+
+/-- Not white space. -/
+abbrev nws (c : Char) : Bool := !isWhitespace c
+
+theorem sw_ws (c : Char) (xs : List Char) (hc : isWhitespace c = true) :
+    Clew.Text.splitWhitespace (c :: xs) = Clew.Text.splitWhitespace xs := by
+  simp [Clew.Text.splitWhitespace, Clew.Text.split, hc]
+
+theorem dropWhile_head {p : Char → Bool} {l : List Char} {d : Char} {r : List Char}
+    (h : l.dropWhile p = d :: r) : p d = false := by
+  have := List.head_dropWhile_not p (l := l) (by simp [h])
+  simpa [h] using this
+
+/-- `str::split_whitespace`, a word at a time. -/
+theorem sw_eq (xs : List Char) : Clew.Text.splitWhitespace xs =
+    match xs.dropWhile isWhitespace with
+    | [] => []
+    | ys => ys.takeWhile nws :: Clew.Text.splitWhitespace (ys.dropWhile nws) := by
+  induction xs with
+  | nil => rfl
+  | cons c xs ih =>
+    by_cases hc : isWhitespace c = true
+    · rw [sw_ws c xs hc, List.dropWhile_cons_of_pos hc]; exact ih
+    · have hc' : isWhitespace c = false := by simpa using hc
+      rw [List.dropWhile_cons_of_neg (by simp [hc'])]
+      dsimp only
+      have hall : ∀ x ∈ (c :: xs).takeWhile nws, isWhitespace x = false := by
+        intro x hx
+        have := List.all_eq_true.mp (List.all_takeWhile (p := nws) (l := c :: xs)) x hx
+        simpa using this
+      have hne : (c :: xs).takeWhile nws ≠ [] := by simp [hc']
+      cases hr : (c :: xs).dropWhile nws with
+      | nil =>
+        have e : c :: xs = (c :: xs).takeWhile nws := by
+          conv_lhs => rw [← List.takeWhile_append_dropWhile (p := nws) (l := c :: xs), hr]
+          simp
+        unfold Clew.Text.splitWhitespace
+        rw [Clew.Text.split_none isWhitespace (c :: xs) (fun x hx => hall x (by rw [← e]; exact hx)),
+          ← e]
+        simp [Clew.Text.split]
+      | cons d r =>
+        have hd : isWhitespace d = true := by have := dropWhile_head hr; simpa using this
+        have e : c :: xs = (c :: xs).takeWhile nws ++ d :: r := by
+          rw [← hr, List.takeWhile_append_dropWhile]
+        rw [sw_ws d r hd]
+        conv_lhs => rw [e]
+        unfold Clew.Text.splitWhitespace
+        rw [Clew.Text.split_at_sep isWhitespace _ d r hall hd, List.filter_cons]
+        simp [hne]
+
+theorem trimEnd_prefix (y : List Char) : Clew.Text.trimEnd y <+: y := by
+  unfold Clew.Text.trimEnd
+  refine ⟨(y.reverse.takeWhile isWhitespace).reverse, ?_⟩
+  rw [← List.reverse_append, List.takeWhile_append_dropWhile, List.reverse_reverse]
+
+/-- Trimmed text starts with no white space. -/
+theorem trim_dropWhile (x : List Char) :
+    (Clew.Text.trim x).dropWhile isWhitespace = Clew.Text.trim x := by
+  unfold Clew.Text.trim Clew.Text.trimStart
+  obtain ⟨t, ht⟩ := trimEnd_prefix (x.dropWhile isWhitespace)
+  cases he : Clew.Text.trimEnd (x.dropWhile isWhitespace) with
+  | nil => rfl
+  | cons c r =>
+    rw [he] at ht
+    have hc := dropWhile_head (p := isWhitespace) (l := x) (d := c) (r := r ++ t) (by rw [← ht]; simp)
+    rw [List.dropWhile_cons_of_neg (by simp [hc])]
+
+/-- The words of `sha256sum` output: exactly two, the first and the second. -/
+theorem sw_two (e : List Char) (he : e.dropWhile isWhitespace = e) :
+    (match Clew.Text.splitWhitespace e with
+      | [a, b] => some (a, b)
+      | _ => none : Option (List Char × List Char)) =
+    (let r2 := (e.dropWhile nws).dropWhile isWhitespace
+     let r4 := (r2.dropWhile nws).dropWhile isWhitespace
+     if e ≠ [] ∧ r2 ≠ [] ∧ r4 = [] then some (e.takeWhile nws, r2.takeWhile nws) else none) := by
+  dsimp only
+  rw [sw_eq e, he]
+  cases e with
+  | nil => simp
+  | cons c e' =>
+    dsimp only
+    rw [sw_eq]
+    cases h2 : ((c :: e').dropWhile nws).dropWhile isWhitespace with
+    | nil => simp
+    | cons d r =>
+      dsimp only
+      rw [sw_eq]
+      cases h4 : ((d :: r).dropWhile nws).dropWhile isWhitespace with
+      | nil => simp
+      | cons x y => simp
+
+/-! ### Bytes -/
+
+/-- An ASCII hex digit. -/
+def hexB (n : Nat) : Bool := (48 ≤ n && n ≤ 57) || (97 ≤ n && n ≤ 102) || (65 ≤ n && n ≤ 70)
+
+/-- `u8::to_ascii_lowercase`. -/
+def lowerB (n : Nat) : Nat := if 65 ≤ n && n ≤ 90 then n + 32 else n
+
+theorem is_hex_ok (b : Std.U8) : is_hex b = ok (hexB b.val) := by
+  unfold is_hex
+  simp only [ge_iff_le, UScalar.le_equiv, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq,
+    Framing.ite_ok, Result.ok.injEq]
+  have hb := Framing.u8_lt b
+  generalize b.val = v at hb ⊢
+  revert v; decide +kernel
+
+theorem lower_byte_ok (b : Std.U8) : ∃ c, lower_byte b = ok c ∧ c.val = lowerB b.val := by
+  unfold lower_byte lowerB
+  have hb := Framing.u8_lt b
+  by_cases h : 65 ≤ b.val ∧ b.val ≤ 90
+  · obtain ⟨c, hc, hcv⟩ := ok_of_spec (UScalar.add_spec (x := b) (y := 32#u8) (by simp [U8.max_eq]; omega))
+    refine ⟨c, ?_, ?_⟩
+    · simp [UScalar.le_equiv, h, hc]
+    · simp [h, hcv]
+  · refine ⟨b, ?_, ?_⟩
+    · simp only [ge_iff_le, UScalar.le_equiv, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq]
+      split_ifs <;> simp_all
+    · simp only [Bool.and_eq_true, decide_eq_true_eq]; simp [h]
+
+theorem is_hex64_ok (t : Slice Std.U8) :
+    is_hex64 t = ok ((bs t.val).length == 64 && (bs t.val).all hexB) := by
+  unfold is_hex64
+  by_cases hl : t.val.length = 64
+  · obtain ⟨b, hb, hq⟩ := loop_spec (is_hex64_loop.body t) (fun _ => True)
+      (fun i b => b = (bs (t.val.drop i.val)).all hexB)
+      (fun i => t.val.length - i.val) (by
+        intro i _
+        by_cases hi : i.val < t.val.length
+        · obtain ⟨j, hj, hjv⟩ := succ_ok t i hi
+          rw [KnownHosts.bs_drop _ _ hi]
+          cases ht : hexB t.val[i.val].val
+          · left
+            exact ⟨false, by simp [is_hex64_loop.body, hi, index_ok t i hi, is_hex_ok, ht],
+              by simp only [List.all_cons, ht, Bool.false_and]⟩
+          · right
+            refine ⟨j, by simp [is_hex64_loop.body, hi, index_ok t i hi, is_hex_ok, ht, hj],
+              trivial, by omega, ?_⟩
+            intro b hb; rw [hb, hjv, List.all_cons, ht, Bool.true_and]
+        · left
+          refine ⟨true, by simp [is_hex64_loop.body, hi], ?_⟩
+          rw [List.drop_eq_nil_of_le (by omega)]; rfl) 0#usize trivial
+    have hne : ¬ (Slice.len t != 64#usize) = true := by simp [hl]
+    simp only [hne, Bool.false_eq_true, ↓reduceIte]
+    unfold is_hex64_loop
+    rw [hb, hq]
+    simp [bs, hl]
+  · have hne : (Slice.len t != 64#usize) = true := by simp [hl]
+    simp only [hne, ↓reduceIte]
+    simp [bs, hl]
+
+theorem lower_ok (t : Slice Std.U8) :
+    ∃ v, lower t = ok v ∧ bs v.val = (bs t.val).map lowerB := by
+  obtain ⟨r, hr, hq⟩ := loop_spec (fun p : alloc.vec.Vec Std.U8 × Std.Usize => lower_loop.body t p.1 p.2)
+    (fun p => p.2.val ≤ t.val.length ∧ bs p.1.val = (bs (t.val.take p.2.val)).map lowerB)
+    (fun _ r => bs r.val = (bs t.val).map lowerB)
+    (fun p => t.val.length - p.2.val)
+    (by
+      rintro ⟨out, i⟩ ⟨hi, ho⟩
+      dsimp only at hi ho ⊢
+      by_cases hlt : i.val < t.val.length
+      · obtain ⟨c, hc, hcv⟩ := lower_byte_ok t.val[i.val]
+        have hol : out.val.length = i.val := by
+          have := congrArg List.length ho; simp [bs] at this; omega
+        have := Slice.length_ineq t
+        obtain ⟨out', ho', ev⟩ := push_ok out c (by omega)
+        obtain ⟨j, hj, hjv⟩ := succ_ok t i hlt
+        right
+        refine ⟨(out', j), by simp [lower_loop.body, UScalar.lt_equiv, hlt, index_ok t i hlt, hc, ho', hj],
+          ⟨by dsimp only; omega, ?_⟩, by dsimp only; omega, fun r hr => hr⟩
+        dsimp only
+        rw [ev, hjv, Shell.bs_take_succ _ _ hlt]
+        simp [bs] at ho ⊢
+        simp [ho, hcv]
+      · left
+        refine ⟨out, by simp [lower_loop.body, UScalar.lt_equiv, hlt], ?_⟩
+        rw [ho, List.take_of_length_le (by omega)])
+    (alloc.vec.Vec.new Std.U8, 0#usize) ⟨by simp, by simp [bs]⟩
+  exact ⟨r, by unfold lower lower_loop; exact hr, hq⟩
+
+theorem same_ok (a b : Slice Std.U8) : same a b = ok (decide (bs a.val = bs b.val)) := by
+  unfold same
+  by_cases hl : a.val.length = b.val.length
+  · obtain ⟨r, hr, hq⟩ := loop_spec (same_loop.body a b) (fun _ => True)
+      (fun i r => r = decide (bs (a.val.drop i.val) = bs (b.val.drop i.val)))
+      (fun i => a.val.length - i.val) (by
+        intro i _
+        by_cases hi : i.val < a.val.length
+        · have hib : i.val < b.val.length := by omega
+          obtain ⟨j, hj, hjv⟩ := succ_ok a i hi
+          rw [KnownHosts.bs_drop _ _ hi, KnownHosts.bs_drop _ _ hib]
+          by_cases he : a.val[i.val] = b.val[i.val]
+          · right
+            refine ⟨j, by simp [same_loop.body, hi, index_ok a i hi, index_ok b i hib, he, hj],
+              trivial, by omega, ?_⟩
+            intro r hr; rw [hr, hjv]; simp [he]
+          · left
+            have hv : (a.val[i.val]).val ≠ (b.val[i.val]).val := fun h => he (UScalar.eq_of_val_eq h)
+            refine ⟨false, by simp [same_loop.body, hi, index_ok a i hi, index_ok b i hib, hv], ?_⟩
+            simp [hv]
+        · left
+          refine ⟨true, by simp [same_loop.body, hi], ?_⟩
+          rw [List.drop_eq_nil_of_le (by omega), List.drop_eq_nil_of_le (by omega)]; rfl) 0#usize trivial
+    have hne : ¬ (Slice.len a != Slice.len b) = true := by simp [hl]
+    simp only [hne, Bool.false_eq_true, ↓reduceIte]
+    unfold same_loop
+    rw [hr, hq]
+    simp
+  · have hne : (Slice.len a != Slice.len b) = true := by simpa using hl
+    simp only [hne, ↓reduceIte]
+    have : bs a.val ≠ bs b.val := fun h => hl (by simpa [bs] using congrArg List.length h)
+    simp [this]
+
+/-! ### Characters behind the bytes -/
+
+theorem isAsciiHexdigit_eq (c : Char) : Clew.Text.isAsciiHexdigit c = hexB c.toNat := by
+  simp only [Clew.Text.isAsciiHexdigit, Clew.Text.isAsciiDigit, hexB]
+  have h0 : ('0' : Char).val.toNat = 48 := rfl
+  have h9 : ('9' : Char).val.toNat = 57 := rfl
+  have ha : ('a' : Char).val.toNat = 97 := rfl
+  have hf : ('f' : Char).val.toNat = 102 := rfl
+  have hA : ('A' : Char).val.toNat = 65 := rfl
+  have hF : ('F' : Char).val.toNat = 70 := rfl
+  simp only [Char.le_def, UInt32.le_iff_toNat_le]
+  unfold Char.toNat
+  rw [h0, h9, ha, hf, hA, hF]
+
+theorem hexB_high (n : Nat) (h : 128 ≤ n) : hexB n = false := by
+  simp only [hexB, Bool.or_eq_false_iff, Bool.and_eq_false_iff, decide_eq_false_iff_not]; omega
+
+theorem hex_ascii (d : List Char) (h : d.all Clew.Text.isAsciiHexdigit = true) :
+    ∀ c ∈ d, c.toNat < 128 := by
+  intro c hc
+  have := List.all_eq_true.mp h c hc
+  rw [isAsciiHexdigit_eq] at this
+  by_contra hn
+  rw [hexB_high _ (by omega)] at this
+  exact absurd this (by simp)
+
+theorem hex64_utf8 (d : List Char) :
+    ((utf8 d).length == 64 && (utf8 d).all hexB) = Clew.ServerDist.isSha256Hex d := by
+  unfold Clew.ServerDist.isSha256Hex
+  rw [KnownHosts.utf8_all hexB Clew.Text.isAsciiHexdigit isAsciiHexdigit_eq hexB_high]
+  cases hall : d.all Clew.Text.isAsciiHexdigit
+  · simp
+  · rw [KnownHosts.utf8_of_ascii d (hex_ascii d hall)]; simp
+
+theorem lower_toNat (c : Char) (h : c.toNat < 128) :
+    (Clew.Text.toAsciiLowercase c).toNat = lowerB c.toNat := by
+  have key : ∀ n : Fin 128, (Clew.Text.toAsciiLowercase (Char.ofNat n.val)).toNat = lowerB n.val := by
+    decide
+  have := key ⟨c.toNat, h⟩
+  simpa [Char.ofNat_toNat] using this
+
+theorem lowerB_lt (n : Nat) (h : n < 128) : lowerB n < 128 := by
+  unfold lowerB; split <;> simp_all; omega
+
+theorem utf8_lowerHex (d : List Char) (h : d.all Clew.Text.isAsciiHexdigit = true) :
+    utf8 (Clew.ServerDist.lowerHex d) = (utf8 d).map lowerB := by
+  have ha := hex_ascii d h
+  unfold Clew.ServerDist.lowerHex
+  rw [KnownHosts.utf8_of_ascii d ha, KnownHosts.utf8_of_ascii]
+  · simp only [List.map_map]
+    apply List.map_congr_left
+    intro c hc
+    exact lower_toNat c (ha c hc)
+  · intro c hc
+    simp only [List.mem_map] at hc
+    obtain ⟨x, hx, rfl⟩ := hc
+    rw [lower_toNat x (ha x hx)]
+    exact lowerB_lt _ (ha x hx)
+
+theorem hex_lower (c : Char) :
+    Clew.Text.isAsciiHexdigit (Clew.Text.toAsciiLowercase c) = Clew.Text.isAsciiHexdigit c := by
+  by_cases h : c.toNat < 128
+  · have key : ∀ n : Fin 128, Clew.Text.isAsciiHexdigit (Clew.Text.toAsciiLowercase (Char.ofNat n.val)) =
+        Clew.Text.isAsciiHexdigit (Char.ofNat n.val) := by decide
+    have := key ⟨c.toNat, h⟩
+    simpa [Char.ofNat_toNat] using this
+  · have hl : Clew.Text.toAsciiLowercase c = c := by
+      unfold Clew.Text.toAsciiLowercase
+      have : ¬ (('A' ≤ c && c ≤ 'Z') = true) := by
+        simp only [Bool.and_eq_true, decide_eq_true_eq, Char.le_def, UInt32.le_iff_toNat_le]
+        intro ⟨_, h2⟩
+        have : c.val.toNat ≤ 90 := by simpa using h2
+        exact h (by unfold Char.toNat; omega)
+      simp [this]
+    rw [hl]
+
+theorem isSha256Hex_lower (w : List Char) :
+    Clew.ServerDist.isSha256Hex (Clew.ServerDist.lowerHex w) = Clew.ServerDist.isSha256Hex w := by
+  unfold Clew.ServerDist.isSha256Hex Clew.ServerDist.lowerHex
+  simp only [List.length_map, List.all_map, Function.comp_def, hex_lower]
+
+/-! ### Searching the bytes -/
+
+theorem find_byte_ok (t : Slice Std.U8) (c : Std.U8) :
+    ∃ j, find_byte t c = ok j ∧ j.val ≤ t.val.length ∧ (∀ x ∈ sg t 0 j.val, x ≠ c.val) ∧
+      (j.val < t.val.length →
+        sg t j.val t.val.length = c.val :: sg t (j.val + 1) t.val.length) := by
+  obtain ⟨r, hr, hq⟩ := loop_spec (find_byte_loop.body t c)
+    (fun i => i.val ≤ t.val.length ∧ ∀ x ∈ sg t 0 i.val, x ≠ c.val)
+    (fun _ r => r.val ≤ t.val.length ∧ (∀ x ∈ sg t 0 r.val, x ≠ c.val) ∧
+      (r.val < t.val.length → sg t r.val t.val.length = c.val :: sg t (r.val + 1) t.val.length))
+    (fun i => t.val.length - i.val)
+    (by
+      rintro i ⟨hi, hno⟩
+      by_cases hlt : i.val < t.val.length
+      · have hc := sg_cons t i.val t.val.length hlt (le_refl _)
+        by_cases ha : t.val[i.val] = c
+        · left
+          refine ⟨i, by simp [find_byte_loop.body, hlt, index_ok t i hlt, ha], hi, hno,
+            fun _ => by rw [hc, ha]⟩
+        · right
+          obtain ⟨j, hj, hjv⟩ := succ_ok t i hlt
+          refine ⟨j, by simp [find_byte_loop.body, hlt, index_ok t i hlt, ha, hj],
+            ⟨by omega, ?_⟩, by omega, fun r hr => hr⟩
+          rw [hjv, sg_snoc t 0 i.val (by omega) hlt]
+          intro x hx
+          rcases List.mem_append.mp hx with hx | hx
+          · exact hno x hx
+          · simp only [List.mem_singleton] at hx
+            subst hx
+            exact fun e => ha (UScalar.eq_of_val_eq e)
+      · left
+        have hit : i.val = t.val.length := by omega
+        refine ⟨Slice.len t, by simp [find_byte_loop.body, hlt], by simp, ?_, fun h => by simp at h⟩
+        simpa [hit] using hno)
+    0#usize ⟨by simp, by simp⟩
+  exact ⟨r, by unfold find_byte find_byte_loop; exact hr, hq⟩
+
+theorem skip_stars_ok (t : Slice Std.U8) (f : Std.Usize) (h1 : f.val ≤ t.val.length) :
+    ∃ j, skip_stars t f = ok j ∧ f.val ≤ j.val ∧ j.val ≤ t.val.length ∧
+      (∀ x ∈ sg t f.val j.val, x = 42) ∧
+      (j.val < t.val.length →
+        ∃ k, sg t j.val t.val.length = k :: sg t (j.val + 1) t.val.length ∧ k ≠ 42) := by
+  obtain ⟨r, hr, hq⟩ := loop_spec (fun i => skip_stars_loop.body t i)
+    (fun i => f.val ≤ i.val ∧ i.val ≤ t.val.length ∧ ∀ x ∈ sg t f.val i.val, x = 42)
+    (fun _ r => f.val ≤ r.val ∧ r.val ≤ t.val.length ∧ (∀ x ∈ sg t f.val r.val, x = 42) ∧
+      (r.val < t.val.length →
+        ∃ k, sg t r.val t.val.length = k :: sg t (r.val + 1) t.val.length ∧ k ≠ 42))
+    (fun i => t.val.length - i.val)
+    (by
+      rintro i ⟨hi1, hi2, hno⟩
+      by_cases hlt : i.val < t.val.length
+      · have hc := sg_cons t i.val t.val.length hlt (le_refl _)
+        by_cases hv : t.val[i.val] = 42#u8
+        · right
+          obtain ⟨j, hj, hjv⟩ := succ_ok t i hlt
+          refine ⟨j, by simp [skip_stars_loop.body, UScalar.lt_equiv, hlt, index_ok t i hlt, hv, hj],
+            ⟨by omega, by omega, ?_⟩, by omega, fun r hr => hr⟩
+          rw [hjv, sg_snoc t f.val i.val hi1 hlt]
+          intro x hx
+          rcases List.mem_append.mp hx with hx | hx
+          · exact hno x hx
+          · simp only [List.mem_singleton] at hx; rw [hx, hv]; rfl
+        · left
+          refine ⟨i, by simp [skip_stars_loop.body, UScalar.lt_equiv, hlt, index_ok t i hlt, hv],
+            hi1, hi2, hno, fun _ => ⟨_, hc, fun e => hv (UScalar.eq_of_val_eq (by rw [e]; rfl))⟩⟩
+      · left
+        refine ⟨i, by simp [skip_stars_loop.body, UScalar.lt_equiv, hlt], hi1, hi2, hno,
+          fun h => absurd h hlt⟩)
+    f ⟨le_refl _, h1, by simp⟩
+  exact ⟨r, by unfold skip_stars skip_stars_loop; exact hr, hq⟩
+
+theorem utf8_dropWhile_star : ∀ (cs : List Char) (pre rest : List Nat), utf8 cs = pre ++ rest →
+    (∀ x ∈ pre, x = 42) → rest.head? ≠ some 42 → utf8 (cs.dropWhile (· == '*')) = rest := by
+  intro cs
+  induction cs with
+  | nil =>
+    intro pre rest h _ _
+    have : pre ++ rest = [] := h.symm
+    simp at this; simp [this.2]; rfl
+  | cons c cs ih =>
+    intro pre rest h hpre hr
+    by_cases hc : c = '*'
+    · subst hc
+      rw [show utf8 ('*' :: cs) = 42 :: utf8 cs from by rw [Shell.utf8_cons]; rfl] at h
+      cases pre with
+      | nil => simp at h; rw [← h] at hr; simp at hr
+      | cons p pre' =>
+        simp only [List.cons_append, List.cons.injEq] at h
+        rw [List.dropWhile_cons_of_pos (by simp)]
+        exact ih pre' rest h.2 (fun x hx => hpre x (by simp [hx])) hr
+    · obtain ⟨b, tl, hbt, hb⟩ := KnownHosts.utf8_cons_head c cs 42 (by omega)
+        (KnownHosts.toNat_ne c '*' hc)
+      cases pre with
+      | nil =>
+        rw [List.dropWhile_cons_of_neg (by simpa using hc)]
+        simpa using h
+      | cons p pre' =>
+        rw [hbt] at h
+        simp only [List.cons_append, List.cons.injEq] at h
+        exact absurd (h.1 ▸ hpre p (by simp)) hb
+
+theorem splitOnce_first : ∀ (e : List Char) (pre rest : List Nat),
+    utf8 e = pre ++ 61 :: rest → (∀ x ∈ pre, x ≠ 61) →
+    ∃ a b, utf8 a = pre ∧ utf8 b = rest ∧ Clew.Text.splitOnce '=' e = some (a, b) := by
+  intro e
+  induction e with
+  | nil => intro pre rest h; simp [Headers.utf8] at h
+  | cons c e ih =>
+    intro pre rest h hpre
+    rw [Shell.utf8_cons] at h
+    by_cases hc : c = '='
+    · subst hc
+      rw [show (String.utf8EncodeChar '=').map (·.toNat) = [61] from rfl] at h
+      cases pre with
+      | nil =>
+        simp only [List.nil_append, List.singleton_append, List.cons.injEq] at h
+        exact ⟨[], e, rfl, h.2, by simp [Clew.Text.splitOnce]⟩
+      | cons p pre =>
+        simp only [List.cons_append, List.cons.injEq] at h
+        exact absurd h.1.symm (hpre p (by simp))
+    · have hno := KnownHosts.bytes_ne c 61 (by omega) (KnownHosts.toNat_ne c '=' hc)
+      obtain ⟨pre', hpre', hcs⟩ : ∃ pre', pre = Text.enc c ++ pre' ∧ utf8 e = pre' ++ 61 :: rest := by
+        rcases List.append_eq_append_iff.mp h with ⟨a', h1, h2⟩ | ⟨c', h1, h2⟩
+        · exact ⟨a', h1, h2⟩
+        · cases c' with
+          | nil => exact ⟨[], by simp at h1; rw [← h1]; simp, by simpa using h2.symm⟩
+          | cons y c'' =>
+            simp only [List.cons_append, List.cons.injEq] at h2
+            exact absurd rfl (hno 61 (by rw [h1, ← h2.1]; simp))
+      obtain ⟨a, b, ha, hb, hs⟩ := ih pre' rest hcs (fun x hx => hpre x (by rw [hpre']; simp [hx]))
+      refine ⟨c :: a, b, by rw [Shell.utf8_cons, ha, hpre'], hb, ?_⟩
+      have hc' : (c == '=') = false := by simpa using hc
+      simp [Clew.Text.splitOnce, hc', hs]
+
+theorem splitOnce_eq_none (e : List Char) (h : ∀ x ∈ utf8 e, x ≠ 61) :
+    Clew.Text.splitOnce '=' e = none := by
+  apply Clew.ServerDist.splitOnce_none
+  intro d hd he
+  subst he
+  exact h 61 (Version.mem_utf8 '=' e hd 61 (by decide)) rfl
+
+/-! ### Places in a part of the bytes -/
+
+theorem sg_sub (s t : Slice Std.U8) (a b x y : Nat) (hs : bs s.val = sg t a b) (_hab : a ≤ b)
+    (_hb : b ≤ t.val.length) (hxy : x ≤ y) (hy : y ≤ b - a) :
+    sg s x y = sg t (a + x) (a + y) := by
+  simp only [sg] at hs ⊢
+  rw [hs]
+  rw [List.drop_take, List.take_take, List.drop_drop]
+  congr 1
+  · omega
+
+theorem sg_between (s : Slice Std.U8) (a b : Nat) (X Y : List Nat) (hab : a ≤ b) (hb : b ≤ s.val.length)
+    (ha : bs (s.val.drop a) = X ++ Y) (hbY : bs (s.val.drop b) = Y) : sg s a b = X := by
+  have l1 := congrArg List.length ha
+  have l2 := congrArg List.length hbY
+  simp only [bs, List.length_map, List.length_drop, List.length_append] at l1 l2
+  simp only [sg]
+  rw [drop_bs, ha]
+  exact List.take_left' (by omega)
+
+theorem bs_drop_split (s : Slice Std.U8) (x y : Nat) (h : x ≤ y) :
+    bs (s.val.drop x) = sg s x y ++ bs (s.val.drop y) := by
+  simp only [sg, drop_bs]
+  rw [show bs (s.val.drop y) = (bs (s.val.drop x)).drop (y - x) by
+    rw [show y = x + (y - x) by omega, Text.bs_drop_add]; simp]
+  exact (List.take_append_drop _ _).symm
+
+theorem bs_drop_nil (s : Slice Std.U8) (k : Nat) (hk : k ≤ s.val.length) :
+    bs (s.val.drop k) = [] ↔ k = s.val.length := by
+  constructor
+  · intro h; have := congrArg List.length h; simp [bs] at this; omega
+  · intro h; rw [h]; simp [bs]
+
+/-! ### One entry -/
+
+theorem parseEntry_eq (e a b : List Char) (h : Clew.Text.splitOnce '=' e = some (a, b)) :
+    Clew.ServerDist.parseEntry e =
+      if Clew.ServerDist.isSha256Hex (Clew.Text.trim b) && !(Clew.Text.trim a).isEmpty then
+        some (Clew.Text.trim a, Clew.ServerDist.lowerHex (Clew.Text.trim b)) else none := by
+  unfold Clew.ServerDist.parseEntry; rw [h]
+
+/-- The two words of `sha256sum` output, when there are exactly two. -/
+def twoWords (e : List Char) : Option (List Char × List Char) :=
+  match Clew.Text.splitWhitespace e with
+  | [a, b] => some (a, b)
+  | _ => none
+
+/-- `parseEntry` of `sha256sum` output, from its two words. -/
+def fromWords : Option (List Char × List Char) → Option (List Char × List Char)
+  | some (digest, nm) =>
+    if Clew.ServerDist.isSha256Hex digest && !(nm.dropWhile (· == '*')).isEmpty then
+      some (nm.dropWhile (· == '*'), Clew.ServerDist.lowerHex digest) else none
+  | none => none
+
+theorem parseEntry_noeq (e : List Char) (h : Clew.Text.splitOnce '=' e = none) :
+    Clew.ServerDist.parseEntry e = fromWords (twoWords e) := by
+  unfold Clew.ServerDist.parseEntry twoWords
+  rw [h]
+  rcases hs : Clew.Text.splitWhitespace e with _ | ⟨a, _ | ⟨b, _ | ⟨c, r⟩⟩⟩ <;> simp [fromWords]
+
+/-- What `entry_fields` finds, read as the model's `parseEntry`. -/
+def EntryRel (t : Slice Std.U8) (e : List Char) :
+    Option (Std.Usize × Std.Usize × Std.Usize × Std.Usize) → Prop
+  | none => Clew.ServerDist.parseEntry e = none
+  | some (nf, nt, df, dt) => nf.val ≤ nt.val ∧ nt.val ≤ t.val.length ∧ df.val ≤ dt.val ∧
+      dt.val ≤ t.val.length ∧ ∃ n d, sg t nf.val nt.val = utf8 n ∧ sg t df.val dt.val = utf8 d ∧
+        Clew.ServerDist.isSha256Hex d = true ∧
+        Clew.ServerDist.parseEntry e = some (n, Clew.ServerDist.lowerHex d)
+
+theorem utf8_eq_nil_iff_len (l : List Char) : utf8 l = [] ↔ l = [] := Headers.utf8_nil l
+
+theorem entry_fields_eq (t : Slice Std.U8) (e : List Char) (h : bs t.val = utf8 e)
+    (eq : Std.Usize) (heq : find_byte t 61#u8 = ok eq) (heq1 : eq.val ≤ t.val.length)
+    (heqno : ∀ x ∈ sg t 0 eq.val, x ≠ (61#u8).val)
+    (heqk : eq.val < t.val.length → sg t eq.val t.val.length = (61#u8).val :: sg t (eq.val + 1) t.val.length)
+    (hlt : eq.val < t.val.length) :
+    ∃ o, entry_fields t = ok o ∧ EntryRel t e o := by
+  have hlen := Slice.length_ineq t
+  have hall : sg t 0 t.val.length = utf8 e := by
+    simp only [sg, List.drop_zero, Nat.sub_zero]
+    rw [List.take_of_length_le (by simp [bs])]; exact h
+  have hsplit : utf8 e = sg t 0 eq.val ++ 61 :: sg t (eq.val + 1) t.val.length := by
+    rw [← hall, sg_split t 0 eq.val t.val.length (by omega) (by omega), heqk hlt]; simp
+  obtain ⟨a, b, ha, hb, hso⟩ := splitOnce_first e _ _ hsplit (by simpa using heqno)
+  obtain ⟨s0, hs0, bs0, ls0⟩ := sub_ok t 0#usize eq (by simp) heq1
+  obtain ⟨nf, nt, htb0, hn1, hn2, hn3⟩ := Text.trim_bounds_is_the_model s0 a (by rw [bs0]; simpa using ha.symm)
+  obtain ⟨i1, hi1, hi1v⟩ := succ_ok t eq hlt
+  obtain ⟨s1, hs1, bs1, ls1⟩ := sub_ok t i1 (Slice.len t) (by simp; omega) (by simp)
+  simp only [Slice.len_val, Slice.length] at bs1 ls1
+  obtain ⟨fr, tt, htb1, hd1, hd2, hd3⟩ := Text.trim_bounds_is_the_model s1 b
+    (by rw [bs1, hi1v]; exact hb.symm)
+  rw [ls1] at hd2
+  obtain ⟨df, hdf, hdfv⟩ := ok_of_spec (UScalar.add_spec (x := i1) (y := fr)
+    (by rw [UScalar.max_USize_eq]; omega))
+  obtain ⟨dt, hdt, hdtv⟩ := ok_of_spec (UScalar.add_spec (x := i1) (y := tt)
+    (by rw [UScalar.max_USize_eq]; omega))
+  obtain ⟨s2, hs2, bs2, ls2⟩ := sub_ok t df dt (by omega) (by omega)
+  rw [Slice.index_SliceIndexRangeUsizeSliceInst] at hs0 hs1 hs2
+  have hname : sg t nf.val nt.val = utf8 (Clew.Text.trim a) := by
+    have := sg_sub s0 t 0 eq.val nf.val nt.val (by rw [bs0]; rfl) (by omega) heq1 hn1
+      (by rw [ls0] at hn2; simpa using hn2)
+    simp only [Nat.zero_add] at this
+    rw [← this]; exact hn3
+  have hdig : sg t df.val dt.val = utf8 (Clew.Text.trim b) := by
+    rw [hdfv, hdtv, ← sg_sub s1 t i1.val t.val.length fr.val tt.val (by rw [bs1]) (by omega) (le_refl _) hd1 hd2]
+    exact hd3
+  have hhex : is_hex64 s2 = ok (Clew.ServerDist.isSha256Hex (Clew.Text.trim b)) := by
+    rw [is_hex64_ok, bs2, hdig, hex64_utf8]
+  have hne : (nf.val < nt.val) ↔ (Clew.Text.trim a).isEmpty = false := by
+    have := congrArg List.length hname
+    simp only [sg, List.length_take, List.length_drop, bs, List.length_map] at this
+    constructor
+    · intro hl
+      cases ht : Clew.Text.trim a with
+      | nil => rw [ht] at this; simp [Headers.utf8] at this; omega
+      | cons _ _ => rfl
+    · intro hl
+      by_contra hn
+      have h0 : utf8 (Clew.Text.trim a) = [] := by
+        apply List.eq_nil_of_length_eq_zero; rw [← this]; omega
+      rw [(Headers.utf8_nil _).mp h0] at hl; simp at hl
+  have hmodel := parseEntry_eq e a b hso
+  have hpre : ¬ (eq.val ≥ t.val.length) := by omega
+  by_cases hx : Clew.ServerDist.isSha256Hex (Clew.Text.trim b) = true
+  · by_cases hn : nf.val < nt.val
+    · refine ⟨some (nf, nt, df, dt), ?_, ?_⟩
+      · simp [entry_fields, heq, UScalar.lt_equiv, hlt, hs0, htb0, hi1, hs1, htb1, hdf, hdt, hs2,
+          hhex, hx, hn]
+      · refine ⟨hn1, by omega, by omega, by omega, Clew.Text.trim a, Clew.Text.trim b, hname, hdig, hx, ?_⟩
+        rw [hmodel]; simp [hx, hne.mp hn]
+    · refine ⟨none, ?_, ?_⟩
+      · simp [entry_fields, heq, UScalar.lt_equiv, hlt, hs0, htb0, hi1, hs1, htb1, hdf, hdt, hs2,
+          hhex, hx, hn]
+      · show Clew.ServerDist.parseEntry e = none
+        have : (Clew.Text.trim a).isEmpty = true := by
+          cases h' : (Clew.Text.trim a).isEmpty
+          · exact absurd (hne.mpr h') hn
+          · rfl
+        rw [hmodel]; simp [this]
+  · refine ⟨none, ?_, ?_⟩
+    · simp [entry_fields, heq, UScalar.lt_equiv, hlt, hs0, htb0, hi1, hs1, htb1, hdf, hdt, hs2, hhex, hx]
+    · show Clew.ServerDist.parseEntry e = none
+      rw [hmodel]; simp [hx]
+
+theorem star_not_ws : isWhitespace '*' = false := by decide
+
+theorem entry_fields_words (t : Slice Std.U8) (e : List Char) (h : bs t.val = utf8 e)
+    (he : e.dropWhile isWhitespace = e)
+    (eq : Std.Usize) (heq : find_byte t 61#u8 = ok eq) (heq1 : eq.val ≤ t.val.length)
+    (heqno : ∀ x ∈ sg t 0 eq.val, x ≠ (61#u8).val) (hge : ¬ eq.val < t.val.length) :
+    ∃ o, entry_fields t = ok o ∧ EntryRel t e o := by
+  have hlen := Slice.length_ineq t
+  have hall : sg t 0 t.val.length = utf8 e := by
+    simp only [sg, List.drop_zero, Nat.sub_zero]
+    rw [List.take_of_length_le (by simp [bs])]; exact h
+  have heqv : eq.val = t.val.length := by omega
+  have hso : Clew.Text.splitOnce '=' e = none := by
+    apply splitOnce_eq_none
+    intro x hx; rw [← hall, ← heqv] at hx; simpa using heqno x hx
+  have hmodel := parseEntry_noeq e hso
+  have h0 : bs (t.val.drop (0#usize).val) = utf8 e := by simpa using h
+  -- the first word
+  obtain ⟨dto, hdto, _, hdto2, hr1⟩ := skip_word_ok t 0#usize e (by simp) h0
+  have hw1 : sg t 0 dto.val = utf8 (e.takeWhile nws) :=
+    sg_takeWhile t 0 dto.val nws e (by omega) hdto2 (by simpa using h) hr1
+  -- the white space after it, then the second word
+  obtain ⟨sec, hsec, hsec1, hsec2, hr2⟩ := skip_space_ok' t dto _ hdto2 hr1
+  set r2 := (e.dropWhile nws).dropWhile isWhitespace with hr2def
+  obtain ⟨sto, hsto, hsto1, hsto2, hr3⟩ := skip_word_ok t sec r2 hsec2 hr2
+  have hw2 : sg t sec.val sto.val = utf8 (r2.takeWhile nws) :=
+    sg_takeWhile t sec.val sto.val nws r2 hsto1 hsto2 hr2 hr3
+  have hw2len := congrArg List.length hw2
+  rw [sg_length t sec.val sto.val hsto1 hsto2] at hw2len
+  have htw := sw_two e he
+  have hnot : ¬ eq.val < (Slice.len t).val := by simpa using hge
+  by_cases hsame : sec = sto
+  · -- one word or none
+    have hr2nil : r2 = [] := by
+      cases hr : r2 with
+      | nil => rfl
+      | cons d r =>
+        exfalso
+        have hd : isWhitespace d = false := by
+          have := dropWhile_head (p := isWhitespace) (l := e.dropWhile nws) (d := d) (r := r)
+            (by rw [← hr2def, hr])
+          exact this
+        rw [hr] at hw2len
+        rw [hsame] at hw2len
+        simp [hd, Headers.utf8] at hw2len
+        have := Text.enc_pos d
+        simp [Text.enc] at this
+        omega
+    have hsto' : clew_rules.text.skip_word t sec = ok sec := by rw [hsame]; rw [hsame] at hsto; exact hsto
+    refine ⟨none, by simp [entry_fields, heq, hge, hdto, hsec, hsto'], ?_⟩
+    show Clew.ServerDist.parseEntry e = none
+    rw [hmodel]
+    unfold twoWords
+    rw [htw]
+    simp [← hr2def, hr2nil, fromWords]
+  · have hsame' : ¬ sec.val = sto.val := fun h' => hsame (UScalar.eq_of_val_eq h')
+    have hr2ne : r2 ≠ [] := by
+      intro hn; rw [hn] at hw2len; simp [Headers.utf8] at hw2len; omega
+    obtain ⟨k, hk, hk1, hk2, hr4⟩ := skip_space_ok' t sto _ hsto2 hr3
+    set r3 := r2.dropWhile nws with hr3def
+    set r4 := r3.dropWhile isWhitespace with hr4def
+    by_cases hkl : k.val = t.val.length
+    · have hr4nil : r4 = [] := by
+        rw [hkl, Text.bs_drop_end _ _ (le_refl _)] at hr4
+        exact ((Headers.utf8_nil _).mp hr4.symm)
+      have hkeq : ¬ (k != Slice.len t) = true := by simp [hkl]
+      have hene : e ≠ [] := by
+        intro hn; apply hr2ne; rw [hr2def, hn]; rfl
+      -- the name: past the stars of the second word
+      obtain ⟨nf, hnf, hnf1, hnf2, hnfstar, hnfk⟩ := skip_stars_ok t sec hsec2
+      have hr2split : r2 = r2.takeWhile nws ++ r3 := (List.takeWhile_append_dropWhile).symm
+      have hr3head : r3.head? ≠ some '*' := by
+        cases hr : r3 with
+        | nil => simp
+        | cons d r =>
+          have hd := dropWhile_head (p := nws) (l := r2) (d := d) (r := r) (by rw [← hr3def, hr])
+          intro hh
+          simp at hh
+          subst hh
+          simp [star_not_ws] at hd
+      have hdropstar : r2.dropWhile (· == '*') = (r2.takeWhile nws).dropWhile (· == '*') ++ r3 := by
+        conv_lhs => rw [hr2split]
+        rw [List.dropWhile_append]
+        split
+        · rename_i hemp
+          simp only [List.isEmpty_iff] at hemp
+          rw [hemp, List.nil_append]
+          cases hr : r3 with
+          | nil => rfl
+          | cons d r =>
+            rw [hr] at hr3head
+            have : (d == '*') = false := by simpa using hr3head
+            rw [List.dropWhile_cons_of_neg (by simp [this])]
+        · rfl
+      have hnfbytes : bs (t.val.drop nf.val) = utf8 (r2.dropWhile (· == '*')) := by
+        symm
+        apply utf8_dropWhile_star r2 (sg t sec.val nf.val) (bs (t.val.drop nf.val))
+        · rw [← hr2, bs_drop_split t sec.val nf.val hnf1]
+        · exact hnfstar
+        · by_cases hlt : nf.val < t.val.length
+          · obtain ⟨k', hk', hk'2⟩ := hnfk hlt
+            rw [← drop_bs]
+            have : ((bs t.val).drop nf.val) = sg t nf.val t.val.length := by
+              simp [sg, bs]
+            rw [this, hk']; simpa using hk'2
+          · rw [Text.bs_drop_end _ _ (by omega)]; simp
+      rw [hdropstar, Shell.utf8_append] at hnfbytes
+      have hnfle : nf.val ≤ sto.val := by
+        have l1 := congrArg List.length hnfbytes
+        have l2 := congrArg List.length hr3
+        simp only [bs, List.length_map, List.length_drop, List.length_append] at l1 l2
+        omega
+      have hname := sg_between t nf.val sto.val _ _ hnfle hsto2 hnfbytes hr3
+      -- the digest: the first word
+      obtain ⟨sd, hsd, bsd, _⟩ := sub_ok t 0#usize dto (by simp) hdto2
+      rw [Slice.index_SliceIndexRangeUsizeSliceInst] at hsd
+      have hhex : is_hex64 sd = ok (Clew.ServerDist.isSha256Hex (e.takeWhile nws)) := by
+        rw [is_hex64_ok, bsd, show (0#usize).val = 0 from rfl, hw1, hex64_utf8]
+      have hnl : (nf.val < sto.val) ↔ ((r2.takeWhile nws).dropWhile (· == '*')).isEmpty = false := by
+        have := congrArg List.length hname
+        rw [sg_length t nf.val sto.val hnfle hsto2] at this
+        constructor
+        · intro hl
+          cases hc : (r2.takeWhile nws).dropWhile (· == '*') with
+          | nil => rw [hc] at this; simp [Headers.utf8] at this; omega
+          | cons _ _ => rfl
+        · intro hl
+          by_contra hn
+          have h0 : utf8 ((r2.takeWhile nws).dropWhile (· == '*')) = [] := by
+            apply List.eq_nil_of_length_eq_zero; rw [← this]; omega
+          rw [(Headers.utf8_nil _).mp h0] at hl; simp at hl
+      have hmodel' : Clew.ServerDist.parseEntry e =
+          if Clew.ServerDist.isSha256Hex (e.takeWhile nws) &&
+              !((r2.takeWhile nws).dropWhile (· == '*')).isEmpty then
+            some ((r2.takeWhile nws).dropWhile (· == '*'), Clew.ServerDist.lowerHex (e.takeWhile nws))
+          else none := by
+        rw [hmodel]; unfold twoWords; rw [htw]
+        simp only [← hr2def, ← hr3def, ← hr4def]
+        simp only [ne_eq, hene, not_false_eq_true, hr2ne, hr4nil, and_self, ↓reduceIte]
+        rfl
+      by_cases hx : Clew.ServerDist.isSha256Hex (e.takeWhile nws) = true
+      · by_cases hn : nf.val < sto.val
+        · refine ⟨some (nf, sto, 0#usize, dto), ?_, ?_⟩
+          · simp [entry_fields, heq, hge, hdto, hsec, hsto, hsame, hk, hkl, hnf, hsd, hhex, hx, hn]
+          · refine ⟨hnfle, hsto2, by simp, hdto2, _, e.takeWhile nws, hname, by simpa using hw1, hx, ?_⟩
+            rw [hmodel']; simp [hx, hnl.mp hn]
+        · refine ⟨none, ?_, ?_⟩
+          · simp [entry_fields, heq, hge, hdto, hsec, hsto, hsame, hk, hnf, hsd, hhex, hx, hn]
+          · show Clew.ServerDist.parseEntry e = none
+            have : ((r2.takeWhile nws).dropWhile (· == '*')).isEmpty = true := by
+              cases h' : ((r2.takeWhile nws).dropWhile (· == '*')).isEmpty
+              · exact absurd (hnl.mpr h') hn
+              · rfl
+            rw [hmodel']; simp [this]
+      · refine ⟨none, ?_, ?_⟩
+        · simp [entry_fields, heq, hge, hdto, hsec, hsto, hsame, hk, hnf, hsd, hhex, hx]
+        · show Clew.ServerDist.parseEntry e = none
+          rw [hmodel']; simp [hx]
+    · have hkne : (k != Slice.len t) = true := by simp; omega
+      have hr4ne : r4 ≠ [] := by
+        intro hn
+        rw [hn] at hr4
+        exact hkl ((bs_drop_nil t k.val hk2).mp (by rw [hr4]; rfl))
+      refine ⟨none, by simp [entry_fields, heq, hge, hdto, hsec, hsto, hsame, hk, hkl], ?_⟩
+      show Clew.ServerDist.parseEntry e = none
+      rw [hmodel]; unfold twoWords; rw [htw]
+      simp only [← hr2def, ← hr3def, ← hr4def]
+      simp [hr4ne, fromWords]
+
+theorem entry_fields_ok (t : Slice Std.U8) (e : List Char) (h : bs t.val = utf8 e)
+    (he : e.dropWhile isWhitespace = e) : ∃ o, entry_fields t = ok o ∧ EntryRel t e o := by
+  obtain ⟨eq, heq, heq1, heqno, heqk⟩ := find_byte_ok t 61#u8
+  by_cases hlt : eq.val < t.val.length
+  · exact entry_fields_eq t e h eq heq heq1 heqno heqk hlt
+  · exact entry_fields_words t e h he eq heq heq1 heqno hlt
+
+/-! ### The list -/
+
+/-- The model's step over one piece of the list: the entry's digest when it
+names `asset`, else what was found before. -/
+def stepE (asset : List Char) (found : Option (List Char)) (piece : List Char) : Option (List Char) :=
+  match Clew.ServerDist.parseEntry (Clew.Text.trim piece) with
+  | some (n, d) => if n == asset then some d else found
+  | none => found
+
+/-- The code's digest so far is the model's. -/
+def RelF (found : Option (alloc.vec.Vec Std.U8)) (mf : Option (List Char)) : Prop :=
+  found.map (fun v => bs v.val) = mf.map utf8
+
+theorem with_entry_ok (found : Option (alloc.vec.Vec Std.U8)) (mf : Option (List Char))
+    (hf : RelF found mf) (entry asset : Slice Std.U8) (piece a : List Char)
+    (hp : bs entry.val = utf8 piece) (ha : bs asset.val = utf8 a) :
+    ∃ r, with_entry found entry asset = ok r ∧ RelF r (stepE a mf piece) := by
+  obtain ⟨st, en, htb, h1, h2, h3⟩ := Text.trim_bounds_is_the_model entry piece hp
+  obtain ⟨t, ht, bt, _⟩ := sub_ok entry st en h1 h2
+  rw [Slice.index_SliceIndexRangeUsizeSliceInst] at ht
+  have bt' : bs t.val = utf8 (Clew.Text.trim piece) := by rw [bt]; exact h3
+  obtain ⟨o, ho, hrel⟩ := entry_fields_ok t _ bt' (trim_dropWhile piece)
+  cases o with
+  | none =>
+    refine ⟨found, by simp [with_entry, htb, ht, ho], ?_⟩
+    have : Clew.ServerDist.parseEntry (Clew.Text.trim piece) = none := hrel
+    simpa [stepE, this] using hf
+  | some q =>
+    obtain ⟨nf, nt, df, dt⟩ := q
+    obtain ⟨hn1, hn2, hd1, hd2, n, d, hn, hd, hx, hpe⟩ := hrel
+    obtain ⟨sn, hsn, bsn, _⟩ := sub_ok t nf nt hn1 hn2
+    rw [Slice.index_SliceIndexRangeUsizeSliceInst] at hsn
+    have hsame : same sn asset = ok (decide (n = a)) := by
+      rw [same_ok, bsn, hn, ha]
+      congr 1
+      exact decide_eq_decide.mpr ⟨fun h => Text.utf8_inj _ _ h, fun h => h ▸ rfl⟩
+    by_cases hna : n = a
+    · obtain ⟨sd, hsd, bsd, _⟩ := sub_ok t df dt hd1 hd2
+      rw [Slice.index_SliceIndexRangeUsizeSliceInst] at hsd
+      obtain ⟨v, hv, ev⟩ := lower_ok sd
+      refine ⟨some v, by simp [with_entry, htb, ht, ho, hsn, hsame, hna, hsd, hv], ?_⟩
+      have hall : d.all Clew.Text.isAsciiHexdigit = true := by
+        unfold Clew.ServerDist.isSha256Hex at hx; simp at hx; simpa using hx.2
+      simp [RelF, stepE, hpe, hna, ev, bsd, hd, utf8_lowerHex d hall]
+    · refine ⟨found, by simp [with_entry, htb, ht, ho, hsn, hsame, hna], ?_⟩
+      simpa [RelF, stepE, hpe, hna] using hf
+
+theorem foldl_stepE (a : List Char) : ∀ (ps : List (List Char)) (found : Option (List Char)),
+    ps.foldl (stepE a) found =
+      match ((ps.map Clew.Text.trim).filterMap Clew.ServerDist.parseEntry).reverse.find? (·.1 == a) with
+      | some x => some x.2
+      | none => found := by
+  intro ps
+  induction ps with
+  | nil => intro found; rfl
+  | cons p ps ih =>
+    intro found
+    rw [List.foldl_cons, ih]
+    simp only [List.map_cons, List.filterMap_cons]
+    cases hp : Clew.ServerDist.parseEntry (Clew.Text.trim p) with
+    | none => simp [stepE, hp]
+    | some e =>
+      simp only [List.reverse_cons, List.find?_append]
+      cases hf : ((ps.map Clew.Text.trim).filterMap Clew.ServerDist.parseEntry).reverse.find? (·.1 == a) with
+      | some x => simp
+      | none =>
+        obtain ⟨n, d⟩ := e
+        by_cases hn : n = a <;> simp [stepE, hp, hn]
+
+theorem lookup_fold (cs a : List Char) :
+    Clew.ServerDist.lookup (Clew.ServerDist.parseDigestList cs) a =
+      (Clew.Text.split Clew.ServerDist.entrySep cs).foldl (stepE a) none := by
+  rw [foldl_stepE]
+  unfold Clew.ServerDist.lookup Clew.ServerDist.parseDigestList
+  cases ((((Clew.Text.split Clew.ServerDist.entrySep cs).map Clew.Text.trim).filterMap
+    Clew.ServerDist.parseEntry).reverse.find? (·.1 == a)) <;> rfl
+
+/-- A separator between entries, on bytes. -/
+def sepB (x : Nat) : Bool := x == 10 || x == 59 || x == 44
+
+theorem agree_sep : Version.Agree Clew.ServerDist.entrySep sepB := by
+  constructor
+  · intro c hc
+    simp only [Clew.ServerDist.entrySep, Bool.or_eq_true, beq_iff_eq] at hc
+    rcases hc with (rfl | rfl) | rfl <;> exact ⟨rfl, rfl⟩
+  · intro c hc x hx
+    simp only [Clew.ServerDist.entrySep, Bool.or_eq_false_iff, beq_eq_false_iff_ne] at hc
+    have h1 := KnownHosts.bytes_ne c 10 (by omega) (KnownHosts.toNat_ne c '\n' hc.1.1) x hx
+    have h2 := KnownHosts.bytes_ne c 59 (by omega) (KnownHosts.toNat_ne c ';' hc.1.2) x hx
+    have h3 := KnownHosts.bytes_ne c 44 (by omega) (KnownHosts.toNat_ne c ',' hc.2) x hx
+    simp [sepB, h1, h2, h3]
+
+theorem is_entry_sep_ok (b : Std.U8) : is_entry_sep b = ok (sepB b.val) := by
+  unfold is_entry_sep sepB
+  simp only [UScalar.eq_equiv, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq,
+    Framing.ite_ok, Result.ok.injEq]
+  have hb := Framing.u8_lt b
+  generalize b.val = v at hb ⊢
+  revert v; decide +kernel
+
+/-- **`pinned_digest` is the model**: on the UTF-8 bytes of any list and any
+asset name, it returns, and gives the UTF-8 bytes of the digest
+`Clew.ServerDist.lookup (parseDigestList list) asset` gives — the digest
+`pinned_only` proves is the only one a release build accepts. -/
+theorem pinned_digest_is_the_model (cs a : List Char) (list asset : Slice Std.U8)
+    (h : bs list.val = utf8 cs) (ha : bs asset.val = utf8 a) :
+    ∃ r, pinned_digest list asset = ok r ∧
+      r.map (fun v => bs v.val) = (Clew.ServerDist.lookup (Clew.ServerDist.parseDigestList cs) a).map utf8 := by
+  set Mtot := (Clew.Text.split Clew.ServerDist.entrySep cs).foldl (stepE a) none with hMtot
+  have hlen := Slice.length_ineq list
+  obtain ⟨r, hr, hq⟩ := loop_spec
+    (fun p : Option (alloc.vec.Vec Std.U8) × Std.Usize × Std.Usize => pinned_digest_loop.body list asset p.1 p.2.1 p.2.2)
+    (fun p => p.2.1.val ≤ p.2.2.val ∧ p.2.2.val ≤ list.val.length ∧
+      (∀ x ∈ sg list p.2.1.val p.2.2.val, sepB x = false) ∧
+      ∃ rest mf, bs (list.val.drop p.2.1.val) = utf8 rest ∧ RelF p.1 mf ∧
+        Mtot = (Clew.Text.split Clew.ServerDist.entrySep rest).foldl (stepE a) mf)
+    (fun _ r => r.2.val ≤ list.val.length ∧ ∃ rest mf, bs (list.val.drop r.2.val) = utf8 rest ∧
+      RelF r.1 mf ∧ (∀ x ∈ utf8 rest, sepB x = false) ∧
+      Mtot = (Clew.Text.split Clew.ServerDist.entrySep rest).foldl (stepE a) mf)
+    (fun p => list.val.length - p.2.2.val)
+    (by
+      rintro ⟨found, st, i⟩ ⟨h1, h2, hno, rest, mf, hrest, hrel, hm⟩
+      dsimp only at h1 h2 hno hrest hrel hm ⊢
+      by_cases hlt : i.val < list.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok list i hlt
+        have hc := sg_cons list i.val list.val.length hlt (le_refl _)
+        by_cases hsep : sepB (list.val[i.val]).val = true
+        · have hdrop : bs (list.val.drop st.val) =
+              sg list st.val i.val ++ (list.val[i.val]).val :: bs (list.val.drop (i.val + 1)) := by
+            rw [bs_drop_split list st.val i.val h1, KnownHosts.bs_drop _ _ hlt]
+          obtain ⟨A, zs, hA, hzs, hsp⟩ := Version.split_first _ _ agree_sep rest _ _ _
+            (by rw [← hrest, hdrop]) hno hsep
+          obtain ⟨en, hen, ben, _⟩ := sub_ok list st i h1 h2
+          rw [Slice.index_SliceIndexRangeUsizeSliceInst] at hen
+          obtain ⟨f2, hf2, hrel2⟩ := with_entry_ok found mf hrel en asset A a (by rw [ben, hA]) ha
+          right
+          refine ⟨(f2, j, j), by simp [pinned_digest_loop.body, UScalar.lt_equiv, hlt, index_ok list i hlt,
+            is_entry_sep_ok, hsep, hen, hf2, hj], ⟨le_refl _, by dsimp only; omega, by simp,
+            zs, stepE a mf A, by rw [hjv]; exact hzs.symm, hrel2, ?_⟩, by dsimp only; omega, fun r hr => hr⟩
+          rw [hm, hsp, List.foldl_cons]
+        · right
+          refine ⟨(found, st, j), by simp [pinned_digest_loop.body, UScalar.lt_equiv, hlt, index_ok list i hlt,
+            is_entry_sep_ok, hsep, hj], ⟨by dsimp only; omega, by dsimp only; omega, ?_,
+            rest, mf, hrest, hrel, hm⟩, by dsimp only; omega, fun r hr => hr⟩
+          dsimp only
+          rw [hjv, sg_snoc list st.val i.val h1 hlt]
+          intro x hx
+          rcases List.mem_append.mp hx with hx | hx
+          · exact hno x hx
+          · simp at hx; subst hx; simpa using hsep
+      · left
+        have hil : i.val = list.val.length := by omega
+        refine ⟨(found, st), by simp [pinned_digest_loop.body, UScalar.lt_equiv, hlt], ?_⟩
+        refine ⟨by dsimp only; omega, rest, mf, hrest, hrel, ?_, hm⟩
+        rw [← hrest]
+        have : bs (list.val.drop st.val) = sg list st.val i.val := by
+          rw [hil]; simp [sg, bs]
+        rw [this]; exact hno)
+    (none, 0#usize, 0#usize) ⟨le_refl _, by simp, by simp, cs, none, by simpa using h, rfl, rfl⟩
+  obtain ⟨rf, rs⟩ := r
+  obtain ⟨hr1, rest, mf, hrest, hrel, hnosep, hm⟩ := hq
+  dsimp only at hr1 hrest hrel
+  obtain ⟨en, hen, ben, _⟩ := sub_ok list rs (Slice.len list) (by simp; omega) (by simp)
+  rw [Slice.index_SliceIndexRangeUsizeSliceInst] at hen
+  have ben' : bs en.val = utf8 rest := by
+    rw [ben, ← hrest]; simp [sg, bs]
+  obtain ⟨f, hf, hrelf⟩ := with_entry_ok rf mf hrel en asset rest a ben' ha
+  refine ⟨f, ?_, ?_⟩
+  · simp only [pinned_digest, pinned_digest_loop, hr, bind_ok]
+    simp [hen, hf]
+  · rw [lookup_fold, ← hMtot, hm, Version.split_none _ _ agree_sep rest hnosep]
+    exact hrelf
+
+/-! ### The sidecar -/
+
+theorem dropWhile_idem (p : Char → Bool) (l : List Char) :
+    (l.dropWhile p).dropWhile p = l.dropWhile p := by
+  cases h : l.dropWhile p with
+  | nil => rfl
+  | cons d r =>
+    have := dropWhile_head h
+    rw [List.dropWhile_cons_of_neg (by simp [this])]
+
+theorem sw_dropWhile (l : List Char) :
+    Clew.Text.splitWhitespace (l.dropWhile isWhitespace) = Clew.Text.splitWhitespace l := by
+  rw [sw_eq (l.dropWhile isWhitespace), sw_eq l, dropWhile_idem]
+
+/-- **`sidecar_digest` is the model**: on the UTF-8 bytes of any `.sha256`
+file, it returns, and gives the UTF-8 bytes of what
+`Clew.ServerDist.parseSha256` reads: the first word that is 64 hex digits,
+lower-cased. -/
+theorem sidecar_digest_is_the_model (cs : List Char) (file : Slice Std.U8) (h : bs file.val = utf8 cs) :
+    ∃ r, sidecar_digest file = ok r ∧
+      r.map (fun v => bs v.val) = (Clew.ServerDist.parseSha256 cs).map utf8 := by
+  have hlen := Slice.length_ineq file
+  obtain ⟨i0, hi0, _, hi02, hr0⟩ := skip_space_ok' file 0#usize cs (by simp) (by simpa using h)
+  obtain ⟨r, hr, hq⟩ := loop_spec (fun i => sidecar_digest_loop.body file i)
+    (fun i => i.val ≤ file.val.length ∧ ∃ rest, bs (file.val.drop i.val) = utf8 rest ∧
+      rest.dropWhile isWhitespace = rest)
+    (fun i r => ∀ rest, bs (file.val.drop i.val) = utf8 rest → rest.dropWhile isWhitespace = rest →
+      r.map (fun v => bs v.val) =
+        (((Clew.Text.splitWhitespace rest).map Clew.ServerDist.lowerHex).find?
+          Clew.ServerDist.isSha256Hex).map utf8)
+    (fun i => file.val.length - i.val)
+    (by
+      rintro i ⟨hi, rest, hrest, hrw⟩
+      by_cases hlt : i.val < file.val.length
+      · obtain ⟨en, hen, hen1, hen2, hr1⟩ := skip_word_ok file i rest hi hrest
+        have hw := sg_takeWhile file i.val en.val nws rest hen1 hen2 hrest hr1
+        obtain ⟨sw, hsw, bsw, _⟩ := sub_ok file i en hen1 hen2
+        rw [Slice.index_SliceIndexRangeUsizeSliceInst] at hsw
+        have hhex : is_hex64 sw = ok (Clew.ServerDist.isSha256Hex (rest.takeWhile nws)) := by
+          rw [is_hex64_ok, bsw, hw, hex64_utf8]
+        have hne : rest ≠ [] := by
+          intro hn; rw [hn] at hrest
+          exact absurd ((bs_drop_nil file i.val hi).mp hrest) (by omega)
+        have hsplit : Clew.Text.splitWhitespace rest =
+            rest.takeWhile nws :: Clew.Text.splitWhitespace (rest.dropWhile nws) := by
+          rw [sw_eq, hrw]
+          cases rest with
+          | nil => exact absurd rfl hne
+          | cons _ _ => rfl
+        have same_rest : ∀ rest', bs (file.val.drop i.val) = utf8 rest' → rest' = rest :=
+          fun rest' h' => Text.utf8_inj _ _ (by rw [← h', hrest])
+        by_cases hx : Clew.ServerDist.isSha256Hex (rest.takeWhile nws) = true
+        · obtain ⟨v, hv, ev⟩ := lower_ok sw
+          left
+          refine ⟨some v, by simp [sidecar_digest_loop.body, UScalar.lt_equiv, hlt, hen, hsw, hhex, hx, hv], ?_⟩
+          intro rest' h' _
+          rw [same_rest rest' h', hsplit]
+          have hall : (rest.takeWhile nws).all Clew.Text.isAsciiHexdigit = true := by
+            unfold Clew.ServerDist.isSha256Hex at hx; simp at hx; simpa using hx.2
+          simp [isSha256Hex_lower, hx, ev, bsw, hw, utf8_lowerHex _ hall]
+        · obtain ⟨i', hi', hi'1, hi'2, hr2⟩ := skip_space_ok' file en _ hen2 hr1
+          have hwne : rest.takeWhile nws ≠ [] := by
+            cases hrr : rest with
+            | nil => exact absurd hrr hne
+            | cons d r =>
+              have hd : isWhitespace d = false := by
+                rw [hrr] at hrw
+                exact dropWhile_head hrw
+              simp [hd]
+          have hgt : i.val < en.val := by
+            have := congrArg List.length hw
+            rw [sg_length file i.val en.val hen1 hen2] at this
+            cases hc : rest.takeWhile nws with
+            | nil => exact absurd hc hwne
+            | cons _ _ =>
+              rw [hc] at this; simp [Headers.utf8] at this
+              have := Text.enc_pos ‹Char›
+              simp [Text.enc] at this; omega
+          right
+          refine ⟨i', by simp [sidecar_digest_loop.body, UScalar.lt_equiv, hlt, hen, hsw, hhex, hx, hi'],
+            ⟨hi'2, _, hr2, dropWhile_idem _ _⟩, by omega, ?_⟩
+          intro r hq' rest' h' _
+          rw [same_rest rest' h', hsplit, hq' _ hr2 (dropWhile_idem _ _), sw_dropWhile]
+          have : Clew.ServerDist.isSha256Hex (Clew.ServerDist.lowerHex (rest.takeWhile nws)) = false := by
+            rw [isSha256Hex_lower]; simpa using hx
+          simp [this]
+      · left
+        refine ⟨none, by simp [sidecar_digest_loop.body, UScalar.lt_equiv, hlt], ?_⟩
+        intro rest' h' _
+        rw [Text.bs_drop_end _ _ (by omega)] at h'
+        rw [(Headers.utf8_nil rest').mp h'.symm]
+        rfl)
+    i0 ⟨hi02, _, hr0, dropWhile_idem _ _⟩
+  refine ⟨r, by simp only [sidecar_digest, hi0, bind_ok]; unfold sidecar_digest_loop; exact hr, ?_⟩
+  rw [hq _ hr0 (dropWhile_idem _ _), sw_dropWhile]
+  rfl
+
+end Digests
+
 end Clew.Extracted

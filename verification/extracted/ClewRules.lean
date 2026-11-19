@@ -400,7 +400,7 @@ def text.next_char (s : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
   else i + len
 
 /-- [clew_rules::text::end_of_text]: loop body 0:
-    Source: 'crates/clew-rules/src/text.rs', lines 103:4-109:5 -/
+    Source: 'crates/clew-rules/src/text.rs', lines 116:4-122:5 -/
 @[rust_loop_body]
 def text.end_of_text_loop.body
   (s : Slice Std.U8) (i : Std.Usize) («end» : Std.Usize) :
@@ -417,7 +417,7 @@ def text.end_of_text_loop.body
   else ok (done «end»)
 
 /-- [clew_rules::text::end_of_text]: loop 0:
-    Source: 'crates/clew-rules/src/text.rs', lines 103:4-109:5 -/
+    Source: 'crates/clew-rules/src/text.rs', lines 116:4-122:5 -/
 @[rust_loop]
 def text.end_of_text_loop
   (s : Slice Std.U8) (i : Std.Usize) («end» : Std.Usize) :
@@ -428,7 +428,7 @@ def text.end_of_text_loop
     (i, «end»)
 
 /-- [clew_rules::text::end_of_text]:
-    Source: 'crates/clew-rules/src/text.rs', lines 100:0-111:1 -/
+    Source: 'crates/clew-rules/src/text.rs', lines 113:0-124:1 -/
 @[reducible]
 def text.end_of_text
   (s : Slice Std.U8) («from» : Std.Usize) : Result Std.Usize := do
@@ -468,7 +468,7 @@ def text.skip_space
   text.skip_space_loop s «from»
 
 /-- [clew_rules::text::trim_bounds]:
-    Source: 'crates/clew-rules/src/text.rs', lines 115:0-118:1
+    Source: 'crates/clew-rules/src/text.rs', lines 128:0-131:1
     Visibility: public -/
 def text.trim_bounds (s : Slice Std.U8) : Result (Std.Usize × Std.Usize) := do
   let start ← text.skip_space s 0#usize
@@ -1950,7 +1950,7 @@ def location.trusted_by
   else ok false
 
 /-- [clew_rules::server_dist::is_slug_byte]:
-    Source: 'crates/clew-rules/src/server_dist.rs', lines 17:0-23:1 -/
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 23:0-29:1 -/
 def server_dist.is_slug_byte (b : Std.U8) : Result Bool := do
   if b >= 48#u8
   then
@@ -2012,7 +2012,7 @@ def server_dist.is_slug_byte (b : Std.U8) : Result Bool := do
            else ok (b = 95#u8)
 
 /-- [clew_rules::server_dist::slug_ok]: loop body 0:
-    Source: 'crates/clew-rules/src/server_dist.rs', lines 31:4-38:1
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 37:4-44:1
     Visibility: public -/
 @[rust_loop_body]
 def server_dist.slug_ok_loop.body
@@ -2031,7 +2031,7 @@ def server_dist.slug_ok_loop.body
   else ok (done true)
 
 /-- [clew_rules::server_dist::slug_ok]: loop 0:
-    Source: 'crates/clew-rules/src/server_dist.rs', lines 31:4-38:1
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 37:4-44:1
     Visibility: public -/
 @[rust_loop]
 def server_dist.slug_ok_loop
@@ -2041,13 +2041,457 @@ def server_dist.slug_ok_loop
     i
 
 /-- [clew_rules::server_dist::slug_ok]:
-    Source: 'crates/clew-rules/src/server_dist.rs', lines 26:0-38:1
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 32:0-44:1
     Visibility: public -/
 def server_dist.slug_ok (s : Slice Std.U8) : Result Bool := do
   let b ← core.slice.Slice.is_empty s
   if b
   then ok false
   else server_dist.slug_ok_loop s 0#usize
+
+/-- [clew_rules::server_dist::is_hex]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 47:0-55:1 -/
+def server_dist.is_hex (b : Std.U8) : Result Bool := do
+  if b >= 48#u8
+  then
+    if b <= 57#u8
+    then ok true
+    else
+      if b >= 97#u8
+      then
+        if b <= 102#u8
+        then ok true
+        else if b >= 65#u8
+             then ok (b <= 70#u8)
+             else ok false
+      else if b >= 65#u8
+           then ok (b <= 70#u8)
+           else ok false
+  else
+    if b >= 97#u8
+    then
+      if b <= 102#u8
+      then ok true
+      else if b >= 65#u8
+           then ok (b <= 70#u8)
+           else ok false
+    else if b >= 65#u8
+         then ok (b <= 70#u8)
+         else ok false
+
+/-- [clew_rules::server_dist::is_hex64]: loop body 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 63:4-70:1 -/
+@[rust_loop_body]
+def server_dist.is_hex64_loop.body
+  (t : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len t
+  if i < i1
+  then
+    let i2 ← Slice.index_usize t i
+    let b ← server_dist.is_hex i2
+    if b
+    then let i3 ← i + 1#usize
+         ok (cont i3)
+    else ok (done false)
+  else ok (done true)
+
+/-- [clew_rules::server_dist::is_hex64]: loop 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 63:4-70:1 -/
+@[rust_loop]
+def server_dist.is_hex64_loop
+  (t : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => server_dist.is_hex64_loop.body t i1)
+    i
+
+/-- [clew_rules::server_dist::is_hex64]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 58:0-70:1 -/
+def server_dist.is_hex64 (t : Slice Std.U8) : Result Bool := do
+  let i := Slice.len t
+  if i != 64#usize
+  then ok false
+  else server_dist.is_hex64_loop t 0#usize
+
+/-- [clew_rules::server_dist::lower_byte]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 73:0-75:1 -/
+def server_dist.lower_byte (b : Std.U8) : Result Std.U8 := do
+  if b >= 65#u8
+  then if b <= 90#u8
+       then b + 32#u8
+       else ok b
+  else ok b
+
+/-- [clew_rules::server_dist::lower]: loop body 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 81:4-84:5 -/
+@[rust_loop_body]
+def server_dist.lower_loop.body
+  (t : Slice Std.U8) (out : alloc.vec.Vec Std.U8) (i : Std.Usize) :
+  Result (ControlFlow ((alloc.vec.Vec Std.U8) × Std.Usize) (alloc.vec.Vec
+    Std.U8))
+  := do
+  let i1 := Slice.len t
+  if i < i1
+  then
+    let i2 ← Slice.index_usize t i
+    let i3 ← server_dist.lower_byte i2
+    let out1 ← alloc.vec.Vec.push out i3
+    let i4 ← i + 1#usize
+    ok (cont (out1, i4))
+  else ok (done out)
+
+/-- [clew_rules::server_dist::lower]: loop 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 81:4-84:5 -/
+@[rust_loop]
+def server_dist.lower_loop
+  (t : Slice Std.U8) (out : alloc.vec.Vec Std.U8) (i : Std.Usize) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  loop
+    (fun (out1, i1) => server_dist.lower_loop.body t out1 i1)
+    (out, i)
+
+/-- [clew_rules::server_dist::lower]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 78:0-86:1 -/
+@[reducible]
+def server_dist.lower (t : Slice Std.U8) : Result (alloc.vec.Vec Std.U8) := do
+  server_dist.lower_loop t (alloc.vec.Vec.new Std.U8) 0#usize
+
+/-- [clew_rules::server_dist::same]: loop body 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 94:4-101:1 -/
+@[rust_loop_body]
+def server_dist.same_loop.body
+  (a : Slice Std.U8) (b : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len a
+  if i < i1
+  then
+    let i2 ← Slice.index_usize a i
+    let i3 ← Slice.index_usize b i
+    if i2 != i3
+    then ok (done false)
+    else let i4 ← i + 1#usize
+         ok (cont i4)
+  else ok (done true)
+
+/-- [clew_rules::server_dist::same]: loop 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 94:4-101:1 -/
+@[rust_loop]
+def server_dist.same_loop
+  (a : Slice Std.U8) (b : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => server_dist.same_loop.body a b i1)
+    i
+
+/-- [clew_rules::server_dist::same]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 89:0-101:1 -/
+def server_dist.same (a : Slice Std.U8) (b : Slice Std.U8) : Result Bool := do
+  let i := Slice.len a
+  let i1 := Slice.len b
+  if i != i1
+  then ok false
+  else server_dist.same_loop a b 0#usize
+
+/-- [clew_rules::server_dist::find_byte]: loop body 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 106:4-113:1 -/
+@[rust_loop_body]
+def server_dist.find_byte_loop.body
+  (t : Slice Std.U8) (c : Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Std.Usize)
+  := do
+  let i1 := Slice.len t
+  if i < i1
+  then
+    let i2 ← Slice.index_usize t i
+    if i2 = c
+    then ok (done i)
+    else let i3 ← i + 1#usize
+         ok (cont i3)
+  else let i2 := Slice.len t
+       ok (done i2)
+
+/-- [clew_rules::server_dist::find_byte]: loop 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 106:4-113:1 -/
+@[rust_loop]
+def server_dist.find_byte_loop
+  (t : Slice Std.U8) (c : Std.U8) (i : Std.Usize) : Result Std.Usize := do
+  loop
+    (fun i1 => server_dist.find_byte_loop.body t c i1)
+    i
+
+/-- [clew_rules::server_dist::find_byte]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 104:0-113:1 -/
+@[reducible]
+def server_dist.find_byte
+  (t : Slice Std.U8) (c : Std.U8) : Result Std.Usize := do
+  server_dist.find_byte_loop t c 0#usize
+
+/-- [clew_rules::server_dist::skip_stars]: loop body 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 118:4-120:5 -/
+@[rust_loop_body]
+def server_dist.skip_stars_loop.body
+  (t : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Std.Usize)
+  := do
+  let i1 := Slice.len t
+  if i < i1
+  then
+    let i2 ← Slice.index_usize t i
+    if i2 = 42#u8
+    then let i3 ← i + 1#usize
+         ok (cont i3)
+    else ok (done i)
+  else ok (done i)
+
+/-- [clew_rules::server_dist::skip_stars]: loop 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 118:4-120:5 -/
+@[rust_loop]
+def server_dist.skip_stars_loop
+  (t : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
+  loop
+    (fun i1 => server_dist.skip_stars_loop.body t i1)
+    i
+
+/-- [clew_rules::server_dist::skip_stars]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 116:0-122:1 -/
+@[reducible]
+def server_dist.skip_stars
+  (t : Slice Std.U8) («from» : Std.Usize) : Result Std.Usize := do
+  server_dist.skip_stars_loop t «from»
+
+/-- [clew_rules::text::skip_word]: loop body 0:
+    Source: 'crates/clew-rules/src/text.rs', lines 101:4-108:1 -/
+@[rust_loop_body]
+def text.skip_word_loop.body
+  (s : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Std.Usize)
+  := do
+  let i1 := Slice.len s
+  if i < i1
+  then
+    let b ← text.is_space_at s i
+    if b
+    then ok (done i)
+    else let i2 ← text.next_char s i
+         ok (cont i2)
+  else ok (done i)
+
+/-- [clew_rules::text::skip_word]: loop 0:
+    Source: 'crates/clew-rules/src/text.rs', lines 101:4-108:1 -/
+@[rust_loop]
+def text.skip_word_loop
+  (s : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
+  loop
+    (fun i1 => text.skip_word_loop.body s i1)
+    i
+
+/-- [clew_rules::text::skip_word]:
+    Source: 'crates/clew-rules/src/text.rs', lines 99:0-108:1 -/
+@[reducible]
+def text.skip_word
+  (s : Slice Std.U8) («from» : Std.Usize) : Result Std.Usize := do
+  text.skip_word_loop s «from»
+
+/-- [clew_rules::server_dist::entry_fields]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 128:0-150:1 -/
+def server_dist.entry_fields
+  (t : Slice Std.U8) :
+  Result (Option (Std.Usize × Std.Usize × Std.Usize × Std.Usize))
+  := do
+  let eq ← server_dist.find_byte t 61#u8
+  let i := Slice.len t
+  if eq < i
+  then
+    let s ←
+      core.slice.index.Slice.index (core.slice.index.SliceIndexRangeUsizeSlice
+        Std.U8) t { start := 0#usize, «end» := eq }
+    let (name_from, name_to) ← text.trim_bounds s
+    let i1 ← eq + 1#usize
+    let i2 := Slice.len t
+    let s1 ←
+      core.slice.index.Slice.index (core.slice.index.SliceIndexRangeUsizeSlice
+        Std.U8) t { start := i1, «end» := i2 }
+    let («from», «to») ← text.trim_bounds s1
+    let digest_from ← i1 + «from»
+    let digest_to ← i1 + «to»
+    let s2 ←
+      core.slice.index.Slice.index (core.slice.index.SliceIndexRangeUsizeSlice
+        Std.U8) t { start := digest_from, «end» := digest_to }
+    let b ← server_dist.is_hex64 s2
+    if b
+    then
+      if name_from < name_to
+      then ok (some (name_from, name_to, digest_from, digest_to))
+      else ok none
+    else ok none
+  else
+    let digest_to ← text.skip_word t 0#usize
+    let second ← text.skip_space t digest_to
+    let second_to ← text.skip_word t second
+    if second = second_to
+    then ok none
+    else
+      let i1 ← text.skip_space t second_to
+      let i2 := Slice.len t
+      if i1 != i2
+      then ok none
+      else
+        let name_from ← server_dist.skip_stars t second
+        let s ←
+          core.slice.index.Slice.index
+            (core.slice.index.SliceIndexRangeUsizeSlice Std.U8) t
+            { start := 0#usize, «end» := digest_to }
+        let b ← server_dist.is_hex64 s
+        if b
+        then
+          if name_from < second_to
+          then ok (some (name_from, second_to, 0#usize, digest_to))
+          else ok none
+        else ok none
+
+/-- [clew_rules::server_dist::with_entry]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 153:0-166:1 -/
+def server_dist.with_entry
+  (found : Option (alloc.vec.Vec Std.U8)) (entry : Slice Std.U8)
+  (asset : Slice Std.U8) :
+  Result (Option (alloc.vec.Vec Std.U8))
+  := do
+  let (start, «end») ← text.trim_bounds entry
+  let t ←
+    core.slice.index.Slice.index (core.slice.index.SliceIndexRangeUsizeSlice
+      Std.U8) entry { start, «end» }
+  let o ← server_dist.entry_fields t
+  match o with
+  | none => ok found
+  | some t1 =>
+    let (name_from, name_to, digest_from, digest_to) := t1
+    let s ←
+      core.slice.index.Slice.index (core.slice.index.SliceIndexRangeUsizeSlice
+        Std.U8) t { start := name_from, «end» := name_to }
+    let b ← server_dist.same s asset
+    if b
+    then
+      let s1 ←
+        core.slice.index.Slice.index
+          (core.slice.index.SliceIndexRangeUsizeSlice Std.U8) t
+          { start := digest_from, «end» := digest_to }
+      let v ← server_dist.lower s1
+      ok (some v)
+    else ok found
+
+/-- [clew_rules::server_dist::is_entry_sep]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 169:0-174:1 -/
+def server_dist.is_entry_sep (b : Std.U8) : Result Bool := do
+  if b = 10#u8
+  then ok true
+  else if b = 59#u8
+       then ok true
+       else ok (b = 44#u8)
+
+/-- [clew_rules::server_dist::pinned_digest]: loop body 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 183:4-189:5
+    Visibility: public -/
+@[rust_loop_body]
+def server_dist.pinned_digest_loop.body
+  (list : Slice Std.U8) (asset : Slice Std.U8)
+  (found : Option (alloc.vec.Vec Std.U8)) (start : Std.Usize) (i : Std.Usize) :
+  Result (ControlFlow ((Option (alloc.vec.Vec Std.U8)) × Std.Usize ×
+    Std.Usize) ((Option (alloc.vec.Vec Std.U8)) × Std.Usize))
+  := do
+  let i1 := Slice.len list
+  if i < i1
+  then
+    let i2 ← Slice.index_usize list i
+    let b ← server_dist.is_entry_sep i2
+    let (found1, start1) ←
+      if b
+      then
+        do
+        let s ←
+          core.slice.index.Slice.index
+            (core.slice.index.SliceIndexRangeUsizeSlice Std.U8) list
+            { start, «end» := i }
+        let found2 ← server_dist.with_entry found s asset
+        let start2 ← i + 1#usize
+        ok (found2, start2)
+      else ok (found, start)
+    let i3 ← i + 1#usize
+    ok (cont (found1, start1, i3))
+  else ok (done (found, start))
+
+/-- [clew_rules::server_dist::pinned_digest]: loop 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 183:4-189:5
+    Visibility: public -/
+@[rust_loop]
+def server_dist.pinned_digest_loop
+  (list : Slice Std.U8) (asset : Slice Std.U8)
+  (found : Option (alloc.vec.Vec Std.U8)) (start : Std.Usize) (i : Std.Usize) :
+  Result ((Option (alloc.vec.Vec Std.U8)) × Std.Usize)
+  := do
+  loop
+    (fun (found1, start1, i1) => server_dist.pinned_digest_loop.body list asset
+      found1 start1 i1)
+    (found, start, i)
+
+/-- [clew_rules::server_dist::pinned_digest]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 179:0-191:1
+    Visibility: public -/
+def server_dist.pinned_digest
+  (list : Slice Std.U8) (asset : Slice Std.U8) :
+  Result (Option (alloc.vec.Vec Std.U8))
+  := do
+  let (found, start) ←
+    server_dist.pinned_digest_loop list asset none 0#usize 0#usize
+  let i := Slice.len list
+  let s ←
+    core.slice.index.Slice.index (core.slice.index.SliceIndexRangeUsizeSlice
+      Std.U8) list { start, «end» := i }
+  server_dist.with_entry found s asset
+
+/-- [clew_rules::server_dist::sidecar_digest]: loop body 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 197:4-205:1
+    Visibility: public -/
+@[rust_loop_body]
+def server_dist.sidecar_digest_loop.body
+  (file : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize (Option (alloc.vec.Vec Std.U8)))
+  := do
+  let i1 := Slice.len file
+  if i < i1
+  then
+    let «end» ← text.skip_word file i
+    let s ←
+      core.slice.index.Slice.index (core.slice.index.SliceIndexRangeUsizeSlice
+        Std.U8) file { start := i, «end» }
+    let b ← server_dist.is_hex64 s
+    if b
+    then let v ← server_dist.lower s
+         ok (done (some v))
+    else let i2 ← text.skip_space file «end»
+         ok (cont i2)
+  else ok (done none)
+
+/-- [clew_rules::server_dist::sidecar_digest]: loop 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 197:4-205:1
+    Visibility: public -/
+@[rust_loop]
+def server_dist.sidecar_digest_loop
+  (file : Slice Std.U8) (i : Std.Usize) :
+  Result (Option (alloc.vec.Vec Std.U8))
+  := do
+  loop
+    (fun i1 => server_dist.sidecar_digest_loop.body file i1)
+    i
+
+/-- [clew_rules::server_dist::sidecar_digest]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 195:0-205:1
+    Visibility: public -/
+def server_dist.sidecar_digest
+  (file : Slice Std.U8) : Result (Option (alloc.vec.Vec Std.U8)) := do
+  let i ← text.skip_space file 0#usize
+  server_dist.sidecar_digest_loop file i
 
 /-- [clew_rules::shell::is_bare_byte]:
     Source: 'crates/clew-rules/src/shell.rs', lines 15:0-27:1 -/

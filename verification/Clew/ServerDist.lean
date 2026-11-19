@@ -30,6 +30,11 @@ This file models `slug`, `asset_name`, `parse_digest_list`,
   list does not name is never deployed;
 * every pinned digest is 64 lower-case hex digits under a non-empty name,
   and the shape the release writes its list in parses to exactly its entries.
+
+The list and the sidecar are read by `clew_rules::server_dist::pinned_digest`
+and `sidecar_digest`, proved in `verification/extracted/Equal.lean` to read
+what `lookup (parseDigestList list) asset` and `parseSha256` here read, on
+the UTF-8 bytes of any text.
 -/
 
 namespace Clew.ServerDist
