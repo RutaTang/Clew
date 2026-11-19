@@ -4,6 +4,7 @@ import Clew.Guards
 import Clew.Framing
 import Clew.Ssh
 import Clew.ServerDist
+import Clew.Trust
 
 /-!
 # The code that runs is the model
@@ -2342,5 +2343,266 @@ theorem slug_ok_is_the_model (s : List Char) (bytes : Slice Std.U8) (h : bs byte
     KnownHosts.utf8_all slugB Clew.ServerDist.slugChar slugChar_eq slugB_high]
 
 end ServerDist
+
+/-! ## What an approval covers — `clew_rules::fingerprint`
+
+Every language-server fingerprint is a SHA-256 of `length_prefixed` parts,
+one of them the `args_part` of the server's arguments. The model in
+`../Clew/Trust.lean` proves those encodings injective — no rearrangement of
+the parts, no argument holding the separators, reads the same — so the
+three kinds of fingerprint hash disjoint inputs. Proved here: the Rust
+functions return, and write exactly the model's encodings, for any input
+that fits in memory. -/
+
+namespace Fingerprint
+
+open clew_rules.fingerprint
+open Shell (bs push_ok extend_ok deref_val)
+
+theorem digitChar_toNat (d : Nat) (h : d < 10) : (Clew.Text.digitChar d).toNat = 48 + d := by
+  have : ∀ d < 10, (Clew.Text.digitChar d).toNat = 48 + d := by decide
+  exact this d h
+
+theorem digits_eq (n : Nat) : Clew.Trust.digits n =
+    if n < 10 then [48 + n] else Clew.Trust.digits (n / 10) ++ [48 + n % 10] := by
+  unfold Clew.Trust.digits
+  rw [Clew.Text.decimal]
+  split
+  · simp [digitChar_toNat n ‹_›]
+  · simp [digitChar_toNat (n % 10) (Nat.mod_lt _ (by omega))]
+
+theorem digits_length_pos (n : Nat) : 1 ≤ (Clew.Trust.digits n).length := by
+  rw [digits_eq]; split <;> simp
+
+/-- `with_decimal` appends `n` in decimal: `Clew.Trust.digits n`. -/
+theorem with_decimal_ok (n : Std.Usize) (out : alloc.vec.Vec Std.U8)
+    (hroom : out.val.length + (Clew.Trust.digits n.val).length ≤ Usize.max) :
+    ∃ v, with_decimal out n = ok v ∧ bs v.val = bs out.val ++ Clew.Trust.digits n.val := by
+  induction hm : n.val using Nat.strong_induction_on generalizing n out with
+  | _ m ih =>
+  subst hm
+  have hd := digits_eq n.val
+  obtain ⟨r, hr, hrv⟩ := ok_of_spec (UScalar.rem_spec n (y := 10#usize) (by simp))
+  simp only [show (10#usize).val = 10 by simp] at hrv
+  set c := UScalar.cast UScalarTy.U8 r with hc
+  have hcv : c.val = n.val % 10 := by
+    rw [hc, UScalar.cast_val_eq, hrv]; simp; omega
+  obtain ⟨d, hdd, hdv⟩ := ok_of_spec (UScalar.add_spec (x := 48#u8) (y := c)
+    (by have := Nat.mod_lt n.val (show 10 > 0 by omega); simp [hcv, U8.max_eq]; omega))
+  have hdv' : d.val = 48 + n.val % 10 := by rw [hdv, hcv]; simp
+  by_cases h10 : 10 ≤ n.val
+  · obtain ⟨q, hq, hqv⟩ := UScalar.div_spec n (y := 10#usize) (by simp)
+    simp only [show (10#usize).val = 10 by simp] at hqv
+    simp only [show ¬ n.val < 10 by omega, ↓reduceIte] at hd
+    have hlen : (Clew.Trust.digits n.val).length = (Clew.Trust.digits (n.val / 10)).length + 1 := by
+      rw [hd]; simp
+    obtain ⟨v1, hv1, ev1⟩ := ih q.val (by omega) q out (by rw [hqv]; omega) rfl
+    have hv1l : v1.val.length = out.val.length + (Clew.Trust.digits (n.val / 10)).length := by
+      have := congrArg List.length ev1; simp [bs] at this; rw [hqv] at this; omega
+    obtain ⟨v, hv, ev⟩ := push_ok v1 d (by omega)
+    refine ⟨v, ?_, ?_⟩
+    · rw [with_decimal]
+      simp [UScalar.le_equiv, h10, hq, hv1, hr, lift, ← hc, hdd, hv]
+    · rw [ev, hd]
+      simp only [bs, List.map_append] at ev1 ⊢
+      rw [ev1, hqv]; simp [hdv']
+  · simp only [show n.val < 10 by omega, ↓reduceIte] at hd
+    obtain ⟨v, hv, ev⟩ := push_ok out d (by rw [hd] at hroom; simp at hroom; omega)
+    refine ⟨v, ?_, ?_⟩
+    · rw [with_decimal]
+      simp [UScalar.le_equiv, h10, hr, lift, ← hc, hdd, hv]
+    · rw [ev, hd]
+      simp only [bs, List.map_append]
+      simp [hdv']; omega
+
+theorem flatMap_take_succ {α β : Type} (f : α → List β) (l : List α) (i : Nat) (h : i < l.length) :
+    (l.take (i + 1)).flatMap f = (l.take i).flatMap f ++ f l[i] := by
+  rw [List.take_add_one, List.getElem?_eq_getElem h, Option.toList_some, List.flatMap_append]
+  simp
+
+theorem flatMap_take_length_le {α β : Type} (f : α → List β) (l : List α) (i : Nat) :
+    ((l.take i).flatMap f).length ≤ (l.flatMap f).length := by
+  conv => rhs; rw [← List.take_append_drop i l]
+  rw [List.flatMap_append, List.length_append]; omega
+
+/-- One argument as `args_part` writes it: `;<byte length>:<bytes>`. -/
+def argPiece (a : List Nat) : List Nat := 59 :: (Clew.Trust.digits a.length ++ 58 :: a)
+
+theorem argsPart_eq (args : List (List Nat)) :
+    Clew.Trust.argsPart args = Clew.Trust.digits args.length ++ args.flatMap argPiece := rfl
+
+theorem with_arg_ok (out : alloc.vec.Vec Std.U8) (arg : Slice Std.U8)
+    (h : out.val.length + (argPiece (bs arg.val)).length ≤ Usize.max) :
+    ∃ v, with_arg out arg = ok v ∧ bs v.val = bs out.val ++ argPiece (bs arg.val) := by
+  simp only [argPiece, bs, List.length_cons, List.length_append, List.length_map] at h
+  obtain ⟨o1, h1, e1⟩ := push_ok out 59#u8 (by omega)
+  obtain ⟨o2, h2, e2⟩ := with_decimal_ok (Slice.len arg) o1 (by rw [e1]; simp; omega)
+  have hl2 : o2.val.length = out.val.length + 1 + (Clew.Trust.digits arg.val.length).length := by
+    have := congrArg List.length e2; simp [bs, e1] at this; omega
+  obtain ⟨o3, h3, e3⟩ := push_ok o2 58#u8 (by omega)
+  obtain ⟨v, hv, ev⟩ := extend_ok o3 arg (by rw [e3]; simp; omega)
+  refine ⟨v, by simp [with_arg, h1, h2, h3, hv], ?_⟩
+  rw [ev, e3]
+  simp only [bs, List.map_append] at e2 ⊢
+  rw [e2, e1]
+  simp [argPiece]
+
+/-- **`args_part` is the model**: for any arguments whose encoding fits in
+memory, it returns, and writes exactly `Clew.Trust.argsPart` of their bytes,
+which no other argument list writes (`argsPart_injective`). -/
+theorem args_part_is_the_model (args : Slice (alloc.vec.Vec Std.U8))
+    (room : (Clew.Trust.argsPart (args.val.map fun v => bs v.val)).length ≤ Usize.max) :
+    ∃ v, args_part args = ok v ∧ bs v.val = Clew.Trust.argsPart (args.val.map fun v => bs v.val) := by
+  rw [argsPart_eq] at room ⊢
+  simp only [List.length_append, List.length_map] at room
+  obtain ⟨o0, h0, e0⟩ := with_decimal_ok (Slice.len args) (alloc.vec.Vec.new Std.U8) (by simp; omega)
+  set f : alloc.vec.Vec Std.U8 → List Nat := fun v => argPiece (bs v.val) with hf
+  have hfl : ∀ l : List (alloc.vec.Vec Std.U8), (l.map fun v => bs v.val).flatMap argPiece = l.flatMap f := by
+    intro l; simp [hf, List.flatMap_map]
+  rw [hfl] at room ⊢
+  obtain ⟨r, hl, hq⟩ := loop_spec (fun (o, i) => args_part_loop.body args o i)
+    (fun p => p.2.val ≤ args.val.length ∧
+      bs p.1.val = Clew.Trust.digits args.val.length ++ (args.val.take p.2.val).flatMap f)
+    (fun _ r => bs r.val = Clew.Trust.digits args.val.length ++ args.val.flatMap f)
+    (fun p => args.val.length - p.2.val) (by
+      rintro ⟨o, i⟩ ⟨hle, ho⟩
+      dsimp only at hle ho
+      by_cases hi : i.val < args.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok args i hi
+        right
+        have hpre := flatMap_take_length_le f args.val (i.val + 1)
+        rw [flatMap_take_succ f args.val i.val hi, List.length_append] at hpre
+        have hol : o.val.length = (Clew.Trust.digits args.val.length).length +
+            ((args.val.take i.val).flatMap f).length := by
+          have := congrArg List.length ho
+          rw [List.length_append] at this; simp only [bs, List.length_map] at this; omega
+        have hfi : (f args.val[i.val]).length = (argPiece (bs args.val[i.val].val)).length := rfl
+        obtain ⟨v, hv, ev⟩ := with_arg_ok o (alloc.vec.Vec.deref args.val[i.val]) (by
+          rw [deref_val]; omega)
+        refine ⟨(v, j), ?_, ⟨show j.val ≤ _ by omega, ?_⟩,
+          show args.val.length - j.val < args.val.length - i.val by omega, fun _ h => h⟩
+        · simp [args_part_loop.body, hi, index_ok args i hi, hv, hj]
+        · show bs v.val = _
+          rw [ev, ho, hjv, flatMap_take_succ f args.val i.val hi, deref_val]
+          simp [hf]
+      · left
+        refine ⟨o, by simp [args_part_loop.body, hi], ?_⟩
+        simpa [List.take_of_length_le (show args.val.length ≤ i.val by omega)] using ho)
+    (o0, 0#usize) ⟨by simp, show bs o0.val = _ by rw [e0]; simp [bs]⟩
+  exact ⟨r, by simp [args_part, h0]; exact hl, by rw [hq, List.length_map]⟩
+
+theorem leBytes_succ (k n : Nat) :
+    Clew.Trust.leBytes (k + 1) n = Clew.Trust.leBytes k n ++ [n / 256 ^ k % 256] := by
+  induction k generalizing n with
+  | zero => simp [Clew.Trust.leBytes]
+  | succ k ih =>
+    rw [Clew.Trust.leBytes, ih (n / 256), Clew.Trust.leBytes, Nat.div_div_eq_div_mul, ← Nat.pow_succ']
+    rfl
+
+/-- `with_le64` appends the eight little-endian bytes of `n`. -/
+theorem with_le64_ok (out : alloc.vec.Vec Std.U8) (n : Std.U64)
+    (h : out.val.length + 8 ≤ Usize.max) :
+    ∃ v, with_le64 out n = ok v ∧ bs v.val = bs out.val ++ Clew.Trust.leBytes 8 n.val := by
+  obtain ⟨r, hl, hq⟩ := loop_spec (fun (o, rest, k) => with_le64_loop.body o rest k)
+    (fun p : alloc.vec.Vec Std.U8 × Std.U64 × Std.Usize => p.2.2.val ≤ 8 ∧
+      bs p.1.val = bs out.val ++ Clew.Trust.leBytes p.2.2.val n.val ∧
+      p.2.1.val = n.val / 256 ^ p.2.2.val)
+    (fun _ r => bs r.val = bs out.val ++ Clew.Trust.leBytes 8 n.val)
+    (fun p => 8 - p.2.2.val) (by
+      rintro ⟨o, rest, k⟩ ⟨hk, ho, hr⟩
+      dsimp only at hk ho hr
+      have hol : o.val.length = out.val.length + k.val := by
+        have := congrArg List.length ho
+        simp only [bs, List.length_append, List.length_map, Clew.Trust.leBytes_length] at this
+        omega
+      by_cases h8 : k.val < 8
+      · right
+        obtain ⟨x, hx, hxv⟩ := ok_of_spec (UScalar.rem_spec rest (y := 256#u64) (by simp))
+        simp only [show (256#u64).val = 256 by simp] at hxv
+        set c := UScalar.cast UScalarTy.U8 x with hc
+        have hcv : c.val = rest.val % 256 := by rw [hc, UScalar.cast_val_eq, hxv]; simp
+        obtain ⟨o1, h1, e1⟩ := push_ok o c (by omega)
+        obtain ⟨q, hqd, hqv⟩ := UScalar.div_spec rest (y := 256#u64) (by simp)
+        simp only [show (256#u64).val = 256 by simp] at hqv
+        obtain ⟨k1, hk1, hk1v⟩ := ok_of_spec (UScalar.add_spec (x := k) (y := 1#usize) (by scalar_tac))
+        simp only [show (1#usize).val = 1 by simp] at hk1v
+        refine ⟨(o1, q, k1), ?_, ⟨show k1.val ≤ 8 by omega, ?_, ?_⟩,
+          show 8 - k1.val < 8 - k.val by omega, fun _ h => h⟩
+        · simp [with_le64_loop.body, UScalar.lt_equiv, h8, hx, lift, ← hc, h1, hqd, hk1]
+        · show bs o1.val = _
+          rw [e1, hk1v, leBytes_succ]
+          simp only [bs, List.map_append] at ho ⊢
+          rw [ho]; simp [hcv, hr]
+        · show q.val = _
+          rw [hqv, hr, hk1v, Nat.div_div_eq_div_mul, ← Nat.pow_succ]
+      · left
+        refine ⟨o, by simp [with_le64_loop.body, UScalar.lt_equiv, h8], ?_⟩
+        rw [ho, show k.val = 8 by omega])
+    (out, n, 0#usize) ⟨by simp, by simp [Clew.Trust.leBytes], by simp⟩
+  exact ⟨r, by unfold with_le64; exact hl, hq⟩
+
+theorem with_field_ok (out : alloc.vec.Vec Std.U8) (part : Slice Std.U8)
+    (h : out.val.length + (Clew.Trust.field (bs part.val)).length ≤ Usize.max) :
+    ∃ v, with_field out part = ok v ∧ bs v.val = bs out.val ++ Clew.Trust.field (bs part.val) := by
+  simp only [Clew.Trust.field, List.length_append, Clew.Trust.leBytes_length, bs, List.length_map] at h
+  set c := UScalar.cast UScalarTy.U64 (Slice.len part) with hc
+  have hmax : Usize.max < 2 ^ 64 := by
+    rcases Usize.bounds_eq with h | h <;> rw [h] <;> simp [U32.max_eq, U64.max_eq]
+  have hlen : (Slice.len part).val < 2 ^ 64 := by
+    have := Slice.length_ineq part
+    have e : (Slice.len part).val = part.val.length := by simp
+    omega
+  have hcv : c.val = part.val.length := by rw [hc, UScalar.cast_val_eq]; simp; omega
+  obtain ⟨o1, h1, e1⟩ := with_le64_ok out c (by omega)
+  have hl1 : o1.val.length = out.val.length + 8 := by
+    have := congrArg List.length e1
+    simp only [bs, List.length_append, List.length_map, Clew.Trust.leBytes_length] at this; omega
+  obtain ⟨v, hv, ev⟩ := extend_ok o1 part (by omega)
+  refine ⟨v, by simp [with_field, lift, ← hc, h1, hv], ?_⟩
+  rw [ev]
+  simp only [bs, List.map_append] at e1 ⊢
+  rw [e1, hcv]
+  simp [Clew.Trust.field]
+
+/-- **`length_prefixed` is the model**: for any parts whose encoding fits in
+memory, it returns, and writes exactly `Clew.Trust.fields` of their bytes —
+the input every fingerprint hashes, in which no rearrangement of the parts
+reads the same (`fields_injective`). -/
+theorem length_prefixed_is_the_model (parts : Slice (alloc.vec.Vec Std.U8))
+    (room : (Clew.Trust.fields (parts.val.map fun v => bs v.val)).length ≤ Usize.max) :
+    ∃ v, length_prefixed parts = ok v ∧
+      bs v.val = Clew.Trust.fields (parts.val.map fun v => bs v.val) := by
+  set f : alloc.vec.Vec Std.U8 → List Nat := fun v => Clew.Trust.field (bs v.val) with hf
+  have hfl : ∀ l : List (alloc.vec.Vec Std.U8), Clew.Trust.fields (l.map fun v => bs v.val) = l.flatMap f := by
+    intro l; simp [Clew.Trust.fields, hf, List.flatMap_map]
+  rw [hfl] at room ⊢
+  obtain ⟨r, hl, hq⟩ := loop_spec (fun (o, i) => length_prefixed_loop.body parts o i)
+    (fun p => p.2.val ≤ parts.val.length ∧ bs p.1.val = (parts.val.take p.2.val).flatMap f)
+    (fun _ r => bs r.val = parts.val.flatMap f)
+    (fun p => parts.val.length - p.2.val) (by
+      rintro ⟨o, i⟩ ⟨hle, ho⟩
+      dsimp only at hle ho
+      by_cases hi : i.val < parts.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok parts i hi
+        right
+        have hpre := flatMap_take_length_le f parts.val (i.val + 1)
+        rw [flatMap_take_succ f parts.val i.val hi, List.length_append] at hpre
+        have hol : o.val.length = ((parts.val.take i.val).flatMap f).length := by
+          have := congrArg List.length ho; simp only [bs, List.length_map] at this; omega
+        have hfi : (f parts.val[i.val]).length = (Clew.Trust.field (bs parts.val[i.val].val)).length := rfl
+        obtain ⟨v, hv, ev⟩ := with_field_ok o (alloc.vec.Vec.deref parts.val[i.val]) (by
+          rw [deref_val]; omega)
+        refine ⟨(v, j), ?_, ⟨show j.val ≤ _ by omega, ?_⟩,
+          show parts.val.length - j.val < parts.val.length - i.val by omega, fun _ h => h⟩
+        · simp [length_prefixed_loop.body, hi, index_ok parts i hi, hv, hj]
+        · show bs v.val = _
+          rw [ev, ho, hjv, flatMap_take_succ f parts.val i.val hi, deref_val]
+      · left
+        refine ⟨o, by simp [length_prefixed_loop.body, hi], ?_⟩
+        simpa [List.take_of_length_le (show parts.val.length ≤ i.val by omega)] using ho)
+    (alloc.vec.Vec.new Std.U8, 0#usize) ⟨by simp, by simp [bs]⟩
+  exact ⟨r, by unfold length_prefixed; exact hl, hq⟩
+
+end Fingerprint
 
 end Clew.Extracted

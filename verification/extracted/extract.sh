@@ -31,6 +31,8 @@ trap 'rm -rf "$out"' EXIT
   --start-from crate::shell::sh_c \
   --start-from crate::known_hosts::plain_host_field \
   --start-from crate::server_dist::slug_ok \
+  --start-from crate::fingerprint::args_part \
+  --start-from crate::fingerprint::length_prefixed \
   --dest "$out" -- --target-dir "$out/target" -q) >"$out/charon.log" 2>&1 || {
   cat "$out/charon.log" >&2
   exit 1

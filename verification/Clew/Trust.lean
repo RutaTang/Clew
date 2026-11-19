@@ -17,7 +17,10 @@ alike. Everything else is proved here, about the inputs:
 * `args_part` is injective: no two argument lists read alike (`[]` and
   `[""]` once did);
 * the length-prefixed fields every fingerprint hashes are injective, and
-  with the 32-byte content digest after them still are;
+  with the 32-byte content digest after them still are (the Rust that writes
+  both encodings, `clew_rules::fingerprint`, translated to Lean by Charon
+  and Aeneas, is proved in `verification/extracted/Equal.lean` to write
+  exactly `argsPart` and `fields`);
 * the three kinds of fingerprint — command, options-only, leave-to-build —
   hash disjoint inputs, so an approval of one is never an approval of
   another;

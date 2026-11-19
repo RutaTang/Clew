@@ -251,7 +251,10 @@ const BUILD_DOMAIN: &str = "clew.lsp.build.v1";
 pub fn build_fingerprint(server: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(length_prefixed(&[BUILD_DOMAIN, server]));
+    h.update(length_prefixed(&[
+        BUILD_DOMAIN.as_bytes(),
+        server.as_bytes(),
+    ]));
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -261,14 +264,11 @@ pub fn build_fingerprint(server: &str) -> String {
 /// rearrangement of parts reads the same, and the three kinds — command,
 /// options alone, leave to build — differ in their first part (a canonical
 /// path, [`OPTIONS_DOMAIN`], [`BUILD_DOMAIN`]): proved of exactly this
-/// encoding in `verification/Clew/Trust.lean`.
-fn length_prefixed(parts: &[&str]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(parts.iter().map(|p| p.len() + 8).sum());
-    for part in parts {
-        out.extend_from_slice(&(part.len() as u64).to_le_bytes());
-        out.extend_from_slice(part.as_bytes());
-    }
-    out
+/// encoding in `verification/Clew/Trust.lean`, and `clew_rules::fingerprint`
+/// is proved to write exactly it (`verification/extracted/Equal.lean`).
+fn length_prefixed(parts: &[&[u8]]) -> Vec<u8> {
+    let parts: Vec<Vec<u8>> = parts.iter().map(|p| p.to_vec()).collect();
+    clew_rules::fingerprint::length_prefixed(&parts)
 }
 
 /// The absolute form of a (possibly project-relative) lsp.toml `command`.
@@ -339,12 +339,9 @@ const OPTIONS_DOMAIN: &str = "clew.lsp.init-options.v1";
 /// length. Joined by a separator they were not: `[]` and `[""]` read the same,
 /// as did an argument holding the separator and the two around it — a
 /// consent given to the one let the other run.
-fn args_part(args: &[String]) -> String {
-    let mut part = format!("{}", args.len());
-    for arg in args {
-        part.push_str(&format!(";{}:{arg}", arg.len()));
-    }
-    part
+fn args_part(args: &[String]) -> Vec<u8> {
+    let args: Vec<Vec<u8>> = args.iter().map(|a| a.as_bytes().to_vec()).collect();
+    clew_rules::fingerprint::args_part(&args)
 }
 
 /// A stable fingerprint of the `init_options` a config asks clew to send in
@@ -386,11 +383,11 @@ pub fn lsp_options_fingerprint(
     let mut h = Sha256::new();
     // Length-prefix each field so no rearrangement of the parts collides.
     h.update(length_prefixed(&[
-        OPTIONS_DOMAIN,
+        OPTIONS_DOMAIN.as_bytes(),
         &args_part(args),
-        server,
-        version,
-        &options,
+        server.as_bytes(),
+        version.as_bytes(),
+        options.as_bytes(),
     ]));
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
@@ -473,11 +470,11 @@ fn hash_command(
     let mut h = Sha256::new();
     // Length-prefix each field so no rearrangement of the parts collides.
     h.update(length_prefixed(&[
-        real.to_string_lossy().as_ref(),
+        real.to_string_lossy().as_bytes(),
         &args_part(args),
-        server,
-        version,
-        &options,
+        server.as_bytes(),
+        version.as_bytes(),
+        options.as_bytes(),
     ]));
     h.update(content);
     let fingerprint = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
@@ -1053,15 +1050,11 @@ mod tests {
         };
         for (input, want) in cases("args_part") {
             let args = strings(&input);
-            assert_eq!(
-                args_part(&args).into_bytes(),
-                bytes(&want),
-                "args_part({args:?})"
-            );
+            assert_eq!(args_part(&args), bytes(&want), "args_part({args:?})");
         }
         for (input, want) in cases("length_prefixed") {
             let parts = strings(&input);
-            let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+            let parts: Vec<&[u8]> = parts.iter().map(|p| p.as_bytes()).collect();
             assert_eq!(
                 length_prefixed(&parts),
                 bytes(&want),

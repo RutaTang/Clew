@@ -6,6 +6,7 @@
 //! that runs, not of a copy. So this crate stays in the part of Rust Aeneas
 //! translates: no strings, no closures, no I/O, no dependencies.
 
+pub mod fingerprint;
 pub mod framing;
 pub mod headers;
 pub mod known_hosts;

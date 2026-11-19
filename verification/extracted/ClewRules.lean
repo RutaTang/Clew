@@ -20,6 +20,168 @@ set_option maxRecDepth 2048
 
 namespace clew_rules
 
+/-- [clew_rules::fingerprint::with_decimal]:
+    Source: 'crates/clew-rules/src/fingerprint.rs', lines 12:0-18:1 -/
+def fingerprint.with_decimal
+  (out : alloc.vec.Vec Std.U8) (n : Std.Usize) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  let out1 ←
+    if n >= 10#usize
+    then do
+         let i ← n / 10#usize
+         fingerprint.with_decimal out i
+    else ok out
+  let i ← n % 10#usize
+  let i1 ← lift (UScalar.cast .U8 i)
+  let i2 ← 48#u8 + i1
+  alloc.vec.Vec.push out1 i2
+partial_fixpoint
+
+/-- [clew_rules::fingerprint::with_arg]:
+    Source: 'crates/clew-rules/src/fingerprint.rs', lines 21:0-27:1 -/
+def fingerprint.with_arg
+  (out : alloc.vec.Vec Std.U8) (arg : Slice Std.U8) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  let out1 ← alloc.vec.Vec.push out 59#u8
+  let i := Slice.len arg
+  let out2 ← fingerprint.with_decimal out1 i
+  let out3 ← alloc.vec.Vec.push out2 58#u8
+  alloc.vec.Vec.extend_from_slice core.clone.CloneU8 out3 arg
+
+/-- [clew_rules::fingerprint::args_part]: loop body 0:
+    Source: 'crates/clew-rules/src/fingerprint.rs', lines 34:4-37:5
+    Visibility: public -/
+@[rust_loop_body]
+def fingerprint.args_part_loop.body
+  (args : Slice (alloc.vec.Vec Std.U8)) (out : alloc.vec.Vec Std.U8)
+  (i : Std.Usize) :
+  Result (ControlFlow ((alloc.vec.Vec Std.U8) × Std.Usize) (alloc.vec.Vec
+    Std.U8))
+  := do
+  let i1 := Slice.len args
+  if i < i1
+  then
+    let v ← Slice.index_usize args i
+    let s := alloc.vec.Vec.deref v
+    let out1 ← fingerprint.with_arg out s
+    let i2 ← i + 1#usize
+    ok (cont (out1, i2))
+  else ok (done out)
+
+/-- [clew_rules::fingerprint::args_part]: loop 0:
+    Source: 'crates/clew-rules/src/fingerprint.rs', lines 34:4-37:5
+    Visibility: public -/
+@[rust_loop]
+def fingerprint.args_part_loop
+  (args : Slice (alloc.vec.Vec Std.U8)) (out : alloc.vec.Vec Std.U8)
+  (i : Std.Usize) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  loop
+    (fun (out1, i1) => fingerprint.args_part_loop.body args out1 i1)
+    (out, i)
+
+/-- [clew_rules::fingerprint::args_part]:
+    Source: 'crates/clew-rules/src/fingerprint.rs', lines 31:0-39:1
+    Visibility: public -/
+def fingerprint.args_part
+  (args : Slice (alloc.vec.Vec Std.U8)) : Result (alloc.vec.Vec Std.U8) := do
+  let i := Slice.len args
+  let out ← fingerprint.with_decimal (alloc.vec.Vec.new Std.U8) i
+  fingerprint.args_part_loop args out 0#usize
+
+/-- [clew_rules::fingerprint::with_le64]: loop body 0:
+    Source: 'crates/clew-rules/src/fingerprint.rs', lines 45:4-49:5 -/
+@[rust_loop_body]
+def fingerprint.with_le64_loop.body
+  (out : alloc.vec.Vec Std.U8) (rest : Std.U64) (k : Std.Usize) :
+  Result (ControlFlow ((alloc.vec.Vec Std.U8) × Std.U64 × Std.Usize)
+    (alloc.vec.Vec Std.U8))
+  := do
+  if k < 8#usize
+  then
+    let i ← rest % 256#u64
+    let i1 ← lift (UScalar.cast .U8 i)
+    let out1 ← alloc.vec.Vec.push out i1
+    let rest1 ← rest / 256#u64
+    let k1 ← k + 1#usize
+    ok (cont (out1, rest1, k1))
+  else ok (done out)
+
+/-- [clew_rules::fingerprint::with_le64]: loop 0:
+    Source: 'crates/clew-rules/src/fingerprint.rs', lines 45:4-49:5 -/
+@[rust_loop]
+def fingerprint.with_le64_loop
+  (out : alloc.vec.Vec Std.U8) (rest : Std.U64) (k : Std.Usize) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  loop
+    (fun (out1, rest1, k1) => fingerprint.with_le64_loop.body out1 rest1 k1)
+    (out, rest, k)
+
+/-- [clew_rules::fingerprint::with_le64]:
+    Source: 'crates/clew-rules/src/fingerprint.rs', lines 42:0-51:1 -/
+@[reducible]
+def fingerprint.with_le64
+  (out : alloc.vec.Vec Std.U8) (n : Std.U64) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  fingerprint.with_le64_loop out n 0#usize
+
+/-- [clew_rules::fingerprint::with_field]:
+    Source: 'crates/clew-rules/src/fingerprint.rs', lines 54:0-58:1 -/
+def fingerprint.with_field
+  (out : alloc.vec.Vec Std.U8) (part : Slice Std.U8) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  let i := Slice.len part
+  let i1 ← lift (UScalar.cast .U64 i)
+  let out1 ← fingerprint.with_le64 out i1
+  alloc.vec.Vec.extend_from_slice core.clone.CloneU8 out1 part
+
+/-- [clew_rules::fingerprint::length_prefixed]: loop body 0:
+    Source: 'crates/clew-rules/src/fingerprint.rs', lines 65:4-68:5
+    Visibility: public -/
+@[rust_loop_body]
+def fingerprint.length_prefixed_loop.body
+  (parts : Slice (alloc.vec.Vec Std.U8)) (out : alloc.vec.Vec Std.U8)
+  (i : Std.Usize) :
+  Result (ControlFlow ((alloc.vec.Vec Std.U8) × Std.Usize) (alloc.vec.Vec
+    Std.U8))
+  := do
+  let i1 := Slice.len parts
+  if i < i1
+  then
+    let v ← Slice.index_usize parts i
+    let s := alloc.vec.Vec.deref v
+    let out1 ← fingerprint.with_field out s
+    let i2 ← i + 1#usize
+    ok (cont (out1, i2))
+  else ok (done out)
+
+/-- [clew_rules::fingerprint::length_prefixed]: loop 0:
+    Source: 'crates/clew-rules/src/fingerprint.rs', lines 65:4-68:5
+    Visibility: public -/
+@[rust_loop]
+def fingerprint.length_prefixed_loop
+  (parts : Slice (alloc.vec.Vec Std.U8)) (out : alloc.vec.Vec Std.U8)
+  (i : Std.Usize) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  loop
+    (fun (out1, i1) => fingerprint.length_prefixed_loop.body parts out1 i1)
+    (out, i)
+
+/-- [clew_rules::fingerprint::length_prefixed]:
+    Source: 'crates/clew-rules/src/fingerprint.rs', lines 62:0-70:1
+    Visibility: public -/
+@[reducible]
+def fingerprint.length_prefixed
+  (parts : Slice (alloc.vec.Vec Std.U8)) : Result (alloc.vec.Vec Std.U8) := do
+  fingerprint.length_prefixed_loop parts (alloc.vec.Vec.new Std.U8) 0#usize
+
 /-- [clew_rules::framing::MAX_FRAME_BYTES]
     Source: 'crates/clew-rules/src/framing.rs', lines 12:0-12:50
     Visibility: public -/
