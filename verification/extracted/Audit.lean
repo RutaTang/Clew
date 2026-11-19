@@ -41,3 +41,4 @@ does not model (the code proved here calls none of them). -/
 #print axioms Clew.Extracted.OAuth.take_stored_is_the_model
 #print axioms Clew.Extracted.OAuth.fresh_is_the_model
 #print axioms Clew.Extracted.OAuth.answers_is_the_model
+#print axioms Clew.Extracted.Launch.launch_is_the_model

@@ -46,3 +46,47 @@ pub fn trusted_by(me: u32, file: &Node, dirs: &[Node]) -> bool {
     }
     true
 }
+
+/// How a language server command the repository names is run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Launch {
+    /// Its fingerprint is not approved: it does not run.
+    Refused,
+    /// Approved, outside the project, and where nobody but you or root can
+    /// change it ([`trusted_by`]): it runs where it is.
+    InPlace,
+    /// Approved, anywhere else: Clew's own copy of the approved bytes runs.
+    Staged,
+}
+
+/// The decision `stage_lsp_command` and `CommandProbe::into_exec` in
+/// `crates/clew-core/src/trust.rs` make: refused unless `approved`; in place
+/// only when the command is `outside_project` and `trusted` ([`trusted_by`]'s
+/// answer for it); otherwise from the staged copy.
+pub fn launch(approved: bool, outside_project: bool, trusted: bool) -> Launch {
+    if !approved {
+        return Launch::Refused;
+    }
+    if outside_project && trusted {
+        return Launch::InPlace;
+    }
+    Launch::Staged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Launch, launch};
+
+    #[test]
+    fn launch_runs_only_what_was_approved_and_in_place_only_what_is_private() {
+        for outside in [false, true] {
+            for trusted in [false, true] {
+                assert_eq!(launch(false, outside, trusted), Launch::Refused);
+            }
+        }
+        assert_eq!(launch(true, true, true), Launch::InPlace);
+        assert_eq!(launch(true, true, false), Launch::Staged);
+        assert_eq!(launch(true, false, true), Launch::Staged);
+        assert_eq!(launch(true, false, false), Launch::Staged);
+    }
+}

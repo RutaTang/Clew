@@ -68,6 +68,7 @@ Clew 的一部分规则不只是经过测试，而是经过证明的。对每条
 
 **两道关卡**：`crates/clew-rules/src/location.rs` 中的 `trusted_by`（由 `crates/clew-core/src/trust.rs` 中的 `trusted_location` 调用）和 `crates/clew-core/src/mcp/config.rs` 中的 `check_headers`（它用 `crates/clew-rules/src/headers.rs` 检查每个请求头的字节），模型在 `Guards.lean`。
 - 项目指定的语言服务器，从 Clew 自己保存的、已获许可的字节副本运行，除非它所在的位置只有你或 root 能修改。`trusted_by` 允许它原地运行时，其他用户既不能写它，也不能替换通往它的路径上的任何目录项。这基于 Unix 权限规则，并把每个用户都当作可能属于该文件的组。
+- 这样的命令如何运行由 `clew_rules::location::launch` 决定，`stage_lsp_command` 和 `CommandProbe::into_exec` 都询问它，对代码本身已证明（Aeneas）：指纹未获许可时恰好被拒绝；只有在已获许可、位于项目之外、且 `trusted_by` 判定为私有时才原地运行。其他已获许可的命令，运行的是 Clew 保存的已获许可字节的副本。
 - `check_headers` 接受的 MCP 服务器请求头，从请求中读回时恰好就是这些请求头，每个一行，名字不变。无论服务器多么宽松地分行（在 CR、LF 或 NUL 处），都成立。任何值都不能另起一个请求头。
 
 **悬停时求值**：`src/dap/proto.rs` 中的 `hover_eval_allowed`（`clew_rules::dap`），模型在 `Guards.lean`。
@@ -95,7 +96,7 @@ Clew 的一部分规则不只是经过测试，而是经过证明的。对每条
 - **模型读起来就像代码。** 它按同样的顺序走同样的步骤。它依赖的每个 Rust 标准库函数，细到 `char::is_whitespace` 的含义，都在 `Text.lean` 里写明了。这些函数通过用到它们的函数来测试：每个 `White_Space` 码位及其相邻码位都在测试输入里。
 - **测试用例。** `lake exe vectors` 在一组固定的输入上运行每个模型，把结果写进 `verification/vectors/*.json`。这些输入包括：在一个能走到每个分支的字母表上的所有短输入，以及每个文件列出的边界情况。`cargo test` 用同样的输入运行真正的 Rust 函数，要求得到同样的结果。只要代码和模型有一处不一致，测试就会失败。
 - **shell 的模型对照真正的 shell 检查。** 每个 shell 测试用例也会交给 `/bin/sh` 运行，它读出来的必须是同样的词。
-- **有十五条规则，被翻译和证明的就是代码本身。** 路径检查（`check_lexical`、`names_a_folder`、它开头的 `str::trim`，即 `trim_bounds`，以及对解析后路径的检查 `inside`）、更新检查（`parse`、`is_newer`、`upgrade`，以及下载可以从哪里来 `release_asset`）、ssh 参数列表（`ssh_args`）、服务端摘要列表和旁挂文件（`pinned_digest`、`sidecar_digest`）、`route`、`trusted_by`、分帧读取函数对每一行的判断（`frame_line`、`json_line`、`capped_line`，以及 `header`）、MCP 请求头检查、shell 引号（`shell_command`、`sh_c`、`quote`）、known_hosts 检查（`plain_host_field`）、平台 slug 检查（`slug_ok`）、指纹编码（`length_prefixed`、`args_part`）、远程许可键（`scope_label`、`approval_key`）、悬停规则（`hover_eval_allowed`）和 MCP 登录的判断（`endpoint_allowed`、`fresh`、`take_stored`、`answers`）放在 `crates/clew-rules` 中。Charon 和 Aeneas 把这份 Rust 源码翻译成 Lean（`verification/extracted/ClewRules.lean`），`Equal.lean` 证明这份翻译对每一个输入都等于模型：它总会返回，不会 panic、不会溢出、不会越界索引，每个循环都一定结束；返回的也恰好是模型算出的结果。所以关于这些模型的每条定理，都对实际运行的代码成立。对分帧而言，读取函数读到的每一行上的判断，按读取函数的 `match` 那样执行，被证明恰好是模型循环的一轮；从数据流读出这一行是 tokio 的事。见[实际运行的代码](#实际运行的代码)。
+- **有十五条规则，被翻译和证明的就是代码本身。** 路径检查（`check_lexical`、`names_a_folder`、它开头的 `str::trim`，即 `trim_bounds`，以及对解析后路径的检查 `inside`）、更新检查（`parse`、`is_newer`、`upgrade`，以及下载可以从哪里来 `release_asset`）、ssh 参数列表（`ssh_args`）、服务端摘要列表和旁挂文件（`pinned_digest`、`sidecar_digest`）、`route`、`trusted_by` 和 `launch`、分帧读取函数对每一行的判断（`frame_line`、`json_line`、`capped_line`，以及 `header`）、MCP 请求头检查、shell 引号（`shell_command`、`sh_c`、`quote`）、known_hosts 检查（`plain_host_field`）、平台 slug 检查（`slug_ok`）、指纹编码（`length_prefixed`、`args_part`）、远程许可键（`scope_label`、`approval_key`）、悬停规则（`hover_eval_allowed`）和 MCP 登录的判断（`endpoint_allowed`、`fresh`、`take_stored`、`answers`）放在 `crates/clew-rules` 中。Charon 和 Aeneas 把这份 Rust 源码翻译成 Lean（`verification/extracted/ClewRules.lean`），`Equal.lean` 证明这份翻译对每一个输入都等于模型：它总会返回，不会 panic、不会溢出、不会越界索引，每个循环都一定结束；返回的也恰好是模型算出的结果。所以关于这些模型的每条定理，都对实际运行的代码成立。对分帧而言，读取函数读到的每一行上的判断，按读取函数的 `match` 那样执行，被证明恰好是模型循环的一轮；从数据流读出这一行是 tokio 的事。见[实际运行的代码](#实际运行的代码)。
 - 其他规则的测试用例是很大的输入样本，而不是全部输入。
 
 `verification/check.sh` 检查三件事：
@@ -136,7 +137,7 @@ CI 在 `extracted` 任务中运行它，所用的 Charon 和 Aeneas 来自一个
 | 哪个服务端程序可以部署 | `server_dist` | 已证明。每个平台名在选定程序之前都要通过的检查 `clew_rules::server_dist::slug_ok`，以及固定摘要列表和旁挂文件的读取 `pinned_digest`、`sidecar_digest`，对代码本身已证明（Aeneas），适用于任意字符串的 UTF-8 字节。把程序的 SHA-256 与读到的摘要相比较只是一次字符串比较，有测试 |
 | 一条许可涵盖什么 | `trust` 指纹 | 已证明。每个指纹所哈希的字节 `clew_rules::fingerprint::{length_prefixed, args_part}` 对代码本身已证明（Aeneas）。SHA-256 不碰撞是 SHA-256 自己的承诺 |
 | 许可登记在哪台机器、哪个项目下 | `derived::project_key`、`scope_label`、`ssh_endpoint` | 已证明。标签和远程键 `clew_rules::approval::{scope_label, approval_key}` 对代码本身已证明（Aeneas），适用于任意字符串的 UTF-8 字节 |
-| 项目的语言服务器能否运行 | `lsp_gate::lsp_command_allowed` | 规则（它的指纹已获许可）依赖已证明的指纹。运行的正是被哈希的那些字节，这属于文件系统，有测试 |
+| 项目的语言服务器能否运行 | `lsp_gate::lsp_command_allowed`、`trust::stage_lsp_command` | 已证明。它如何运行，即 `clew_rules::location::launch`，对代码本身已证明（Aeneas）：指纹未获许可就拒绝；只有在已获许可、位于项目之外、且 `trusted_by` 判定为私有时才原地运行；否则运行 Clew 的副本。指纹也已证明。副本保存的正是被哈希的那些字节，这属于文件系统，有测试 |
 | 某个文件夹能否存放 Clew 不经暂存就运行的程序 | `clew_rules::location::trusted_by` | 对代码本身已证明（Aeneas）。读取它所依据的所有者和权限属于文件系统 |
 | 消息如何分帧 | `framing` | 已证明。每个读取函数读到的每一行上的判断 `clew_rules::framing::{frame_line, json_line, capped_line}` 及 `header`，对代码本身已证明（Aeneas）恰好是模型循环的一轮。从数据流读出一行是 tokio 的 `read_until`，已测试 |
 | Clew 交给 shell 的内容 | `clew_rules::shell`（`shell_command`、`sh_c`、`quote`） | 对代码本身已证明（Aeneas），适用于任意字符串的 UTF-8 字节，并对照 `/bin/sh` 检查 |
@@ -149,14 +150,14 @@ CI 在 `extracted` 任务中运行它，所用的 Charon 和 Aeneas 来自一个
 
 ## 实际运行的代码
 
-大多数模型是照着代码逐步写成的，再由测试用例把两者联系起来。路径检查、更新检查、ssh 参数列表、摘要读取、`route`、`trusted_by`、分帧读取函数对每一行的判断、MCP 请求头检查、shell 引号、known_hosts 检查、slug 检查、指纹编码、许可键、悬停规则和 MCP 登录的判断则没有副本：定理所针对的 Lean，就是实际运行的 Rust。
+大多数模型是照着代码逐步写成的，再由测试用例把两者联系起来。路径检查、更新检查、ssh 参数列表、摘要读取、`route`、`trusted_by` 和 `launch`、分帧读取函数对每一行的判断、MCP 请求头检查、shell 引号、known_hosts 检查、slug 检查、指纹编码、许可键、悬停规则和 MCP 登录的判断则没有副本：定理所针对的 Lean，就是实际运行的 Rust。
 
 - **`crates/clew-rules`** 存放这十五个决定。它没有任何依赖，只有纯代码，而且只用 Aeneas 能翻译的那部分 Rust：`match`、`while`、递归、切片和可选的切片、`Vec`、带溢出检查的整数运算和位掩码。应用和 `clew-core` 都调用它。
 - **`verification/extracted/extract.sh`** 在这个 crate 上运行 Charon 和 Aeneas，写出 `ClewRules.lean`。这个文件不手工修改。
 - **`Equal.lean`** 证明翻译出的函数等于 `verification/Clew` 中的模型，具体如[证明如何落实到代码](#证明如何落实到代码)所述。
 - **独立的项目。** Aeneas 的 Lean 库需要 Mathlib，所以这是一个单独的 Lake 项目；`verification/` 中的证明依然只需要 Lean 本身。第一次构建会编译 Aeneas 和它用到的约 1500 个 Mathlib 模块；CI 从 Mathlib 的构建缓存获取。
 
-改动 `crates/clew-rules` 会被两道检查拦下：翻译结果不再与 `ClewRules.lean` 一致；重新生成后，如果新代码算出的结果与模型不同，证明就会失败。把 `trusted_by` 的掩码从 `0o022` 放宽到 `0o002`，两道检查都会失败；让恰好等于上限的消息通过，让 shell 词里的空格不加引号，让 known_hosts 主机名里出现 `*`，让含 `..` 的路径通过路径检查，让 `trim_bounds` 不再把 U+3000 当作空白，让 `is_newer` 放行与正在运行的版本相同的版本，去掉 ssh 目标前的 `--`，让摘要列表不再在 `,` 处切分，放过第 33 行头部，在 JSON 行末尾留下 `\r`，拒绝恰好等于上限的一行，把兄弟目录 `/pq` 当作 `/p` 之下的路径，在令牌的最后一秒还使用它，按前缀匹配登录的 `state`，或接受仅仅以发布主机名开头的主机，也一样。
+改动 `crates/clew-rules` 会被两道检查拦下：翻译结果不再与 `ClewRules.lean` 一致；重新生成后，如果新代码算出的结果与模型不同，证明就会失败。把 `trusted_by` 的掩码从 `0o022` 放宽到 `0o002`，两道检查都会失败；让恰好等于上限的消息通过，让 shell 词里的空格不加引号，让 known_hosts 主机名里出现 `*`，让含 `..` 的路径通过路径检查，让 `trim_bounds` 不再把 U+3000 当作空白，让 `is_newer` 放行与正在运行的版本相同的版本，去掉 ssh 目标前的 `--`，让摘要列表不再在 `,` 处切分，放过第 33 行头部，在 JSON 行末尾留下 `\r`，拒绝恰好等于上限的一行，把兄弟目录 `/pq` 当作 `/p` 之下的路径，在令牌的最后一秒还使用它，按前缀匹配登录的 `state`，接受仅仅以发布主机名开头的主机，或在语言服务器只是位于项目之外或只是私有（而不是两者兼备）时就原地运行它，也一样。
 
 其他规则仍然是由测试用例检查的模型，因为它们的代码用到了 Aeneas 不能翻译的东西。Aeneas 把 `str` 读作字节，不对逐字符遍历、字符串格式化、传给迭代器的闭包、`char` 的分类、SHA-256 或异步 I/O 建模。分帧读取函数剩下的部分是 I/O：从数据流读出一行。一条规则一旦能不用这些写出来，就可以移进 `clew-rules`，上面十五条就是这样移进去的。
 

@@ -82,3 +82,5 @@ the kernel did not check.
 #print axioms Clew.OAuth.fresh_means_time_left
 #print axioms Clew.OAuth.refresh_only_when_needed
 #print axioms Clew.OAuth.answers_iff
+#print axioms Clew.Guards.launch_refused_iff
+#print axioms Clew.Guards.in_place_is_approved_and_private

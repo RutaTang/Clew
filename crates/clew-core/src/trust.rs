@@ -575,26 +575,42 @@ impl CommandProbe {
     ///   is written. Programs that locate siblings relative to their own path
     ///   do not work from there — point `lsp.toml` at an installed copy
     ///   outside the repository for those.
-    pub fn into_exec(mut self) -> Result<PathBuf, String> {
-        if self.outside_project && trusted_location(&self.canonical) {
-            same_file(&self.file, &self.canonical).map_err(|e| {
-                format!(
-                    "{}: {e} — it changed after it was approved; open the file again to \
-                     re-approve",
-                    self.canonical.display()
-                )
-            })?;
-            return Ok(self.canonical);
+    pub fn into_exec(self) -> Result<PathBuf, String> {
+        self.run_as(true)?
+            .ok_or_else(|| "refused: the command is not approved".to_string())
+    }
+
+    /// The path to spawn, as `clew_rules::location::launch` decides — proved
+    /// of the code itself (Aeneas) to refuse what is not `approved`, and to
+    /// run in place only what is outside the project and where nobody but
+    /// you or root can change it. `None` when refused.
+    fn run_as(mut self, approved: bool) -> Result<Option<PathBuf>, String> {
+        // Read only when it can matter: approved, and outside the project.
+        let trusted = approved && self.outside_project && trusted_location(&self.canonical);
+        match clew_rules::location::launch(approved, self.outside_project, trusted) {
+            clew_rules::location::Launch::Refused => Ok(None),
+            clew_rules::location::Launch::InPlace => {
+                same_file(&self.file, &self.canonical).map_err(|e| {
+                    format!(
+                        "{}: {e} — it changed after it was approved; open the file again to \
+                         re-approve",
+                        self.canonical.display()
+                    )
+                })?;
+                Ok(Some(self.canonical))
+            }
+            clew_rules::location::Launch::Staged => {
+                let exec = stage_bytes(
+                    &mut self.file,
+                    &self.content,
+                    &self.fingerprint,
+                    &self.source,
+                )?;
+                // Housekeeping rides on the (rare, already slow) stage.
+                sweep_exec();
+                Ok(Some(exec))
+            }
         }
-        let exec = stage_bytes(
-            &mut self.file,
-            &self.content,
-            &self.fingerprint,
-            &self.source,
-        )?;
-        // Housekeeping rides on the (rare, already slow) stage.
-        sweep_exec();
-        Ok(exec)
     }
 }
 
@@ -657,18 +673,11 @@ pub fn stage_lsp_command(
     let probe = probe_lsp_command(root, command, args, server, version, init_options)?;
     let fingerprint = probe.fingerprint.clone();
     let source = probe.source.clone();
-    if !approved(&fingerprint) {
-        return Ok(StagedCommand {
-            fingerprint,
-            source,
-            exec_path: None,
-        });
-    }
-    let exec_path = probe.into_exec()?;
+    let exec_path = probe.run_as(approved(&fingerprint))?;
     Ok(StagedCommand {
         fingerprint,
         source,
-        exec_path: Some(exec_path),
+        exec_path,
     })
 }
 

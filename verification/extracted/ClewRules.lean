@@ -2239,6 +2239,32 @@ def location.trusted_by
     else ok false
   else ok false
 
+/-- [clew_rules::location::Launch]
+    Source: 'crates/clew-rules/src/location.rs', lines 52:0-60:1
+    Visibility: public -/
+@[discriminant isize]
+inductive location.Launch where
+| Refused : location.Launch
+| InPlace : location.Launch
+| Staged : location.Launch
+
+/-- [clew_rules::location::launch]:
+    Source: 'crates/clew-rules/src/location.rs', lines 66:0-74:1
+    Visibility: public -/
+def location.launch
+  (approved : Bool) (outside_project : Bool) (trusted : Bool) :
+  Result location.Launch
+  := do
+  if approved
+  then
+    if outside_project
+    then
+      if trusted
+      then ok location.Launch.InPlace
+      else ok location.Launch.Staged
+    else ok location.Launch.Staged
+  else ok location.Launch.Refused
+
 /-- [clew_rules::oauth::endpoint_allowed]:
     Source: 'crates/clew-rules/src/oauth.rs', lines 13:0-15:1
     Visibility: public -/

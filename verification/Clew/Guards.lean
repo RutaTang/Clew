@@ -96,6 +96,43 @@ theorem trusted_means_private (me : Nat) (file : Node) (dirs : List Node)
       · rw [hg'] at hgw; cases hgw
       · rw [ho'] at how; cases how
 
+/-- How a language server command the repository names is run. -/
+inductive Launch where
+  | refused
+  | inPlace
+  | staged
+  deriving DecidableEq, Repr
+
+/-- `launch`: refused unless approved; in place only when the command is
+outside the project and `trusted_by` said yes for it; otherwise Clew's
+staged copy of the approved bytes. -/
+def launch (approved outsideProject trusted : Bool) : Launch :=
+  if !approved then .refused
+  else if outsideProject && trusted then .inPlace
+  else .staged
+
+/-- **Nothing unapproved runs**: the command is refused exactly when its
+fingerprint is not approved. -/
+theorem launch_refused_iff (approved outsideProject trusted : Bool) :
+    launch approved outsideProject trusted = .refused ↔ approved = false := by
+  cases approved <;> cases outsideProject <;> cases trusted <;> simp [launch]
+
+/-- **What runs in place was approved, is outside the project, and nobody
+else can change**: when `launch`, given `trusted_by`'s answer, runs the
+command where it is, it was approved, it lies outside the project, and no
+user but you and root may write it or replace any entry on the way to it.
+Anything else approved runs from Clew's copy of the approved bytes. -/
+theorem in_place_is_approved_and_private (approved outsideProject : Bool) (me : Nat)
+    (file : Node) (dirs : List Node)
+    (h : launch approved outsideProject (trustedBy me file dirs) = .inPlace)
+    (u : Nat) (hu : u ≠ me) (hr : u ≠ 0) :
+    approved = true ∧ outsideProject = true ∧
+      ¬ mayWrite u file ∧ ∀ d ∈ dirs, ¬ mayReplaceIn u d := by
+  unfold launch at h
+  cases ha : approved <;> cases ho : outsideProject <;> cases ht : trustedBy me file dirs <;>
+    simp [ha, ho, ht] at h
+  exact ⟨rfl, rfl, trusted_means_private me file dirs ht u hu hr⟩
+
 /-! ## An MCP server's headers -/
 
 /-- A character of a header name (`tchar`, RFC 9110). -/

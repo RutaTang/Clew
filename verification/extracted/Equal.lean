@@ -6211,4 +6211,30 @@ theorem answers_is_the_model (stateParam : Option (Slice Std.U8)) (state : Slice
     cases h : (bs got.val == bs state.val) <;> simp_all
 
 end OAuth
+/-! ## Running a language server the repository names
+
+`stage_lsp_command` and `CommandProbe::into_exec` in
+`crates/clew-core/src/trust.rs` ask `clew_rules::location::launch` how a
+command runs: refused, in place, or from Clew's staged copy. -/
+
+namespace Launch
+
+/-- What the Rust function returns, as the model's answer. -/
+def toModel : clew_rules.location.Launch → Clew.Guards.Launch
+  | .Refused => .refused
+  | .InPlace => .inPlace
+  | .Staged => .staged
+
+/-- **`launch` is the model**: for any approval, place and `trusted_by`
+answer, the Rust function returns what `Guards.launch` decides — so
+`launch_refused_iff` and `in_place_is_approved_and_private` hold of the
+code that runs. -/
+theorem launch_is_the_model (approved outsideProject trusted : Bool) :
+    ∃ r, clew_rules.location.launch approved outsideProject trusted = ok r ∧
+      toModel r = Clew.Guards.launch approved outsideProject trusted := by
+  cases approved <;> cases outsideProject <;> cases trusted <;>
+    exact ⟨_, rfl, rfl⟩
+
+end Launch
+
 end Clew.Extracted
