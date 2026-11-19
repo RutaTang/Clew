@@ -39108,6 +39108,10 @@ fn an_agents_install_is_answered_as_the_user_decides() {
     let data = clew_core::testutil::TempDir::new("plugin-install-answers");
     let _env = data_dir_override(data.path());
     let mut app = blank_app();
+    // The delay the window waits before an Allow counts (none in tests
+    // unless one is set).
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
     let filed = || {
         let ask = Ask::Install {
             plugin: "word-count".into(),
@@ -39142,6 +39146,7 @@ fn an_agents_install_is_answered_as_the_user_decides() {
         clew_rules::plugin::READ,
         Some(Reply::Request(declined.clone())),
     ));
+    let _ = app.update(Message::Noop);
     let number = asked(&app).expect("the install is asked");
     let _ = app.update(Message::Plugin(
         crate::app::plugins::PluginMsg::InstallAllowed(number),
@@ -39163,8 +39168,9 @@ fn an_agents_install_is_answered_as_the_user_decides() {
         clew_rules::plugin::READ,
         Some(Reply::Request(allowed.clone())),
     ));
+    let _ = app.update(Message::Noop);
     let number = asked(&app).expect("the install is asked");
-    read_for(&mut app, std::time::Duration::from_secs(5));
+    read_for(&mut app, delay);
     let _install = app.update(Message::Plugin(
         crate::app::plugins::PluginMsg::InstallAllowed(number),
     ));
@@ -39186,4 +39192,151 @@ fn an_agents_install_is_answered_as_the_user_decides() {
     );
     assert!(app.status.contains("installed"), "{}", app.status);
     assert!(app.plugins.handling.is_empty());
+}
+
+/// Plugin `word-count`, installed, on or off.
+fn installed_plugin(enabled: bool) -> crate::app::plugins::Installed {
+    let manifest = pending_plugin_install("word-count", 0, None)
+        .inspected
+        .manifest;
+    crate::app::plugins::Installed {
+        id: "word-count".into(),
+        record: clew_plugin::store::Record {
+            fingerprint: "fp-word-count".into(),
+            sha256: "00".into(),
+            permissions: Vec::new(),
+            enabled,
+            installed: 0,
+            origin: clew_plugin::store::Origin::Ask,
+            manifest: manifest.to_toml(),
+            later: Default::default(),
+        },
+        manifest,
+    }
+}
+
+/// An installed plugin's commands are in the palette, named by the plugin
+/// and the command, and run the plugin; one turned off offers none.
+#[test]
+fn the_palette_offers_an_enabled_plugins_commands() {
+    use crate::app::plugins::PluginMsg;
+    let mut app = blank_app();
+    app.plugins.installed = vec![installed_plugin(true)];
+    let offered = app
+        .palette_commands()
+        .into_iter()
+        .find(|c| c.title == "Word count: Count words")
+        .expect("the command is in the palette");
+    match offered.action {
+        crate::app::palette::PaletteAction::Send(Message::Plugin(PluginMsg::Run {
+            id,
+            command,
+        })) => {
+            assert_eq!((id.as_str(), command.as_str()), ("word-count", "count"));
+        }
+        other => panic!("{other:?}"),
+    }
+    app.plugins.installed[0].record.enabled = false;
+    assert!(
+        !app.palette_commands()
+            .iter()
+            .any(|c| c.title.starts_with("Word count:")),
+        "a plugin turned off offers nothing"
+    );
+}
+
+/// A plugin's page draws every kind of block in Clew's own widgets, and a
+/// row naming a place in the code opens it, putting the page away.
+#[test]
+fn a_plugin_page_draws_every_block_and_its_rows_open_the_code() {
+    use crate::app::plugins::{PluginMsg, PluginPage};
+    use clew_plugin::runtime::{
+        Block, Code, Fact, Item, Level, Location, Notice, Row, Table, TreeRow, View,
+    };
+    let mut app = scanned_app("plugin-page");
+    let at = |line| {
+        Some(Location {
+            path: "src/lib.rs".into(),
+            line,
+        })
+    };
+    let view = View {
+        title: "Words by file".into(),
+        blocks: vec![
+            Block::Heading("Counted".into()),
+            Block::Text("Every **word** of the project.".into()),
+            Block::Notice(Notice {
+                level: Level::Warning,
+                text: "Two files were skipped".into(),
+            }),
+            Block::Items(vec![Item {
+                title: "origin".into(),
+                detail: Some("three words".into()),
+                at: at(3),
+                tag: Some("3".into()),
+                level: None,
+            }]),
+            Block::Tree(vec![
+                TreeRow {
+                    depth: 0,
+                    title: "src".into(),
+                    detail: None,
+                    at: None,
+                    tag: None,
+                },
+                TreeRow {
+                    depth: 1,
+                    title: "lib.rs".into(),
+                    detail: None,
+                    at: at(1),
+                    tag: Some("12".into()),
+                },
+            ]),
+            Block::Table(Table {
+                columns: vec!["File".into(), "Words".into()],
+                rows: vec![Row {
+                    cells: vec!["src/lib.rs".into(), "12".into()],
+                    at: at(1),
+                }],
+            }),
+            Block::Facts(vec![Fact {
+                name: "Files".into(),
+                value: "1".into(),
+            }]),
+            Block::Code(Code {
+                language: Some("rust".into()),
+                text: "pub fn origin() -> Point".into(),
+                at: at(3),
+            }),
+        ],
+    };
+    app.show_plugin_page(PluginPage::new(
+        "word-count".into(),
+        "Word count".into(),
+        view,
+    ));
+    let page = app.proj.plugin_page.as_ref().expect("the page is up");
+    let mut drawn = iced_test::simulator(crate::ui::plugin_page(page));
+    for shown in [
+        "Words by file",
+        "Word count",
+        "Counted",
+        "Two files were skipped",
+        "origin",
+        "three words",
+        "lib.rs",
+        "File",
+        "src/lib.rs",
+        "Files",
+    ] {
+        assert!(drawn.find(shown).is_ok(), "{shown} is not drawn");
+    }
+    drawn.click("origin").expect("the row is a button");
+    let opened: Vec<Message> = drawn.into_messages().collect();
+    let open = opened
+        .into_iter()
+        .find(|m| matches!(m, Message::Plugin(PluginMsg::Open { .. })))
+        .expect("the row opens its place");
+    let _open = app.update(open);
+    assert!(app.proj.plugin_page.is_none(), "the page is put away");
 }
