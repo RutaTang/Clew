@@ -100,12 +100,20 @@ impl Limits {
     };
 }
 
-/// Why a call gave nothing back.
+/// Why a call gave nothing back. Each case the window says in the
+/// reader's words; [`Display`](std::fmt::Display) says it in English, for
+/// an agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
     /// The plugin said it could not, in its own words.
     Plugin(String),
-    /// It was stopped, or it crashed: why, in a sentence.
+    /// It ran past its time limit, this many seconds, and was stopped.
+    TimedOut(u64),
+    /// It needed more memory than its limit, this many MB, and was stopped.
+    OutOfMemory(u64),
+    /// It crashed: the panic's message, or the trap.
+    Crashed(String),
+    /// It could not be run at all: why, in a sentence.
     Stopped(String),
 }
 
@@ -113,6 +121,16 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Failure::Plugin(why) | Failure::Stopped(why) => f.write_str(why),
+            Failure::TimedOut(secs) => {
+                write!(f, "the plugin took longer than {secs} s and was stopped")
+            }
+            Failure::OutOfMemory(mb) => {
+                write!(
+                    f,
+                    "the plugin needed more than {mb} MB of memory and was stopped"
+                )
+            }
+            Failure::Crashed(why) => write!(f, "the plugin crashed: {why}"),
         }
     }
 }
@@ -353,25 +371,19 @@ impl Loaded {
 /// Why a call that trapped stopped, in a sentence.
 fn stopped(e: &wasmtime::Error, limits: Limits, out_of_memory: bool, stderr: &Capture) -> Failure {
     if e.downcast_ref::<Trap>() == Some(&Trap::Interrupt) {
-        return Failure::Stopped(format!(
-            "the plugin took longer than {} s and was stopped",
-            limits.deadline.as_secs()
-        ));
+        return Failure::TimedOut(limits.deadline.as_secs());
     }
     if out_of_memory {
-        return Failure::Stopped(format!(
-            "the plugin needed more than {} MB of memory and was stopped",
-            limits.memory / (1024 * 1024)
-        ));
+        return Failure::OutOfMemory((limits.memory / (1024 * 1024)) as u64);
     }
     if let Some(panic) = panic_message(&stderr.text()) {
-        return Failure::Stopped(format!("the plugin crashed: {panic}"));
+        return Failure::Crashed(panic);
     }
     let why = match e.downcast_ref::<Trap>() {
         Some(trap) => trap.to_string(),
         None => e.to_string(),
     };
-    Failure::Stopped(format!("the plugin crashed: {}", capped(&why, 512)))
+    Failure::Crashed(capped(&why, 512))
 }
 
 /// The message of a Rust panic, as the standard library writes it to

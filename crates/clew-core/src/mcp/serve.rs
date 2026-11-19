@@ -43,6 +43,9 @@ pub trait Host: Send + Sync + 'static {
     /// gives the call up. `Err` is a call the protocol refuses (no such
     /// tool); a tool's own failure is an `Ok` output with `is_error` set.
     fn call(&self, name: &str, args: &Value, stop: &AtomicBool) -> Result<ToolOutput, String>;
+    /// The client said who it is (`initialize`'s `clientInfo.name`), for a
+    /// host that tells its user which agent asked for something.
+    fn client(&self, _name: &str) {}
 }
 
 /// How long a modern client may cache the tool list, in milliseconds.
@@ -168,6 +171,13 @@ fn dispatch(
     };
     match method.as_str() {
         "initialize" => {
+            if let Some(client) = params
+                .get("clientInfo")
+                .and_then(|c| c.get("name"))
+                .and_then(Value::as_str)
+            {
+                host.client(client);
+            }
             let asked = params
                 .get("protocolVersion")
                 .and_then(Value::as_str)

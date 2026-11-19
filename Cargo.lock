@@ -1018,6 +1018,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "clew-core",
+ "clew-plugin",
  "clew-protocol",
  "notify-debouncer-full",
  "roxmltree 0.21.2",

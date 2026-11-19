@@ -221,7 +221,7 @@ fn a_call_that_never_ends_is_stopped_at_its_deadline() {
         )
         .unwrap_err();
     assert!(
-        matches!(&stopped, Failure::Stopped(why) if why.contains("took longer")),
+        matches!(&stopped, Failure::TimedOut(_)) && stopped.to_string().contains("took longer"),
         "{stopped:?}"
     );
     assert!(
@@ -255,7 +255,8 @@ fn a_call_that_takes_too_much_memory_is_stopped() {
         )
         .unwrap_err();
     assert!(
-        matches!(&stopped, Failure::Stopped(why) if why.contains("more than 64 MB")),
+        matches!(&stopped, Failure::OutOfMemory(64))
+            && stopped.to_string().contains("more than 64 MB"),
         "{stopped:?}"
     );
 }
@@ -273,7 +274,7 @@ fn a_panic_is_told_in_its_own_words() {
         )
         .unwrap_err();
     assert!(
-        matches!(&stopped, Failure::Stopped(why) if why.contains("index out of bounds") && why.contains("src/lib.rs")),
+        matches!(&stopped, Failure::Crashed(why) if why.contains("index out of bounds") && why.contains("src/lib.rs")),
         "{stopped:?}"
     );
 }
@@ -313,7 +314,11 @@ fn a_plugin_keeps_its_own_store_between_calls() {
             Outcome::Say(format!("run {n}"))
         );
     }
-    assert!(clew_plugin::runtime::store_dir(&dir, "views").unwrap().is_dir());
+    assert!(
+        clew_plugin::runtime::store_dir(&dir, "views")
+            .unwrap()
+            .is_dir()
+    );
     // Without a data folder there is nowhere to keep it, and the plugin is told.
     let bare = Runtime::new(None).unwrap();
     let refused = views(&bare)

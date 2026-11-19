@@ -31834,9 +31834,13 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::ContextMenu(_) => "context menu",
             O::TreeMenu(_) => "tree menu",
             O::Hover(_) => "hover",
+            O::PluginInstall(..) => "plugin install",
+            O::PluginPrompt(_) => "plugin prompt",
         }
     }
     fn clear(app: &mut App) {
+        app.plugins.install = Default::default();
+        app.plugins.prompt = None;
         app.pending_consent = None;
         app.proj.pending_lsp_command = Default::default();
         app.proj.pending_lsp_consent = Default::default();
@@ -31977,6 +31981,20 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 y: 10.0,
             })
         }),
+        Box::new(|a| {
+            a.plugins
+                .install
+                .offer(pending_plugin_install("word-count", 1, None))
+        }),
+        Box::new(|a| {
+            a.plugins.prompt = Some(crate::app::plugins::Prompt {
+                id: "word-count".into(),
+                command: "count".into(),
+                title: "Count words".into(),
+                asks: "Which word?".into(),
+                text: String::new(),
+            })
+        }),
     ];
     let revision = |app: &App| app.proj.time_travel.as_ref().map(|t| t.idx);
     let mut raised = Vec::new();
@@ -31998,7 +32016,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (23, 23),
+        (25, 25),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 
@@ -38991,4 +39009,181 @@ fn the_tree_menu_opens_in_the_other_half_and_does_not_outlive_its_tree() {
     assert!(app.proj.tree_menu.is_some());
     let _ = app.update(Message::Settings(SettingsMsg::Open));
     assert!(app.proj.tree_menu.is_none());
+}
+
+/// An install for the tests to ask about: plugin `id`, whose code needs
+/// `needs` (`clew_rules::plugin` bits), offering one command. Its bytes are
+/// not a plugin: the dialog shows what was inspected, and these tests end
+/// the install with the message the store's work would send.
+pub(crate) fn pending_plugin_install(
+    id: &str,
+    needs: u8,
+    reply: Option<crate::app::plugins::Reply>,
+) -> crate::app::plugins::PendingInstall {
+    let manifest = clew_plugin::Manifest::parse(&format!(
+        "[plugin]\nid = \"{id}\"\nname = \"Word count\"\nversion = \"0.1.0\"\n\
+         description = \"Counts the words of a file.\"\n\n\
+         [[command]]\nid = \"count\"\ntitle = \"Count words\"\n"
+    ))
+    .expect("the manifest is valid");
+    crate::app::plugins::PendingInstall {
+        bytes: Arc::new(b"not a plugin".to_vec()),
+        inspected: clew_plugin::Inspected {
+            manifest,
+            imports: Vec::new(),
+            exports: Vec::new(),
+            needs,
+            sha256: [0; 32],
+        },
+        origin: clew_plugin::store::Origin::Agent("Claude Code".into()),
+        previous: None,
+        reply: reply.unwrap_or(crate::app::plugins::Reply::None),
+    }
+}
+
+/// The window answers what `clew-server mcp` filed for it. A try names the
+/// project it is for: one for a project this window does not have open is
+/// left for the window that has it, and one naming this window's project by
+/// another path to the same folder is taken. A request whose build is gone
+/// is answered at once with why, so the agent is not left waiting.
+#[test]
+fn the_window_takes_the_plugin_requests_meant_for_it() {
+    use clew_plugin::requests::{self, Answer, Ask};
+    let data = clew_core::testutil::TempDir::new("plugin-requests");
+    let _env = data_dir_override(data.path());
+    let mut app = scanned_app("plugin-requests");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let try_on = |root: String| Ask::Try {
+        plugin: "word-count".into(),
+        sha256: "00".into(),
+        command: "count".into(),
+        root,
+        file: None,
+        line: None,
+        input: None,
+    };
+    let file = |ask| requests::file(data.path(), ask, "Claude Code").unwrap();
+    let elsewhere = file(try_on(
+        data.path().join("another-project").display().to_string(),
+    ));
+    let here = file(try_on(format!("{}/./", root.display())));
+    let install = file(Ask::Install {
+        plugin: "word-count".into(),
+        sha256: "00".into(),
+    });
+
+    let found = requests::pending(data.path());
+    assert_eq!(found.len(), 3);
+    let _ = app.update(Message::Plugin(crate::app::plugins::PluginMsg::Requests(
+        Arc::new(found),
+    )));
+
+    let left: Vec<String> = requests::pending(data.path())
+        .into_iter()
+        .map(|(nonce, _)| nonce)
+        .collect();
+    assert_eq!(left, vec![elsewhere], "left for the window that has it");
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    for nonce in [&here, &install] {
+        match requests::wait(data.path(), nonce, std::time::Duration::from_secs(5), &stop) {
+            Some(Answer::Failed { why }) => assert!(!why.is_empty()),
+            other => panic!("{nonce}: {other:?}"),
+        }
+    }
+    assert!(app.plugins.handling.is_empty(), "nothing left in hand");
+    assert!(
+        crate::ui::active_overlay(&app).is_none(),
+        "no install is asked for a build that is gone"
+    );
+}
+
+/// An agent's install is the user's to allow: the dialog takes no Allow
+/// before it was read, a dismissal answers that the user said no, and an
+/// install allowed and written answers with the approved copy's
+/// fingerprint, which the agent's next calls can name.
+#[test]
+fn an_agents_install_is_answered_as_the_user_decides() {
+    use crate::app::plugins::Reply;
+    use clew_plugin::requests::{self, Answer, Ask};
+    let data = clew_core::testutil::TempDir::new("plugin-install-answers");
+    let _env = data_dir_override(data.path());
+    let mut app = blank_app();
+    let filed = || {
+        let ask = Ask::Install {
+            plugin: "word-count".into(),
+            sha256: "00".into(),
+        };
+        let nonce = requests::file(data.path(), ask, "Claude Code").unwrap();
+        assert!(
+            requests::claim(data.path(), &nonce),
+            "taken as a window would"
+        );
+        nonce
+    };
+    let asked = |app: &App| match crate::ui::active_overlay(app) {
+        Some(crate::ui::ActiveOverlay::PluginInstall(pending, number, _)) => {
+            assert_eq!(pending.inspected.manifest.plugin.id, "word-count");
+            Some(number)
+        }
+        _ => None,
+    };
+    let answered = |nonce: &str| {
+        requests::wait(
+            data.path(),
+            nonce,
+            std::time::Duration::from_secs(5),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    };
+
+    let declined = filed();
+    app.plugins.install.offer(pending_plugin_install(
+        "word-count",
+        clew_rules::plugin::READ,
+        Some(Reply::Request(declined.clone())),
+    ));
+    let number = asked(&app).expect("the install is asked");
+    let _ = app.update(Message::Plugin(
+        crate::app::plugins::PluginMsg::InstallAllowed(number),
+    ));
+    assert_eq!(
+        asked(&app),
+        Some(number),
+        "an Allow before the dialog was read is not taken"
+    );
+    let _ = app.update(Message::Plugin(
+        crate::app::plugins::PluginMsg::InstallDismissed(number),
+    ));
+    assert_eq!(asked(&app), None);
+    assert_eq!(answered(&declined), Some(Answer::Declined));
+
+    let allowed = filed();
+    app.plugins.install.offer(pending_plugin_install(
+        "word-count",
+        clew_rules::plugin::READ,
+        Some(Reply::Request(allowed.clone())),
+    ));
+    let number = asked(&app).expect("the install is asked");
+    read_for(&mut app, std::time::Duration::from_secs(5));
+    let _install = app.update(Message::Plugin(
+        crate::app::plugins::PluginMsg::InstallAllowed(number),
+    ));
+    assert_eq!(
+        asked(&app),
+        None,
+        "taken: the install is written off the window"
+    );
+    let _ = app.update(Message::Plugin(crate::app::plugins::PluginMsg::Installed {
+        id: "word-count".into(),
+        reply: Reply::Request(allowed.clone()),
+        result: Ok("fp-word-count".into()),
+    }));
+    assert_eq!(
+        answered(&allowed),
+        Some(Answer::Installed {
+            fingerprint: "fp-word-count".into()
+        })
+    );
+    assert!(app.status.contains("installed"), "{}", app.status);
+    assert!(app.plugins.handling.is_empty());
 }

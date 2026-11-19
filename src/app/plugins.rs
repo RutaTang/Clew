@@ -8,7 +8,7 @@
 //! Its messages, [`PluginMsg`], arrive through `App::update_plugins`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -162,7 +162,7 @@ pub struct Plugins {
     /// Why the last install from a file, or the last change, failed.
     pub(crate) failure: Option<String>,
     /// The requests of `clew-server mcp` this window took on.
-    handling: HashSet<String>,
+    pub(crate) handling: HashSet<String>,
 }
 
 impl std::fmt::Debug for Plugins {
@@ -324,11 +324,20 @@ fn data() -> Result<PathBuf, String> {
     clew_core::lsp::store::data_root().ok_or_else(|| tr!("Clew has no data folder").to_string())
 }
 
-/// A failure, in the reader's words.
+/// A failure, in the reader's words. What a plugin says of itself is shown
+/// as it wrote it; why Clew stopped it is Clew's to say.
 fn failure_words(failure: &Failure) -> String {
     match failure {
-        // The plugin's own words, as it wrote them.
         Failure::Plugin(why) => why.clone(),
+        Failure::TimedOut(secs) => tr!(
+            "it took longer than {seconds} s and was stopped",
+            seconds = secs.to_string()
+        ),
+        Failure::OutOfMemory(mb) => tr!(
+            "it needed more than {megabytes} MB of memory and was stopped",
+            megabytes = mb.to_string()
+        ),
+        Failure::Crashed(why) => tr!("it crashed: {reason}", reason = why.clone()),
         Failure::Stopped(why) => crate::i18n::lookup(why).to_string(),
     }
 }
@@ -577,14 +586,21 @@ impl App {
         });
     }
 
-    /// Tell whoever asked for an install how it went.
-    fn answer_install(&mut self, reply: &Reply, answer: Result<String, String>, declined: bool) {
+    /// Tell whoever asked for an install how it went: installed with this
+    /// fingerprint, said so in these words for an agent; failed; or
+    /// `declined` by the user.
+    fn answer_install(
+        &mut self,
+        reply: &Reply,
+        answer: Result<(String, String), String>,
+        declined: bool,
+    ) {
         match reply {
             Reply::None => {}
             Reply::AskTool { stream, call } => {
                 let (content, is_error) = match (&answer, declined) {
                     (_, true) => ("The user chose not to install it.".to_string(), false),
-                    (Ok(what), _) => (what.clone(), false),
+                    (Ok((_, words)), _) => (words.clone(), false),
                     (Err(why), _) => (why.clone(), true),
                 };
                 let _ = self.send_to_server(clew_protocol::Request::AgentToolResult {
@@ -597,7 +613,7 @@ impl App {
             Reply::Request(nonce) => {
                 let answer = match (answer, declined) {
                     (_, true) => clew_plugin::requests::Answer::Declined,
-                    (Ok(fingerprint), _) => {
+                    (Ok((fingerprint, _)), _) => {
                         clew_plugin::requests::Answer::Installed { fingerprint }
                     }
                     (Err(why), _) => clew_plugin::requests::Answer::Failed { why },
@@ -658,7 +674,7 @@ impl App {
                     let mut answer = match outcome {
                         Ok(outcome) => clew_plugin::tools::describe_outcome(&outcome),
                         Err(Failure::Plugin(why)) => format!("It answered with an error: {why}"),
-                        Err(Failure::Stopped(why)) => format!("It stopped: {why}"),
+                        Err(other) => format!("It did not finish: {other}"),
                     };
                     if !log.is_empty() {
                         answer.push_str("\n\nIts log:\n");
@@ -750,13 +766,15 @@ impl App {
         let mut tasks = Vec::new();
         for (nonce, request) in found {
             // A try is for the window with its project open: another window
-            // leaves it for that one.
+            // leaves it for that one. `clew-server mcp` runs on this machine,
+            // so a remote project is never the one it means.
             if let Ask::Try { root, .. } = &request.ask {
-                let open = self
-                    .proj
-                    .project
-                    .as_ref()
-                    .is_some_and(|p| p.root.to_string_lossy() == *root);
+                let open = self.local_project_state()
+                    && self
+                        .proj
+                        .project
+                        .as_ref()
+                        .is_some_and(|p| same_folder(&p.root, Path::new(root)));
                 if !open {
                     continue;
                 }
@@ -987,9 +1005,11 @@ impl App {
                                     .join(", ")
                             })
                             .unwrap_or_default();
-                        let _ = fingerprint;
-                        Ok(format!(
-                            "The user installed {name}. Its commands are in Clew's command palette: {commands}. You can run one with run_command."
+                        Ok((
+                            fingerprint,
+                            format!(
+                                "The user installed {name}. Its commands are in Clew's command palette: {commands}. You can run one with run_command."
+                            ),
                         ))
                     }
                     Err(why) => {
@@ -1108,6 +1128,17 @@ impl App {
     }
 }
 
+/// Whether `a` and `b` name the same folder: the server names it as it was
+/// resolved (`/private/var/…` for `/var/…`, no `..`, no trailing `/`), the
+/// window as it was opened.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+}
+
 /// Load the approved copy of `record`'s plugin, checked, and link it with
 /// what was granted.
 fn load(runtime: &Runtime, data: &std::path::Path, record: &Record) -> Result<Loaded, String> {
@@ -1139,6 +1170,8 @@ pub(crate) fn requests_subscription(data: PathBuf) -> Subscription<Message> {
 /// How often the requests folder is looked at.
 const REQUESTS_EVERY: std::time::Duration = std::time::Duration::from_millis(700);
 
+// `Subscription::run_with` hands its data over as it was given: a `&PathBuf`.
+#[allow(clippy::ptr_arg)]
 fn watch_requests(data: &PathBuf) -> impl iced::futures::Stream<Item = Message> + use<> {
     let data = data.clone();
     iced::stream::channel(

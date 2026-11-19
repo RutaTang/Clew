@@ -33,16 +33,18 @@ pub(crate) fn plugin_row_place(view: &View, block: usize, row: usize) -> Option<
     }
 }
 
-/// What the permissions `bits` let a plugin do, in the reader's words.
-pub(crate) fn permission_words(bits: u8) -> Vec<String> {
-    let mut words = Vec::new();
-    if bits & clew_rules::plugin::READ != 0 {
-        words.push(tr!("Read this project's files").to_string());
+/// What the permissions `bits` let a plugin do, in one line of the
+/// reader's words (Settings → Plugins).
+pub(crate) fn permission_line(bits: u8) -> String {
+    let read = bits & clew_rules::plugin::READ != 0;
+    let git = bits & clew_rules::plugin::GIT != 0;
+    match (read, git) {
+        (true, true) => tr!("Reads the open project's files and history"),
+        (true, false) => tr!("Reads the open project's files"),
+        (false, true) => tr!("Reads the open project's history"),
+        (false, false) => tr!("Reads none of your files"),
     }
-    if bits & clew_rules::plugin::GIT != 0 {
-        words.push(tr!("Read the project's history").to_string());
-    }
-    words
+    .to_string()
 }
 
 /// A notice's colour.
@@ -342,8 +344,14 @@ pub(crate) fn plugin_install_modal(
     let new = pending.new_permissions();
     let mut can: Vec<Element<'_, Message>> = Vec::new();
     for (bit, words) in [
-        (clew_rules::plugin::READ, tr!("Read this project's files")),
-        (clew_rules::plugin::GIT, tr!("Read the project's history")),
+        (
+            clew_rules::plugin::READ,
+            tr!("Read the open project's files"),
+        ),
+        (
+            clew_rules::plugin::GIT,
+            tr!("Read the open project's history"),
+        ),
     ] {
         if pending.inspected.needs & bit == 0 {
             continue;
@@ -353,7 +361,7 @@ pub(crate) fn plugin_install_modal(
             .align_y(iced::Center);
         if pending.previous.is_some() && new & bit != 0 {
             line = line.push(
-                container(text(tr!("new")).size(ts::CAPTION).color(theme::warning()))
+                container(text(tr!("New")).size(ts::CAPTION).color(theme::warning()))
                     .padding([1, 6])
                     .style(theme::chip),
             );
@@ -362,12 +370,10 @@ pub(crate) fn plugin_install_modal(
     }
     if can.is_empty() {
         can.push(
-            text(tr!(
-                "• Nothing beyond its own results: it reads none of your files"
-            ))
-            .size(ts::BASE)
-            .color(theme::fg())
-            .into(),
+            text(format!("• {}", tr!("Nothing beyond showing its results")))
+                .size(ts::BASE)
+                .color(theme::fg())
+                .into(),
         );
     }
     let section = |heading: String| text(heading).size(ts::SMALL).color(theme::dim());
@@ -378,7 +384,7 @@ pub(crate) fn plugin_install_modal(
             text(manifest.description_in(lang).to_string())
                 .size(ts::BASE)
                 .color(theme::fg()),
-            column![section(tr!("Adds").to_string())]
+            column![section(tr!("What it adds").to_string())]
                 .extend(adds.into_iter().map(|a| {
                     text(format!("• {a}"))
                         .size(ts::BASE)
@@ -386,7 +392,7 @@ pub(crate) fn plugin_install_modal(
                         .into()
                 }))
                 .spacing(4),
-            column![section(tr!("Can").to_string())]
+            column![section(tr!("What it may do").to_string())]
                 .extend(can)
                 .spacing(4),
             text(tr!(
@@ -394,12 +400,10 @@ pub(crate) fn plugin_install_modal(
             ))
             .size(ts::BODY)
             .color(theme::dim()),
-            text(format!(
-                "{} · {} {} · {}",
-                origin_words(&pending.origin),
-                tr!("version"),
-                manifest.plugin.version,
-                &pending.inspected.fingerprint()[..12]
+            text(tr!(
+                "{origin}, version {version}",
+                origin = origin_words(&pending.origin),
+                version = manifest.plugin.version.clone()
             ))
             .size(ts::SMALL)
             .color(theme::dim()),
@@ -460,12 +464,7 @@ pub(crate) fn plugin_prompt_modal(prompt: &Prompt) -> Element<'_, Message> {
 /// One installed plugin, in Settings: its name and what it is, what it may
 /// do, a switch, and Remove; its log's last lines under it.
 fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message> {
-    let can = permission_words(plugin.record.granted());
-    let can = if can.is_empty() {
-        tr!("Reads none of your files").to_string()
-    } else {
-        can.join(", ")
-    };
+    let can = permission_line(plugin.record.granted());
     let commands = plugin
         .manifest
         .commands
@@ -546,7 +545,7 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
             "",
             Some(
                 tr!(
-                    "A plugin adds what you need to Clew. Ask your agent for one, in your own words: “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before it runs."
+                    "A plugin adds what you need to Clew. Ask your agent for one, in your own words: “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before installing it."
                 )
                 .to_string(),
             ),

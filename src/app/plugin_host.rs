@@ -15,7 +15,6 @@ use clew_core::fs_scan::FileEntry;
 use clew_plugin::runtime::{BlameLine, Commit, Hit, Host, Level, ProjectInfo, Query, Symbol};
 
 use crate::app::rpc::AiClient;
-use crate::tr;
 
 /// The most of a file a plugin may read.
 const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
@@ -109,7 +108,7 @@ impl Host for ProjectHost {
     fn read(&self, path: &str) -> Result<String, String> {
         let entry = self
             .entry(path)
-            .ok_or_else(|| tr!("{file} is not a file of the project", file = path).to_string())?;
+            .ok_or_else(|| format!("{path} is not a file of the project"))?;
         match &self.source {
             Source::Local(root) => {
                 match clew_core::fs_scan::read_confined_capped_checked(
@@ -118,9 +117,7 @@ impl Host for ProjectHost {
                     MAX_READ_BYTES,
                 ) {
                     Ok(Some(text)) => Ok(text),
-                    Ok(None) => {
-                        Err(tr!("{file} is not text, or larger than 4 MB", file = path).to_string())
-                    }
+                    Ok(None) => Err(format!("{path} is not text, or larger than 4 MB")),
                     Err(e) => Err(format!("{path}: {e}")),
                 }
             }
@@ -136,8 +133,7 @@ impl Host for ProjectHost {
                     .map(|(_, text)| text)
                     .ok_or_else(|| match read.unread.into_iter().next() {
                         Some((_, Some(why))) => format!("{path}: {why}"),
-                        _ => tr!("could not read {file} from the remote host", file = path)
-                            .to_string(),
+                        _ => format!("could not read {path} from the remote host"),
                     })
             }
         }
@@ -146,7 +142,7 @@ impl Host for ProjectHost {
     fn outline(&self, path: &str) -> Result<Vec<Symbol>, String> {
         let text = self.read(path)?;
         let lang = crate::highlight::detect(std::path::Path::new(path))
-            .ok_or_else(|| tr!("Clew has no outline for {file}", file = path).to_string())?;
+            .ok_or_else(|| format!("Clew has no outline for {path}"))?;
         Ok(clew_core::outline::extract(&text, lang)
             .into_iter()
             .map(|s| Symbol {
@@ -198,7 +194,7 @@ impl Host for ProjectHost {
                             .collect::<Vec<_>>(),
                         error,
                     ),
-                    _ => return Err(tr!("the search was not answered").to_string()),
+                    _ => return Err("the search was not answered".to_string()),
                 }
             }
         };
@@ -229,7 +225,7 @@ impl Host for ProjectHost {
             Source::Remote(ai, handle) => Self::wait(handle, ai.git(op))?,
         };
         let clew_protocol::GitResult::Log(page) = result else {
-            return Err(tr!("git answered something else").to_string());
+            return Err("git answered something else".to_string());
         };
         Ok(page
             .commits
@@ -246,7 +242,7 @@ impl Host for ProjectHost {
     fn git_blame(&self, path: &str) -> Result<Vec<BlameLine>, String> {
         let entry = self
             .entry(path)
-            .ok_or_else(|| tr!("{file} is not a file of the project", file = path).to_string())?;
+            .ok_or_else(|| format!("{path} is not a file of the project"))?;
         let info = match &self.source {
             Source::Local(root) => {
                 clew_core::git::try_info(root, &entry.abs).map_err(|e| e.to_string())?
@@ -257,11 +253,11 @@ impl Host for ProjectHost {
                 };
                 match Self::wait(handle, ai.request(request))? {
                     clew_protocol::Event::GitInfo { info, .. } => info,
-                    _ => return Err(tr!("git answered something else").to_string()),
+                    _ => return Err("git answered something else".to_string()),
                 }
             }
         };
-        let info = info.ok_or_else(|| tr!("the project has no git history").to_string())?;
+        let info = info.ok_or_else(|| "the project has no git history".to_string())?;
         Ok(info
             .blame
             .into_iter()

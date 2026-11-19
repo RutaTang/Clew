@@ -8,6 +8,11 @@
 //! the project's cached explanations. All of them only read, and every path
 //! they take is confined to the project, as in a turn.
 //!
+//! It also serves the plugin tools (`clew_plugin::tools`): an agent writes
+//! a plugin's source and builds it here, and asks Clew's window, which has
+//! the plugin runtime and the user, to try a build on the open project or
+//! to ask the user to install it (`clew_plugin::requests`).
+//!
 //! Run from the project (or with `--root <dir>`), it serves that project until
 //! the client closes its input. The file list is rescanned when it is a few
 //! seconds old, so files created meanwhile are found. Language servers the
@@ -30,12 +35,20 @@ use crate::agent_lsp::LspPool;
 /// How old the file list may be before a call rescans it.
 const FILES_FRESH_FOR: Duration = Duration::from_secs(5);
 
+/// How long a try waits for Clew's window: a run is stopped after 30 s.
+const TRY_WAIT: Duration = Duration::from_secs(90);
+
+/// How long an install waits for the user to answer.
+const INSTALL_WAIT: Duration = Duration::from_secs(15 * 60);
+
 /// The project the server serves, and what its tools share.
 struct CodeTools {
     root: PathBuf,
     files: Mutex<(Instant, Arc<Vec<FileEntry>>)>,
     lsp: Arc<LspPool>,
     rt: tokio::runtime::Handle,
+    /// The client's name, for the user to see who asked for an install.
+    client: Mutex<String>,
 }
 
 impl CodeTools {
@@ -81,7 +94,18 @@ impl Host for CodeTools {
                 description: t.description,
                 input_schema: t.parameters,
             })
+            .chain(clew_plugin::tools::tool_defs().into_iter().map(|t| Tool {
+                name: t.name.into(),
+                title: None,
+                description: format!("[Clew plugins] {}", t.description),
+                input_schema: t.schema,
+            }))
             .collect()
+    }
+
+    fn client(&self, name: &str) {
+        *self.client.lock().unwrap_or_else(PoisonError::into_inner) =
+            name.chars().filter(|c| !c.is_control()).take(80).collect();
     }
 
     fn call(
@@ -90,6 +114,13 @@ impl Host for CodeTools {
         args: &serde_json::Value,
         stop: &AtomicBool,
     ) -> Result<ToolOutput, String> {
+        if clew_plugin::tools::is_plugin_tool(name) {
+            let (text, is_error) = match self.plugin_call(name, args, stop) {
+                Ok(text) => (text, false),
+                Err(why) => (why, true),
+            };
+            return Ok(ToolOutput { text, is_error });
+        }
         let text = agent::run_code_tool(
             self.root.clone(),
             self.files(),
@@ -105,6 +136,90 @@ impl Host for CodeTools {
             text,
             is_error: false,
         })
+    }
+}
+
+impl CodeTools {
+    /// A plugin tool: done here, or asked of Clew's window.
+    fn plugin_call(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        stop: &AtomicBool,
+    ) -> Result<String, String> {
+        use clew_plugin::requests::{Answer, Ask};
+        use clew_plugin::tools::Step;
+        let data =
+            clew_core::lsp::store::data_root().ok_or("Clew has no data folder on this machine")?;
+        let agent = {
+            let client = self.client.lock().unwrap_or_else(PoisonError::into_inner);
+            if client.is_empty() {
+                "an agent".to_string()
+            } else {
+                client.clone()
+            }
+        };
+        // What an install says once the user allowed it.
+        let mut installed = String::new();
+        let (ask, wait) = match clew_plugin::tools::call(&data, name, args, stop) {
+            Step::Done(result) => return result,
+            Step::Try {
+                built,
+                command,
+                file,
+                line,
+                input,
+            } => (
+                Ask::Try {
+                    plugin: built.inspected.manifest.plugin.id.clone(),
+                    sha256: clew_plugin::inspect::hex(&built.inspected.sha256),
+                    command,
+                    root: self.root.to_string_lossy().into_owned(),
+                    file,
+                    line,
+                    input,
+                },
+                TRY_WAIT,
+            ),
+            Step::Install { built } => {
+                let manifest = &built.inspected.manifest;
+                installed = format!(
+                    "The user installed {}. Its commands are in Clew's command palette: {}.",
+                    manifest.plugin.name,
+                    manifest
+                        .commands
+                        .iter()
+                        .map(|c| format!("\"{}\"", c.title))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                (
+                    Ask::Install {
+                        plugin: manifest.plugin.id.clone(),
+                        sha256: clew_plugin::inspect::hex(&built.inspected.sha256),
+                    },
+                    INSTALL_WAIT,
+                )
+            }
+        };
+        let installing = matches!(ask, Ask::Install { .. });
+        let nonce = clew_plugin::requests::file(&data, ask, &agent)?;
+        match clew_plugin::requests::wait(&data, &nonce, wait, stop) {
+            Some(Answer::Tried { result }) => Ok(result),
+            Some(Answer::Installed { .. }) => Ok(installed),
+            Some(Answer::Declined) => Ok("The user chose not to install it.".into()),
+            Some(Answer::Failed { why }) => Err(why),
+            None if installing => Err(
+                "The user did not answer in Clew, so the install was withdrawn. Ask them to \
+                 open Clew and try again."
+                    .into(),
+            ),
+            None => Err(format!(
+                "No Clew window with this project open picked the try up. Open {} in Clew \
+                 and try again.",
+                self.root.display()
+            )),
+        }
     }
 }
 
@@ -142,6 +257,7 @@ pub async fn serve_mcp(root: &Path) {
         files: Mutex::new((Instant::now(), Arc::new(files))),
         lsp: lsp.clone(),
         rt,
+        client: Mutex::new(String::new()),
     });
     clew_core::mcp::serve::serve(host, tokio::io::stdin(), tokio::io::stdout()).await;
     lsp.close();
@@ -183,10 +299,22 @@ mod tests {
             lsp: Arc::new(LspPool::new(root.clone(), Default::default())),
             rt: tokio::runtime::Handle::current(),
             root,
+            client: Mutex::new(String::new()),
         };
         let names: Vec<String> = host.tools().into_iter().map(|t| t.name).collect();
         assert!(names.contains(&"search".to_string()) && names.contains(&"read".to_string()));
         assert!(!names.contains(&"answer".to_string()));
+        // The plugin tools are served beside the code tools.
+        for plugin_tool in [
+            "plugin_guide",
+            "plugin_new",
+            "plugin_build",
+            "plugin_install",
+        ] {
+            assert!(names.contains(&plugin_tool.to_string()), "{plugin_tool}");
+        }
+        host.client("Claude Code\n");
+        assert_eq!(*host.client.lock().unwrap(), "Claude Code");
         let host = Arc::new(host);
         let h = host.clone();
         let found = tokio::task::spawn_blocking(move || {
