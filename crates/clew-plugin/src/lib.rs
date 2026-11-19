@@ -7,14 +7,19 @@
 //! - [`mod@inspect`] reads a plugin's file without running it: its manifest,
 //!   imports, exports and the permissions they need.
 //! - [`store`] keeps what the user approved, and the copies Clew runs.
+//! - [`authoring`], [`tools`] and [`requests`] are what agents make plugins
+//!   with.
 //! - `runtime` (a feature) runs plugins.
 
+pub mod authoring;
 pub mod build;
 pub mod inspect;
 pub mod manifest;
+pub mod requests;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 pub mod store;
+pub mod tools;
 
 pub use inspect::{Inspected, inspect};
 pub use manifest::Manifest;
