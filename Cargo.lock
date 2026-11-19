@@ -833,6 +833,7 @@ dependencies = [
  "chrono",
  "clew-core",
  "clew-protocol",
+ "clew-rules",
  "clew-voice",
  "iced",
  "iced_runtime",
@@ -867,6 +868,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "clew-protocol",
+ "clew-rules",
  "flate2",
  "globset",
  "grep-matcher",
@@ -931,6 +933,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "clew-rules"
+version = "0.1.0"
 
 [[package]]
 name = "clew-server"

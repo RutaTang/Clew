@@ -1127,101 +1127,13 @@ pub(crate) fn past_clews_words<'a>(heard: &'a str, said: &[String]) -> &'a str {
     heard[from..].trim_start()
 }
 
-/// What sends a heard utterance where it goes: every fact [`App::on_words`]
-/// routes on, read off the words and the app before anything is done.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RouteFacts {
-    /// "Bye, Clew".
-    pub(crate) bye: bool,
-    /// The microphone's label, "Stop listening", said.
-    pub(crate) stop_listening_said: bool,
-    /// Nothing said past Clew's name.
-    pub(crate) empty: bool,
-    /// A command waits for a yes.
-    pub(crate) confirm_waiting: bool,
-    /// Only a word that stops Clew ("stop", "okay, be quiet").
-    pub(crate) hush: bool,
-    /// What opens with a yes or a no.
-    pub(crate) yes_or_no: Option<bool>,
-    /// What it is to a question waiting: one of its answers, or a yes or a no.
-    pub(crate) to_question: Option<QuestionWord>,
-    /// An answer is being written in Ask.
-    pub(crate) answer_being_written: bool,
-    /// Spoken commands are on.
-    pub(crate) run_commands: bool,
-}
-
-/// What words are to a question waiting ([`crate::app::onscreen::ToQuestion`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum QuestionWord {
-    YesOrNo,
-    Answer,
-}
-
-/// One step of where heard words go. Every step acts but the two `Try`s,
-/// which act only on words that are a command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Step {
-    Bye,
-    SayHowToStop,
-    Nothing,
-    RunWaiting,
-    DeclineWaiting,
-    Hush,
-    TryCommand,
-    TryCommandsBackOn,
-    Hold,
-    Ask,
-}
-
-/// Where heard words go: the steps to take, in order, until one acts.
-///
-/// The rules the voice reviews kept returning to are theorems about this
-/// function in `verification/Clew/VoiceRoute.lean` — a word that stops Clew
-/// is never sent to Ask, nor taken for a yes; what is said to a question
-/// waiting is never asked; "Bye, Clew" is always heard first — and a test
-/// checks this function against the model on every combination of facts.
-pub(crate) fn route(f: &RouteFacts) -> Vec<Step> {
-    if f.bye {
-        return vec![Step::Bye];
-    }
-    if f.stop_listening_said {
-        return vec![Step::SayHowToStop];
-    }
-    if f.empty {
-        return vec![Step::Nothing];
-    }
-    if f.confirm_waiting {
-        // "Stop" is a no too — "Okay, stop" as well, though it opens with a
-        // yes. Anything else said puts the command away, and is read as
-        // itself.
-        match if f.hush { Some(false) } else { f.yes_or_no } {
-            Some(true) => return vec![Step::RunWaiting],
-            Some(false) => return vec![Step::DeclineWaiting],
-            None => {}
-        }
-    }
-    // An answer of a stop word's name the question offers is that answer.
-    let hush = f.hush && f.to_question != Some(QuestionWord::Answer);
-    // While an answer is being written, a stop word is that answer's —
-    // before any command of its name (the debugger's Stop).
-    if hush && f.answer_being_written {
-        return vec![Step::Hush];
-    }
-    let mut steps = vec![if f.run_commands {
-        Step::TryCommand
-    } else {
-        Step::TryCommandsBackOn
-    }];
-    steps.push(if hush {
-        Step::Hush
-    } else if f.to_question.is_some() {
-        Step::Hold
-    } else {
-        Step::Ask
-    });
-    steps
-}
+/// Where heard words go, once [`App::on_words`] has read every fact it
+/// routes on off the words and the app: `clew_rules::voice`, whose source is
+/// translated to Lean and proved to be the model the theorems in
+/// `verification/Clew/VoiceRoute.lean` are about — a word that stops Clew is
+/// never sent to Ask, nor taken for a yes; what is said to a question waiting
+/// is never asked; "Bye, Clew" is always heard first.
+pub(crate) use clew_rules::voice::{QuestionWord, RouteFacts, Step, route};
 
 /// Whether a call is Clew's own voice, heard back (`said`, its last
 /// sentences): only if Clew called itself (`named` times) in what it

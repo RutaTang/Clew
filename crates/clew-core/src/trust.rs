@@ -713,35 +713,16 @@ pub fn trusted_location(path: &Path) -> bool {
         dirs.push(node(&m, m.is_dir()));
         dir = d.parent();
     }
-    trusted_by(me, file, &dirs)
+    trusted_by(me, &file, &dirs)
 }
 
 /// What [`trusted_location`] reads of the file, and of each directory above
-/// it: its owner, its mode bits, and whether it is the right kind (a regular
-/// file, a directory).
+/// it, and its decision: `clew_rules::location`, whose source is translated
+/// to Lean and proved to be the model in `verification/Clew/Guards.lean` —
+/// where a yes is proved to leave no other user able to write the file or
+/// replace an entry on its path.
 #[cfg(unix)]
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Node {
-    pub uid: u32,
-    pub mode: u32,
-    pub kind_ok: bool,
-}
-
-/// [`trusted_location`]'s decision, from what it read: the file and every
-/// directory above it the right kind and owned by `me` or root, the file
-/// writable by neither group nor others, and each directory too unless it
-/// is sticky. That a yes leaves no other user able to write the file or
-/// replace an entry on its path is proved in `verification/Clew/Guards.lean`.
-#[cfg(unix)]
-pub(crate) fn trusted_by(me: u32, file: Node, dirs: &[Node]) -> bool {
-    let owned = |n: &Node| n.uid == me || n.uid == 0;
-    file.kind_ok
-        && owned(&file)
-        && file.mode & 0o022 == 0
-        && dirs
-            .iter()
-            .all(|d| d.kind_ok && owned(d) && (d.mode & 0o1000 != 0 || d.mode & 0o022 == 0))
-}
+pub(crate) use clew_rules::location::{Node, trusted_by};
 
 /// Without POSIX ownership and modes there is no cheap way to prove a
 /// location private, so every command is staged.
@@ -1156,7 +1137,7 @@ mod tests {
             let file = node(&input[1]);
             let dirs: Vec<Node> = input[2].as_array().unwrap().iter().map(node).collect();
             assert_eq!(
-                trusted_by(me, file, &dirs),
+                trusted_by(me, &file, &dirs),
                 want.as_bool().unwrap(),
                 "trusted_by({me}, {file:?}, {dirs:?})"
             );

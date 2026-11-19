@@ -2,7 +2,7 @@ import Clew.Text
 import Clew.Trust
 
 /-!
-# Two guards — `trusted_by` in `crates/clew-core/src/trust.rs`, `check_headers` in `crates/clew-core/src/mcp/config.rs`
+# Two guards — `trusted_by` in `crates/clew-rules/src/location.rs`, `check_headers` in `crates/clew-core/src/mcp/config.rs`
 
 **A program Clew runs where it is.** A language server a project names is
 run from a copy Clew makes of the approved bytes — unless the program sits
@@ -12,7 +12,9 @@ and of each directory above it: owner, mode bits, kind. Proved here: when
 it says yes, no other user can write the file or replace any directory
 entry on its path — under the Unix permission rules, taking every user as
 possibly in the file's group, since that is not known. (An ACL is not mode
-bits: the code's own comment says what it does with one.)
+bits: the code's own comment says what it does with one.) The Rust
+function itself, translated to Lean by Charon and Aeneas, is proved to be
+`trustedBy` in `verification/extracted/Equal.lean`.
 
 **An MCP server's headers.** A header the user configures is sent as a
 line of the request. `check_headers` refuses a name that is not a header

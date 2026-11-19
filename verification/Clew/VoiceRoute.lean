@@ -1,5 +1,5 @@
 /-!
-# Where spoken words go — `route` in `src/app/voice.rs`
+# Where spoken words go — `route` in `crates/clew-rules/src/voice.rs`
 
 Everything the reader says in voice mode goes one of a few ways: it turns
 the microphone off, answers a command waiting for a yes, stops Clew
@@ -24,6 +24,9 @@ every combination of facts:
 * every route ends in exactly one step that acts, after at most one `Try`,
   and never takes a step whose subject is not there (a waiting command, a
   question).
+
+The Rust function itself, translated to Lean by Charon and Aeneas, is
+proved to be this model in `verification/extracted/Equal.lean`.
 -/
 
 namespace Clew.VoiceRoute

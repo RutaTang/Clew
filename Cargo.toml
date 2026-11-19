@@ -1,12 +1,14 @@
 # The clew workspace: the `clew` GUI client (this package), `clew-core` (the
 # backend logic both binaries share), `clew-protocol` (the client <-> server wire
-# contract), `clew-server` (the headless backend the client runs as a local
+# contract), `clew-rules` (the pure decisions the Lean proofs in
+# verification/ are about, translated to Lean from their own source),
+# `clew-server` (the headless backend the client runs as a local
 # child or deploys over SSH), `clew-voice` (listening and offline speech
 # recognition, free of anything platform-bound: built and tested on Linux,
 # macOS and Windows alike) and `clew-speak` (answers read aloud by an
 # on-device voice, in a process of its own beside the client).
 [workspace]
-members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server", "crates/clew-speak", "crates/clew-voice"]
+members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-rules", "crates/clew-server", "crates/clew-speak", "crates/clew-voice"]
 # Third-party crates carried with a fix of clew's (see vendor/README.md): built
 # as dependencies, not linted, formatted or tested as clew's own.
 exclude = ["vendor"]
@@ -21,6 +23,7 @@ rust-version = "1.95"
 [dependencies]
 clew-core = { path = "crates/clew-core" }
 clew-protocol = { path = "crates/clew-protocol" }
+clew-rules = { path = "crates/clew-rules" }
 # Voice: the microphone, and whisper.cpp's speech recognition on this machine.
 clew-voice = { path = "crates/clew-voice" }
 # `access(2)` / `getuid(2)` for the self-update and SSH control-socket checks.

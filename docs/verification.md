@@ -12,6 +12,8 @@ Some of Clew's rules are proved, not only tested. For each rule, `verification/`
 - which programs Clew runs where they are, and which headers it sends;
 - where spoken words go.
 
+For two of them, which programs Clew runs where they are and where spoken words go, the theorems reach the Rust itself: Aeneas translates the code to Lean, and the translation is proved equal to the model.
+
 ## What is proved
 
 **Path confinement** — `check_lexical` in `crates/clew-core/src/confine.rs`, modelled in `verification/Clew/Confine.lean`.
@@ -57,11 +59,11 @@ The user, host and port in a key are the ones ssh connects with. With `CLEW_SSH`
 - A machine has one label, whether it is reached as a saved connection or through `CLEW_SSH` with the same arguments, for any user name that is not itself an `ssh://` address. So approvals given through either are filed under one name.
 - The known_hosts field Clew writes a host key under names one host and one port. It holds none of the pattern syntax (`*`, `?`, `!`, `,`, a hashed `|1|` name) that would let one key vouch for other hosts.
 
-**Two guards** — `trusted_by` in `crates/clew-core/src/trust.rs` and `check_headers` in `crates/clew-core/src/mcp/config.rs`, modelled in `Guards.lean`.
+**Two guards** — `trusted_by` in `crates/clew-rules/src/location.rs` (which `trusted_location` in `crates/clew-core/src/trust.rs` calls) and `check_headers` in `crates/clew-core/src/mcp/config.rs`, modelled in `Guards.lean`.
 - A language server a project names runs from Clew's own copy of the approved bytes, unless it sits where nobody but you or root can change it. When `trusted_by` lets it run in place, no other user can write it or replace any directory entry on the way to it. This uses the Unix permission rules, and counts every user as possibly in the file's group.
 - The headers `check_headers` accepts for an MCP server are read back from the request as exactly those headers, one line each, under their own names. This holds however leniently the server splits lines: at a CR, an LF or a NUL. No value can start a header of its own.
 
-**Where spoken words go** — `route` in `src/app/voice.rs`, modelled in `VoiceRoute.lean`.
+**Where spoken words go** — `route` in `crates/clew-rules/src/voice.rs` (which the app calls), modelled in `VoiceRoute.lean`.
 - "Bye, Clew" is always heard first.
 - A word that stops Clew is never sent to Ask. If the question waiting offers an answer by that name, the word is that answer.
 - A stop word is never taken for a yes either: "okay, stop" begins with a yes.
@@ -77,7 +79,8 @@ A theorem is about a model. What connects each model to the code:
 - **The model reads like the code.** It takes the same steps in the same order. Every Rust standard-library function it relies on, down to what `char::is_whitespace` means, is spelled out in `Text.lean`. Those are tested through the functions that use them: every `White_Space` code point and its neighbours are among the test inputs.
 - **Test cases.** `lake exe vectors` runs each model on a fixed set of inputs and writes the answers to `verification/vectors/*.json`. The inputs are every short input over an alphabet chosen to reach every branch, plus the edge cases each file names. `cargo test` runs the real Rust functions on the same inputs and requires the same answers. If the code and the model ever disagree, a test fails.
 - **The shell model is checked against a real shell.** Every shell test case is also run through `/bin/sh`, which must read it back as the same words.
-- **For the voice routing, the inputs are every possible input**: all 1,152 combinations of facts. The Rust `route` is therefore the model, and the theorems hold of it outright. For the other rules the inputs are a large sample, not all possible inputs.
+- **For two rules, the code itself is translated and proved.** `route` and `trusted_by` live in `crates/clew-rules`. Charon and Aeneas translate that Rust source into Lean (`verification/extracted/ClewRules.lean`), and `Equal.lean` proves that the translation equals the model for every input. It always returns: no panic, no overflow, no index out of bounds, and the loop over directories ends. And it returns exactly what the model computes. So every theorem about these two models holds of the code that runs. See [The code that runs](#the-code-that-runs).
+- For the other rules the test cases are a large sample of inputs, not all of them.
 
 `verification/check.sh` checks three things:
 - every proof checks;
@@ -86,12 +89,20 @@ A theorem is about a model. What connects each model to the code:
 
 CI runs it in the `verification` job. The Lean toolchain is pinned in `verification/lean-toolchain`, and CI checks the release's SHA-256.
 
+`verification/extracted/check.sh` checks the translated code:
+- `ClewRules.lean` is exactly what Charon and Aeneas make of `crates/clew-rules` today, so a change to the Rust that is not proved again fails;
+- every proof in `Equal.lean` checks, with warnings as errors;
+- those proofs rest on Lean's three standard axioms and nothing else.
+
+CI runs it in the `extracted` job, with Charon and Aeneas from a pinned release whose SHA-256 it checks.
+
 ## What the proofs rest on
 
 - Lean's kernel and its three standard axioms.
 - SHA-256 being collision resistant. The theorems about approvals and server digests are about the bytes that are hashed. That different bytes give different hashes is SHA-256's own promise.
 - What the operating system does with a path. Symlinks and canonicalization are not modelled. `confine` checks the resolved path again at run time, against the canonical root.
-- The test cases. Outside the voice routing they are a sample of inputs, not all of them.
+- The test cases. Outside `route` and `trusted_by` they are a sample of inputs, not all of them.
+- For `route` and `trusted_by`: that Charon and Aeneas translate the Rust faithfully, and that rustc compiles it as Rust's semantics say. These tools are trusted, as the compiler is.
 - A POSIX shell. A login shell that is not one (fish, csh) is outside the model; the scripts Clew runs remotely avoid what those read differently, and a test checks that they do.
 - What ssh's own configuration does. A key's user, host and port are the ones on ssh's command line. What `~/.ssh/config`, `-F` or `-o HostName=` maps them to is not read: a `Host` alias is known by its name.
 
@@ -110,23 +121,28 @@ These are the places where Clew decides who may do what, or what to trust. Each 
 | What an approval covers | `trust` fingerprints | Proved |
 | Which machine and project an approval is filed under | `derived::project_key`, `scope_label`, `ssh_endpoint` | Proved |
 | Whether a project's language server may run | `lsp_gate::lsp_command_allowed` | The rule, that its fingerprint was approved, rests on the proved fingerprints. Running exactly the bytes that were hashed is file-system work, tested |
-| Whether a folder may hold a program Clew runs unstaged | `trust::trusted_by` | Proved. Reading the owners and modes it decides from is the file system's |
+| Whether a folder may hold a program Clew runs unstaged | `clew_rules::location::trusted_by` | Proved of the code itself (Aeneas). Reading the owners and modes it decides from is the file system's |
 | How messages are framed | `framing` | Proved |
 | What Clew hands to a shell | `shell_command`, `sh_c`, `quote` | Proved, and checked against `/bin/sh` |
 | What Clew hands to ssh | `SavedConnection::ssh_args` | Proved |
 | Which host a recorded host key vouches for | `known_hosts_pattern`, `plain_host_field` | Proved |
-| Where spoken words go | `voice::route` | Proved |
+| Where spoken words go | `clew_rules::voice::route` | Proved of the code itself (Aeneas) |
 | Whether hovering may run the debugged program's code | `dap::hover_eval_allowed` | Tested: one `or` of the debugger's promise and your choice |
 | An MCP server's request headers | `mcp::config::check_headers` | Proved |
 | Signing in to an MCP server | `mcp` OAuth | Tested: a network protocol |
 
-## Why the models are written by hand
+## The code that runs
 
-Aeneas, with Charon, translates Rust into Lean, so a model would be the code itself rather than a copy of it. It was considered and not used, for two reasons:
-- Its Lean library depends on Mathlib. The check would take tens of minutes and gigabytes, where it now takes seconds.
-- The functions here lean on parts of Rust that Aeneas models only in part: `str` methods, iterators and closures, and async I/O.
+Most models are written step for step after the code, and test cases tie the two together. For `route` and `trusted_by` there is no copy: the Lean that the theorems reach is the Rust that runs.
 
-So each model is written step for step after the code, and the test cases tie the two together. If Aeneas comes to cover these, an extracted model can replace a hand-written one, and the theorems stay as they are.
+- **`crates/clew-rules`** holds these two decisions. It has no dependencies and only pure code, in the part of Rust that Aeneas translates: `match`, `while`, `Vec`, integers and bit masks. The app and `clew-core` call it.
+- **`verification/extracted/extract.sh`** runs Charon and Aeneas on that crate and writes `ClewRules.lean`. Nobody edits that file by hand.
+- **`Equal.lean`** proves the translated functions equal the models in `verification/Clew`, as stated in [How the proofs reach the code](#how-the-proofs-reach-the-code).
+- **A project apart.** Aeneas's Lean library needs Mathlib, so this is a Lake project of its own. The proofs in `verification/` still need nothing beyond Lean. Its first build compiles Aeneas and the 1,500 Mathlib modules it uses; CI takes Mathlib from its build cache.
+
+A change to `crates/clew-rules` is caught twice. The translation no longer matches `ClewRules.lean`, and once it is rewritten the proof fails if the new code no longer computes what the model does. Weakening `trusted_by`'s mask from `0o022` to `0o002` fails both.
+
+The other rules stay as models checked by test cases, because their code leans on what Aeneas does not translate. Aeneas reads a `str` as bytes and does not model iterating over its characters, string formatting, closures passed to iterators, `char` classes, SHA-256 or async I/O. A rule moves into `clew-rules` once it can be written without them.
 
 ## What is not verified, and why
 
@@ -146,9 +162,20 @@ lake exe vectors vectors    # rewrite the test cases after changing a model
 
 [elan](https://github.com/leanprover/elan) installs the Lean version `lean-toolchain` names. The project needs nothing beyond Lean itself.
 
+```sh
+cd verification/extracted
+lake exe cache get          # Mathlib from its build cache (or let the first build compile it)
+./check.sh                  # the translation is current, the proofs, what they rest on
+./extract.sh --write        # rewrite ClewRules.lean after changing crates/clew-rules
+```
+
+`extract.sh` needs `charon` and `aeneas` from the Aeneas release `lakefile.lean` names, on `PATH`, and the Rust nightly that release's `rust-toolchain` file names, with `rustc-dev`.
+
 ## Adding a rule
 
 1. Model the function in `verification/Clew/<Area>.lean`, step for step, and prove what it should guarantee.
 2. Add its test cases to `Vectors.lean`, run `lake exe vectors vectors`, and commit the JSON file.
 3. In the Rust code, add a test that runs the real function on them with `clew_core::testutil::lean_cases`.
 4. List the new theorems in `Audit.lean`, then run `./check.sh`.
+
+If the function can be written in the part of Rust Aeneas translates, put it in `crates/clew-rules` instead of a test. Add it to `--start-from` in `extract.sh`, run `./extract.sh --write`, and prove the translation equal to the model in `Equal.lean`.
