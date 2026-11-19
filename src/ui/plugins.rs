@@ -384,7 +384,11 @@ pub(crate) fn plugin_install_modal(
         );
     }
     let section = |heading: String| text(heading).size(ts::SMALL).color(theme::dim());
-    let (decline, accept) = (tr!("Don't install"), tr!("Install"));
+    // An update's answers say so, as its title does.
+    let (decline, accept) = match pending.previous {
+        Some(_) => (tr!("Don't update"), tr!("Update")),
+        None => (tr!("Don't install"), tr!("Install")),
+    };
     let panel = container(
         column![
             text(title).size(ts::TITLE).color(theme::fg()),

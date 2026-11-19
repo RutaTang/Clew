@@ -1381,7 +1381,14 @@ impl App {
                     let log: Vec<String> = host
                         .take_events()
                         .into_iter()
-                        .map(|HostEvent::Log(level, line)| format!("[{level:?}] {line}"))
+                        .map(|HostEvent::Log(level, line)| {
+                            let level = match level {
+                                Level::Info => "info",
+                                Level::Warning => "warning",
+                                Level::Error => "error",
+                            };
+                            format!("[{level}] {line}")
+                        })
                         .collect();
                     let mut answer = match outcome {
                         Ok(said) => said,

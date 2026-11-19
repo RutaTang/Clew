@@ -475,11 +475,21 @@ fn panic_message(stderr: &str) -> Option<String> {
 
 /// Write what a call printed to the plugin's log.
 fn forward_output(host: &dyn Host, level: Level, capture: &Capture) {
-    let text = capture.text();
+    let text = without_backtrace_hint(&capture.text());
     let text = text.trim();
     if !text.is_empty() {
         host.log(level, text);
     }
+}
+
+/// `text` without the standard library's hint after a panic: it names an
+/// environment variable no one can set for a plugin, and in the log it was
+/// a line to read with nothing to do about it.
+fn without_backtrace_hint(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.starts_with("note: run with `RUST_BACKTRACE=1`"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The most of a plugin's log one call passes on, in lines and in bytes:
@@ -1051,6 +1061,19 @@ mod tests {
         let cut = capped("日本語のテキスト", 8);
         assert!(cut.len() <= 8 && cut.ends_with('…'), "{cut}");
         assert_eq!(line("a\nb\r\nc"), "a b  c");
+    }
+
+    #[test]
+    fn the_backtrace_hint_is_not_logged() {
+        let stderr = "thread '<unnamed>' (1) panicked at src/lib.rs:12:5:\nno such file\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n";
+        assert_eq!(
+            without_backtrace_hint(stderr),
+            "thread '<unnamed>' (1) panicked at src/lib.rs:12:5:\nno such file"
+        );
+        assert_eq!(
+            without_backtrace_hint("a note: of its own"),
+            "a note: of its own"
+        );
     }
 
     #[test]
