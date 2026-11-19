@@ -35,7 +35,12 @@ use crate::agent_lsp::LspPool;
 /// How old the file list may be before a call rescans it.
 const FILES_FRESH_FOR: Duration = Duration::from_secs(5);
 
-/// How long a try waits for Clew's window: a run is stopped after 30 s.
+/// How long a request may wait for a Clew window to take it before the
+/// agent is told no window is open for it.
+const TAKE_WITHIN: Duration = Duration::from_secs(8);
+
+/// How long a try waits for Clew's window: a command is stopped after 30 s,
+/// a graph after 60 s.
 const TRY_WAIT: Duration = Duration::from_secs(90);
 
 /// How long an install waits for the user to answer.
@@ -74,7 +79,7 @@ impl Host for CodeTools {
             .unwrap_or_default();
         (
             "clew".into(),
-            env!("CARGO_PKG_VERSION").into(),
+            clew_version().into(),
             Some(format!(
                 "Code-intelligence tools for the project \"{name}\" ({}). Paths are \
                  project-relative. Prefer `definition`/`references`/`hover` (language-server \
@@ -149,17 +154,14 @@ impl CodeTools {
         args: &serde_json::Value,
         stop: &AtomicBool,
     ) -> Result<String, String> {
-        use clew_plugin::requests::{Answer, Ask};
+        use clew_plugin::requests::{Answer, Ask, Waited};
         use clew_plugin::tools::Step;
         let data =
             clew_core::lsp::store::data_root().ok_or("Clew has no data folder on this machine")?;
         let agent = {
             let client = self.client.lock().unwrap_or_else(PoisonError::into_inner);
-            if client.is_empty() {
-                "an agent".to_string()
-            } else {
-                client.clone()
-            }
+            // Unnamed, the window says "an agent" in the user's language.
+            client.clone()
         };
         // What an install says once the user allowed it.
         let mut installed = String::new();
@@ -199,23 +201,58 @@ impl CodeTools {
         };
         let installing = matches!(ask, Ask::Install { .. });
         let nonce = clew_plugin::requests::file(&data, ask, &agent)?;
-        match clew_plugin::requests::wait(&data, &nonce, wait, stop) {
-            Some(Answer::Tried { result }) => Ok(result),
-            Some(Answer::Installed { .. }) => Ok(installed),
-            Some(Answer::Declined) => Ok("The user chose not to install it.".into()),
-            Some(Answer::Failed { why }) => Err(why),
-            None if installing => Err(
-                "The user did not answer in Clew, so the install was withdrawn. Ask them to \
-                 open Clew and try again."
+        // A window takes a request within a second of it being filed: one
+        // not taken in a few means none is open for it, said now rather
+        // than after the whole wait.
+        match clew_plugin::requests::wait_taken(&data, &nonce, TAKE_WITHIN, wait, stop) {
+            Waited::Answered(Answer::Tried { result }) => Ok(result),
+            Waited::Answered(Answer::Installed { .. }) => Ok(installed),
+            Waited::Answered(Answer::Declined) => Ok("The user chose not to install it.".into()),
+            Waited::Answered(Answer::Failed { why }) => Err(why),
+            Waited::NotTaken if installing => Err(
+                "Clew is not open, so the user could not be asked. Ask them to open Clew, \
+                 then try again."
                     .into(),
             ),
-            None => Err(format!(
-                "No Clew window with this project open picked the try up. Open {} in Clew \
-                 and try again.",
+            Waited::NotTaken => Err(format!(
+                "No Clew window has this project open, so the try was not run. Ask the user \
+                 to open {} in Clew, then try again.",
                 self.root.display()
             )),
+            Waited::NoAnswer if installing => Err(
+                "The user did not answer in Clew, so the install was withdrawn. Ask them \
+                 whether they want it, then try again."
+                    .into(),
+            ),
+            Waited::NoAnswer => Err("The try did not finish in time.".into()),
         }
     }
+}
+
+/// Clew's release version, as its workspace's root package gives it: this
+/// crate's own version is an internal 0.1.0, which an agent took for
+/// Clew's.
+fn clew_version() -> &'static str {
+    package_version(include_str!("../../../Cargo.toml")).unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+/// The `version` of a `Cargo.toml`'s `[package]`.
+fn package_version(manifest: &str) -> Option<&str> {
+    let mut in_package = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if in_package
+            && let Some(rest) = line.strip_prefix("version")
+            && let Some(value) = rest.trim_start().strip_prefix('=')
+        {
+            return value.trim().strip_prefix('"')?.split('"').next();
+        }
+    }
+    None
 }
 
 /// The project root `args` name (`--root <dir>`), else the working directory.
@@ -260,6 +297,17 @@ pub async fn serve_mcp(root: &Path) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_server_says_clews_release_version() {
+        let manifest = "[workspace]\nmembers = []\n\n[package]\nname = \"clew\"\nversion = \"0.2.5\"\n\n[dependencies]\nx = { version = \"1\" }\n";
+        assert_eq!(package_version(manifest), Some("0.2.5"));
+        assert_eq!(package_version("[dependencies]\nversion = \"9\"\n"), None);
+        let real = clew_version();
+        assert!(real.split('.').count() == 3, "{real}");
+        assert_ne!(real, "0.1.0", "the root package's, not this crate's");
+    }
+
     use super::*;
 
     #[test]

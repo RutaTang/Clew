@@ -28,10 +28,23 @@ fn turn_app(
             _ => None,
         })
         .expect("the turn was asked");
+    // The window's own tools first; then the tools that write plugins,
+    // which run here too (`app::plugins`).
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, [OPEN_FILE, GO_TO_SYMBOL, LIST_COMMANDS, RUN_COMMAND]);
+    assert_eq!(
+        names[..4],
+        [OPEN_FILE, GO_TO_SYMBOL, LIST_COMMANDS, RUN_COMMAND]
+    );
+    let plugins: Vec<String> = crate::app::plugins::plugin_tools()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert!(!plugins.is_empty());
+    assert_eq!(names[4..], plugins);
     for tool in &tools {
         assert_eq!(tool.parameters["type"], "object", "{}", tool.name);
+    }
+    for tool in &tools[..4] {
         assert!(tool.description.starts_with("[The user's Clew window]"));
     }
     (app, stream, rx)

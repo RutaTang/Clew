@@ -298,6 +298,8 @@ pub(crate) fn plugin_page(page: &PluginPage) -> Element<'_, Message> {
 fn origin_words(origin: &Origin) -> String {
     match origin {
         Origin::Ask => tr!("Made by the agent in Ask").to_string(),
+        // An agent that gave no name, said in the reader's words.
+        Origin::Agent(name) if name.trim().is_empty() => tr!("Made by an agent").to_string(),
         Origin::Agent(name) => tr!("Made by {agent}", agent = name.clone()),
         Origin::File(path) => tr!("From the file {path}", path = path.clone()),
     }
@@ -361,9 +363,14 @@ pub(crate) fn plugin_install_modal(
             .align_y(iced::Center);
         if pending.previous.is_some() && new & bit != 0 {
             line = line.push(
-                container(text(tr!("New")).size(ts::CAPTION).color(theme::warning()))
-                    .padding([1, 6])
-                    .style(theme::chip),
+                // Its own words: "New" is the catalogs' "create new".
+                container(
+                    text(tr!("Newly asked"))
+                        .size(ts::CAPTION)
+                        .color(theme::warning()),
+                )
+                .padding([1, 6])
+                .style(theme::chip),
             );
         }
         can.push(line.into());
@@ -400,13 +407,20 @@ pub(crate) fn plugin_install_modal(
             ))
             .size(ts::BODY)
             .color(theme::dim()),
-            text(tr!(
-                "{origin}, version {version}",
-                origin = origin_words(&pending.origin),
-                version = manifest.plugin.version.clone()
-            ))
-            .size(ts::SMALL)
-            .color(theme::dim()),
+            // Who made it, and which version: apart, as "Made by Claude
+            // Code, version 0.1.0" read as Claude Code's version.
+            row![
+                text(origin_words(&pending.origin))
+                    .size(ts::SMALL)
+                    .color(theme::dim()),
+                text(tr!(
+                    "Version {version}",
+                    version = manifest.plugin.version.clone()
+                ))
+                .size(ts::SMALL)
+                .color(theme::dim()),
+            ]
+            .spacing(16),
         ]
         .push(super::explain_view::more_questions(waiting))
         .push(

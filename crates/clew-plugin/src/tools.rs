@@ -112,7 +112,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "plugin_try",
-            description: "Run a command of the plugin's latest build on the open project, or build one of its graphs, and see what it gives back, to check it works. Nothing is shown to the user.",
+            description: "Run a command of the plugin's latest build on the open project, or build one of its graphs, and see what it gives back, to check it works. Nothing is shown to the user. Needs Clew open with the project.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -129,7 +129,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "plugin_install",
-            description: "Ask the user, in Clew, to install the plugin's latest build. They see its name, description, commands and permissions, and decide. Answers whether they installed it.",
+            description: "Ask the user, in Clew, to install the plugin's latest build. They see its name, description, what it adds and its permissions, and decide. Answers whether they installed it, and where what it adds is. Needs Clew open.",
             schema: json!({"type": "object", "properties": {"id": id}, "required": ["id"]}),
             read_only: false,
         },

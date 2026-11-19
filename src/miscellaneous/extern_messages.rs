@@ -22,12 +22,18 @@ pub(crate) const MESSAGES: &[&str] = &[
     ),
     tr_noop!("Clew cannot use {other}:// proxies"),
     tr_noop!("Clew has no model to answer with — add an API key in Clew's settings ({arg1})"),
+    tr_noop!(
+        "Clew is not open, so the user could not be asked. Ask them to open Clew, then try again."
+    ),
     tr_noop!("Clew lost track of this language server after an internal error; restart it"),
     tr_noop!("EmbeddingGemma is not downloaded: get it in Settings → Embeddings"),
     tr_noop!("GHCi cannot pause a running program"),
     tr_noop!("GHCi is gone: {e}"),
     tr_noop!("Invalid pattern: {e}"),
     tr_noop!("MCP server `{name}`: {why}"),
+    tr_noop!(
+        "No Clew window has this project open, so the try was not run. Ask the user to open {arg1} in Clew, then try again."
+    ),
     tr_noop!("Node did not answer in time"),
     tr_noop!("Node did not open its inspector within {arg1} s"),
     tr_noop!("Node's inspector did not answer"),
@@ -43,6 +49,10 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("The other {arg1} functions of the cycle, by signature:\n"),
     tr_noop!("The project's TypeScript {v} — runs the project's own code"),
     tr_noop!("The tool failed: {content}"),
+    tr_noop!("The try did not finish in time."),
+    tr_noop!(
+        "The user did not answer in Clew, so the install was withdrawn. Ask them whether they want it, then try again."
+    ),
     tr_noop!("TypeScript {v} (installed in {place})"),
     tr_noop!("WAV format {tag} at {bits} bits is not supported"),
     tr_noop!("Xdebug closed the connection"),

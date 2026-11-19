@@ -213,21 +213,57 @@ pub fn answer(data: &Path, nonce: &str, answer: &Answer) -> Result<(), String> {
 /// Wait for the answer to `nonce`, until `timeout` passes or `cancel` is
 /// set; `None` then, and the request is withdrawn.
 pub fn wait(data: &Path, nonce: &str, timeout: Duration, cancel: &AtomicBool) -> Option<Answer> {
+    match wait_taken(data, nonce, timeout, timeout, cancel) {
+        Waited::Answered(answer) => Some(answer),
+        Waited::NotTaken | Waited::NoAnswer => None,
+    }
+}
+
+/// How a wait for a window's answer ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Waited {
+    Answered(Answer),
+    /// No window took the request within the time given for that: none is
+    /// open, or none has the project the request is for.
+    NotTaken,
+    /// A window took it, and gave no answer in time.
+    NoAnswer,
+}
+
+/// [`wait`], but given up after `take_within` if no window took the
+/// request by then: an agent is told at once that Clew is not open, not
+/// after the whole of `timeout`.
+pub fn wait_taken(
+    data: &Path,
+    nonce: &str,
+    take_within: Duration,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Waited {
     let dir = requests_dir(data);
+    let request_path = dir.join(format!("{nonce}.request.json"));
+    let started = std::time::Instant::now();
     let answer_path = dir.join(format!("{nonce}.answer.json"));
-    let deadline = std::time::Instant::now() + timeout;
+    let deadline = started + timeout;
+    let take_by = started + take_within.min(timeout);
     loop {
         if let Ok(Some(text)) = clew_core::statefile::read_capped_checked(&answer_path, 1024 * 1024)
         {
             let _ = std::fs::remove_file(&answer_path);
-            return serde_json::from_str(&text).ok();
+            return serde_json::from_str(&text).map_or(Waited::NoAnswer, Waited::Answered);
         }
-        if cancel.load(Ordering::Relaxed) || std::time::Instant::now() >= deadline {
-            let _ = std::fs::remove_file(dir.join(format!("{nonce}.request.json")));
+        let now = std::time::Instant::now();
+        let untaken = request_path.exists();
+        if cancel.load(Ordering::Relaxed) || now >= deadline || (untaken && now >= take_by) {
+            let _ = std::fs::remove_file(&request_path);
             let _ = std::fs::remove_file(dir.join(format!("{nonce}.taken.json")));
             // An answer written as the wait gave up is not left behind.
             let _ = std::fs::remove_file(&answer_path);
-            return None;
+            return if untaken {
+                Waited::NotTaken
+            } else {
+                Waited::NoAnswer
+            };
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -245,6 +281,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A request no window takes is given up within the time given for
+    /// that, as not taken; one taken and not answered waits it all.
+    #[test]
+    fn a_request_no_window_takes_is_given_up_early() {
+        let data = temp("untaken");
+        let nonce = file(&data, install(), "agent").unwrap();
+        let started = std::time::Instant::now();
+        let waited = wait_taken(
+            &data,
+            &nonce,
+            Duration::from_millis(300),
+            Duration::from_secs(20),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(waited, Waited::NotTaken);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(pending(&data).is_empty(), "withdrawn");
+
+        let nonce = file(&data, install(), "agent").unwrap();
+        assert!(claim(&data, &nonce));
+        let waited = wait_taken(
+            &data,
+            &nonce,
+            Duration::from_millis(100),
+            Duration::from_millis(600),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(waited, Waited::NoAnswer, "taken, so waited for its answer");
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     fn install() -> Ask {
