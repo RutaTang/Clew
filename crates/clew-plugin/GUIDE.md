@@ -152,7 +152,8 @@ g.edge(a, b, "publishes");
 - A command has 30 seconds and 256 MB of memory. A graph has 60 seconds and 512 MB.
 - A crash or a panic stops only that run. The user, and you in `plugin_try`, see the panic message and where it happened.
 - No network, no files outside the project, no processes, no environment variables. `std::fs`, `std::net` and `std::process` fail; use `project` and `git`.
-- Dependencies come from crates.io, by version. A crate that runs its own code while building (a build script or a proc macro) is refused, apart from serde, serde_derive, serde_json, thiserror, anyhow, proc-macro2, quote, syn, memchr, libm, num-traits, paste and a few others the build names. Pure-Rust crates such as `regex` are fine.
+- Nothing is read from the computer while building either: `include_str!`, `include_bytes!`, `include!`, `env!`, `option_env!` and `#[path]` are refused in the plugin's code. Put text the plugin needs in the code itself, and read the project with `project`.
+- Dependencies come from crates.io, by version. A crate that runs its own code while building (a build script or a proc macro) is refused, apart from serde, serde_json, thiserror, anyhow, memchr, libm, num-traits, libc, and the few others serde, serde_json and url need, which the build names. Pure-Rust crates such as `regex`, `url`, `chrono` and `toml` are fine. `paste` is not.
 
 ## Writing a good plugin
 

@@ -10,13 +10,22 @@
 //!   `Cargo.lock` are copied into a clean folder of Clew's to build in: a
 //!   `.cargo/config.toml` or `rust-toolchain.toml` in the source never
 //!   reaches cargo.
-//! - cargo and rustc are run by absolute path, with the variables that
-//!   steer a build (`RUSTFLAGS`, wrappers) taken out.
-//! - Before building, `cargo metadata` (which resolves and downloads, and
-//!   runs nothing) lists every package with a build script or that is a
-//!   proc macro: the code a build runs besides the compiler. Each must be
-//!   one of a few crates nearly every Rust program uses
-//!   ([`BUILD_CODE_ALLOWED`]), or the build is refused, naming it.
+//! - cargo and rustc are run by absolute path, told only the variables
+//!   finding the toolchain and linking need ([`kept`]): nothing that steers
+//!   a build (`RUSTFLAGS`, wrappers), and nothing of the user's — a key in
+//!   a variable — for `env!` to read. The network's settings are told only
+//!   to `cargo fetch`, which downloads and runs nothing; what compiles runs
+//!   offline.
+//! - Before building, `cargo metadata` lists every package with a build
+//!   script or that is a proc macro: the code a build runs besides the
+//!   compiler. Each must be one of a few crates nearly every Rust program
+//!   uses ([`BUILD_CODE_ALLOWED`]), or the build is refused, naming it. The
+//!   plugin's own crate and the SDK are known by where they are, not by
+//!   name: a crates.io crate named like them is checked as any other.
+//! - Nothing compiled reads a file of the computer's beyond its own sources,
+//!   or its environment (`reads`): the plugin's code may not include files
+//!   or read variables at all, and a dependency only includes files of its
+//!   own package.
 //!
 //! What comes back for an agent is short: the compiler's own messages (20 at
 //! most, no colour, paths as in the source), or what the plugin is.
@@ -36,18 +45,25 @@ pub const TARGET: &str = "wasm32-wasip2";
 pub const MIN_RUST: (u32, u32) = (1, 82);
 
 /// Crates whose build script or proc macro a plugin's build may run: the
-/// ones nearly every Rust program depends on. Any other is refused.
+/// ones nearly every Rust program depends on, through serde, serde_json and
+/// url among others. Any other is refused. None of the proc macros can put a
+/// macro's name together from parts (as `paste` can), which would hide an
+/// `include_str!` from the check of the plugin's own code (`reads`).
 pub const BUILD_CODE_ALLOWED: &[&str] = &[
     "anyhow",
     "autocfg",
+    "displaydoc",
+    "icu_normalizer_data",
+    "icu_properties_data",
+    "libc",
     "libm",
     "memchr",
     "num-traits",
-    "paste",
     "proc-macro2",
     "quote",
     "rustversion",
     "serde",
+    "serde_core",
     "serde_derive",
     "serde_json",
     "syn",
@@ -55,8 +71,12 @@ pub const BUILD_CODE_ALLOWED: &[&str] = &[
     "thiserror-impl",
     "typenum",
     "version_check",
+    "yoke-derive",
     "zerocopy",
     "zerocopy-derive",
+    "zerofrom-derive",
+    "zerovec-derive",
+    "zmij",
 ];
 
 /// The guest SDK, written next to every plugin built.
@@ -113,7 +133,8 @@ pub enum BuildError {
     },
     /// `plugin.toml` or the source as a whole is not right.
     Source(String),
-    /// A dependency would run code of its own while building.
+    /// A dependency would run code of its own while building, or the code
+    /// would read what it may not.
     Policy(String),
     /// The compiler refused the code: its messages.
     Compile(Vec<String>),
@@ -258,6 +279,12 @@ pub fn cargo_toml(manifest: &Manifest) -> String {
     package.insert("version".into(), manifest.plugin.version.clone().into());
     package.insert("edition".into(), "2021".into());
     package.insert("publish".into(), false.into());
+    // Only the library: no build script, and nothing else cargo would find
+    // and build by itself.
+    package.insert("build".into(), false.into());
+    for auto in ["autobins", "autoexamples", "autotests", "autobenches"] {
+        package.insert(auto.into(), false.into());
+    }
     let mut lib = toml::Table::new();
     lib.insert("path".into(), "src/lib.rs".into());
     lib.insert(
@@ -308,7 +335,36 @@ fn stage_sources(source: &Path, crate_dir: &Path) -> Result<(), BuildError> {
     if !to.join("lib.rs").is_file() {
         return Err(BuildError::Source("there is no src/lib.rs".into()));
     }
-    Ok(())
+    let mut found = Vec::new();
+    check_own_code(&to, "src", &mut found);
+    if found.is_empty() {
+        Ok(())
+    } else {
+        found.sort();
+        found.truncate(MAX_MESSAGES);
+        Err(BuildError::Policy(format!(
+            "The plugin was not built:\n{}",
+            found.join("\n")
+        )))
+    }
+}
+
+/// What the Rust files staged in `dir` (`rel` from the plugin's folder)
+/// would read of the computer they are built on.
+fn check_own_code(dir: &Path, rel: &str, found: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        let rel = format!("{rel}/{name}");
+        if path.is_dir() {
+            check_own_code(&path, &rel, found);
+        } else if let Ok(text) = std::fs::read_to_string(&path) {
+            found.extend(crate::reads::own_code(&rel, &text));
+        }
+    }
 }
 
 fn copy_rust(
@@ -381,39 +437,103 @@ fn write_if_changed(path: &Path, contents: &str) -> std::io::Result<()> {
 
 // -- running cargo -------------------------------------------------------------
 
-/// The variables taken out of cargo's environment: what would steer a build
-/// away from what Clew wrote (flags, wrappers, another target folder or
-/// toolchain).
-const STEERING: &[&str] = &[
-    "RUSTFLAGS",
-    "RUSTDOCFLAGS",
-    "CARGO_ENCODED_RUSTFLAGS",
-    "CARGO_ENCODED_RUSTDOCFLAGS",
-    "RUSTC_WRAPPER",
-    "RUSTC_WORKSPACE_WRAPPER",
-    "RUSTC_BOOTSTRAP",
-    "RUSTUP_TOOLCHAIN",
-    "CARGO_TARGET_DIR",
-    "CARGO_INCREMENTAL",
-    "CARGO_BUILD_TARGET",
-    "CARGO_BUILD_RUSTFLAGS",
-    "CARGO_BUILD_RUSTC",
-    "CARGO_BUILD_RUSTC_WRAPPER",
-    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
-    "CARGO_BUILD_TARGET_DIR",
-];
+/// Whether cargo and the compiler are told Clew's variable `name`: what
+/// finding the toolchain, its homes and the linker needs, and — for the
+/// download only (`network`) — how to reach crates.io. Everything else is
+/// left out: what steers a build (`RUSTFLAGS`, wrappers, another target
+/// folder or toolchain), and anything of the user's, a key in a variable,
+/// which `env!` in compiled code would read.
+pub(crate) fn kept(name: &str, network: bool) -> bool {
+    const ALWAYS: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "LD_LIBRARY_PATH",
+        // macOS: where the linker for build scripts is.
+        "DEVELOPER_DIR",
+        "SDKROOT",
+        "MACOSX_DEPLOYMENT_TARGET",
+        // Windows: the system, and where Visual Studio's linker is.
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "COMMONPROGRAMFILES",
+        "COMMONPROGRAMFILES(X86)",
+        "COMMONPROGRAMW6432",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+        "OS",
+        "INCLUDE",
+        "LIB",
+        "LIBPATH",
+        "PLATFORM",
+        "UCRTVERSION",
+        "UNIVERSALCRTSDKDIR",
+        "VCINSTALLDIR",
+        "VCTOOLSINSTALLDIR",
+        "VCTOOLSVERSION",
+        "VSINSTALLDIR",
+        "VISUALSTUDIOVERSION",
+        "DEVENVDIR",
+        "WINDOWSSDKDIR",
+        "WINDOWSSDKVERSION",
+        "WINDOWSSDKBINPATH",
+        "WINDOWSSDKLIBVERSION",
+        "WINDOWSLIBPATH",
+        "EXTENSIONSDKDIR",
+        "FRAMEWORKDIR",
+        "FRAMEWORKDIR64",
+        "FRAMEWORKVERSION",
+        "FRAMEWORKVERSION64",
+    ];
+    const NETWORK: &[&str] = &[
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "CARGO_HTTP_PROXY",
+        "CARGO_HTTP_CAINFO",
+        "CARGO_HTTP_CHECK_REVOKE",
+        "CARGO_HTTP_TIMEOUT",
+        "CARGO_HTTP_LOW_SPEED_LIMIT",
+        "CARGO_HTTP_MULTIPLEXING",
+        "CARGO_HTTP_SSL_VERSION",
+        "CARGO_NET_RETRY",
+        "CARGO_NET_GIT_FETCH_WITH_CLI",
+        "CARGO_REGISTRIES_CRATES_IO_PROTOCOL",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+    ];
+    let upper = name.to_ascii_uppercase();
+    ALWAYS.contains(&upper.as_str())
+        // Nix's compiler wrappers read their settings from these.
+        || upper.starts_with("NIX_")
+        || (network && NETWORK.contains(&upper.as_str()))
+}
 
-/// cargo, set up to build in `dir` with `toolchain`, into `target`.
-fn cargo(toolchain: &Toolchain, dir: &Path, target: &Path) -> Command {
+/// cargo, set up to build in `dir` with `toolchain`, into `target`; told
+/// how to reach crates.io only when it downloads (`network`).
+fn cargo(toolchain: &Toolchain, dir: &Path, target: &Path, network: bool) -> Command {
     let mut cmd = clew_core::spawn::command(&toolchain.cargo);
-    cmd.current_dir(dir);
-    for name in STEERING {
-        cmd.env_remove(name);
-    }
-    for (name, _) in std::env::vars_os() {
-        let name = name.to_string_lossy();
-        if name.starts_with("CARGO_PROFILE_") || name.starts_with("CARGO_TARGET_") {
-            cmd.env_remove(&*name);
+    cmd.current_dir(dir).env_clear();
+    for (name, value) in std::env::vars_os() {
+        if name.to_str().is_some_and(|n| kept(n, network)) {
+            cmd.env(name, value);
         }
     }
     cmd.env("RUSTC", &toolchain.rustc)
@@ -557,18 +677,41 @@ fn last_lines(text: &str, n: usize) -> String {
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
+/// `cargo metadata`'s packages, but the plugin's own crate and the SDK:
+/// known by being local packages at `ours` (their `Cargo.toml`s), not by
+/// their names, which a crates.io crate can have too.
+fn dependencies<'m>(
+    metadata: &'m serde_json::Value,
+    ours: &[PathBuf],
+) -> impl Iterator<Item = &'m serde_json::Value> {
+    let ours: Vec<PathBuf> = ours
+        .iter()
+        .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+        .collect();
+    metadata["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(move |package| {
+            let local = package["source"].is_null();
+            let at = package["manifest_path"].as_str().map(PathBuf::from);
+            let at = at.map(|p| p.canonicalize().unwrap_or(p));
+            !(local && at.is_some_and(|at| ours.contains(&at)))
+        })
+}
+
+fn read_metadata(metadata: &str) -> Result<serde_json::Value, BuildError> {
+    serde_json::from_str(metadata)
+        .map_err(|e| BuildError::Failed(format!("cargo metadata said what Clew cannot read: {e}")))
+}
+
 /// Refuse a build whose dependencies run code of their own while building,
 /// beyond [`BUILD_CODE_ALLOWED`], as `cargo metadata` lists them.
-fn check_dependencies(metadata: &str, plugin: &str) -> Result<(), BuildError> {
-    let metadata: serde_json::Value = serde_json::from_str(metadata).map_err(|e| {
-        BuildError::Failed(format!("cargo metadata said what Clew cannot read: {e}"))
-    })?;
+fn check_dependencies(metadata: &str, ours: &[PathBuf]) -> Result<(), BuildError> {
+    let metadata = read_metadata(metadata)?;
     let mut refused = Vec::new();
-    for package in metadata["packages"].as_array().into_iter().flatten() {
+    for package in dependencies(&metadata, ours) {
         let name = package["name"].as_str().unwrap_or_default();
-        if name == plugin || name == "clew-plugin-sdk" {
-            continue;
-        }
         let runs_code = package["targets"]
             .as_array()
             .into_iter()
@@ -596,6 +739,88 @@ fn check_dependencies(metadata: &str, plugin: &str) -> Result<(), BuildError> {
             BUILD_CODE_ALLOWED.join(", ")
         )))
     }
+}
+
+/// The version of [`check_dependency_reads`]'s rules: what passed under
+/// other rules is checked again.
+const READS_RULES: &str = "reads 1";
+
+/// Refuse a build in which a dependency would read a file outside its own
+/// package (`reads`). A crates.io package is the same wherever it is used,
+/// so one that passed is noted in `checked` and not read again.
+fn check_dependency_reads(
+    metadata: &str,
+    ours: &[PathBuf],
+    checked: &Path,
+) -> Result<(), BuildError> {
+    let metadata = read_metadata(metadata)?;
+    let before = std::fs::read_to_string(checked).unwrap_or_default();
+    let mut lines = before.lines();
+    let mut passed: std::collections::BTreeSet<String> = if lines.next() == Some(READS_RULES) {
+        lines.map(str::to_string).collect()
+    } else {
+        Default::default()
+    };
+    let count = passed.len();
+    let mut refused = Vec::new();
+    for package in dependencies(&metadata, ours) {
+        let id = package["id"].as_str().unwrap_or_default();
+        let from_registry = package["source"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("registry+") || s.starts_with("sparse+"));
+        if from_registry && passed.contains(id) {
+            continue;
+        }
+        let name = package["name"].as_str().unwrap_or_default();
+        let version = package["version"].as_str().unwrap_or_default();
+        let Some(root) = package["manifest_path"]
+            .as_str()
+            .and_then(|m| Path::new(m).parent())
+        else {
+            continue;
+        };
+        let libs = package["targets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| {
+                t["kind"].as_array().into_iter().flatten().any(|k| {
+                    matches!(
+                        k.as_str(),
+                        Some("lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro")
+                    )
+                })
+            })
+            .filter_map(|t| t["src_path"].as_str());
+        let mut ok = true;
+        for lib in libs {
+            if let Err(why) = crate::reads::dependency(root, Path::new(lib)) {
+                refused.push(format!("{name} {version}: {why}"));
+                ok = false;
+                break;
+            }
+        }
+        if ok && from_registry {
+            passed.insert(id.to_string());
+        }
+    }
+    if passed.len() != count {
+        let mut text = format!("{READS_RULES}\n");
+        for id in &passed {
+            text.push_str(id);
+            text.push('\n');
+        }
+        let _ = std::fs::write(checked, text);
+    }
+    if refused.is_empty() {
+        return Ok(());
+    }
+    refused.sort();
+    refused.truncate(MAX_MESSAGES);
+    Err(BuildError::Policy(format!(
+        "The plugin was not built: a dependency would read a file outside its own package while building, which could be one of the user's.\n{}\nUse another crate, or write what you need yourself.",
+        refused.join("\n")
+    )))
 }
 
 /// What `cargo build --message-format=json` said: the plugin's file, the
@@ -708,9 +933,20 @@ pub fn build(
     }
 
     let target = work.join("target");
-    let mut metadata = cargo(toolchain, &crate_dir, &target);
+    // Downloading is all that reaches the network, and runs nothing.
+    let mut fetch = cargo(toolchain, &crate_dir, &target, true);
+    fetch.arg("fetch");
+    let ran = run(fetch, METADATA_DEADLINE, cancel)?;
+    if !ran.success {
+        return Err(BuildError::Source(format!(
+            "its dependencies could not be resolved or downloaded:\n{}",
+            last_lines(&ran.stderr, 20)
+        )));
+    }
+    let mut metadata = cargo(toolchain, &crate_dir, &target, false);
     metadata.args([
         "metadata",
+        "--offline",
         "--format-version",
         "1",
         "--filter-platform",
@@ -723,11 +959,17 @@ pub fn build(
             last_lines(&ran.stderr, 20)
         )));
     }
-    check_dependencies(&ran.stdout, &id)?;
+    let ours = [
+        crate_dir.join("Cargo.toml"),
+        work.join("sdk/clew-plugin-sdk/Cargo.toml"),
+    ];
+    check_dependencies(&ran.stdout, &ours)?;
+    check_dependency_reads(&ran.stdout, &ours, &work.join(".checked-dependencies"))?;
 
-    let mut build = cargo(toolchain, &crate_dir, &target);
+    let mut build = cargo(toolchain, &crate_dir, &target, false);
     build.args([
         "build",
+        "--offline",
         "--release",
         "--target",
         TARGET,
@@ -805,7 +1047,11 @@ mod tests {
         );
         assert!(doc.contains_key("workspace"));
         assert!(!doc.contains_key("patch"));
-        assert!(doc["package"].get("build").is_none());
+        assert_eq!(
+            doc["package"]["build"].as_bool(),
+            Some(false),
+            "no build script"
+        );
     }
 
     #[test]
@@ -848,20 +1094,159 @@ mod tests {
 
     #[test]
     fn dependencies_that_run_code_are_refused_unless_well_known() {
+        let ours = [
+            PathBuf::from("/w/sample/Cargo.toml"),
+            PathBuf::from("/w/sdk/clew-plugin-sdk/Cargo.toml"),
+        ];
         let metadata = |name: &str, kind: &str| {
             format!(
                 r#"{{"packages":[
-                    {{"name":"sample","version":"0.1.0","targets":[{{"kind":["cdylib"]}}]}},
-                    {{"name":"serde_derive","version":"1.0.0","targets":[{{"kind":["proc-macro"]}}]}},
-                    {{"name":"{name}","version":"2.0.0","targets":[{{"kind":["{kind}"]}},{{"kind":["lib"]}}]}}
+                    {{"name":"sample","version":"0.1.0","source":null,"manifest_path":"/w/sample/Cargo.toml","targets":[{{"kind":["cdylib"]}}]}},
+                    {{"name":"clew-plugin-sdk","version":"0.1.0","source":null,"manifest_path":"/w/sdk/clew-plugin-sdk/Cargo.toml","targets":[{{"kind":["lib"]}}]}},
+                    {{"name":"serde_derive","version":"1.0.0","source":"registry+https://github.com/rust-lang/crates.io-index","manifest_path":"/r/serde_derive/Cargo.toml","targets":[{{"kind":["proc-macro"]}}]}},
+                    {{"name":"{name}","version":"2.0.0","source":"registry+https://github.com/rust-lang/crates.io-index","manifest_path":"/r/{name}/Cargo.toml","targets":[{{"kind":["{kind}"]}},{{"kind":["lib"]}}]}}
                 ]}}"#
             )
         };
-        assert!(check_dependencies(&metadata("regex", "lib"), "sample").is_ok());
-        assert!(check_dependencies(&metadata("serde", "custom-build"), "sample").is_ok());
-        let refused = check_dependencies(&metadata("evil", "custom-build"), "sample").unwrap_err();
+        assert!(check_dependencies(&metadata("regex", "lib"), &ours).is_ok());
+        assert!(check_dependencies(&metadata("serde", "custom-build"), &ours).is_ok());
+        let refused = check_dependencies(&metadata("evil", "custom-build"), &ours).unwrap_err();
         assert!(matches!(&refused, BuildError::Policy(why) if why.contains("evil 2.0.0")));
-        assert!(check_dependencies(&metadata("magic", "proc-macro"), "sample").is_err());
+        assert!(check_dependencies(&metadata("magic", "proc-macro"), &ours).is_err());
+        // A crates.io crate named like the plugin, or the SDK, is not
+        // theirs: its build script is refused like any other's.
+        for named in ["sample", "clew-plugin-sdk"] {
+            let refused = check_dependencies(&metadata(named, "custom-build"), &ours).unwrap_err();
+            assert!(
+                matches!(&refused, BuildError::Policy(why) if why.contains(&format!("{named} 2.0.0"))),
+                "{refused:?}"
+            );
+        }
+        // paste can put a macro's name together, an include_str! the
+        // check of the plugin's code would not see.
+        assert!(!BUILD_CODE_ALLOWED.contains(&"paste"));
+    }
+
+    #[test]
+    fn a_dependency_reading_outside_its_package_is_refused_and_one_that_does_not_is_noted() {
+        let root = std::env::temp_dir().join(format!("clew-build-reads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let package = |name: &str, lib: &str| {
+            let dir = root.join(format!("registry/{name}-1.0.0"));
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            std::fs::write(dir.join("Cargo.toml"), "").unwrap();
+            std::fs::write(dir.join("src/lib.rs"), lib).unwrap();
+            format!(
+                r#"{{"id":"registry+https://github.com/rust-lang/crates.io-index#{name}@1.0.0","name":"{name}","version":"1.0.0","source":"registry+https://github.com/rust-lang/crates.io-index","manifest_path":"{}","targets":[{{"kind":["lib"],"src_path":"{}"}}]}}"#,
+                dir.join("Cargo.toml").display(),
+                dir.join("src/lib.rs").display()
+            )
+        };
+        let good = package("good", "pub const V: &str = env!(\"CARGO_PKG_VERSION\");");
+        let bad = package(
+            "bad",
+            "pub const K: &str = include_str!(\"/home/u/.config/clew/config.toml\");",
+        );
+        let checked = root.join("checked");
+        let both = format!(r#"{{"packages":[{good},{bad}]}}"#);
+        let refused = check_dependency_reads(&both, &[], &checked).unwrap_err();
+        assert!(
+            matches!(&refused, BuildError::Policy(why) if why.contains("bad 1.0.0: src/lib.rs:1: include_str!")),
+            "{refused:?}"
+        );
+        let noted = std::fs::read_to_string(&checked).unwrap();
+        assert_eq!(
+            noted,
+            format!(
+                "{READS_RULES}\nregistry+https://github.com/rust-lang/crates.io-index#good@1.0.0\n"
+            )
+        );
+        // Noted, it is not read again.
+        std::fs::write(
+            root.join("registry/good-1.0.0/src/lib.rs"),
+            "include!(\"/x\");",
+        )
+        .unwrap();
+        let alone = format!(r#"{{"packages":[{good}]}}"#);
+        assert!(check_dependency_reads(&alone, &[], &checked).is_ok());
+        // Under other rules it is.
+        std::fs::write(
+            &checked,
+            "reads 0\nregistry+https://github.com/rust-lang/crates.io-index#good@1.0.0\n",
+        )
+        .unwrap();
+        assert!(check_dependency_reads(&alone, &[], &checked).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cargo_is_told_nothing_of_the_users_but_the_toolchain_and_for_downloads_the_network() {
+        for name in [
+            "PATH",
+            "HOME",
+            "CARGO_HOME",
+            "RUSTUP_HOME",
+            "SystemRoot",
+            "NIX_CC",
+        ] {
+            assert!(kept(name, false), "{name}");
+        }
+        for name in [
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "CARGO_REGISTRY_TOKEN",
+            "RUSTFLAGS",
+            "RUSTC_WRAPPER",
+            "CARGO_TARGET_DIR",
+            "CARGO_BUILD_RUSTFLAGS",
+            "RUSTUP_TOOLCHAIN",
+        ] {
+            assert!(!kept(name, false) && !kept(name, true), "{name}");
+        }
+        for name in ["HTTPS_PROXY", "https_proxy", "SSL_CERT_FILE"] {
+            assert!(kept(name, true) && !kept(name, false), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_cargo_toml_builds_only_the_library() {
+        let manifest = Manifest::parse(
+            "[plugin]\nid = \"sample\"\nname = \"S\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n[[command]]\nid = \"a\"\ntitle = \"A\"\n",
+        )
+        .unwrap();
+        let doc: toml::Table = cargo_toml(&manifest).parse().unwrap();
+        let package = doc["package"].as_table().unwrap();
+        for key in [
+            "build",
+            "autobins",
+            "autoexamples",
+            "autotests",
+            "autobenches",
+        ] {
+            assert_eq!(package[key].as_bool(), Some(false), "{key}");
+        }
+    }
+
+    #[test]
+    fn the_plugins_own_code_may_not_read_the_computer() {
+        let root = std::env::temp_dir().join(format!("clew-build-own-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let source = root.join("source");
+        std::fs::create_dir_all(source.join("src/views")).unwrap();
+        std::fs::write(source.join("src/lib.rs"), "mod views;").unwrap();
+        std::fs::write(
+            source.join("src/views/mod.rs"),
+            "pub const K: &str = include_str!(\"../../../../config.toml\");",
+        )
+        .unwrap();
+        let refused = stage_sources(&source, &root.join("crate")).unwrap_err();
+        assert!(
+            matches!(&refused, BuildError::Policy(why) if why.contains("src/views/mod.rs:1: `include_str`")),
+            "{refused:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -253,6 +253,13 @@ impl Manifest {
         }
         for (name, version) in &self.dependencies {
             check_crate(name, version)?;
+            // Cargo would take a crates.io crate of the plugin's own name
+            // for a second copy of it.
+            if name.replace('_', "-") == self.plugin.id {
+                return Err(format!(
+                    "[dependencies] lists \"{name}\", the plugin's own id: a plugin cannot depend on a crate named like itself. Give the plugin another id."
+                ));
+            }
         }
         Ok(())
     }
@@ -542,5 +549,15 @@ pub(crate) mod tests_support {
             "[plugin]\nid = \"sample\"\nname = \"Sample\"\nversion = \"0.1.0\"\ndescription = \"A sample.\"\n\n[[command]]\nid = \"hello\"\ntitle = \"Say hello\"\n",
         )
         .unwrap()
+    }
+    #[test]
+    fn a_dependency_may_not_be_named_like_the_plugin() {
+        for named in ["todo-authors", "todo_authors"] {
+            let text = format!(
+                "[plugin]\nid = \"todo-authors\"\nname = \"T\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n[[command]]\nid = \"a\"\ntitle = \"A\"\n\n[dependencies]\n{named} = \"1\"\n"
+            );
+            let why = Manifest::parse(&text).unwrap_err();
+            assert!(why.contains("the plugin's own id"), "{why}");
+        }
     }
 }

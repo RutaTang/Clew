@@ -4,7 +4,8 @@
 //!
 //! - [`manifest`] reads `plugin.toml`.
 //! - [`build`] builds a plugin from its source, with the Rust
-//!   [`toolchain`] finds or sets up.
+//!   [`toolchain`] finds or sets up, checking first that what is compiled
+//!   reads nothing of the computer's but its own sources (`reads`).
 //! - [`mod@inspect`] reads a plugin's file without running it: its manifest,
 //!   imports, exports and the permissions they need.
 //! - [`store`] keeps what the user approved, and the copies Clew runs.
@@ -16,6 +17,7 @@ pub mod authoring;
 pub mod build;
 pub mod inspect;
 pub mod manifest;
+mod reads;
 pub mod requests;
 #[cfg(feature = "runtime")]
 pub mod runtime;

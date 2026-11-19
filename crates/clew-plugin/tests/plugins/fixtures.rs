@@ -181,3 +181,85 @@ fn installs_rust_for_clew_and_builds_with_it() {
     eprintln!("Clew's own Rust {}: {}", own.version, size.trim());
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// A plugin built with crates agents reach for builds: the check that a
+/// dependency reads only its own package does not refuse them. And one
+/// whose own code reads a file of the computer's is refused before cargo
+/// compiles anything. Downloads the crates, so it runs only when asked:
+///
+///     cargo test -p clew-plugin --test plugins popular -- --ignored --nocapture
+#[test]
+#[ignore = "downloads popular crates and builds with them: needs Rust 1.95.0 with wasm32-wasip2, and the network"]
+fn popular_crates_build_and_reading_the_computer_does_not() {
+    let toolchain = toolchain();
+    let root = std::env::temp_dir().join(format!("clew-popular-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("source");
+    std::fs::create_dir_all(source.join("src")).unwrap();
+    std::fs::write(
+        source.join("plugin.toml"),
+        "[plugin]\nid = \"popular\"\nname = \"Popular\"\nversion = \"0.1.0\"\n\
+         description = \"Uses popular crates.\"\n\n[[command]]\nid = \"run\"\ntitle = \"Run\"\n\n\
+         [dependencies]\nregex = \"1\"\nserde = \"1\"\nserde_json = \"1\"\nitertools = \"0.14\"\n\
+         unicode-segmentation = \"1\"\nchrono = \"0.4\"\nurl = \"2\"\nindexmap = \"2\"\n\
+         smallvec = \"1\"\nsemver = \"1\"\nglob = \"0.3\"\nsimilar = \"2\"\ntoml = \"0.8\"\n\
+         heck = \"0.5\"\nstrsim = \"0.11\"\nonce_cell = \"1\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("src/lib.rs"),
+        r#"use clew_plugin_sdk::{Invocation, Outcome, Plugin};
+struct P;
+impl Plugin for P {
+    fn run(_command: &str, _context: Invocation) -> Result<Outcome, String> {
+        let re = regex::Regex::new(r"\d+").map_err(|e| e.to_string())?;
+        let url = url::Url::parse("https://example.com/a?b=1").map_err(|e| e.to_string())?;
+        let v: serde_json::Value = serde_json::from_str("{\"a\":1}").map_err(|e| e.to_string())?;
+        let t: toml::Table = "a = 1".parse().map_err(|e: toml::de::Error| e.to_string())?;
+        let words = unicode_segmentation::UnicodeSegmentation::unicode_words("a b").count();
+        let joined = itertools::Itertools::join(&mut ["a", "b"].iter(), ",");
+        let mut map = indexmap::IndexMap::new();
+        map.insert(heck::ToSnakeCase::to_snake_case("AB"), strsim::levenshtein("a", "b"));
+        let small: smallvec::SmallVec<[u8; 4]> = smallvec::smallvec![1];
+        let version = semver::Version::parse("1.2.3").map_err(|e| e.to_string())?;
+        let pattern = glob::Pattern::new("*.rs").map_err(|e| e.to_string())?;
+        let diff = similar::TextDiff::from_lines("a\n", "b\n").ratio();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).map(|d| d.to_string());
+        static ONCE: once_cell::sync::Lazy<u8> = once_cell::sync::Lazy::new(|| 1);
+        Ok(Outcome::Say(format!(
+            "{} {url} {v} {t} {words} {joined} {map:?} {small:?} {version} {} {diff} {day:?} {}",
+            re.is_match("1"),
+            pattern.matches("a.rs"),
+            *ONCE
+        )))
+    }
+}
+clew_plugin_sdk::export!(P);
+"#,
+    )
+    .unwrap();
+    let work = root.join("work");
+    let built = clew_plugin::build::build(&source, &work, &toolchain, &AtomicBool::new(false))
+        .unwrap_or_else(|e| panic!("{}", e.report()));
+    assert!(built.warnings.is_empty(), "{:?}", built.warnings);
+
+    // Its own code reading a file: refused, saying where and why.
+    std::fs::write(
+        source.join("src/lib.rs"),
+        "use clew_plugin_sdk::{Invocation, Outcome, Plugin};\nstruct P;\n\
+         impl Plugin for P {\n    fn run(_c: &str, _i: Invocation) -> Result<Outcome, String> {\n\
+         Ok(Outcome::Say(include_str!(\"../../../config.toml\").into()))\n    }\n}\n\
+         clew_plugin_sdk::export!(P);\n",
+    )
+    .unwrap();
+    let refused = clew_plugin::build::build(&source, &work, &toolchain, &AtomicBool::new(false))
+        .expect_err("refused");
+    assert!(
+        refused
+            .report()
+            .contains("src/lib.rs:5: `include_str` reads a file"),
+        "{}",
+        refused.report()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
