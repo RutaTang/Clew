@@ -34,6 +34,20 @@ pub fn plugins_dir(data: &Path) -> PathBuf {
     data.join("plugins")
 }
 
+/// `id`, if it is a plugin's id (`clew_rules::plugin::id_ok`): what every
+/// folder of a plugin's is named by goes through this first, so a name an
+/// agent passes can only ever be one plain name under Clew's own folder.
+pub fn checked_id(id: &str) -> Result<&str, String> {
+    if clew_rules::plugin::id_ok(id.as_bytes(), 3) {
+        Ok(id)
+    } else {
+        Err(format!(
+            "\"{}\" is not a plugin's id: an id is 3 to 40 of a-z, 0-9 and -, starting with a letter",
+            id.chars().take(60).collect::<String>()
+        ))
+    }
+}
+
 /// Where the approved copies are.
 pub fn installed_dir(data: &Path) -> PathBuf {
     plugins_dir(data).join("installed")

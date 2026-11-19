@@ -97,10 +97,11 @@ fn nonce() -> String {
     hex(&h.finalize()[..12])
 }
 
-/// Whether `name` is a nonce [`nonce`] could have made: so a file name read
-/// back is never a path.
+/// Whether `name` is a nonce [`nonce`] could have made
+/// (`clew_rules::plugin::nonce_ok`): so a file name read back is never a
+/// path.
 fn is_nonce(name: &str) -> bool {
-    name.len() == 24 && name.bytes().all(|b| b.is_ascii_hexdigit())
+    clew_rules::plugin::nonce_ok(name.as_bytes())
 }
 
 /// File `ask`, from `agent`; its nonce, to wait for its answer with.

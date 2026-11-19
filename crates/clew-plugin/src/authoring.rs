@@ -23,9 +23,9 @@ pub fn sources_dir(data: &Path) -> PathBuf {
     crate::store::plugins_dir(data).join("source")
 }
 
-/// Where the plugin `id`'s source is.
-pub fn source_dir(data: &Path, id: &str) -> PathBuf {
-    sources_dir(data).join(id)
+/// Where the plugin `id`'s source is; refused for what is not an id.
+pub fn source_dir(data: &Path, id: &str) -> Result<PathBuf, String> {
+    Ok(sources_dir(data).join(crate::store::checked_id(id)?))
 }
 
 /// Where plugins are built (`build::build`'s `work`).
@@ -55,7 +55,7 @@ pub fn new_plugin(data: &Path, id: &str, name: &str, description: &str) -> Resul
     // The template is checked as a build would check it, so a bad id or
     // name is refused here, not at the build.
     Manifest::parse(&toml)?;
-    let dir = source_dir(data, id);
+    let dir = source_dir(data, id)?;
     if dir.exists() {
         return Err(format!(
             "a plugin \"{id}\" exists already; change its files instead (plugin_read, plugin_write)"
@@ -113,34 +113,38 @@ impl Plugin for ThisPlugin {
 clew_plugin_sdk::export!(ThisPlugin);
 "#;
 
-/// The file `rel` of a plugin's source: `plugin.toml`, or a Rust file under
-/// `src/`. Anything else is refused: a plugin's source is nothing more.
-fn source_file(data: &Path, id: &str, rel: &str) -> Result<PathBuf, String> {
-    let dir = source_dir(data, id);
+/// How deep a plugin's source may go: `src/` and eight folders under it.
+const MAX_DEPTH: usize = 9;
+
+/// The file `rel` of a plugin's source, and whether it is the manifest:
+/// `plugin.toml`, or a Rust file under `src/` (`clew_rules::plugin::source_kind`,
+/// which is proved to keep it under the plugin's folder). Anything else is
+/// refused: a plugin's source is nothing more. `rel` is read as written,
+/// spaces and a leading `./` aside.
+fn source_file(data: &Path, id: &str, rel: &str) -> Result<(PathBuf, bool), String> {
+    use clew_rules::plugin::{SOURCE_MANIFEST, SOURCE_RUST, source_kind};
+    let dir = source_dir(data, id)?;
     if !dir.join("plugin.toml").is_file() {
         return Err(format!(
             "there is no plugin \"{id}\"; make it first (plugin_new)"
         ));
     }
-    let rel = rel.trim().trim_start_matches("./");
-    let allowed = rel == "plugin.toml"
-        || (rel.starts_with("src/")
-            && rel.ends_with(".rs")
-            && rel.split('/').count() <= 9
-            && rel
-                .split('/')
-                .all(|part| !part.is_empty() && !part.starts_with('.')));
-    if !allowed || clew_core::confine::check_lexical(rel).is_err() {
-        return Err(format!(
-            "\"{rel}\" is not a file of a plugin: write plugin.toml, or Rust files under src/"
-        ));
+    let rel = rel.trim();
+    let rel = rel.strip_prefix("./").unwrap_or(rel);
+    let kind = source_kind(rel.as_bytes());
+    let deep = rel.split('/').count() > MAX_DEPTH;
+    if kind == SOURCE_MANIFEST || (kind == SOURCE_RUST && !deep) {
+        Ok((dir.join(rel), kind == SOURCE_MANIFEST))
+    } else {
+        Err(format!(
+            "\"{rel}\" is not a file of a plugin: write plugin.toml, or Rust files under src/ (letters, digits, _ and - in their names, no piece starting with .)"
+        ))
     }
-    Ok(dir.join(rel))
 }
 
 /// Read the file `rel` of the plugin `id`'s source.
 pub fn read_file(data: &Path, id: &str, rel: &str) -> Result<String, String> {
-    let path = source_file(data, id, rel)?;
+    let (path, _) = source_file(data, id, rel)?;
     match clew_core::statefile::read_capped_checked(&path, MAX_WRITE_BYTES as u64) {
         Ok(Some(text)) => Ok(text),
         Ok(None) => Err(format!("{rel} does not exist")),
@@ -158,8 +162,8 @@ pub fn write_file(data: &Path, id: &str, rel: &str, contents: &str) -> Result<()
             MAX_WRITE_BYTES / 1024
         ));
     }
-    let path = source_file(data, id, rel)?;
-    if rel.trim() == "plugin.toml" {
+    let (path, manifest) = source_file(data, id, rel)?;
+    if manifest {
         let manifest = Manifest::parse(contents)?;
         if manifest.plugin.id != id {
             return Err(format!(
@@ -179,7 +183,7 @@ pub fn write_file(data: &Path, id: &str, rel: &str, contents: &str) -> Result<()
 
 /// The files of the plugin `id`'s source, by path, sorted.
 pub fn list_files(data: &Path, id: &str) -> Result<Vec<String>, String> {
-    let dir = source_dir(data, id);
+    let dir = source_dir(data, id)?;
     if !dir.join("plugin.toml").is_file() {
         return Err(format!("there is no plugin \"{id}\""));
     }
@@ -288,6 +292,32 @@ mod tests {
                 .contains("cannot change")
         );
         assert_eq!(read_file(&data, "sample", "plugin.toml").unwrap(), good);
+        // Written as `./plugin.toml`, it is the same file, checked the same
+        // way: the leading `./` once let a broken or renamed manifest through.
+        for spelled in ["./plugin.toml", " ./plugin.toml "] {
+            assert!(write_file(&data, "sample", spelled, "[plugin\n").is_err());
+            assert!(
+                write_file(&data, "sample", spelled, &renamed)
+                    .unwrap_err()
+                    .contains("cannot change"),
+                "{spelled:?}"
+            );
+        }
+        assert_eq!(read_file(&data, "sample", "plugin.toml").unwrap(), good);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn a_plugin_id_is_never_a_path() {
+        let data = temp("ids");
+        for id in ["../escape", "a/b", "..", "/etc", "Sample", ""] {
+            assert!(source_dir(&data, id).is_err(), "{id:?}");
+            assert!(read_file(&data, id, "plugin.toml").is_err(), "{id:?}");
+            assert!(write_file(&data, id, "src/lib.rs", "x").is_err(), "{id:?}");
+            assert!(list_files(&data, id).is_err(), "{id:?}");
+            assert!(crate::tools::last_build(&data, id).is_err(), "{id:?}");
+        }
+        assert!(!data.join("escape").exists());
         let _ = std::fs::remove_dir_all(&data);
     }
 

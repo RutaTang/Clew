@@ -1,4 +1,5 @@
 import Equal
+import PluginEqual
 
 /-! What the proofs that the code is the model rest on: `lake env lean
 Audit.lean` must print only Lean's standard axioms (`propext`,
@@ -42,3 +43,14 @@ does not model (the code proved here calls none of them). -/
 #print axioms Clew.Extracted.OAuth.fresh_is_the_model
 #print axioms Clew.Extracted.OAuth.answers_is_the_model
 #print axioms Clew.Extracted.Launch.launch_is_the_model
+#print axioms Clew.Extracted.PluginRules.need_of_is_the_model
+#print axioms Clew.Extracted.PluginRules.may_link_is_the_model
+#print axioms Clew.Extracted.PluginRules.id_ok_is_the_model
+#print axioms Clew.Extracted.PluginRules.nonce_ok_is_the_model
+#print axioms Clew.Extracted.PluginRules.source_kind_is_the_model
+#print axioms Clew.Extracted.PluginRules.key_name_is_the_model
+#print axioms Clew.Extracted.PluginRules.code_links_only_what_was_granted
+#print axioms Clew.Extracted.PluginRules.code_id_is_plain
+#print axioms Clew.Extracted.PluginRules.code_nonce_is_plain
+#print axioms Clew.Extracted.PluginRules.code_source_stays_inside
+#print axioms Clew.Extracted.PluginRules.code_key_files

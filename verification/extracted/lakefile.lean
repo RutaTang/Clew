@@ -26,3 +26,7 @@ lean_lib ClewRules {}
 /-- The extracted functions are the models. -/
 @[default_target] lean_lib Equal where
   leanOptions := #[⟨`warningAsError, true⟩]
+
+/-- The plugin rules' extracted functions are the plugin model. -/
+@[default_target] lean_lib PluginEqual where
+  leanOptions := #[⟨`warningAsError, true⟩]

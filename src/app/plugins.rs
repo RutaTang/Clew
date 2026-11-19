@@ -1015,7 +1015,9 @@ impl App {
             PluginMsg::Remove(id) => {
                 let removed = data().and_then(|d| {
                     clew_plugin::store::remove(&d, &id)?;
-                    let _ = std::fs::remove_dir_all(clew_plugin::runtime::store_dir(&d, &id));
+                    if let Ok(dir) = clew_plugin::runtime::store_dir(&d, &id) {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
                     Ok(())
                 });
                 if let Err(why) = removed {

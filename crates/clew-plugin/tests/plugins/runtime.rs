@@ -313,7 +313,7 @@ fn a_plugin_keeps_its_own_store_between_calls() {
             Outcome::Say(format!("run {n}"))
         );
     }
-    assert!(clew_plugin::runtime::store_dir(&dir, "views").is_dir());
+    assert!(clew_plugin::runtime::store_dir(&dir, "views").unwrap().is_dir());
     // Without a data folder there is nowhere to keep it, and the plugin is told.
     let bare = Runtime::new(None).unwrap();
     let refused = views(&bare)

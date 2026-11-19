@@ -293,14 +293,7 @@ fn quoted(names: &[&str]) -> String {
 /// An id: `a`-`z`, `0`-`9` and `-`, starting with a letter, not ending with
 /// or doubling `-`, `min` to 40 characters.
 fn check_id(field: &str, id: &str, min: usize) -> Result<(), String> {
-    let well_formed = (min..=40).contains(&id.len())
-        && id.starts_with(|c: char| c.is_ascii_lowercase())
-        && id
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && !id.ends_with('-')
-        && !id.contains("--");
-    if well_formed {
+    if clew_rules::plugin::id_ok(id.as_bytes(), min) {
         Ok(())
     } else {
         Err(format!(

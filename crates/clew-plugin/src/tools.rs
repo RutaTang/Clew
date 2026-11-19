@@ -224,7 +224,7 @@ pub fn call(data: &Path, tool: &str, args: &Value, cancel: &AtomicBool) -> Step 
 
 /// Build the plugin `id` and say what came of it, for the agent.
 fn build_report(data: &Path, id: &str, cancel: &AtomicBool) -> Result<String, String> {
-    let source = authoring::source_dir(data, id);
+    let source = authoring::source_dir(data, id)?;
     if !source.join("plugin.toml").is_file() {
         return Err(format!(
             "there is no plugin \"{id}\"; make it first (plugin_new)"
@@ -254,6 +254,7 @@ fn build_report(data: &Path, id: &str, cancel: &AtomicBool) -> Result<String, St
 
 /// The plugin `id`'s latest build, as an install would read it.
 pub fn last_build(data: &Path, id: &str) -> Result<Built, String> {
+    let id = crate::store::checked_id(id)?;
     let artifact = authoring::build_dir(data)
         .join(id)
         .join(format!("{id}.wasm"));

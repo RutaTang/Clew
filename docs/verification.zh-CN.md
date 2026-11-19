@@ -89,6 +89,14 @@ Clew 的一部分规则不只是经过测试，而是经过证明的。对每条
 - 回答正在生成时，停止词会先让它停下，然后才会尝试任何命令。例外有两种：有命令在等待确认，这时停止词会拒绝这条命令；正在等待的问题提供了同名的回答。
 - 每一条路由都恰好以一个会执行的步骤结束；而且绝不会采取一个对象不存在的步骤，比如在没有命令等待时回答等待的命令，或在没有问题时暂存回答。
 
+**插件：插件与什么链接，它的东西放在哪里** —— `crates/clew-rules/src/plugin.rs` 中的 `need_of`、`with_need`、`may_link`、`id_ok`、`nonce_ok`、`source_kind` 和 `key_name`，`crates/clew-plugin` 的每个相应决定都调用它们，模型在 `Plugin.lean`。每一条都对代码本身已证明（Aeneas），适用于任意输入的字节；下面的定理也对代码本身重新陈述（`verification/extracted/PluginEqual.lean`）。
+- 插件的权限是它的代码所导入的接口，而不是它自己声称的。只有当没有任何导入是 Clew 不提供的、并且每个导入所需的权限都已授予时，它才会被链接。所以导入 `clew:plugin/project` 的插件没有 *read* 就绝不会被链接，导入 `clew:plugin/git` 的没有 *git* 就绝不会被链接；导入其他任何东西（例如网络接口）的插件，无论授予了什么，都绝不会被链接。
+- 插件或命令的 id，以及请求的 nonce，都是一个普通的名字：没有 `/`、`\`、`:` 或 NUL，也绝不是 `.` 或 `..`。拼接到某个文件夹上，它正好落在下一层的一个文件夹。插件的每个文件夹（源码、构建、它自己的存储）都通过这项检查来命名，所以代理传入的 id 绝不会是一条路径。
+- 代理可以写入插件源码的只有 `plugin.toml`，或 `src/` 下的 Rust 文件，且路径的每一段都非空、不以 `.` 开头。这样的路径能通过 `check_lexical`，所以拼接到插件文件夹后绝不会离开它。
+- 插件自己的存储中的每个键，保存在以其字节的十六进制加 `.bin` 命名的文件里。这个名字是普通文件名，且没有两个键共用一个。
+
+证明这些时发现了一个漏洞：`write_file` 只有在路径恰好写成 `plugin.toml` 时才检查新的 `plugin.toml`，但路径写成 `./plugin.toml` 也会被接受。所以写到那里的清单既跳过了检查，也跳过了「id 不能更改」的规则。现在两者都经过同一个判断 `source_kind`，使用同一种写法。另外，在 id 检查集中到一处之前，构建产物是按代理传入的 id 去找的（`last_build`），这个 id 可能是一条路径。
+
 ## 证明如何落实到代码
 
 定理是关于模型的。把每个模型和代码联系起来的是：
@@ -147,6 +155,8 @@ CI 在 `extracted` 任务中运行它，所用的 Charon 和 Aeneas 来自一个
 | 鼠标悬停时能否运行被调试程序的代码 | `dap::hover_eval_allowed` | 对代码本身已证明（Aeneas）：`clew_rules::dap::hover_eval_allowed` |
 | MCP 服务器的请求头 | `mcp::config::check_headers` | 对代码本身已证明（Aeneas），适用于任意字符串的 UTF-8 字节 |
 | 登录 MCP 服务器 | `mcp` OAuth | 已证明。它的判断 `clew_rules::oauth::{endpoint_allowed, fresh, take_stored, answers}` 对代码本身已证明（Aeneas）。交换本身是网络的事 |
+| 插件与什么链接 | `clew_plugin::inspect`、`Runtime::load` | 已证明。每个导入需要什么、插件能否被链接，`clew_rules::plugin::{need_of, with_need, may_link}` 对代码本身已证明（Aeneas）。链接器只包含已授予的接口，这是 wasmtime 的 `Linker` 的事，有测试 |
+| 插件文件夹和文件的名字 | `store::checked_id`、`requests::is_nonce`、`authoring::source_file`、运行时的存储 | 已证明。`clew_rules::plugin::{id_ok, nonce_ok, source_kind, key_name}` 对代码本身已证明（Aeneas）：普通名字、不会离开插件文件夹的源码路径、没有两个键共用的存储文件 |
 
 ## 实际运行的代码
 

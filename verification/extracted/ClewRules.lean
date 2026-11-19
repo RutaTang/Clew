@@ -2310,6 +2310,575 @@ def oauth.answers
   | none => ok false
   | some got => text.same_bytes got state
 
+/-- [clew_rules::plugin::READ]
+    Source: 'crates/clew-rules/src/plugin.rs', lines 35:0-35:23
+    Visibility: public -/
+@[global_simps, irreducible] def plugin.READ : Std.U8 := 1#u8
+
+/-- [clew_rules::plugin::GIT]
+    Source: 'crates/clew-rules/src/plugin.rs', lines 37:0-37:22
+    Visibility: public -/
+@[global_simps, irreducible] def plugin.GIT : Std.U8 := 2#u8
+
+/-- [clew_rules::plugin::UNKNOWN]
+    Source: 'crates/clew-rules/src/plugin.rs', lines 39:0-39:29
+    Visibility: public -/
+@[global_simps, irreducible] def plugin.UNKNOWN : Std.U8 := 128#u8
+
+/-- [clew_rules::plugin::unversioned_len]: loop body 0:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 45:4-52:1 -/
+@[rust_loop_body]
+def plugin.unversioned_len_loop.body
+  («import» : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Std.Usize)
+  := do
+  let i1 := Slice.len «import»
+  if i < i1
+  then
+    let i2 ← Slice.index_usize «import» i
+    if i2 = 64#u8
+    then ok (done i)
+    else let i3 ← i + 1#usize
+         ok (cont i3)
+  else let i2 := Slice.len «import»
+       ok (done i2)
+
+/-- [clew_rules::plugin::unversioned_len]: loop 0:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 45:4-52:1 -/
+@[rust_loop]
+def plugin.unversioned_len_loop
+  («import» : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
+  loop
+    (fun i1 => plugin.unversioned_len_loop.body «import» i1)
+    i
+
+/-- [clew_rules::plugin::unversioned_len]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 43:0-52:1 -/
+@[reducible]
+def plugin.unversioned_len («import» : Slice Std.U8) : Result Std.Usize := do
+  plugin.unversioned_len_loop «import» 0#usize
+
+/-- [clew_rules::plugin::in_package]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 56:0-58:1 -/
+def plugin.in_package
+  («name» : Slice Std.U8) («prefix» : Slice Std.U8) : Result Bool := do
+  let b ← text.starts_with «name» «prefix»
+  if b
+  then
+    let i := Slice.len «name»
+    let i1 := Slice.len «prefix»
+    let i2 ← i1 + 1#usize
+    if i > i2
+    then
+      let i3 := Slice.len «prefix»
+      let i4 ← Slice.index_usize «name» i3
+      ok (i4 = 47#u8)
+    else ok false
+  else ok false
+
+/-- [clew_rules::plugin::wasi_linked]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 64:0-71:1 -/
+def plugin.wasi_linked («name» : Slice Std.U8) : Result Bool := do
+  let s ←
+    lift (Array.to_slice
+      (Array.make 7#usize [
+        119#u8, 97#u8, 115#u8, 105#u8, 58#u8, 105#u8, 111#u8
+        ]))
+  let b ← plugin.in_package «name» s
+  if b
+  then ok true
+  else
+    let s1 ←
+      lift (Array.to_slice
+        (Array.make 8#usize [
+          119#u8, 97#u8, 115#u8, 105#u8, 58#u8, 99#u8, 108#u8, 105#u8
+          ]))
+    let b1 ← plugin.in_package «name» s1
+    if b1
+    then ok true
+    else
+      let s2 ←
+        lift (Array.to_slice
+          (Array.make 11#usize [
+            119#u8, 97#u8, 115#u8, 105#u8, 58#u8, 99#u8, 108#u8, 111#u8, 99#u8,
+            107#u8, 115#u8
+            ]))
+      let b2 ← plugin.in_package «name» s2
+      if b2
+      then ok true
+      else
+        let s3 ←
+          lift (Array.to_slice
+            (Array.make 11#usize [
+              119#u8, 97#u8, 115#u8, 105#u8, 58#u8, 114#u8, 97#u8, 110#u8,
+              100#u8, 111#u8, 109#u8
+              ]))
+        let b3 ← plugin.in_package «name» s3
+        if b3
+        then ok true
+        else
+          let s4 ←
+            lift (Array.to_slice
+              (Array.make 15#usize [
+                119#u8, 97#u8, 115#u8, 105#u8, 58#u8, 102#u8, 105#u8, 108#u8,
+                101#u8, 115#u8, 121#u8, 115#u8, 116#u8, 101#u8, 109#u8
+                ]))
+          let b4 ← plugin.in_package «name» s4
+          if b4
+          then ok true
+          else
+            let s5 ←
+              lift (Array.to_slice
+                (Array.make 12#usize [
+                  119#u8, 97#u8, 115#u8, 105#u8, 58#u8, 115#u8, 111#u8, 99#u8,
+                  107#u8, 101#u8, 116#u8, 115#u8
+                  ]))
+            plugin.in_package «name» s5
+
+/-- [clew_rules::plugin::need_of]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 76:0-91:1
+    Visibility: public -/
+def plugin.need_of («import» : Slice Std.U8) : Result Std.U8 := do
+  let len ← plugin.unversioned_len «import»
+  let «name» ←
+    core.slice.index.Slice.index (core.slice.index.SliceIndexRangeToUsizeSlice
+      Std.U8) «import» { «end» := len }
+  let s ←
+    lift (Array.to_slice
+      (Array.make 19#usize [
+        99#u8, 108#u8, 101#u8, 119#u8, 58#u8, 112#u8, 108#u8, 117#u8, 103#u8,
+        105#u8, 110#u8, 47#u8, 112#u8, 114#u8, 111#u8, 106#u8, 101#u8, 99#u8,
+        116#u8
+        ]))
+  let b ← text.same_bytes «name» s
+  if b
+  then ok plugin.READ
+  else
+    let s1 ←
+      lift (Array.to_slice
+        (Array.make 15#usize [
+          99#u8, 108#u8, 101#u8, 119#u8, 58#u8, 112#u8, 108#u8, 117#u8, 103#u8,
+          105#u8, 110#u8, 47#u8, 103#u8, 105#u8, 116#u8
+          ]))
+    let b1 ← text.same_bytes «name» s1
+    if b1
+    then ok plugin.GIT
+    else
+      let s2 ←
+        lift (Array.to_slice
+          (Array.make 16#usize [
+            99#u8, 108#u8, 101#u8, 119#u8, 58#u8, 112#u8, 108#u8, 117#u8,
+            103#u8, 105#u8, 110#u8, 47#u8, 104#u8, 111#u8, 115#u8, 116#u8
+            ]))
+      let b2 ← text.same_bytes «name» s2
+      if b2
+      then ok 0#u8
+      else
+        let s3 ←
+          lift (Array.to_slice
+            (Array.make 17#usize [
+              99#u8, 108#u8, 101#u8, 119#u8, 58#u8, 112#u8, 108#u8, 117#u8,
+              103#u8, 105#u8, 110#u8, 47#u8, 116#u8, 121#u8, 112#u8, 101#u8,
+              115#u8
+              ]))
+        let b3 ← text.same_bytes «name» s3
+        if b3
+        then ok 0#u8
+        else
+          let b4 ← plugin.wasi_linked «name»
+          if b4
+          then ok 0#u8
+          else ok plugin.UNKNOWN
+
+/-- [clew_rules::plugin::with_need]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 95:0-97:1
+    Visibility: public -/
+def plugin.with_need
+  (all : Std.U8) («import» : Slice Std.U8) : Result Std.U8 := do
+  let i ← plugin.need_of «import»
+  ok (all ||| i)
+
+/-- [clew_rules::plugin::may_link]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 109:0-111:1
+    Visibility: public -/
+def plugin.may_link (needed : Std.U8) (granted : Std.U8) : Result Bool := do
+  let i ← lift (needed &&& plugin.UNKNOWN)
+  if i = 0#u8
+  then
+    let i1 ← lift (~~~ granted)
+    let i2 ← lift (needed &&& i1)
+    ok (i2 = 0#u8)
+  else ok false
+
+/-- [clew_rules::plugin::ID_MAX]
+    Source: 'crates/clew-rules/src/plugin.rs', lines 114:0-114:29
+    Visibility: public -/
+@[global_simps, irreducible] def plugin.ID_MAX : Std.Usize := 40#usize
+
+/-- [clew_rules::plugin::is_lower]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 117:0-119:1 -/
+def plugin.is_lower (b : Std.U8) : Result Bool := do
+  if b >= 97#u8
+  then ok (b <= 122#u8)
+  else ok false
+
+/-- [clew_rules::plugin::is_digit]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 122:0-124:1 -/
+def plugin.is_digit (b : Std.U8) : Result Bool := do
+  if b >= 48#u8
+  then ok (b <= 57#u8)
+  else ok false
+
+/-- [clew_rules::plugin::is_id_byte]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 127:0-129:1 -/
+def plugin.is_id_byte (b : Std.U8) : Result Bool := do
+  let b1 ← plugin.is_lower b
+  if b1
+  then ok true
+  else let b2 ← plugin.is_digit b
+       if b2
+       then ok true
+       else ok (b = 45#u8)
+
+/-- [clew_rules::plugin::id_fine_at]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 147:0-158:1 -/
+def plugin.id_fine_at (id : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  let i1 ← Slice.index_usize id i
+  let b ← plugin.is_id_byte i1
+  if b
+  then
+    if i1 != 45#u8
+    then ok true
+    else
+      let i2 ← i + 1#usize
+      let i3 := Slice.len id
+      if i2 = i3
+      then ok false
+      else let i4 ← Slice.index_usize id i2
+           ok (i4 != 45#u8)
+  else ok false
+
+/-- [clew_rules::plugin::id_bytes_ok]: loop body 0:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 163:4-170:1 -/
+@[rust_loop_body]
+def plugin.id_bytes_ok_loop.body
+  (id : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len id
+  if i < i1
+  then
+    let b ← plugin.id_fine_at id i
+    if b
+    then let i2 ← i + 1#usize
+         ok (cont i2)
+    else ok (done false)
+  else ok (done true)
+
+/-- [clew_rules::plugin::id_bytes_ok]: loop 0:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 163:4-170:1 -/
+@[rust_loop]
+def plugin.id_bytes_ok_loop
+  (id : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => plugin.id_bytes_ok_loop.body id i1)
+    i
+
+/-- [clew_rules::plugin::id_bytes_ok]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 161:0-170:1 -/
+@[reducible]
+def plugin.id_bytes_ok (id : Slice Std.U8) : Result Bool := do
+  plugin.id_bytes_ok_loop id 0#usize
+
+/-- [clew_rules::plugin::id_ok]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 135:0-143:1
+    Visibility: public -/
+def plugin.id_ok (id : Slice Std.U8) (min : Std.Usize) : Result Bool := do
+  let b ← core.slice.Slice.is_empty id
+  if b
+  then ok false
+  else
+    let i := Slice.len id
+    if i < min
+    then ok false
+    else
+      let i1 := Slice.len id
+      if i1 > plugin.ID_MAX
+      then ok false
+      else
+        let i2 ← Slice.index_usize id 0#usize
+        let b1 ← plugin.is_lower i2
+        if b1
+        then plugin.id_bytes_ok id
+        else ok false
+
+/-- [clew_rules::plugin::NONCE_LEN]
+    Source: 'crates/clew-rules/src/plugin.rs', lines 173:0-173:32
+    Visibility: public -/
+@[global_simps, irreducible] def plugin.NONCE_LEN : Std.Usize := 24#usize
+
+/-- [clew_rules::plugin::is_lower_hex]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 176:0-178:1 -/
+def plugin.is_lower_hex (b : Std.U8) : Result Bool := do
+  let b1 ← plugin.is_digit b
+  if b1
+  then ok true
+  else if b >= 97#u8
+       then ok (b <= 102#u8)
+       else ok false
+
+/-- [clew_rules::plugin::nonce_ok]: loop body 0:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 188:4-195:1
+    Visibility: public -/
+@[rust_loop_body]
+def plugin.nonce_ok_loop.body
+  («name» : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len «name»
+  if i < i1
+  then
+    let i2 ← Slice.index_usize «name» i
+    let b ← plugin.is_lower_hex i2
+    if b
+    then let i3 ← i + 1#usize
+         ok (cont i3)
+    else ok (done false)
+  else ok (done true)
+
+/-- [clew_rules::plugin::nonce_ok]: loop 0:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 188:4-195:1
+    Visibility: public -/
+@[rust_loop]
+def plugin.nonce_ok_loop
+  («name» : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => plugin.nonce_ok_loop.body «name» i1)
+    i
+
+/-- [clew_rules::plugin::nonce_ok]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 183:0-195:1
+    Visibility: public -/
+def plugin.nonce_ok («name» : Slice Std.U8) : Result Bool := do
+  let i := Slice.len «name»
+  if i != plugin.NONCE_LEN
+  then ok false
+  else plugin.nonce_ok_loop «name» 0#usize
+
+/-- [clew_rules::plugin::SOURCE_REFUSED]
+    Source: 'crates/clew-rules/src/plugin.rs', lines 198:0-198:33
+    Visibility: public -/
+@[global_simps, irreducible] def plugin.SOURCE_REFUSED : Std.U8 := 0#u8
+
+/-- [clew_rules::plugin::SOURCE_MANIFEST]
+    Source: 'crates/clew-rules/src/plugin.rs', lines 200:0-200:34
+    Visibility: public -/
+@[global_simps, irreducible] def plugin.SOURCE_MANIFEST : Std.U8 := 1#u8
+
+/-- [clew_rules::plugin::SOURCE_RUST]
+    Source: 'crates/clew-rules/src/plugin.rs', lines 202:0-202:30
+    Visibility: public -/
+@[global_simps, irreducible] def plugin.SOURCE_RUST : Std.U8 := 2#u8
+
+/-- [clew_rules::plugin::is_path_byte]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 206:0-214:1 -/
+def plugin.is_path_byte (b : Std.U8) : Result Bool := do
+  let b1 ← plugin.is_lower b
+  if b1
+  then ok true
+  else
+    let b2 ← plugin.is_digit b
+    if b2
+    then ok true
+    else
+      if b >= 65#u8
+      then
+        if b <= 90#u8
+        then ok true
+        else
+          if b = 95#u8
+          then ok true
+          else
+            if b = 45#u8
+            then ok true
+            else if b = 46#u8
+                 then ok true
+                 else ok (b = 47#u8)
+      else
+        if b = 95#u8
+        then ok true
+        else
+          if b = 45#u8
+          then ok true
+          else if b = 46#u8
+               then ok true
+               else ok (b = 47#u8)
+
+/-- [clew_rules::plugin::fine_at]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 240:0-251:1 -/
+def plugin.fine_at (rel : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  let i1 ← Slice.index_usize rel i
+  let b ← plugin.is_path_byte i1
+  if b
+  then
+    if i1 != 47#u8
+    then ok true
+    else
+      let i2 ← i + 1#usize
+      let i3 := Slice.len rel
+      if i2 = i3
+      then ok false
+      else
+        let i4 ← Slice.index_usize rel i2
+        if i4 != 47#u8
+        then let i5 ← Slice.index_usize rel i2
+             ok (i5 != 46#u8)
+        else ok false
+  else ok false
+
+/-- [clew_rules::plugin::path_ok]: loop body 0:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 256:4-263:1 -/
+@[rust_loop_body]
+def plugin.path_ok_loop.body
+  (rel : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len rel
+  if i < i1
+  then
+    let b ← plugin.fine_at rel i
+    if b
+    then let i2 ← i + 1#usize
+         ok (cont i2)
+    else ok (done false)
+  else ok (done true)
+
+/-- [clew_rules::plugin::path_ok]: loop 0:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 256:4-263:1 -/
+@[rust_loop]
+def plugin.path_ok_loop
+  (rel : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => plugin.path_ok_loop.body rel i1)
+    i
+
+/-- [clew_rules::plugin::path_ok]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 254:0-263:1 -/
+@[reducible]
+def plugin.path_ok (rel : Slice Std.U8) : Result Bool := do
+  plugin.path_ok_loop rel 0#usize
+
+/-- [clew_rules::plugin::source_kind]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 223:0-235:1
+    Visibility: public -/
+def plugin.source_kind (rel : Slice Std.U8) : Result Std.U8 := do
+  let s ←
+    lift (Array.to_slice
+      (Array.make 11#usize [
+        112#u8, 108#u8, 117#u8, 103#u8, 105#u8, 110#u8, 46#u8, 116#u8, 111#u8,
+        109#u8, 108#u8
+        ]))
+  let b ← text.same_bytes rel s
+  if b
+  then ok plugin.SOURCE_MANIFEST
+  else
+    let n := Slice.len rel
+    if n < 8#usize
+    then ok plugin.SOURCE_REFUSED
+    else
+      let s1 ←
+        lift (Array.to_slice
+          (Array.make 4#usize [ 115#u8, 114#u8, 99#u8, 47#u8 ]))
+      let b1 ← text.starts_with rel s1
+      if b1
+      then
+        let i ← n - 3#usize
+        let i1 ← Slice.index_usize rel i
+        if i1 != 46#u8
+        then ok plugin.SOURCE_REFUSED
+        else
+          let i2 ← n - 2#usize
+          let i3 ← Slice.index_usize rel i2
+          if i3 != 114#u8
+          then ok plugin.SOURCE_REFUSED
+          else
+            let i4 ← n - 1#usize
+            let i5 ← Slice.index_usize rel i4
+            if i5 != 115#u8
+            then ok plugin.SOURCE_REFUSED
+            else
+              let b2 ← plugin.path_ok rel
+              if b2
+              then ok plugin.SOURCE_RUST
+              else ok plugin.SOURCE_REFUSED
+      else ok plugin.SOURCE_REFUSED
+
+/-- [clew_rules::plugin::KEY_MAX]
+    Source: 'crates/clew-rules/src/plugin.rs', lines 266:0-266:31
+    Visibility: public -/
+@[global_simps, irreducible] def plugin.KEY_MAX : Std.Usize := 128#usize
+
+/-- [clew_rules::plugin::hex_digit]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 269:0-271:1 -/
+def plugin.hex_digit (n : Std.U8) : Result Std.U8 := do
+  if n < 10#u8
+  then 48#u8 + n
+  else let i ← n - 10#u8
+       97#u8 + i
+
+/-- [clew_rules::plugin::key_name]: loop body 0:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 283:4-287:5
+    Visibility: public -/
+@[rust_loop_body]
+def plugin.key_name_loop.body
+  (key : Slice Std.U8) (out : alloc.vec.Vec Std.U8) (i : Std.Usize) :
+  Result (ControlFlow ((alloc.vec.Vec Std.U8) × Std.Usize) (alloc.vec.Vec
+    Std.U8))
+  := do
+  let i1 := Slice.len key
+  if i < i1
+  then
+    let i2 ← Slice.index_usize key i
+    let i3 ← i2 / 16#u8
+    let i4 ← plugin.hex_digit i3
+    let out1 ← alloc.vec.Vec.push out i4
+    let i5 ← i2 % 16#u8
+    let i6 ← plugin.hex_digit i5
+    let out2 ← alloc.vec.Vec.push out1 i6
+    let i7 ← i + 1#usize
+    ok (cont (out2, i7))
+  else ok (done out)
+
+/-- [clew_rules::plugin::key_name]: loop 0:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 283:4-287:5
+    Visibility: public -/
+@[rust_loop]
+def plugin.key_name_loop
+  (key : Slice Std.U8) (out : alloc.vec.Vec Std.U8) (i : Std.Usize) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  loop
+    (fun (out1, i1) => plugin.key_name_loop.body key out1 i1)
+    (out, i)
+
+/-- [clew_rules::plugin::key_name]:
+    Source: 'crates/clew-rules/src/plugin.rs', lines 277:0-293:1
+    Visibility: public -/
+def plugin.key_name (key : Slice Std.U8) : Result (alloc.vec.Vec Std.U8) := do
+  let b ← core.slice.Slice.is_empty key
+  if b
+  then ok (alloc.vec.Vec.new Std.U8)
+  else
+    let i := Slice.len key
+    if i > plugin.KEY_MAX
+    then ok (alloc.vec.Vec.new Std.U8)
+    else
+      let out ← plugin.key_name_loop key (alloc.vec.Vec.new Std.U8) 0#usize
+      let out1 ← alloc.vec.Vec.push out 46#u8
+      let out2 ← alloc.vec.Vec.push out1 98#u8
+      let out3 ← alloc.vec.Vec.push out2 105#u8
+      alloc.vec.Vec.push out3 110#u8
+
 /-- [clew_rules::server_dist::is_slug_byte]:
     Source: 'crates/clew-rules/src/server_dist.rs', lines 23:0-29:1 -/
 def server_dist.is_slug_byte (b : Std.U8) : Result Bool := do

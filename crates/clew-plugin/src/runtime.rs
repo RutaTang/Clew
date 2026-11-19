@@ -60,7 +60,7 @@ const READ_BUDGET: u64 = 1024 * 1024 * 1024;
 
 /// The most a plugin may keep in its own store, and the longest key.
 const STORE_CAP: u64 = 1024 * 1024;
-const KEY_CAP: usize = 128;
+const KEY_CAP: usize = clew_rules::plugin::KEY_MAX;
 
 /// What Clew gives a plugin of the open project. The GUI implements it
 /// over a local project or a remote one alike; every path it is handed has
@@ -158,11 +158,10 @@ impl Runtime {
             .map_err(|e| format!("the plugin does not export what Clew calls: {e}"))?;
         Ok(Loaded {
             pre,
-            store: self.data.as_ref().map(|d| {
-                crate::store::plugins_dir(d)
-                    .join("data")
-                    .join(&inspected.manifest.plugin.id)
-            }),
+            store: self
+                .data
+                .as_ref()
+                .and_then(|d| store_dir(d, &inspected.manifest.plugin.id).ok()),
         })
     }
 
@@ -515,10 +514,12 @@ impl bindings::clew::plugin::host::Host for State {
     }
 }
 
-/// The file a store key is kept in: its bytes as hex, so any key is a safe
-/// file name. `None` for a key too long or empty.
+/// The file a store key is kept in: its bytes as hex and `.bin`
+/// (`clew_rules::plugin::key_name`, proved to be a plain file name no other
+/// key shares). `None` for a key too long or empty.
 fn key_file(key: &str) -> Option<String> {
-    (!key.is_empty() && key.len() <= KEY_CAP).then(|| format!("{}.bin", hex(key.as_bytes())))
+    let name = clew_rules::plugin::key_name(key.as_bytes());
+    (!name.is_empty()).then(|| String::from_utf8_lossy(&name).into_owned())
 }
 
 impl bindings::clew::plugin::project::Host for State {
@@ -799,9 +800,11 @@ pub fn checked_graph(graph: Graph) -> Graph {
     Graph { nodes, edges }
 }
 
-/// Where a plugin's own store is: for removing it with the plugin.
-pub fn store_dir(data: &Path, id: &str) -> PathBuf {
-    crate::store::plugins_dir(data).join("data").join(id)
+/// Where a plugin's own store is; refused for what is not an id.
+pub fn store_dir(data: &Path, id: &str) -> Result<PathBuf, String> {
+    Ok(crate::store::plugins_dir(data)
+        .join("data")
+        .join(crate::store::checked_id(id)?))
 }
 
 #[cfg(test)]

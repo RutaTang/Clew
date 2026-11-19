@@ -8,3 +8,4 @@ import Clew.VoiceRoute
 import Clew.Ssh
 import Clew.Guards
 import Clew.OAuth
+import Clew.Plugin
