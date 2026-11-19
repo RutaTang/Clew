@@ -3,13 +3,17 @@
 //! the two sides.
 //!
 //! - [`manifest`] reads `plugin.toml`.
+//! - [`build`] builds a plugin from its source.
 //! - [`mod@inspect`] reads a plugin's file without running it: its manifest,
 //!   imports, exports and the permissions they need.
 //! - [`store`] keeps what the user approved, and the copies Clew runs.
 //! - `runtime` (a feature) runs plugins.
 
+pub mod build;
 pub mod inspect;
 pub mod manifest;
+#[cfg(feature = "runtime")]
+pub mod runtime;
 pub mod store;
 
 pub use inspect::{Inspected, inspect};

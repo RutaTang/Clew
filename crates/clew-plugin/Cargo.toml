@@ -13,7 +13,7 @@ publish = false
 
 [features]
 default = ["runtime"]
-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
+runtime = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:tokio"]
 
 [dependencies]
 clew-core = { path = "../clew-core" }
@@ -29,3 +29,5 @@ wasmparser = "0.254.1"
 # proposals, no profiling or debugging support compiled in.
 wasmtime = { version = "=48.0.9", optional = true, default-features = false, features = ["cranelift", "component-model", "runtime", "std", "parallel-compilation"] }
 wasmtime-wasi = { version = "=48.0.9", optional = true, default-features = false, features = ["p2"] }
+# Only for the `AsyncWrite` a plugin's standard output is captured through.
+tokio = { version = "1.52.3", optional = true, default-features = false }
