@@ -192,4 +192,21 @@ theorem readHeaders_headerBlock (hs : List (List Char × List Char)) (h : checkH
         simp only [headerBlock, List.map_cons]
         rw [readHeaders_cons n v _ hn' hv', ih h]
 
+/-! ## Evaluating on hover
+
+Hovering a name in a paused program asks the debugger for its value, and
+an evaluation can run the program's own code (a getter, a `toString`).
+`hover_eval_allowed` in `src/dap/proto.rs` (`clew_rules::dap`) decides
+whether a hover may. -/
+
+/-- `hover_eval_allowed`: the adapter promised a side-effect-free hover
+evaluation (`supportsEvaluateForHovers`), or you chose to allow it. -/
+def hoverEvalAllowed (promised optedIn : Bool) : Bool := promised || optedIn
+
+/-- **Hovering runs the program's code only with a promise or your
+choice**: no other way. -/
+theorem hover_runs_code_only_if_promised_or_chosen (promised optedIn : Bool) :
+    hoverEvalAllowed promised optedIn = true ↔ promised = true ∨ optedIn = true := by
+  simp [hoverEvalAllowed]
+
 end Clew.Guards

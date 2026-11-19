@@ -45,8 +45,11 @@ impl EvalContext {
 /// happens by default only when the adapter promised a side-effect-free
 /// `"hover"` evaluation (`supportsEvaluateForHovers`); for any other adapter
 /// the reader has to opt in.
+///
+/// The rule is `clew_rules::dap::hover_eval_allowed`, proved of the code
+/// itself (Aeneas).
 pub fn hover_eval_allowed(adapter_promises_no_side_effects: bool, opted_in: bool) -> bool {
-    adapter_promises_no_side_effects || opted_in
+    clew_rules::dap::hover_eval_allowed(adapter_promises_no_side_effects, opted_in)
 }
 
 /// Whether an adapter's `initialize` capabilities promise a side-effect-free

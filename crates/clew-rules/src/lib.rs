@@ -8,11 +8,14 @@
 
 pub mod approval;
 pub mod confine;
+pub mod dap;
+pub mod download;
 pub mod fingerprint;
 pub mod framing;
 pub mod headers;
 pub mod known_hosts;
 pub mod location;
+pub mod oauth;
 pub mod server_dist;
 pub mod shell;
 pub mod ssh;

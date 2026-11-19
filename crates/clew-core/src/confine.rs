@@ -156,10 +156,28 @@ pub fn confine(root: &Path, rel: &str) -> Result<PathBuf, ConfineError> {
     if folder && !canonical.is_dir() {
         return Err(not_a_folder());
     }
-    if !canonical.starts_with(&canonical_root) {
+    // Inside only if both say so: the standard library's reading of the
+    // components, and on Unix `clew_rules::confine::inside`, proved of the
+    // code itself (Aeneas) to accept only the root or a path under it.
+    if !canonical.starts_with(&canonical_root) || !resolved_inside(&canonical_root, &canonical) {
         return Err(ConfineError::Escapes);
     }
     Ok(canonical)
+}
+
+/// Whether the canonical `path` is the canonical `root` or lies under it,
+/// by the proved rule on their bytes.
+#[cfg(unix)]
+fn resolved_inside(root: &Path, path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    clew_rules::confine::inside(root.as_os_str().as_bytes(), path.as_os_str().as_bytes())
+}
+
+/// Windows paths are not `/`-separated bytes: the standard library's
+/// reading of their components decides alone.
+#[cfg(not(unix))]
+fn resolved_inside(_root: &Path, _path: &Path) -> bool {
+    true
 }
 
 #[cfg(test)]

@@ -34,3 +34,10 @@ does not model (the code proved here calls none of them). -/
 #print axioms Clew.Extracted.FrameLoop.frame_line_is_the_model
 #print axioms Clew.Extracted.FrameLoop.json_line_is_the_model
 #print axioms Clew.Extracted.FrameLoop.capped_line_is_the_model
+#print axioms Clew.Extracted.Resolved.inside_is_the_model
+#print axioms Clew.Extracted.Download.release_asset_is_the_model
+#print axioms Clew.Extracted.Hover.hover_eval_allowed_is_the_model
+#print axioms Clew.Extracted.OAuth.endpoint_allowed_is_the_model
+#print axioms Clew.Extracted.OAuth.take_stored_is_the_model
+#print axioms Clew.Extracted.OAuth.fresh_is_the_model
+#print axioms Clew.Extracted.OAuth.answers_is_the_model

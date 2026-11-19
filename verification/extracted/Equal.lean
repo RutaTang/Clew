@@ -7,6 +7,7 @@ import Clew.ServerDist
 import Clew.Trust
 import Clew.Confine
 import Clew.Update
+import Clew.OAuth
 
 /-!
 # The code that runs is the model
@@ -5981,4 +5982,233 @@ theorem capped_line_is_the_model (buf : Slice Std.U8) (cap : Std.Usize) (s : Lis
 
 end FrameLoop
 
+/-! ## Bytes: a prefix, the same bytes
+
+What `starts_with` and `same_bytes` in `crates/clew-rules/src/text.rs`
+decide, for the decisions below. -/
+
+namespace Bytes
+
+open clew_rules.text
+open Shell (bs)
+
+/-- What `starts_with` decides: `prefix`'s bytes begin `s`'s. -/
+theorem starts_with_ok (s pre : Slice Std.U8) :
+    starts_with s pre = ok ((bs pre.val).isPrefixOf (bs s.val)) := by
+  unfold starts_with
+  by_cases hlt : s.val.length < pre.val.length
+  · have hf : (bs pre.val).isPrefixOf (bs s.val) = false := by
+      rw [Bool.eq_false_iff]; intro h
+      have := (List.isPrefixOf_iff_prefix.mp h).length_le
+      simp [bs] at this; omega
+    simp [UScalar.lt_equiv, hlt, hf]
+  obtain ⟨b, hl, hq⟩ := loop_spec (starts_with_loop.body s pre) (fun _ => True)
+    (fun i b => b = ((bs pre.val).drop i.val).isPrefixOf ((bs s.val).drop i.val))
+    (fun i => pre.val.length - i.val) (by
+      intro i _
+      by_cases hi : i.val < pre.val.length
+      · have his : i.val < s.val.length := by omega
+        obtain ⟨j, hj, hjv⟩ := succ_ok pre i hi
+        have e1 : (bs pre.val).drop i.val = (pre.val[i.val]).val :: (bs pre.val).drop (i.val + 1) := by
+          unfold bs; rw [← List.map_drop, List.drop_eq_getElem_cons hi, List.map_cons, List.map_drop]
+        have e2 : (bs s.val).drop i.val = (s.val[i.val]).val :: (bs s.val).drop (i.val + 1) := by
+          unfold bs; rw [← List.map_drop, List.drop_eq_getElem_cons his, List.map_cons, List.map_drop]
+        rw [e1, e2]
+        by_cases heq : s.val[i.val] = pre.val[i.val]
+        · right
+          refine ⟨j, by simp [starts_with_loop.body, hi, index_ok s i his, index_ok pre i hi, heq, hj],
+            trivial, by omega, ?_⟩
+          intro b hb; rw [hb, hjv]; simp [List.isPrefixOf, heq]
+        · left
+          have hv : (pre.val[i.val]).val ≠ (s.val[i.val]).val :=
+            fun e => heq (UScalar.eq_of_val_eq e).symm
+          have hv' : (s.val[i.val]).val ≠ (pre.val[i.val]).val := fun e => hv e.symm
+          refine ⟨false, by simp [starts_with_loop.body, hi, index_ok s i his, index_ok pre i hi, hv'], ?_⟩
+          simp [List.isPrefixOf, hv]
+      · left
+        refine ⟨true, by simp [starts_with_loop.body, hi], ?_⟩
+        rw [List.drop_eq_nil_of_le (by simp [bs]; omega)]; rfl) 0#usize trivial
+  have hlt' : ¬ (Slice.len s < Slice.len pre) := by simp [UScalar.lt_equiv]; omega
+  simp only [hlt', ↓reduceIte]
+  unfold starts_with_loop
+  rw [hl, hq]; simp
+
+/-- What `same_bytes` decides: the same bytes. -/
+theorem same_bytes_ok (a b : Slice Std.U8) :
+    same_bytes a b = ok (decide (bs a.val = bs b.val)) := by
+  unfold same_bytes
+  by_cases hl : a.val.length = b.val.length
+  · have hlen : Slice.len a = Slice.len b := by rw [UScalar.eq_equiv]; simp [hl]
+    simp only [hlen, ↓reduceIte, starts_with_ok]
+    congr 1
+    rw [Bool.eq_iff_iff, List.isPrefixOf_iff_prefix, decide_eq_true_iff]
+    constructor
+    · intro h; exact (h.eq_of_length (by simp [bs, hl])).symm
+    · intro h; rw [h]
+  · have hlen : ¬ Slice.len a = Slice.len b := by rw [UScalar.eq_equiv]; simpa using hl
+    have hne : bs a.val ≠ bs b.val := fun e => hl (by simpa [bs] using congrArg List.length e)
+    simp [hlen, hne]
+
+end Bytes
+
+/-! ## The resolved path
+
+`confine` asks `clew_rules::confine::inside` of the canonical root and the
+canonical path, as well as `Path::starts_with`: a path both accept. -/
+
+namespace Resolved
+
+open clew_rules.confine
+open Shell (bs)
+
+/-- **`inside` is the model**: for the bytes of any two paths, the Rust
+function returns, and returns what `Confine.inside` decides. -/
+theorem inside_is_the_model (root path : Slice Std.U8) :
+    inside root path = ok (Clew.Confine.inside (bs root.val) (bs path.val)) := by
+  unfold inside Clew.Confine.inside
+  rw [Bytes.starts_with_ok]
+  cases hp : (bs root.val).isPrefixOf (bs path.val)
+  · simp
+  have hle : root.val.length ≤ path.val.length := by
+    have := (List.isPrefixOf_iff_prefix.mp hp).length_le
+    simpa [bs] using this
+  simp only [↓reduceIte, Bool.true_and, bind_ok]
+  have hbl : (bs path.val).length = path.val.length := by simp [bs]
+  have hbr : (bs root.val).length = root.val.length := by simp [bs]
+  by_cases heq : path.val.length = root.val.length
+  · have : Slice.len path = Slice.len root := by rw [UScalar.eq_equiv]; simp [heq]
+    simp [this, hbl, hbr, heq]
+  have hne : ¬ Slice.len path = Slice.len root := by rw [UScalar.eq_equiv]; simpa using heq
+  have hlt : root.val.length < path.val.length := by omega
+  have hat : (bs path.val)[root.val.length]? = some (path.val[root.val.length]'hlt).val := by
+    simp [bs, hlt]
+  simp only [hne, ↓reduceIte, hbl, hbr]
+  by_cases he : root.val = []
+  · have hie : core.slice.Slice.is_empty root = ok true := by simp [core.slice.Slice.is_empty, he]
+    have h0 : root.val.length = 0 := by simp [he]
+    simp only [hie, bind_ok, ↓reduceIte]
+    rw [index_ok path (Slice.len root) (by simpa using hlt), hat]
+    have hr : (bs root.val).getLast? = none := by simp [bs, he]
+    rw [hr]
+    simp only [UScalar.eq_equiv, bind_ok]
+    by_cases hx : (path.val[root.val.length]'hlt).val = 47 <;> simp [hx, heq]
+  have hie : core.slice.Slice.is_empty root = ok false := by simp [core.slice.Slice.is_empty, he]
+  have hn : 0 < root.val.length := List.length_pos_iff.mpr he
+  obtain ⟨k, hk, hkv⟩ := ok_of_spec (UScalar.sub_spec (x := Slice.len root) (y := 1#usize)
+    (by simp; omega))
+  have hkn : k.val = root.val.length - 1 := by simp at hkv; omega
+  have hr : (bs root.val).getLast? = some (root.val[k.val]'(by omega)).val := by
+    rw [List.getLast?_eq_getElem?]; simp [bs, hkn, hn]
+  simp only [hie, bind_ok, Bool.false_eq_true, ↓reduceIte, hk, index_ok root k (by omega), hr]
+  by_cases h47 : (root.val[k.val]'(by omega)).val = 47
+  · have : root.val[k.val]'(by omega) = 47#u8 := by rw [UScalar.eq_equiv]; simp [h47]
+    simp [this]
+  · have : ¬ root.val[k.val]'(by omega) = 47#u8 := by rw [UScalar.eq_equiv]; simpa using h47
+    rw [index_ok path (Slice.len root) (by simpa using hlt), hat]
+    simp only [this, ↓reduceIte, UScalar.eq_equiv, bind_ok]
+    by_cases hx : (path.val[root.val.length]'hlt).val = 47 <;> simp [hx, heq, h47]
+
+end Resolved
+
+/-! ## Where an update may be downloaded from
+
+`validate_dmg_url` asks `clew_rules::download::release_asset` of the host
+and path the `url` crate read. -/
+
+namespace Download
+
+open Shell (bs)
+
+/-- **`release_asset` is the model**, for the bytes of any host, path and
+releases' host and downloads directory. -/
+theorem release_asset_is_the_model (host path releasesHost downloads : Slice Std.U8) :
+    clew_rules.download.release_asset host path releasesHost downloads =
+      ok (Clew.Update.releaseAsset (bs host.val) (bs path.val) (bs releasesHost.val)
+        (bs downloads.val)) := by
+  unfold clew_rules.download.release_asset Clew.Update.releaseAsset
+  rw [Bytes.same_bytes_ok]
+  by_cases h : bs host.val = bs releasesHost.val
+  · simp [h, Bytes.starts_with_ok]
+  · simp [h]
+
+end Download
+
+/-! ## Evaluating on hover -/
+
+namespace Hover
+
+/-- **`hover_eval_allowed` is the model.** -/
+theorem hover_eval_allowed_is_the_model (promised optedIn : Bool) :
+    clew_rules.dap.hover_eval_allowed promised optedIn =
+      ok (Clew.Guards.hoverEvalAllowed promised optedIn) := by
+  cases promised <;> cases optedIn <;> rfl
+
+end Hover
+
+/-! ## Signing in to an MCP server
+
+The decisions `crates/clew-core/src/mcp/oauth.rs` makes in the sign-in
+(`clew_rules::oauth`). -/
+
+namespace OAuth
+
+open clew_rules.oauth
+open Shell (bs)
+
+/-- **`endpoint_allowed` is the model.** -/
+theorem endpoint_allowed_is_the_model (https loopbackHttp : Bool) :
+    endpoint_allowed https loopbackHttp = ok (Clew.OAuth.endpointAllowed https loopbackHttp) := by
+  cases https <;> cases loopbackHttp <;> rfl
+
+/-- **`take_stored` is the model.** -/
+theorem take_stored_is_the_model (refused isFresh : Bool) :
+    take_stored refused isFresh = ok (Clew.OAuth.takeStored refused isFresh) := by
+  cases refused <;> cases isFresh <;> rfl
+
+/-- **`fresh` is the model**: for any expiry, time and margin, the Rust
+function returns — `u64::MAX - margin` never underflows, `now + margin` is
+added only where it fits — and decides what `OAuth.fresh` decides. -/
+theorem fresh_is_the_model (expiresAt : Option Std.U64) (now margin : Std.U64) :
+    fresh expiresAt now margin =
+      ok (Clew.OAuth.fresh (expiresAt.map (·.val)) now.val margin.val) := by
+  unfold fresh Clew.OAuth.fresh
+  cases expiresAt with
+  | none => rfl
+  | some t =>
+    simp only [Option.map_some]
+    have hmax := Framing.u64_MAX_val
+    have hmv : margin.val ≤ 18446744073709551615 := by have := margin.hBounds; simp at this; omega
+    have hnv : now.val ≤ 18446744073709551615 := by have := now.hBounds; simp at this; omega
+    have htv : t.val ≤ 18446744073709551615 := by have := t.hBounds; simp at this; omega
+    have hu : Clew.OAuth.u64Max = 18446744073709551615 := rfl
+    obtain ⟨d, hd, hdv⟩ := ok_of_spec (UScalar.sub_spec (x := core.num.U64.MAX) (y := margin)
+      (by rw [hmax]; exact hmv))
+    have hdv' : d.val = 18446744073709551615 - margin.val := by rw [hmax] at hdv; exact hdv.1
+    simp only [hd, bind_ok]
+    by_cases hbig : d.val < now.val
+    · have : now > d := by simp [UScalar.lt_equiv]; omega
+      simp only [this, ↓reduceIte]
+      rw [Nat.min_eq_right (by rw [hu]; omega)]
+      simp [hu]; omega
+    · have : ¬ now > d := by simp [UScalar.lt_equiv]; omega
+      simp only [this, ↓reduceIte]
+      obtain ⟨sm, hs, hsv⟩ := ok_of_spec (UScalar.add_spec (x := now) (y := margin)
+        (by rw [Framing.u64_max]; omega))
+      simp only [hs, bind_ok]
+      rw [Nat.min_eq_left (by rw [hu]; omega)]
+      simp [UScalar.lt_equiv, hsv]
+
+/-- **`answers` is the model**, for the bytes of any `state` sent and any
+redirect's. -/
+theorem answers_is_the_model (stateParam : Option (Slice Std.U8)) (state : Slice Std.U8) :
+    answers stateParam state =
+      ok (Clew.OAuth.answers (stateParam.map (bs ·.val)) (bs state.val)) := by
+  unfold answers Clew.OAuth.answers
+  cases stateParam with
+  | none => rfl
+  | some got =>
+    simp only [Bytes.same_bytes_ok, Option.map_some]
+    cases h : (bs got.val == bs state.val) <;> simp_all
+
+end OAuth
 end Clew.Extracted

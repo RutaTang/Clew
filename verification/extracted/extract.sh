@@ -47,6 +47,13 @@ trap 'rm -rf "$out"' EXIT
   --start-from crate::framing::frame_line \
   --start-from crate::framing::json_line \
   --start-from crate::framing::capped_line \
+  --start-from crate::confine::inside \
+  --start-from crate::download::release_asset \
+  --start-from crate::dap::hover_eval_allowed \
+  --start-from crate::oauth::endpoint_allowed \
+  --start-from crate::oauth::fresh \
+  --start-from crate::oauth::take_stored \
+  --start-from crate::oauth::answers \
   --dest "$out" -- --target-dir "$out/target" -q) >"$out/charon.log" 2>&1 || {
   cat "$out/charon.log" >&2
   exit 1

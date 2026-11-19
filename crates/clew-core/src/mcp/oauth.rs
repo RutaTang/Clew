@@ -277,9 +277,7 @@ fn now_secs() -> u64 {
 /// has expired past refreshing. Blocking (a refresh is a request).
 pub fn bearer(url: &str) -> Option<String> {
     let session = session(url)?;
-    let fresh = session
-        .expires_at
-        .is_none_or(|at| now_secs().saturating_add(EXPIRY_MARGIN_SECS) < at);
+    let fresh = clew_rules::oauth::fresh(session.expires_at, now_secs(), EXPIRY_MARGIN_SECS);
     if fresh {
         return Some(session.access_token);
     }
@@ -317,10 +315,8 @@ fn refresh_locked(key: &str, seen: &str) -> Result<String, String> {
         .get(key)
         .cloned()
         .ok_or("signed out — sign in again")?;
-    let fresh = session
-        .expires_at
-        .is_none_or(|at| now_secs().saturating_add(EXPIRY_MARGIN_SECS) < at);
-    if session.access_token != seen && fresh {
+    let fresh = clew_rules::oauth::fresh(session.expires_at, now_secs(), EXPIRY_MARGIN_SECS);
+    if clew_rules::oauth::take_stored(session.access_token == seen, fresh) {
         return Ok(session.access_token);
     }
     let refresh_token = session
@@ -359,12 +355,16 @@ fn refresh_locked(key: &str, seen: &str) -> Result<String, String> {
 /// An endpoint of the flow may be https, or plain http on this machine.
 fn check_endpoint(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
-    match parsed.scheme() {
-        "https" => Ok(()),
-        "http" if crate::net::is_loopback_http(url) => Ok(()),
-        _ => Err(format!(
+    // The decision is `clew_rules::oauth::endpoint_allowed`, proved of the
+    // code itself (Aeneas); reading the scheme and host is the `url` crate's.
+    let https = parsed.scheme() == "https";
+    let loopback_http = parsed.scheme() == "http" && crate::net::is_loopback_http(url);
+    if clew_rules::oauth::endpoint_allowed(https, loopback_http) {
+        Ok(())
+    } else {
+        Err(format!(
             "{url}: an authorization endpoint must be https — refusing to send credentials in the clear"
-        )),
+        ))
     }
 }
 
@@ -676,7 +676,9 @@ fn await_redirect(
         // Only the answer to this sign-in ends the wait: anything else that
         // reaches the port (a page, another program) is turned away, and
         // cannot make the sign-in fail.
-        if params.get("state").map(String::as_str) != Some(state) {
+        // `clew_rules::oauth::answers`, proved of the code itself (Aeneas).
+        let state_param = params.get("state").map(|got| got.as_bytes());
+        if !clew_rules::oauth::answers(state_param, state.as_bytes()) {
             let _ = stream.write_all(
                 b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             );

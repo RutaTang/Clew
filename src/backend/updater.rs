@@ -205,8 +205,15 @@ pub fn validate_dmg_url(url: &str) -> Result<(), String> {
     }
     // Judged as the transfer will send it: the raw text's prefix passes
     // `…/releases/download/%2e%2e/%2e%2e/…`, which resolves elsewhere.
+    // The decision on what the parser read is `clew_rules::download::
+    // release_asset`, proved of the code itself (Aeneas).
     let release_asset = clew_core::net::https_host_path(url).is_some_and(|(host, path)| {
-        host == "github.com" && path.starts_with("/RutaTang/Clew/releases/download/")
+        clew_rules::download::release_asset(
+            host.as_bytes(),
+            path.as_bytes(),
+            b"github.com",
+            b"/RutaTang/Clew/releases/download/",
+        )
     });
     if !release_asset {
         return Err(tr!(

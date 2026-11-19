@@ -74,3 +74,11 @@ the kernel did not check.
 -- Programs run in place, MCP headers
 #print axioms Clew.Guards.trusted_means_private
 #print axioms Clew.Guards.readHeaders_headerBlock
+-- The resolved path, the update download, hovering, signing in to an MCP server
+#print axioms Clew.Confine.inside_iff
+#print axioms Clew.Update.release_asset_iff
+#print axioms Clew.Guards.hover_runs_code_only_if_promised_or_chosen
+#print axioms Clew.OAuth.credentials_only_over_https_or_to_this_machine
+#print axioms Clew.OAuth.fresh_means_time_left
+#print axioms Clew.OAuth.refresh_only_when_needed
+#print axioms Clew.OAuth.answers_iff

@@ -240,4 +240,28 @@ theorem parse_tag (v : Version) (h1 : v.major < 2 ^ 64) (h2 : v.minor < 2 ^ 64)
   simp only [htrim, hdrop]
   simpa [trim_of_no_whitespace _ hnows] using hd
 
+/-! ## Where an update may be downloaded from
+
+`validate_dmg_url` reads the download's URL with the `url` crate, as the
+download will send it — its path with every `.` and `..` piece resolved
+and `%2e` read as the `.` it is — and asks `release_asset` of the host and
+path it read (`clew_rules::download::release_asset`). -/
+
+/-- `release_asset`: the host is the releases' host, and the path starts
+with their downloads directory. -/
+def releaseAsset (host path releasesHost downloads : List Nat) : Bool :=
+  host == releasesHost && downloads.isPrefixOf path
+
+/-- **An update is downloaded only from the releases**: from their host
+exactly — not a longer name that begins with it — and under their
+downloads directory. -/
+theorem release_asset_iff (host path releasesHost downloads : List Nat) :
+    releaseAsset host path releasesHost downloads = true ↔
+      host = releasesHost ∧ ∃ rest, path = downloads ++ rest := by
+  unfold releaseAsset
+  simp only [Bool.and_eq_true, beq_iff_eq, List.isPrefixOf_iff_prefix]
+  constructor
+  · rintro ⟨h, t, rfl⟩; exact ⟨h, t, rfl⟩
+  · rintro ⟨h, t, rfl⟩; exact ⟨h, t, rfl⟩
+
 end Clew.Update

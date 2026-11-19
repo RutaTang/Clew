@@ -542,6 +542,109 @@ def confine.names_a_folder (rel : Slice Std.U8) : Result Bool := do
          ok (i1 = 46#u8)
     else ok false
 
+/-- [clew_rules::text::starts_with]: loop body 0:
+    Source: 'crates/clew-rules/src/text.rs', lines 139:4-146:1 -/
+@[rust_loop_body]
+def text.starts_with_loop.body
+  (s : Slice Std.U8) («prefix» : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len «prefix»
+  if i < i1
+  then
+    let i2 ← Slice.index_usize s i
+    let i3 ← Slice.index_usize «prefix» i
+    if i2 != i3
+    then ok (done false)
+    else let i4 ← i + 1#usize
+         ok (cont i4)
+  else ok (done true)
+
+/-- [clew_rules::text::starts_with]: loop 0:
+    Source: 'crates/clew-rules/src/text.rs', lines 139:4-146:1 -/
+@[rust_loop]
+def text.starts_with_loop
+  (s : Slice Std.U8) («prefix» : Slice Std.U8) (i : Std.Usize) :
+  Result Bool
+  := do
+  loop
+    (fun i1 => text.starts_with_loop.body s «prefix» i1)
+    i
+
+/-- [clew_rules::text::starts_with]:
+    Source: 'crates/clew-rules/src/text.rs', lines 134:0-146:1 -/
+def text.starts_with
+  (s : Slice Std.U8) («prefix» : Slice Std.U8) : Result Bool := do
+  let i := Slice.len s
+  let i1 := Slice.len «prefix»
+  if i < i1
+  then ok false
+  else text.starts_with_loop s «prefix» 0#usize
+
+/-- [clew_rules::confine::inside]:
+    Source: 'crates/clew-rules/src/confine.rs', lines 97:0-108:1
+    Visibility: public -/
+def confine.inside
+  (root : Slice Std.U8) (path : Slice Std.U8) : Result Bool := do
+  let b ← text.starts_with path root
+  if b
+  then
+    let i := Slice.len path
+    let i1 := Slice.len root
+    if i = i1
+    then ok true
+    else
+      let b1 ← core.slice.Slice.is_empty root
+      if b1
+      then
+        let i2 := Slice.len root
+        let i3 ← Slice.index_usize path i2
+        ok (i3 = 47#u8)
+      else
+        let i2 := Slice.len root
+        let i3 ← i2 - 1#usize
+        let i4 ← Slice.index_usize root i3
+        if i4 = 47#u8
+        then ok true
+        else
+          let i5 := Slice.len root
+          let i6 ← Slice.index_usize path i5
+          ok (i6 = 47#u8)
+  else ok false
+
+/-- [clew_rules::dap::hover_eval_allowed]:
+    Source: 'crates/clew-rules/src/dap.rs', lines 12:0-14:1
+    Visibility: public -/
+def dap.hover_eval_allowed
+  (adapter_promises_no_side_effects : Bool) (opted_in : Bool) :
+  Result Bool
+  := do
+  if adapter_promises_no_side_effects
+  then ok true
+  else ok opted_in
+
+/-- [clew_rules::text::same_bytes]:
+    Source: 'crates/clew-rules/src/text.rs', lines 149:0-151:1 -/
+def text.same_bytes (a : Slice Std.U8) (b : Slice Std.U8) : Result Bool := do
+  let i := Slice.len a
+  let i1 := Slice.len b
+  if i = i1
+  then text.starts_with a b
+  else ok false
+
+/-- [clew_rules::download::release_asset]:
+    Source: 'crates/clew-rules/src/download.rs', lines 15:0-17:1
+    Visibility: public -/
+def download.release_asset
+  (host : Slice Std.U8) (path : Slice Std.U8) (releases_host : Slice Std.U8)
+  (downloads : Slice Std.U8) :
+  Result Bool
+  := do
+  let b ← text.same_bytes host releases_host
+  if b
+  then text.starts_with path downloads
+  else ok false
+
 /-- [clew_rules::fingerprint::with_decimal]:
     Source: 'crates/clew-rules/src/fingerprint.rs', lines 12:0-18:1 -/
 def fingerprint.with_decimal
@@ -2135,6 +2238,51 @@ def location.trusted_by
     then location.trusted_by_loop me dirs 0#usize
     else ok false
   else ok false
+
+/-- [clew_rules::oauth::endpoint_allowed]:
+    Source: 'crates/clew-rules/src/oauth.rs', lines 13:0-15:1
+    Visibility: public -/
+def oauth.endpoint_allowed
+  (https : Bool) (loopback_http : Bool) : Result Bool := do
+  if https
+  then ok true
+  else ok loopback_http
+
+/-- [clew_rules::oauth::fresh]:
+    Source: 'crates/clew-rules/src/oauth.rs', lines 21:0-33:1
+    Visibility: public -/
+def oauth.fresh
+  (expires_at : Option Std.U64) (now : Std.U64) (margin : Std.U64) :
+  Result Bool
+  := do
+  match expires_at with
+  | none => ok true
+  | some «at» =>
+    let i ← core.num.U64.MAX - margin
+    if now > i
+    then ok false
+    else let i1 ← now + margin
+         ok (i1 < «at»)
+
+/-- [clew_rules::oauth::take_stored]:
+    Source: 'crates/clew-rules/src/oauth.rs', lines 38:0-40:1
+    Visibility: public -/
+def oauth.take_stored
+  (stored_is_refused : Bool) (fresh : Bool) : Result Bool := do
+  if stored_is_refused
+  then ok false
+  else ok fresh
+
+/-- [clew_rules::oauth::answers]:
+    Source: 'crates/clew-rules/src/oauth.rs', lines 44:0-49:1
+    Visibility: public -/
+def oauth.answers
+  (state_param : Option (Slice Std.U8)) (state : Slice Std.U8) :
+  Result Bool
+  := do
+  match state_param with
+  | none => ok false
+  | some got => text.same_bytes got state
 
 /-- [clew_rules::server_dist::is_slug_byte]:
     Source: 'crates/clew-rules/src/server_dist.rs', lines 23:0-29:1 -/

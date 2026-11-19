@@ -145,4 +145,45 @@ theorem checkLexical_spec (rel : List Char) :
       exact hnp s hs (by simpa using hb)
     simp [e1, e2, e3]
 
+/-! ## The resolved path
+
+`confine` then canonicalizes the root and the joined path: the operating
+system resolves every `..`, `.` and link in both. What is left to decide is
+whether the one canonical path lies under the other, and `confine` asks it
+of their bytes (`clew_rules::confine::inside`, on Unix) as well as of
+their components (`Path::starts_with`): both must say yes. -/
+
+/-- `inside`: the path's bytes start with the root's, and then the path
+ends, or the root ends in `/`, or a `/` follows. -/
+def inside (root path : List Nat) : Bool :=
+  root.isPrefixOf path &&
+    (path.length == root.length || root.getLast? == some 47 || path[root.length]? == some 47)
+
+/-- **A resolved path accepted is the root, or under it**: the root
+itself, or the root then a `/` and more — or, after a root that ends in
+`/` (among canonical paths, only `/`), anything more. Never a sibling
+that merely begins with the root's spelling, such as `/project-old`
+beside `/project`. -/
+theorem inside_iff (root path : List Nat) :
+    inside root path = true ↔
+      path = root ∨ (∃ rest, path = root ++ 47 :: rest) ∨
+        (root.getLast? = some 47 ∧ ∃ rest, path = root ++ rest) := by
+  unfold inside
+  constructor
+  · intro h
+    simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq] at h
+    obtain ⟨hp, hc⟩ := h
+    obtain ⟨t, rfl⟩ := List.isPrefixOf_iff_prefix.mp hp
+    cases t with
+    | nil => left; simp
+    | cons c rest =>
+      simp at hc
+      rcases hc with hl | hc
+      · right; right; exact ⟨hl, c :: rest, rfl⟩
+      · right; left; exact ⟨rest, by rw [hc]⟩
+  · rintro (rfl | ⟨rest, rfl⟩ | ⟨hl, rest, rfl⟩)
+    · simp [List.isPrefixOf_iff_prefix]
+    · simp [List.isPrefixOf_iff_prefix]
+    · simp [List.isPrefixOf_iff_prefix, hl]
+
 end Clew.Confine

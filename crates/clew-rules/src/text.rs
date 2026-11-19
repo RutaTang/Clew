@@ -130,6 +130,26 @@ pub fn trim_bounds(s: &[u8]) -> (usize, usize) {
     (start, end_of_text(s, start))
 }
 
+/// Whether `s` starts with the bytes of `prefix`.
+pub(crate) fn starts_with(s: &[u8], prefix: &[u8]) -> bool {
+    if s.len() < prefix.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < prefix.len() {
+        if s[i] != prefix[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Whether `a` and `b` hold the same bytes.
+pub(crate) fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && starts_with(a, b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::trim_bounds;
