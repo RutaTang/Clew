@@ -420,6 +420,12 @@ fn install_from(
     })();
     let _ = std::fs::remove_file(&partial);
     let _ = std::fs::remove_file(&installer);
+    // Cancelled or failed partway, what was installed is half a Rust:
+    // left, it was reported as Clew's own, broken, in place of the offer
+    // to install it.
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     result
 }
 
@@ -562,9 +568,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_failed_install_says_why() {
-        let script = "#!/bin/sh\necho 'info: downloading' >&2\necho 'error: no space left on device' >&2\nexit 1\n";
-        let (done, _, _data) = fake_install("own-rust-fails", script, None);
+        // It wrote part of a Rust before failing: none of it is left, to be
+        // taken for Clew's own, broken.
+        let script = "#!/bin/sh\nmkdir -p \"$RUSTUP_HOME/toolchains\"\necho 'info: downloading' >&2\necho 'error: no space left on device' >&2\nexit 1\n";
+        let (done, _, data) = fake_install("own-rust-fails", script, None);
         assert_eq!(done.unwrap_err(), "no space left on device");
+        assert!(
+            !managed_dir(data.path()).exists(),
+            "the half-installed Rust is removed"
+        );
     }
 
     #[test]

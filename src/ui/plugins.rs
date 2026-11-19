@@ -692,14 +692,17 @@ fn building_group(app: &App) -> Element<'_, Message> {
                 }
                 Stage::AddingTarget => tr!("Adding the WebAssembly target…"),
             };
-            rows.push(form::item(
-                tr!("Rust"),
-                Some(said.into()),
+            // Adding the target runs to its end (`CancelToolchainSetup`).
+            let cancel: Element<'_, Message> = if *stage == Stage::AddingTarget {
+                none()
+            } else {
                 form::action(
                     tr!("Cancel"),
                     Some(Message::Plugin(PluginMsg::CancelToolchainSetup)),
-                ),
-            ));
+                )
+                .into()
+            };
+            rows.push(form::item(tr!("Rust"), Some(said.into()), cancel));
         }
     }
     if let Some(why) = &app.plugins.setup_failure {
@@ -718,17 +721,22 @@ fn building_group(app: &App) -> Element<'_, Message> {
             Building::SettingUp { .. } | Building::Checking
         )
     {
-        let used = matches!(app.plugins.building, Building::Ready { own: true, .. });
+        let said = match &app.plugins.building {
+            Building::Ready { own: true, .. } => tr!(
+                "Removing it frees about 700 MB. Plugins already installed keep working; building new ones needs Rust again."
+            ),
+            Building::Ready { own: false, .. } => {
+                tr!("Not in use: your own Rust is ready. Removing it frees about 700 MB.")
+            }
+            _ => tr!("It does not work as it is. Removing it frees about 700 MB."),
+        };
         rows.push(form::item(
             tr!("Clew's own Rust"),
-            Some(match used {
-                true => tr!(
-                    "Removing it frees about 700 MB. Plugins already installed keep working; building new ones needs Rust again."
-                )
-                .into(),
-                false => tr!("Not in use: your own Rust is ready. Removing it frees about 700 MB.").into(),
-            }),
-            form::action(tr!("Remove"), Some(Message::Plugin(PluginMsg::AskRemoveOwnRust))),
+            Some(said.into()),
+            form::action(
+                tr!("Remove"),
+                Some(Message::Plugin(PluginMsg::AskRemoveOwnRust)),
+            ),
         ));
     }
     form::group(

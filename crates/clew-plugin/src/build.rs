@@ -189,7 +189,16 @@ pub fn toolchain_from(
         .join("lib")
         .join("rustlib")
         .join(TARGET);
-    if !std_lib.is_dir() {
+    // Its standard library, not only its folder: an install stopped
+    // partway leaves the folder.
+    let has_std = std::fs::read_dir(std_lib.join("lib")).is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("libstd-") && name.ends_with(".rlib")
+        })
+    });
+    if !has_std {
         return Err(BuildError::Toolchain {
             message: format!(
                 "Rust {version} is installed, but not its {TARGET} target, which plugins are built for."

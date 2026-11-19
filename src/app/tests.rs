@@ -39687,11 +39687,20 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
     checked(&mut app, Ok(("1.95.0".into(), true)), true);
     assert!(matches!(app.plugins.building, Building::SettingUp { .. }));
 
-    // It did not work: why, with what is still missing and its fix.
-    let _ = app.update(Message::Plugin(PluginMsg::ToolchainSetUp(Err(
-        "cancelled".into()
-    ))));
+    // Cancelled: said so, not as a failure.
+    let _ = app.update(Message::Plugin(PluginMsg::ToolchainSetUp(Err(None))));
     assert!(matches!(app.plugins.building, Building::Checking));
+    assert_eq!(app.status, "Setting up Rust was cancelled");
+    assert!(app.plugins.setup_failure.is_none());
+
+    // It did not work: why, with what is still missing and its fix.
+    app.plugins.building = Building::SettingUp {
+        stage: Stage::Downloading,
+        cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let _ = app.update(Message::Plugin(PluginMsg::ToolchainSetUp(Err(Some(
+        "the download was cut off".into(),
+    )))));
     checked(
         &mut app,
         Err(Missing {
@@ -39700,15 +39709,42 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
         }),
         false,
     );
-    assert!(says(&app, "Setting up did not work: cancelled"));
+    assert!(says(
+        &app,
+        "Setting up did not work: the download was cut off"
+    ));
+    assert!(
+        app.status.contains("the download was cut off"),
+        "{}",
+        app.status
+    );
     assert!(says(&app, "Install Rust for Clew"));
+
+    // Adding the target to the user's own Rust runs to its end: no Cancel.
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.plugins.building = Building::SettingUp {
+        stage: Stage::AddingTarget,
+        cancel: cancel.clone(),
+    };
+    assert!(says(&app, "Adding the WebAssembly target…"));
+    assert!(!says(&app, "Cancel"));
+    let _ = app.update(Message::Plugin(PluginMsg::CancelToolchainSetup));
+    assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+    let _ = app.update(Message::Plugin(PluginMsg::ToolchainSetUp(Ok(
+        "1.95.0".into()
+    ))));
+    assert!(
+        app.status.contains("ask it to build again"),
+        "{}",
+        app.status
+    );
 
     // Ready with Clew's own: said so, and it can be removed.
     checked(&mut app, Ok(("1.95.0".into(), true)), true);
     assert!(says(&app, "Ready: Rust 1.95.0, installed by Clew"));
     assert!(says(&app, "Clew's own Rust"));
     assert!(
-        !says(&app, "Setting up did not work: cancelled"),
+        !says(&app, "Setting up did not work: the download was cut off"),
         "a failure is forgotten once ready"
     );
     checked(&mut app, Ok(("1.95.0".into(), false)), false);

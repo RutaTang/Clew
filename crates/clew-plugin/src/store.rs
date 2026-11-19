@@ -144,6 +144,24 @@ impl Store {
         data: &Path,
         change: impl FnOnce(&mut Store) -> Result<T, String>,
     ) -> Result<T, String> {
+        Self::locked(data, change, false)
+    }
+
+    /// [`Store::update`], then — still under the lock — the copies no
+    /// record names any more removed. Swept outside it, an install between
+    /// another's copy and its record lost its copy to the sweep.
+    fn update_and_sweep<T>(
+        data: &Path,
+        change: impl FnOnce(&mut Store) -> Result<T, String>,
+    ) -> Result<T, String> {
+        Self::locked(data, change, true)
+    }
+
+    fn locked<T>(
+        data: &Path,
+        change: impl FnOnce(&mut Store) -> Result<T, String>,
+        sweep: bool,
+    ) -> Result<T, String> {
         let _serialized = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clew_core::derived::ensure_private_dir(data).map_err(|e| e.to_string())?;
         let path = store_path(data);
@@ -153,6 +171,9 @@ impl Store {
         let out = change(&mut store)?;
         let text = toml::to_string(&store).map_err(|e| e.to_string())?;
         clew_core::statefile::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+        if sweep {
+            sweep_unused(data, &store);
+        }
         Ok(out)
     }
 
@@ -188,7 +209,6 @@ pub fn install(
         return Err("the plugin's file changed after it was read".into());
     }
     let fingerprint = fingerprint(&sha256);
-    write_copy(data, &fingerprint, bytes)?;
     let record = Record {
         fingerprint,
         sha256: hex(&sha256),
@@ -201,11 +221,13 @@ pub fn install(
     };
     let id = inspected.manifest.plugin.id.clone();
     let kept = record.clone();
-    Store::update(data, move |store| {
+    // The copy, its record and the sweep under one lock: no other install
+    // or remove sweeps between the copy written and its record.
+    Store::update_and_sweep(data, move |store| {
+        write_copy(data, &kept.fingerprint, bytes)?;
         store.plugin.insert(id, kept);
         Ok(())
     })?;
-    sweep(data);
     Ok(record)
 }
 
@@ -297,25 +319,24 @@ pub fn set_enabled(data: &Path, id: &str, on: bool) -> Result<(), String> {
 
 /// Remove the plugin `id`, and its file.
 pub fn remove(data: &Path, id: &str) -> Result<(), String> {
-    Store::update(data, |store| {
+    Store::update_and_sweep(data, |store| {
         store
             .plugin
             .remove(id)
             .map(drop)
             .ok_or_else(|| format!("no plugin \"{id}\" is installed"))
-    })?;
-    sweep(data);
-    Ok(())
+    })
 }
 
 /// Remove the copies no record names any more. Best effort: a copy left
 /// behind is never run.
 pub fn sweep(data: &Path) {
-    let store = match Store::load_checked(data) {
-        Ok(store) => store,
-        // Unreadable: nothing can be known to be unused.
-        Err(_) => return,
-    };
+    // Under the store's lock, as installs and removes sweep.
+    let _ = Store::update_and_sweep(data, |_| Ok(()));
+}
+
+/// Remove the copies `store` names none of. Called under the store's lock.
+fn sweep_unused(data: &Path, store: &Store) {
     let keep: Vec<String> = store
         .plugin
         .values()

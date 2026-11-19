@@ -519,7 +519,9 @@ pub enum PluginMsg {
     /// How the step goes.
     ToolchainStage(clew_plugin::toolchain::Stage),
     /// The step ended: ready with this Rust, or why not.
-    ToolchainSetUp(Result<String, String>),
+    /// A setup step ended: the Rust version now ready, or why not (`None`:
+    /// the user cancelled it).
+    ToolchainSetUp(Result<String, Option<String>>),
     CancelToolchainSetup,
     /// Remove the Rust Clew installed.
     RemoveOwnRust,
@@ -738,7 +740,8 @@ impl App {
                 let _ = stages.unbounded_send(Message::Plugin(PluginMsg::ToolchainStage(stage)));
             };
             let done = clew_plugin::toolchain::set_up(&data, &setup, &cancel, &mut stage)
-                .map(|toolchain| toolchain.version);
+                .map(|toolchain| toolchain.version)
+                .map_err(|why| (!cancel.load(std::sync::atomic::Ordering::Relaxed)).then_some(why));
             let _ = tx.unbounded_send(Message::Plugin(PluginMsg::ToolchainSetUp(done)));
         });
         Task::run(rx, std::convert::identity)
@@ -1793,16 +1796,33 @@ impl App {
                     Ok(version) => {
                         self.plugins.setup_failure = None;
                         self.status = tr!(
-                            "Plugins can be built now, with Rust {version}",
+                            "Plugins can be built now, with Rust {version}. If an agent was building one, ask it to build again.",
                             version = version
                         );
                     }
-                    Err(why) => self.plugins.setup_failure = Some(why),
+                    Err(None) => {
+                        self.plugins.setup_failure = None;
+                        self.status = tr!("Setting up Rust was cancelled").into();
+                    }
+                    // Said on the status bar too: an install takes minutes,
+                    // and Settings may be closed by its end.
+                    Err(Some(why)) => {
+                        self.status = tr!(
+                            "Setting up Rust did not work: {reason}",
+                            reason = why.clone()
+                        );
+                        self.plugins.setup_failure = Some(why);
+                    }
                 }
                 self.check_toolchain()
             }
             PluginMsg::CancelToolchainSetup => {
-                if let Building::SettingUp { cancel, .. } = &self.plugins.building {
+                // Adding the target changes the user's own Rust: stopped
+                // partway, rustup can refuse to add it again. It is quick,
+                // and runs to its end.
+                if let Building::SettingUp { cancel, stage } = &self.plugins.building
+                    && *stage != clew_plugin::toolchain::Stage::AddingTarget
+                {
                     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Task::none()
