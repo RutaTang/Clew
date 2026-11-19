@@ -20,7 +20,7 @@
 //! - **A release build** embeds the SHA-256 of every server asset of its own
 //!   release at compile time (`CLEW_SERVER_DIGESTS`, set by the release
 //!   workflow once the server jobs have built; format in
-//!   [`parse_digest_list`]). The download AND every later reuse of the cache
+//!   [`embedded_digest`]). The download AND every later reuse of the cache
 //!   are checked against that list — which travels inside the signed,
 //!   notarized app — so neither the release host, nor anything that can
 //!   write clew's cache directory, can substitute other bytes. An asset the
@@ -35,7 +35,6 @@
 //! so the deployer streams exactly what was checked instead of re-reading a
 //! path that could have changed since.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -80,11 +79,7 @@ fn base_url() -> String {
 /// (`/`); anything else is rejected.
 pub fn slug(platform: &str) -> Result<String, String> {
     let s = platform.trim().to_lowercase().replace(' ', "-");
-    if s.is_empty()
-        || !s
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if !clew_rules::server_dist::slug_ok(s.as_bytes()) {
         return Err(format!("unsupported remote platform {platform:?}"));
     }
     Ok(s)
@@ -105,58 +100,34 @@ fn hex_sha256(bytes: &[u8]) -> String {
     s
 }
 
-fn is_sha256_hex(t: &str) -> bool {
-    t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit())
-}
-
 /// The digest out of a `.sha256` sidecar: the first 64-hex-char token, so both
 /// a bare digest and `sha256sum` output ("digest  filename") parse.
-fn parse_sha256(text: &str) -> Option<String> {
-    text.split_whitespace()
-        .map(|t| t.to_ascii_lowercase())
-        .find(|t| is_sha256_hex(t))
-}
-
-/// Parse the embedded digest list into `asset name -> sha256`.
 ///
-/// Entries are separated by newlines, `;` or `,`, and each is either
-/// `sha256sum` output — `<64 hex> <asset>` or `<64 hex> *<asset>` (any
-/// whitespace between) — or `<asset>=<64 hex>`. Anything else is ignored, so
-/// a list assembled by concatenating the release's `.sha256` sidecars works
-/// as-is.
-pub fn parse_digest_list(text: &str) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    for entry in text.split(['\n', ';', ',']).map(str::trim) {
-        if let Some((name, digest)) = entry.split_once('=') {
-            let (name, digest) = (name.trim(), digest.trim());
-            if is_sha256_hex(digest) && !name.is_empty() {
-                out.insert(name.to_string(), digest.to_ascii_lowercase());
-            }
-            continue;
-        }
-        let mut parts = entry.split_whitespace();
-        if let (Some(digest), Some(name), None) = (parts.next(), parts.next(), parts.next())
-            && is_sha256_hex(digest)
-        {
-            let name = name.trim_start_matches('*');
-            if !name.is_empty() {
-                out.insert(name.to_string(), digest.to_ascii_lowercase());
-            }
-        }
-    }
-    out
+/// The reading is `clew_rules::server_dist::sidecar_digest`, proved to be the
+/// model in `verification/Clew/ServerDist.lean` for every string.
+fn parse_sha256(text: &str) -> Option<String> {
+    clew_rules::server_dist::sidecar_digest(text.as_bytes())
+        .map(|d| String::from_utf8_lossy(&d).into_owned())
 }
 
 /// The digest `asset` must have, per `embedded` (the build-time list):
 /// `Ok(None)` when no list was embedded (fall back to the sidecar), an error
 /// when there is one and it does not name this asset.
+///
+/// Entries are separated by newlines, `;` or `,`, and each is either
+/// `sha256sum` output — `<64 hex> <asset>` or `<64 hex> *<asset>` (any
+/// whitespace between) — or `<asset>=<64 hex>`. Anything else is ignored, so
+/// a list assembled by concatenating the release's `.sha256` sidecars works
+/// as-is; of two entries naming one asset, the last counts. The reading is
+/// `clew_rules::server_dist::pinned_digest`, proved to be the model in
+/// `verification/Clew/ServerDist.lean` for every string: with a list
+/// embedded, only the digest it pins for the asset itself is ever accepted.
 fn embedded_digest(embedded: Option<&str>, asset: &str) -> Result<Option<String>, String> {
     let Some(list) = embedded else {
         return Ok(None);
     };
-    parse_digest_list(list)
-        .remove(asset)
-        .map(Some)
+    clew_rules::server_dist::pinned_digest(list.as_bytes(), asset.as_bytes())
+        .map(|d| Some(String::from_utf8_lossy(&d).into_owned()))
         .ok_or_else(|| format!("this build of Clew ships no clew-server named {asset}"))
 }
 
@@ -346,6 +317,71 @@ fn sweep_older_than(dist: &Path, keep: &str, now: std::time::SystemTime, age: Du
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    /// `slug`, `asset_name`, the digest list, `embedded_digest`,
+    /// `parse_sha256` and `verify` compute, on every input the Lean model
+    /// was run on, what the model computes — the model whose theorems say a
+    /// slug is a plain token, an asset name names one platform and protocol,
+    /// and with a list embedded only the digest pinned for the asset itself
+    /// is ever accepted (`verification/Clew/ServerDist.lean`).
+    #[test]
+    fn deployment_checks_are_the_proven_model() {
+        let vectors = include_str!("../../../verification/vectors/server_dist.json");
+        let cases = |f| crate::testutil::lean_cases(vectors, f);
+        for (input, want) in cases("slug") {
+            let platform = input.as_str().unwrap();
+            assert_eq!(
+                slug(platform).ok().as_deref(),
+                want.as_str(),
+                "slug({platform:?})"
+            );
+        }
+        for (input, want) in cases("asset_name") {
+            let (s, p) = (
+                input[0].as_str().unwrap(),
+                input[1].as_u64().unwrap() as u32,
+            );
+            assert_eq!(asset_name(s, p), want.as_str().unwrap());
+        }
+        for (input, want) in cases("parse_digest_list") {
+            let text = input.as_str().unwrap();
+            for entry in want.as_array().unwrap() {
+                let (name, digest) = (entry[0].as_str().unwrap(), entry[1].as_str().unwrap());
+                assert_eq!(
+                    embedded_digest(Some(text), name).unwrap().as_deref(),
+                    Some(digest),
+                    "the digest {text:?} pins for {name:?}"
+                );
+            }
+        }
+        for (input, want) in cases("embedded_digest") {
+            let (list, asset) = (input[0].as_str(), input[1].as_str().unwrap());
+            let got = match embedded_digest(list, asset) {
+                Ok(None) => "none".to_string(),
+                Ok(Some(d)) => d,
+                Err(_) => "refused".to_string(),
+            };
+            assert_eq!(
+                got,
+                want.as_str().unwrap(),
+                "embedded_digest({list:?}, {asset:?})"
+            );
+        }
+        for (input, want) in cases("parse_sha256") {
+            let text = input.as_str().unwrap();
+            assert_eq!(
+                parse_sha256(text).as_deref(),
+                want.as_str(),
+                "parse_sha256({text:?})"
+            );
+        }
+        for (input, want) in cases("verify_abc") {
+            let expected = input.as_str().unwrap();
+            let got = verify(b"abc".to_vec(), expected).is_ok();
+            assert_eq!(got, want.as_bool().unwrap(), "verify(abc, {expected:?})");
+        }
+    }
 
     #[test]
     fn slug_accepts_known_platforms() {
@@ -391,14 +427,13 @@ mod tests {
             "{a}  clew-server-linux-x86_64-p11\n{b} *clew-server-linux-aarch64-p11\n\
              clew-server-linux-riscv64-p11={a}; garbage line\n"
         );
-        let parsed = parse_digest_list(&list);
-        assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed["clew-server-linux-x86_64-p11"], a);
+        let pinned = |name| embedded_digest(Some(&list), name).unwrap();
+        assert_eq!(pinned("clew-server-linux-x86_64-p11"), Some(a.clone()));
         assert_eq!(
-            parsed["clew-server-linux-aarch64-p11"],
-            b.to_ascii_lowercase()
+            pinned("clew-server-linux-aarch64-p11"),
+            Some(b.to_ascii_lowercase())
         );
-        assert_eq!(parsed["clew-server-linux-riscv64-p11"], a);
+        assert_eq!(pinned("clew-server-linux-riscv64-p11"), Some(a.clone()));
 
         // With a list, the asset must be in it; without one, the sidecar is
         // the fallback.
@@ -408,6 +443,71 @@ mod tests {
         );
         assert!(embedded_digest(Some(&list), "clew-server-darwin-arm64-p11").is_err());
         assert_eq!(embedded_digest(None, "anything").unwrap(), None);
+    }
+
+    /// The readings the list and the sidecar had before they moved to
+    /// `clew_rules`, on `str`.
+    fn list_by_str(text: &str) -> HashMap<String, String> {
+        let is_hex64 = |t: &str| t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit());
+        let mut out = HashMap::new();
+        for entry in text.split(['\n', ';', ',']).map(str::trim) {
+            if let Some((name, digest)) = entry.split_once('=') {
+                let (name, digest) = (name.trim(), digest.trim());
+                if is_hex64(digest) && !name.is_empty() {
+                    out.insert(name.to_string(), digest.to_ascii_lowercase());
+                }
+                continue;
+            }
+            let mut parts = entry.split_whitespace();
+            if let (Some(digest), Some(name), None) = (parts.next(), parts.next(), parts.next())
+                && is_hex64(digest)
+            {
+                let name = name.trim_start_matches('*');
+                if !name.is_empty() {
+                    out.insert(name.to_string(), digest.to_ascii_lowercase());
+                }
+            }
+        }
+        out
+    }
+
+    fn sidecar_by_str(text: &str) -> Option<String> {
+        let is_hex64 = |t: &str| t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit());
+        text.split_whitespace()
+            .map(|t| t.to_ascii_lowercase())
+            .find(|t| is_hex64(t))
+    }
+
+    /// The proved readings read every list and sidecar built from these
+    /// pieces as the `str` readings did.
+    #[test]
+    fn the_proved_readings_are_the_str_readings() {
+        let digest = "0123456789abcdefABCDEF0123456789abcdef0123456789abcdef0123456789";
+        let pieces = [
+            digest, "a", "*a", "=", " ", "\u{3000}", "\n", ";", ",", "é", "**", "g",
+        ];
+        let mut texts = vec![String::new()];
+        for _ in 0..4 {
+            let mut longer = Vec::new();
+            for t in &texts {
+                for p in pieces {
+                    longer.push(format!("{t}{p}"));
+                }
+            }
+            texts.extend(longer);
+        }
+        for text in &texts {
+            let map = list_by_str(text);
+            for name in ["a", "*a", "é", "g", "a a", ""] {
+                assert_eq!(
+                    clew_rules::server_dist::pinned_digest(text.as_bytes(), name.as_bytes())
+                        .map(|d| String::from_utf8(d).unwrap()),
+                    map.get(name).cloned(),
+                    "{text:?} {name:?}"
+                );
+            }
+            assert_eq!(parse_sha256(text), sidecar_by_str(text), "{text:?}");
+        }
     }
 
     fn verified(payload: &[u8]) -> VerifiedServer {

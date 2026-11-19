@@ -1,0 +1,11 @@
+[package]
+name = "clew-rules"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+# Clew's pure decisions, kept apart so they can be translated to Lean as they
+# are (Charon and Aeneas: `verification/extracted/`) and proved there. No
+# dependencies, and only what Aeneas translates: `match`, `while`, `Vec`,
+# integers — no strings, no closures, no I/O.
+[dependencies]

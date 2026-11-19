@@ -1095,6 +1095,24 @@ pub fn run_in_child(name: &str, env: &[(&str, Option<&OsStr>)]) {
     );
 }
 
+/// The `(input, output)` pairs one Lean model computed for `function`, out
+/// of a conformance-vector file the verification project wrote
+/// (`verification/vectors/*.json`, passed in with `include_str!`). The
+/// model's theorems hold of the Rust code only as far as the code computes
+/// what the model does: each test that walks these pairs is that link.
+pub fn lean_cases(vectors: &str, function: &str) -> Vec<(serde_json::Value, serde_json::Value)> {
+    let all: serde_json::Value =
+        serde_json::from_str(vectors).expect("the conformance vectors are JSON");
+    let cases = all[function]
+        .as_array()
+        .unwrap_or_else(|| panic!("no vectors for {function}"));
+    assert!(!cases.is_empty(), "no vectors for {function}");
+    cases
+        .iter()
+        .map(|pair| (pair[0].clone(), pair[1].clone()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

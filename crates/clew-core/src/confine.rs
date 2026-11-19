@@ -37,6 +37,7 @@
 //! directory-swap window needs an attacker already running code on the host,
 //! which is out of scope here (the same residual `statefile` documents).
 
+use clew_rules::confine::Lexical;
 use std::path::{Component, Path, PathBuf};
 
 /// Why a path was refused.
@@ -94,9 +95,19 @@ impl ConfineError {
 /// The lexical half of [`confine`]: refuse a relative path whose shape alone
 /// could leave the root. Pure — no filesystem access — so it is safe to call
 /// on an async thread.
+///
+/// The rule is `clew_rules::confine::check_lexical`, the code
+/// `verification/` proves never accepts a path that, resolved against any
+/// root, stands outside it. On Unix — where the server and the app run — it
+/// refuses all the standard library's `Path` reading below would; that
+/// reading stays for Windows, where `\`, a drive (`C:`) or a UNC prefix also
+/// lead out.
 pub fn check_lexical(rel: &str) -> Result<(), ConfineError> {
-    if rel.trim().is_empty() {
-        return Err(ConfineError::Empty);
+    match clew_rules::confine::check_lexical(rel.as_bytes()) {
+        Lexical::Empty => return Err(ConfineError::Empty),
+        Lexical::Absolute => return Err(ConfineError::Absolute),
+        Lexical::Traversal => return Err(ConfineError::Traversal),
+        Lexical::Inside => {}
     }
     let path = Path::new(rel);
     if path.is_absolute() {
@@ -133,7 +144,7 @@ pub fn confine(root: &Path, rel: &str) -> Result<PathBuf, ConfineError> {
     // in the same words: the OS's own are the host's — before containment,
     // which Linux never reaches for such a name, so that one led out of the
     // project is refused alike too.
-    let folder = names_a_folder(rel);
+    let folder = clew_rules::confine::names_a_folder(rel.as_bytes());
     let not_a_folder = || ConfineError::Unresolvable(std::io::ErrorKind::NotADirectory.into());
     let canonical = std::fs::canonicalize(canonical_root.join(rel)).map_err(|e| {
         if folder && e.kind() == std::io::ErrorKind::NotADirectory {
@@ -145,21 +156,90 @@ pub fn confine(root: &Path, rel: &str) -> Result<PathBuf, ConfineError> {
     if folder && !canonical.is_dir() {
         return Err(not_a_folder());
     }
-    if !canonical.starts_with(&canonical_root) {
+    // Inside only if both say so: the standard library's reading of the
+    // components, and on Unix `clew_rules::confine::inside`, proved of the
+    // code itself (Aeneas) to accept only the root or a path under it.
+    if !canonical.starts_with(&canonical_root) || !resolved_inside(&canonical_root, &canonical) {
         return Err(ConfineError::Escapes);
     }
     Ok(canonical)
 }
 
-/// Whether `rel` ends in a separator or a `.` component (`src/`, `src/.`,
-/// `.`): a name only a folder answers to, whatever the name before it is.
-fn names_a_folder(rel: &str) -> bool {
-    matches!(rel.rsplit('/').next(), Some("" | "."))
+/// Whether the canonical `path` is the canonical `root` or lies under it,
+/// by the proved rule on their bytes.
+#[cfg(unix)]
+fn resolved_inside(root: &Path, path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    clew_rules::confine::inside(root.as_os_str().as_bytes(), path.as_os_str().as_bytes())
+}
+
+/// Windows paths are not `/`-separated bytes: the standard library's
+/// reading of their components decides alone.
+#[cfg(not(unix))]
+fn resolved_inside(_root: &Path, _path: &Path) -> bool {
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The lexical check computes, on every input the Lean model was run
+    /// on, what the model computes — the model whose theorems say an
+    /// accepted path never leaves the root (`verification/Clew/Confine.lean`).
+    #[test]
+    fn the_lexical_check_is_the_proven_model() {
+        let vectors = include_str!("../../../verification/vectors/confine.json");
+        for (input, want) in crate::testutil::lean_cases(vectors, "check_lexical") {
+            let rel = input.as_str().unwrap();
+            let got = match check_lexical(rel) {
+                Ok(()) => "ok",
+                Err(ConfineError::Empty) => "empty",
+                Err(ConfineError::Absolute) => "absolute",
+                Err(ConfineError::Traversal) => "traversal",
+                Err(e) => panic!("check_lexical({rel:?}) gave {e}, which it never gives"),
+            };
+            assert_eq!(got, want, "check_lexical({rel:?})");
+        }
+        for (input, want) in crate::testutil::lean_cases(vectors, "names_a_folder") {
+            let rel = input.as_str().unwrap();
+            assert_eq!(
+                serde_json::Value::Bool(clew_rules::confine::names_a_folder(rel.as_bytes())),
+                want,
+                "names_a_folder({rel:?})"
+            );
+        }
+    }
+
+    /// On Unix the proved rule refuses all the standard library's `Path`
+    /// reading refuses, for the same reason: that reading is there for
+    /// Windows alone.
+    #[cfg(unix)]
+    #[test]
+    fn on_unix_the_path_reading_adds_nothing_to_the_proved_rule() {
+        let pieces = ["", ".", "..", "...", "a", " ", "\u{3000}", "é", "..a"];
+        let mut paths = vec![String::new()];
+        for _ in 0..3 {
+            let mut longer = Vec::new();
+            for p in &paths {
+                for piece in pieces {
+                    longer.push(format!("{p}/{piece}"));
+                    longer.push(format!("{p}{piece}"));
+                }
+            }
+            paths.extend(longer);
+        }
+        for rel in &paths {
+            let proved = clew_rules::confine::check_lexical(rel.as_bytes());
+            let std_refuses = Path::new(rel).is_absolute()
+                || Path::new(rel)
+                    .components()
+                    .any(|c| !matches!(c, Component::CurDir | Component::Normal(_)));
+            if proved == Lexical::Inside {
+                assert!(!std_refuses, "{rel:?}");
+            }
+        }
+    }
 
     use crate::testutil::TempDir;
 

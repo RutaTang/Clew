@@ -8,6 +8,8 @@ name: CI
 # `clew-core` + `clew-protocol`) is the piece deployed to remote hosts over
 # SSH, so it is also built and tested on Linux on its own (no audio stack, as
 # on a server), and cross-built for the static musl targets the release ships.
+# The Lean 4 proofs of the rules Clew's safety rests on (verification/) are
+# checked in `verification`.
 #
 # Supply chain: every action is pinned to a full commit SHA (the tag is in the
 # trailing comment), checkouts do not persist the token, and the workflow token
@@ -296,3 +298,89 @@ jobs:
             exit 1
           }
           echo "protocol v$PROTO has a committed wire snapshot"
+
+  # The Lean 4 proofs in verification/ (docs/verification.md): every proof
+  # checks, each rests on Lean's standard axioms alone, and the conformance
+  # vectors the Rust tests run the real code on are what the models compute.
+  # The toolchain is the one verification/lean-toolchain pins, fetched from
+  # its GitHub release and checked against a pinned SHA-256 (no installer
+  # script); the proofs need nothing beyond it.
+  verification:
+    name: Verification · Lean proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Lean toolchain (pinned)
+        env:
+          LEAN_VERSION: 4.36.0-rc2
+          LEAN_SHA256: 0a0a3208617e9eab92f1041efa83ad94d405e69d172fb654a62dbfa9fbc5313b
+        run: |
+          set -euo pipefail
+          test "$(cat verification/lean-toolchain)" = "leanprover/lean4:v$LEAN_VERSION" || {
+            echo "::error::verification/lean-toolchain is not v$LEAN_VERSION; update LEAN_VERSION and LEAN_SHA256 here"
+            exit 1
+          }
+          curl -sSfL -o "$RUNNER_TEMP/lean.tar.zst" \
+            "https://github.com/leanprover/lean4/releases/download/v$LEAN_VERSION/lean-$LEAN_VERSION-linux.tar.zst"
+          echo "$LEAN_SHA256  $RUNNER_TEMP/lean.tar.zst" | sha256sum -c -
+          tar --zstd -xf "$RUNNER_TEMP/lean.tar.zst" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/lean-$LEAN_VERSION-linux/bin" >> "$GITHUB_PATH"
+      - name: Proofs, axioms, vectors
+        run: verification/check.sh
+
+  # The code that runs is the model (docs/verification.md, "The code that
+  # runs"): crates/clew-rules translated to Lean by the pinned Charon and
+  # Aeneas must be the committed verification/extracted/ClewRules.lean, and
+  # the proofs that it computes what the models compute must check, on Lean's
+  # standard axioms alone. A project apart, since Aeneas's Lean library needs
+  # Mathlib (fetched from its cache) and the proofs in verification/ do not.
+  extracted:
+    name: Verification · the Rust is the model (Aeneas)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Lean toolchain (pinned)
+        env:
+          LEAN_VERSION: 4.36.0-rc2
+          LEAN_SHA256: 0a0a3208617e9eab92f1041efa83ad94d405e69d172fb654a62dbfa9fbc5313b
+        run: |
+          set -euo pipefail
+          test "$(cat verification/extracted/lean-toolchain)" = "leanprover/lean4:v$LEAN_VERSION" || {
+            echo "::error::verification/extracted/lean-toolchain is not v$LEAN_VERSION; update LEAN_VERSION and LEAN_SHA256 here"
+            exit 1
+          }
+          curl -sSfL -o "$RUNNER_TEMP/lean.tar.zst" \
+            "https://github.com/leanprover/lean4/releases/download/v$LEAN_VERSION/lean-$LEAN_VERSION-linux.tar.zst"
+          echo "$LEAN_SHA256  $RUNNER_TEMP/lean.tar.zst" | sha256sum -c -
+          tar --zstd -xf "$RUNNER_TEMP/lean.tar.zst" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/lean-$LEAN_VERSION-linux/bin" >> "$GITHUB_PATH"
+      # The release whose Lean library lakefile.lean pins (same commit).
+      - name: Charon and Aeneas (pinned)
+        env:
+          AENEAS_RELEASE: nightly-2026.11.18-1dc8ad3
+          AENEAS_SHA256: 09c07d644ca0e7b1d0c751049e8d733438194a85e8a6941b7ac00d99609a4391
+        run: |
+          set -euo pipefail
+          grep -q "@ \"1dc8ad3" verification/extracted/lakefile.lean || {
+            echo "::error::verification/extracted/lakefile.lean pins another Aeneas commit than $AENEAS_RELEASE"
+            exit 1
+          }
+          curl -sSfL -o "$RUNNER_TEMP/aeneas.tar.gz" \
+            "https://github.com/AeneasVerif/aeneas/releases/download/$AENEAS_RELEASE/aeneas-linux-x86_64.tar.gz"
+          echo "$AENEAS_SHA256  $RUNNER_TEMP/aeneas.tar.gz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/aeneas"
+          tar -xzf "$RUNNER_TEMP/aeneas.tar.gz" -C "$RUNNER_TEMP/aeneas"
+          echo "$RUNNER_TEMP/aeneas" >> "$GITHUB_PATH"
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$RUNNER_TEMP/aeneas/rust-toolchain")
+          rustup toolchain install "$channel" --profile minimal --component rustc-dev,llvm-tools,rust-src
+      - name: Mathlib (its build cache)
+        working-directory: verification/extracted
+        run: lake exe cache get
+      - name: Translation current, proofs, axioms
+        run: verification/extracted/check.sh

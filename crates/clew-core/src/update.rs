@@ -20,6 +20,7 @@
 //! check at install time for the version the downloaded bundle actually
 //! declares, since a tag alone says nothing about the bytes behind it.
 
+use clew_rules::version::Upgrade;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -50,18 +51,29 @@ pub struct Version {
 impl Version {
     /// Parse `1.2.3` or `v1.2.3`. Any pre-release / build suffix after the patch
     /// is ignored (clew tags are plain `vX.Y.Z`, but stay lenient).
+    ///
+    /// The reading is `clew_rules::version::parse`, proved to be the model in
+    /// `verification/Clew/Update.lean` for every string.
     pub fn parse(s: &str) -> Option<Version> {
-        let s = s.trim().trim_start_matches('v');
-        let core = s.split(['-', '+']).next().unwrap_or(s);
-        let mut it = core.split('.');
-        let major = it.next()?.trim().parse().ok()?;
-        let minor = it.next()?.trim().parse().ok()?;
-        let patch = it.next()?.trim().parse().ok()?;
-        Some(Version {
-            major,
-            minor,
-            patch,
-        })
+        clew_rules::version::parse(s.as_bytes()).map(Version::from)
+    }
+
+    fn rule(self) -> clew_rules::version::Version {
+        clew_rules::version::Version {
+            major: self.major,
+            minor: self.minor,
+            patch: self.patch,
+        }
+    }
+}
+
+impl From<clew_rules::version::Version> for Version {
+    fn from(v: clew_rules::version::Version) -> Version {
+        Version {
+            major: v.major,
+            minor: v.minor,
+            patch: v.patch,
+        }
     }
 }
 
@@ -102,14 +114,21 @@ pub fn latest_release() -> Result<Release, String> {
 /// it is a label on the release page, and says nothing about which build the
 /// image actually contains.
 pub fn ensure_upgrade(running: Version, candidate: &str) -> Result<Version, String> {
-    let v = Version::parse(candidate)
-        .ok_or_else(|| format!("the update declares an unreadable version {candidate:?}"))?;
-    if v <= running {
-        return Err(format!(
-            "the update contains Clew {v}, which is not newer than the running {running} — refusing to install it"
-        ));
+    // The decision `verification/` proves of this very code: what it lets
+    // through reads as a version strictly newer than `running`.
+    match clew_rules::version::upgrade(running.rule(), candidate.as_bytes()) {
+        Upgrade::Unreadable => Err(format!(
+            "the update declares an unreadable version {candidate:?}"
+        )),
+        Upgrade::NotNewer(v) => {
+            // Named, so the message is the one `extern_messages` translates.
+            let v = Version::from(v);
+            Err(format!(
+                "the update contains Clew {v}, which is not newer than the running {running} — refusing to install it"
+            ))
+        }
+        Upgrade::Newer(v) => Ok(Version::from(v)),
     }
-    Ok(v)
 }
 
 fn parse_release(body: &[u8], arch: &str) -> Result<Release, String> {
@@ -228,6 +247,59 @@ pub fn download_to_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Version::parse`, the order `Version` derives and `ensure_upgrade`
+    /// compute, on every input the Lean model was run on, what the model
+    /// computes — the model whose theorems say an accepted update is
+    /// strictly newer, successive ones never repeat a version, and every
+    /// tag Clew publishes reads back (`verification/Clew/Update.lean`).
+    #[test]
+    fn versions_are_the_proven_model() {
+        let vectors = include_str!("../../../verification/vectors/update.json");
+        let version = |v: &serde_json::Value| Version {
+            major: v[0].as_u64().unwrap(),
+            minor: v[1].as_u64().unwrap(),
+            patch: v[2].as_u64().unwrap(),
+        };
+        for (input, want) in crate::testutil::lean_cases(vectors, "parse") {
+            let s = input.as_str().unwrap();
+            let want = (!want.is_null()).then(|| version(&want));
+            assert_eq!(Version::parse(s), want, "Version::parse({s:?})");
+        }
+        for (input, want) in crate::testutil::lean_cases(vectors, "lt") {
+            let (a, b) = (version(&input[0]), version(&input[1]));
+            assert_eq!(a < b, want.as_bool().unwrap(), "{a} < {b}");
+            assert_eq!(
+                clew_rules::version::is_newer(a.rule(), b.rule()),
+                want.as_bool().unwrap(),
+                "is_newer({a}, {b})"
+            );
+        }
+        for (input, want) in crate::testutil::lean_cases(vectors, "ensure_upgrade") {
+            let running = version(&input[0]);
+            let candidate = input[1].as_str().unwrap();
+            let got = ensure_upgrade(running, candidate);
+            match want.as_str() {
+                Some("unreadable") => {
+                    assert!(
+                        Version::parse(candidate).is_none() && got.is_err(),
+                        "{candidate:?}"
+                    )
+                }
+                Some("not_newer") => {
+                    assert!(
+                        Version::parse(candidate).is_some() && got.is_err(),
+                        "{candidate:?}"
+                    )
+                }
+                _ => assert_eq!(
+                    got,
+                    Ok(version(&want)),
+                    "ensure_upgrade({running}, {candidate:?})"
+                ),
+            }
+        }
+    }
 
     /// A cancel flag nothing sets.
     fn never() -> AtomicBool {

@@ -1148,7 +1148,8 @@ impl App {
     /// The first 1-based line where `caller` (in `caller_file`) calls
     /// `callee`, found by re-parsing the caller's live source — here, on
     /// the update loop; a jump finds it off it ([`App::jump_to_call`]).
-    #[cfg(test)]
+    /// Only the Unix test of its refusals (symlinks) calls it.
+    #[cfg(all(test, unix))]
     pub(crate) fn call_site_line(
         &self,
         caller_file: &Path,

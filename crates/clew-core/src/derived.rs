@@ -54,11 +54,12 @@ pub fn dir(host: Option<&str>, root: &Path) -> Option<PathBuf> {
     // Before the key was canonical, a project opened through a symlinked or
     // `..`-bearing path was filed under that spelling. Adopt such a directory
     // once, so the switch does not throw away (and re-bill) what it holds.
-    if std::fs::symlink_metadata(&dir).is_err() {
-        let legacy = cache.join(legacy_key(host, root));
-        if legacy != dir && legacy.is_dir() {
-            let _ = std::fs::rename(&legacy, &dir);
-        }
+    if std::fs::symlink_metadata(&dir).is_err()
+        && let Some(legacy) = legacy_key(host, root).map(|k| cache.join(k))
+        && legacy != dir
+        && legacy.is_dir()
+    {
+        let _ = std::fs::rename(&legacy, &dir);
     }
     ensure_private_dir(&dir).ok()?;
     Some(dir)
@@ -72,20 +73,34 @@ pub fn dir(host: Option<&str>, root: &Path) -> Option<PathBuf> {
 /// `..`-bearing spelling of an already-known project is the same project —
 /// two keys for one directory was how an approval and a cache could each be
 /// found under a different spelling than the other. A root that cannot be
-/// canonicalized (it no longer exists) keys by the path as given.
+/// canonicalized (it no longer exists) keys by its absolute path, so a local
+/// key is always absolute and never begins `ssh://` as a remote's does.
 ///
-/// A remote root cannot be resolved from here, and the same absolute path on
-/// two hosts is two projects, so the host is part of the key and the path is
-/// used verbatim — exactly the form trust records have always used, so no
-/// existing approval changes its key.
+/// A remote root cannot be resolved from here, and the same path on two
+/// hosts is two projects, so the host's label is part of the key and the
+/// path is used verbatim: `ssh://<label>:<root>`, the form trust records have
+/// always used. A relative root (`clew proj` with `CLEW_SSH` set) is written
+/// `./proj`: as it was, `ssh://u@h:2222:/srv/p` was both `u@h` port 22's
+/// `2222:/srv/p` and `u@h:2222`'s `/srv/p`. That the key names one label and
+/// one root is proved in `verification/Clew/Trust.lean`, and
+/// `clew_rules::approval` is proved to write that key.
+///
+/// A path is written as [`path_text`] writes it, so two paths never share a
+/// key, whatever bytes they hold.
 pub fn project_key(host: Option<&str>, root: &Path) -> String {
     match host {
-        None => root
-            .canonicalize()
-            .unwrap_or_else(|_| root.to_path_buf())
-            .to_string_lossy()
-            .into_owned(),
-        Some(h) => format!("ssh://{h}:{}", root.to_string_lossy()),
+        None => path_text(
+            &root
+                .canonicalize()
+                .or_else(|_| std::path::absolute(root))
+                .unwrap_or_else(|_| root.to_path_buf()),
+        ),
+        Some(h) => {
+            let key = clew_rules::approval::approval_key(h.as_bytes(), path_text(root).as_bytes());
+            // `ssh://`, `:` and `./` are ASCII between whole strings: UTF-8
+            // in is UTF-8 out, so nothing is ever replaced here.
+            String::from_utf8_lossy(&key).into_owned()
+        }
     }
 }
 
@@ -138,14 +153,52 @@ fn key(host: Option<&str>, root: &Path) -> String {
     hex128(&project_key(host, root))
 }
 
+/// A path as the text of a key: its UTF-8 as it is, and each byte of it that
+/// is not UTF-8 (on Windows, each unpaired surrogate) as a NUL and its value
+/// in hex. No path holds a NUL, so no two paths share a text — as they did
+/// when every such byte became the one `\u{FFFD}` of `to_string_lossy`, and
+/// `/p/\xff` and `/p/\xfe` were one project to approve. A UTF-8 path, which
+/// is nearly every path, is its own text, so its key is what it always was.
+pub fn path_text(path: &Path) -> String {
+    #[cfg(unix)]
+    {
+        use std::fmt::Write;
+        use std::os::unix::ffi::OsStrExt;
+        let mut text = String::new();
+        for chunk in path.as_os_str().as_bytes().utf8_chunks() {
+            text.push_str(chunk.valid());
+            for byte in chunk.invalid() {
+                let _ = write!(text, "\0{byte:02x}");
+            }
+        }
+        text
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        char::decode_utf16(path.as_os_str().encode_wide())
+            .map(|unit| match unit {
+                Ok(c) => c.to_string(),
+                Err(e) => format!("\0{:04x}", e.unpaired_surrogate()),
+            })
+            .collect()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        path.to_string_lossy().into_owned()
+    }
+}
+
 /// The key before it was canonical: the path exactly as the caller spelled
-/// it. Only consulted to adopt an old directory (see [`dir`]).
-fn legacy_key(host: Option<&str>, root: &Path) -> String {
+/// it. Only consulted to adopt an old directory (see [`dir`]) — and never
+/// for a path that is not UTF-8, whose old key other paths shared.
+fn legacy_key(host: Option<&str>, root: &Path) -> Option<String> {
+    let root = root.to_str()?;
     let scoped = match host {
-        None => root.to_string_lossy().into_owned(),
-        Some(h) => format!("ssh://{h}:{}", root.to_string_lossy()),
+        None => root.to_string(),
+        Some(h) => format!("ssh://{h}:{root}"),
     };
-    hex128(&scoped)
+    Some(hex128(&scoped))
 }
 
 fn hex128(s: &str) -> String {
@@ -215,6 +268,41 @@ mod tests {
             project_key(Some("u@h"), Path::new("/srv/p")),
             "ssh://u@h:/srv/p"
         );
+        // A relative remote root can never read as a port and a root.
+        assert_eq!(
+            project_key(Some("u@h"), Path::new("2222:/srv/p")),
+            "ssh://u@h:./2222:/srv/p"
+        );
+        assert_ne!(
+            project_key(Some("u@h"), Path::new("2222:/srv/p")),
+            project_key(Some("u@h:2222"), Path::new("/srv/p"))
+        );
+        // A local root that does not exist is keyed by its absolute path.
+        let gone = project_key(None, Path::new("no-such-project-here"));
+        assert!(Path::new(&gone).is_absolute(), "{gone}");
+    }
+
+    /// Two paths that are not UTF-8 are two projects: their bytes are kept,
+    /// not each made the same replacement character.
+    #[test]
+    #[cfg(unix)]
+    fn paths_that_are_not_utf8_keep_their_bytes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let a = Path::new(OsStr::from_bytes(b"/srv/p\xff"));
+        let b = Path::new(OsStr::from_bytes(b"/srv/p\xfe"));
+        assert_eq!(path_text(a), "/srv/p\0ff");
+        assert_ne!(project_key(None, a), project_key(None, b));
+        assert_ne!(project_key(Some("u@h"), a), project_key(Some("u@h"), b));
+        assert_ne!(key(None, a), key(None, b));
+        // Nor is either the path that holds the replacement character.
+        assert_ne!(
+            project_key(None, a),
+            project_key(None, Path::new("/srv/p\u{FFFD}"))
+        );
+        // And a UTF-8 path is its own text, so its key never changed.
+        assert_eq!(path_text(Path::new("/srv/é p")), "/srv/é p");
+        assert_eq!(legacy_key(None, a), None);
     }
 
     /// The data directory and the per-project cache are user-only, and a
@@ -236,7 +324,7 @@ mod tests {
         // An older clew filed the project under the alias spelling.
         let legacy = data
             .join("cache")
-            .join(legacy_key(None, &base.join("alias")));
+            .join(legacy_key(None, &base.join("alias")).unwrap());
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join("explain.json"), "{}").unwrap();
 

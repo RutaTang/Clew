@@ -592,8 +592,9 @@ impl Engines {
         *slot = None;
     }
 
-    /// Whether the model is loaded.
-    #[cfg(test)]
+    /// Whether the model is loaded (asked by the Unix-only tests that run a
+    /// fake engine).
+    #[cfg(all(test, unix))]
     pub(crate) fn loaded(&self) -> bool {
         self.engine.lock().map(|s| s.is_some()).unwrap_or(false)
     }
@@ -697,7 +698,9 @@ fn retrying(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::Arc;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Every file is pinned: a revision, a size, a SHA-256, inside the
@@ -829,6 +832,7 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
     fn texts(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("text {i}")).collect()
     }

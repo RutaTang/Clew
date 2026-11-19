@@ -851,22 +851,10 @@ impl ChangedKeyReport {
 
 /// A command for the user to run, with each argument quoted for a POSIX shell.
 fn shell_command(words: &[&str]) -> String {
-    words
-        .iter()
-        .map(|w| {
-            if !w.is_empty()
-                && w.chars().all(|c| {
-                    c.is_ascii_alphanumeric()
-                        || matches!(c, '-' | '_' | '.' | '/' | '@' | ':' | ',' | '+')
-                })
-            {
-                w.to_string()
-            } else {
-                format!("'{}'", w.replace('\'', "'\\''"))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let words: Vec<Vec<u8>> = words.iter().map(|w| w.as_bytes().to_vec()).collect();
+    // Quoting adds only ASCII between whole characters, so UTF-8 in is UTF-8
+    // out and nothing is ever replaced here.
+    String::from_utf8_lossy(&clew_rules::shell::shell_command(&words)).into_owned()
 }
 
 /// The refusal of a host whose key CHANGED, with what ssh said about it: the
@@ -1126,7 +1114,7 @@ const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// release's `.sha256` sidecars concatenated — one `sha256sum` line per server
 /// asset, `<64 lowercase hex>  clew-server-<slug>-p<protocol>` (for example
 /// `3b0c…9f1e  clew-server-linux-x86_64-p13` at protocol 13). The parser,
-/// `server_dist::parse_digest_list`, also accepts `;` or `,` between entries,
+/// `server_dist::embedded_digest`, also accepts `;` or `,` between entries,
 /// a `*` before the name, and `<asset>=<hex>`. A build without it (a developer
 /// build) falls back to the sidecar published beside each asset, which only
 /// guards against a corrupted transfer.
@@ -1201,13 +1189,13 @@ fn remote_layout() -> Result<RemoteLayout, Failure> {
 /// shell is. `script` must not contain a single quote; every caller builds it
 /// from constants and validated tokens, and this refuses rather than escapes.
 fn sh_c(script: &str) -> Result<String, Failure> {
-    if script.contains('\'') {
-        return Err(Failure::new(
+    match clew_rules::shell::sh_c(script.as_bytes()) {
+        Some(command) => Ok(String::from_utf8_lossy(&command).into_owned()),
+        None => Err(Failure::new(
             FailureKind::Other,
             tr!("internal error: a remote script contains a single quote"),
-        ));
+        )),
     }
-    Ok(format!("sh -c '{script}'"))
 }
 
 /// Probe for this build's server, and sweep the other builds' directories
@@ -2676,6 +2664,18 @@ exit 3
         ] {
             assert!(sh_c(&script).is_ok(), "{script}");
             assert!(script.contains(&l.dir));
+            // Read alike by a login shell that is not POSIX, inside the
+            // quotes `sh_c` puts it in: one line (csh refuses a newline in
+            // quotes), no `\\` (fish reads it as one backslash there), and
+            // every `!` before a space (which csh never takes for history).
+            assert!(!script.contains('\n'), "{script}");
+            assert!(!script.contains("\\\\"), "{script}");
+            assert!(
+                script
+                    .match_indices('!')
+                    .all(|(i, _)| script[i + 1..].starts_with(' ')),
+                "{script}"
+            );
         }
         assert!(sh_c("echo 'x'").is_err());
         assert_ne!(unique_token(), unique_token());
@@ -3595,5 +3595,65 @@ esac"#
             "an unresolvable tool falls back to the system path, not a bare name"
         );
         assert!(system_openssh_dir().is_absolute());
+    }
+
+    /// The commands Clew writes for a shell, on every input the Lean model was
+    /// run on (`verification/Clew/Ssh.lean`), whose theorems say a POSIX shell
+    /// reads them back as exactly the words meant — and, on Unix, the real
+    /// `/bin/sh` reading every one of them back, so the model of the shell is
+    /// checked too.
+    #[test]
+    fn shell_words_are_the_proven_model() {
+        let vectors = include_str!("../../verification/vectors/ssh.json");
+        let cases = |f| clew_core::testutil::lean_cases(vectors, f);
+        // What `sh` reads `command` as: its words, after a first one.
+        #[cfg(unix)]
+        let read_back = |command: &str| -> Vec<String> {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("printf '%s\\0' x {command}"))
+                .output()
+                .expect("sh runs");
+            assert!(out.status.success(), "sh refused {command:?}");
+            let text = String::from_utf8(out.stdout).unwrap();
+            let mut words: Vec<String> = text.split('\0').map(str::to_string).collect();
+            assert_eq!(words.pop().as_deref(), Some(""), "{command:?}");
+            assert_eq!(words.remove(0), "x", "{command:?}");
+            words
+        };
+        for (input, want) in cases("shell_command") {
+            let words: Vec<String> = input
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|w| w.as_str().unwrap().to_string())
+                .collect();
+            let refs: Vec<&str> = words.iter().map(String::as_str).collect();
+            let got = shell_command(&refs);
+            assert_eq!(got, want.as_str().unwrap(), "shell_command({words:?})");
+            #[cfg(unix)]
+            assert_eq!(read_back(&got), words, "sh reading {got:?}");
+        }
+        for (input, want) in cases("sh_c") {
+            let script = input.as_str().unwrap();
+            let got = sh_c(script).ok();
+            assert_eq!(got.as_deref(), want.as_str(), "sh_c({script:?})");
+            #[cfg(unix)]
+            if let Some(command) = got {
+                assert_eq!(
+                    read_back(&command),
+                    ["sh", "-c", script],
+                    "sh reading {command:?}"
+                );
+            }
+        }
+        // `quote`, which the macOS installer calls, on its vectors too.
+        for (input, want) in cases("quote") {
+            let word = input.as_str().unwrap();
+            let got = String::from_utf8(clew_rules::shell::quote(word.as_bytes())).unwrap();
+            assert_eq!(got, want.as_str().unwrap(), "quote({word:?})");
+            #[cfg(unix)]
+            assert_eq!(read_back(&got), [word], "sh reading {got:?}");
+        }
     }
 }

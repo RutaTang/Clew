@@ -1009,13 +1009,25 @@ fn swap_script(plan: &SwapPlan) -> String {
 
 /// Single-quote a string for safe interpolation into the shell helper.
 fn quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+    String::from_utf8_lossy(&clew_rules::shell::quote(s.as_bytes())).into_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::tests::test_dir;
+
+    /// `quote` writes what the Lean model writes, on every input it was run
+    /// on (`verification/Clew/Ssh.lean`), whose theorem says a POSIX shell
+    /// reads a quoted word back as exactly the word, whatever it holds.
+    #[test]
+    fn quoting_is_the_proven_model() {
+        let vectors = include_str!("../../verification/vectors/ssh.json");
+        for (input, want) in clew_core::testutil::lean_cases(vectors, "quote") {
+            let word = input.as_str().unwrap();
+            assert_eq!(quote(word), want.as_str().unwrap(), "quote({word:?})");
+        }
+    }
 
     /// The app on an image is the folder itself: a link — verified at its
     /// target, then copied from wherever it pointed by then — is refused.

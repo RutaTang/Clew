@@ -174,16 +174,18 @@ pub fn clean_name(name: &str) -> String {
 
 /// Whether `name: value` can be sent as an HTTP header.
 fn valid_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+    clew_rules::headers::header_name_ok(name.as_bytes())
 }
 
 /// Whether every header can be sent as it is. What it says of one that
 /// cannot names it only when its name is a header name — a malformed one
 /// may hold the credential (a whole `Authorization: Bearer …` line), and
 /// the message is shown, and kept in settings errors.
+///
+/// That the headers it accepts are read back as exactly those headers, one
+/// line each — no value starts a header of its own — is proved in
+/// `verification/Clew/Guards.lean`, of the checks in `clew_rules::headers`
+/// it makes on each header's bytes.
 pub fn check_headers(headers: &[(String, String)]) -> Result<(), String> {
     for (name, value) in headers {
         if !valid_header_name(name) {
@@ -191,7 +193,7 @@ pub fn check_headers(headers: &[(String, String)]) -> Result<(), String> {
                         (letters, digits and !#$%&'*+-.^_`|~) — write each as `Name: value`"
                 .into());
         }
-        if value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+        if !clew_rules::headers::header_value_ok(value.as_bytes()) {
             return Err(format!("header `{name}`'s value holds a line break"));
         }
     }
@@ -751,5 +753,27 @@ mod tests {
         assert!(set_enabled("missing", true).is_err());
         remove("one").unwrap();
         assert!(load().0.is_empty());
+    }
+
+    /// `check_headers` decides what the Lean model decides, on every input
+    /// it was run on (`verification/Clew/Guards.lean`), whose theorem says
+    /// the headers it accepts are read back as exactly those headers.
+    #[test]
+    fn header_checks_are_the_proven_model() {
+        let vectors = include_str!("../../../../verification/vectors/guards.json");
+        for (input, want) in crate::testutil::lean_cases(vectors, "check_headers") {
+            let headers: Vec<(String, String)> = input
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| (h[0].as_str().unwrap().into(), h[1].as_str().unwrap().into()))
+                .collect();
+            let got = match check_headers(&headers) {
+                Ok(()) => "ok",
+                Err(e) if e.contains("line break") => "value",
+                Err(_) => "name",
+            };
+            assert_eq!(got, want.as_str().unwrap(), "check_headers({headers:?})");
+        }
     }
 }

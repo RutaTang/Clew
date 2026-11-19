@@ -45,11 +45,15 @@ const SSH_VALUE_OPTIONS: &str = "BbcDEeFIiJLlmOoPpQRSWw";
 struct SshArgs<'a> {
     options: Vec<(char, &'a str)>,
     destination: Option<&'a str>,
+    /// How many of `options` come before the destination: ssh keeps the
+    /// first user and port it is given, in the order the words come.
+    before: usize,
 }
 
 fn parse_ssh_args(args: &[String]) -> SshArgs<'_> {
     let mut options = Vec::new();
     let mut destination = None;
+    let mut before = 0;
     let mut i = 0;
     loop {
         let mut terminated = false;
@@ -88,6 +92,7 @@ fn parse_ssh_args(args: &[String]) -> SshArgs<'_> {
             break;
         };
         destination = Some(word.as_str());
+        before = options.len();
         i += 1;
         if terminated {
             break;
@@ -96,26 +101,160 @@ fn parse_ssh_args(args: &[String]) -> SshArgs<'_> {
     SshArgs {
         options,
         destination,
+        before,
     }
 }
 
-/// The port a raw `ssh` argument list selects, if it says so: `-p 2222`,
-/// `-p2222`, or `-o Port=2222` / `-oPort=2222` (case-insensitive, as ssh
-/// treats option names) — the first of them, as ssh keeps the first value it
-/// is given. `None` means the default.
+/// Who an `ssh` argument list logs in as, which host it reaches, and the
+/// port it names, read as OpenSSH reads them.
+///
+/// The destination is `[user@]host` — the user is everything before its last
+/// `@` — or a URI, `ssh://[user[;params]@]host[:port]`, whose user is
+/// percent-decoded. ssh keeps the first user and the first port it is given,
+/// in the order the words come: `-l alice` or `-o User=alice` before the
+/// destination wins over its `bob@`, the destination's over either after it;
+/// `-p`, `-o Port=` and a URI's port likewise.
+///
+/// What ssh's configuration says (`~/.ssh/config`, `-F`, `-o HostName=` or
+/// `ProxyJump`) is not read here: a `Host` alias is known by its name.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SshEndpoint {
+    pub user: Option<String>,
+    pub host: String,
+    /// The port as given (`2222`, or a service name such as `http`), or
+    /// `None` when ssh is left to pick it.
+    pub port: Option<String>,
+}
+
+/// The endpoint of an `ssh` argument list (see [`SshEndpoint`]). `None` when
+/// there is no destination, or it is an `ssh://` URI ssh would refuse — ssh
+/// connects nowhere then.
+pub(crate) fn ssh_endpoint(args: &[String]) -> Option<SshEndpoint> {
+    let parsed = parse_ssh_args(args);
+    let (dest_user, host, dest_port) = read_destination(parsed.destination?)?;
+    let user_of = |&(letter, value): &(char, &str)| match letter {
+        'l' => Some(value.to_string()),
+        'o' => config_value(value, "user").map(str::to_string),
+        _ => None,
+    };
+    let port_of = |&(letter, value): &(char, &str)| match letter {
+        'p' => Some(value.to_string()),
+        'o' => config_value(value, "port").map(str::to_string),
+        _ => None,
+    };
+    let (front, back) = parsed.options.split_at(parsed.before);
+    Some(SshEndpoint {
+        user: front
+            .iter()
+            .find_map(user_of)
+            .or(dest_user)
+            .or_else(|| back.iter().find_map(user_of)),
+        host,
+        port: front
+            .iter()
+            .find_map(port_of)
+            .or(dest_port)
+            .or_else(|| back.iter().find_map(port_of)),
+    })
+}
+
+/// The value of an `-o Key=value` option when its key is `key` (ssh matches
+/// option names case-insensitively).
+fn config_value<'a>(option: &'a str, key: &str) -> Option<&'a str> {
+    option
+        .split_once('=')
+        .filter(|(k, _)| k.trim().eq_ignore_ascii_case(key))
+        .map(|(_, v)| v.trim())
+}
+
+/// A destination's user, host and port, as ssh reads it (see
+/// [`SshEndpoint`]); `None` for an `ssh://` URI ssh refuses.
+fn read_destination(dest: &str) -> Option<(Option<String>, String, Option<String>)> {
+    let Some(uri) = dest.strip_prefix("ssh://") else {
+        return Some(match dest.rsplit_once('@') {
+            Some((user, host)) => (Some(user.to_string()), host.to_string(), None),
+            None => (None, dest.to_string(), None),
+        });
+    };
+    // The user is up to the FIRST `@`, its `;params` dropped.
+    let (user, rest) = match uri.split_once('@') {
+        Some((info, rest)) => {
+            let user = info.split(';').next().unwrap_or_default();
+            if user.is_empty() {
+                return None;
+            }
+            (Some(url_decode(user)?), rest)
+        }
+        None => (None, uri),
+    };
+    // The host, bracketed or up to a `:` or `/`.
+    let (host, after) = match rest.strip_prefix('[') {
+        Some(inner) => {
+            let (host, after) = inner.split_once(']')?;
+            (host, after)
+        }
+        None => rest.split_at(rest.find([':', '/']).unwrap_or(rest.len())),
+    };
+    let host = valid_domain(host)?;
+    let port = match after.chars().next() {
+        None => None,
+        Some(':') => {
+            let (port, path) = after[1..].split_once('/').unwrap_or((&after[1..], ""));
+            if !path.is_empty() || port.is_empty() {
+                return None;
+            }
+            Some(port.to_string())
+        }
+        Some('/') if after.len() == 1 => None,
+        Some(_) => return None,
+    };
+    Some((user, host, port))
+}
+
+/// A URI's user decoded as ssh decodes it: `+` is a space, `%XX` a byte
+/// (never NUL); `None` for a broken escape or bytes that are not UTF-8.
+fn url_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let hex = text
+                    .get(i + 1..i + 3)
+                    .filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))?;
+                let byte = u8::from_str_radix(hex, 16).ok().filter(|b| *b != 0)?;
+                out.push(byte);
+                i += 2;
+            }
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).ok()
+}
+
+/// A URI's host as ssh takes it: letters, digits, `-`, `_` and single dots,
+/// starting with a letter, digit or `_`, one final dot dropped; `None`
+/// otherwise.
+fn valid_domain(host: &str) -> Option<String> {
+    let first = host.chars().next()?;
+    if !(first.is_ascii_alphanumeric() || first == '_')
+        || host.contains("..")
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return None;
+    }
+    Some(host.strip_suffix('.').unwrap_or(host).to_string())
+}
+
+/// The port an `ssh` argument list connects to, if it names one as a number
+/// (see [`SshEndpoint`]). `None` means the default.
 pub(crate) fn ssh_port(args: &[String]) -> Option<u16> {
-    parse_ssh_args(args)
-        .options
-        .into_iter()
-        .find_map(|(letter, value)| match letter {
-            'p' => Some(value),
-            'o' => value
-                .split_once('=')
-                .filter(|(k, _)| k.trim().eq_ignore_ascii_case("port"))
-                .map(|(_, v)| v),
-            _ => None,
-        })
-        .and_then(|value| value.trim().parse().ok())
+    ssh_endpoint(args)?.port?.parse().ok()
 }
 
 /// The destination (`user@host` or `host`) of an `ssh` argument list (see
@@ -135,19 +274,18 @@ impl ConnTarget {
         match std::env::var("CLEW_SSH") {
             Ok(ssh) if !ssh.trim().is_empty() => {
                 let args: Vec<String> = ssh.split_whitespace().map(str::to_string).collect();
-                // The host (or user@host), read as ssh reads its arguments;
-                // the whole string when there is none.
-                let host = ssh_destination(&args)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| ssh.trim().to_string());
-                // The label is also the approval-scoping identity, so a
-                // non-default port belongs in it exactly as it does for an
-                // in-app connection: `host:2222` can be a different machine
-                // (or container) than `host:22`, and trust granted for one
-                // must not silently cover the other.
-                let label = match ssh_port(&args) {
-                    Some(port) if port != 22 => format!("{host}:{port}"),
-                    _ => host,
+                // The label is also the approval-scoping identity: the user,
+                // host and port read as ssh reads them, made into a label as
+                // an in-app connection's is (see [`scope_label`]). With no
+                // destination ssh connects nowhere, and the label is just
+                // what was given.
+                let label = match ssh_endpoint(&args) {
+                    Some(end) => scope_label(
+                        end.user.as_deref(),
+                        &end.host,
+                        label_port(end.port.as_deref()).as_deref(),
+                    ),
+                    None => ssh.trim().to_string(),
                 };
                 ConnTarget::Ssh { label, args }
             }
@@ -318,47 +456,69 @@ impl SavedConnection {
     /// `--` ends ssh's options before the destination, so no field value can
     /// be parsed as one.
     pub fn ssh_args(&self) -> Vec<String> {
-        let mut args: Vec<String> = [
-            "-o",
-            "ConnectTimeout=10",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            "ServerAliveInterval=15",
-            "-o",
-            "ServerAliveCountMax=3",
-            "-o",
-            "NumberOfPasswordPrompts=1",
-        ]
-        .map(String::from)
-        .to_vec();
-        if self.port != 22 {
-            args.push("-p".into());
-            args.push(self.port.to_string());
-        }
-        if !self.identity.trim().is_empty() {
-            args.push("-i".into());
-            args.push(self.identity.trim().to_string());
-        }
-        args.push("--".into());
-        args.push(format!("{}@{}", self.user.trim(), self.host.trim()));
-        args
+        // The list `verification/` proves ssh reads as meant, whatever the
+        // fields hold: `clew_rules::ssh::ssh_args` is that model, of the code.
+        clew_rules::ssh::ssh_args(
+            self.user.trim().as_bytes(),
+            self.host.trim().as_bytes(),
+            self.port,
+            self.identity.trim().as_bytes(),
+        )
+        .iter()
+        .map(|word| String::from_utf8_lossy(word).into_owned())
+        .collect()
     }
 
     pub fn target(&self) -> ConnTarget {
-        // The label doubles as the approval-scoping host identity, so a
-        // non-default port is part of it: `host:2222` can be a different
-        // machine (or container) than `host:22`, and trust granted for one
-        // must not cover the other.
-        let label = if self.port == 22 {
-            self.user_host()
-        } else {
-            format!("{}:{}", self.user_host(), self.port)
-        };
         ConnTarget::Ssh {
-            label,
+            label: scope_label(
+                Some(self.user.trim()),
+                self.host.trim(),
+                label_port(Some(&self.port.to_string())).as_deref(),
+            ),
             args: self.ssh_args(),
         }
+    }
+}
+
+/// The label a remote is known by — `user@host`, with `:port` after it when
+/// the port is not 22 — which is also the identity its approvals are filed
+/// under ([`ConnTarget::approval_host`]), so it must name one machine.
+/// `host:2222` can be a different machine (or container) than `host:22`, so
+/// the port is part of it; a host holding a `:` (an IPv6 address) is
+/// bracketed, `[2001:db8::1]:2222`, so a port is never read as part of it —
+/// `2001:db8::1:2222` on port 22 and `2001:db8::1` on port 2222 once shared
+/// one label, and with it their approvals; and `%`, `/`, `[`, `]` and `@`
+/// are escaped, so no part runs into the next or into the project root that
+/// follows it in the approval key. What it gives an ordinary `user@host`
+/// is `user@host`.
+///
+/// The port is as given: `ssh -p http` is labelled `:http`, never taken for
+/// port 22.
+///
+/// That the label, with a project root after it, names exactly one user,
+/// host, port and project is proved in `verification/Clew/Trust.lean`, and
+/// `clew_rules::approval` is proved to write that label.
+pub(crate) fn scope_label(user: Option<&str>, host: &str, port: Option<&str>) -> String {
+    let label = clew_rules::approval::scope_label(
+        user.map(str::as_bytes),
+        host.as_bytes(),
+        port.map(str::as_bytes),
+    );
+    // Escaping adds only ASCII between whole characters: UTF-8 in is UTF-8
+    // out, so nothing is ever replaced here.
+    String::from_utf8_lossy(&label).into_owned()
+}
+
+/// The port a label shows: none for 22 or none given, a number as a number
+/// (`02222` is `2222`, as ssh reads it), anything else — a service name — as
+/// it was given.
+fn label_port(port: Option<&str>) -> Option<String> {
+    let port = port?;
+    match port.parse::<u16>() {
+        Ok(22) => None,
+        Ok(number) => Some(number.to_string()),
+        Err(_) => Some(port.to_string()),
     }
 }
 
@@ -747,12 +907,12 @@ pub fn known_hosts_pattern(host: &str, port: Option<u16>) -> String {
 /// `None` for a destination that cannot be one host name (empty, or starting
 /// with `-`).
 pub fn ssh_host_port(args: &[String]) -> Option<(String, Option<u16>)> {
-    let dest = ssh_destination(args)?;
-    let host = dest.rsplit_once('@').map_or(dest, |(_, h)| h);
+    let end = ssh_endpoint(args)?;
+    let host = end.host;
     if host.is_empty() || host.starts_with('-') || host.chars().any(|c| c.is_whitespace()) {
         return None;
     }
-    Some((host.to_string(), ssh_port(args)))
+    Some((host, end.port.and_then(|p| p.parse().ok())))
 }
 
 /// Whether `field` names exactly one host as a known_hosts host field —
@@ -761,19 +921,7 @@ pub fn ssh_host_port(args: &[String]) -> Option<(String, Option<u16>)> {
 /// to that one name and nothing else. (`:` is allowed in a bare name for an
 /// IPv6 address on port 22.)
 pub(crate) fn plain_host_field(field: &str) -> bool {
-    let name_ok = |name: &str| {
-        !name.is_empty()
-            && name.len() <= 255
-            && name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
-    };
-    match field.strip_prefix('[') {
-        Some(rest) => rest
-            .split_once("]:")
-            .is_some_and(|(name, port)| name_ok(name) && port.parse::<u16>().is_ok_and(|p| p != 0)),
-        None => name_ok(field),
-    }
+    clew_rules::known_hosts::plain_host_field(field.as_bytes())
 }
 
 /// Split one `ssh-keyscan` line into `(key type, base64 key)` when it is a
@@ -1243,6 +1391,46 @@ mod tests {
                 "the user's file must be left exactly as it was"
             );
         });
+    }
+
+    /// `scope_label` computes, on every input the Lean model was run on,
+    /// what the model computes — the model whose theorem says the label,
+    /// with a project root after it, names one user, host, port and project
+    /// (`verification/Clew/Trust.lean`).
+    #[test]
+    fn the_scope_label_is_the_proven_model() {
+        let vectors = include_str!("../../verification/vectors/trust.json");
+        for (input, want) in clew_core::testutil::lean_cases(vectors, "scope_label") {
+            let user = input[0].as_str();
+            let host = input[1].as_str().unwrap();
+            let port = input[2].as_str();
+            assert_eq!(
+                scope_label(user, host, port),
+                want.as_str().unwrap(),
+                "scope_label({user:?}, {host:?}, {port:?})"
+            );
+        }
+    }
+
+    /// Two machines never share an approval scope: an IPv6 host whose last
+    /// group reads like a port, on 22, and the address before it on that
+    /// port used to be labelled alike.
+    #[test]
+    fn an_ipv6_host_and_a_port_are_never_one_label() {
+        let at = |host: &str, port: u16| SavedConnection {
+            host: host.into(),
+            port,
+            ..conn(22, "")
+        };
+        let a = at("2001:db8::1:2222", 22).target();
+        let b = at("2001:db8::1", 2222).target();
+        assert_ne!(a.approval_host(), b.approval_host());
+        assert_eq!(b.approval_host(), Some("root@[2001:db8::1]:2222"));
+        // An ordinary host keeps the label it always had.
+        assert_eq!(
+            at("example.com", 2222).target().approval_host(),
+            Some("root@example.com:2222")
+        );
     }
 
     #[test]
@@ -2002,6 +2190,160 @@ mod env_target_tests {
                 from(spelling).approval_host(),
                 Some("root@example.com:2222"),
                 "{spelling}"
+            );
+        }
+        // A port named by its service is not taken for port 22.
+        assert_eq!(
+            from("-p http root@example.com").approval_host(),
+            Some("root@example.com:http")
+        );
+        // A number reads as ssh reads it.
+        assert_eq!(
+            from("-p 02222 root@example.com").approval_host(),
+            Some("root@example.com:2222")
+        );
+    }
+
+    /// The user is the one ssh logs in as: the first given, in the order the
+    /// words come. `-l` used to be ignored, so `alice` and `bob` on one host
+    /// shared an approval scope — on a gateway that routes by user, two
+    /// machines.
+    #[test]
+    fn a_clew_ssh_target_scopes_trust_to_its_user() {
+        for (spelling, label) in [
+            ("-l alice example.com", "alice@example.com"),
+            ("-lalice example.com", "alice@example.com"),
+            ("-o User=alice example.com", "alice@example.com"),
+            ("-oUser=alice example.com", "alice@example.com"),
+            ("-o user=alice example.com", "alice@example.com"),
+            // Before the destination, `-l` wins over its `bob@`…
+            ("-l alice bob@example.com", "alice@example.com"),
+            ("-o User=alice bob@example.com", "alice@example.com"),
+            // …after it, the destination's user does.
+            ("bob@example.com -l alice", "bob@example.com"),
+            ("example.com -l alice", "alice@example.com"),
+            ("-l alice -o User=carol example.com", "alice@example.com"),
+            ("-o User=carol -l alice example.com", "carol@example.com"),
+            // The user of `user@host` runs to the host's last `@`.
+            ("a@b@example.com", "a%40b@example.com"),
+        ] {
+            assert_eq!(from(spelling).approval_host(), Some(label), "{spelling}");
+        }
+        assert_ne!(
+            from("-l alice example.com").approval_host(),
+            from("-l bob example.com").approval_host()
+        );
+    }
+
+    /// An `ssh://` destination is read as ssh reads one: its user (decoded,
+    /// `;params` dropped), host and port, in the same first-given order; one
+    /// ssh would refuse names nothing.
+    #[test]
+    fn an_ssh_uri_destination_is_read_as_ssh_reads_it() {
+        for (spelling, label) in [
+            ("ssh://example.com", "example.com"),
+            ("ssh://root@example.com", "root@example.com"),
+            ("ssh://root@example.com:2222", "root@example.com:2222"),
+            ("ssh://root@example.com:2222/", "root@example.com:2222"),
+            ("ssh://root@example.com/", "root@example.com"),
+            ("ssh://root;fingerprint=x@example.com", "root@example.com"),
+            ("ssh://a%40b+c@example.com", "a%40b c@example.com"),
+            ("ssh://root@example.com.", "root@example.com"),
+            ("ssh://root@[example.com]:2222", "root@example.com:2222"),
+            // The first port given is the one ssh keeps.
+            ("-p 22 ssh://root@example.com:2222", "root@example.com"),
+            ("ssh://root@example.com:2222 -p 22", "root@example.com:2222"),
+            ("-l alice ssh://root@example.com", "alice@example.com"),
+            ("ssh://root@example.com -l alice", "root@example.com"),
+        ] {
+            assert_eq!(from(spelling).approval_host(), Some(label), "{spelling}");
+        }
+        let args = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        for refused in [
+            "ssh://root@example.com:2222/srv",
+            "ssh://@example.com",
+            "ssh://root@",
+            "ssh://root@exa..mple.com",
+            "ssh://root@[2001:db8::1]",
+            "ssh://root@example.com:",
+            "ssh://a%zz@example.com",
+            "ssh://a%00@example.com",
+            "ssh://root@[example.com]x",
+        ] {
+            assert_eq!(ssh_endpoint(&args(refused)), None, "{refused}");
+        }
+        assert_eq!(
+            ssh_host_port(&args("ssh://root@example.com:2222")),
+            Some(("example.com".to_string(), Some(2222)))
+        );
+    }
+
+    /// ssh's arguments, the endpoint ssh is told and the label approvals
+    /// are filed under, on every input the Lean model was run on
+    /// (`verification/Clew/Ssh.lean`), whose theorems say no field of a saved
+    /// connection is ever an option to ssh, and that a machine has one label
+    /// whether it is reached as a saved connection or through `CLEW_SSH`. And
+    /// the known_hosts field a key is written under names one host and port,
+    /// with none of the pattern syntax that would let it vouch for others.
+    #[test]
+    fn ssh_arguments_and_known_hosts_are_the_proven_model() {
+        use serde_json::{Value, json};
+        let vectors = include_str!("../../verification/vectors/ssh.json");
+        let cases = |f| clew_core::testutil::lean_cases(vectors, f);
+        let strings = |v: &Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        };
+        let endpoint =
+            |e: Option<SshEndpoint>| e.map_or(Value::Null, |e| json!([e.user, e.host, e.port]));
+        for (input, want) in cases("ssh_endpoint") {
+            let args = strings(&input);
+            let got = ssh_endpoint(&args).map_or(Value::Null, |e| {
+                let label = scope_label(
+                    e.user.as_deref(),
+                    &e.host,
+                    label_port(e.port.as_deref()).as_deref(),
+                );
+                json!([e.user, e.host, e.port, label])
+            });
+            assert_eq!(got, want, "ssh_endpoint({args:?})");
+        }
+        for (input, want) in cases("saved_connection") {
+            let c = SavedConnection {
+                name: String::new(),
+                user: input[0].as_str().unwrap().into(),
+                host: input[1].as_str().unwrap().into(),
+                port: input[2].as_u64().unwrap() as u16,
+                identity: input[3].as_str().unwrap().into(),
+                send_ai_keys: false,
+            };
+            let args = c.ssh_args();
+            assert_eq!(args, strings(&want[0]), "ssh_args of {c:?}");
+            assert_eq!(
+                c.target().approval_host(),
+                want[1].as_str(),
+                "label of {c:?}"
+            );
+            assert_eq!(endpoint(ssh_endpoint(&args)), want[2], "endpoint of {c:?}");
+        }
+        for (input, want) in cases("known_hosts_pattern") {
+            let host = input[0].as_str().unwrap();
+            let port = input[1].as_u64().map(|p| p as u16);
+            assert_eq!(
+                known_hosts_pattern(host, port),
+                want.as_str().unwrap(),
+                "known_hosts_pattern({host:?}, {port:?})"
+            );
+        }
+        for (input, want) in cases("plain_host_field") {
+            let field = input.as_str().unwrap();
+            assert_eq!(
+                plain_host_field(field),
+                want.as_bool().unwrap(),
+                "plain_host_field({field:?})"
             );
         }
     }

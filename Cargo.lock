@@ -827,12 +827,13 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "clew"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ab_glyph",
  "chrono",
  "clew-core",
  "clew-protocol",
+ "clew-rules",
  "clew-voice",
  "iced",
  "iced_runtime",
@@ -867,6 +868,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "clew-protocol",
+ "clew-rules",
  "flate2",
  "globset",
  "grep-matcher",
@@ -931,6 +933,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "clew-rules"
+version = "0.1.0"
 
 [[package]]
 name = "clew-server"

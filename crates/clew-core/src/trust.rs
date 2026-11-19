@@ -251,11 +251,24 @@ const BUILD_DOMAIN: &str = "clew.lsp.build.v1";
 pub fn build_fingerprint(server: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    for part in [BUILD_DOMAIN, server] {
-        h.update((part.len() as u64).to_le_bytes());
-        h.update(part.as_bytes());
-    }
+    h.update(length_prefixed(&[
+        BUILD_DOMAIN.as_bytes(),
+        server.as_bytes(),
+    ]));
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The parts of a fingerprint as the bytes it hashes: each part's length as
+/// eight little-endian bytes, then its bytes. Every fingerprint is a SHA-256
+/// of this (the command's also of its content digest after it), so no
+/// rearrangement of parts reads the same, and the three kinds — command,
+/// options alone, leave to build — differ in their first part (a canonical
+/// path, [`OPTIONS_DOMAIN`], [`BUILD_DOMAIN`]): proved of exactly this
+/// encoding in `verification/Clew/Trust.lean`, and `clew_rules::fingerprint`
+/// is proved to write exactly it (`verification/extracted/Equal.lean`).
+fn length_prefixed(parts: &[&[u8]]) -> Vec<u8> {
+    let parts: Vec<Vec<u8>> = parts.iter().map(|p| p.to_vec()).collect();
+    clew_rules::fingerprint::length_prefixed(&parts)
 }
 
 /// The absolute form of a (possibly project-relative) lsp.toml `command`.
@@ -326,12 +339,9 @@ const OPTIONS_DOMAIN: &str = "clew.lsp.init-options.v1";
 /// length. Joined by a separator they were not: `[]` and `[""]` read the same,
 /// as did an argument holding the separator and the two around it — a
 /// consent given to the one let the other run.
-fn args_part(args: &[String]) -> String {
-    let mut part = format!("{}", args.len());
-    for arg in args {
-        part.push_str(&format!(";{}:{arg}", arg.len()));
-    }
-    part
+fn args_part(args: &[String]) -> Vec<u8> {
+    let args: Vec<Vec<u8>> = args.iter().map(|a| a.as_bytes().to_vec()).collect();
+    clew_rules::fingerprint::args_part(&args)
 }
 
 /// A stable fingerprint of the `init_options` a config asks clew to send in
@@ -372,10 +382,13 @@ pub fn lsp_options_fingerprint(
         serde_json::to_string(init_options).map_err(|e| format!("lsp.toml init_options: {e}"))?;
     let mut h = Sha256::new();
     // Length-prefix each field so no rearrangement of the parts collides.
-    for part in [OPTIONS_DOMAIN, &args_part(args), server, version, &options] {
-        h.update((part.len() as u64).to_le_bytes());
-        h.update(part.as_bytes());
-    }
+    h.update(length_prefixed(&[
+        OPTIONS_DOMAIN.as_bytes(),
+        &args_part(args),
+        server.as_bytes(),
+        version.as_bytes(),
+        options.as_bytes(),
+    ]));
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -456,16 +469,13 @@ fn hash_command(
 
     let mut h = Sha256::new();
     // Length-prefix each field so no rearrangement of the parts collides.
-    for part in [
-        real.to_string_lossy().as_ref(),
+    h.update(length_prefixed(&[
+        real.to_string_lossy().as_bytes(),
         &args_part(args),
-        server,
-        version,
-        &options,
-    ] {
-        h.update((part.len() as u64).to_le_bytes());
-        h.update(part.as_bytes());
-    }
+        server.as_bytes(),
+        version.as_bytes(),
+        options.as_bytes(),
+    ]));
     h.update(content);
     let fingerprint = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
     Ok(Hashed {
@@ -565,26 +575,42 @@ impl CommandProbe {
     ///   is written. Programs that locate siblings relative to their own path
     ///   do not work from there — point `lsp.toml` at an installed copy
     ///   outside the repository for those.
-    pub fn into_exec(mut self) -> Result<PathBuf, String> {
-        if self.outside_project && trusted_location(&self.canonical) {
-            same_file(&self.file, &self.canonical).map_err(|e| {
-                format!(
-                    "{}: {e} — it changed after it was approved; open the file again to \
-                     re-approve",
-                    self.canonical.display()
-                )
-            })?;
-            return Ok(self.canonical);
+    pub fn into_exec(self) -> Result<PathBuf, String> {
+        self.run_as(true)?
+            .ok_or_else(|| "refused: the command is not approved".to_string())
+    }
+
+    /// The path to spawn, as `clew_rules::location::launch` decides — proved
+    /// of the code itself (Aeneas) to refuse what is not `approved`, and to
+    /// run in place only what is outside the project and where nobody but
+    /// you or root can change it. `None` when refused.
+    fn run_as(mut self, approved: bool) -> Result<Option<PathBuf>, String> {
+        // Read only when it can matter: approved, and outside the project.
+        let trusted = approved && self.outside_project && trusted_location(&self.canonical);
+        match clew_rules::location::launch(approved, self.outside_project, trusted) {
+            clew_rules::location::Launch::Refused => Ok(None),
+            clew_rules::location::Launch::InPlace => {
+                same_file(&self.file, &self.canonical).map_err(|e| {
+                    format!(
+                        "{}: {e} — it changed after it was approved; open the file again to \
+                         re-approve",
+                        self.canonical.display()
+                    )
+                })?;
+                Ok(Some(self.canonical))
+            }
+            clew_rules::location::Launch::Staged => {
+                let exec = stage_bytes(
+                    &mut self.file,
+                    &self.content,
+                    &self.fingerprint,
+                    &self.source,
+                )?;
+                // Housekeeping rides on the (rare, already slow) stage.
+                sweep_exec();
+                Ok(Some(exec))
+            }
         }
-        let exec = stage_bytes(
-            &mut self.file,
-            &self.content,
-            &self.fingerprint,
-            &self.source,
-        )?;
-        // Housekeeping rides on the (rare, already slow) stage.
-        sweep_exec();
-        Ok(exec)
     }
 }
 
@@ -647,18 +673,11 @@ pub fn stage_lsp_command(
     let probe = probe_lsp_command(root, command, args, server, version, init_options)?;
     let fingerprint = probe.fingerprint.clone();
     let source = probe.source.clone();
-    if !approved(&fingerprint) {
-        return Ok(StagedCommand {
-            fingerprint,
-            source,
-            exec_path: None,
-        });
-    }
-    let exec_path = probe.into_exec()?;
+    let exec_path = probe.run_as(approved(&fingerprint))?;
     Ok(StagedCommand {
         fingerprint,
         source,
-        exec_path: Some(exec_path),
+        exec_path,
     })
 }
 
@@ -682,26 +701,34 @@ pub fn stage_lsp_command(
 pub fn trusted_location(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let me = unsafe { libc::geteuid() };
-    let owned = |m: &std::fs::Metadata| m.uid() == me || m.uid() == 0;
+    let node = |m: &std::fs::Metadata, kind_ok: bool| Node {
+        uid: m.uid(),
+        mode: m.mode(),
+        kind_ok,
+    };
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
-    if !meta.is_file() || !owned(&meta) || meta.mode() & 0o022 != 0 {
-        return false;
-    }
+    let file = node(&meta, meta.is_file());
+    let mut dirs = Vec::new();
     let mut dir = path.parent();
     while let Some(d) = dir {
         let Ok(m) = std::fs::symlink_metadata(d) else {
             return false;
         };
-        let sticky = m.mode() & 0o1000 != 0;
-        if !m.is_dir() || !owned(&m) || (m.mode() & 0o022 != 0 && !sticky) {
-            return false;
-        }
+        dirs.push(node(&m, m.is_dir()));
         dir = d.parent();
     }
-    true
+    trusted_by(me, &file, &dirs)
 }
+
+/// What [`trusted_location`] reads of the file, and of each directory above
+/// it, and its decision: `clew_rules::location`, whose source is translated
+/// to Lean and proved to be the model in `verification/Clew/Guards.lean` —
+/// where a yes is proved to leave no other user able to write the file or
+/// replace an entry on its path.
+#[cfg(unix)]
+pub(crate) use clew_rules::location::{Node, trusted_by};
 
 /// Without POSIX ownership and modes there is no cheap way to prove a
 /// location private, so every command is staged.
@@ -1006,6 +1033,65 @@ fn sweep_exec_in(
 mod tests {
     use super::*;
 
+    /// The bytes every fingerprint hashes — `args_part`, the length-prefixed
+    /// fields — and the key a remote approval is filed under are, on every
+    /// input the Lean model was run on, what the model computes: the model
+    /// whose theorems say no two argument lists or field lists read alike,
+    /// the three kinds of fingerprint hash disjoint inputs, and a key names
+    /// one machine and one project (`verification/Clew/Trust.lean`).
+    #[test]
+    fn fingerprint_inputs_and_approval_keys_are_the_proven_model() {
+        let vectors = include_str!("../../../verification/vectors/trust.json");
+        let cases = |f| crate::testutil::lean_cases(vectors, f);
+        let strings = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        };
+        let bytes = |v: &serde_json::Value| -> Vec<u8> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b.as_u64().unwrap() as u8)
+                .collect()
+        };
+        for (input, want) in cases("args_part") {
+            let args = strings(&input);
+            assert_eq!(args_part(&args), bytes(&want), "args_part({args:?})");
+        }
+        for (input, want) in cases("length_prefixed") {
+            let parts = strings(&input);
+            let parts: Vec<&[u8]> = parts.iter().map(|p| p.as_bytes()).collect();
+            assert_eq!(
+                length_prefixed(&parts),
+                bytes(&want),
+                "length_prefixed({parts:?})"
+            );
+        }
+        for (input, want) in cases("project_key") {
+            let (label, root) = (input[0].as_str().unwrap(), input[1].as_str().unwrap());
+            assert_eq!(
+                crate::derived::project_key(Some(label), Path::new(root)),
+                want.as_str().unwrap()
+            );
+        }
+    }
+
+    /// The fingerprints hash exactly the modelled encoding: leave to build
+    /// rust-analyzer is the SHA-256 of its two length-prefixed fields, a
+    /// digest worked out apart from this code (Python's `hashlib` over
+    /// `struct.pack('<Q', len) + part` for each part) and the same one 0.2.4
+    /// recorded — so no approval already given changes its fingerprint.
+    #[test]
+    fn a_build_fingerprint_hashes_its_length_prefixed_fields() {
+        assert_eq!(
+            build_fingerprint("rust-analyzer"),
+            "7e500c2cf82da5a078e52c17eee597b286057d3daa0e5823fe1674188013152f"
+        );
+    }
+
     /// Run `f` with `CLEW_DATA_DIR` at a fresh directory, restored afterwards
     /// (a failing test included) — see [`crate::testutil::DataDir`].
     pub(super) fn with_data_dir<T>(name: &str, f: impl FnOnce(&Path) -> T) -> T {
@@ -1033,6 +1119,74 @@ mod tests {
             let mut again = back;
             again.trust_root(None, &project);
             assert_eq!(again.roots().len(), 1);
+        });
+    }
+
+    /// `trusted_by` decides what the Lean model decides, on every input it
+    /// was run on (`verification/Clew/Guards.lean`), whose theorem says a yes
+    /// leaves no other user able to change the program or its path.
+    #[test]
+    #[cfg(unix)]
+    fn trusted_locations_are_the_proven_model() {
+        let vectors = include_str!("../../../verification/vectors/guards.json");
+        let node = |v: &serde_json::Value| Node {
+            uid: v[0].as_u64().unwrap() as u32,
+            mode: v[1].as_u64().unwrap() as u32,
+            kind_ok: v[2].as_bool().unwrap(),
+        };
+        for (input, want) in crate::testutil::lean_cases(vectors, "trusted_by") {
+            let me = input[0].as_u64().unwrap() as u32;
+            let file = node(&input[1]);
+            let dirs: Vec<Node> = input[2].as_array().unwrap().iter().map(node).collect();
+            assert_eq!(
+                trusted_by(me, &file, &dirs),
+                want.as_bool().unwrap(),
+                "trusted_by({me}, {file:?}, {dirs:?})"
+            );
+        }
+    }
+
+    /// A project whose path is not UTF-8 is trusted under its own key and
+    /// read back from `trust.toml` as that key — its sibling with another
+    /// byte where the first is not UTF-8 is not trusted with it.
+    ///
+    /// A remote project's path is the remote host's bytes, whatever this
+    /// machine's file system allows. A local one exists only where the file
+    /// system takes such a name: APFS (macOS) refuses it (`EILSEQ`), so
+    /// there no local project can have one, and only the remote is tried.
+    #[test]
+    #[cfg(unix)]
+    fn a_path_that_is_not_utf8_is_trusted_alone() {
+        use std::os::unix::ffi::OsStrExt;
+        with_data_dir("clew-trust-bytes", |dir| {
+            let named = |last: u8| {
+                let mut bytes = dir.as_os_str().as_bytes().to_vec();
+                bytes.extend_from_slice(b"/proj");
+                bytes.push(last);
+                std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&bytes))
+            };
+            let (ff, fe) = (named(0xff), named(0xfe));
+            let local =
+                match std::fs::create_dir_all(&ff).and_then(|()| std::fs::create_dir_all(&fe)) {
+                    Ok(()) => true,
+                    Err(e) if e.raw_os_error() == Some(libc::EILSEQ) => false,
+                    Err(e) => panic!("{}: {e}", ff.display()),
+                };
+            Trust::load()
+                .update(|t| {
+                    if local {
+                        t.trust_root(None, &ff);
+                    }
+                    t.trust_root(Some("u@h"), &ff);
+                })
+                .unwrap();
+            let back = Trust::load_checked().unwrap();
+            if local {
+                assert!(back.is_root_trusted(None, &ff));
+                assert!(!back.is_root_trusted(None, &fe));
+            }
+            assert!(back.is_root_trusted(Some("u@h"), &ff));
+            assert!(!back.is_root_trusted(Some("u@h"), &fe));
         });
     }
 
