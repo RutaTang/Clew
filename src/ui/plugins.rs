@@ -450,7 +450,8 @@ pub(crate) fn plugin_install_modal(
 pub(crate) fn plugin_prompt_modal(prompt: &Prompt) -> Element<'_, Message> {
     super::chrome::prompt_modal(super::chrome::Prompt {
         title: prompt.title.clone(),
-        placeholder: &prompt.asks,
+        question: Some(&prompt.asks),
+        placeholder: "",
         value: &prompt.text,
         input_id: plugin_prompt_id(),
         on_input: |v| Message::Plugin(PluginMsg::PromptEdit(v)),

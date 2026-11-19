@@ -31993,6 +31993,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 title: "Count words".into(),
                 asks: "Which word?".into(),
                 text: String::new(),
+                at: None,
             })
         }),
     ];
@@ -39227,6 +39228,7 @@ fn the_palette_offers_an_enabled_plugins_commands() {
         .into_iter()
         .find(|c| c.title == "Word count: Count words")
         .expect("the command is in the palette");
+    assert_eq!(offered.shown_as.as_deref(), Some("Word count: Count words"));
     match offered.action {
         crate::app::palette::PaletteAction::Send(Message::Plugin(PluginMsg::Run {
             id,
@@ -39243,6 +39245,76 @@ fn the_palette_offers_an_enabled_plugins_commands() {
             .any(|c| c.title.starts_with("Word count:")),
         "a plugin turned off offers nothing"
     );
+}
+
+/// A plugin's `where = "code"` command is in the code's right-click menu,
+/// named as the palette names it, and a palette-only one is not; picked
+/// there it runs at the line clicked, not the caret's. A command asking for
+/// a line of text asks first, keeping the line clicked for the run.
+#[test]
+fn a_plugins_code_command_is_in_the_code_menu_and_runs_at_the_line_clicked() {
+    use crate::app::plugins::{PluginMsg, Spot};
+    use clew_plugin::manifest::Place;
+    let mut app = scanned_app("plugin-code-menu");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let mut plugin = installed_plugin(true);
+    let mut total = plugin.manifest.commands[0].clone();
+    total.id = "total".into();
+    total.title = "Total".into();
+    plugin.manifest.commands[0].place = Place::Code;
+    plugin.manifest.commands[0].input = Some("Which word?".into());
+    plugin.manifest.commands.push(total);
+    app.plugins.installed = vec![plugin];
+    if let Some(v) = app.active_viewer_mut() {
+        v.caret = Some((0, 0));
+    }
+    let menu = ContextMenu {
+        pane: 0,
+        line: 2,
+        col: 0,
+        x: 40.0,
+        y: 100.0,
+        insight: None,
+        served: true,
+        by_pointer: true,
+        line_top: None,
+    };
+    app.proj.context_menu = Some(menu);
+    let (targets, _) = crate::ui::heard::gather_all_of(|| crate::ui::context_menu(&app, &menu));
+    let row = targets
+        .iter()
+        .find(|t| t.shown == "Word count: Count words")
+        .unwrap_or_else(|| panic!("{:?}", targets.iter().map(|t| &t.shown).collect::<Vec<_>>()));
+    assert!(
+        matches!(&row.message, Message::Plugin(PluginMsg::RunFromMenu { id, command })
+            if id == "word-count" && command == "count"),
+        "{:?}",
+        row.message
+    );
+    assert!(
+        !targets.iter().any(|t| t.shown.contains("Total")),
+        "a palette command is not in the code's menu"
+    );
+    // Turned off, the plugin leaves the menu.
+    app.plugins.installed[0].record.enabled = false;
+    let (off, _) = crate::ui::heard::gather_all_of(|| crate::ui::context_menu(&app, &menu));
+    assert!(!off.iter().any(|t| t.shown.starts_with("Word count")));
+    app.plugins.installed[0].record.enabled = true;
+
+    // Picked: it asks its question first, the menu put away, and keeps
+    // the line clicked for when it runs.
+    let _ = app.update(row.message.clone());
+    assert!(app.proj.context_menu.is_none());
+    let prompt = app.plugins.prompt.as_ref().expect("it asks first");
+    assert_eq!(prompt.asks, "Which word?");
+    let at = prompt.at.expect("the line clicked is kept");
+    assert_eq!(at, Spot { pane: 0, line: 2 });
+    let run = app.invocation(Some("origin".into()), Some(at));
+    assert_eq!(run.file.as_deref(), Some("src/lib.rs"));
+    assert_eq!(run.line, Some(3), "the line clicked, from 1");
+    assert_eq!(run.input.as_deref(), Some("origin"));
+    // From the palette, the caret's line.
+    assert_eq!(app.invocation(None, None).line, Some(1));
 }
 
 /// A plugin's page draws every kind of block in Clew's own widgets, and a

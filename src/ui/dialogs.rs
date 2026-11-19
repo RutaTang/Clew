@@ -38,6 +38,7 @@ pub(crate) fn bp_condition_modal<'a>(
 ) -> Element<'a, Message> {
     let (path, line, draft) = edit;
     prompt_modal(Prompt {
+        question: None,
         title: tr!(
             "Break at {location} when…",
             location = format!("{}:{}", rel_of(app, path), line)
@@ -75,6 +76,7 @@ pub(crate) fn bp_condition_modal<'a>(
 pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_, Message> {
     let (rel, line, draft) = edit;
     prompt_modal(Prompt {
+        question: None,
         title: tr!("Note for {location}", location = format!("{rel}:{line}")),
         placeholder: tr!("a short note to your future self…"),
         value: draft,
@@ -91,6 +93,7 @@ pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_,
 pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_, Message> {
     let (rel, symbol, draft) = edit;
     prompt_modal(Prompt {
+        question: None,
         title: tr!("Note on {symbol} in {file}", symbol = symbol, file = rel),
         placeholder: tr!("what you worked out about this symbol…"),
         value: draft,

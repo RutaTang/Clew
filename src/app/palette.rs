@@ -1283,10 +1283,14 @@ impl App {
         // command's ("TODO Owners: List TODOs"), as the agent and the voice
         // find them too.
         for plugin in self.plugins.installed.iter().filter(|p| p.record.enabled) {
-            let name = plugin.name();
+            let name = &plugin.manifest.plugin.name;
             for command in &plugin.manifest.commands {
                 out.push(PaletteCommand {
-                    title: format!("{}: {}", plugin.manifest.plugin.name, command.title),
+                    title: if command.title == *name {
+                        name.clone()
+                    } else {
+                        format!("{name}: {}", command.title)
+                    },
                     keys: None,
                     action: PaletteAction::Send(Message::Plugin(
                         crate::app::plugins::PluginMsg::Run {
@@ -1294,10 +1298,7 @@ impl App {
                             command: command.id.clone(),
                         },
                     )),
-                    shown_as: Some(format!(
-                        "{name}: {}",
-                        crate::app::plugins::command_title(command)
-                    )),
+                    shown_as: Some(crate::app::plugins::command_label(plugin, command)),
                 });
             }
         }

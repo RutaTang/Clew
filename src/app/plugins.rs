@@ -59,6 +59,32 @@ pub(crate) fn command_title(command: &clew_plugin::manifest::Command) -> String 
         .unwrap_or_else(|| command.title.clone())
 }
 
+/// How a command is named where Clew lists it, in the reader's language:
+/// "{plugin}: {command}", or the one name when both are the same (a
+/// plugin of one command often names it as itself: "Word count: Word
+/// count" said it twice).
+pub(crate) fn command_label(
+    plugin: &Installed,
+    command: &clew_plugin::manifest::Command,
+) -> String {
+    let name = plugin.name();
+    let title = command_title(command);
+    if title == name {
+        name
+    } else {
+        format!("{name}: {title}")
+    }
+}
+
+/// Where a command run from the code's right-click menu was asked: the
+/// pane and the line clicked, which the caret need not be on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Spot {
+    pub(crate) pane: usize,
+    /// From 0.
+    pub(crate) line: usize,
+}
+
 /// Who an install is answered to, besides the user: the agent that asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
@@ -170,6 +196,8 @@ pub struct Prompt {
     /// What it asks for.
     pub(crate) asks: String,
     pub(crate) text: String,
+    /// Asked from the code's menu, at this line.
+    pub(crate) at: Option<Spot>,
 }
 
 /// A page a plugin's command showed, over the code.
@@ -377,6 +405,11 @@ pub struct Prepared {
 pub enum PluginMsg {
     /// Run plugin `id`'s command `command` (the palette, voice, the agent).
     Run {
+        id: String,
+        command: String,
+    },
+    /// Run it from the code's right-click menu, at the line clicked.
+    RunFromMenu {
         id: String,
         command: String,
     },
@@ -857,20 +890,35 @@ impl App {
     }
 
     /// Where a command is run from: the file shown, the caret, the selection.
-    fn invocation(&self, input: Option<String>) -> Invocation {
-        let viewer = self.active_viewer();
+    pub(crate) fn invocation(&self, input: Option<String>, at: Option<Spot>) -> Invocation {
+        // From the menu: the pane and line clicked. Otherwise the code
+        // being read, at its caret.
+        let (viewer, line) = match at {
+            Some(spot) => {
+                let viewer = self.proj.panes.get(spot.pane).and_then(Option::as_ref);
+                (viewer, viewer.map(|_| spot.line))
+            }
+            None => {
+                let viewer = self.active_viewer();
+                (viewer, viewer.and_then(|v| v.caret).map(|(line, _)| line))
+            }
+        };
         Invocation {
             file: viewer.map(|v| v.rel.clone()).filter(|r| !r.is_empty()),
-            line: viewer
-                .and_then(|v| v.caret)
-                .map(|(line, _)| (line + 1).min(u32::MAX as usize) as u32),
+            line: line.map(|line| (line + 1).min(u32::MAX as usize) as u32),
             selection: viewer.and_then(|v| v.selected_text()),
             input,
         }
     }
 
     /// Run plugin `id`'s command `command`, asking first for what it asks.
-    fn run_plugin(&mut self, id: &str, command: &str, input: Option<String>) -> Task<Message> {
+    fn run_plugin(
+        &mut self,
+        id: &str,
+        command: &str,
+        input: Option<String>,
+        at: Option<Spot>,
+    ) -> Task<Message> {
         let Some(plugin) = self.plugins.get(id).filter(|p| p.record.enabled).cloned() else {
             self.status = tr!("That plugin is not installed, or is turned off").into();
             return Task::none();
@@ -880,6 +928,15 @@ impl App {
             return Task::none();
         };
         let title = command_title(&cmd);
+        // What would stop the run, said before the user types for it.
+        if let Some(running) = &self.plugins.running {
+            self.status = tr!("{command} is still running", command = running.clone());
+            return Task::none();
+        }
+        if self.proj.project.is_none() {
+            self.status = tr!("Open a project to run {command}", command = title);
+            return Task::none();
+        }
         if let (Some(asks), None) = (&cmd.input, &input) {
             self.plugins.prompt = Some(Prompt {
                 id: id.to_string(),
@@ -887,12 +944,9 @@ impl App {
                 title,
                 asks: asks.clone(),
                 text: String::new(),
+                at,
             });
             return iced::widget::operation::focus(crate::ui::plugin_prompt_id());
-        }
-        if let Some(running) = &self.plugins.running {
-            self.status = tr!("{command} is still running", command = running.clone());
-            return Task::none();
         }
         let Some(host) = self.project_host() else {
             self.status = tr!("Open a project to run {command}", command = title);
@@ -912,7 +966,7 @@ impl App {
                 return Task::none();
             }
         };
-        let invocation = self.invocation(input);
+        let invocation = self.invocation(input, at);
         let loaded = self.plugins.loaded.get(&plugin.record.fingerprint).cloned();
         self.plugins.running = Some(title.clone());
         self.status = tr!("Running {command}…", command = title.clone());
@@ -1295,7 +1349,17 @@ impl App {
     /// Handle a [`PluginMsg`].
     pub(crate) fn update_plugins(&mut self, message: PluginMsg) -> Task<Message> {
         match message {
-            PluginMsg::Run { id, command } => self.run_plugin(&id, &command, None),
+            PluginMsg::Run { id, command } => self.run_plugin(&id, &command, None, None),
+            PluginMsg::RunFromMenu { id, command } => {
+                let Some(menu) = self.proj.context_menu.take() else {
+                    return Task::none();
+                };
+                let at = Spot {
+                    pane: menu.pane,
+                    line: menu.line,
+                };
+                self.run_plugin(&id, &command, None, Some(at))
+            }
             PluginMsg::PromptEdit(text) => {
                 if let Some(prompt) = self.plugins.prompt.as_mut() {
                     prompt.text = text;
@@ -1306,7 +1370,7 @@ impl App {
                 let Some(prompt) = self.plugins.prompt.take() else {
                     return Task::none();
                 };
-                self.run_plugin(&prompt.id, &prompt.command, Some(prompt.text))
+                self.run_plugin(&prompt.id, &prompt.command, Some(prompt.text), prompt.at)
             }
             PluginMsg::PromptCancel => {
                 self.plugins.prompt = None;
