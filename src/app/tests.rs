@@ -39592,6 +39592,26 @@ fn a_failed_plugin_run_stands_with_its_next_steps() {
 
     // A new build installed: the last build's log goes with it. Kept, its
     // crash stood under the new version, as if the new one had crashed.
+    // So does the failure of a run of the build replaced, still standing
+    // on the status bar; another plugin's install leaves it.
+    ran(
+        &mut app,
+        Err(Failure::Crashed("index out of bounds".into())),
+    );
+    assert_eq!(
+        app.failure_shown().map(|f| f.of),
+        Some(FailureOf::PluginRun)
+    );
+    let _ = app.update(Message::Plugin(PluginMsg::Installed {
+        id: "another".into(),
+        reply: Reply::None,
+        result: Ok("its build".into()),
+    }));
+    assert_eq!(
+        app.failure_shown().map(|f| f.of),
+        Some(FailureOf::PluginRun),
+        "another plugin's install took it away"
+    );
     assert!(!app.plugins.log_text("word-count").is_empty());
     let _ = app.update(Message::Plugin(PluginMsg::Installed {
         id: "word-count".into(),

@@ -14594,6 +14594,17 @@ fn what_failed_is_said_whole_before_the_setup_offer() {
         assert!(text_at(&mut sim, |t| t == "Set up 2 language servers", 0).is_some());
         assert!(text_at(&mut sim, |t| t == said, 0).is_some());
     }
+    // What an install says is said whole at 1280, beside the offer and the
+    // server declined on the right: in more words, it was cut there.
+    let installed = "TODO count is installed, in the command palette and Project Graphs";
+    app.status = installed.into();
+    for width in [1280.0, 1440.0] {
+        let mut sim = sim_sized(&app, Size::new(width, 800.0));
+        assert!(
+            text_at(&mut sim, |t| t == installed, 0).is_some(),
+            "what an install says is cut at {width}"
+        );
+    }
     // A short word beside it leaves the offer whole.
     app.status = "Copied".into();
     let mut sim = sim_sized(&app, Size::new(1280.0, 800.0));

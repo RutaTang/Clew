@@ -1794,22 +1794,39 @@ impl App {
                         // kept under the new version, read as the new one's.
                         self.plugins.failed.remove(&id);
                         self.plugins.log.remove(&id);
+                        // So does a run of the build replaced that did not
+                        // finish: it stood on the status bar beside the
+                        // new build, its Try again and Settings about the
+                        // old one.
+                        let replaced_run = self.failure_notice.as_ref().is_some_and(|f| {
+                            f.of == FailureOf::PluginRun
+                                && matches!(
+                                    &f.retry,
+                                    Some(Message::Plugin(PluginMsg::RunAgain(again))) if again.id == id
+                                )
+                        });
+                        if replaced_run {
+                            self.forget_failure_of(FailureOf::PluginRun);
+                        }
                         let manifest = self.plugins.get(&id).map(|p| p.manifest.clone());
                         let (commands, graphs) = manifest
                             .as_ref()
                             .map_or((0, 0), |m| (m.commands.len(), m.graphs.len()));
                         // Where what it added is, as it added it.
+                        // Said in few words: said in many ("…: its commands
+                        // are in the command palette, its graphs in Project
+                        // Graphs"), it was cut beside the status bar's chips.
                         self.status = match (commands > 0, graphs > 0) {
                             (true, true) => tr!(
-                                "{plugin} is installed: its commands are in the command palette, its graphs in Project Graphs",
+                                "{plugin} is installed, in the command palette and Project Graphs",
                                 plugin = name.clone()
                             ),
                             (false, true) => tr!(
-                                "{plugin} is installed: its graphs are in Project Graphs",
+                                "{plugin} is installed, in Project Graphs",
                                 plugin = name.clone()
                             ),
                             _ => tr!(
-                                "{plugin} is installed: its commands are in the command palette",
+                                "{plugin} is installed, in the command palette",
                                 plugin = name.clone()
                             ),
                         };
