@@ -34862,6 +34862,59 @@ fn a_failed_appearance_write_is_reported() {
     );
 }
 
+/// The saved appearance is applied once, for the first window: a window
+/// opened later paints as the windows open do, whatever config.toml says by
+/// then. Applied again, it moved every open window to the file's choice —
+/// and, in this suite, opened every later test's window in the appearance
+/// one test had saved: a render test of the file tree read light pixels
+/// where it had drawn dark ones once the command palette's test had chosen
+/// "Theme: Light".
+#[test]
+fn a_later_window_paints_as_the_open_ones_do() {
+    use crate::theme::{self, ThemePref};
+    let first = blank_app();
+    let open = || {
+        (
+            theme::is_light(),
+            theme::current_pref(),
+            theme::current_light().id,
+            theme::current_dark().id,
+        )
+    };
+    let before = open();
+    assert_eq!(first.theme_pref, before.1);
+    // config.toml now says otherwise on every count, as a save from another
+    // window, or another copy of clew, leaves it.
+    let other = |light: bool, now: &str| {
+        theme::THEMES
+            .iter()
+            .find(|t| t.is_light == light && t.id != now)
+            .expect("a second theme of each kind")
+            .id
+    };
+    let pref = if before.0 {
+        ThemePref::Dark
+    } else {
+        ThemePref::Light
+    };
+    let dir = test_dir("theme-later-window");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "theme = \"{}\"\ntheme_light = \"{}\"\ntheme_dark = \"{}\"\ntheme_generation = 2\n",
+            pref.as_str(),
+            other(true, before.2),
+            other(false, before.3),
+        ),
+    )
+    .unwrap();
+    let _env = data_dir_override(&dir);
+    let later = blank_app();
+    assert_eq!(open(), before, "a later window moved the appearance");
+    assert_eq!(later.theme_pref, before.1);
+}
+
 /// B14/B16: a file opens with nothing in the status line (the sheet's
 /// header names it), and an empty outline says WHY it is empty: a language
 /// without an outline is not a file without symbols.

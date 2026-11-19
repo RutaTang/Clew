@@ -1281,10 +1281,23 @@ pub fn apply_pref(pref: ThemePref) {
     set_light(pref.resolve_light());
 }
 
-/// Load persisted appearance settings (mode preference + chosen light/dark
-/// themes), apply the theme selections, and return the mode. Called once at
-/// startup before the first frame.
+/// The saved appearance (mode preference + chosen light/dark themes),
+/// applied once for the process, before its first window's first frame; the
+/// preference in effect. Every window builds its `App` through here, and a
+/// window opened later paints as the windows open do: applied again,
+/// config.toml's choice — which a save that failed, or another copy of clew,
+/// may have left saying something else — moved every open window to it, an
+/// appearance being previewed included. (In the tests, whose appearance is
+/// each test thread's own, it also opened every later test's window in the
+/// appearance one test had saved, and their pixels came out light.)
 pub fn init() -> ThemePref {
+    static APPLIED: std::sync::Once = std::sync::Once::new();
+    APPLIED.call_once(apply_saved);
+    current_pref()
+}
+
+/// Point the palette at the appearance config.toml holds (see [`init`]).
+fn apply_saved() {
     let get = |key: &str| {
         clew_core::globalconfig::get(key)
             .as_ref()
@@ -1305,11 +1318,11 @@ pub fn init() -> ThemePref {
     };
     set_light_theme(&pick("theme_light", OLD_DEFAULT_LIGHT, DEFAULT_LIGHT));
     set_dark_theme(&pick("theme_dark", OLD_DEFAULT_DARK, DEFAULT_DARK));
-    let pref = get("theme")
-        .and_then(|s| ThemePref::parse(&s))
-        .unwrap_or(ThemePref::System);
-    apply_pref(pref);
-    pref
+    apply_pref(
+        get("theme")
+            .and_then(|s| ThemePref::parse(&s))
+            .unwrap_or(ThemePref::System),
+    );
 }
 
 /// Persist the appearance settings, preserving everything else in

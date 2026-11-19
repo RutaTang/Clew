@@ -155,11 +155,10 @@ impl App {
             overlay_open: false,
             arm_on_enter: window_unplaced(),
             acp_agents: clew_core::acp::config::load().0,
-            // Load the persisted appearance settings and point the palette at
-            // them before the first frame, so the window opens in the right theme.
+            // The appearance and the language the first frame is drawn in:
+            // the saved ones for the first window, those of the windows open
+            // for a later one.
             theme_pref: {
-                // And the language, so the first frame speaks it: the saved
-                // one for the first window, the one spoken for a later one.
                 crate::i18n::init();
                 theme::init()
             },

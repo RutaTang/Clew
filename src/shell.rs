@@ -541,34 +541,25 @@ impl Clew {
     /// (used for the first window at launch); otherwise the window starts empty,
     /// ready for the user to open a folder — the standard "New Window".
     fn open_window(&mut self, restore: bool) -> Task<Shell> {
-        // What the windows already open run on: the process-wide appearance
-        // and the keymap. Building an `App` loads both from `config.toml`
-        // (`theme::init` writes the palette every window paints with), so a
-        // later window reverted an appearance being previewed, or a binding
-        // whose save failed, under the others, which were never told — and
-        // then fired different chords than they did. It joins them instead —
-        // and their voice settings, which a later window read from the file
-        // too: one whose save failed went back to what the file said, and
-        // the new window's next voice change carried that to every window.
-        let live = self.windows.values().next().map(|app| {
-            (
-                crate::theme::current_light().id,
-                crate::theme::current_dark().id,
-                crate::theme::current_pref(),
-                app.keymap.clone(),
-                app.voice.prefs.clone(),
-            )
-        });
+        // What the windows already open run on: the keymap and the voice
+        // settings. Building an `App` loads both from `config.toml`, so a
+        // later window fired other chords than they did after a binding's
+        // save failed, and went back to what the file said for a voice
+        // setting whose save failed — and its next voice change carried that
+        // to every window. It joins them instead. (The appearance it joins
+        // by itself: `theme::init` applies the saved one once, for the first
+        // window.)
+        let live = self
+            .windows
+            .values()
+            .next()
+            .map(|app| (app.keymap.clone(), app.voice.prefs.clone()));
         let (mut app, init) = if restore {
             App::new()
         } else {
             (App::blank(), Task::none())
         };
-        if let Some((light, dark, pref, keymap, voice)) = live {
-            crate::theme::set_light_theme(light);
-            crate::theme::set_dark_theme(dark);
-            crate::theme::apply_pref(pref);
-            app.theme_pref = pref;
+        if let Some((keymap, voice)) = live {
             app.keymap = keymap;
             app.voice.prefs = voice;
         }
