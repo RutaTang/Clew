@@ -20,6 +20,194 @@ set_option maxRecDepth 2048
 
 namespace clew_rules
 
+/-- [clew_rules::approval::with_escaped_byte]:
+    Source: 'crates/clew-rules/src/approval.rs', lines 14:0-39:1 -/
+def approval.with_escaped_byte
+  (out : alloc.vec.Vec Std.U8) (b : Std.U8) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  if b = 37#u8
+  then
+    let out1 ← alloc.vec.Vec.push out 37#u8
+    let out2 ← alloc.vec.Vec.push out1 50#u8
+    alloc.vec.Vec.push out2 53#u8
+  else
+    if b = 47#u8
+    then
+      let out1 ← alloc.vec.Vec.push out 37#u8
+      let out2 ← alloc.vec.Vec.push out1 50#u8
+      alloc.vec.Vec.push out2 70#u8
+    else
+      if b = 91#u8
+      then
+        let out1 ← alloc.vec.Vec.push out 37#u8
+        let out2 ← alloc.vec.Vec.push out1 53#u8
+        alloc.vec.Vec.push out2 66#u8
+      else
+        if b = 93#u8
+        then
+          let out1 ← alloc.vec.Vec.push out 37#u8
+          let out2 ← alloc.vec.Vec.push out1 53#u8
+          alloc.vec.Vec.push out2 68#u8
+        else
+          if b = 64#u8
+          then
+            let out1 ← alloc.vec.Vec.push out 37#u8
+            let out2 ← alloc.vec.Vec.push out1 52#u8
+            alloc.vec.Vec.push out2 48#u8
+          else alloc.vec.Vec.push out b
+
+/-- [clew_rules::approval::with_escaped]: loop body 0:
+    Source: 'crates/clew-rules/src/approval.rs', lines 44:4-47:5 -/
+@[rust_loop_body]
+def approval.with_escaped_loop.body
+  (text : Slice Std.U8) (out : alloc.vec.Vec Std.U8) (i : Std.Usize) :
+  Result (ControlFlow ((alloc.vec.Vec Std.U8) × Std.Usize) (alloc.vec.Vec
+    Std.U8))
+  := do
+  let i1 := Slice.len text
+  if i < i1
+  then
+    let i2 ← Slice.index_usize text i
+    let out1 ← approval.with_escaped_byte out i2
+    let i3 ← i + 1#usize
+    ok (cont (out1, i3))
+  else ok (done out)
+
+/-- [clew_rules::approval::with_escaped]: loop 0:
+    Source: 'crates/clew-rules/src/approval.rs', lines 44:4-47:5 -/
+@[rust_loop]
+def approval.with_escaped_loop
+  (out : alloc.vec.Vec Std.U8) (text : Slice Std.U8) (i : Std.Usize) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  loop
+    (fun (out1, i1) => approval.with_escaped_loop.body text out1 i1)
+    (out, i)
+
+/-- [clew_rules::approval::with_escaped]:
+    Source: 'crates/clew-rules/src/approval.rs', lines 42:0-49:1 -/
+@[reducible]
+def approval.with_escaped
+  (out : alloc.vec.Vec Std.U8) (text : Slice Std.U8) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  approval.with_escaped_loop out text 0#usize
+
+/-- [clew_rules::approval::has_colon]: loop body 0:
+    Source: 'crates/clew-rules/src/approval.rs', lines 54:4-61:1 -/
+@[rust_loop_body]
+def approval.has_colon_loop.body
+  (text : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len text
+  if i < i1
+  then
+    let i2 ← Slice.index_usize text i
+    if i2 = 58#u8
+    then ok (done true)
+    else let i3 ← i + 1#usize
+         ok (cont i3)
+  else ok (done false)
+
+/-- [clew_rules::approval::has_colon]: loop 0:
+    Source: 'crates/clew-rules/src/approval.rs', lines 54:4-61:1 -/
+@[rust_loop]
+def approval.has_colon_loop
+  (text : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => approval.has_colon_loop.body text i1)
+    i
+
+/-- [clew_rules::approval::has_colon]:
+    Source: 'crates/clew-rules/src/approval.rs', lines 52:0-61:1 -/
+@[reducible]
+def approval.has_colon (text : Slice Std.U8) : Result Bool := do
+  approval.has_colon_loop text 0#usize
+
+/-- [clew_rules::approval::with_user]:
+    Source: 'crates/clew-rules/src/approval.rs', lines 65:0-71:1 -/
+def approval.with_user
+  (label : alloc.vec.Vec Std.U8) (user : Option (Slice Std.U8)) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  match user with
+  | none => ok label
+  | some user1 =>
+    let label1 ← approval.with_escaped label user1
+    alloc.vec.Vec.push label1 64#u8
+
+/-- [clew_rules::approval::with_host]:
+    Source: 'crates/clew-rules/src/approval.rs', lines 75:0-84:1 -/
+def approval.with_host
+  (label : alloc.vec.Vec Std.U8) (host : Slice Std.U8) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  let b ← approval.has_colon host
+  if b
+  then
+    let label1 ← alloc.vec.Vec.push label 91#u8
+    let label2 ← approval.with_escaped label1 host
+    alloc.vec.Vec.push label2 93#u8
+  else approval.with_escaped label host
+
+/-- [clew_rules::approval::with_port]:
+    Source: 'crates/clew-rules/src/approval.rs', lines 88:0-94:1 -/
+def approval.with_port
+  (label : alloc.vec.Vec Std.U8) (port : Option (Slice Std.U8)) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  match port with
+  | none => ok label
+  | some port1 =>
+    let label1 ← alloc.vec.Vec.push label 58#u8
+    approval.with_escaped label1 port1
+
+/-- [clew_rules::approval::scope_label]:
+    Source: 'crates/clew-rules/src/approval.rs', lines 99:0-101:1
+    Visibility: public -/
+def approval.scope_label
+  (user : Option (Slice Std.U8)) (host : Slice Std.U8)
+  (port : Option (Slice Std.U8)) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  let v ← approval.with_user (alloc.vec.Vec.new Std.U8) user
+  let v1 ← approval.with_host v host
+  approval.with_port v1 port
+
+/-- [clew_rules::approval::approval_key]:
+    Source: 'crates/clew-rules/src/approval.rs', lines 109:0-125:1
+    Visibility: public -/
+def approval.approval_key
+  (label : Slice Std.U8) (root : Slice Std.U8) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  let key ← alloc.vec.Vec.push (alloc.vec.Vec.new Std.U8) 115#u8
+  let key1 ← alloc.vec.Vec.push key 115#u8
+  let key2 ← alloc.vec.Vec.push key1 104#u8
+  let key3 ← alloc.vec.Vec.push key2 58#u8
+  let key4 ← alloc.vec.Vec.push key3 47#u8
+  let key5 ← alloc.vec.Vec.push key4 47#u8
+  let key6 ← alloc.vec.Vec.extend_from_slice core.clone.CloneU8 key5 label
+  let key7 ← alloc.vec.Vec.push key6 58#u8
+  let b ← core.slice.Slice.is_empty root
+  let key8 ←
+    if b
+    then
+      do
+      let key9 ← alloc.vec.Vec.push key7 46#u8
+      alloc.vec.Vec.push key9 47#u8
+    else
+      do
+      let i ← Slice.index_usize root 0#usize
+      if i != 47#u8
+      then
+        let key9 ← alloc.vec.Vec.push key7 46#u8
+        alloc.vec.Vec.push key9 47#u8
+      else ok key7
+  alloc.vec.Vec.extend_from_slice core.clone.CloneU8 key8 root
+
 /-- [clew_rules::fingerprint::with_decimal]:
     Source: 'crates/clew-rules/src/fingerprint.rs', lines 12:0-18:1 -/
 def fingerprint.with_decimal

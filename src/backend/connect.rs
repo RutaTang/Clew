@@ -511,37 +511,17 @@ impl SavedConnection {
 /// port 22.
 ///
 /// That the label, with a project root after it, names exactly one user,
-/// host, port and project is proved in `verification/Clew/Trust.lean`.
+/// host, port and project is proved in `verification/Clew/Trust.lean`, and
+/// `clew_rules::approval` is proved to write that label.
 pub(crate) fn scope_label(user: Option<&str>, host: &str, port: Option<&str>) -> String {
-    fn esc(text: &str, out: &mut String) {
-        for c in text.chars() {
-            match c {
-                '%' => out.push_str("%25"),
-                '/' => out.push_str("%2F"),
-                '[' => out.push_str("%5B"),
-                ']' => out.push_str("%5D"),
-                '@' => out.push_str("%40"),
-                c => out.push(c),
-            }
-        }
-    }
-    let mut label = String::new();
-    if let Some(user) = user {
-        esc(user, &mut label);
-        label.push('@');
-    }
-    if host.contains(':') {
-        label.push('[');
-        esc(host, &mut label);
-        label.push(']');
-    } else {
-        esc(host, &mut label);
-    }
-    if let Some(port) = port {
-        label.push(':');
-        esc(port, &mut label);
-    }
-    label
+    let label = clew_rules::approval::scope_label(
+        user.map(str::as_bytes),
+        host.as_bytes(),
+        port.map(str::as_bytes),
+    );
+    // Escaping adds only ASCII between whole characters: UTF-8 in is UTF-8
+    // out, so nothing is ever replaced here.
+    String::from_utf8_lossy(&label).into_owned()
 }
 
 /// The port a label shows: none for 22 or none given, a number as a number

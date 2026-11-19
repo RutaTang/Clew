@@ -31,7 +31,10 @@ alike. Everything else is proved here, about the inputs:
   2222 shared one key, and so did `2222:/srv/p`, a relative root, on `u@h`
   and `/srv/p` on `u@h:2222`. The host is now bracketed when it holds a
   `:`, `%`, `/`, `[`, `]` and `@` are escaped, and a relative root is
-  written after `./`.)
+  written after `./`.) The Rust that writes the label and the key,
+  `clew_rules::approval`, translated to Lean by Charon and Aeneas, is proved
+  in `verification/extracted/Equal.lean` to write exactly `scopeLabel` and
+  `approvalKey`.
 
 Byte strings are lists of `Nat`s, each a byte.
 -/

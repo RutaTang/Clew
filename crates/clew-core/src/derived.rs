@@ -82,7 +82,8 @@ pub fn dir(host: Option<&str>, root: &Path) -> Option<PathBuf> {
 /// always used. A relative root (`clew proj` with `CLEW_SSH` set) is written
 /// `./proj`: as it was, `ssh://u@h:2222:/srv/p` was both `u@h` port 22's
 /// `2222:/srv/p` and `u@h:2222`'s `/srv/p`. That the key names one label and
-/// one root is proved in `verification/Clew/Trust.lean`.
+/// one root is proved in `verification/Clew/Trust.lean`, and
+/// `clew_rules::approval` is proved to write that key.
 ///
 /// A path is written as [`path_text`] writes it, so two paths never share a
 /// key, whatever bytes they hold.
@@ -95,12 +96,10 @@ pub fn project_key(host: Option<&str>, root: &Path) -> String {
                 .unwrap_or_else(|_| root.to_path_buf()),
         ),
         Some(h) => {
-            let root = path_text(root);
-            if root.starts_with('/') {
-                format!("ssh://{h}:{root}")
-            } else {
-                format!("ssh://{h}:./{root}")
-            }
+            let key = clew_rules::approval::approval_key(h.as_bytes(), path_text(root).as_bytes());
+            // `ssh://`, `:` and `./` are ASCII between whole strings: UTF-8
+            // in is UTF-8 out, so nothing is ever replaced here.
+            String::from_utf8_lossy(&key).into_owned()
         }
     }
 }

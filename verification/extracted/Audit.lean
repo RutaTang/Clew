@@ -18,3 +18,5 @@ does not model (the code proved here calls none of them). -/
 #print axioms Clew.Extracted.ServerDist.slug_ok_is_the_model
 #print axioms Clew.Extracted.Fingerprint.args_part_is_the_model
 #print axioms Clew.Extracted.Fingerprint.length_prefixed_is_the_model
+#print axioms Clew.Extracted.Approval.scope_label_is_the_model
+#print axioms Clew.Extracted.Approval.approval_key_is_the_model

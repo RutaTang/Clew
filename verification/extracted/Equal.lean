@@ -2605,4 +2605,415 @@ theorem length_prefixed_is_the_model (parts : Slice (alloc.vec.Vec Std.U8))
 
 end Fingerprint
 
+/-! ## Which machine and project an approval is filed under — `clew_rules::approval`
+
+A remote project's approvals are filed under `ssh://<label>:<root>`, the
+label `user@host:port` with each part escaped. The model in
+`../Clew/Trust.lean` proves two remotes and two roots share a key only when
+they are the same (`approvalKey_injective`). Proved here: on the UTF-8 bytes
+of any user, host, port and root, the Rust functions return, and write the
+UTF-8 bytes of the model's label and key. -/
+
+namespace Approval
+
+open clew_rules.approval
+open Shell (bs push_ok extend_ok)
+
+/-- `with_escaped_byte` on bytes: `%`, `/`, `[`, `]`, `@` as `%XX`. -/
+def escB (b : Nat) : List Nat :=
+  if b = 37 then [37, 50, 53] else if b = 47 then [37, 50, 70]
+  else if b = 91 then [37, 53, 66] else if b = 93 then [37, 53, 68]
+  else if b = 64 then [37, 52, 48] else [b]
+
+theorem escB_length (b : Nat) : (escB b).length ≤ 3 := by
+  unfold escB; split_ifs <;> simp
+
+theorem push3_ok (v : alloc.vec.Vec Std.U8) (x y z : Std.U8) (h : v.val.length + 3 ≤ Usize.max) :
+    ∃ w, (do
+      let a ← alloc.vec.Vec.push v x
+      let b ← alloc.vec.Vec.push a y
+      alloc.vec.Vec.push b z) = ok w ∧ bs w.val = bs v.val ++ [x.val, y.val, z.val] := by
+  obtain ⟨a, ha, ea⟩ := push_ok v x (by omega)
+  obtain ⟨b, hb, eb⟩ := push_ok a y (by rw [ea]; simp; omega)
+  obtain ⟨c, hc, ec⟩ := push_ok b z (by rw [eb, ea]; simp; omega)
+  exact ⟨c, by simp [ha, hb, hc], by rw [ec, eb, ea]; simp [bs]⟩
+
+theorem with_escaped_byte_ok (out : alloc.vec.Vec Std.U8) (b : Std.U8)
+    (h : out.val.length + 3 ≤ Usize.max) :
+    ∃ v, with_escaped_byte out b = ok v ∧ bs v.val = bs out.val ++ escB b.val := by
+  unfold with_escaped_byte
+  by_cases h37 : b.val = 37
+  · have e : b = 37#u8 := by rw [UScalar.eq_equiv]; simp [h37]
+    obtain ⟨w, hw, ew⟩ := push3_ok out 37#u8 50#u8 53#u8 h
+    exact ⟨w, by simp only [e, ↓reduceIte]; exact hw, by rw [ew]; simp [escB, h37]⟩
+  by_cases h47 : b.val = 47
+  · have e : b = 47#u8 := by rw [UScalar.eq_equiv]; simp [h47]
+    obtain ⟨w, hw, ew⟩ := push3_ok out 37#u8 50#u8 70#u8 h
+    exact ⟨w, by simp only [e]; simp; exact hw, by rw [ew]; simp [escB, h47]⟩
+  by_cases h91 : b.val = 91
+  · have e : b = 91#u8 := by rw [UScalar.eq_equiv]; simp [h91]
+    obtain ⟨w, hw, ew⟩ := push3_ok out 37#u8 53#u8 66#u8 h
+    exact ⟨w, by simp only [e]; simp; exact hw, by rw [ew]; simp [escB, h91]⟩
+  by_cases h93 : b.val = 93
+  · have e : b = 93#u8 := by rw [UScalar.eq_equiv]; simp [h93]
+    obtain ⟨w, hw, ew⟩ := push3_ok out 37#u8 53#u8 68#u8 h
+    exact ⟨w, by simp only [e]; simp; exact hw, by rw [ew]; simp [escB, h93]⟩
+  by_cases h64 : b.val = 64
+  · have e : b = 64#u8 := by rw [UScalar.eq_equiv]; simp [h64]
+    obtain ⟨w, hw, ew⟩ := push3_ok out 37#u8 52#u8 48#u8 h
+    exact ⟨w, by simp only [e]; simp; exact hw, by rw [ew]; simp [escB, h64]⟩
+  obtain ⟨w, hw, ew⟩ := push_ok out b (by omega)
+  refine ⟨w, ?_, by rw [ew]; simp [bs, escB, h37, h47, h91, h93, h64]⟩
+  simp [U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq, h37, h47, h91, h93, h64, hw]
+
+theorem with_escaped_ok (out : alloc.vec.Vec Std.U8) (text : Slice Std.U8)
+    (room : out.val.length + 3 * text.val.length ≤ Usize.max) :
+    ∃ v, with_escaped out text = ok v ∧ bs v.val = bs out.val ++ (bs text.val).flatMap escB := by
+  obtain ⟨r, hl, hq⟩ := loop_spec (fun (o, i) => with_escaped_loop.body text o i)
+    (fun p => p.2.val ≤ text.val.length ∧
+      bs p.1.val = bs out.val ++ (bs (text.val.take p.2.val)).flatMap escB)
+    (fun _ r => bs r.val = bs out.val ++ (bs text.val).flatMap escB)
+    (fun p => text.val.length - p.2.val) (by
+      rintro ⟨o, i⟩ ⟨hle, ho⟩
+      dsimp only at hle ho
+      have hlen : o.val.length ≤ out.val.length + 3 * i.val := by
+        have h1 := congrArg List.length ho
+        have h2 : ((bs (text.val.take i.val)).flatMap escB).length ≤ 3 * (bs (text.val.take i.val)).length := by
+          generalize bs (text.val.take i.val) = ns
+          induction ns with
+          | nil => simp
+          | cons n ns ih =>
+            rw [List.flatMap_cons, List.length_append, List.length_cons]
+            have := escB_length n; omega
+        simp only [bs, List.length_append, List.length_map, List.length_take] at h1 h2
+        omega
+      by_cases hi : i.val < text.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok text i hi
+        right
+        obtain ⟨v, hv, ev⟩ := with_escaped_byte_ok o text.val[i.val] (by omega)
+        refine ⟨(v, j), ?_, ⟨show j.val ≤ _ by omega, ?_⟩,
+          show text.val.length - j.val < text.val.length - i.val by omega, fun _ h => h⟩
+        · simp [with_escaped_loop.body, hi, index_ok text i hi, hv, hj]
+        · show bs v.val = _
+          rw [ev, ho, hjv, Shell.bs_take_succ _ _ hi, List.flatMap_append]
+          simp
+      · left
+        refine ⟨o, by simp [with_escaped_loop.body, hi], ?_⟩
+        simpa [List.take_of_length_le (show text.val.length ≤ i.val by omega)] using ho)
+    (out, 0#usize) ⟨by simp, show bs out.val = _ by simp [bs]⟩
+  exact ⟨r, by unfold with_escaped; exact hl, hq⟩
+
+theorem has_colon_ok (text : Slice Std.U8) :
+    has_colon text = ok ((bs text.val).any (· == 58)) := by
+  obtain ⟨b, hl, hq⟩ := loop_spec (has_colon_loop.body text) (fun _ => True)
+    (fun i b => b = (text.val.drop i.val).any fun b => b.val == 58)
+    (fun i => text.val.length - i.val) (by
+      intro i _
+      by_cases hi : i.val < text.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok text i hi
+        rw [List.drop_eq_getElem_cons hi]
+        by_cases hb : text.val[i.val].val = 58
+        · left
+          refine ⟨true, ?_, by rw [List.any_cons]; simp [hb]⟩
+          simp [has_colon_loop.body, hi, index_ok text i hi, UScalar.eq_equiv, U8.ofNat,
+            UScalar.ofNat, UScalar.ofNatCore_val_eq, hb]
+        · right
+          refine ⟨j, by simp [has_colon_loop.body, hi, index_ok text i hi, hj, UScalar.eq_equiv,
+            U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq, hb], trivial, by omega, ?_⟩
+          intro b hb'
+          rw [hb', hjv, List.any_cons]; simp [hb]
+      · left
+        refine ⟨false, by simp [has_colon_loop.body, hi], ?_⟩
+        rw [List.drop_eq_nil_of_le (by omega)]; rfl) 0#usize trivial
+  unfold has_colon has_colon_loop
+  rw [hl, hq]; simp [bs, List.any_map, Function.comp_def]
+
+theorem flatMap_escB_length (ns : List Nat) : (ns.flatMap escB).length ≤ 3 * ns.length := by
+  induction ns with
+  | nil => simp
+  | cons n ns ih =>
+    rw [List.flatMap_cons, List.length_append, List.length_cons]
+    have := escB_length n; omega
+
+theorem bs_length (l : List Std.U8) : (bs l).length = l.length := by simp [bs]
+
+/-- What `with_user` writes: `user@`, escaped, or nothing. -/
+def userB : Option (List Nat) → List Nat
+  | none => []
+  | some u => u.flatMap escB ++ [64]
+
+/-- What `with_host` writes: the host escaped, bracketed when it holds a `:`. -/
+def hostB (h : List Nat) : List Nat :=
+  if h.any (· == 58) then 91 :: (h.flatMap escB ++ [93]) else h.flatMap escB
+
+/-- What `with_port` writes: `:port`, escaped, or nothing. -/
+def portB : Option (List Nat) → List Nat
+  | none => []
+  | some t => 58 :: t.flatMap escB
+
+/-- The byte length of an optional part. -/
+def olen (o : Option (Slice Std.U8)) : Nat := (o.map (·.val.length)).getD 0
+
+theorem with_user_ok (label : alloc.vec.Vec Std.U8) (user : Option (Slice Std.U8))
+    (h : label.val.length + 3 * olen user + 1 ≤ Usize.max) :
+    ∃ v, with_user label user = ok v ∧ bs v.val = bs label.val ++ userB (user.map (bs ·.val)) := by
+  cases user with
+  | none => exact ⟨label, rfl, by simp [userB]⟩
+  | some u =>
+    simp only [olen, Option.map_some, Option.getD_some] at h
+    obtain ⟨l1, h1, e1⟩ := with_escaped_ok label u (by omega)
+    have hl1 : l1.val.length ≤ label.val.length + 3 * u.val.length := by
+      have := congrArg List.length e1
+      have := flatMap_escB_length (bs u.val)
+      simp only [bs_length, List.length_append] at *; omega
+    obtain ⟨v, hv, ev⟩ := push_ok l1 64#u8 (by omega)
+    refine ⟨v, by simp [with_user, h1, hv], ?_⟩
+    rw [ev]; simp only [bs, List.map_append] at e1 ⊢; rw [e1]; simp [userB]
+
+theorem with_host_ok (label : alloc.vec.Vec Std.U8) (host : Slice Std.U8)
+    (h : label.val.length + 3 * host.val.length + 2 ≤ Usize.max) :
+    ∃ v, with_host label host = ok v ∧ bs v.val = bs label.val ++ hostB (bs host.val) := by
+  have hesc := flatMap_escB_length (bs host.val)
+  rw [bs_length] at hesc
+  cases hc : (bs host.val).any (· == 58)
+  · obtain ⟨v, hv, ev⟩ := with_escaped_ok label host (by omega)
+    exact ⟨v, by simp [with_host, has_colon_ok, hc, hv], by rw [ev]; simp [hostB, hc]⟩
+  · obtain ⟨l1, h1, e1⟩ := push_ok label 91#u8 (by omega)
+    obtain ⟨l2, h2, e2⟩ := with_escaped_ok l1 host (by rw [e1]; simp; omega)
+    have hl2 : l2.val.length ≤ label.val.length + 1 + 3 * host.val.length := by
+      have := congrArg List.length e2
+      simp only [bs_length, List.length_append, e1, List.length_singleton] at this; omega
+    obtain ⟨v, hv, ev⟩ := push_ok l2 93#u8 (by omega)
+    refine ⟨v, by simp [with_host, has_colon_ok, hc, h1, h2, hv], ?_⟩
+    have hb : bs v.val = bs l2.val ++ [93] := by rw [ev]; simp [bs]
+    have hb1 : bs l1.val = bs label.val ++ [91] := by rw [e1]; simp [bs]
+    rw [hb, e2, hb1]
+    simp only [hostB, hc, ↓reduceIte]
+    simp
+
+theorem with_port_ok (label : alloc.vec.Vec Std.U8) (port : Option (Slice Std.U8))
+    (h : label.val.length + 3 * olen port + 1 ≤ Usize.max) :
+    ∃ v, with_port label port = ok v ∧ bs v.val = bs label.val ++ portB (port.map (bs ·.val)) := by
+  cases port with
+  | none => exact ⟨label, rfl, by simp [portB]⟩
+  | some t =>
+    simp only [olen, Option.map_some, Option.getD_some] at h
+    obtain ⟨l1, h1, e1⟩ := push_ok label 58#u8 (by omega)
+    obtain ⟨v, hv, ev⟩ := with_escaped_ok l1 t (by rw [e1]; simp; omega)
+    refine ⟨v, by simp [with_port, h1, hv], ?_⟩
+    rw [ev, e1]; simp [portB, bs]
+
+theorem scope_label_ok (user : Option (Slice Std.U8)) (host : Slice Std.U8) (port : Option (Slice Std.U8))
+    (room : 3 * (olen user + host.val.length + olen port) + 4 ≤ Usize.max) :
+    ∃ v, scope_label user host port = ok v ∧ bs v.val =
+      userB (user.map (bs ·.val)) ++ (hostB (bs host.val) ++ portB (port.map (bs ·.val))) := by
+  obtain ⟨l1, h1, e1⟩ := with_user_ok (alloc.vec.Vec.new Std.U8) user (by simp; omega)
+  have h0 : (alloc.vec.Vec.new Std.U8).val.length = 0 := by simp
+  have hl1 : l1.val.length ≤ 3 * olen user + 1 := by
+    have hlen := congrArg List.length e1
+    rw [bs_length, List.length_append, bs_length, h0, Nat.zero_add] at hlen
+    cases user with
+    | none =>
+      have : olen none = 0 := rfl
+      simp only [userB, Option.map_none, List.length_nil] at hlen; omega
+    | some u =>
+      have hesc := flatMap_escB_length (bs u.val)
+      rw [bs_length] at hesc
+      have : olen (some u) = u.val.length := rfl
+      simp only [userB, Option.map_some, List.length_append, List.length_singleton] at hlen
+      omega
+  obtain ⟨l2, h2, e2⟩ := with_host_ok l1 host (by omega)
+  have hl2 : l2.val.length ≤ 3 * olen user + 3 * host.val.length + 3 := by
+    have hlen := congrArg List.length e2
+    have hesc := flatMap_escB_length (bs host.val)
+    rw [bs_length, List.length_append, bs_length] at hlen
+    rw [bs_length] at hesc
+    unfold hostB at hlen
+    split at hlen
+    · simp only [List.length_cons, List.length_append, List.length_nil] at hlen; omega
+    · omega
+  obtain ⟨v, hv, ev⟩ := with_port_ok l2 port (by omega)
+  refine ⟨v, by simp [scope_label, h1, h2, hv], ?_⟩
+  rw [ev, e2, e1]; simp [bs]
+
+/-- What `approval_key` writes after `ssh://<label>:`: the root, after `./`
+unless it starts with `/`. -/
+def rootB (r : List Nat) : List Nat := if r.head? = some 47 then r else 46 :: 47 :: r
+
+theorem approval_key_ok (label root : Slice Std.U8)
+    (room : label.val.length + root.val.length + 9 ≤ Usize.max) :
+    ∃ v, approval_key label root = ok v ∧
+      bs v.val = [115, 115, 104, 58, 47, 47] ++ bs label.val ++ 58 :: rootB (bs root.val) := by
+  obtain ⟨k1, h1, e1⟩ := push_ok (alloc.vec.Vec.new Std.U8) 115#u8 (by simp; omega)
+  obtain ⟨k2, h2, e2⟩ := push_ok k1 115#u8 (by simp [e1]; omega)
+  obtain ⟨k3, h3, e3⟩ := push_ok k2 104#u8 (by simp [e2, e1]; omega)
+  obtain ⟨k4, h4, e4⟩ := push_ok k3 58#u8 (by simp [e3, e2, e1]; omega)
+  obtain ⟨k5, h5, e5⟩ := push_ok k4 47#u8 (by simp [e4, e3, e2, e1]; omega)
+  obtain ⟨k6, h6, e6⟩ := push_ok k5 47#u8 (by simp [e5, e4, e3, e2, e1]; omega)
+  obtain ⟨k7, h7, e7⟩ := extend_ok k6 label (by simp [e6, e5, e4, e3, e2, e1]; omega)
+  obtain ⟨k8, h8, e8⟩ := push_ok k7 58#u8 (by simp [e7, e6, e5, e4, e3, e2, e1]; omega)
+  have hk8 : k8.val.length = label.val.length + 7 := by simp [e8, e7, e6, e5, e4, e3, e2, e1]
+  have hpre : bs k8.val = [115, 115, 104, 58, 47, 47] ++ bs label.val ++ [58] := by
+    simp [e8, e7, e6, e5, e4, e3, e2, e1, bs]
+  have bs_append : ∀ a b : List Std.U8, bs (a ++ b) = bs a ++ bs b := by intro a b; simp [bs]
+  by_cases he : root.val = []
+  · obtain ⟨d1, hd1, ed1⟩ := push_ok k8 46#u8 (by omega)
+    obtain ⟨d2, hd2, ed2⟩ := push_ok d1 47#u8 (by simp [ed1]; omega)
+    obtain ⟨v, hv, ev⟩ := extend_ok d2 root (by simp [ed2, ed1]; omega)
+    refine ⟨v, by simp [approval_key, h1, h2, h3, h4, h5, h6, h7, h8, core.slice.Slice.is_empty, he,
+      hd1, hd2, hv], ?_⟩
+    rw [ev, ed2, ed1, bs_append, bs_append, bs_append, hpre, he]
+    simp [rootB, bs]
+  · have hpos : 0 < root.val.length := List.length_pos_iff.mpr he
+    have hidx := index_ok root 0#usize (by simp; omega)
+    have hb : bs root.val = root.val[0].val :: bs (root.val.drop 1) := by
+      rw [← KnownHosts.bs_drop _ _ hpos]; rfl
+    by_cases h47 : root.val[0].val = 47
+    · have h47' : root.val[0] = 47#u8 := by rw [UScalar.eq_equiv]; simp [h47]
+      obtain ⟨v, hv, ev⟩ := extend_ok k8 root (by omega)
+      refine ⟨v, by simp [approval_key, h1, h2, h3, h4, h5, h6, h7, h8, core.slice.Slice.is_empty, he,
+        hidx, h47', hv], ?_⟩
+      rw [ev, bs_append, hpre]
+      have hr : rootB (bs root.val) = bs root.val := by simp [rootB, hb, h47]
+      rw [hr]; simp
+    · have h47' : ¬ root.val[0] = 47#u8 := by rw [UScalar.eq_equiv]; simp [h47]
+      obtain ⟨d1, hd1, ed1⟩ := push_ok k8 46#u8 (by omega)
+      obtain ⟨d2, hd2, ed2⟩ := push_ok d1 47#u8 (by simp [ed1]; omega)
+      obtain ⟨v, hv, ev⟩ := extend_ok d2 root (by simp [ed2, ed1]; omega)
+      refine ⟨v, by simp [approval_key, h1, h2, h3, h4, h5, h6, h7, h8, core.slice.Slice.is_empty, he,
+        hidx, h47, hd1, hd2, hv], ?_⟩
+      rw [ev, ed2, ed1, bs_append, bs_append, bs_append, hpre]
+      have hr : rootB (bs root.val) = 46 :: 47 :: bs root.val := by simp [rootB, hb, h47]
+      rw [hr]; simp [bs]
+
+/-! ### From bytes to characters -/
+
+open Headers (utf8 utf8_ascii utf8_high)
+open Shell (utf8_cons utf8_append)
+
+theorem flatMap_escB_id (ns : List Nat) (h : ∀ n ∈ ns, escB n = [n]) : ns.flatMap escB = ns := by
+  induction ns with
+  | nil => rfl
+  | cons n ns ih =>
+    rw [List.flatMap_cons, h n (by simp), ih (fun m hm => h m (by simp [hm]))]; rfl
+
+theorem utf8_escChar (c : Char) :
+    utf8 (Clew.Trust.escChar c) = ((String.utf8EncodeChar c).map (·.toNat)).flatMap escB := by
+  by_cases h1 : c = '%'
+  · subst h1; decide
+  by_cases h2 : c = '/'
+  · subst h2; decide
+  by_cases h3 : c = '['
+  · subst h3; decide
+  by_cases h4 : c = ']'
+  · subst h4; decide
+  by_cases h5 : c = '@'
+  · subst h5; decide
+  have he : Clew.Trust.escChar c = [c] := by simp [Clew.Trust.escChar, h1, h2, h3, h4, h5]
+  rw [he, flatMap_escB_id]
+  · simp [utf8]
+  · intro b hb
+    have n1 := KnownHosts.bytes_ne c 37 (by omega) (KnownHosts.toNat_ne c '%' h1) b hb
+    have n2 := KnownHosts.bytes_ne c 47 (by omega) (KnownHosts.toNat_ne c '/' h2) b hb
+    have n3 := KnownHosts.bytes_ne c 91 (by omega) (KnownHosts.toNat_ne c '[' h3) b hb
+    have n4 := KnownHosts.bytes_ne c 93 (by omega) (KnownHosts.toNat_ne c ']' h4) b hb
+    have n5 := KnownHosts.bytes_ne c 64 (by omega) (KnownHosts.toNat_ne c '@' h5) b hb
+    simp [escB, n1, n2, n3, n4, n5]
+
+theorem utf8_esc (s : List Char) : utf8 (Clew.Trust.esc s) = (utf8 s).flatMap escB := by
+  induction s with
+  | nil => rfl
+  | cons c s ih =>
+    rw [Clew.Trust.esc, List.flatMap_cons, utf8_append, ← Clew.Trust.esc, ih, utf8_escChar, utf8_cons,
+      List.flatMap_append]
+
+theorem utf8_any_colon (s : List Char) : (utf8 s).any (· == 58) = s.contains ':' := by
+  rw [List.contains_eq_any_beq]
+  induction s with
+  | nil => rfl
+  | cons c s ih =>
+    rw [utf8_cons, List.any_append, ih, List.any_cons, Shell.char_beq]
+    congr 1
+    by_cases h : c.toNat < 128
+    · rw [utf8_ascii c h]; simp [eq_comm]
+    · obtain ⟨_, hhi⟩ := utf8_high c (by omega)
+      have h1 : ((':' : Char).toNat == c.toNat) = false := by
+        rw [beq_eq_false_iff_ne]; intro he; rw [← he] at h; exact h (by decide)
+      rw [h1, List.any_eq_false]
+      intro n hn
+      simp only [List.mem_map] at hn
+      obtain ⟨b, hb, rfl⟩ := hn
+      have := hhi b hb
+      simp; omega
+
+theorem utf8_hostPart (h : List Char) : utf8 (Clew.Trust.hostPart h) = hostB (utf8 h) := by
+  unfold Clew.Trust.hostPart hostB
+  rw [utf8_any_colon]
+  split
+  · rw [utf8_cons, utf8_append, utf8_esc]; rfl
+  · rw [utf8_esc]
+
+theorem utf8_scopeLabel (u : Option (List Char)) (h : List Char) (p : Option (List Char)) :
+    utf8 (Clew.Trust.scopeLabel u h p) = userB (u.map utf8) ++ (hostB (utf8 h) ++ portB (p.map utf8)) := by
+  unfold Clew.Trust.scopeLabel
+  rw [utf8_append, utf8_append, utf8_hostPart]
+  congr 1
+  · cases u with
+    | none => rfl
+    | some u => simp only [userB, Option.map_some]; rw [utf8_append, utf8_esc]; rfl
+  · congr 1
+    cases p with
+    | none => rfl
+    | some t => simp only [Clew.Trust.portPart, portB, Option.map_some]; rw [utf8_cons, utf8_esc]; rfl
+
+theorem utf8_rootPart (root : List Char) : utf8 (Clew.Trust.rootPart root) = rootB (utf8 root) := by
+  unfold Clew.Trust.rootPart rootB
+  cases root with
+  | nil => rfl
+  | cons c r =>
+    by_cases hc : c = '/'
+    · subst hc
+      have e : utf8 ('/' :: r) = 47 :: utf8 r := by rw [utf8_cons]; rfl
+      simp [e]
+    · obtain ⟨b, tl, hbt, hb⟩ := KnownHosts.utf8_cons_head c r 47 (by omega) (KnownHosts.toNat_ne c '/' hc)
+      have e : utf8 ('.' :: '/' :: c :: r) = 46 :: 47 :: utf8 (c :: r) := by
+        rw [utf8_cons, utf8_cons]; rfl
+      simp [hc, hbt, hb, e]
+
+theorem utf8_approvalKey (label root : List Char) :
+    utf8 (Clew.Trust.approvalKey label root) =
+      [115, 115, 104, 58, 47, 47] ++ utf8 label ++ 58 :: rootB (utf8 root) := by
+  unfold Clew.Trust.approvalKey
+  rw [utf8_append, utf8_append, utf8_cons, utf8_rootPart]
+  have e : utf8 "ssh://".toList = [115, 115, 104, 58, 47, 47] := by decide
+  rw [e]; rfl
+
+/-- **`scope_label` is the model**: on the UTF-8 bytes of any user, host and
+port whose label fits in memory, it returns, and writes the UTF-8 bytes of
+`Clew.Trust.scopeLabel`. -/
+theorem scope_label_is_the_model (u : Option (List Char)) (h : List Char) (p : Option (List Char))
+    (user : Option (Slice Std.U8)) (host : Slice Std.U8) (port : Option (Slice Std.U8))
+    (hu : user.map (fun s => bs s.val) = u.map utf8) (hh : bs host.val = utf8 h)
+    (hp : port.map (fun s => bs s.val) = p.map utf8)
+    (room : 3 * (olen user + host.val.length + olen port) + 4 ≤ Usize.max) :
+    ∃ v, scope_label user host port = ok v ∧ bs v.val = utf8 (Clew.Trust.scopeLabel u h p) := by
+  obtain ⟨v, hv, ev⟩ := scope_label_ok user host port room
+  refine ⟨v, hv, ?_⟩
+  rw [ev, utf8_scopeLabel]
+  have hu' : user.map (bs ·.val) = u.map utf8 := hu
+  have hp' : port.map (bs ·.val) = p.map utf8 := hp
+  rw [hu', hh, hp']
+
+/-- **`approval_key` is the model**: on the UTF-8 bytes of any label and
+root, it returns, and writes the UTF-8 bytes of `Clew.Trust.approvalKey` —
+the key `approvalKey_injective` proves names one machine and one project. -/
+theorem approval_key_is_the_model (label root : List Char) (l r : Slice Std.U8)
+    (hl : bs l.val = utf8 label) (hr : bs r.val = utf8 root)
+    (room : l.val.length + r.val.length + 9 ≤ Usize.max) :
+    ∃ v, approval_key l r = ok v ∧ bs v.val = utf8 (Clew.Trust.approvalKey label root) := by
+  obtain ⟨v, hv, ev⟩ := approval_key_ok l r room
+  exact ⟨v, hv, by rw [ev, utf8_approvalKey, hl, hr]⟩
+
+end Approval
+
 end Clew.Extracted
