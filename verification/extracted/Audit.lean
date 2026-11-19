@@ -9,3 +9,5 @@ does not model (the code proved here calls none of them). -/
 #print axioms Clew.Extracted.Voice.route_is_the_model
 #print axioms Clew.Extracted.Location.trusted_by_is_the_model
 #print axioms Clew.Extracted.Framing.header_is_the_model
+#print axioms Clew.Extracted.Headers.header_name_ok_is_the_model
+#print axioms Clew.Extracted.Headers.header_value_ok_is_the_model

@@ -24,6 +24,8 @@ trap 'rm -rf "$out"' EXIT
   --start-from crate::voice::route \
   --start-from crate::location::trusted_by \
   --start-from crate::framing::header \
+  --start-from crate::headers::header_name_ok \
+  --start-from crate::headers::header_value_ok \
   --dest "$out" -- --target-dir "$out/target" -q) >"$out/charon.log" 2>&1 || {
   cat "$out/charon.log" >&2
   exit 1

@@ -12,7 +12,7 @@ Clew 的一部分规则不只是经过测试，而是经过证明的。对每条
 - Clew 直接运行哪些程序，以及发送哪些请求头；
 - 说出的话交给哪里处理。
 
-其中三项的定理直接落到 Rust 代码本身：Clew 直接运行哪些程序、说出的话交给哪里，以及分帧消息的每一行头部说了什么。Aeneas 把这些代码翻译成 Lean，并证明这份翻译等于模型。
+其中四项的定理直接落到 Rust 代码本身：Clew 直接运行哪些程序、向 MCP 服务器发送哪些请求头、说出的话交给哪里，以及分帧消息的每一行头部说了什么。Aeneas 把这些代码翻译成 Lean，并证明这份翻译等于模型。
 
 ## 证明了什么
 
@@ -59,7 +59,7 @@ Clew 的一部分规则不只是经过测试，而是经过证明的。对每条
 - 一台机器只有一个标签，无论是通过已保存的连接，还是通过参数相同的 `CLEW_SSH` 连接（只要用户名本身不是 `ssh://` 地址）。所以从任一途径给出的许可都登记在同一个名字下。
 - Clew 记录主机密钥时用的 known_hosts 字段，恰好对应一台主机和一个端口。它不含任何会让一个密钥替其他主机担保的模式语法（`*`、`?`、`!`、`,`、哈希形式的 `|1|` 名字）。
 
-**两道关卡**：`crates/clew-rules/src/location.rs` 中的 `trusted_by`（由 `crates/clew-core/src/trust.rs` 中的 `trusted_location` 调用）和 `crates/clew-core/src/mcp/config.rs` 中的 `check_headers`，模型在 `Guards.lean`。
+**两道关卡**：`crates/clew-rules/src/location.rs` 中的 `trusted_by`（由 `crates/clew-core/src/trust.rs` 中的 `trusted_location` 调用）和 `crates/clew-core/src/mcp/config.rs` 中的 `check_headers`（它用 `crates/clew-rules/src/headers.rs` 检查每个请求头的字节），模型在 `Guards.lean`。
 - 项目指定的语言服务器，从 Clew 自己保存的、已获许可的字节副本运行，除非它所在的位置只有你或 root 能修改。`trusted_by` 允许它原地运行时，其他用户既不能写它，也不能替换通往它的路径上的任何目录项。这基于 Unix 权限规则，并把每个用户都当作可能属于该文件的组。
 - `check_headers` 接受的 MCP 服务器请求头，从请求中读回时恰好就是这些请求头，每个一行，名字不变。无论服务器多么宽松地分行（在 CR、LF 或 NUL 处），都成立。任何值都不能另起一个请求头。
 
@@ -79,7 +79,7 @@ Clew 的一部分规则不只是经过测试，而是经过证明的。对每条
 - **模型读起来就像代码。** 它按同样的顺序走同样的步骤。它依赖的每个 Rust 标准库函数，细到 `char::is_whitespace` 的含义，都在 `Text.lean` 里写明了。这些函数通过用到它们的函数来测试：每个 `White_Space` 码位及其相邻码位都在测试输入里。
 - **测试用例。** `lake exe vectors` 在一组固定的输入上运行每个模型，把结果写进 `verification/vectors/*.json`。这些输入包括：在一个能走到每个分支的字母表上的所有短输入，以及每个文件列出的边界情况。`cargo test` 用同样的输入运行真正的 Rust 函数，要求得到同样的结果。只要代码和模型有一处不一致，测试就会失败。
 - **shell 的模型对照真正的 shell 检查。** 每个 shell 测试用例也会交给 `/bin/sh` 运行，它读出来的必须是同样的词。
-- **有三条规则，被翻译和证明的就是代码本身。** `route`、`trusted_by` 和分帧的 `header` 一步放在 `crates/clew-rules` 中。Charon 和 Aeneas 把这份 Rust 源码翻译成 Lean（`verification/extracted/ClewRules.lean`），`Equal.lean` 证明这份翻译对每一个输入都等于模型：它总会返回，不会 panic、不会溢出、不会越界索引，每个循环都一定结束；返回的也恰好是模型算出的结果。所以关于这些模型的每条定理，都对实际运行的代码成立：对分帧而言，成立的是每一行头部的判断，而读取这些行的循环是建模并测试的。见[实际运行的代码](#实际运行的代码)。
+- **有四条规则，被翻译和证明的就是代码本身。** `route`、`trusted_by`、分帧的 `header` 一步和 MCP 请求头检查放在 `crates/clew-rules` 中。Charon 和 Aeneas 把这份 Rust 源码翻译成 Lean（`verification/extracted/ClewRules.lean`），`Equal.lean` 证明这份翻译对每一个输入都等于模型：它总会返回，不会 panic、不会溢出、不会越界索引，每个循环都一定结束；返回的也恰好是模型算出的结果。所以关于这些模型的每条定理，都对实际运行的代码成立：对分帧而言，成立的是每一行头部的判断，而读取这些行的循环是建模并测试的。见[实际运行的代码](#实际运行的代码)。
 - 其他规则的测试用例是很大的输入样本，而不是全部输入。
 
 `verification/check.sh` 检查三件事：
@@ -101,8 +101,8 @@ CI 在 `extracted` 任务中运行它，所用的 Charon 和 Aeneas 来自一个
 - Lean 的内核和它的三条标准公理。
 - SHA-256 抗碰撞。关于许可和服务端摘要的定理说的是被哈希的字节；不同的字节得到不同的哈希值，这是 SHA-256 本身的保证。
 - 操作系统如何处理路径。符号链接和规范化没有建模。`confine` 在运行时会对照规范化的根目录，再检查一次解析后的路径。
-- 测试用例。除 `route`、`trusted_by` 和头部一步外，它们是输入的样本，而不是全部。
-- 对这三者：Charon 和 Aeneas 如实翻译了 Rust，rustc 也按 Rust 的语义编译了它。这些工具和编译器一样，是被信任的。
+- 测试用例。除了对代码本身证明的四条规则，它们是输入的样本，而不是全部。
+- 对这四者：Charon 和 Aeneas 如实翻译了 Rust，rustc 也按 Rust 的语义编译了它。这些工具和编译器一样，是被信任的。对请求头检查，还依赖 Rust 的 `str` 存放的是其字符的 UTF-8 编码，这是 Rust 保证的。
 - POSIX shell。不是 POSIX 的登录 shell（fish、csh）不在模型范围内；Clew 在远程运行的脚本避开了这些 shell 读法不同的写法，并有测试检查这一点。
 - ssh 自己的配置做了什么。键里的用户、主机和端口，是 ssh 命令行上的那些。`~/.ssh/config`、`-F` 或 `-o HostName=` 把它们映射成什么，不会被读取：`Host` 别名按它的名字识别。
 
@@ -128,14 +128,14 @@ CI 在 `extracted` 任务中运行它，所用的 Charon 和 Aeneas 来自一个
 | 记录下的主机密钥为哪台主机担保 | `known_hosts_pattern`、`plain_host_field` | 已证明 |
 | 说出的话交给哪里 | `clew_rules::voice::route` | 对代码本身已证明（Aeneas） |
 | 鼠标悬停时能否运行被调试程序的代码 | `dap::hover_eval_allowed` | 有测试：调试器的承诺和你的选择取“或” |
-| MCP 服务器的请求头 | `mcp::config::check_headers` | 已证明 |
+| MCP 服务器的请求头 | `mcp::config::check_headers` | 对代码本身已证明（Aeneas），适用于任意字符串的 UTF-8 字节 |
 | 登录 MCP 服务器 | `mcp` OAuth | 有测试：这是网络协议 |
 
 ## 实际运行的代码
 
-大多数模型是照着代码逐步写成的，再由测试用例把两者联系起来。`route`、`trusted_by` 和分帧的 `header` 一步则没有副本：定理所针对的 Lean，就是实际运行的 Rust。
+大多数模型是照着代码逐步写成的，再由测试用例把两者联系起来。`route`、`trusted_by`、分帧的 `header` 一步和 MCP 请求头检查则没有副本：定理所针对的 Lean，就是实际运行的 Rust。
 
-- **`crates/clew-rules`** 存放这三个决定。它没有任何依赖，只有纯代码，而且只用 Aeneas 能翻译的那部分 Rust：`match`、`while`、切片、`Vec`、带溢出检查的整数运算和位掩码。应用和 `clew-core` 都调用它。
+- **`crates/clew-rules`** 存放这四个决定。它没有任何依赖，只有纯代码，而且只用 Aeneas 能翻译的那部分 Rust：`match`、`while`、切片、`Vec`、带溢出检查的整数运算和位掩码。应用和 `clew-core` 都调用它。
 - **`verification/extracted/extract.sh`** 在这个 crate 上运行 Charon 和 Aeneas，写出 `ClewRules.lean`。这个文件不手工修改。
 - **`Equal.lean`** 证明翻译出的函数等于 `verification/Clew` 中的模型，具体如[证明如何落实到代码](#证明如何落实到代码)所述。
 - **独立的项目。** Aeneas 的 Lean 库需要 Mathlib，所以这是一个单独的 Lake 项目；`verification/` 中的证明依然只需要 Lean 本身。第一次构建会编译 Aeneas 和它用到的约 1500 个 Mathlib 模块；CI 从 Mathlib 的构建缓存获取。

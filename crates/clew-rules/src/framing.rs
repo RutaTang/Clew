@@ -26,7 +26,7 @@ pub enum HeaderError {
 
 /// An RFC 7230 `token` byte — what a header name is made of. No whitespace,
 /// so `Content-Length :` is malformed rather than guessed at.
-fn is_token_byte(b: u8) -> bool {
+pub(crate) fn is_token_byte(b: u8) -> bool {
     (b >= b'0' && b <= b'9')
         || (b >= b'A' && b <= b'Z')
         || (b >= b'a' && b <= b'z')

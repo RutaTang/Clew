@@ -174,10 +174,7 @@ pub fn clean_name(name: &str) -> String {
 
 /// Whether `name: value` can be sent as an HTTP header.
 fn valid_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+    clew_rules::headers::header_name_ok(name.as_bytes())
 }
 
 /// Whether every header can be sent as it is. What it says of one that
@@ -187,7 +184,8 @@ fn valid_header_name(name: &str) -> bool {
 ///
 /// That the headers it accepts are read back as exactly those headers, one
 /// line each — no value starts a header of its own — is proved in
-/// `verification/Clew/Guards.lean`.
+/// `verification/Clew/Guards.lean`, of the checks in `clew_rules::headers`
+/// it makes on each header's bytes.
 pub fn check_headers(headers: &[(String, String)]) -> Result<(), String> {
     for (name, value) in headers {
         if !valid_header_name(name) {
@@ -195,7 +193,7 @@ pub fn check_headers(headers: &[(String, String)]) -> Result<(), String> {
                         (letters, digits and !#$%&'*+-.^_`|~) — write each as `Name: value`"
                 .into());
         }
-        if value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+        if !clew_rules::headers::header_value_ok(value.as_bytes()) {
             return Err(format!("header `{name}`'s value holds a line break"));
         }
     }

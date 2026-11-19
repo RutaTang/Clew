@@ -875,4 +875,242 @@ theorem header_is_the_model (length : Option Std.U64) (line : Slice Std.U8)
 
 end Framing
 
+/-! ## An MCP server's request headers — `clew_rules::headers`
+
+`check_headers` calls `header_name_ok` and `header_value_ok` on each header's
+bytes. The model in `../Clew/Guards.lean` reads characters; Rust hands over
+the UTF-8 bytes of a string. Proved here: on the UTF-8 bytes of any list of
+characters, as Lean's own `List.utf8Encode` makes them, the Rust functions
+return, and decide what `validHeaderName` and the model's value check decide
+of those characters. -/
+
+namespace Headers
+
+open clew_rules.headers
+/-- What `header_name_ok` decides: not empty, every byte a token byte. -/
+theorem header_name_ok_spec (line : Slice Std.U8) :
+    header_name_ok line =
+      ok (!line.val.isEmpty && line.val.all fun b => Clew.Framing.isTokenByte b.val) := by
+  unfold header_name_ok
+  by_cases he : line.val = []
+  · simp [core.slice.Slice.is_empty, he]
+  obtain ⟨b, hl, hq⟩ := loop_spec (header_name_ok_loop.body line) (fun _ => True)
+    (fun i b => b = (line.val.drop i.val).all fun b => Clew.Framing.isTokenByte b.val)
+    (fun i => line.val.length - i.val) (by
+      intro i _
+      by_cases hi : i.val < line.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok line i hi
+        rw [List.drop_eq_getElem_cons hi]
+        cases ht : Clew.Framing.isTokenByte line.val[i.val].val
+        · left
+          exact ⟨false, by simp [header_name_ok_loop.body, hi, index_ok line i hi,
+            Framing.is_token_byte_ok, ht], by simp only [List.all_cons, ht, Bool.false_and]⟩
+        · right
+          refine ⟨j, by simp [header_name_ok_loop.body, hi, index_ok line i hi,
+            Framing.is_token_byte_ok, ht, hj], trivial, by omega, ?_⟩
+          intro b hb; rw [hb, hjv, List.all_cons, ht, Bool.true_and]
+      · left
+        refine ⟨true, by simp [header_name_ok_loop.body, hi], ?_⟩
+        rw [List.drop_eq_nil_of_le (by omega)]; rfl) 0#usize trivial
+  simp only [core.slice.Slice.is_empty, Slice.length, bind_ok]
+  unfold header_name_ok_loop
+  rw [hl, hq]
+  simp [he]
+
+/-- A byte that may not be in a header value: CR, LF or NUL. -/
+def breakByte (b : Nat) : Bool := b == 13 || b == 10 || b == 0
+
+/-- What `header_value_ok` decides: no CR, LF or NUL. -/
+theorem header_value_ok_spec (line : Slice Std.U8) :
+    header_value_ok line = ok (!line.val.any fun b => breakByte b.val) := by
+  obtain ⟨b, hl, hq⟩ := loop_spec (header_value_ok_loop.body line) (fun _ => True)
+    (fun i b => b = !(line.val.drop i.val).any fun b => breakByte b.val)
+    (fun i => line.val.length - i.val) (by
+      intro i _
+      by_cases hi : i.val < line.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok line i hi
+        rw [List.drop_eq_getElem_cons hi]
+        cases hb : breakByte line.val[i.val].val
+        · right
+          simp only [breakByte, Bool.or_eq_false_iff, beq_eq_false_iff_ne] at hb
+          refine ⟨j, by simp [header_value_ok_loop.body, hi, index_ok line i hi, hj, UScalar.eq_equiv,
+            U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq, hb.1.1, hb.1.2, hb.2], trivial, by omega, ?_⟩
+          intro b hb'
+          rw [hb', hjv, List.any_cons]
+          simp only [breakByte, hb.1.1, hb.1.2, hb.2, beq_false_of_ne, ne_eq, not_false_eq_true,
+            Bool.or_false, Bool.false_or]
+        · left
+          simp only [breakByte, Bool.or_eq_true, beq_iff_eq] at hb
+          refine ⟨false, ?_, by rcases hb with (h | h) | h <;> (rw [List.any_cons]; simp only [breakByte, h]; rfl)⟩
+          rcases hb with (h | h) | h <;>
+            simp [header_value_ok_loop.body, hi, index_ok line i hi, UScalar.eq_equiv, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq, h]
+      · left
+        refine ⟨true, by simp [header_value_ok_loop.body, hi], ?_⟩
+        rw [List.drop_eq_nil_of_le (by omega)]; rfl) 0#usize trivial
+  unfold header_value_ok header_value_ok_loop
+  rw [hl, hq]; simp
+
+/-- The UTF-8 bytes of a list of characters, as Lean's own `List.utf8Encode`
+makes them (`(cs.flatMap String.utf8EncodeChar).toByteArray`): what Rust's
+`str::as_bytes` gives for a string of those characters. -/
+def utf8 (cs : List Char) : List Nat := (cs.flatMap String.utf8EncodeChar).map (·.toNat)
+
+/-- A character below 128 is one byte: itself. -/
+theorem utf8_ascii (c : Char) (h : c.toNat < 128) :
+    (String.utf8EncodeChar c).map (·.toNat) = [c.toNat] := by
+  have h' : c.val.toNat ≤ 0x7f := by unfold Char.toNat at h; omega
+  unfold String.utf8EncodeChar
+  simp only [h', ↓reduceIte, List.map_cons, List.map_nil, UInt8.toNat_ofNat', List.cons.injEq, and_true]
+  unfold Char.toNat
+  omega
+
+/-- Any other character is one byte or more, each 128 or above. -/
+theorem utf8_high (c : Char) (h : 128 ≤ c.toNat) :
+    String.utf8EncodeChar c ≠ [] ∧ ∀ b ∈ String.utf8EncodeChar c, 128 ≤ b.toNat := by
+  have h' : ¬ c.val.toNat ≤ 0x7f := by unfold Char.toNat at h; omega
+  unfold String.utf8EncodeChar
+  simp only [h', ↓reduceIte]
+  split_ifs <;> simp only [ne_eq, reduceCtorEq, not_false_eq_true, List.mem_cons, List.not_mem_nil,
+    or_false, forall_eq_or_imp, forall_eq, UInt8.toNat_ofNat', true_and] <;> omega
+
+theorem utf8EncodeChar_ne_nil (c : Char) : String.utf8EncodeChar c ≠ [] := by
+  by_cases h : c.toNat < 128
+  · intro he; have := utf8_ascii c h; simp [he] at this
+  · exact (utf8_high c (by omega)).1
+
+theorem isTokenByte_lt (n : Nat) (h : Clew.Framing.isTokenByte n = true) : n < 128 := by
+  simp only [Clew.Framing.isTokenByte, Clew.Framing.isAsciiAlnumB, Clew.Framing.isAsciiDigitB,
+    Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq, List.contains_iff_mem, List.mem_cons,
+    List.not_mem_nil, or_false] at h
+  omega
+
+theorem tokenChar_lt (c : Char) (h : Clew.Guards.tokenChar c = true) : c.toNat < 128 := by
+  simp only [Clew.Guards.tokenChar, Clew.Text.isAsciiAlphanumeric, Clew.Text.isAsciiDigit,
+    Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at h
+  rcases h with h | h
+  · have h0 : ('0' : Char).val.toNat = 48 := rfl
+    have h9 : ('9' : Char).val.toNat = 57 := rfl
+    have ha : ('a' : Char).val.toNat = 97 := rfl
+    have hz : ('z' : Char).val.toNat = 122 := rfl
+    have hA : ('A' : Char).val.toNat = 65 := rfl
+    have hZ : ('Z' : Char).val.toNat = 90 := rfl
+    simp only [Char.le_def, UInt32.le_iff_toNat_le, h0, h9, ha, hz, hA, hZ] at h
+    unfold Char.toNat; omega
+  · have hall : ∀ d ∈ "!#$%&'*+-.^_`|~".toList, d.toNat < 128 := by decide
+    exact hall c (List.contains_iff_mem.mp h)
+
+/-- A character is a header-name character exactly when its one byte is a
+token byte. -/
+theorem tokenChar_eq (c : Char) :
+    Clew.Guards.tokenChar c = Clew.Framing.isTokenByte c.toNat := by
+  by_cases h : c.toNat < 128
+  · have hc : c = Char.ofNat c.toNat := (Char.ofNat_toNat c).symm
+    rw [hc]
+    generalize c.toNat = n at h
+    revert n; decide +kernel
+  · have h1 : Clew.Guards.tokenChar c = false := by
+      cases ht : Clew.Guards.tokenChar c
+      · rfl
+      · exact absurd (tokenChar_lt c ht) h
+    have h2 : Clew.Framing.isTokenByte c.toNat = false := by
+      cases ht : Clew.Framing.isTokenByte c.toNat
+      · rfl
+      · exact absurd (isTokenByte_lt _ ht) h
+    rw [h1, h2]
+
+theorem char_all_token (c : Char) :
+    ((String.utf8EncodeChar c).all fun b => Clew.Framing.isTokenByte b.toNat) = Clew.Guards.tokenChar c := by
+  by_cases h : c.toNat < 128
+  · have := utf8_ascii c h
+    rw [show ((String.utf8EncodeChar c).all fun b => Clew.Framing.isTokenByte b.toNat) =
+      ((String.utf8EncodeChar c).map (·.toNat)).all Clew.Framing.isTokenByte by
+        simp [List.all_map, Function.comp_def], this, tokenChar_eq]
+    simp
+  · obtain ⟨hne, hhi⟩ := utf8_high c (by omega)
+    have h1 : Clew.Guards.tokenChar c = false := by
+      cases ht : Clew.Guards.tokenChar c
+      · rfl
+      · exact absurd (tokenChar_lt c ht) h
+    rw [h1]
+    cases hl : String.utf8EncodeChar c with
+    | nil => exact absurd hl hne
+    | cons b bs =>
+      have hb := hhi b (by rw [hl]; simp)
+      have : Clew.Framing.isTokenByte b.toNat = false := by
+        cases ht : Clew.Framing.isTokenByte b.toNat
+        · rfl
+        · exact absurd (isTokenByte_lt _ ht) (by omega)
+      simp [this]
+
+theorem breakChar_eq (c : Char) : Clew.Guards.breakChar c = breakByte c.toNat := by
+  simp only [Clew.Guards.breakChar, breakByte]
+  have e : ∀ d : Char, (c == d) = (c.toNat == d.toNat) := by
+    intro d
+    rw [Bool.eq_iff_iff, beq_iff_eq, beq_iff_eq]
+    exact ⟨fun h => h ▸ rfl, fun h => Char.ext (UInt32.toNat_inj.mp (show c.val.toNat = d.val.toNat from h))⟩
+  rw [e, e, e]
+  rfl
+
+theorem char_any_break (c : Char) :
+    ((String.utf8EncodeChar c).any fun b => breakByte b.toNat) = Clew.Guards.breakChar c := by
+  by_cases h : c.toNat < 128
+  · have := utf8_ascii c h
+    rw [show ((String.utf8EncodeChar c).any fun b => breakByte b.toNat) =
+      ((String.utf8EncodeChar c).map (·.toNat)).any breakByte by
+        simp [List.any_map, Function.comp_def], this, breakChar_eq]
+    simp
+  · obtain ⟨_, hhi⟩ := utf8_high c (by omega)
+    have h1 : Clew.Guards.breakChar c = false := by
+      rw [breakChar_eq]; unfold breakByte
+      simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne, ne_eq]; omega
+    rw [h1]
+    simp only [List.any_eq_false]
+    intro b hb
+    have := hhi b hb
+    simp [breakByte]; omega
+
+theorem utf8_nil (cs : List Char) : utf8 cs = [] ↔ cs = [] := by
+  constructor
+  · intro h
+    cases cs with
+    | nil => rfl
+    | cons c cs => simp [utf8] at h
+  · rintro rfl; rfl
+
+/-- **`header_name_ok` is the model**: on the UTF-8 bytes of any name, it
+returns, and says what `validHeaderName` says of the name's characters. -/
+theorem header_name_ok_is_the_model (n : List Char) (line : Slice Std.U8)
+    (h : line.val.map (·.val) = utf8 n) :
+    header_name_ok line = ok (Clew.Guards.validHeaderName n) := by
+  rw [header_name_ok_spec]
+  congr 1
+  have hall : (line.val.all fun b => Clew.Framing.isTokenByte b.val) = n.all Clew.Guards.tokenChar := by
+    rw [show (line.val.all fun b => Clew.Framing.isTokenByte b.val) =
+      (line.val.map (·.val)).all Clew.Framing.isTokenByte by simp [List.all_map, Function.comp_def], h]
+    simp only [utf8, List.flatMap, List.map_flatten, List.all_flatten, List.map_map, List.all_map,
+      Function.comp_def, char_all_token]
+  have hemp : line.val.isEmpty = n.isEmpty := by
+    have : line.val = [] ↔ n = [] := by
+      rw [← utf8_nil, ← h]; simp
+    cases hl : line.val with
+    | nil => simp [hl] at this; simp [this]
+    | cons _ _ => simp [hl] at this; cases n with
+      | nil => exact absurd rfl this
+      | cons _ _ => rfl
+  simp [Clew.Guards.validHeaderName, hall, hemp]
+
+/-- **`header_value_ok` is the model**: on the UTF-8 bytes of any value, it
+returns, and refuses exactly the values that hold a CR, an LF or a NUL. -/
+theorem header_value_ok_is_the_model (v : List Char) (line : Slice Std.U8)
+    (h : line.val.map (·.val) = utf8 v) :
+    header_value_ok line = ok (!v.any Clew.Guards.breakChar) := by
+  rw [header_value_ok_spec]
+  congr 2
+  rw [show (line.val.any fun b => breakByte b.val) = (line.val.map (·.val)).any breakByte by
+    simp [List.any_map, Function.comp_def], h]
+  simp only [utf8, List.flatMap, List.map_flatten, List.any_flatten, List.map_map, List.any_map,
+    Function.comp_def, char_any_break]
+
+end Headers
+
 end Clew.Extracted

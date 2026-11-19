@@ -7,5 +7,6 @@
 //! translates: no strings, no closures, no I/O, no dependencies.
 
 pub mod framing;
+pub mod headers;
 pub mod location;
 pub mod voice;

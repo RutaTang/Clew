@@ -813,6 +813,85 @@ def framing.header
         else ok (core.result.Result.Err framing.HeaderError.Malformed)
   else ok (core.result.Result.Err framing.HeaderError.Malformed)
 
+/-- [clew_rules::headers::header_name_ok]: loop body 0:
+    Source: 'crates/clew-rules/src/headers.rs', lines 12:4-19:1
+    Visibility: public -/
+@[rust_loop_body]
+def headers.header_name_ok_loop.body
+  («name» : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len «name»
+  if i < i1
+  then
+    let i2 ← Slice.index_usize «name» i
+    let b ← framing.is_token_byte i2
+    if b
+    then let i3 ← i + 1#usize
+         ok (cont i3)
+    else ok (done false)
+  else ok (done true)
+
+/-- [clew_rules::headers::header_name_ok]: loop 0:
+    Source: 'crates/clew-rules/src/headers.rs', lines 12:4-19:1
+    Visibility: public -/
+@[rust_loop]
+def headers.header_name_ok_loop
+  («name» : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => headers.header_name_ok_loop.body «name» i1)
+    i
+
+/-- [clew_rules::headers::header_name_ok]:
+    Source: 'crates/clew-rules/src/headers.rs', lines 7:0-19:1
+    Visibility: public -/
+def headers.header_name_ok («name» : Slice Std.U8) : Result Bool := do
+  let b ← core.slice.Slice.is_empty «name»
+  if b
+  then ok false
+  else headers.header_name_ok_loop «name» 0#usize
+
+/-- [clew_rules::headers::header_value_ok]: loop body 0:
+    Source: 'crates/clew-rules/src/headers.rs', lines 30:4-37:1
+    Visibility: public -/
+@[rust_loop_body]
+def headers.header_value_ok_loop.body
+  (value : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len value
+  if i < i1
+  then
+    let i2 ← Slice.index_usize value i
+    if i2 = 13#u8
+    then ok (done false)
+    else
+      if i2 = 10#u8
+      then ok (done false)
+      else
+        if i2 = 0#u8
+        then ok (done false)
+        else let i3 ← i + 1#usize
+             ok (cont i3)
+  else ok (done true)
+
+/-- [clew_rules::headers::header_value_ok]: loop 0:
+    Source: 'crates/clew-rules/src/headers.rs', lines 30:4-37:1
+    Visibility: public -/
+@[rust_loop]
+def headers.header_value_ok_loop
+  (value : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => headers.header_value_ok_loop.body value i1)
+    i
+
+/-- [clew_rules::headers::header_value_ok]:
+    Source: 'crates/clew-rules/src/headers.rs', lines 28:0-37:1
+    Visibility: public -/
+@[reducible]
+def headers.header_value_ok (value : Slice Std.U8) : Result Bool := do
+  headers.header_value_ok_loop value 0#usize
+
 /-- [clew_rules::location::Node]
     Source: 'crates/clew-rules/src/location.rs', lines 6:0-10:1
     Visibility: public -/

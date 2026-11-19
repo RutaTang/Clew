@@ -22,7 +22,10 @@ name and a value that holds a line break or a NUL. Proved here: the
 headers it accepts are read back — splitting the request's header block at
 every CR, LF or NUL, as the most lenient server might — as exactly those
 headers, one line each, under their own names. No value can start a header
-of its own.
+of its own. The Rust checks themselves (`clew_rules::headers`), translated to
+Lean by Charon and Aeneas, are proved in `verification/extracted/Equal.lean`
+to decide what `validHeaderName` and the value check below decide, on the
+UTF-8 bytes of any string.
 -/
 
 namespace Clew.Guards
