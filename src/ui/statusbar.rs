@@ -292,11 +292,17 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     if super::heard::gathering() {
         drop(status_left(app, f32::INFINITY));
     }
-    let said_row = container(iced::widget::responsive(move |room| {
-        status_left(app, room.width)
-    }))
-    .width(Fill)
-    .height(Length::Fixed(STATUS_LINE_H));
+    // Where the pointer is on it, a failure standing there holds still
+    // (`FailureNotice::held`).
+    let said_row = mouse_area(
+        container(iced::widget::responsive(move |room| {
+            status_left(app, room.width)
+        }))
+        .width(Fill)
+        .height(Length::Fixed(STATUS_LINE_H)),
+    )
+    .on_enter(Message::Window(WindowMsg::StatusHover(true)))
+    .on_exit(Message::Window(WindowMsg::StatusHover(false)));
     // The place, its scan's state, then the branch: "Local · Up to date ·
     // ⎇ main", the state still read as the place's.
     let mut left = row![conn_indicator, sync];
@@ -575,11 +581,13 @@ const STATUS_LINE_H: f32 = 20.0;
 /// The least room what Clew says is given beside the chips: below it, the
 /// chips are said short, and with less still, it is not said.
 const SAID_MIN_W: f32 = 120.0;
-/// The most room kept beside a standing failure for what Clew says next —
-/// half the bar, up to this: kept whatever is said, so the failure's
-/// controls do not move, and enough for what is under way to be said
-/// whole ("Working out what discounts does…" was cut to "Working out wh…"
-/// beside an older failure given the rest).
+/// The most room a standing failure gives what Clew says beside it — half
+/// the bar, up to this, whatever is said: enough for what is under way to
+/// be said whole ("Working out what discounts does…" was cut to "Working
+/// out wh…" beside an older failure given the rest). With nothing said
+/// beside it, the failure has the room, and is said whole where it fits:
+/// kept empty for what might be said, it was cut to "Oldest TODO did not
+/// finish…" beside nothing.
 const SAID_KEPT_MAX_W: f32 = 320.0;
 /// What a chip takes beside its words: its mark, the room after it, and its
 /// padding.
@@ -619,10 +627,11 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     };
     // A failure stands first, in the danger colour, with what to do about
     // it — what fits of it beside the least of its words, its dismissal
-    // always — at a width that does not change with what else is said:
-    // after the chips, and shortened to make room for the next message,
-    // its Try again, Settings and × moved under the pointer, and a click
-    // meant for Settings landed on words.
+    // always. It gives room to what is said beside it, and takes it back
+    // when that goes; but not while the pointer is on the line: after the
+    // chips, and shortened to make room for the next message, its Try
+    // again, Settings and × moved under the pointer, and a click meant for
+    // Settings landed on words (`FailureNotice::held`).
     let failure = app.failure_shown();
     let setup = setup_label(app);
     let explain = explain_label(app);
@@ -691,20 +700,30 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             row = row.push(controls);
             used += controls_w + STATUS_GAP;
         } else {
-            // Half of what is free is kept for what is said next, up to
-            // `SAID_KEPT_MAX_W`; the failure keeps at least what failed
-            // (its words before the reason), its reason whole where the
-            // pointer rests.
+            // With something said beside it, half of what is free is kept
+            // for that, up to `SAID_KEPT_MAX_W`; the failure keeps at least
+            // what failed (its words before the reason), its reason whole
+            // where the pointer rests. With nothing, all of it is the
+            // failure's. Laid out as it was when the pointer came, while
+            // the pointer is on the line.
             // What failed counts on the offer to set up said short, where
-            // it would not be said whole beside the offer said whole.
+            // it would not be said whole beside the offer said whole — and,
+            // with nothing beside it, so does its reason: an offer waits.
+            let beside = failure.held.unwrap_or_else(|| app.said_beside_failure());
+            let least_beside = if beside { SAID_MIN_W } else { 0.0 };
             let head_w = width(head) + width("…");
+            let needs = if beside { head_w } else { width(&whole) };
             let free = room - controls_w - 2.0 * STATUS_GAP - chips_w;
-            let free = match head_w > free - SAID_MIN_W {
+            let free = match needs > free - least_beside {
                 true => free + setup_saving,
                 false => free,
             };
-            let kept = (free / 2.0).clamp(SAID_MIN_W, SAID_KEPT_MAX_W);
-            let floor = head_w.min(free - SAID_MIN_W);
+            let kept = if beside {
+                (free / 2.0).clamp(SAID_MIN_W, SAID_KEPT_MAX_W)
+            } else {
+                0.0
+            };
+            let floor = head_w.min(free - least_beside);
             let words = (free - kept).max(floor).max(least).min(width(&whole));
             row = row.push(line_of(whole, words, Some(theme::danger())));
             row = row.push(controls);
@@ -756,11 +775,14 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     // waits, what was just said goes ("TODO count is installed: its
     // commands are in the comma…" beside the offer said whole) — and what
     // is under way (Explain's pass) only when even that leaves too little.
+    // Nothing said, nothing is made room for: beside a failure said whole,
+    // the offer was said short for the room of words that were not there.
     let gaps = STATUS_GAP * chips_n as f32;
     let said_w = said.as_deref().map_or(0.0, width);
-    let setup_short = full_chips + gaps + SAID_MIN_W.max(said_w) > room;
+    let said_least = if said.is_some() { SAID_MIN_W } else { 0.0 };
+    let setup_short = full_chips + gaps + said_least.max(said_w) > room;
     let short =
-        full_chips - if setup_short { setup_saving } else { 0.0 } + gaps + SAID_MIN_W > room;
+        full_chips - if setup_short { setup_saving } else { 0.0 } + gaps + said_least > room;
     // A chip short of room even shortened is left out: laid out clipped to
     // nothing, it was a control no one saw that the keyboard's ring still
     // stopped on (its Set up is in the command bar, its pass's progress in

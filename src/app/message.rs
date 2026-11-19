@@ -2347,6 +2347,9 @@ pub enum WindowMsg {
     FocusChanged(bool),
     /// The pointer entered or left the traffic-light cluster (shows the icons).
     ControlsHover(bool),
+    /// The pointer came onto the status line's words and chips, or left
+    /// them (`App::status_hovered`).
+    StatusHover(bool),
     /// Take the failure the status line stands for off it
     /// (`App::failure_notice`): read, and nothing more to do about it.
     DismissFailure,
@@ -3376,6 +3379,7 @@ impl WindowMsg {
             | WindowMsg::ResizeDragged(..)
             | WindowMsg::FocusChanged(..)
             | WindowMsg::ControlsHover(..)
+            | WindowMsg::StatusHover(..)
             | WindowMsg::DismissFailure
             | WindowMsg::RetryFailure
             | WindowMsg::Close

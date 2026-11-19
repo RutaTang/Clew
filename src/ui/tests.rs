@@ -14442,14 +14442,18 @@ fn the_jump_hint_is_said_whole_beside_a_failure() {
 }
 
 /// A failure on the status line keeps its Try again, Settings and × where
-/// they are whatever else is said or stops being said: shortened to make
-/// room for the next message, they moved under the pointer and a click
-/// meant for Settings landed on words.
+/// they are while the pointer is on the line, whatever else is said or
+/// stops being said: shortened to make room for the next message, they
+/// moved under the pointer and a click meant for Settings landed on words.
+/// Away from it, the failure gives room to what is said beside it and takes
+/// it back after — kept empty for what might be said, its reason was cut
+/// beside nothing.
 #[test]
 fn a_failures_controls_stay_put_on_the_status_line() {
     let mut app = reader_app();
+    let failed = "Couldn't explain lib.rs: couldn't reach the AI provider (nothing answered at that address) — check the base URL in Settings";
     app.say_failure(
-        "Couldn't explain lib.rs: couldn't reach the AI provider (nothing answered at that address) — check the base URL in Settings".into(),
+        failed.into(),
         Some(Message::Explain(crate::ExplainMsg::Refresh)),
         crate::app::state::FailureOf::Explain,
     );
@@ -14457,15 +14461,91 @@ fn a_failures_controls_stay_put_on_the_status_line() {
         let mut sim = sim_elem(super::statusbar::statusbar(app));
         text_at(&mut sim, |t| t == words, 0).map(|r| r.x)
     };
-    let before = (at(&app, "Try again"), at(&app, "Settings"));
-    assert!(before.0.is_some() && before.1.is_some(), "{before:?}");
-    for said in ["Copied 2 lines", "Code statistics ready", ""] {
-        app.status = said.into();
+    let hover = |app: &mut App, over: bool| {
+        let _ = app.update(Message::Window(WindowMsg::StatusHover(over)));
+    };
+    // The pointer came with nothing said beside the failure, and with
+    // something.
+    for first in [failed, "Copied 2 lines"] {
+        app.status = first.into();
+        hover(&mut app, true);
+        let before = (at(&app, "Try again"), at(&app, "Settings"));
+        assert!(before.0.is_some() && before.1.is_some(), "{before:?}");
+        for said in ["Copied 2 lines", "Code statistics ready", ""] {
+            app.status = said.into();
+            assert_eq!(
+                (at(&app, "Try again"), at(&app, "Settings")),
+                before,
+                "moved for {said:?} under the pointer, which came to {first:?}"
+            );
+        }
+        // Another failure in its place, the pointer still there: laid out
+        // as the one it replaced was.
+        app.status = first.into();
+        app.say_failure(
+            failed.into(),
+            Some(Message::Explain(crate::ExplainMsg::Refresh)),
+            crate::app::state::FailureOf::Explain,
+        );
+        app.status = "Code statistics ready".into();
         assert_eq!(
             (at(&app, "Try again"), at(&app, "Settings")),
             before,
-            "moved for {said:?}"
+            "the next failure moved under the pointer"
         );
+        hover(&mut app, false);
+    }
+    // Away from it: all the room is the failure's while nothing else is
+    // said, and half of it, about, is given to what is.
+    app.status = String::new();
+    let alone = at(&app, "Try again").expect("Try again");
+    app.status = "Copied 2 lines".into();
+    let beside = at(&app, "Try again").expect("Try again");
+    assert!(beside < alone, "no room given: {beside} {alone}");
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(text_at(&mut sim, |t| t == "Copied 2 lines", 0).is_some());
+    drop(sim);
+    app.status = String::new();
+    assert_eq!(
+        at(&app, "Try again"),
+        Some(alone),
+        "the room not taken back"
+    );
+    // A failure raised under the pointer holds still from the first.
+    app.forget_failure_of(crate::app::state::FailureOf::Explain);
+    hover(&mut app, true);
+    app.say_failure(
+        failed.into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    let first = at(&app, "Try again");
+    app.status = "Copied 2 lines".into();
+    assert_eq!(at(&app, "Try again"), first, "moved under the pointer");
+    hover(&mut app, false);
+    assert_eq!(app.failure_notice.as_ref().and_then(|f| f.held), None);
+}
+
+/// A failure with nothing said beside it is said whole where the window has
+/// the room, at the widths a window is used at: the room kept for what
+/// might be said next cut it to what failed, beside nothing.
+#[test]
+fn a_failure_alone_is_said_whole() {
+    let mut app = reader_app();
+    let failed = "Couldn't explain lib.rs: couldn't reach the AI provider (nothing answered at that address) — check the base URL in Settings";
+    app.say_failure(
+        failed.into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    for width in [1280.0, 1440.0] {
+        let mut sim = sim_sized(&app, Size::new(width, 800.0));
+        assert!(
+            text_at(&mut sim, |t| t == failed, 0).is_some(),
+            "cut at {width}"
+        );
+        assert!(text_at(&mut sim, |t| t == "Try again", 0).is_some());
+        assert!(text_at(&mut sim, |t| t == "Settings", 0).is_some());
     }
 }
 
@@ -14535,11 +14615,8 @@ fn what_failed_is_said_whole_before_the_setup_offer() {
             builds: false,
         },
     ];
-    app.say_failure(
-        "Oldest TODO did not finish: it crashed: index out of bounds: the len is 4 but the index is 4 (at src/lib.rs:46:36)".into(),
-        None,
-        crate::app::state::FailureOf::PluginRun,
-    );
+    let failed = "Oldest TODO did not finish: it crashed: index out of bounds: the len is 4 but the index is 4 (at src/lib.rs:46:36)";
+    app.say_failure(failed.into(), None, crate::app::state::FailureOf::PluginRun);
     // The right side says something too: the language's server declined.
     app.proj.link.lsp.insert(
         "rust".into(),
@@ -14562,12 +14639,31 @@ fn what_failed_is_said_whole_before_the_setup_offer() {
             .is_some(),
             "the offer is gone at {width}"
         );
+        // Nothing is said beside it: why it failed is said before the
+        // offer is — "List TODOs did not finish: the plu…" stood beside
+        // "Set up 2 language servers" said whole.
+        let whole = text_at(&mut sim, |t| t == failed, 0).is_some();
+        let offer_whole = text_at(&mut sim, |t| t == "Set up 2 language servers", 0).is_some();
+        assert!(
+            whole || !offer_whole,
+            "why it failed is cut beside the offer said whole at {width}"
+        );
+    }
+    // With nothing said beside it, it is said whole where there is the room:
+    // kept empty for what might be said, it was "Oldest TODO did not
+    // finish: it crashed: inde…" beside nothing.
+    for width in [1280.0, 1440.0] {
+        let mut sim = sim_sized(&app, Size::new(width, 800.0));
+        assert!(
+            text_at(&mut sim, |t| t == failed, 0).is_some(),
+            "cut beside nothing at {width}"
+        );
     }
     // With room for both, the offer is said whole.
     {
         let mut sim = sim_sized(&app, Size::new(2400.0, 800.0));
         assert!(text_at(&mut sim, |t| t == "Set up 2 language servers", 0).is_some());
-        assert!(text_at(&mut sim, |t| t.starts_with("Oldest TODO did not finish"), 0).is_some());
+        assert!(text_at(&mut sim, |t| t == failed, 0).is_some());
     }
 
     // What was just said, too, before the offer: it was cut to "TODO count

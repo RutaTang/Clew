@@ -865,6 +865,12 @@ pub struct FailureNotice {
     /// keyboard: "check the base URL in Settings" opened the page and left
     /// the reader to find the field.
     pub about: Option<LlmField>,
+    /// While the pointer is on the status line: whether something was said
+    /// beside the failure when it came there. The failure is laid out as
+    /// it was then until the pointer leaves, so its Try again, Settings
+    /// and × do not move under it as messages come and go
+    /// (`App::status_hovered`).
+    pub held: Option<bool>,
 }
 
 /// A field of Settings' Language model page a failure can be about.
@@ -1858,6 +1864,9 @@ pub struct App {
     /// Whether the pointer is over the traffic-light cluster, so the icons show
     /// on all three (native behaviour), not just the hovered one.
     pub controls_hovered: bool,
+    /// Whether the pointer is on the status line's words and chips: a
+    /// failure standing there holds still meanwhile (`FailureNotice::held`).
+    pub status_hovered: bool,
     /// User-draggable panel sizes (px): left sidebar width, right context-panel
     /// width, and the bottom debug/ask panel height. See [`resize::Divider`].
     pub sidebar_width: f32,

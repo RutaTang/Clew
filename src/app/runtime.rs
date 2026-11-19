@@ -235,6 +235,7 @@ impl App {
             window_focused: true,
             asking: Default::default(),
             controls_hovered: false,
+            status_hovered: false,
             // The design's sidebar, as it is laid out: its six views take
             // 234 between its 10s.
             sidebar_width: 254.0,
@@ -612,12 +613,21 @@ impl App {
     ) {
         let said = say();
         self.status = said.clone();
+        // Said where the pointer rests, it holds still from the first: as
+        // the failure it takes the place of did, or with nothing beside it,
+        // as nothing is.
+        let held = self
+            .failure_notice
+            .as_ref()
+            .and_then(|f| f.held)
+            .or(self.status_hovered.then_some(false));
         self.failure_notice = Some(crate::app::state::FailureNotice {
             said,
             retry,
             of,
             again: Some(crate::app::state::SayAgain(std::sync::Arc::new(say))),
             about: None,
+            held,
         });
     }
 
@@ -641,6 +651,17 @@ impl App {
             })
     }
 
+    /// Whether the status line says something beside the failure it stands
+    /// (`failure_notice`) — its own words are not said again — or, with
+    /// none standing, says anything.
+    pub(crate) fn said_beside_failure(&self) -> bool {
+        !self.status.is_empty()
+            && self
+                .failure_notice
+                .as_ref()
+                .is_none_or(|f| f.said != self.status)
+    }
+
     /// Take a standing failure of `of` away: what it was of was done again
     /// successfully, or dismissed where it was asked for.
     pub(crate) fn forget_failure_of(&mut self, of: crate::app::state::FailureOf) {
@@ -658,12 +679,15 @@ impl App {
     }
 
     /// Take a notice off the status line once it has been up for
-    /// `STATUS_LIFETIME`: the line goes back to the project's counts.
+    /// `STATUS_LIFETIME`: the line goes back to the project's counts. Not
+    /// while the pointer is on the line: what is read there, or reached
+    /// for, stays; and one said meanwhile beside a failure held still may
+    /// have had no room to be said in (`FailureNotice::held`).
     pub(crate) fn expire_status(&mut self) {
         let due = self
             .status_since
             .is_some_and(|since| since.elapsed() >= STATUS_LIFETIME);
-        if due && self.status_may_expire() {
+        if due && self.status_may_expire() && !self.status_hovered {
             self.status.clear();
             self.note_status();
         }
@@ -803,6 +827,19 @@ impl App {
             }
             WindowMsg::ControlsHover(over) => {
                 self.controls_hovered = over;
+                Task::none()
+            }
+            WindowMsg::StatusHover(over) => {
+                self.status_hovered = over;
+                let beside = self.said_beside_failure();
+                if let Some(notice) = self.failure_notice.as_mut() {
+                    notice.held = over.then_some(beside);
+                }
+                // A notice that waited out the pointer is given its time
+                // again, to be read now it can be (`expire_status`).
+                if !over && self.status_since.is_some() {
+                    self.status_since = Some(std::time::Instant::now());
+                }
                 Task::none()
             }
             WindowMsg::DismissFailure => {

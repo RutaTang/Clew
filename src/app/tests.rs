@@ -37156,6 +37156,21 @@ fn a_notice_on_the_status_line_goes_once_read() {
     let _ = app.update(Message::Noop);
     let _ = app.update(Message::Tick);
     assert_eq!(app.status, "Copied 3 lines");
+
+    // Not while the pointer is on the line: what is read there, or reached
+    // for, stays — and once the pointer leaves, it has its time again, to
+    // be read now it can be (said beside a failure held still, it may have
+    // had no room).
+    let _ = app.update(Message::Window(WindowMsg::StatusHover(true)));
+    app.status_since = Some(long_ago());
+    let _ = app.update(Message::Tick);
+    assert_eq!(app.status, "Copied 3 lines", "it went under the pointer");
+    let _ = app.update(Message::Window(WindowMsg::StatusHover(false)));
+    let _ = app.update(Message::Tick);
+    assert_eq!(app.status, "Copied 3 lines", "it went as the pointer left");
+    app.status_since = Some(long_ago());
+    let _ = app.update(Message::Tick);
+    assert!(app.status.is_empty(), "it stayed: {}", app.status);
 }
 
 /// F12 is Go to Definition and ⇧F12 Find References, as most editors have
