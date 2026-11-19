@@ -125,7 +125,7 @@ View::new("Title")
     .code(Some("rust"), "fn main() {}")
 ```
 
-A `line` of 0 opens a file at its top. Paths are from the project root, with `/`, as `project::files()` gives them. Clew shows 10 000 rows at most across a page, so for big results show the top ones and say how many there are.
+A `line` of 0 opens a file at its top. Paths are from the project root, with `/`, as `project::files()` gives them. A row that points at the code shows its place itself (`src/a.rs:12`, at its right), so its title and detail need not repeat it: say what is there. Clew shows 10 000 rows at most across a page, so for big results show the top ones and say how many there are.
 
 ### What a plugin may ask of Clew
 

@@ -1081,9 +1081,9 @@ pub(crate) fn lsp_consent_modal(
         }))
         // Asked one at a time: say that more follow, so answering this one
         // and seeing another does not read as the same question again.
-        .push(more_questions(waiting))
         .push(
             row![
+                more_questions(waiting),
                 space().width(Fill),
                 button(text(tr!("Not now")).size(ts::BASE))
                     .style(theme::toolbar_button)
@@ -1145,10 +1145,11 @@ pub(crate) fn lsp_consent_modal(
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }
 
-/// "N more questions are waiting…", under a question `waiting` more follow;
-/// under the last, its line held empty. The dialog is centred: a line
-/// coming as more questions queued moved its buttons under the hand on its
-/// way to them.
+/// "N more after this", beside a question's buttons, at their left, while
+/// `waiting` more follow; nothing under the last. Said in the buttons' row,
+/// it takes no line of its own: as a line of its own, coming as more
+/// questions queued, it moved the buttons of a centred dialog under the
+/// hand on its way to them, and held empty it left a gap under each card.
 pub(crate) fn more_questions<'a>(waiting: usize) -> Element<'a, Message> {
     let said = match waiting {
         0 => String::new(),
@@ -1248,9 +1249,9 @@ pub(crate) fn lsp_command_modal(
             .color(theme::dim())
             .wrapping(Wrapping::None),
         ]
-        .push(more_questions(waiting))
         .push(
             row![
+                more_questions(waiting),
                 space().width(Fill),
                 button(text(decline).size(ts::BASE))
                     .style(theme::primary_button)

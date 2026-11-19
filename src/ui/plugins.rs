@@ -422,9 +422,9 @@ pub(crate) fn plugin_install_modal(
             ]
             .spacing(16),
         ]
-        .push(super::explain_view::more_questions(waiting))
         .push(
             row![
+                super::explain_view::more_questions(waiting),
                 space().width(Fill),
                 button(text(decline).size(ts::BASE))
                     .style(theme::primary_button)

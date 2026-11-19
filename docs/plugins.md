@@ -12,17 +12,30 @@ Ask, in your own words:
 
 > Make me a plugin that lists the TODO and FIXME comments in this project, grouped by who last changed the line.
 
-The agent reads Clew's plugin guide, writes the plugin and builds it. While it works it can try the plugin on your project, and it fixes what the compiler says until the build is clean. Then Clew asks you once:
+The agent reads Clew's plugin guide, writes the plugin and builds it. While it works it can try the plugin on your project, and it fixes what the compiler says until the build is clean. Then Clew asks you once, in a card over the window:
 
 > **Install “TODOs by author”?**
 > Lists the TODO and FIXME comments, grouped by who last changed each line.
-> **Adds** a command: TODOs by author
-> **Can** read this project's files · read the project's git history
-> *Don't install* · *Install*
+>
+> *What it adds*
+> • A command: TODOs by author
+>
+> *What it may do*
+> • Read the open project's files
+> • Read the open project's history
+>
+> It can never reach the network, other files, programs or your keys.
+> *Made by the agent in Ask* · *Version 0.1.0*
+>
+> **Don't install** · **Install**
 
-Once installed, the command is in the command palette. Like any other command, you can run it by voice or the agent can run it for you. Its result opens as a page over the code, drawn by Clew in your theme. Every row opens the line it is about, by mouse, keyboard or "open the third one".
+Building a plugin needs Rust; running one needs nothing. If Rust is missing, the agent says so. In **Settings → Plugins**, click **Install Rust for Clew** (about 700 MB, in Clew's own folder; nothing else on your computer changes), or **Add the WebAssembly target** if you have Rust already. Then ask the agent to build again.
 
-To change a plugin, ask for the change. The agent edits it, and Clew asks again before the new version runs. If the new version can do more than the last one, the card says so.
+Once installed, the command is in the command palette. Like any other command, you can run it by voice or the agent can run it for you. Its result opens as a page over the code, drawn by Clew in your theme. Every row opens the line it is about, by mouse, keyboard or "open the third one". A graph a plugin adds is in Project Graphs, beside Clew's own.
+
+To change a plugin, ask for the change. The agent edits it, and Clew asks again before the new version runs. If the new version asks for a permission the last one did not have, the card marks it **Newly asked**.
+
+If a command fails, the status bar says why, with **Try again** and **Settings**, which opens the plugin's log in Settings → Plugins. There, **Copy log** copies it for the agent that made the plugin, and **Ask to fix it** puts a request to fix it, with the log, in Ask's field for you to send.
 
 ## What a plugin can add
 
@@ -30,7 +43,7 @@ To change a plugin, ask for the change. The agent edits it, and Clew asks again 
 |---|---|---|
 | **Commands** | The command palette, voice and the agent's `run_command`. A command marked `where = "code"` also appears in the code's right-click menu and is told the file, the line and the selection. | now |
 | **Views** | What a command shows: headings, Markdown, lists that open code, trees, tables, facts, code, notices. Clew draws them, so they follow the theme, the language, the keyboard ring, jump badges and voice. | now |
-| **Project graphs** | Beside Clew's own graphs, in the Project graphs tool. | next |
+| **Graphs** | In Project Graphs, beside Clew's own: built when shown, and again after the project changes. | now |
 | **Checks** | Findings in the code (a mark in the gutter, a note in the margin) and in Weak Spots. | later |
 | **Ask tools** | A tool your Ask agent may call. | later |
 | **Settings** | The plugin's own options, on its page in Settings → Plugins. | later |
@@ -51,7 +64,7 @@ Clew does not take a plugin's word for its permissions. It reads them from the p
 
 ## Installing, updating, removing
 
-- **Settings → Plugins** lists your plugins. From there you can turn one off, remove it, see what it may do, and read its log. **Install from a file…** installs a plugin someone sent you, and it asks the same question an agent's plugin does.
+- **Settings → Plugins** lists your plugins. From there you can turn one off, remove it (Clew asks first), see what it adds and what it may do, and read its log. **Install from a file…** installs a plugin someone sent you, and it asks the same question an agent's plugin does. The same page says whether plugins can be built here, and sets Rust up in one click.
 - Clew asks again whenever a plugin's file changes. Nothing changes a plugin's file after you approve it: Clew runs its own copy of the file you approved, and checks that copy each time it loads it.
 - Plugins belong to you, not to a project. They work in every project you open.
 
@@ -96,9 +109,10 @@ title = "TODOs by author"
 where = "palette"              # or "code": the right-click menu too
 # input = "Which tag?"         # ask for text before running
 
-[[graph]]                      # next phase
+[[graph]]                      # a graph in Project Graphs
 id = "topics"
 title = "Event bus"
+translations = { zh = "事件总线" }
 
 [dependencies]                 # crates.io, versions only
 regex = "1"
@@ -110,7 +124,7 @@ regex = "1"
 
 - **Free:** `host`, with log, progress, and a store of 1 MiB per plugin.
 - **Gated by a permission:** `project` (read) and `git` (git).
-- **Exported by the plugin:** `commands` (run a command, get an `outcome`: `show(view)`, `open(location)`, `say(text)` or nothing) and `graphs`.
+- **Exported by the plugin:** `commands` (run a command, get an `outcome`: `show(view)`, `open(location)`, `say(text)` or nothing) and `graphs` (build a graph: nodes, edges, and where each node is in the code).
 
 A view is a list of blocks rather than a tree, because WIT has no recursive types and a page reads top to bottom anyway. Tree rows carry a depth.
 
@@ -135,8 +149,8 @@ The permissions the user approves are the ones derived from the imports. The man
 - **Engine:** one per process. Cranelift, component model, epoch interruption, and a 1 MiB wasm stack.
 - **Compile cache:** compiled code is cached by `(sha256 of the file, Engine::precompile_compatibility_hash)` under `<data>/plugins/compiled/`, written atomically into Clew's private data folder. That folder is the trust boundary, since loading compiled code is code execution. Compiling happens in the background when a plugin is installed and when Clew starts. A later load is a deserialize: about 0.4 ms for a small plugin.
 - **Calls are stateless:** each call gets a new `Store` and instance from a cached `InstancePre` (about 12 µs). Nothing leaks between calls, a crashed call takes nothing down with it, and calls run in parallel on blocking threads. State a plugin wants to keep goes through `host.save`.
-- **Limits per call:** 256 MiB of memory (`StoreLimits`), and a deadline enforced by a 10 ms epoch ticker. Commands get 30 s, graphs 60 s. A trap, a deadline or an exhausted limit becomes a sentence the user can read: "The plugin stopped: it took longer than 30 s."
-- **Output is capped and checked before it is drawn:** 10 000 rows per view, 4000 graph nodes, strings cut at 64 KiB, and locations confined to the project (`confine::check_lexical`).
+- **Limits per call:** memory (`StoreLimits`) and a deadline enforced by a 10 ms epoch ticker. A command gets 256 MiB and 30 s, a graph 512 MiB and 60 s. A trap, a deadline or an exhausted limit becomes a sentence the user can read: "TODOs by author did not finish: it took longer than 30 s and was stopped". It stands on the status bar with Try again and a way to the plugin's log.
+- **Output is capped and checked before it is drawn:** 500 blocks and 10 000 rows per view, 4 MiB of text per page (what is past it is left out, and the page says so), 4000 graph nodes and 20 000 edges, lines cut at 1 KiB and text blocks at 64 KiB, a run's log kept to 1000 lines, and locations confined to the project (`confine::check_lexical`).
 
 Measured on the prototype (wasmtime 48, a 47 KB plugin): 28 ms to compile, 0.4 ms to load from the cache, 12 µs to instantiate, 0.12 µs per empty call, and 14 ms to pass 10 MB of text in and count its lines.
 
@@ -147,7 +161,7 @@ The design follows the language-server approval Clew already has.
 - **Fingerprint:** `sha256(length_prefixed(["clew-plugin/1", sha256(file)]))`, using the proved encoding in `clew_rules::fingerprint`. The file carries the manifest, so the fingerprint covers the code, the name and the declared contributions together.
 - **Record:** `<data>/plugins.toml` holds, per plugin id, its fingerprint, the permissions approved, whether it is on, and a copy of its manifest, so the palette is ready at startup without reading any plugin. It is a file of its own rather than a table in `trust.toml`, because an older Clew rewriting `trust.toml` would drop a table it doesn't know. Writes use the same lock, `load_checked` and `write_atomic` as `Trust::update`.
 - **The approved copy:** on approval, the bytes the user saw are copied to `<data>/plugins/installed/<fingerprint>.wasm` (mode 0400). Clew runs that copy only, and checks its digest each time it loads it. So a rebuild after approval cannot change what runs: a new build is a new fingerprint and a new question.
-- **The question:** asked only by the GUI, through `Questions<T>`, with the 500 ms answer delay and the `may_allow` check the other consent cards use. The card names the plugin, its description, what it adds, what it may do, and where it came from: an agent in this chat, an agent over ACP, or a file you picked. On an update, what is new is marked. A headless path such as `clew-server mcp` never approves anything. It files a request (below), and the GUI asks.
+- **The question:** asked only by the GUI, through `Questions<T>`, with the 500 ms answer delay and the `may_allow` check the other consent cards use. The card, centred over the window, names the plugin, its description, what it adds, what it may do, that it can never reach the network, other files, programs or keys, who made it (the agent in Ask, an MCP client by the name it gave, or a file you picked) and its version. On an update, a permission the last version did not have is marked "Newly asked". A headless path such as `clew-server mcp` never approves anything. It files a request (below), and the GUI asks.
 
 ### Building
 
@@ -173,11 +187,11 @@ The same tools serve Clew's Ask agent and every ACP agent:
 | `plugin_read` | Read a file of a plugin's source. |
 | `plugin_write` | Write a file of a plugin's source, confined to its folder (the Ask agent has no other way to write). |
 | `plugin_build` | Build it. Returns compiler messages or what the plugin is. |
-| `plugin_try` | Run one of its commands on the open project, with its declared permissions (read and git only) and nothing approved. The result goes back to the agent, not to the screen. That is safe without asking: the agent can already read the project with its own tools, and a plugin has no network to send anything anywhere. |
+| `plugin_try` | Run one of its commands, or build one of its graphs, on the open project, with its declared permissions (read and git only) and nothing approved. The result goes back to the agent, not to the screen. That is safe without asking: the agent can already read the project with its own tools, and a plugin has no network to send anything anywhere. |
 | `plugin_install` | Ask the user, in Clew, to install the build. Waits for the answer. |
 | `plugin_status` | Whether a plugin is installed, at which version, and whether it is on. |
 
-For the Ask agent these are client-side tools (like the window tools), run by the GUI. Its `plugin_install` shows the consent card in the conversation, in place of the approval card. For ACP agents and any other MCP client, `clew-server mcp` serves them from the same code. It builds itself, and files `plugin_try` and `plugin_install` as requests in `<data>/plugins/requests/`, naming the client as `initialize` named it. The GUI watches that folder; one window claims a request by renaming it, runs the try or asks the question, and writes the answer the tool is waiting for. A try is claimed only by a window with that project open on this machine, matched by its canonical path; a try waits 90 seconds, an install 15 minutes, and a request no window answered is withdrawn with a sentence saying why. The tools that write, build or ask for an install say they are not read-only (`readOnlyHint: false`), so a client asks before them; the code tools and the plugin tools that only read say they are.
+For the Ask agent these are client-side tools (like the window tools), run by the GUI. Its `plugin_install` shows the consent card over the window, as an MCP client's does. For ACP agents and any other MCP client, `clew-server mcp` serves them from the same code. It builds itself, and files `plugin_try` and `plugin_install` as requests in `<data>/plugins/requests/`, naming the client as `initialize` named it. The GUI watches that folder; one window claims a request by renaming it, runs the try or asks the question, and writes the answer the tool is waiting for. A try is claimed only by a window with that project open on this machine, matched by its canonical path; a request no window takes within 8 seconds (Clew is not open, or no window has the project) is given up at once; a try taken waits 90 seconds for its result, an install 15 minutes for the user; and a request no window answered is withdrawn with a sentence saying why and what to ask the user. The tools that write, build or ask for an install say they are not read-only (`readOnlyHint: false`), so a client asks before them; the code tools and the plugin tools that only read say they are.
 
 ### Views
 
@@ -193,14 +207,14 @@ A plugin's `view` becomes a native page over the code, like Weak Spots. Each blo
 - **Tests:** the manifest and its section; permission derivation; refusals; deadlines and memory limits; output caps and confinement; the store (approve, update, turn off, remove, a tampered copy refused); the build's policy (a fake `cargo` on `PATH` proves the arguments and environment, and a real build runs where the target is installed); the GUI (the palette lists a plugin's commands, a page draws every block, and the consent card asks, waits and records).
 - **Proofs:** the `may_link` rule in Lean, with the Rust source extracted by Aeneas like the rules in `docs/verification.md`.
 
-### Phases
+### Status
 
-1. **Now:** the runtime, commands and views, the store and consent, Settings → Plugins, install from a file, the build, the authoring tools for Ask and ACP, and the guide.
-2. **Next:** project graphs, checks, Ask tools, plugin settings, views a plugin updates in place (an action on a row calls the plugin again), and a toolchain Clew downloads itself.
+1. **Shipped:** the runtime, commands and views, graphs in Project Graphs, the store and consent, Settings → Plugins (log, Copy log, Ask to fix it), install from a file, the build and its dependency policy, Rust set up in one click, the authoring tools for Ask, ACP and MCP clients, and the guide.
+2. **Next:** checks, Ask tools, plugin settings, and views a plugin updates in place (an action on a row calls the plugin again).
 3. **Later:** plugins next to a remote project's files (wasmtime in `clew-server`, behind a request of its own), plugins a project shares in `.clew/plugins/` (still approved by each user), and the network and the AI provider as permissions, each asked for by name and metered like Clew's own use.
 
 ### Costs
 
 - **Size:** wasmtime with Cranelift adds about 15–20 MB to `clew`, and a few minutes to a release build.
-- **Toolchain:** making plugins needs Rust with the WebAssembly target, about 250 MB. Running plugins needs nothing.
+- **Toolchain:** making plugins needs Rust with the WebAssembly target: about 700 MB when Clew installs Rust for itself, about 100 MB to add the target to a Rust you have. Running plugins needs nothing.
 - **First build:** the first build of a plugin downloads the crates it uses. Later builds of any plugin reuse them.
