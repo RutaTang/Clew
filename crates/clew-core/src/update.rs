@@ -120,10 +120,13 @@ pub fn ensure_upgrade(running: Version, candidate: &str) -> Result<Version, Stri
         Upgrade::Unreadable => Err(format!(
             "the update declares an unreadable version {candidate:?}"
         )),
-        Upgrade::NotNewer(v) => Err(format!(
-            "the update contains Clew {}, which is not newer than the running {running} — refusing to install it",
-            Version::from(v)
-        )),
+        Upgrade::NotNewer(v) => {
+            // Named, so the message is the one `extern_messages` translates.
+            let v = Version::from(v);
+            Err(format!(
+                "the update contains Clew {v}, which is not newer than the running {running} — refusing to install it"
+            ))
+        }
         Upgrade::Newer(v) => Ok(Version::from(v)),
     }
 }
