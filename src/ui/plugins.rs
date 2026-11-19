@@ -318,7 +318,14 @@ pub(crate) fn plugin_install_modal(
     let manifest = &pending.inspected.manifest;
     let lang = crate::i18n::current().code();
     let name = manifest.name_in(lang).to_string();
+    // The very build installed — its copy to be made again, say, or turned
+    // back on — is installed again, not an update to itself.
+    let again = pending
+        .previous
+        .as_ref()
+        .is_some_and(|p| p.record.fingerprint == pending.inspected.fingerprint());
     let title = match &pending.previous {
+        Some(_) if again => tr!("Install “{plugin}” again?", plugin = name.clone()),
         Some(previous) if previous.manifest.plugin.version != manifest.plugin.version => tr!(
             "Update “{plugin}” to version {version}?",
             plugin = name.clone(),
@@ -386,6 +393,7 @@ pub(crate) fn plugin_install_modal(
     let section = |heading: String| text(heading).size(ts::SMALL).color(theme::dim());
     // An update's answers say so, as its title does.
     let (decline, accept) = match pending.previous {
+        Some(_) if again => (tr!("Don't install"), tr!("Install again")),
         Some(_) => (tr!("Don't update"), tr!("Update")),
         None => (tr!("Don't install"), tr!("Install")),
     };

@@ -10,6 +10,8 @@ A Clew plugin adds something to Clew the user asked for: a command whose result 
 4. `plugin_try` runs a command of the build on the open project (`command`), or builds one of its graphs (`graph`), and gives you what came of it, so you can check it does what was asked. Nothing is shown to the user. Clew must be open with the project.
 5. `plugin_install` asks the user, in Clew, to install it. They see its name, description, what it adds (its commands and graphs) and its permissions. It answers whether they did, and where what it added now is.
 
+`plugin_try` and `plugin_install` take the last build only while the source is as it was built: after you write a file, or after a build that failed, build again first.
+
 To change an installed plugin, change its source, build and install again. The user is asked again.
 
 ## plugin.toml

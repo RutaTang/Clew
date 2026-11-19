@@ -54,7 +54,7 @@ pub fn installed_dir(data: &Path) -> PathBuf {
 }
 
 /// The approved copy of the file whose fingerprint is `fingerprint`.
-fn installed_path(data: &Path, fingerprint: &str) -> PathBuf {
+pub(crate) fn installed_path(data: &Path, fingerprint: &str) -> PathBuf {
     installed_dir(data).join(format!("{fingerprint}.wasm"))
 }
 

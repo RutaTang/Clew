@@ -927,6 +927,9 @@ pub fn build(
         write_if_changed(&work.join("sdk/clew-plugin-sdk").join(name), contents)
             .map_err(|e| BuildError::Failed(e.to_string()))?;
     }
+    // What this build is made from, read before it is staged: a write
+    // while it builds makes the source newer than the build.
+    let made_from = source_digest(source);
     stage_sources(source, &crate_dir)?;
     write_if_changed(&crate_dir.join("Cargo.toml"), &cargo_toml(&manifest))
         .map_err(|e| BuildError::Failed(e.to_string()))?;
@@ -1011,6 +1014,10 @@ pub fn build(
     }
     let artifact = crate_dir.join(format!("{id}.wasm"));
     std::fs::write(&artifact, &bytes).map_err(|e| BuildError::Failed(e.to_string()))?;
+    // Which source the build is of (`built_from`): a build that fails
+    // leaves the last one's, and its source, changed since, no longer
+    // matches it.
+    record_built_from(&crate_dir, made_from).map_err(|e| BuildError::Failed(e.to_string()))?;
     if let Ok(lock) = std::fs::read(crate_dir.join("Cargo.lock")) {
         let _ = std::fs::write(source.join("Cargo.lock"), lock);
     }
@@ -1020,6 +1027,74 @@ pub fn build(
         artifact,
         warnings,
     })
+}
+
+/// The file beside a build that names the source it was built from.
+const SOURCE_STAMP: &str = "built-from";
+
+/// A digest of what a build of the plugin whose source is `source` is made
+/// of: its `plugin.toml` and the Rust files under `src/` that are staged
+/// (`stage_sources`), each with its path. `None` when one cannot be read.
+pub fn source_digest(source: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    fn rust_files(dir: &Path, rel: &str, depth: usize, out: &mut Vec<(String, PathBuf)>) {
+        if depth > MAX_SOURCE_DEPTH {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if name.starts_with('.') || kind.is_symlink() {
+                continue;
+            }
+            let rel = format!("{rel}/{name}");
+            if kind.is_dir() {
+                rust_files(&entry.path(), &rel, depth + 1, out);
+            } else if kind.is_file() && name.ends_with(".rs") {
+                out.push((rel, entry.path()));
+            }
+        }
+    }
+    let mut files = vec![("plugin.toml".to_string(), source.join("plugin.toml"))];
+    let mut rust = Vec::new();
+    rust_files(&source.join("src"), "src", 0, &mut rust);
+    rust.sort();
+    files.extend(rust);
+    let mut hash = Sha256::new();
+    for (rel, path) in files {
+        let bytes = std::fs::read(path).ok()?;
+        hash.update((rel.len() as u64).to_le_bytes());
+        hash.update(rel.as_bytes());
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(&bytes);
+    }
+    Some(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Note beside the build in `crate_dir` the source it was built from
+/// (`source_digest`); `None`, when that could not be read, notes none.
+pub(crate) fn record_built_from(crate_dir: &Path, digest: Option<String>) -> std::io::Result<()> {
+    let stamp = crate_dir.join(SOURCE_STAMP);
+    match digest {
+        Some(digest) => std::fs::write(&stamp, digest),
+        None => std::fs::remove_file(&stamp).or(Ok(())),
+    }
+}
+
+/// Whether the build in `crate_dir` is of the plugin's source at `source`
+/// as it is now: built from it, and nothing written to it since.
+pub fn built_from(crate_dir: &Path, source: &Path) -> bool {
+    let Ok(stamp) = std::fs::read_to_string(crate_dir.join(SOURCE_STAMP)) else {
+        return false;
+    };
+    source_digest(source).is_some_and(|now| now == stamp.trim())
 }
 
 fn quoted(names: &[String]) -> String {
@@ -1034,6 +1109,56 @@ fn quoted(names: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::manifest::tests_support;
+
+    #[test]
+    fn a_build_is_of_the_source_as_it_was_built() {
+        let root = std::env::temp_dir().join(format!("clew-build-from-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (source, built) = (root.join("source"), root.join("built"));
+        std::fs::create_dir_all(source.join("src/parts")).unwrap();
+        std::fs::create_dir_all(&built).unwrap();
+        std::fs::write(source.join("plugin.toml"), "[plugin]\n").unwrap();
+        std::fs::write(source.join("src/lib.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(source.join("src/parts/b.rs"), "fn b() {}\n").unwrap();
+        // Never built.
+        assert!(!built_from(&built, &source));
+        record_built_from(&built, source_digest(&source)).unwrap();
+        assert!(built_from(&built, &source));
+        // What a build does not stage does not change it.
+        std::fs::write(source.join("src/notes.md"), "notes").unwrap();
+        std::fs::write(source.join("src/.hidden.rs"), "fn h() {}").unwrap();
+        std::fs::write(source.join("README.md"), "readme").unwrap();
+        assert!(built_from(&built, &source));
+        // What it does, does: the manifest, a file in a folder, a new file,
+        // a file moved, a file gone.
+        let changes: [&dyn Fn(); 5] = [
+            &|| std::fs::write(source.join("plugin.toml"), "[plugin]\n# more\n").unwrap(),
+            &|| std::fs::write(source.join("src/parts/b.rs"), "fn b2() {}\n").unwrap(),
+            &|| std::fs::write(source.join("src/c.rs"), "").unwrap(),
+            &|| std::fs::rename(source.join("src/parts/b.rs"), source.join("src/b.rs")).unwrap(),
+            &|| std::fs::remove_file(source.join("src/parts/b.rs")).unwrap(),
+        ];
+        for (n, change) in changes.iter().enumerate() {
+            let before = source_digest(&source);
+            record_built_from(&built, before.clone()).unwrap();
+            change();
+            assert!(!built_from(&built, &source), "change {n}");
+            assert_ne!(source_digest(&source), before, "change {n}");
+            // Put back for the next.
+            let _ = std::fs::remove_file(source.join("src/c.rs"));
+            let _ = std::fs::remove_file(source.join("src/b.rs"));
+            std::fs::write(source.join("plugin.toml"), "[plugin]\n").unwrap();
+            std::fs::write(source.join("src/parts/b.rs"), "fn b() {}\n").unwrap();
+            assert_eq!(source_digest(&source), before, "change {n} put back");
+        }
+        // A source that cannot be read is no build's.
+        std::fs::remove_file(source.join("plugin.toml")).unwrap();
+        assert_eq!(source_digest(&source), None);
+        assert!(!built_from(&built, &source));
+        record_built_from(&built, None).unwrap();
+        assert!(!built.join(SOURCE_STAMP).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn cargo_toml_holds_only_what_clew_writes() {

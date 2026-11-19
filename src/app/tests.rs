@@ -39261,7 +39261,7 @@ fn an_agents_install_is_answered_as_the_user_decides() {
 }
 
 /// Plugin `word-count`, installed, on or off.
-fn installed_plugin(enabled: bool) -> crate::app::plugins::Installed {
+pub(crate) fn installed_plugin(enabled: bool) -> crate::app::plugins::Installed {
     let manifest = pending_plugin_install("word-count", 0, None)
         .inspected
         .manifest;
@@ -39524,6 +39524,38 @@ fn a_failed_plugin_run_stands_with_its_next_steps() {
     );
     assert!(asked.contains("it crashed: index out of bounds"), "{asked}");
     assert!(app.proj.ask_turns.is_empty(), "not sent: the user sends it");
+
+    // Asked again with a draft in the field: the draft is kept, the
+    // request after it. With no log yet, the request says no "Its log:".
+    app.proj.ask_input = "Why is the cart total wrong?".into();
+    app.plugins.log.clear();
+    let _ = app.update(Message::Plugin(PluginMsg::AskToFix("word-count".into())));
+    let asked = &app.proj.ask_input;
+    assert!(
+        asked.starts_with("Why is the cart total wrong?\n\n"),
+        "{asked}"
+    );
+    assert!(asked.contains("Word count"), "{asked}");
+    assert!(!asked.contains("Its log:"), "{asked}");
+    assert!(app.proj.ask_turns.is_empty(), "not sent: the user sends it");
+    // Copy log: the log, a line each, to the clipboard; nothing to copy,
+    // nothing said.
+    app.plugins.log.insert(
+        "word-count".into(),
+        [
+            (clew_plugin::runtime::Level::Warning, "first".to_string()),
+            (clew_plugin::runtime::Level::Error, "second".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    assert_eq!(app.plugins.log_text("word-count"), "first\nsecond");
+    app.status.clear();
+    let _ = app.update(Message::Plugin(PluginMsg::CopyLog("word-count".into())));
+    assert_eq!(app.status, "Copied its log");
+    app.status.clear();
+    let _ = app.update(Message::Plugin(PluginMsg::CopyLog("no-such".into())));
+    assert!(app.status.is_empty());
 
     // A run that finishes takes the failure away.
     ran(&mut app, Ok(Outcome::Nothing));
@@ -39856,6 +39888,17 @@ fn a_plugins_graph_is_built_when_shown_in_project_graphs() {
     // A failure says why and offers Try again, which builds it anew.
     app.proj.plugin_maps.get_mut(&id).unwrap().failed = Some("it was stopped".into());
     assert!(says(&app, "Try again"));
+    // And a way to its log, where what fixes it is.
+    let (targets, _) = crate::ui::heard::gather_all_of(|| crate::ui::project_maps_body(&app));
+    assert!(
+        targets.iter().any(|t| t.shown == "See its log"
+            && matches!(
+                t.message,
+                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::Plugins))
+            )),
+        "{:?}",
+        targets.iter().map(|t| &t.shown).collect::<Vec<_>>()
+    );
     let retried = app.update(Message::Plugin(PluginMsg::RebuildGraph));
     assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Building));
     settle(&mut app, retried);

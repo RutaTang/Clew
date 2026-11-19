@@ -232,8 +232,11 @@ pub fn call(data: &Path, tool: &str, args: &Value, cancel: &AtomicBool) -> Step 
             }
         }
         "plugin_install" => match text(args, "id").and_then(|id| last_build(data, id)) {
-            Ok(built) => Step::Install {
-                built: Box::new(built),
+            Ok(built) => match already_installed(data, &built) {
+                Some(said) => done(Ok(said)),
+                None => Step::Install {
+                    built: Box::new(built),
+                },
             },
             Err(e) => done(Err(e)),
         },
@@ -273,6 +276,29 @@ fn build_report(data: &Path, id: &str, cancel: &AtomicBool) -> Result<String, St
     Ok(report)
 }
 
+/// What to tell the agent when `built` is the very build installed, its
+/// copy intact: the user approved this file, and is not asked again about
+/// it. `None` when it is not, or its copy needs installing again.
+fn already_installed(data: &Path, built: &Built) -> Option<String> {
+    let manifest = &built.inspected.manifest;
+    let store = crate::store::Store::load(data);
+    let record = store.plugin.get(&manifest.plugin.id)?;
+    if record.fingerprint != built.inspected.fingerprint()
+        || crate::store::read_approved(data, record).is_err()
+    {
+        return None;
+    }
+    let name = &manifest.plugin.name;
+    Some(match record.enabled {
+        true => format!(
+            "This exact build of {name} is already installed, so the user was not asked again. If you meant to change it, write the change, build it (plugin_build), then install it."
+        ),
+        false => format!(
+            "This exact build of {name} is already installed, but the user turned it off in Settings → Plugins; it stays off until they turn it on there."
+        ),
+    })
+}
+
 /// The plugin `id`'s latest build, as an install would read it.
 pub fn last_build(data: &Path, id: &str) -> Result<Built, String> {
     let id = crate::store::checked_id(id)?;
@@ -282,6 +308,16 @@ pub fn last_build(data: &Path, id: &str) -> Result<Built, String> {
     let bytes = std::fs::read(&artifact).map_err(|_| {
         format!("the plugin \"{id}\" has not been built; build it first (plugin_build)")
     })?;
+    // A build of an older source — written to since, or its last build
+    // failed — is not what the agent just wrote: tried or offered, it
+    // was the last good build, an "update" to the version installed.
+    let source = authoring::source_dir(data, id)?;
+    let crate_dir = artifact.parent().unwrap_or(&artifact);
+    if !crate::build::built_from(crate_dir, &source) {
+        return Err(format!(
+            "the plugin \"{id}\" changed since it was last built, or its last build failed; build it again first (plugin_build)"
+        ));
+    }
     let inspected = inspect(&bytes)?;
     Ok(Built {
         bytes,
@@ -575,10 +611,17 @@ mod tests {
     #[test]
     fn try_and_install_are_handed_back_with_the_build() {
         let data = temp("handback");
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/views.wasm");
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
         let dir = authoring::build_dir(&data).join("views");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::copy(&fixture, dir.join("views.wasm")).unwrap();
+        std::fs::copy(fixtures.join("views.wasm"), dir.join("views.wasm")).unwrap();
+        // Its source, as built.
+        let source = authoring::source_dir(&data, "views").unwrap();
+        std::fs::create_dir_all(source.join("src")).unwrap();
+        for file in ["plugin.toml", "src/lib.rs"] {
+            std::fs::copy(fixtures.join("views").join(file), source.join(file)).unwrap();
+        }
+        crate::build::record_built_from(&dir, crate::build::source_digest(&source)).unwrap();
         let cancel = AtomicBool::new(false);
         match call(
             &data,
@@ -636,6 +679,65 @@ mod tests {
             let refused = answer(call(&data, "plugin_try", &both_or_neither, &cancel)).unwrap_err();
             assert!(refused.contains("one of them"), "{refused}");
         }
+        assert!(matches!(
+            call(&data, "plugin_install", &json!({"id": "views"}), &cancel),
+            Step::Install { .. }
+        ));
+        // Written to since it was built — or built since and that build
+        // failed, which leaves this build — it is not what was written:
+        // neither tried nor offered, so an older build is never offered as
+        // an update.
+        let lib = authoring::read_file(&data, "views", "src/lib.rs").unwrap();
+        authoring::write_file(&data, "views", "src/lib.rs", &format!("{lib}\n// more\n")).unwrap();
+        for (tool, args) in [
+            ("plugin_try", json!({"id": "views", "command": "say"})),
+            ("plugin_install", json!({"id": "views"})),
+        ] {
+            let stale = answer(call(&data, tool, &args, &cancel)).unwrap_err();
+            assert!(stale.contains("build it again first"), "{tool}: {stale}");
+        }
+        // Put back as it was built, it is that build again.
+        authoring::write_file(&data, "views", "src/lib.rs", &lib).unwrap();
+        let built = match call(&data, "plugin_install", &json!({"id": "views"}), &cancel) {
+            Step::Install { built } => built,
+            other => panic!("{other:?}"),
+        };
+        // Installed, the very build is not asked about again: the agent is
+        // told so, and told it is off when the user turned it off.
+        crate::store::install(
+            &data,
+            &built.bytes,
+            &built.inspected,
+            crate::store::Origin::Ask,
+        )
+        .unwrap();
+        let again = answer(call(
+            &data,
+            "plugin_install",
+            &json!({"id": "views"}),
+            &cancel,
+        ))
+        .unwrap();
+        assert!(
+            again.contains("already installed") && !again.contains("turned it off"),
+            "{again}"
+        );
+        crate::store::set_enabled(&data, "views", false).unwrap();
+        let off = answer(call(
+            &data,
+            "plugin_install",
+            &json!({"id": "views"}),
+            &cancel,
+        ))
+        .unwrap();
+        assert!(off.contains("turned it off in Settings"), "{off}");
+        // Its copy gone bad, installing it again is what mends it: asked.
+        let record = crate::store::Store::load(&data).plugin["views"].clone();
+        std::fs::write(
+            crate::store::installed_path(&data, &record.fingerprint),
+            b"bad",
+        )
+        .unwrap();
         assert!(matches!(
             call(&data, "plugin_install", &json!({"id": "views"}), &cancel),
             Step::Install { .. }

@@ -66,6 +66,7 @@ Clew does not take a plugin's word for its permissions. It reads them from the p
 
 - **Settings → Plugins** lists your plugins. From there you can turn one off, remove it (Clew asks first), see what it adds and what it may do, and read its log. **Install from a file…** installs a plugin someone sent you, and it asks the same question an agent's plugin does. The same page says whether plugins can be built here, and sets Rust up in one click.
 - Clew asks again whenever a plugin's file changes. Nothing changes a plugin's file after you approve it: Clew runs its own copy of the file you approved, and checks that copy each time it loads it.
+- What an agent offers you is a build of what it just wrote: if its last build failed, or it changed the plugin since, it has to build again before it can ask. It doesn't ask about the very build you already installed; installing that again from a file asks **Install again?**.
 - Plugins belong to you, not to a project. They work in every project you open.
 
 ---
@@ -187,9 +188,11 @@ The same tools serve Clew's Ask agent and every ACP agent:
 | `plugin_read` | Read a file of a plugin's source. |
 | `plugin_write` | Write a file of a plugin's source, confined to its folder (the Ask agent has no other way to write). |
 | `plugin_build` | Build it. Returns compiler messages or what the plugin is. |
-| `plugin_try` | Run one of its commands, or build one of its graphs, on the open project, with its declared permissions (read and git only) and nothing approved. The result goes back to the agent, not to the screen. That is safe without asking: the agent can already read the project with its own tools, and a plugin has no network to send anything anywhere. |
-| `plugin_install` | Ask the user, in Clew, to install the build. Waits for the answer. |
+| `plugin_try` | Run one of its commands, or build one of its graphs, of the build of its source as it is now, on the open project, with its declared permissions (read and git only) and nothing approved. The result goes back to the agent, not to the screen. That is safe without asking: the agent can already read the project with its own tools, and a plugin has no network to send anything anywhere. |
+| `plugin_install` | Ask the user, in Clew, to install the build. Waits for the answer. The very build already installed is not asked about again: the agent is told so (and whether the user turned it off). |
 | `plugin_status` | Whether a plugin is installed, at which version, and whether it is on. |
+
+A build records which source it was built from (a digest of `plugin.toml` and the Rust files under `src/`). `plugin_try` and `plugin_install` use a build only while its source is still that: after a write to the source, or a build that failed, they ask the agent to build again, so the user is never offered the previous build as an "update" in place of what the agent just wrote.
 
 For the Ask agent these are client-side tools (like the window tools), run by the GUI. Its `plugin_install` shows the consent card over the window, as an MCP client's does. For ACP agents and any other MCP client, `clew-server mcp` serves them from the same code. It builds itself, and files `plugin_try` and `plugin_install` as requests in `<data>/plugins/requests/`, naming the client as `initialize` named it. The GUI watches that folder; one window claims a request by renaming it, runs the try or asks the question, and writes the answer the tool is waiting for. A try is claimed only by a window with that project open on this machine, matched by its canonical path; a request no window takes within 8 seconds (Clew is not open, or no window has the project) is given up at once; a try taken waits 90 seconds for its result, an install 15 minutes for the user; and a request no window answered is withdrawn with a sentence saying why and what to ask the user. The tools that write, build or ask for an install say they are not read-only (`readOnlyHint: false`), so a client asks before them; the code tools and the plugin tools that only read say they are.
 

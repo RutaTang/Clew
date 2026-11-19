@@ -643,6 +643,15 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     // rests). Beside a run's failure, Explain's progress was squeezed to
     // "✦ … ×".
     let chips_w = full_chips + STATUS_GAP * chips_n as f32;
+    // What the offer to set servers up gives back said short — its mark
+    // and count, the whole where the pointer rests. An offer waits; what
+    // failed, beside it, was cut to "Oldest TO…" with the offer said whole.
+    let setup_saving = match &setup {
+        Some((whole, true)) => {
+            (width(whole) - width(&app.missing_setup().len().to_string())).max(0.0)
+        }
+        _ => 0.0,
+    };
     let mut used = 0.0;
     if let Some(failure) = failure
         && room >= least
@@ -686,9 +695,16 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             // `SAID_KEPT_MAX_W`; the failure keeps at least what failed
             // (its words before the reason), its reason whole where the
             // pointer rests.
+            // What failed counts on the offer to set up said short, where
+            // it would not be said whole beside the offer said whole.
+            let head_w = width(head) + width("…");
             let free = room - controls_w - 2.0 * STATUS_GAP - chips_w;
+            let free = match head_w > free - SAID_MIN_W {
+                true => free + setup_saving,
+                false => free,
+            };
             let kept = (free / 2.0).clamp(SAID_MIN_W, SAID_KEPT_MAX_W);
-            let floor = (width(head) + width("…")).min(free - SAID_MIN_W);
+            let floor = head_w.min(free - SAID_MIN_W);
             let words = (free - kept).max(floor).max(least).min(width(&whole));
             row = row.push(line_of(whole, words, Some(theme::danger())));
             row = row.push(controls);
@@ -697,26 +713,6 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     }
     let room = (room - used).max(0.0);
     let mut used = 0.0;
-    let short = full_chips + STATUS_GAP * chips_n as f32 + SAID_MIN_W > room;
-    // A chip short of room even shortened is left out: laid out clipped to
-    // nothing, it was a control no one saw that the keyboard's ring still
-    // stopped on (its Set up is in the command bar, its pass's progress in
-    // the margin).
-    if let Some(chip) = setup_chip(app, short).filter(|chip| used + chip.1 <= room) {
-        used += chip.1 + STATUS_GAP;
-        row = row.push(chip.0);
-    }
-    if let Some(chip) = explain_chip(app, short).filter(|chip| used + chip.1 <= room) {
-        used += chip.1 + STATUS_GAP;
-        row = row.push(chip.0);
-    }
-    // A session going on behind the hidden panel, said, and a way back to
-    // it: hidden while paused, nothing showed one was live, and Debug
-    // started a second copy of the program.
-    if let Some(chip) = session_chip(app).filter(|chip| used + chip.1 <= room) {
-        used += chip.1 + STATUS_GAP;
-        row = row.push(chip.0);
-    }
     // What Clew says besides a failure that stands: the failure keeps its
     // own place, and what is said after it (a file copied, a search done)
     // goes beside it rather than over it — said over it, the red Explain
@@ -755,6 +751,35 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             counts
         })
     };
+    // The offer to set servers up is said short first — for the least room
+    // what is said needs, and for what is said to be said whole: an offer
+    // waits, what was just said goes ("TODO count is installed: its
+    // commands are in the comma…" beside the offer said whole) — and what
+    // is under way (Explain's pass) only when even that leaves too little.
+    let gaps = STATUS_GAP * chips_n as f32;
+    let said_w = said.as_deref().map_or(0.0, width);
+    let setup_short = full_chips + gaps + SAID_MIN_W.max(said_w) > room;
+    let short =
+        full_chips - if setup_short { setup_saving } else { 0.0 } + gaps + SAID_MIN_W > room;
+    // A chip short of room even shortened is left out: laid out clipped to
+    // nothing, it was a control no one saw that the keyboard's ring still
+    // stopped on (its Set up is in the command bar, its pass's progress in
+    // the margin).
+    if let Some(chip) = setup_chip(app, setup_short).filter(|chip| used + chip.1 <= room) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
+    if let Some(chip) = explain_chip(app, short).filter(|chip| used + chip.1 <= room) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
+    // A session going on behind the hidden panel, said, and a way back to
+    // it: hidden while paused, nothing showed one was live, and Debug
+    // started a second copy of the program.
+    if let Some(chip) = session_chip(app).filter(|chip| used + chip.1 <= room) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
     let left = room - used;
     if let Some(said) = said
         && left >= least

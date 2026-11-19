@@ -6147,6 +6147,28 @@ fn the_download_question_offers_the_program_already_here() {
     );
 }
 
+/// An install of the very build installed — its copy made again, say — is
+/// asked as installing it again, not as an update of itself; another build
+/// of it is an update.
+#[test]
+fn the_same_build_again_is_not_offered_as_an_update() {
+    let mut pending = crate::app::tests::pending_plugin_install("word-count", 0, None);
+    let mut previous = crate::app::tests::installed_plugin(true);
+    previous.record.fingerprint = pending.inspected.fingerprint();
+    pending.previous = Some(previous.clone());
+    {
+        let mut sim = sim_elem(super::plugins::plugin_install_modal(&pending, 1, 0, true));
+        assert!(shows(&mut sim, "Install “Word count” again?"));
+        assert!(shows(&mut sim, "Install again") && shows(&mut sim, "Don't install"));
+        assert!(!shows(&mut sim, "Update"));
+    }
+    previous.record.fingerprint = "an older build".into();
+    pending.previous = Some(previous);
+    let mut sim = sim_elem(super::plugins::plugin_install_modal(&pending, 1, 0, true));
+    assert!(shows(&mut sim, "Update “Word count”?"));
+    assert!(shows(&mut sim, "Don't update") && !shows(&mut sim, "again"));
+}
+
 /// F#8: consent questions are asked one at a time, and the modal says when
 /// more wait behind the one on screen.
 #[test]
@@ -14492,6 +14514,92 @@ fn what_is_under_way_is_said_whole_beside_an_older_failure() {
     assert!(text_at(&mut sim, |t| t.starts_with("无法解释 lib.rs"), 0).is_some());
 }
 
+/// What failed is said whole before the offer to set servers up is: the
+/// offer gives way to its mark and count (whole where the pointer rests),
+/// where a plugin's failure beside it was cut to "Oldest TO…". What is said
+/// next keeps its room all the same.
+#[test]
+fn what_failed_is_said_whole_before_the_setup_offer() {
+    let mut app = reader_app();
+    app.proj.setup_missing = vec![
+        crate::app::setup::SetupServer {
+            language: "rust".into(),
+            name: "rust-analyzer".into(),
+            fetch: crate::app::setup::Fetch::Download,
+            builds: false,
+        },
+        crate::app::setup::SetupServer {
+            language: "python".into(),
+            name: "pyright".into(),
+            fetch: crate::app::setup::Fetch::Install("npm".into()),
+            builds: false,
+        },
+    ];
+    app.say_failure(
+        "Oldest TODO did not finish: it crashed: index out of bounds: the len is 4 but the index is 4 (at src/lib.rs:46:36)".into(),
+        None,
+        crate::app::state::FailureOf::PluginRun,
+    );
+    // The right side says something too: the language's server declined.
+    app.proj.link.lsp.insert(
+        "rust".into(),
+        crate::app::model::LspSlot::Declined("server download declined".into()),
+    );
+    for width in [1000.0, 1100.0, 1280.0, 1440.0] {
+        let mut sim = sim_sized(&app, Size::new(width, 800.0));
+        assert!(
+            text_at(&mut sim, |t| t.starts_with("Oldest TODO did not finish"), 0).is_some(),
+            "what failed is cut at {width}"
+        );
+        assert!(text_at(&mut sim, |t| t == "Settings", 0).is_some());
+        // The offer is still there, short or whole.
+        assert!(
+            text_at(
+                &mut sim,
+                |t| t == "2" || t == "Set up 2 language servers",
+                0
+            )
+            .is_some(),
+            "the offer is gone at {width}"
+        );
+    }
+    // With room for both, the offer is said whole.
+    {
+        let mut sim = sim_sized(&app, Size::new(2400.0, 800.0));
+        assert!(text_at(&mut sim, |t| t == "Set up 2 language servers", 0).is_some());
+        assert!(text_at(&mut sim, |t| t.starts_with("Oldest TODO did not finish"), 0).is_some());
+    }
+
+    // What was just said, too, before the offer: it was cut to "TODO count
+    // is installed: its commands are in the comma…" beside the offer said
+    // whole.
+    app.forget_failure_of(crate::app::state::FailureOf::PluginRun);
+    let said = "TODO count is installed: its commands are in the command palette, its graphs in Project Graphs";
+    app.status = said.into();
+    for width in [1000.0, 1100.0, 1280.0, 1440.0] {
+        let mut sim = sim_sized(&app, Size::new(width, 800.0));
+        let whole = text_at(&mut sim, |t| t == said, 0).is_some();
+        let offer_whole = text_at(&mut sim, |t| t == "Set up 2 language servers", 0).is_some();
+        assert!(
+            whole || !offer_whole,
+            "what was said is cut beside the offer said whole at {width}"
+        );
+        assert!(
+            text_at(&mut sim, |t| t.starts_with("TODO count is installed"), 0).is_some(),
+            "what was said is gone at {width}"
+        );
+    }
+    {
+        let mut sim = sim_sized(&app, Size::new(2400.0, 800.0));
+        assert!(text_at(&mut sim, |t| t == "Set up 2 language servers", 0).is_some());
+        assert!(text_at(&mut sim, |t| t == said, 0).is_some());
+    }
+    // A short word beside it leaves the offer whole.
+    app.status = "Copied".into();
+    let mut sim = sim_sized(&app, Size::new(1280.0, 800.0));
+    assert!(text_at(&mut sim, |t| t == "Set up 2 language servers", 0).is_some());
+}
+
 /// An Ask answer's failure, raised with Ask put away, is said in the
 /// conversation once Ask is open — and not on the status bar in grey as
 /// well, for as long as the status line kept its words.
@@ -19280,12 +19388,13 @@ fn the_file_trees_scrollbar_shows_beside_the_sidebars_divider() {
     let (away, _) = window_with_pointer(&app, size, None, &[]);
     let over = iced::Point::new(app.window_frame + 120.0, 300.0);
     let (hovered, _) = window_with_pointer(&app, size, Some(over), &[]);
-    // Unseen at rest; seen, well over the chrome, under the pointer.
-    assert!(lightest(&away) < 30, "{}", lightest(&away));
+    // Unseen at rest; seen, well over the chrome, under the pointer. Both
+    // said either way: once under load it failed with one of them alone.
+    let (away, hovered) = (lightest(&away), lightest(&hovered));
+    assert!(away < 30, "at rest {away}, under the pointer {hovered}");
     assert!(
-        lightest(&hovered) > lightest(&away) + 15,
-        "{}",
-        lightest(&hovered)
+        hovered > away + 15,
+        "at rest {away}, under the pointer {hovered}"
     );
 }
 
