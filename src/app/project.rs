@@ -975,6 +975,10 @@ impl App {
         for language in std::mem::take(&mut self.proj.inflight.deferred_lsp) {
             tasks.push(self.ensure_lsp(&language));
         }
+        // An agent's plugin try may have waited for this project: the
+        // watch says only what changes, and a try left for another window
+        // stays as it was.
+        tasks.push(crate::app::plugins::pending_requests());
         Task::batch(tasks)
     }
 

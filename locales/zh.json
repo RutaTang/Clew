@@ -1817,6 +1817,7 @@
  "The overview is written by the AI model you choose in Settings.": "概览由您在设置中选择的 AI 模型撰写。",
  "The overview is written from the project's explanations, which Explain All writes.": "概览依据项目的解释撰写，这些解释由“全部解释”生成。",
  "The plugin found nothing to draw.": "插件没有找到可绘制的内容。",
+ "The plugin gave more than Clew shows on a page; the rest is left out.": "插件给出的内容超过了一页能显示的量，其余部分已省略。",
  "The plugin had nothing to show.": "插件没有可显示的内容。",
  "The port must be between 1 and 65535.": "端口必须在 1 到 65535 之间。",
  "The program printed nothing.": "程序没有输出任何内容。",

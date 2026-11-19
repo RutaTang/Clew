@@ -719,6 +719,12 @@ impl tokio::io::AsyncWrite for Capture {
 /// The most blocks a view may have, and rows in all its lists together.
 pub const MAX_BLOCKS: usize = 500;
 pub const MAX_ROWS: usize = 10_000;
+/// The most text a page holds, in bytes, across all its blocks.
+pub const MAX_VIEW_TEXT: usize = 4 * 1024 * 1024;
+/// The notice ending a page cut short (the window says it in the reader's
+/// language).
+pub const CUT_NOTICE: &str =
+    "The plugin gave more than Clew shows on a page; the rest is left out.";
 const MAX_COLUMNS: usize = 32;
 /// The most nodes and edges a graph may have.
 pub const MAX_NODES: usize = 4000;
@@ -769,56 +775,92 @@ pub fn checked_outcome(outcome: Outcome) -> Result<Outcome, Failure> {
     })
 }
 
-/// A view, checked: [`MAX_BLOCKS`] blocks and [`MAX_ROWS`] rows at most, each
-/// line and text capped, places outside the project dropped.
+/// A view, checked: [`MAX_BLOCKS`] blocks, [`MAX_ROWS`] rows and
+/// [`MAX_VIEW_TEXT`] bytes of text at most, each text capped, places
+/// outside the project dropped. A view cut short ends with a notice saying
+/// so, for the user to know there was more.
 pub fn checked_view(view: View) -> View {
-    let mut rows = MAX_ROWS;
-    let mut take = |n: usize| {
-        let k = n.min(rows);
-        rows -= k;
-        k
+    /// What is left of a page's rows and text.
+    struct Budget {
+        rows: usize,
+        text: usize,
+    }
+    impl Budget {
+        /// Whether a row of `size` bytes still fits; counted if so.
+        fn row(&mut self, size: usize) -> bool {
+            if self.rows == 0 || size > self.text {
+                return false;
+            }
+            self.rows -= 1;
+            self.text -= size;
+            true
+        }
+        /// Whether a block of `size` bytes of text still fits; counted if so.
+        fn text(&mut self, size: usize) -> bool {
+            if size > self.text {
+                return false;
+            }
+            self.text -= size;
+            true
+        }
+    }
+    let mut left = Budget {
+        rows: MAX_ROWS,
+        text: MAX_VIEW_TEXT,
     };
-    let blocks = view
-        .blocks
-        .into_iter()
-        .take(MAX_BLOCKS)
-        .map(|block| match block {
-            Block::Heading(text) => Block::Heading(line(&text)),
-            Block::Text(text) => Block::Text(capped(&text, TEXT_CAP)),
+    let mut cut = view.blocks.len() > MAX_BLOCKS;
+    let mut blocks = Vec::new();
+    for block in view.blocks.into_iter().take(MAX_BLOCKS) {
+        let checked = match block {
+            Block::Heading(words) => Block::Heading(line(&words)),
+            Block::Text(words) => Block::Text(capped(&words, TEXT_CAP)),
             Block::Notice(n) => Block::Notice(Notice {
                 level: n.level,
                 text: capped(&n.text, TEXT_CAP),
             }),
             Block::Items(items) => {
-                let k = take(items.len());
-                Block::Items(
-                    items
-                        .into_iter()
-                        .take(k)
-                        .map(|i| Item {
-                            title: line(&i.title),
-                            detail: i.detail.as_deref().map(line),
-                            at: place(i.at),
-                            tag: i.tag.as_deref().map(line),
-                            level: i.level,
-                        })
-                        .collect(),
-                )
+                let total = items.len();
+                let kept: Vec<Item> = items
+                    .into_iter()
+                    .map(|i| Item {
+                        title: line(&i.title),
+                        detail: i.detail.as_deref().map(line),
+                        at: place(i.at),
+                        tag: i.tag.as_deref().map(line),
+                        level: i.level,
+                    })
+                    .take_while(|i| {
+                        left.row(
+                            i.title.len()
+                                + i.detail.as_ref().map_or(0, String::len)
+                                + i.tag.as_ref().map_or(0, String::len),
+                        )
+                    })
+                    .collect();
+                cut |= kept.len() < total;
+                Block::Items(kept)
             }
             Block::Tree(tree) => {
-                let k = take(tree.len());
-                Block::Tree(
-                    tree.into_iter()
-                        .take(k)
-                        .map(|r| TreeRow {
-                            depth: r.depth.min(32),
-                            title: line(&r.title),
-                            detail: r.detail.as_deref().map(line),
-                            at: place(r.at),
-                            tag: r.tag.as_deref().map(line),
-                        })
-                        .collect(),
-                )
+                let total = tree.len();
+                let kept: Vec<TreeRow> = tree
+                    .into_iter()
+                    .map(|r| TreeRow {
+                        depth: r.depth.min(32),
+                        title: line(&r.title),
+                        detail: r.detail.as_deref().map(line),
+                        at: place(r.at),
+                        tag: r.tag.as_deref().map(line),
+                    })
+                    .take_while(|r| {
+                        left.row(
+                            r.title.len()
+                                + r.detail.as_ref().map_or(0, String::len)
+                                + r.tag.as_ref().map_or(0, String::len),
+                        )
+                    })
+                    .collect();
+                cut |= kept.len() < total;
+                Block::Tree(kept)
             }
             Block::Table(t) => {
                 let columns: Vec<String> = t
@@ -828,40 +870,60 @@ pub fn checked_view(view: View) -> View {
                     .map(|c| line(c))
                     .collect();
                 let width = columns.len();
-                let k = take(t.rows.len());
+                let total = t.rows.len();
+                let kept: Vec<Row> = t
+                    .rows
+                    .into_iter()
+                    .map(|r| Row {
+                        cells: r.cells.iter().take(width.max(1)).map(|c| line(c)).collect(),
+                        at: place(r.at),
+                    })
+                    .take_while(|r| left.row(r.cells.iter().map(String::len).sum()))
+                    .collect();
+                cut |= kept.len() < total;
                 Block::Table(Table {
-                    rows: t
-                        .rows
-                        .into_iter()
-                        .take(k)
-                        .map(|r| Row {
-                            cells: r.cells.iter().take(width.max(1)).map(|c| line(c)).collect(),
-                            at: place(r.at),
-                        })
-                        .collect(),
+                    rows: kept,
                     columns,
                 })
             }
             Block::Facts(facts) => {
-                let k = take(facts.len());
-                Block::Facts(
-                    facts
-                        .into_iter()
-                        .take(k)
-                        .map(|f| Fact {
-                            name: line(&f.name),
-                            value: line(&f.value),
-                        })
-                        .collect(),
-                )
+                let total = facts.len();
+                let kept: Vec<Fact> = facts
+                    .into_iter()
+                    .map(|f| Fact {
+                        name: line(&f.name),
+                        value: line(&f.value),
+                    })
+                    .take_while(|f| left.row(f.name.len() + f.value.len()))
+                    .collect();
+                cut |= kept.len() < total;
+                Block::Facts(kept)
             }
             Block::Code(c) => Block::Code(Code {
                 language: c.language.as_deref().map(|l| capped(l, 32)),
                 text: capped(&c.text, TEXT_CAP),
                 at: place(c.at),
             }),
-        })
-        .collect();
+        };
+        // A block of text spends the same budget as rows do.
+        let size = match &checked {
+            Block::Heading(t) | Block::Text(t) => t.len(),
+            Block::Notice(n) => n.text.len(),
+            Block::Code(c) => c.text.len(),
+            _ => 0,
+        };
+        if !left.text(size) {
+            cut = true;
+            break;
+        }
+        blocks.push(checked);
+    }
+    if cut {
+        blocks.push(Block::Notice(Notice {
+            level: Level::Info,
+            text: CUT_NOTICE.into(),
+        }));
+    }
     View {
         title: line(&view.title),
         blocks,
@@ -1056,6 +1118,48 @@ mod tests {
             panic!()
         };
         assert!(second.is_empty());
+        // Cut short, the page says so.
+        assert!(matches!(
+            view.blocks.last(),
+            Some(Block::Notice(n)) if n.text.contains("the rest is left out")
+        ));
+
+        // Fewer rows, but long ones: the page's text runs out first.
+        let wide = (0..2000)
+            .map(|_| Row {
+                cells: vec!["x".repeat(LINE_CAP); MAX_COLUMNS],
+                at: None,
+            })
+            .collect();
+        let view = checked_view(View {
+            title: "t".into(),
+            blocks: vec![
+                Block::Table(Table {
+                    columns: vec!["c".into(); MAX_COLUMNS],
+                    rows: wide,
+                }),
+                Block::Text("after".into()),
+            ],
+        });
+        let Block::Table(table) = &view.blocks[0] else {
+            panic!()
+        };
+        assert_eq!(table.rows.len(), MAX_VIEW_TEXT / (LINE_CAP * MAX_COLUMNS));
+        let text: usize = table
+            .rows
+            .iter()
+            .flat_map(|r| &r.cells)
+            .map(String::len)
+            .sum();
+        assert!(text <= MAX_VIEW_TEXT);
+        assert!(matches!(view.blocks.last(), Some(Block::Notice(_))));
+
+        // A page within its limits is not marked.
+        let small = checked_view(View {
+            title: "t".into(),
+            blocks: vec![Block::Text("hello".into())],
+        });
+        assert_eq!(small.blocks.len(), 1);
     }
 
     #[test]

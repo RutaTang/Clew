@@ -1817,6 +1817,7 @@
  "The overview is written by the AI model you choose in Settings.": "概要は、設定で選んだ AI モデルが書きます。",
  "The overview is written from the project's explanations, which Explain All writes.": "概要はプロジェクトの解説をもとに書かれます。解説は「すべて解説」が書きます。",
  "The plugin found nothing to draw.": "プラグインは描くものを見つけられませんでした。",
+ "The plugin gave more than Clew shows on a page; the rest is left out.": "プラグインの出力が 1 ページに表示できる量を超えたため、残りは省略しています。",
  "The plugin had nothing to show.": "プラグインに表示する内容はありませんでした。",
  "The port must be between 1 and 65535.": "ポートは 1〜65535 の範囲で指定してください。",
  "The program printed nothing.": "プログラムは何も出力しませんでした。",

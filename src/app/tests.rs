@@ -39087,9 +39087,11 @@ fn the_window_takes_the_plugin_requests_meant_for_it() {
 
     let found = requests::pending(data.path());
     assert_eq!(found.len(), 3);
-    let _ = app.update(Message::Plugin(crate::app::plugins::PluginMsg::Requests(
+    // Each build is read off the window; then the request is answered.
+    let read = app.update(Message::Plugin(crate::app::plugins::PluginMsg::Requests(
         Arc::new(found),
     )));
+    settle(&mut app, read);
 
     let left: Vec<String> = requests::pending(data.path())
         .into_iter()
@@ -39108,6 +39110,33 @@ fn the_window_takes_the_plugin_requests_meant_for_it() {
         crate::ui::active_overlay(&app).is_none(),
         "no install is asked for a build that is gone"
     );
+
+    // A try for a project this window then opens is taken once it is open:
+    // the watch says only what changes, and the try stayed as it was.
+    let later = fixture_project("plugin-requests-later");
+    let waiting = file(try_on(later.display().to_string()));
+    let read = app.update(Message::Plugin(crate::app::plugins::PluginMsg::Requests(
+        Arc::new(requests::pending(data.path())),
+    )));
+    settle(&mut app, read);
+    assert!(
+        requests::pending(data.path())
+            .iter()
+            .any(|(n, _)| *n == waiting),
+        "left while its project is not open here"
+    );
+    scan_synchronously(&mut app, later);
+    let looked = crate::app::plugins::pending_requests();
+    settle(&mut app, looked);
+    match requests::wait(
+        data.path(),
+        &waiting,
+        std::time::Duration::from_secs(5),
+        &stop,
+    ) {
+        Some(Answer::Failed { why }) => assert!(!why.is_empty()),
+        other => panic!("taken once its project is open: {other:?}"),
+    }
 }
 
 /// An agent's install is the user's to allow: the dialog takes no Allow
@@ -39427,6 +39456,51 @@ fn a_plugins_web_link_and_a_remove_are_asked_about_first() {
         !app.plugins.log.contains_key("word-count"),
         "removed on yes"
     );
+}
+
+/// The largest page a plugin may give is drawn quickly enough to scroll:
+/// its rows, at the most, built in well under a frame's worth of time a
+/// few times over. And the notice of a page cut short is Clew's own words.
+#[test]
+fn the_largest_plugin_page_is_drawn_in_time() {
+    use crate::app::plugins::PluginPage;
+    use clew_plugin::runtime::{Block, Item, Location, View};
+    let mut app = scanned_app("plugin-page-large");
+    let items = (0..clew_plugin::runtime::MAX_ROWS + 10)
+        .map(|i| Item {
+            title: format!("TODO number {i} in a long project"),
+            detail: Some("a line of detail under it".into()),
+            at: Some(Location {
+                path: "src/lib.rs".into(),
+                line: (i % 50) as u32,
+            }),
+            tag: Some(format!("{i}")),
+            level: None,
+        })
+        .collect();
+    let view = clew_plugin::runtime::checked_view(View {
+        title: "Everything".into(),
+        blocks: vec![Block::Items(items)],
+    });
+    let page = PluginPage::new("big".into(), "Big".into(), view);
+    assert!(
+        matches!(
+            page.view.blocks.last(),
+            Some(Block::Notice(n)) if n.text == clew_plugin::runtime::CUT_NOTICE
+        ),
+        "the English is the catalog's key"
+    );
+    app.proj.plugin_page = Some(page);
+    let start = std::time::Instant::now();
+    for _ in 0..3 {
+        let _ = crate::ui::plugin_page(app.proj.plugin_page.as_ref().unwrap());
+    }
+    let each = start.elapsed() / 3;
+    eprintln!(
+        "a page of {} rows is built in {each:?}",
+        clew_plugin::runtime::MAX_ROWS
+    );
+    assert!(each < std::time::Duration::from_millis(250), "{each:?}");
 }
 
 /// A plugin's page draws every kind of block in Clew's own widgets, and a

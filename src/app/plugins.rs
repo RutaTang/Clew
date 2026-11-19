@@ -241,8 +241,18 @@ pub struct PluginPage {
 impl PluginPage {
     /// The page for `view`, its Markdown parsed and its code coloured once,
     /// here, rather than at every frame.
-    pub(crate) fn new(id: String, plugin: String, view: View) -> Self {
+    pub(crate) fn new(id: String, plugin: String, mut view: View) -> Self {
         use clew_plugin::runtime::Block;
+        // Clew's own notice that the page was cut, in the reader's language.
+        for block in &mut view.blocks {
+            if let Block::Notice(n) = block
+                && n.text == clew_plugin::runtime::CUT_NOTICE
+            {
+                n.text =
+                    tr!("The plugin gave more than Clew shows on a page; the rest is left out.")
+                        .to_string();
+            }
+        }
         let mut markdown = HashMap::new();
         let mut code = HashMap::new();
         for (i, block) in view.blocks.iter().enumerate() {
@@ -290,6 +300,9 @@ pub struct Plugins {
     pub(crate) failure: Option<String>,
     /// The requests of `clew-server mcp` this window took on.
     pub(crate) handling: HashSet<String>,
+    /// What stops the plugin tools an Ask turn is running (a build of
+    /// minutes), by the turn's stream: set when the turn is stopped.
+    pub(crate) tool_cancels: HashMap<u64, Arc<AtomicBool>>,
     /// Whether plugins can be built here, as Settings → Plugins says.
     pub(crate) building: Building,
     /// The Rust Clew installed is there, used or not.
@@ -467,6 +480,12 @@ pub enum PluginMsg {
         result: Arc<Result<Prepared, String>>,
         origin: Source,
         reply: Reply,
+    },
+    /// A request's build, read off the window for it.
+    RequestRead {
+        nonce: String,
+        request: Arc<clew_plugin::requests::Request>,
+        built: Arc<std::sync::Mutex<Option<Result<clew_plugin::build::Built, String>>>>,
     },
     InstallAllowed(u64),
     InstallDismissed(u64),
@@ -1285,10 +1304,16 @@ impl App {
             }
         };
         self.push_plugin_step(stream, &tool);
+        let cancel = self
+            .plugins
+            .tool_cancels
+            .entry(stream)
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone();
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    clew_plugin::tools::call(&data, &tool, &args, &AtomicBool::new(false))
+                    clew_plugin::tools::call(&data, &tool, &args, &cancel)
                 })
                 .await
                 .unwrap_or_else(|_| {
@@ -1329,7 +1354,7 @@ impl App {
 
     /// Handle the requests found: try, or ask about installing.
     fn on_requests(&mut self, found: &[(String, clew_plugin::requests::Request)]) -> Task<Message> {
-        use clew_plugin::requests::{Answer, Ask};
+        use clew_plugin::requests::Ask;
         let Ok(data) = data() else {
             return Task::none();
         };
@@ -1354,28 +1379,64 @@ impl App {
                 continue;
             }
             self.plugins.handling.insert(nonce.clone());
-            let reply = Reply::Request(nonce.clone());
             let (plugin, sha256) = match &request.ask {
                 Ask::Try { plugin, sha256, .. } | Ask::Install { plugin, sha256 } => {
-                    (plugin, sha256)
+                    (plugin.clone(), sha256.clone())
                 }
             };
-            // The build named by its digest, from Clew's own build folder.
-            let built = clew_plugin::tools::last_build(&data, plugin).and_then(|built| {
-                if clew_plugin::inspect::hex(&built.inspected.sha256) == *sha256 {
-                    Ok(built)
-                } else {
-                    Err("the plugin was built again since; ask again".to_string())
-                }
-            });
-            let built = match built {
-                Ok(built) => built,
-                Err(why) => {
-                    let _ = clew_plugin::requests::answer(&data, nonce, &Answer::Failed { why });
-                    self.plugins.handling.remove(nonce);
-                    continue;
-                }
-            };
+            // The build named by its digest, from Clew's own build folder:
+            // read (a file of up to 32 MB) and checked off the window.
+            let data = data.clone();
+            let nonce = nonce.clone();
+            let request = Arc::new(request.clone());
+            tasks.push(Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        clew_plugin::tools::last_build(&data, &plugin).and_then(|built| {
+                            if clew_plugin::inspect::hex(&built.inspected.sha256) == sha256 {
+                                Ok(built)
+                            } else {
+                                Err("the plugin was built again since; ask again".to_string())
+                            }
+                        })
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("reading the build failed unexpectedly".into()))
+                },
+                move |built| {
+                    Message::Plugin(PluginMsg::RequestRead {
+                        nonce: nonce.clone(),
+                        request: request.clone(),
+                        built: Arc::new(std::sync::Mutex::new(Some(built))),
+                    })
+                },
+            ));
+        }
+        Task::batch(tasks)
+    }
+
+    /// A request's build read: tried, or asked about, as it asked; or
+    /// answered at once with why not.
+    fn on_request_read(
+        &mut self,
+        nonce: String,
+        request: &clew_plugin::requests::Request,
+        built: Result<clew_plugin::build::Built, String>,
+    ) -> Task<Message> {
+        use clew_plugin::requests::{Answer, Ask};
+        let Ok(data) = data() else {
+            return Task::none();
+        };
+        let reply = Reply::Request(nonce.clone());
+        let built = match built {
+            Ok(built) => built,
+            Err(why) => {
+                let _ = clew_plugin::requests::answer(&data, &nonce, &Answer::Failed { why });
+                self.plugins.handling.remove(&nonce);
+                return Task::none();
+            }
+        };
+        {
             match &request.ask {
                 Ask::Try {
                     command,
@@ -1383,16 +1444,14 @@ impl App {
                     line,
                     input,
                     ..
-                } => {
-                    tasks.push(self.try_for_agent(
-                        built,
-                        command.clone(),
-                        file.clone(),
-                        *line,
-                        input.clone(),
-                        reply,
-                    ));
-                }
+                } => self.try_for_agent(
+                    built,
+                    command.clone(),
+                    file.clone(),
+                    *line,
+                    input.clone(),
+                    reply,
+                ),
                 Ask::Install { .. } => {
                     self.offer_install(
                         Prepared {
@@ -1402,10 +1461,10 @@ impl App {
                         Source::Agent(request.agent.clone()),
                         reply,
                     );
+                    Task::none()
                 }
             }
         }
-        Task::batch(tasks)
     }
 
     /// Handle a [`PluginMsg`].
@@ -1695,6 +1754,14 @@ impl App {
                 self.reload_plugins()
             }
             PluginMsg::Requests(found) => self.on_requests(&found),
+            PluginMsg::RequestRead {
+                nonce,
+                request,
+                built,
+            } => match built.lock().ok().and_then(|mut b| b.take()) {
+                Some(built) => self.on_request_read(nonce, &request, built),
+                None => Task::none(),
+            },
             PluginMsg::ToolAnswered {
                 stream,
                 call,
@@ -1933,6 +2000,27 @@ pub(crate) fn requests_subscription(data: PathBuf) -> Subscription<Message> {
 
 /// How often the requests folder is looked at.
 const REQUESTS_EVERY: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// The requests of `clew-server mcp` waiting now, looked at once.
+pub(crate) fn pending_requests() -> Task<Message> {
+    let Ok(data) = data() else {
+        return Task::none();
+    };
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || clew_plugin::requests::pending(&data))
+                .await
+                .unwrap_or_default()
+        },
+        |found| {
+            if found.is_empty() {
+                Message::Noop
+            } else {
+                Message::Plugin(PluginMsg::Requests(Arc::new(found)))
+            }
+        },
+    )
+}
 
 // `Subscription::run_with` hands its data over as it was given: a `&PathBuf`.
 #[allow(clippy::ptr_arg)]

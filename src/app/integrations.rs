@@ -881,6 +881,10 @@ impl App {
     /// waiting for approval (and their cards), its calls running.
     pub(crate) fn drop_turn_tools(&mut self, stream: u64) {
         self.proj.link.agent_tools.remove(&stream);
+        // A plugin build it started stops with it: one runs for minutes.
+        if let Some(cancel) = self.plugins.tool_cancels.remove(&stream) {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.proj.link.mcp_pending.retain(|(s, _), _| *s != stream);
         self.proj
             .link

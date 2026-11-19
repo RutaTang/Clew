@@ -1817,6 +1817,7 @@
  "The overview is written by the AI model you choose in Settings.": "L’aperçu est rédigé par le modèle d’IA que vous choisissez dans les Réglages.",
  "The overview is written from the project's explanations, which Explain All writes.": "L’aperçu est rédigé à partir des explications du projet, que « Tout expliquer » écrit.",
  "The plugin found nothing to draw.": "Le plugin n’a rien trouvé à dessiner.",
+ "The plugin gave more than Clew shows on a page; the rest is left out.": "Le plugin a fourni plus que ce que Clew affiche sur une page ; le reste est omis.",
  "The plugin had nothing to show.": "Le plugin n’avait rien à montrer.",
  "The port must be between 1 and 65535.": "Le port doit être compris entre 1 et 65535.",
  "The program printed nothing.": "Le programme n’a rien affiché.",
