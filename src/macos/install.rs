@@ -326,9 +326,10 @@ fn attach_image_reading(
 }
 
 /// How often a detach is tried before it is forced, how often in all, and
-/// the pause after the first failure (it grows with each).
+/// the pause after the first failure (it grows with each): 8.4 s of pauses
+/// in all, five of the tries forced.
 const DETACH_PLAIN: u32 = 3;
-const DETACH_ATTEMPTS: u32 = 6;
+const DETACH_ATTEMPTS: u32 = 8;
 const DETACH_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Detach the image attached from the file `image` (canonical), if it still
@@ -338,7 +339,11 @@ const DETACH_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
 /// session. It is tried again after a pause, then forced: nothing of clew's
 /// is open on it any more. On a busy machine a forced detach, or the lookup
 /// before it, fails now and then too, so the forcing is tried again as well
-/// — about five seconds in all, off the UI thread.
+/// — for about eight seconds, off the UI thread. Less was too little: with
+/// three forced tries in under three seconds, a busy CI runner left a busy
+/// image attached (`a_busy_update_image_is_detached_anyway`), the disk-image
+/// service failing for seconds on end, as the tests' own `hdiutil` steps
+/// allow for (7.5 s, their `TRIES`).
 ///
 /// The image is found by what it is, each time: the entry `hdiutil info`
 /// lists for the file ([`attached_disk`]), detached as the whole disk that
