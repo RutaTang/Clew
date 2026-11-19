@@ -33,6 +33,14 @@ pub(crate) struct ProjectHost {
     partial: bool,
     /// What the plugin logs and how far it has come, for the window.
     events: std::sync::Mutex<Vec<HostEvent>>,
+    /// How far a run has come, as the plugin said: done in the high half,
+    /// the total in the low; read by the window while it runs.
+    progress: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// `done` of `total`, packed as [`ProjectHost`] keeps it.
+pub(crate) fn unpack_progress(packed: u64) -> (u32, u32) {
+    ((packed >> 32) as u32, packed as u32)
 }
 
 /// What a plugin said while it ran, for the window to show once it is done.
@@ -55,6 +63,7 @@ impl ProjectHost {
             files,
             partial,
             events: Default::default(),
+            progress: Default::default(),
         }
     }
 
@@ -73,7 +82,14 @@ impl ProjectHost {
             files,
             partial,
             events: Default::default(),
+            progress: Default::default(),
         }
+    }
+
+    /// Where the plugin's progress is told, for the window to read.
+    pub(crate) fn with_progress(mut self, progress: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// What the plugin said while it ran.
@@ -269,6 +285,13 @@ impl Host for ProjectHost {
                 commit: b.commit,
             })
             .collect())
+    }
+
+    fn progress(&self, done: u32, total: u32) {
+        self.progress.store(
+            (u64::from(done) << 32) | u64::from(total),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     fn log(&self, level: Level, message: &str) {

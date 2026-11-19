@@ -1,14 +1,14 @@
 # Writing a Clew plugin
 
-A Clew plugin adds something to Clew the user asked for: a command whose result Clew shows as a page, or a graph (later). It is written in Rust against `clew_plugin_sdk`, built by Clew into a WebAssembly component, and runs inside Clew in a sandbox. It can only do what its code imports: read the open project's files, read its git history, and nothing else. It has no network, no other files, no processes and no environment.
+A Clew plugin adds something to Clew the user asked for: a command whose result Clew shows as a page, or a graph Clew shows in Project Graphs. It is written in Rust against `clew_plugin_sdk`, built by Clew into a WebAssembly component, and runs inside Clew in a sandbox. It can only do what its code imports: read the open project's files, read its git history, and nothing else. It has no network, no other files, no processes and no environment.
 
 ## How to make one
 
 1. `plugin_new` with an `id` (`todo-authors`: a-z, 0-9 and -), a `name` the user will see, and a one-line `description`. It writes `plugin.toml` and `src/lib.rs` from a template that builds as it is.
 2. Write the code with `plugin_write` (`src/lib.rs`, more files under `src/`, and `plugin.toml`). `plugin_read` reads a file back; `plugin_files` lists them. Source files are `.rs` files under `src/`, named with ASCII letters, digits, `_`, `-` and `.`, in folders if you like (`src/views/list.rs`); a name or folder may not start with `.`. Nothing else is written or built.
 3. `plugin_build`. It answers with the compiler's messages, or with what the plugin is: its permissions and commands. Fix and build again until it builds clean, warnings included.
-4. `plugin_try` runs a command of the build on the open project and gives you its result, so you can check it does what was asked. Nothing is shown to the user.
-5. `plugin_install` asks the user, in Clew, to install it. They see its name, description, commands and permissions. It answers whether they did.
+4. `plugin_try` runs a command of the build on the open project (`command`), or builds one of its graphs (`graph`), and gives you what came of it, so you can check it does what was asked. Nothing is shown to the user. Clew must be open with the project.
+5. `plugin_install` asks the user, in Clew, to install it. They see its name, description, what it adds (its commands and graphs) and its permissions. It answers whether they did, and where what it added now is.
 
 To change an installed plugin, change its source, build and install again. The user is asked again.
 
@@ -28,12 +28,19 @@ title = "TODOs by author"          # in the command palette; up to 60 characters
 where = "palette"                  # or "code": also in the code's right-click menu
 # input = "Which tag?"             # Clew asks the user for a line of text first
 
+[[graph]]                          # optional: a graph in Project Graphs
+id = "owners"                      # what `graph` is called with
+title = "TODO owners"              # in Project Graphs' list; up to 60 characters
+description = "Who owns the files with TODOs."   # one line on how to read it
+
 [dependencies]                     # crates.io only, by version
 regex = "1"
 ```
 
+In the palette a command is listed as "plugin name: command title" ("TODOs by author" alone when both are the same). A command with `where = "code"` is also in the code's right-click menu, and is told the file, the line clicked and the selection.
+
 - `permissions`: `"read"` if the code calls anything in `project`, `"git"` if it calls anything in `git`. The build checks the code against this list. A permission the code uses but the list leaves out fails the build. One the list has but the code never uses is a warning: take it out, or the user is asked for it for nothing.
-- `translations`: a command's title, and the plugin's name and description, in other languages. Write them in the language the user writes to you in, and add English if that is not English:
+- `translations`: the plugin's name and description, and a command's or a graph's title, in other languages. Write them in the language the user writes to you in, and add English if that is not English:
   ```toml
   [plugin.translations.zh]
   name = "按作者列出 TODO"
@@ -43,6 +50,11 @@ regex = "1"
   id = "list"
   title = "TODOs by author"
   translations = { zh = "按作者列出 TODO" }
+
+  [[graph]]
+  id = "owners"
+  title = "TODO owners"
+  translations = { zh = "TODO 的负责人" }
   ```
 - Do not add `clew-plugin-sdk` to `[dependencies]`; Clew adds it. There is no `Cargo.toml` to write. Clew writes it from this file.
 
@@ -120,7 +132,7 @@ A `line` of 0 opens a file at its top. Paths are from the project root, with `/`
 `host` needs no permission:
 
 - `host::info(msg)`, `host::warn(msg)`, `host::error(msg)`: the plugin's log, which the user can read in Settings → Plugins. `println!` and `eprintln!` go there too.
-- `host::progress(done, total)`: progress in the status bar, for long work.
+- `host::progress(done, total)`: how far a command has come, shown as a percentage in the status bar while it runs.
 - `host::load(key) -> Option<Vec<u8>>`, `host::save(key, &bytes) -> Result<(), String>`: a store of the plugin's own, 1 MB in all, kept between runs.
 
 `project` needs `"read"`:
@@ -138,18 +150,31 @@ A `line` of 0 opens a file at its top. Paths are from the project root, with `/`
 
 ### Graphs
 
-A `[[graph]]` in `plugin.toml` and `fn graph(id: &str) -> Result<Graph, String>` add a graph to Clew's Project graphs. (Clew shows plugin graphs in a later version; a plugin can already provide them.)
+A `[[graph]]` in `plugin.toml` and `fn graph(id: &str) -> Result<Graph, String>` add a graph to Project Graphs, beside Clew's own. Clew builds it when the user opens it there, and again once the project's files have changed. Try it with `plugin_try` and `graph`.
 
 ```rust
-let mut g = Graph::new();
-let a = g.node_at("service", "billing", "src/billing.rs", 1);
-let b = g.node("topic", "invoice.created");
-g.edge(a, b, "publishes");
+fn graph(id: &str) -> Result<Graph, String> {
+    match id {
+        "owners" => {
+            let mut g = Graph::new();
+            let a = g.node_at("service", "billing", "src/billing.rs", 1);
+            let b = g.node("topic", "invoice.created");
+            g.edge(a, b, "publishes");
+            Ok(g)
+        }
+        other => Err(format!("no graph {other}")),
+    }
+}
 ```
+
+- `node(kind, label)` and `node_at(kind, label, path, line)` add a node and return its number; a node with a place opens the code when the user picks it. `kind` groups nodes: Project Graphs lists them by kind, under its name.
+- `edge(from, to, label)` adds an arrow between two nodes by their numbers.
+- A graph shows 4 000 nodes and 20 000 arrows at most; an arrow to a node that is not there is left out.
 
 ## Limits
 
 - A command has 30 seconds and 256 MB of memory. A graph has 60 seconds and 512 MB.
+- A page shows 10 000 rows and 4 MB of text at most; past that it is cut, and says so. A run's log keeps 1000 lines.
 - A crash or a panic stops only that run. The user, and you in `plugin_try`, see the panic message and where it happened.
 - No network, no files outside the project, no processes, no environment variables. `std::fs`, `std::net` and `std::process` fail; use `project` and `git`.
 - Nothing is read from the computer while building either: `include_str!`, `include_bytes!`, `include!`, `env!`, `option_env!` and `#[path]` are refused in the plugin's code. Put text the plugin needs in the code itself, and read the project with `project`.

@@ -161,7 +161,7 @@ fn project_map(
 ) -> clew_protocol::ProjectMap {
     clew_protocol::ProjectMap {
         id,
-        title: decl.title.clone(),
+        title: decl.title_in(crate::i18n::current().code()).to_string(),
         description: decl.description.clone(),
         nodes: graph
             .nodes
@@ -223,6 +223,17 @@ pub(crate) enum Then {
     Remove(String),
     /// Remove the Rust Clew installed for itself.
     RemoveOwnRust,
+}
+
+/// What an agent tries of a build: a command, run as if from where the
+/// user is, or a graph, built.
+pub(crate) struct Trial {
+    /// Empty when a graph is tried.
+    pub(crate) command: String,
+    pub(crate) graph: Option<String>,
+    pub(crate) file: Option<String>,
+    pub(crate) line: Option<u32>,
+    pub(crate) input: Option<String>,
 }
 
 /// A page a plugin's command showed, over the code.
@@ -290,6 +301,8 @@ pub struct Plugins {
     loaded: HashMap<String, Arc<Loaded>>,
     /// The command running, by its title, as the status bar says it.
     pub(crate) running: Option<String>,
+    /// How far it has come, as it says (`plugin_host::unpack_progress`).
+    pub(crate) progress: Option<Arc<std::sync::atomic::AtomicU64>>,
     pub(crate) install: Questions<PendingInstall>,
     pub(crate) prompt: Option<Prompt>,
     /// What is being asked before it is done.
@@ -458,6 +471,8 @@ pub enum PluginMsg {
     /// Run the command with what was typed.
     PromptRun,
     PromptCancel,
+    /// While a command runs: look at how far it has come.
+    ProgressTick,
     /// A run ended.
     Ran {
         stamp: Stamp,
@@ -646,7 +661,7 @@ impl App {
                     .and_then(|m| m.built.clone());
                 maps.push(built.unwrap_or_else(|| clew_protocol::ProjectMap {
                     id,
-                    title: decl.title.clone(),
+                    title: decl.title_in(crate::i18n::current().code()).to_string(),
                     description: decl.description.clone(),
                     nodes: Vec::new(),
                     edges: Vec::new(),
@@ -1037,6 +1052,8 @@ impl App {
         };
         let invocation = self.invocation(input, at);
         let loaded = self.plugins.loaded.get(&plugin.record.fingerprint).cloned();
+        let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        self.plugins.progress = Some(progress.clone());
         self.plugins.running = Some(title.clone());
         self.status = tr!("Running {command}…", command = title.clone());
         let stamp = self.stamp();
@@ -1049,7 +1066,7 @@ impl App {
             async move {
                 let handle = tokio::runtime::Handle::current();
                 tokio::task::spawn_blocking(move || {
-                    let host = Arc::new(host(handle));
+                    let host = Arc::new(host(handle).with_progress(progress));
                     let (loaded, fresh) = match loaded {
                         Some(loaded) => (loaded, false),
                         None => match load(&runtime, &data, &record) {
@@ -1093,7 +1110,14 @@ impl App {
     /// A run's end: show what it gave back.
     fn on_plugin_ran(&mut self, id: String, title: String, ran: Ran) -> Task<Message> {
         self.plugins.running = None;
-        self.settle_status(&[&tr!("Running {command}…", command = title.clone())]);
+        self.plugins.progress = None;
+        // The run's own word on the status bar goes; another's stays.
+        if self
+            .status
+            .starts_with(&tr!("Running {command}…", command = title.clone()))
+        {
+            self.status.clear();
+        }
         for HostEvent::Log(level, line) in ran.log {
             self.plugins.note(&id, level, line);
         }
@@ -1215,15 +1239,19 @@ impl App {
 
     /// Run `built`'s command for an agent trying it: with the permissions
     /// its code needs, read and git at most, on the open project.
-    fn try_for_agent(
+    pub(crate) fn try_for_agent(
         &mut self,
         built: clew_plugin::build::Built,
-        command: String,
-        file: Option<String>,
-        line: Option<u32>,
-        input: Option<String>,
+        trial: Trial,
         reply: Reply,
     ) -> Task<Message> {
+        let Trial {
+            command,
+            graph,
+            file,
+            line,
+            input,
+        } = trial;
         let Some(host) = self.project_host() else {
             return Task::done(Message::Plugin(PluginMsg::Tried {
                 reply,
@@ -1254,14 +1282,23 @@ impl App {
                     // Tried, not installed: a store of its own, emptied
                     // after, and no compiled copy kept.
                     let loaded = runtime.load_trial(&built.bytes, &built.inspected, granted)?;
-                    let outcome = loaded.run(host.clone(), &command, &invocation, Limits::COMMAND);
+                    // A graph is built as Project Graphs builds it; a
+                    // command runs as the palette runs it.
+                    let outcome = match &graph {
+                        Some(graph) => loaded
+                            .graph(host.clone(), graph, Limits::GRAPH)
+                            .map(|g| clew_plugin::tools::describe_graph(&g)),
+                        None => loaded
+                            .run(host.clone(), &command, &invocation, Limits::COMMAND)
+                            .map(|o| clew_plugin::tools::describe_outcome(&o)),
+                    };
                     let log: Vec<String> = host
                         .take_events()
                         .into_iter()
                         .map(|HostEvent::Log(level, line)| format!("[{level:?}] {line}"))
                         .collect();
                     let mut answer = match outcome {
-                        Ok(outcome) => clew_plugin::tools::describe_outcome(&outcome),
+                        Ok(said) => said,
                         Err(Failure::Plugin(why)) => format!("It answered with an error: {why}"),
                         Err(other) => format!("It did not finish: {other}"),
                     };
@@ -1440,16 +1477,20 @@ impl App {
             match &request.ask {
                 Ask::Try {
                     command,
+                    graph,
                     file,
                     line,
                     input,
                     ..
                 } => self.try_for_agent(
                     built,
-                    command.clone(),
-                    file.clone(),
-                    *line,
-                    input.clone(),
+                    Trial {
+                        command: command.clone(),
+                        graph: graph.clone(),
+                        file: file.clone(),
+                        line: *line,
+                        input: input.clone(),
+                    },
                     reply,
                 ),
                 Ask::Install { .. } => {
@@ -1480,6 +1521,23 @@ impl App {
                     line: menu.line,
                 };
                 self.run_plugin(&id, &command, None, Some(at))
+            }
+            PluginMsg::ProgressTick => {
+                let (Some(title), Some(progress)) = (&self.plugins.running, &self.plugins.progress)
+                else {
+                    return Task::none();
+                };
+                let (done, total) = crate::app::plugin_host::unpack_progress(
+                    progress.load(std::sync::atomic::Ordering::Relaxed),
+                );
+                let running = tr!("Running {command}…", command = title.clone());
+                // Only over the run's own word: what the user did meanwhile
+                // stays said.
+                if total > 0 && self.status.starts_with(&running) {
+                    let percent = (u64::from(done.min(total)) * 100 / u64::from(total)) as u32;
+                    self.status = format!("{running} {percent}%");
+                }
+                Task::none()
             }
             PluginMsg::PromptEdit(text) => {
                 if let Some(prompt) = self.plugins.prompt.as_mut() {
@@ -1628,28 +1686,35 @@ impl App {
                     .unwrap_or(id.clone());
                 let answer = match result {
                     Ok(fingerprint) => {
-                        self.status = tr!(
-                            "{plugin} is installed: its commands are in the command palette",
-                            plugin = name.clone()
-                        );
-                        let commands = self
-                            .plugins
-                            .get(&id)
-                            .map(|p| {
-                                p.manifest
-                                    .commands
-                                    .iter()
-                                    .map(|c| format!("\"{}\"", c.title))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            })
-                            .unwrap_or_default();
-                        Ok((
-                            fingerprint,
-                            format!(
-                                "The user installed {name}. Its commands are in Clew's command palette: {commands}. You can run one with run_command."
+                        let manifest = self.plugins.get(&id).map(|p| p.manifest.clone());
+                        let (commands, graphs) = manifest
+                            .as_ref()
+                            .map_or((0, 0), |m| (m.commands.len(), m.graphs.len()));
+                        // Where what it added is, as it added it.
+                        self.status = match (commands > 0, graphs > 0) {
+                            (true, true) => tr!(
+                                "{plugin} is installed: its commands are in the command palette, its graphs in Project Graphs",
+                                plugin = name.clone()
                             ),
-                        ))
+                            (false, true) => tr!(
+                                "{plugin} is installed: its graphs are in Project Graphs",
+                                plugin = name.clone()
+                            ),
+                            _ => tr!(
+                                "{plugin} is installed: its commands are in the command palette",
+                                plugin = name.clone()
+                            ),
+                        };
+                        let mut words = manifest
+                            .map(|m| m.installed_words())
+                            .unwrap_or_else(|| format!("The user installed {name}."));
+                        if commands > 0 {
+                            words.push_str(&format!(
+                                " You can run one with {}, by its palette name.",
+                                crate::app::windowtools::RUN_COMMAND
+                            ));
+                        }
+                        Ok((fingerprint, words))
                     }
                     Err(why) => {
                         self.plugins.failure = Some(tr!(
@@ -1790,10 +1855,21 @@ impl App {
                     clew_plugin::tools::Step::Try {
                         built,
                         command,
+                        graph,
                         file,
                         line,
                         input,
-                    } => self.try_for_agent(*built, command, file, line, input, reply),
+                    } => self.try_for_agent(
+                        *built,
+                        Trial {
+                            command,
+                            graph,
+                            file,
+                            line,
+                            input,
+                        },
+                        reply,
+                    ),
                     clew_plugin::tools::Step::Install { built } => {
                         self.offer_install(
                             Prepared {

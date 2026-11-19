@@ -35,10 +35,13 @@ pub struct ToolDef {
 pub enum Step {
     /// The tool's answer, for the agent.
     Done(Result<String, String>),
-    /// Run the command `command` of `built` on the open project.
+    /// Run the command `command` of `built` on the open project, or build
+    /// its graph `graph`.
     Try {
         built: Box<Built>,
+        /// Empty when a graph is tried.
         command: String,
+        graph: Option<String>,
         file: Option<String>,
         line: Option<u32>,
         input: Option<String>,
@@ -109,17 +112,18 @@ pub fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "plugin_try",
-            description: "Run a command of the plugin's latest build on the open project and see what it gives back, to check it works. Nothing is shown to the user.",
+            description: "Run a command of the plugin's latest build on the open project, or build one of its graphs, and see what it gives back, to check it works. Nothing is shown to the user.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "id": id,
-                    "command": {"type": "string", "description": "The command's id in plugin.toml."},
+                    "command": {"type": "string", "description": "The command's id in plugin.toml. Give this or graph."},
+                    "graph": {"type": "string", "description": "A graph's id in plugin.toml, to build it instead of running a command."},
                     "file": {"type": "string", "description": "A file to run it on, from the project root, as if it were shown."},
                     "line": {"type": "integer", "description": "The caret's line in that file, from 1."},
                     "input": {"type": "string", "description": "What the user typed, for a command that asks for input."}
                 },
-                "required": ["id", "command"]
+                "required": ["id"]
             }),
             read_only: true,
         },
@@ -185,21 +189,37 @@ pub fn call(data: &Path, tool: &str, args: &Value, cancel: &AtomicBool) -> Step 
                 Ok(id) => id,
                 Err(e) => return done(Err(e)),
             };
-            let command = match text(args, "command") {
-                Ok(c) => c.to_string(),
-                Err(e) => return done(Err(e)),
+            let (command, graph) = match (optional(args, "command"), optional(args, "graph")) {
+                (Some(command), None) => (command, None),
+                (None, Some(graph)) => (String::new(), Some(graph)),
+                _ => {
+                    return done(Err(
+                        "give the command to run, or the graph to build: one of them".into(),
+                    ));
+                }
             };
             match last_build(data, id) {
                 Ok(built) => {
-                    if built.inspected.manifest.command(&command).is_none() {
+                    let manifest = &built.inspected.manifest;
+                    let known = match &graph {
+                        Some(g) => manifest.graph(g).is_some(),
+                        None => manifest.command(&command).is_some(),
+                    };
+                    if !known {
+                        let named = graph
+                            .as_deref()
+                            .map_or(format!("command \"{command}\""), |g| {
+                                format!("graph \"{g}\"")
+                            });
                         return done(Err(format!(
-                            "the build of {id} has no command \"{command}\"; it has {}",
+                            "the build of {id} has no {named}; it has {}",
                             commands_list(&built.inspected)
                         )));
                     }
                     Step::Try {
                         built: Box::new(built),
                         command,
+                        graph,
                         file: optional(args, "file"),
                         line: args
                             .get("line")
@@ -337,6 +357,52 @@ fn status(data: &Path) -> String {
     } else {
         lines.join("\n")
     }
+}
+
+/// A graph a try built, as an agent reads it: how big it is, then its
+/// first nodes and arrows, so it can see the graph is what was asked.
+#[cfg(feature = "runtime")]
+pub fn describe_graph(graph: &crate::runtime::Graph) -> String {
+    const SHOWN: usize = 40;
+    let mut said = format!(
+        "It built a graph of {} nodes and {} arrows (after Clew's checks: at most {} nodes, arrows only between nodes there are).",
+        graph.nodes.len(),
+        graph.edges.len(),
+        crate::runtime::MAX_NODES
+    );
+    if graph.nodes.is_empty() {
+        said.push_str(" Project Graphs would show it empty.");
+        return said;
+    }
+    said.push_str("\n\nNodes:");
+    for node in graph.nodes.iter().take(SHOWN) {
+        said.push_str(&format!("\n- [{}] {}", node.kind, node.label));
+        if let Some(at) = &node.at {
+            said.push_str(&format!(" ({}:{})", at.path, at.line));
+        }
+    }
+    if graph.nodes.len() > SHOWN {
+        said.push_str(&format!("\n… and {} more", graph.nodes.len() - SHOWN));
+    }
+    if !graph.edges.is_empty() {
+        said.push_str("\n\nArrows:");
+        let label = |n: u32| {
+            graph
+                .nodes
+                .get(n as usize)
+                .map_or("?", |node| node.label.as_str())
+        };
+        for edge in graph.edges.iter().take(SHOWN) {
+            said.push_str(&format!("\n- {} → {}", label(edge.from), label(edge.to)));
+            if !edge.label.is_empty() {
+                said.push_str(&format!(": {}", edge.label));
+            }
+        }
+        if graph.edges.len() > SHOWN {
+            said.push_str(&format!("\n… and {} more", graph.edges.len() - SHOWN));
+        }
+    }
+    said
 }
 
 /// What a command's outcome is, as an agent reads it in `plugin_try`.
@@ -540,6 +606,36 @@ mod tests {
         ))
         .unwrap_err();
         assert!(unknown.contains("no command \"nope\""), "{unknown}");
+        // A graph is tried by its id, in place of a command.
+        match call(
+            &data,
+            "plugin_try",
+            &json!({"id": "views", "graph": "pair"}),
+            &cancel,
+        ) {
+            Step::Try { command, graph, .. } => {
+                assert_eq!((command.as_str(), graph.as_deref()), ("", Some("pair")));
+            }
+            other => panic!("{other:?}"),
+        }
+        let unknown = answer(call(
+            &data,
+            "plugin_try",
+            &json!({"id": "views", "graph": "nope"}),
+            &cancel,
+        ))
+        .unwrap_err();
+        assert!(
+            unknown.contains("no graph \"nope\"") && unknown.contains("graph pair"),
+            "{unknown}"
+        );
+        for both_or_neither in [
+            json!({"id": "views"}),
+            json!({"id": "views", "command": "say", "graph": "pair"}),
+        ] {
+            let refused = answer(call(&data, "plugin_try", &both_or_neither, &cancel)).unwrap_err();
+            assert!(refused.contains("one of them"), "{refused}");
+        }
         assert!(matches!(
             call(&data, "plugin_install", &json!({"id": "views"}), &cancel),
             Step::Install { .. }

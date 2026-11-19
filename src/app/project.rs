@@ -627,6 +627,7 @@ impl App {
         // one of its lines, perhaps): the run's end is dropped by its
         // stamp, and left set, "still running" refused every command after.
         self.plugins.running = None;
+        self.plugins.progress = None;
         self.plugins.prompt = None;
         // So does the sheet asking about it ("Set Up Project…", Explain All
         // asking first): left up, its Apply acted on whatever project was

@@ -348,6 +348,13 @@ impl App {
         if let Some(data) = clew_core::lsp::store::data_root() {
             subs.push(crate::app::plugins::requests_subscription(data));
         }
+        // While a plugin's command runs: how far it has come, as it says.
+        if self.plugins.running.is_some() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(250))
+                    .map(|_| Message::Plugin(crate::app::plugins::PluginMsg::ProgressTick)),
+            );
+        }
         // No per-frame clock for the graph maps: the canvas requests its own
         // redraws (`canvas::Action::request_redraw`) while its simulation
         // moves and stops when it settles. The `window::frames()`

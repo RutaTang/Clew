@@ -99,6 +99,19 @@ pub struct GraphDecl {
     /// One line on how to read it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// The title in other languages, by code.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub translations: BTreeMap<String, String>,
+}
+
+impl GraphDecl {
+    /// Its title in `lang`, or as written.
+    pub fn title_in(&self, lang: &str) -> &str {
+        self.translations
+            .get(lang)
+            .map(String::as_str)
+            .unwrap_or(&self.title)
+    }
 }
 
 impl Manifest {
@@ -136,6 +149,48 @@ impl Manifest {
     /// The graph `id`, if it adds one.
     pub fn graph(&self, id: &str) -> Option<&GraphDecl> {
         self.graphs.iter().find(|g| g.id == id)
+    }
+
+    /// Command `command`'s name in the command palette, in English, as an
+    /// agent finds it there: "{plugin}: {command}", or the one name when
+    /// both are the same.
+    pub fn palette_title(&self, command: &Command) -> String {
+        if command.title == self.plugin.name {
+            command.title.clone()
+        } else {
+            format!("{}: {}", self.plugin.name, command.title)
+        }
+    }
+
+    /// What an agent is told once the user installed this plugin: where
+    /// each command and graph it adds now is.
+    pub fn installed_words(&self) -> String {
+        let quoted = |names: Vec<String>| {
+            names
+                .into_iter()
+                .map(|n| format!("\"{n}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut said = format!("The user installed {}.", self.plugin.name);
+        if !self.commands.is_empty() {
+            said.push_str(&format!(
+                " Its commands are in Clew's command palette as {}.",
+                quoted(
+                    self.commands
+                        .iter()
+                        .map(|c| self.palette_title(c))
+                        .collect()
+                )
+            ));
+        }
+        if !self.graphs.is_empty() {
+            said.push_str(&format!(
+                " Its graphs are in Project Graphs as {}.",
+                quoted(self.graphs.iter().map(|g| g.title.clone()).collect())
+            ));
+        }
+        said
     }
 
     /// The plugin's name in `lang` (`zh`, `fr`, …), or as written.
@@ -233,6 +288,14 @@ impl Manifest {
         for g in &self.graphs {
             check_id("[[graph]] id", &g.id, 1)?;
             check_line(&format!("[[graph]] \"{}\" title", g.id), &g.title, 60)?;
+            for (lang, title) in &g.translations {
+                check_lang(&format!("[[graph]] \"{}\" translations", g.id), lang)?;
+                check_line(
+                    &format!("[[graph]] \"{}\" translations.{lang}", g.id),
+                    title,
+                    60,
+                )?;
+            }
             if !g.description.is_empty() {
                 check_line(
                     &format!("[[graph]] \"{}\" description", g.id),
@@ -559,5 +622,17 @@ pub(crate) mod tests_support {
             let why = Manifest::parse(&text).unwrap_err();
             assert!(why.contains("the plugin's own id"), "{why}");
         }
+    }
+    #[test]
+    fn an_agent_is_told_where_what_was_installed_is() {
+        let text = "[plugin]\nid = \"todo\"\nname = \"TODOs\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+                    [[command]]\nid = \"list\"\ntitle = \"List TODOs\"\n\n\
+                    [[command]]\nid = \"all\"\ntitle = \"TODOs\"\n\n\
+                    [[graph]]\nid = \"owners\"\ntitle = \"TODO owners\"\n";
+        let m = Manifest::parse(text).unwrap();
+        assert_eq!(
+            m.installed_words(),
+            "The user installed TODOs. Its commands are in Clew's command palette as \"TODOs: List TODOs\", \"TODOs\". Its graphs are in Project Graphs as \"TODO owners\"."
+        );
     }
 }

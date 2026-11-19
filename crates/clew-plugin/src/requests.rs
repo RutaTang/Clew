@@ -33,7 +33,12 @@ pub enum Ask {
     Try {
         plugin: String,
         sha256: String,
+        /// The command to run; empty when a graph is tried.
+        #[serde(default)]
         command: String,
+        /// The graph to build, in place of a command.
+        #[serde(default)]
+        graph: Option<String>,
         root: String,
         #[serde(default)]
         file: Option<String>,

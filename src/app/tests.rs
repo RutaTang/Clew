@@ -39070,6 +39070,7 @@ fn the_window_takes_the_plugin_requests_meant_for_it() {
         plugin: "word-count".into(),
         sha256: "00".into(),
         command: "count".into(),
+        graph: None,
         root,
         file: None,
         line: None,
@@ -39403,6 +39404,27 @@ fn a_plugin_run_does_not_outlive_its_project() {
     assert!(app.plugins.prompt.is_none());
 }
 
+/// A command that says how far it has come is shown so on the status bar,
+/// over its own "Running…" only: what the user did meanwhile stays said.
+#[test]
+fn a_running_command_shows_how_far_it_has_come() {
+    use crate::app::plugins::PluginMsg;
+    let mut app = scanned_app("plugin-progress");
+    let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    app.plugins.running = Some("Count words".into());
+    app.plugins.progress = Some(progress.clone());
+    app.status = "Running Count words…".into();
+    let _ = app.update(Message::Plugin(PluginMsg::ProgressTick));
+    assert_eq!(app.status, "Running Count words…", "nothing said yet");
+    // The plugin's host::progress(3, 12), as the host keeps it.
+    progress.store((3 << 32) | 12, std::sync::atomic::Ordering::Relaxed);
+    let _ = app.update(Message::Plugin(PluginMsg::ProgressTick));
+    assert_eq!(app.status, "Running Count words… 25%");
+    app.status = "Bookmark added".into();
+    let _ = app.update(Message::Plugin(PluginMsg::ProgressTick));
+    assert_eq!(app.status, "Bookmark added");
+}
+
 /// A link on a plugin's page to a web address is shown whole and asked
 /// about before anything opens it: the plugin read the project, and the
 /// address could carry what it read away. A link to a place in the project
@@ -39501,6 +39523,54 @@ fn the_largest_plugin_page_is_drawn_in_time() {
         clew_plugin::runtime::MAX_ROWS
     );
     assert!(each < std::time::Duration::from_millis(250), "{each:?}");
+}
+
+/// An agent tries a build's graph as Project Graphs would build it, and
+/// reads what it built: how big, its nodes with their places, its arrows.
+#[test]
+fn an_agent_tries_a_plugins_graph() {
+    use crate::app::plugins::{PluginMsg, Reply, Trial};
+    let data = clew_core::testutil::TempDir::new("plugin-try-graph");
+    let _env = data_dir_override(data.path());
+    let mut app = scanned_app("plugin-try-graph");
+    let bytes = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/clew-plugin/fixtures/views.wasm"),
+    )
+    .unwrap();
+    let inspected = clew_plugin::inspect(&bytes).unwrap();
+    let built = clew_plugin::build::Built {
+        bytes,
+        inspected,
+        artifact: data.path().join("views.wasm"),
+        warnings: Vec::new(),
+    };
+    let tried = app.try_for_agent(
+        built,
+        Trial {
+            command: String::new(),
+            graph: Some("pair".into()),
+            file: None,
+            line: None,
+            input: None,
+        },
+        Reply::None,
+    );
+    let answer = run_task(tried)
+        .into_iter()
+        .find_map(|m| match m {
+            Message::Plugin(PluginMsg::Tried { answer, .. }) => Some(answer),
+            _ => None,
+        })
+        .expect("the try answers");
+    let said = answer.unwrap();
+    assert!(
+        said.starts_with("It built a graph of 2 nodes and 1 arrows"),
+        "{said}"
+    );
+    assert!(
+        said.contains("(a.rs:1)") && said.contains("a → b"),
+        "{said}"
+    );
 }
 
 /// A plugin's page draws every kind of block in Clew's own widgets, and a

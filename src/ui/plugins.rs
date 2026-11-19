@@ -335,12 +335,12 @@ pub(crate) fn plugin_install_modal(
             )
         })
         .collect();
-    adds.extend(
-        manifest
-            .graphs
-            .iter()
-            .map(|g| tr!("A project graph: {title}", title = g.title.clone())),
-    );
+    adds.extend(manifest.graphs.iter().map(|g| {
+        tr!(
+            "A project graph: {title}",
+            title = g.title_in(lang).to_string()
+        )
+    }));
     let new = pending.new_permissions();
     let mut can: Vec<Element<'_, Message>> = Vec::new();
     for (bit, words) in [
@@ -536,6 +536,7 @@ pub(crate) fn plugin_prompt_modal(prompt: &Prompt) -> Element<'_, Message> {
 /// do, a switch, and Remove; its log's last lines under it.
 fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message> {
     let can = permission_line(plugin.record.granted());
+    let lang = crate::i18n::current().code();
     let commands = plugin
         .manifest
         .commands
@@ -543,6 +544,19 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
         .map(crate::app::plugins::command_title)
         .collect::<Vec<_>>()
         .join(", ");
+    let graphs = plugin
+        .manifest
+        .graphs
+        .iter()
+        .map(|g| g.title_in(lang).to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    // What it adds, where each is: the palette's commands, Project
+    // Graphs' graphs. A plugin of graphs only said "Commands:" and nothing.
+    let adds = [
+        (!commands.is_empty()).then(|| tr!("Commands: {list}", list = commands)),
+        (!graphs.is_empty()).then(|| tr!("Graphs in Project Graphs: {list}", list = graphs)),
+    ];
     let id = plugin.id.clone();
     let mut item = column![
         row![
@@ -557,11 +571,13 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
                 text(plugin.description())
                     .size(ts::BODY)
                     .color(theme::fg_muted()),
-                text(tr!("Commands: {list}", list = commands))
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
-                text(can).size(ts::SMALL).color(theme::dim()),
             ]
+            .extend(
+                adds.into_iter()
+                    .flatten()
+                    .map(|line| text(line).size(ts::SMALL).color(theme::dim()).into()),
+            )
+            .push(text(can).size(ts::SMALL).color(theme::dim()))
             .spacing(3)
             .width(Fill),
             form::switch(

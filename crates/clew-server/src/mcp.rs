@@ -168,6 +168,7 @@ impl CodeTools {
             Step::Try {
                 built,
                 command,
+                graph,
                 file,
                 line,
                 input,
@@ -176,6 +177,7 @@ impl CodeTools {
                     plugin: built.inspected.manifest.plugin.id.clone(),
                     sha256: clew_plugin::inspect::hex(&built.inspected.sha256),
                     command,
+                    graph,
                     root: self.root.to_string_lossy().into_owned(),
                     file,
                     line,
@@ -185,16 +187,7 @@ impl CodeTools {
             ),
             Step::Install { built } => {
                 let manifest = &built.inspected.manifest;
-                installed = format!(
-                    "The user installed {}. Its commands are in Clew's command palette: {}.",
-                    manifest.plugin.name,
-                    manifest
-                        .commands
-                        .iter()
-                        .map(|c| format!("\"{}\"", c.title))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+                installed = manifest.installed_words();
                 (
                     Ask::Install {
                         plugin: manifest.plugin.id.clone(),
