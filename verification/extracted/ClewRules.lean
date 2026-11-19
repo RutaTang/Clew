@@ -208,6 +208,340 @@ def approval.approval_key
       else ok key7
   alloc.vec.Vec.extend_from_slice core.clone.CloneU8 key8 root
 
+/-- [clew_rules::confine::Lexical]
+    Source: 'crates/clew-rules/src/confine.rs', lines 16:0-25:1
+    Visibility: public -/
+@[discriminant isize]
+inductive confine.Lexical where
+| Inside : confine.Lexical
+| Empty : confine.Lexical
+| Absolute : confine.Lexical
+| Traversal : confine.Lexical
+
+/-- [clew_rules::confine::is_parent]:
+    Source: 'crates/clew-rules/src/confine.rs', lines 28:0-33:1 -/
+def confine.is_parent
+  (rel : Slice Std.U8) («from» : Std.Usize) («to» : Std.Usize) :
+  Result Bool
+  := do
+  let i ← «to» - «from»
+  if i != 2#usize
+  then ok false
+  else
+    let i1 ← Slice.index_usize rel «from»
+    if i1 = 46#u8
+    then
+      let i2 ← «from» + 1#usize
+      let i3 ← Slice.index_usize rel i2
+      ok (i3 = 46#u8)
+    else ok false
+
+/-- [clew_rules::confine::has_parent]: loop body 0:
+    Source: 'crates/clew-rules/src/confine.rs', lines 39:4-49:1 -/
+@[rust_loop_body]
+def confine.has_parent_loop.body
+  (rel : Slice Std.U8) (start : Std.Usize) (i : Std.Usize) :
+  Result (ControlFlow (Std.Usize × Std.Usize) Bool)
+  := do
+  let i1 := Slice.len rel
+  if i < i1
+  then
+    let i2 ← Slice.index_usize rel i
+    if i2 = 47#u8
+    then
+      let b ← confine.is_parent rel start i
+      if b
+      then ok (done true)
+      else let start1 ← i + 1#usize
+           ok (cont (start1, start1))
+    else let i3 ← i + 1#usize
+         ok (cont (start, i3))
+  else
+    let i2 := Slice.len rel
+    let b ← confine.is_parent rel start i2
+    ok (done b)
+
+/-- [clew_rules::confine::has_parent]: loop 0:
+    Source: 'crates/clew-rules/src/confine.rs', lines 39:4-49:1 -/
+@[rust_loop]
+def confine.has_parent_loop
+  (rel : Slice Std.U8) (start : Std.Usize) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun (start1, i1) => confine.has_parent_loop.body rel start1 i1)
+    (start, i)
+
+/-- [clew_rules::confine::has_parent]:
+    Source: 'crates/clew-rules/src/confine.rs', lines 36:0-49:1 -/
+@[reducible]
+def confine.has_parent (rel : Slice Std.U8) : Result Bool := do
+  confine.has_parent_loop rel 0#usize 0#usize
+
+/-- [clew_rules::text::is_space_e2]:
+    Source: 'crates/clew-rules/src/text.rs', lines 47:0-53:1 -/
+def text.is_space_e2 (b : Std.U16) (c : Std.U16) : Result Bool := do
+  if b = 128#u16
+  then
+    if c >= 128#u16
+    then
+      if c <= 138#u16
+      then ok true
+      else
+        if c = 168#u16
+        then ok true
+        else if c = 169#u16
+             then ok true
+             else ok (c = 175#u16)
+    else
+      if c = 168#u16
+      then ok true
+      else if c = 169#u16
+           then ok true
+           else ok (c = 175#u16)
+  else if b = 129#u16
+       then ok (c = 159#u16)
+       else ok false
+
+/-- [clew_rules::text::is_space_bytes]:
+    Source: 'crates/clew-rules/src/text.rs', lines 59:0-73:1 -/
+def text.is_space_bytes
+  (a : Std.U16) (b : Std.U16) (c : Std.U16) : Result Bool := do
+  if a = 32#u16
+  then ok true
+  else
+    if a >= 9#u16
+    then
+      if a <= 13#u16
+      then ok true
+      else
+        if a = 194#u16
+        then if b = 133#u16
+             then ok true
+             else ok (b = 160#u16)
+        else
+          if a = 225#u16
+          then if b = 154#u16
+               then ok (c = 128#u16)
+               else ok false
+          else
+            if a = 226#u16
+            then text.is_space_e2 b c
+            else
+              if a = 227#u16
+              then if b = 128#u16
+                   then ok (c = 128#u16)
+                   else ok false
+              else ok false
+    else
+      if a = 194#u16
+      then if b = 133#u16
+           then ok true
+           else ok (b = 160#u16)
+      else
+        if a = 225#u16
+        then if b = 154#u16
+             then ok (c = 128#u16)
+             else ok false
+        else
+          if a = 226#u16
+          then text.is_space_e2 b c
+          else
+            if a = 227#u16
+            then if b = 128#u16
+                 then ok (c = 128#u16)
+                 else ok false
+            else ok false
+
+/-- [clew_rules::text::byte_after]:
+    Source: 'crates/clew-rules/src/text.rs', lines 37:0-43:1 -/
+def text.byte_after
+  (s : Slice Std.U8) (i : Std.Usize) (k : Std.Usize) : Result Std.U16 := do
+  let i1 := Slice.len s
+  if i < i1
+  then
+    let i2 := Slice.len s
+    let i3 ← i2 - i
+    if k < i3
+    then
+      let i4 ← i + k
+      let i5 ← Slice.index_usize s i4
+      ok (UScalar.cast .U16 i5)
+    else ok 256#u16
+  else ok 256#u16
+
+/-- [clew_rules::text::is_space_at]:
+    Source: 'crates/clew-rules/src/text.rs', lines 76:0-82:1 -/
+def text.is_space_at (s : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  let i1 ← text.byte_after s i 0#usize
+  let i2 ← text.byte_after s i 1#usize
+  let i3 ← text.byte_after s i 2#usize
+  text.is_space_bytes i1 i2 i3
+
+/-- [clew_rules::text::char_len]:
+    Source: 'crates/clew-rules/src/text.rs', lines 17:0-27:1 -/
+def text.char_len (b : Std.U8) : Result Std.Usize := do
+  if b < 128#u8
+  then ok 1#usize
+  else
+    if b < 224#u8
+    then ok 2#usize
+    else if b < 240#u8
+         then ok 3#usize
+         else ok 4#usize
+
+/-- [clew_rules::text::next_char]:
+    Source: 'crates/clew-rules/src/text.rs', lines 31:0-34:1 -/
+def text.next_char (s : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
+  let i1 ← Slice.index_usize s i
+  let len ← text.char_len i1
+  let i2 := Slice.len s
+  let i3 ← i2 - i
+  if len > i3
+  then ok (Slice.len s)
+  else i + len
+
+/-- [clew_rules::text::end_of_text]: loop body 0:
+    Source: 'crates/clew-rules/src/text.rs', lines 103:4-109:5 -/
+@[rust_loop_body]
+def text.end_of_text_loop.body
+  (s : Slice Std.U8) (i : Std.Usize) («end» : Std.Usize) :
+  Result (ControlFlow (Std.Usize × Std.Usize) Std.Usize)
+  := do
+  let i1 := Slice.len s
+  if i < i1
+  then
+    let next ← text.next_char s i
+    let b ← text.is_space_at s i
+    if b
+    then ok (cont (next, «end»))
+    else ok (cont (next, next))
+  else ok (done «end»)
+
+/-- [clew_rules::text::end_of_text]: loop 0:
+    Source: 'crates/clew-rules/src/text.rs', lines 103:4-109:5 -/
+@[rust_loop]
+def text.end_of_text_loop
+  (s : Slice Std.U8) (i : Std.Usize) («end» : Std.Usize) :
+  Result Std.Usize
+  := do
+  loop
+    (fun (i1, end1) => text.end_of_text_loop.body s i1 end1)
+    (i, «end»)
+
+/-- [clew_rules::text::end_of_text]:
+    Source: 'crates/clew-rules/src/text.rs', lines 100:0-111:1 -/
+@[reducible]
+def text.end_of_text
+  (s : Slice Std.U8) («from» : Std.Usize) : Result Std.Usize := do
+  text.end_of_text_loop s «from» «from»
+
+/-- [clew_rules::text::skip_space]: loop body 0:
+    Source: 'crates/clew-rules/src/text.rs', lines 88:4-95:1 -/
+@[rust_loop_body]
+def text.skip_space_loop.body
+  (s : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Std.Usize)
+  := do
+  let i1 := Slice.len s
+  if i < i1
+  then
+    let b ← text.is_space_at s i
+    if b
+    then let i2 ← text.next_char s i
+         ok (cont i2)
+    else ok (done i)
+  else ok (done i)
+
+/-- [clew_rules::text::skip_space]: loop 0:
+    Source: 'crates/clew-rules/src/text.rs', lines 88:4-95:1 -/
+@[rust_loop]
+def text.skip_space_loop
+  (s : Slice Std.U8) (i : Std.Usize) : Result Std.Usize := do
+  loop
+    (fun i1 => text.skip_space_loop.body s i1)
+    i
+
+/-- [clew_rules::text::skip_space]:
+    Source: 'crates/clew-rules/src/text.rs', lines 86:0-95:1 -/
+@[reducible]
+def text.skip_space
+  (s : Slice Std.U8) («from» : Std.Usize) : Result Std.Usize := do
+  text.skip_space_loop s «from»
+
+/-- [clew_rules::text::trim_bounds]:
+    Source: 'crates/clew-rules/src/text.rs', lines 115:0-118:1
+    Visibility: public -/
+def text.trim_bounds (s : Slice Std.U8) : Result (Std.Usize × Std.Usize) := do
+  let start ← text.skip_space s 0#usize
+  let i ← text.end_of_text s start
+  ok (start, i)
+
+/-- [clew_rules::confine::check_lexical]:
+    Source: 'crates/clew-rules/src/confine.rs', lines 53:0-66:1
+    Visibility: public -/
+def confine.check_lexical (rel : Slice Std.U8) : Result confine.Lexical := do
+  let (start, «end») ← text.trim_bounds rel
+  if start = «end»
+  then ok confine.Lexical.Empty
+  else
+    let i ← Slice.index_usize rel 0#usize
+    if i = 47#u8
+    then ok confine.Lexical.Absolute
+    else
+      let b ← confine.has_parent rel
+      if b
+      then ok confine.Lexical.Traversal
+      else ok confine.Lexical.Inside
+
+/-- [clew_rules::confine::last_piece]: loop body 0:
+    Source: 'crates/clew-rules/src/confine.rs', lines 72:4-77:5 -/
+@[rust_loop_body]
+def confine.last_piece_loop.body
+  (rel : Slice Std.U8) (start : Std.Usize) (i : Std.Usize) :
+  Result (ControlFlow (Std.Usize × Std.Usize) Std.Usize)
+  := do
+  let i1 := Slice.len rel
+  if i < i1
+  then
+    let i2 ← Slice.index_usize rel i
+    let start1 ← if i2 = 47#u8
+                   then i + 1#usize
+                   else ok start
+    let i3 ← i + 1#usize
+    ok (cont (start1, i3))
+  else ok (done start)
+
+/-- [clew_rules::confine::last_piece]: loop 0:
+    Source: 'crates/clew-rules/src/confine.rs', lines 72:4-77:5 -/
+@[rust_loop]
+def confine.last_piece_loop
+  (rel : Slice Std.U8) (start : Std.Usize) (i : Std.Usize) :
+  Result Std.Usize
+  := do
+  loop
+    (fun (start1, i1) => confine.last_piece_loop.body rel start1 i1)
+    (start, i)
+
+/-- [clew_rules::confine::last_piece]:
+    Source: 'crates/clew-rules/src/confine.rs', lines 69:0-79:1 -/
+@[reducible]
+def confine.last_piece (rel : Slice Std.U8) : Result Std.Usize := do
+  confine.last_piece_loop rel 0#usize 0#usize
+
+/-- [clew_rules::confine::names_a_folder]:
+    Source: 'crates/clew-rules/src/confine.rs', lines 83:0-90:1
+    Visibility: public -/
+def confine.names_a_folder (rel : Slice Std.U8) : Result Bool := do
+  let start ← confine.last_piece rel
+  let i := Slice.len rel
+  let len ← i - start
+  if len = 0#usize
+  then ok true
+  else
+    if len = 1#usize
+    then let i1 ← Slice.index_usize rel start
+         ok (i1 = 46#u8)
+    else ok false
+
 /-- [clew_rules::fingerprint::with_decimal]:
     Source: 'crates/clew-rules/src/fingerprint.rs', lines 12:0-18:1 -/
 def fingerprint.with_decimal

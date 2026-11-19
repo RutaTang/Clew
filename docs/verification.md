@@ -12,13 +12,14 @@ Some of Clew's rules are proved, not only tested. For each rule, `verification/`
 - which programs Clew runs where they are, and which headers it sends;
 - where spoken words go.
 
-For nine of them, the theorems reach the Rust itself: which programs Clew runs where they are, which headers it sends an MCP server, where spoken words go, what each header line of a framed message says, how a command handed to a shell is quoted, which host a recorded ssh key vouches for, which platform names may pick a server binary, the bytes an approval's fingerprint hashes, and the key a remote project's approvals are filed under. Aeneas translates that code to Lean, and the translation is proved equal to the model.
+For ten of them, the theorems reach the Rust itself: which paths a project may name, which programs Clew runs where they are, which headers it sends an MCP server, where spoken words go, what each header line of a framed message says, how a command handed to a shell is quoted, which host a recorded ssh key vouches for, which platform names may pick a server binary, the bytes an approval's fingerprint hashes, and the key a remote project's approvals are filed under. Aeneas translates that code to Lean, and the translation is proved equal to the model.
 
 ## What is proved
 
 **Path confinement** — `check_lexical` in `crates/clew-core/src/confine.rs`, modelled in `verification/Clew/Confine.lean`.
 - A path from outside (a client's request, a tool argument a model wrote) that the check accepts never leads above the project root. This holds when the path is resolved against any root, and at every step of the resolution, not only at the end.
 - The check refuses exactly an empty path, an absolute one, and one with `..` in it, and nothing else.
+- This is proved of the code itself (Aeneas): `clew_rules::confine::check_lexical`, which `check_lexical` asks first, on the UTF-8 bytes of any string. So is the `str::trim` it starts with (`clew_rules::text::trim_bounds`, every Unicode `White_Space` character), and `names_a_folder`, which says whether a path names a folder by its spelling. The standard library's `Path` reading that comes after refuses nothing more on Unix; it is there for Windows, where `\`, a drive or a UNC prefix also lead out.
 
 **Updates never go backwards** — `Version::parse` and `ensure_upgrade` in `crates/clew-core/src/update.rs`, modelled in `Update.lean`.
 - An update is installed only if it is strictly newer than the version running.
@@ -79,7 +80,7 @@ A theorem is about a model. What connects each model to the code:
 - **The model reads like the code.** It takes the same steps in the same order. Every Rust standard-library function it relies on, down to what `char::is_whitespace` means, is spelled out in `Text.lean`. Those are tested through the functions that use them: every `White_Space` code point and its neighbours are among the test inputs.
 - **Test cases.** `lake exe vectors` runs each model on a fixed set of inputs and writes the answers to `verification/vectors/*.json`. The inputs are every short input over an alphabet chosen to reach every branch, plus the edge cases each file names. `cargo test` runs the real Rust functions on the same inputs and requires the same answers. If the code and the model ever disagree, a test fails.
 - **The shell model is checked against a real shell.** Every shell test case is also run through `/bin/sh`, which must read it back as the same words.
-- **For nine rules, the code itself is translated and proved.** `route`, `trusted_by`, the framing `header` step, the MCP header checks, the shell quoting (`shell_command`, `sh_c`, `quote`), the known_hosts check (`plain_host_field`), the platform slug check (`slug_ok`), the fingerprint encodings (`length_prefixed`, `args_part`) and the remote approval key (`scope_label`, `approval_key`) live in `crates/clew-rules`. Charon and Aeneas translate that Rust source into Lean (`verification/extracted/ClewRules.lean`), and `Equal.lean` proves that the translation equals the model for every input. It always returns: no panic, no overflow, no index out of bounds, and every loop ends. And it returns exactly what the model computes. So every theorem about these models holds of the code that runs: for framing, of the decision on each header line, while the loop that reads the lines is modelled and tested. See [The code that runs](#the-code-that-runs).
+- **For ten rules, the code itself is translated and proved.** The path check (`check_lexical`, `names_a_folder`, and the `str::trim` it starts with, `trim_bounds`), `route`, `trusted_by`, the framing `header` step, the MCP header checks, the shell quoting (`shell_command`, `sh_c`, `quote`), the known_hosts check (`plain_host_field`), the platform slug check (`slug_ok`), the fingerprint encodings (`length_prefixed`, `args_part`) and the remote approval key (`scope_label`, `approval_key`) live in `crates/clew-rules`. Charon and Aeneas translate that Rust source into Lean (`verification/extracted/ClewRules.lean`), and `Equal.lean` proves that the translation equals the model for every input. It always returns: no panic, no overflow, no index out of bounds, and every loop ends. And it returns exactly what the model computes. So every theorem about these models holds of the code that runs: for framing, of the decision on each header line, while the loop that reads the lines is modelled and tested. See [The code that runs](#the-code-that-runs).
 - For the other rules the test cases are a large sample of inputs, not all of them.
 
 `verification/check.sh` checks three things:
@@ -101,8 +102,8 @@ CI runs it in the `extracted` job, with Charon and Aeneas from a pinned release 
 - Lean's kernel and its three standard axioms.
 - SHA-256 being collision resistant. The theorems about approvals and server digests are about the bytes that are hashed. That different bytes give different hashes is SHA-256's own promise.
 - What the operating system does with a path. Symlinks and canonicalization are not modelled. `confine` checks the resolved path again at run time, against the canonical root.
-- The test cases. Outside the nine rules proved of the code itself they are a sample of inputs, not all of them.
-- For those nine: that Charon and Aeneas translate the Rust faithfully, and that rustc compiles it as Rust's semantics say. These tools are trusted, as the compiler is. For the rules on strings (headers, shell quoting, known_hosts, slugs, approval keys), also that a Rust `str` holds the UTF-8 encoding of its characters, which Rust guarantees. For what writes text (shell quoting, fingerprint encodings, approval labels and keys), also that what it writes fits in memory: at most four bytes for each byte of a quoted word and three more per word, three for each byte of an escaped label part, and an encoding's or a key's own length. No string Clew holds comes near that.
+- The test cases. Outside the ten rules proved of the code itself they are a sample of inputs, not all of them.
+- For those ten: that Charon and Aeneas translate the Rust faithfully, and that rustc compiles it as Rust's semantics say. These tools are trusted, as the compiler is. For the rules on strings (paths, headers, shell quoting, known_hosts, slugs, approval keys), also that a Rust `str` holds the UTF-8 encoding of its characters, which Rust guarantees. For what writes text (shell quoting, fingerprint encodings, approval labels and keys), also that what it writes fits in memory: at most four bytes for each byte of a quoted word and three more per word, three for each byte of an escaped label part, and an encoding's or a key's own length. No string Clew holds comes near that.
 - A POSIX shell. A login shell that is not one (fish, csh) is outside the model; the scripts Clew runs remotely avoid what those read differently, and a test checks that they do.
 - What ssh's own configuration does. A key's user, host and port are the ones on ssh's command line. What `~/.ssh/config`, `-F` or `-o HostName=` maps them to is not read: a `Host` alias is known by its name.
 
@@ -112,7 +113,7 @@ These are the places where Clew decides who may do what, or what to trust. Each 
 
 | Decision | Code | How it is checked |
 |---|---|---|
-| Which paths a request or a tool may name | `confine::check_lexical` | Proved |
+| Which paths a request or a tool may name | `confine::check_lexical` | Proved of the code itself (Aeneas), `clew_rules::confine::check_lexical`, on the UTF-8 bytes of any string. Windows' own path forms (`\`, drives, UNC) are refused by the standard library's `Path` reading after it, tested |
 | That a resolved path is still inside the project | `confine::confine` | Tested: symlinks and canonical paths are the file system's |
 | Whether an update is newer | `update::ensure_upgrade` | Proved |
 | Where an update may be downloaded from | `updater::validate_dmg_url` | Tested: it rests on the `url` crate's URL parser |
@@ -133,16 +134,16 @@ These are the places where Clew decides who may do what, or what to trust. Each 
 
 ## The code that runs
 
-Most models are written step for step after the code, and test cases tie the two together. For `route`, `trusted_by`, the framing `header` step, the MCP header checks, the shell quoting, the known_hosts check, the slug check, the fingerprint encodings and the approval key there is no copy: the Lean that the theorems reach is the Rust that runs.
+Most models are written step for step after the code, and test cases tie the two together. For the path check, `route`, `trusted_by`, the framing `header` step, the MCP header checks, the shell quoting, the known_hosts check, the slug check, the fingerprint encodings and the approval key there is no copy: the Lean that the theorems reach is the Rust that runs.
 
-- **`crates/clew-rules`** holds these nine decisions. It has no dependencies and only pure code, in the part of Rust that Aeneas translates: `match`, `while`, recursion, slices and optional slices, `Vec`, integers with their overflow checks, and bit masks. The app and `clew-core` call it.
+- **`crates/clew-rules`** holds these ten decisions. It has no dependencies and only pure code, in the part of Rust that Aeneas translates: `match`, `while`, recursion, slices and optional slices, `Vec`, integers with their overflow checks, and bit masks. The app and `clew-core` call it.
 - **`verification/extracted/extract.sh`** runs Charon and Aeneas on that crate and writes `ClewRules.lean`. Nobody edits that file by hand.
 - **`Equal.lean`** proves the translated functions equal the models in `verification/Clew`, as stated in [How the proofs reach the code](#how-the-proofs-reach-the-code).
 - **A project apart.** Aeneas's Lean library needs Mathlib, so this is a Lake project of its own. The proofs in `verification/` still need nothing beyond Lean. Its first build compiles Aeneas and the 1,500 Mathlib modules it uses; CI takes Mathlib from its build cache.
 
-A change to `crates/clew-rules` is caught twice. The translation no longer matches `ClewRules.lean`, and once it is rewritten the proof fails if the new code no longer computes what the model does. Weakening `trusted_by`'s mask from `0o022` to `0o002` fails both, and so does letting a frame of exactly the cap through, a space stand unquoted in a shell word, or a `*` into a known_hosts host name.
+A change to `crates/clew-rules` is caught twice. The translation no longer matches `ClewRules.lean`, and once it is rewritten the proof fails if the new code no longer computes what the model does. Weakening `trusted_by`'s mask from `0o022` to `0o002` fails both, and so does letting a frame of exactly the cap through, a space stand unquoted in a shell word, a `*` into a known_hosts host name, a `..` piece past the path check, or U+3000 out of what `trim_bounds` counts as white space.
 
-The other rules stay as models checked by test cases, because their code leans on what Aeneas does not translate. Aeneas reads a `str` as bytes and does not model iterating over its characters, string formatting, closures passed to iterators, `char` classes, SHA-256 or async I/O. Path confinement rests on the standard library's `Path` components and the OS's own reading of a path; update versions, the ssh argument list and the server digest list each trim Unicode whitespace from strings; framing's reading loop is I/O. A rule moves into `clew-rules` once it can be written without them, as the nine above were.
+The other rules stay as models checked by test cases, because their code leans on what Aeneas does not translate. Aeneas reads a `str` as bytes and does not model iterating over its characters, string formatting, closures passed to iterators, `char` classes, SHA-256 or async I/O. Update versions, the ssh argument list and the server digest list read numbers and fields out of trimmed Unicode text and are not yet written in that part of Rust; framing's reading loop is I/O. A rule moves into `clew-rules` once it can be written without them, as the ten above were.
 
 ## What is not verified, and why
 

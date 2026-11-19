@@ -15,6 +15,11 @@ line, re-checked on the canonical path.
 
 The model is of Unix paths, which is where both ends of Clew run (the
 server on Linux, the app on macOS and Linux).
+
+`check_lexical` and `names_a_folder` run as `clew_rules::confine`, on the
+UTF-8 bytes of the path; that code, as Charon and Aeneas translate it, is
+proved in `verification/extracted/Equal.lean` to decide what `checkLexical`
+and `namesAFolder` here decide, for every string.
 -/
 
 namespace Clew.Confine
