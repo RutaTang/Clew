@@ -579,6 +579,47 @@ pub(crate) fn graph_search_field(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// A plugin's graph that could not be built: why, Try again (the same
+/// build), and See its log (Settings → Plugins, its log and what fixes it).
+/// `last_shown` when the last build that worked is still drawn.
+fn plugin_graph_failure(why: &str, last_shown: bool) -> Element<'static, Message> {
+    use crate::app::plugins::PluginMsg;
+    let said = match last_shown {
+        false => tr!("This graph could not be built: {reason}", reason = why),
+        true => tr!(
+            "This graph could not be built again, so it shows the last build: {reason}",
+            reason = why
+        ),
+    };
+    row![
+        text(said)
+            .size(ts::CAPTION)
+            .color(theme::warning())
+            .width(Fill),
+        button(text(tr!("Try again")).size(ts::SMALL))
+            .style(theme::secondary_button)
+            .padding([3, 10])
+            .on_press(super::heard::said(
+                tr!("Try again"),
+                Message::Plugin(PluginMsg::RebuildGraph),
+            )),
+        // Try again alone left a graph that fails each time with nowhere
+        // to go.
+        button(text(tr!("See its log")).size(ts::SMALL))
+            .style(theme::secondary_button)
+            .padding([3, 10])
+            .on_press(super::heard::said(
+                tr!("See its log"),
+                Message::Settings(SettingsMsg::OpenAt(
+                    crate::app::state::SettingsPage::Plugins,
+                )),
+            )),
+    ]
+    .spacing(8)
+    .align_y(iced::Center)
+    .into()
+}
+
 /// The node-link map: a force-directed canvas plus a legend.
 pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     let overlay = app.proj.overlay;
@@ -603,20 +644,36 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     {
         // A plugin's graph, asked of the plugin: the list says whose.
         tr!("Building this graph…")
-    } else if overlay == Some(crate::Overlay::ProjectMaps)
-        && matches!(
-            app.plugin_map_status(),
-            Some(crate::app::plugins::PluginMapStatus::Failed(_))
-        )
-    {
-        // Why, and Try again, are in the list.
-        tr!("This graph could not be built. Switch to List to see why.")
     } else if app.proj.graph_layout_pending {
         // Laid out off the UI thread (`App::refresh_graph_layout`).
         tr!("Laying out the graph…")
     } else {
         tr!("Nothing to show.")
     };
+    // A plugin's graph that failed says why, and what to do, here: "Switch
+    // to List to see why" sent the reader to another view for both.
+    let failed = match app.plugin_map_status() {
+        Some(crate::app::plugins::PluginMapStatus::Failed(why))
+            if overlay == Some(crate::Overlay::ProjectMaps) =>
+        {
+            Some(why)
+        }
+        _ => None,
+    };
+    let drawn = app
+        .proj
+        .graph_layout
+        .as_ref()
+        .is_some_and(|l| !l.nodes.is_empty());
+    if let Some(why) = &failed
+        && !drawn
+    {
+        return container(plugin_graph_failure(why, false))
+            .padding(8)
+            .width(Fill)
+            .height(Fill)
+            .into();
+    }
     let Some(layout) = &app.proj.graph_layout else {
         return hint(empty_msg);
     };
@@ -655,7 +712,12 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     .height(Fill);
     // Clipped to its frame: a canvas draws where its geometry says, and a
     // map zoomed in drew its edges over the header above it.
-    super::clipped::Clipped::new(map).into()
+    let map = super::clipped::Clipped::new(map);
+    match failed {
+        // The last build that worked, drawn under why the next did not.
+        Some(why) => column![container(plugin_graph_failure(&why, true)).padding(8), map].into(),
+        None => map.into(),
+    }
 }
 
 /// A distinct base colour per graphed language (see `theme::language_hue`).
@@ -3409,7 +3471,7 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     }
     // A plugin's graph: whose it is, and how its build stands.
     if let Some(plugin) = app.shown_graph_plugin() {
-        use crate::app::plugins::{PluginMapStatus, PluginMsg};
+        use crate::app::plugins::PluginMapStatus;
         rows.push(
             text(tr!("Added by the plugin {plugin}", plugin = plugin))
                 .size(ts::CAPTION)
@@ -3421,43 +3483,7 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
                 rows.push(hint(tr!("Building this graph…").into()));
             }
             Some(PluginMapStatus::Failed(why)) => {
-                let said = match map.nodes.is_empty() {
-                    true => tr!("This graph could not be built: {reason}", reason = why),
-                    false => tr!(
-                        "This graph could not be built again, so it shows the last build: {reason}",
-                        reason = why
-                    ),
-                };
-                rows.push(
-                    row![
-                        text(said)
-                            .size(ts::CAPTION)
-                            .color(theme::warning())
-                            .width(Fill),
-                        button(text(tr!("Try again")).size(ts::SMALL))
-                            .style(theme::secondary_button)
-                            .padding([3, 10])
-                            .on_press(super::heard::said(
-                                tr!("Try again"),
-                                Message::Plugin(PluginMsg::RebuildGraph),
-                            )),
-                        // Its log, and what fixes it, are in Settings →
-                        // Plugins: Try again alone left a graph that
-                        // fails each time with nowhere to go.
-                        button(text(tr!("See its log")).size(ts::SMALL))
-                            .style(theme::secondary_button)
-                            .padding([3, 10])
-                            .on_press(super::heard::said(
-                                tr!("See its log"),
-                                Message::Settings(SettingsMsg::OpenAt(
-                                    crate::app::state::SettingsPage::Plugins,
-                                )),
-                            )),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Center)
-                    .into(),
-                );
+                rows.push(plugin_graph_failure(&why, !map.nodes.is_empty()));
             }
             Some(PluginMapStatus::Built) if map.nodes.is_empty() => {
                 rows.push(hint(tr!("The plugin found nothing to draw.").into()));

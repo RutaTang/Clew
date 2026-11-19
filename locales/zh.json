@@ -1906,7 +1906,6 @@
  "This function is not in any commit yet": "这个函数还不在任何提交里",
  "This function through time": "此函数的历次变化",
  "This graph could not be built again, so it shows the last build: {reason}": "此图无法重新生成，因此显示的是上一次的结果：{reason}",
- "This graph could not be built. Switch to List to see why.": "无法生成此图。切换到“列表”查看原因。",
  "This graph could not be built: {reason}": "无法生成此图：{reason}",
  "This host no longer holds your API keys": "此主机不再持有你的 API 密钥",
  "This is how Clew sounds when it reads an answer aloud.": "这就是 Clew 朗读回答时的声音。",

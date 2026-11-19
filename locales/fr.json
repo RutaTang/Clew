@@ -1906,7 +1906,6 @@
  "This function is not in any commit yet": "Cette fonction n’est encore dans aucun commit",
  "This function through time": "Cette fonction au fil du temps",
  "This graph could not be built again, so it shows the last build: {reason}": "Ce graphe n’a pas pu être reconstruit ; il montre donc la dernière version : {reason}",
- "This graph could not be built. Switch to List to see why.": "Ce graphe n’a pas pu être construit. Passez à Liste pour savoir pourquoi.",
  "This graph could not be built: {reason}": "Ce graphe n’a pas pu être construit : {reason}",
  "This host no longer holds your API keys": "Cet hôte ne détient plus vos clés d’API",
  "This is how Clew sounds when it reads an answer aloud.": "Voici la voix de Clew quand il lit une réponse à voix haute.",

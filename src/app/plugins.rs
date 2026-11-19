@@ -1789,8 +1789,11 @@ impl App {
                 let answer = match result {
                     Ok(fingerprint) => {
                         self.forget_failure_of(FailureOf::PluginInstall);
-                        // A new build: whether it works is for its runs to say.
+                        // A new build: whether it works is for its runs to say,
+                        // and its log starts empty. The last build's crash,
+                        // kept under the new version, read as the new one's.
                         self.plugins.failed.remove(&id);
+                        self.plugins.log.remove(&id);
                         let manifest = self.plugins.get(&id).map(|p| p.manifest.clone());
                         let (commands, graphs) = manifest
                             .as_ref()
@@ -1955,6 +1958,11 @@ impl App {
                 };
                 self.proj.ask_spoken = false;
                 let closed = self.close_settings();
+                // Asked from Settings opened by a graph's See its log, Ask
+                // opened under Project Graphs, and nothing showed it had.
+                if self.proj.overlay.is_some() {
+                    let _ = self.update(Message::Graph(crate::GraphMsg::CloseOverlay));
+                }
                 Task::batch([closed, self.update(Message::Ask(AskMsg::Open))])
             }
             PluginMsg::Remove(id) => {

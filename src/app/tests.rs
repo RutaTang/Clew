@@ -39511,11 +39511,15 @@ fn a_failed_plugin_run_stands_with_its_next_steps() {
     app.plugins.installed[0].has_source = true;
 
     // Ask to fix it: the request, with the log, in Ask's field to send.
+    // Reached from a graph's See its log, Project Graphs is put away too:
+    // Ask opened under it, out of sight.
+    app.proj.overlay = Some(Overlay::ProjectMaps);
     let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
         crate::SettingsPage::Plugins,
     )));
     let _ = app.update(Message::Plugin(PluginMsg::AskToFix("word-count".into())));
     assert!(!app.settings.open, "Settings put away for Ask");
+    assert_eq!(app.proj.overlay, None, "Project Graphs put away for Ask");
     assert!(app.ask_view.is_open());
     let asked = &app.proj.ask_input;
     assert!(
@@ -39585,6 +39589,17 @@ fn a_failed_plugin_run_stands_with_its_next_steps() {
         app.plugins.failure.is_none(),
         "read, and gone with Settings"
     );
+
+    // A new build installed: the last build's log goes with it. Kept, its
+    // crash stood under the new version, as if the new one had crashed.
+    assert!(!app.plugins.log_text("word-count").is_empty());
+    let _ = app.update(Message::Plugin(PluginMsg::Installed {
+        id: "word-count".into(),
+        reply: Reply::None,
+        result: Ok("a newer build".into()),
+    }));
+    assert!(app.plugins.log_text("word-count").is_empty());
+    assert!(app.failure_shown().is_none());
 }
 
 /// A link on a plugin's page to a web address is shown whole and asked
@@ -39899,6 +39914,42 @@ fn a_plugins_graph_is_built_when_shown_in_project_graphs() {
         "{:?}",
         targets.iter().map(|t| &t.shown).collect::<Vec<_>>()
     );
+    // The graph view says so too, with both next steps, where the reader
+    // is: it said only to switch to List to see why. Over the last build
+    // that worked, still drawn, and in place of a graph never built.
+    let next_steps = |app: &App| {
+        let (targets, _) = crate::ui::heard::gather_all_of(|| crate::ui::graph_map_view(app));
+        let shown: Vec<String> = targets.iter().map(|t| t.shown.clone()).collect();
+        assert!(
+            targets.iter().any(|t| t.shown == "Try again"
+                && matches!(t.message, Message::Plugin(PluginMsg::RebuildGraph)))
+                && targets.iter().any(|t| t.shown == "See its log"
+                    && matches!(
+                        t.message,
+                        Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::Plugins))
+                    )),
+            "{shown:?}"
+        );
+        let mut view = iced_test::simulator(crate::ui::graph_map_view(app));
+        let said =
+            |view: &mut iced_test::Simulator<'_, Message>, words: &str| view.find(words).is_ok();
+        (
+            said(&mut view, "This graph could not be built: it was stopped"),
+            said(
+                &mut view,
+                "This graph could not be built again, so it shows the last build: it was stopped",
+            ),
+        )
+    };
+    let drawn = app.proj.graph_layout.clone();
+    assert!(
+        drawn.as_ref().is_some_and(|l| !l.nodes.is_empty()),
+        "the last build is drawn"
+    );
+    assert_eq!(next_steps(&app), (false, true));
+    app.proj.graph_layout = None;
+    assert_eq!(next_steps(&app), (true, false));
+    app.proj.graph_layout = drawn;
     let retried = app.update(Message::Plugin(PluginMsg::RebuildGraph));
     assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Building));
     settle(&mut app, retried);

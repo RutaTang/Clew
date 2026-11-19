@@ -1906,7 +1906,6 @@
  "This function is not in any commit yet": "이 함수는 아직 어떤 커밋에도 없습니다",
  "This function through time": "타임 트래블: 이 함수",
  "This graph could not be built again, so it shows the last build: {reason}": "이 그래프를 다시 만들지 못해 마지막 결과를 보여 줍니다: {reason}",
- "This graph could not be built. Switch to List to see why.": "이 그래프를 만들지 못했습니다. 이유는 목록으로 전환하면 볼 수 있습니다.",
  "This graph could not be built: {reason}": "이 그래프를 만들지 못했습니다: {reason}",
  "This host no longer holds your API keys": "이 호스트는 더 이상 API 키를 보관하지 않습니다",
  "This is how Clew sounds when it reads an answer aloud.": "Clew가 답변을 소리 내어 읽을 때 이렇게 들립니다.",

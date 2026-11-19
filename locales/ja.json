@@ -1906,7 +1906,6 @@
  "This function is not in any commit yet": "この関数はまだどのコミットにも含まれていません",
  "This function through time": "この関数を時系列でたどる",
  "This graph could not be built again, so it shows the last build: {reason}": "このグラフを作り直せなかったため、前回の結果を表示しています：{reason}",
- "This graph could not be built. Switch to List to see why.": "このグラフを作成できませんでした。理由は「リスト」で確認できます。",
  "This graph could not be built: {reason}": "このグラフを作成できませんでした：{reason}",
  "This host no longer holds your API keys": "このホストはもう API キーを保持していません",
  "This is how Clew sounds when it reads an answer aloud.": "Clew が回答を読み上げると、このように聞こえます。",
