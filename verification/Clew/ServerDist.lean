@@ -19,7 +19,10 @@ This file models `slug`, `asset_name`, `parse_digest_list`,
 
 * a slug is a non-empty run of `[A-Za-z0-9_-]` — whatever the remote said,
   and whatever Unicode lower-casing does — so it can neither climb out of
-  the cache directory nor change the URL it is put into;
+  the cache directory nor change the URL it is put into (the Rust check,
+  `clew_rules::server_dist::slug_ok`, translated to Lean by Charon and
+  Aeneas, is proved in `verification/extracted/Equal.lean` to decide what
+  the check here decides, on the UTF-8 bytes of any string);
 * an asset name names one platform and one protocol: two different pairs
   never share a name, so never share a pinned digest;
 * with a list embedded, a binary is deployed only if it hashes to the digest

@@ -15,3 +15,4 @@ does not model (the code proved here calls none of them). -/
 #print axioms Clew.Extracted.Shell.sh_c_is_the_model
 #print axioms Clew.Extracted.Shell.quote_is_the_model
 #print axioms Clew.Extracted.KnownHosts.plain_host_field_is_the_model
+#print axioms Clew.Extracted.ServerDist.slug_ok_is_the_model

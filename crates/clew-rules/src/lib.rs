@@ -10,5 +10,6 @@ pub mod framing;
 pub mod headers;
 pub mod known_hosts;
 pub mod location;
+pub mod server_dist;
 pub mod shell;
 pub mod voice;

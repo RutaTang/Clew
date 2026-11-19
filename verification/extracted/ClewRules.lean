@@ -1265,6 +1265,106 @@ def location.trusted_by
     else ok false
   else ok false
 
+/-- [clew_rules::server_dist::is_slug_byte]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 17:0-23:1 -/
+def server_dist.is_slug_byte (b : Std.U8) : Result Bool := do
+  if b >= 48#u8
+  then
+    if b <= 57#u8
+    then ok true
+    else
+      if b >= 65#u8
+      then
+        if b <= 90#u8
+        then ok true
+        else
+          if b >= 97#u8
+          then
+            if b <= 122#u8
+            then ok true
+            else if b = 45#u8
+                 then ok true
+                 else ok (b = 95#u8)
+          else if b = 45#u8
+               then ok true
+               else ok (b = 95#u8)
+      else
+        if b >= 97#u8
+        then
+          if b <= 122#u8
+          then ok true
+          else if b = 45#u8
+               then ok true
+               else ok (b = 95#u8)
+        else if b = 45#u8
+             then ok true
+             else ok (b = 95#u8)
+  else
+    if b >= 65#u8
+    then
+      if b <= 90#u8
+      then ok true
+      else
+        if b >= 97#u8
+        then
+          if b <= 122#u8
+          then ok true
+          else if b = 45#u8
+               then ok true
+               else ok (b = 95#u8)
+        else if b = 45#u8
+             then ok true
+             else ok (b = 95#u8)
+    else
+      if b >= 97#u8
+      then
+        if b <= 122#u8
+        then ok true
+        else if b = 45#u8
+             then ok true
+             else ok (b = 95#u8)
+      else if b = 45#u8
+           then ok true
+           else ok (b = 95#u8)
+
+/-- [clew_rules::server_dist::slug_ok]: loop body 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 31:4-38:1
+    Visibility: public -/
+@[rust_loop_body]
+def server_dist.slug_ok_loop.body
+  (s : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len s
+  if i < i1
+  then
+    let i2 ← Slice.index_usize s i
+    let b ← server_dist.is_slug_byte i2
+    if b
+    then let i3 ← i + 1#usize
+         ok (cont i3)
+    else ok (done false)
+  else ok (done true)
+
+/-- [clew_rules::server_dist::slug_ok]: loop 0:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 31:4-38:1
+    Visibility: public -/
+@[rust_loop]
+def server_dist.slug_ok_loop
+  (s : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => server_dist.slug_ok_loop.body s i1)
+    i
+
+/-- [clew_rules::server_dist::slug_ok]:
+    Source: 'crates/clew-rules/src/server_dist.rs', lines 26:0-38:1
+    Visibility: public -/
+def server_dist.slug_ok (s : Slice Std.U8) : Result Bool := do
+  let b ← core.slice.Slice.is_empty s
+  if b
+  then ok false
+  else server_dist.slug_ok_loop s 0#usize
+
 /-- [clew_rules::shell::is_bare_byte]:
     Source: 'crates/clew-rules/src/shell.rs', lines 15:0-27:1 -/
 def shell.is_bare_byte (b : Std.U8) : Result Bool := do

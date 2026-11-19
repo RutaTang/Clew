@@ -80,11 +80,7 @@ fn base_url() -> String {
 /// (`/`); anything else is rejected.
 pub fn slug(platform: &str) -> Result<String, String> {
     let s = platform.trim().to_lowercase().replace(' ', "-");
-    if s.is_empty()
-        || !s
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if !clew_rules::server_dist::slug_ok(s.as_bytes()) {
         return Err(format!("unsupported remote platform {platform:?}"));
     }
     Ok(s)

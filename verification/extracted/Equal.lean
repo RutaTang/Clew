@@ -3,6 +3,7 @@ import Clew.VoiceRoute
 import Clew.Guards
 import Clew.Framing
 import Clew.Ssh
+import Clew.ServerDist
 
 /-!
 # The code that runs is the model
@@ -2246,5 +2247,100 @@ theorem plain_host_field_is_the_model (f : List Char) (field : Slice Std.U8)
   rw [plain_host_field_ok, h, plainB_utf8]
 
 end KnownHosts
+
+/-! ## Which server binary may be deployed — `clew_rules::server_dist`
+
+`slug` turns the platform a remote's `uname` reports into the name of the
+server binary to deploy there, and that name is joined into a cache path and
+a download URL. It refuses any platform whose lower-cased name `slug_ok`
+says no to. The model in `../Clew/ServerDist.lean` proves that a slug it
+accepts is a plain token, with nothing that climbs out of a directory or
+changes a URL (`slug_has_no_path_or_url_syntax`). Proved here: on the UTF-8
+bytes of any name, the Rust check returns, and decides what the model's
+check decides of the name's characters. -/
+
+namespace ServerDist
+
+open clew_rules.server_dist
+open Shell (bs)
+open Headers (utf8)
+
+/-- What `is_slug_byte` lets a slug hold: ASCII letters and digits, `-`, `_`. -/
+def slugB (n : Nat) : Bool :=
+  (48 ≤ n && n ≤ 57) || (65 ≤ n && n ≤ 90) || (97 ≤ n && n ≤ 122) || n == 45 || n == 95
+
+theorem is_slug_byte_ok (b : Std.U8) : is_slug_byte b = ok (slugB b.val) := by
+  unfold is_slug_byte
+  simp only [ge_iff_le, UScalar.le_equiv, UScalar.eq_equiv, U8.ofNat, UScalar.ofNat,
+    UScalar.ofNatCore_val_eq, Framing.ite_ok, Result.ok.injEq]
+  have hb := Framing.u8_lt b
+  generalize b.val = v at hb ⊢
+  revert v; decide +kernel
+
+/-- What `slug_ok` decides: not empty, every byte a slug byte. -/
+theorem slug_ok_spec (s : Slice Std.U8) :
+    slug_ok s = ok (!s.val.isEmpty && s.val.all fun b => slugB b.val) := by
+  unfold slug_ok
+  by_cases he : s.val = []
+  · simp [core.slice.Slice.is_empty, he]
+  obtain ⟨b, hl, hq⟩ := loop_spec (slug_ok_loop.body s) (fun _ => True)
+    (fun i b => b = (s.val.drop i.val).all fun b => slugB b.val)
+    (fun i => s.val.length - i.val) (by
+      intro i _
+      by_cases hi : i.val < s.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok s i hi
+        rw [List.drop_eq_getElem_cons hi]
+        cases ht : slugB s.val[i.val].val
+        · left
+          exact ⟨false, by simp [slug_ok_loop.body, hi, index_ok s i hi, is_slug_byte_ok, ht],
+            by simp only [List.all_cons, ht, Bool.false_and]⟩
+        · right
+          refine ⟨j, by simp [slug_ok_loop.body, hi, index_ok s i hi, is_slug_byte_ok, ht, hj],
+            trivial, by omega, ?_⟩
+          intro b hb; rw [hb, hjv, List.all_cons, ht, Bool.true_and]
+      · left
+        refine ⟨true, by simp [slug_ok_loop.body, hi], ?_⟩
+        rw [List.drop_eq_nil_of_le (by omega)]; rfl) 0#usize trivial
+  simp only [core.slice.Slice.is_empty, Slice.length, bind_ok]
+  unfold slug_ok_loop
+  rw [hl, hq]
+  simp [he]
+
+theorem slugChar_eq (c : Char) : Clew.ServerDist.slugChar c = slugB c.toNat := by
+  simp only [Clew.ServerDist.slugChar, Clew.Text.isAsciiAlphanumeric, Clew.Text.isAsciiDigit,
+    Shell.char_beq]
+  have h0 : ('0' : Char).val.toNat = 48 := rfl
+  have h9 : ('9' : Char).val.toNat = 57 := rfl
+  have ha : ('a' : Char).val.toNat = 97 := rfl
+  have hz : ('z' : Char).val.toNat = 122 := rfl
+  have hA : ('A' : Char).val.toNat = 65 := rfl
+  have hZ : ('Z' : Char).val.toNat = 90 := rfl
+  have e1 : ('-' : Char).val.toNat = 45 := rfl
+  have e2 : ('_' : Char).val.toNat = 95 := rfl
+  simp only [Char.le_def, UInt32.le_iff_toNat_le, slugB]
+  unfold Char.toNat
+  rw [h0, h9, ha, hz, hA, hZ, e1, e2, Bool.eq_iff_iff]
+  simp only [Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq]
+  omega
+
+theorem slugB_high (n : Nat) (h : 128 ≤ n) : slugB n = false := by
+  simp only [slugB, Bool.or_eq_false_iff, Bool.and_eq_false_iff, decide_eq_false_iff_not,
+    beq_eq_false_iff_ne]
+  omega
+
+/-- **`slug_ok` is the model's check**: on the UTF-8 bytes of any name, it
+returns, and accepts exactly the names `Clew.ServerDist.slug` accepts — not
+empty, every character a `slugChar`. -/
+theorem slug_ok_is_the_model (s : List Char) (bytes : Slice Std.U8) (h : bs bytes.val = utf8 s) :
+    slug_ok bytes = ok (!s.isEmpty && s.all Clew.ServerDist.slugChar) := by
+  rw [slug_ok_spec]
+  have hall : (bytes.val.all fun b => slugB b.val) = (bs bytes.val).all slugB := by
+    simp [bs, List.all_map, Function.comp_def]
+  have hemp : bytes.val.isEmpty = (bs bytes.val).isEmpty := by
+    cases bytes.val <;> rfl
+  rw [hall, hemp, h, Shell.utf8_isEmpty,
+    KnownHosts.utf8_all slugB Clew.ServerDist.slugChar slugChar_eq slugB_high]
+
+end ServerDist
 
 end Clew.Extracted
