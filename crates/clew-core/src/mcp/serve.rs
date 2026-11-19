@@ -9,9 +9,11 @@
 //! this server speaks), `server/discover` says what it speaks, and an
 //! `initialize` selects the legacy handshake for the rest of the process.
 //!
-//! Every tool is read-only — this server answers questions about code — and
-//! says so in its annotations. A call runs on a blocking thread with a stop
-//! flag the client's `notifications/cancelled` raises.
+//! Each tool says in its annotations whether it only reads: the code tools
+//! do, so a client may run them without asking; the plugin tools that write
+//! a plugin's source, build it or ask for an install do not. A call runs on
+//! a blocking thread with a stop flag the client's `notifications/cancelled`
+//! raises.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +33,9 @@ pub struct Tool {
     pub title: Option<String>,
     pub description: String,
     pub input_schema: Value,
+    /// It only reads, changes nothing and reaches nothing outside the
+    /// project: what its annotations tell the client.
+    pub read_only: bool,
 }
 
 /// What a server serves.
@@ -308,17 +313,21 @@ fn unsupported(requested: &str) -> RpcError {
     }
 }
 
-/// A tool as `tools/list` lists it.
+/// A tool as `tools/list` lists it. One that does more than read is
+/// described as the protocol's defaults assume such a tool to be: it may
+/// change things, calling it twice may not do the same, and it may reach
+/// outside (a plugin build downloads crates), so a client asks before it.
 fn tool_json(tool: &Tool) -> Value {
+    let read_only = tool.read_only;
     let mut t = json!({
         "name": tool.name,
         "description": tool.description,
         "inputSchema": tool.input_schema,
         "annotations": {
-            "readOnlyHint": true,
-            "destructiveHint": false,
-            "idempotentHint": true,
-            "openWorldHint": false,
+            "readOnlyHint": read_only,
+            "destructiveHint": !read_only,
+            "idempotentHint": read_only,
+            "openWorldHint": !read_only,
         },
     });
     if let Some(title) = &tool.title {
@@ -333,6 +342,26 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, DuplexStream};
 
+    /// A tool that does more than read is not described as one that only
+    /// reads: a client runs a read-only tool without asking.
+    #[test]
+    fn a_tool_says_whether_it_only_reads() {
+        let tool = |read_only| Tool {
+            name: "t".into(),
+            title: None,
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+            read_only,
+        };
+        let reads = tool_json(&tool(true));
+        assert_eq!(reads["annotations"]["readOnlyHint"], true);
+        assert_eq!(reads["annotations"]["destructiveHint"], false);
+        let writes = tool_json(&tool(false));
+        assert_eq!(writes["annotations"]["readOnlyHint"], false);
+        assert_eq!(writes["annotations"]["destructiveHint"], true);
+        assert_eq!(writes["annotations"]["idempotentHint"], false);
+    }
+
     struct Echo;
 
     impl Host for Echo {
@@ -345,6 +374,7 @@ mod tests {
                 title: Some("Echo".into()),
                 description: "Says it back".into(),
                 input_schema: json!({"type": "object", "properties": {"text": {"type": "string"}}}),
+                read_only: true,
             }]
         }
         fn call(&self, name: &str, args: &Value, stop: &AtomicBool) -> Result<ToolOutput, String> {

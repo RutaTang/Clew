@@ -5,7 +5,7 @@ A Clew plugin adds something to Clew the user asked for: a command whose result 
 ## How to make one
 
 1. `plugin_new` with an `id` (`todo-authors`: a-z, 0-9 and -), a `name` the user will see, and a one-line `description`. It writes `plugin.toml` and `src/lib.rs` from a template that builds as it is.
-2. Write the code with `plugin_write` (`src/lib.rs`, more files under `src/`, and `plugin.toml`). `plugin_read` reads a file back; `plugin_files` lists them.
+2. Write the code with `plugin_write` (`src/lib.rs`, more files under `src/`, and `plugin.toml`). `plugin_read` reads a file back; `plugin_files` lists them. Source files are `.rs` files under `src/`, named with ASCII letters, digits, `_`, `-` and `.`, in folders if you like (`src/views/list.rs`); a name or folder may not start with `.`. Nothing else is written or built.
 3. `plugin_build`. It answers with the compiler's messages, or with what the plugin is: its permissions and commands. Fix and build again until it builds clean, warnings included.
 4. `plugin_try` runs a command of the build on the open project and gives you its result, so you can check it does what was asked. Nothing is shown to the user.
 5. `plugin_install` asks the user, in Clew, to install it. They see its name, description, commands and permissions. It answers whether they did.

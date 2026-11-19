@@ -28,6 +28,8 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 
 (On Linux and Windows, `clew-server` is the one beside `clew` in the folder you unpacked.)
 
+The same server serves Clew's plugin tools, so an agent connected this way can make you a [plugin](plugins.md): it writes and builds the plugin there, and asks Clew to try it or to install it. Clew must be open with the project for a try. An install is asked in Clew's window, naming the agent that asked, and the agent waits until you answer. The code tools only read, and say so to the agent's client; the plugin tools that write, build or ask for an install say they do more, so the client asks you before them.
+
 **Clew as an ACP agent.** `clew-server acp` serves Ask Clew's agent to editors that host ACP agents, answering with the model set in Clew's settings. The MCP servers the editor hands over join its tools, each call asking you first. For example, in Zed's `settings.json`:
 
 ```json

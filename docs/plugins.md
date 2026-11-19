@@ -1,8 +1,8 @@
 # Plugins
 
-**English**
+**English** · [简体中文](plugins.zh-CN.md)
 
-A plugin adds to Clew what you need and Clew does not have: a command that lists your project's TODOs by who wrote them, a graph of which services publish to which topics, a check your team cares about. You don't need to write one yourself. Ask your agent in Ask, or an ACP agent such as Claude Code. It writes the plugin, Clew builds it, and you approve it once.
+A plugin adds to Clew what you need and Clew does not have: a command that lists your project's TODOs by who wrote them, a graph of which services publish to which topics, a check your team cares about. You don't need to write one yourself. Ask your agent in Ask, an ACP agent in the Ask panel, or an agent such as Claude Code connected to Clew over MCP (see [MCP and ACP](mcp-acp.md)). It writes the plugin, Clew builds it, and you approve it once.
 
 A plugin is one file: a WebAssembly component written in Rust. It runs inside Clew at close to native speed, in a sandbox that holds only what you allowed. It cannot open a file outside your project, start a program, reach the network or see your keys, because Clew gives it no way to.
 
@@ -165,13 +165,15 @@ The same tools serve Clew's Ask agent and every ACP agent:
 |---|---|
 | `plugin_guide` | The guide: the API, the manifest, the SDK, examples, and what is refused and why. |
 | `plugin_new` | Make a plugin's source from a template: `plugin.toml` and `src/lib.rs`. |
+| `plugin_files` | List a plugin's source files. |
+| `plugin_read` | Read a file of a plugin's source. |
 | `plugin_write` | Write a file of a plugin's source, confined to its folder (the Ask agent has no other way to write). |
 | `plugin_build` | Build it. Returns compiler messages or what the plugin is. |
 | `plugin_try` | Run one of its commands on the open project, with its declared permissions (read and git only) and nothing approved. The result goes back to the agent, not to the screen. That is safe without asking: the agent can already read the project with its own tools, and a plugin has no network to send anything anywhere. |
 | `plugin_install` | Ask the user, in Clew, to install the build. Waits for the answer. |
 | `plugin_status` | Whether a plugin is installed, at which version, and whether it is on. |
 
-For the Ask agent these are client-side tools (like the window tools), run by the GUI. Its `plugin_install` shows the consent card in the conversation, in place of the approval card. For ACP agents, `clew-server mcp` serves them from the same code. It builds itself, and files `plugin_try` and `plugin_install` as requests in `<data>/plugins/requests/`. The GUI picks those up, runs the try or asks the question, and writes the answer the tool is waiting for. They are the only tools there that are not read-only, and they say so (`readOnlyHint: false`).
+For the Ask agent these are client-side tools (like the window tools), run by the GUI. Its `plugin_install` shows the consent card in the conversation, in place of the approval card. For ACP agents and any other MCP client, `clew-server mcp` serves them from the same code. It builds itself, and files `plugin_try` and `plugin_install` as requests in `<data>/plugins/requests/`, naming the client as `initialize` named it. The GUI watches that folder; one window claims a request by renaming it, runs the try or asks the question, and writes the answer the tool is waiting for. A try is claimed only by a window with that project open on this machine, matched by its canonical path; a try waits 90 seconds, an install 15 minutes, and a request no window answered is withdrawn with a sentence saying why. The tools that write, build or ask for an install say they are not read-only (`readOnlyHint: false`), so a client asks before them; the code tools and the plugin tools that only read say they are.
 
 ### Views
 

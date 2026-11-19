@@ -20,6 +20,7 @@ impl mcp::serve::Host for Shout {
             title: None,
             description: "Upper-cases s".into(),
             input_schema: json!({"type": "object", "properties": {"s": {"type": "string"}}}),
+            read_only: true,
         }]
     }
     fn call(&self, _: &str, args: &Value, _: &AtomicBool) -> Result<mcp::ToolOutput, String> {

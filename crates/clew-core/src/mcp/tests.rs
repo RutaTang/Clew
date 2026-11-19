@@ -441,6 +441,7 @@ impl serve::Host for Tiny {
             title: None,
             description: "uppercases".into(),
             input_schema: json!({"type": "object", "properties": {"s": {"type": "string"}}}),
+            read_only: true,
         }]
     }
     fn call(&self, _: &str, args: &Value, _: &AtomicBool) -> Result<ToolOutput, String> {

@@ -124,13 +124,16 @@ pub fn file(data: &Path, ask: Ask, agent: &str) -> Result<String, String> {
 
 /// The requests waiting, oldest first. Ones older than [`STALE_AFTER`], and
 /// files that are not requests, are removed; so are requests taken and
-/// never answered, once stale.
+/// never answered, and answers never read, once stale.
 pub fn pending(data: &Path) -> Vec<(String, Request)> {
     let dir = requests_dir(data);
     let mut found = Vec::new();
     for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(nonce) = name.strip_suffix(".taken.json") {
+        if let Some(nonce) = name
+            .strip_suffix(".taken.json")
+            .or_else(|| name.strip_suffix(".answer.json"))
+        {
             let stale = !is_nonce(nonce)
                 || entry
                     .metadata()
@@ -181,12 +184,19 @@ pub fn claim(data: &Path, nonce: &str) -> bool {
     .is_ok()
 }
 
-/// Answer the request `nonce`, and take it off the list.
+/// Answer the request `nonce`, and take it off the list. A request its
+/// asker stopped waiting for (it was withdrawn) is not answered: no one
+/// would read it.
 pub fn answer(data: &Path, nonce: &str, answer: &Answer) -> Result<(), String> {
     if !is_nonce(nonce) {
         return Err("not a request".into());
     }
     let dir = requests_dir(data);
+    if !dir.join(format!("{nonce}.taken.json")).exists()
+        && !dir.join(format!("{nonce}.request.json")).exists()
+    {
+        return Ok(());
+    }
     let json = serde_json::to_vec(answer).map_err(|e| e.to_string())?;
     clew_core::statefile::write_atomic(&dir.join(format!("{nonce}.answer.json")), &json)
         .map_err(|e| e.to_string())?;
@@ -319,6 +329,27 @@ mod tests {
             None
         );
         assert!(pending(&data).is_empty());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// The user answered after the agent stopped waiting: nothing is left
+    /// behind for no one to read.
+    #[test]
+    fn a_withdrawn_request_is_not_answered() {
+        let data = temp("withdrawn");
+        let nonce = file(&data, install(), "agent").unwrap();
+        assert!(claim(&data, &nonce));
+        assert_eq!(
+            wait(&data, &nonce, Duration::ZERO, &AtomicBool::new(false)),
+            None
+        );
+        answer(&data, &nonce, &Answer::Declined).unwrap();
+        let left: Vec<_> = std::fs::read_dir(requests_dir(&data))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
         let _ = std::fs::remove_dir_all(&data);
     }
 

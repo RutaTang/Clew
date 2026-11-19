@@ -93,12 +93,14 @@ impl Host for CodeTools {
                 title: None,
                 description: t.description,
                 input_schema: t.parameters,
+                read_only: true,
             })
             .chain(clew_plugin::tools::tool_defs().into_iter().map(|t| Tool {
                 name: t.name.into(),
                 title: None,
                 description: format!("[Clew plugins] {}", t.description),
                 input_schema: t.schema,
+                read_only: t.read_only,
             }))
             .collect()
     }
@@ -304,7 +306,12 @@ mod tests {
         let names: Vec<String> = host.tools().into_iter().map(|t| t.name).collect();
         assert!(names.contains(&"search".to_string()) && names.contains(&"read".to_string()));
         assert!(!names.contains(&"answer".to_string()));
-        // The plugin tools are served beside the code tools.
+        // The plugin tools are served beside the code tools; those that do
+        // more than read say so, for the client to ask before them.
+        let tools = host.tools();
+        let read_only = |name: &str| tools.iter().find(|t| t.name == name).unwrap().read_only;
+        assert!(read_only("search") && read_only("plugin_guide"));
+        assert!(!read_only("plugin_write") && !read_only("plugin_install"));
         for plugin_tool in [
             "plugin_guide",
             "plugin_new",
