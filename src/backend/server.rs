@@ -851,22 +851,10 @@ impl ChangedKeyReport {
 
 /// A command for the user to run, with each argument quoted for a POSIX shell.
 fn shell_command(words: &[&str]) -> String {
-    words
-        .iter()
-        .map(|w| {
-            if !w.is_empty()
-                && w.chars().all(|c| {
-                    c.is_ascii_alphanumeric()
-                        || matches!(c, '-' | '_' | '.' | '/' | '@' | ':' | ',' | '+')
-                })
-            {
-                w.to_string()
-            } else {
-                format!("'{}'", w.replace('\'', "'\\''"))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let words: Vec<Vec<u8>> = words.iter().map(|w| w.as_bytes().to_vec()).collect();
+    // Quoting adds only ASCII between whole characters, so UTF-8 in is UTF-8
+    // out and nothing is ever replaced here.
+    String::from_utf8_lossy(&clew_rules::shell::shell_command(&words)).into_owned()
 }
 
 /// The refusal of a host whose key CHANGED, with what ssh said about it: the
@@ -1201,13 +1189,13 @@ fn remote_layout() -> Result<RemoteLayout, Failure> {
 /// shell is. `script` must not contain a single quote; every caller builds it
 /// from constants and validated tokens, and this refuses rather than escapes.
 fn sh_c(script: &str) -> Result<String, Failure> {
-    if script.contains('\'') {
-        return Err(Failure::new(
+    match clew_rules::shell::sh_c(script.as_bytes()) {
+        Some(command) => Ok(String::from_utf8_lossy(&command).into_owned()),
+        None => Err(Failure::new(
             FailureKind::Other,
             tr!("internal error: a remote script contains a single quote"),
-        ));
+        )),
     }
-    Ok(format!("sh -c '{script}'"))
 }
 
 /// Probe for this build's server, and sweep the other builds' directories
@@ -3658,6 +3646,14 @@ esac"#
                     "sh reading {command:?}"
                 );
             }
+        }
+        // `quote`, which the macOS installer calls, on its vectors too.
+        for (input, want) in cases("quote") {
+            let word = input.as_str().unwrap();
+            let got = String::from_utf8(clew_rules::shell::quote(word.as_bytes())).unwrap();
+            assert_eq!(got, want.as_str().unwrap(), "quote({word:?})");
+            #[cfg(unix)]
+            assert_eq!(read_back(&got), [word], "sh reading {got:?}");
         }
     }
 }

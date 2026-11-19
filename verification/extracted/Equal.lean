@@ -2,6 +2,7 @@ import ClewRules
 import Clew.VoiceRoute
 import Clew.Guards
 import Clew.Framing
+import Clew.Ssh
 
 /-!
 # The code that runs is the model
@@ -1112,5 +1113,528 @@ theorem header_value_ok_is_the_model (v : List Char) (line : Slice Std.U8)
     Function.comp_def, char_any_break]
 
 end Headers
+
+/-! ## Commands handed to a shell — `clew_rules::shell`
+
+`shell_command` quotes the words of a command Clew gives the user to run on a
+remote host, `sh_c` wraps the scripts Clew runs there over ssh, and `quote`
+quotes the paths the macOS installer hands its shell helper. The model in
+`../Clew/Ssh.lean` reads characters, and proves that a POSIX shell reads the
+quoted command back as exactly the words given (`readWords_shellCommand`,
+`readWords_shC`); Rust hands over the UTF-8 bytes of a string. Proved here:
+on the UTF-8 bytes of any words, the Rust functions return, and return the
+UTF-8 bytes of what the model returns. The one condition is room for the
+result in memory (a quoted word takes at most `4 × length + 2` bytes), which
+no string Clew holds comes near. -/
+
+namespace Shell
+
+open clew_rules.shell
+
+/-- What `is_bare_byte` lets stand unquoted: ASCII letters and digits and
+`-_./@:,+`. -/
+def bareB (n : Nat) : Bool :=
+  (48 ≤ n && n ≤ 57) || (65 ≤ n && n ≤ 90) || (97 ≤ n && n ≤ 122) ||
+    n == 45 || n == 95 || n == 46 || n == 47 || n == 64 || n == 58 || n == 44 || n == 43
+
+/-- A byte inside single quotes: a `'` (39) closes, escapes and opens again. -/
+def qB (n : Nat) : List Nat := if n = 39 then [39, 92, 39, 39] else [n]
+
+theorem is_bare_byte_ok (b : Std.U8) : is_bare_byte b = ok (bareB b.val) := by
+  unfold is_bare_byte
+  simp only [ge_iff_le, UScalar.le_equiv, UScalar.eq_equiv, U8.ofNat, UScalar.ofNat,
+    UScalar.ofNatCore_val_eq, Framing.ite_ok, Result.ok.injEq]
+  have hb := Framing.u8_lt b
+  generalize b.val = v at hb ⊢
+  revert v; decide +kernel
+
+theorem all_bare_ok (word : Slice Std.U8) :
+    all_bare word = ok (word.val.all fun b => bareB b.val) := by
+  obtain ⟨b, hl, hq⟩ := loop_spec (all_bare_loop.body word) (fun _ => True)
+    (fun i b => b = (word.val.drop i.val).all fun b => bareB b.val)
+    (fun i => word.val.length - i.val) (by
+      intro i _
+      by_cases hi : i.val < word.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok word i hi
+        rw [List.drop_eq_getElem_cons hi]
+        cases ht : bareB word.val[i.val].val
+        · left
+          exact ⟨false, by simp [all_bare_loop.body, hi, index_ok word i hi, is_bare_byte_ok, ht],
+            by simp only [List.all_cons, ht, Bool.false_and]⟩
+        · right
+          refine ⟨j, by simp [all_bare_loop.body, hi, index_ok word i hi, is_bare_byte_ok, ht, hj],
+            trivial, by omega, ?_⟩
+          intro b hb; rw [hb, hjv, List.all_cons, ht, Bool.true_and]
+      · left
+        refine ⟨true, by simp [all_bare_loop.body, hi], ?_⟩
+        rw [List.drop_eq_nil_of_le (by omega)]; rfl) 0#usize trivial
+  unfold all_bare all_bare_loop
+  rw [hl, hq]; simp
+
+theorem has_quote_ok (script : Slice Std.U8) :
+    has_quote script = ok (script.val.any fun b => b.val == 39) := by
+  obtain ⟨b, hl, hq⟩ := loop_spec (has_quote_loop.body script) (fun _ => True)
+    (fun i b => b = (script.val.drop i.val).any fun b => b.val == 39)
+    (fun i => script.val.length - i.val) (by
+      intro i _
+      by_cases hi : i.val < script.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok script i hi
+        rw [List.drop_eq_getElem_cons hi]
+        by_cases hb : script.val[i.val].val = 39
+        · left
+          refine ⟨true, ?_, by rw [List.any_cons]; simp [hb]⟩
+          simp [has_quote_loop.body, hi, index_ok script i hi, UScalar.eq_equiv, U8.ofNat,
+            UScalar.ofNat, UScalar.ofNatCore_val_eq, hb]
+        · right
+          refine ⟨j, by simp [has_quote_loop.body, hi, index_ok script i hi, hj, UScalar.eq_equiv,
+            U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq, hb], trivial, by omega, ?_⟩
+          intro b hb'
+          rw [hb', hjv, List.any_cons]; simp [hb]
+      · left
+        refine ⟨false, by simp [has_quote_loop.body, hi], ?_⟩
+        rw [List.drop_eq_nil_of_le (by omega)]; rfl) 0#usize trivial
+  unfold has_quote has_quote_loop
+  rw [hl, hq]; simp
+
+theorem push_ok {α : Type} (v : alloc.vec.Vec α) (x : α) (h : v.val.length < Usize.max) :
+    ∃ v', alloc.vec.Vec.push v x = ok v' ∧ v'.val = v.val ++ [x] :=
+  ok_of_spec (alloc.vec.Vec.push_spec v x h)
+
+theorem extend_ok (v : alloc.vec.Vec Std.U8) (s : Slice Std.U8)
+    (h : v.val.length + s.val.length ≤ Usize.max) :
+    ∃ v', alloc.vec.Vec.extend_from_slice core.clone.CloneU8 v s = ok v' ∧ v'.val = v.val ++ s.val := by
+  unfold alloc.vec.Vec.extend_from_slice
+  split
+  · obtain ⟨l, hl, hv, _⟩ := ok_of_spec (List.clone_spec (clone := core.clone.CloneU8.clone)
+      (l := s.val) (by intro x _; rfl))
+    rw [hl, bind_tc_ok]; exact ⟨_, rfl, by simp [hv]⟩
+  · exfalso; simp_all
+
+theorem to_vec_ok (s : Slice Std.U8) :
+    ∃ v, alloc.slice.Slice.to_vec core.clone.CloneU8 s = ok v ∧ v.val = s.val := by
+  obtain ⟨v, hv, he⟩ := ok_of_spec (alloc.slice.Slice.to_vec_spec core.clone.CloneU8 s
+    (by intro x _; rfl))
+  exact ⟨v, hv, by rw [he]; rfl⟩
+
+
+/-- The numbers of a list of bytes. -/
+def bs (l : List Std.U8) : List Nat := l.map (·.val)
+
+theorem flatMap_qB_length (ns : List Nat) : (ns.flatMap qB).length ≤ 4 * ns.length := by
+  induction ns with
+  | nil => simp
+  | cons n ns ih =>
+    rw [List.flatMap_cons, List.length_append, List.length_cons]
+    have : (qB n).length ≤ 4 := by unfold qB; split <;> simp
+    omega
+
+theorem bs_take_succ (l : List Std.U8) (i : Nat) (h : i < l.length) :
+    bs (l.take (i + 1)) = bs (l.take i) ++ [l[i].val] := by
+  rw [List.take_add_one, List.getElem?_eq_getElem h]
+  simp only [bs, Option.toList_some, List.map_append, List.map_cons, List.map_nil]
+
+theorem quote_loop_ok (word : Slice Std.U8) (out : alloc.vec.Vec Std.U8)
+    (hout : bs out.val = [39]) (room : 4 * word.val.length + 2 ≤ Usize.max) :
+    ∃ r, quote_loop word out 0#usize = ok r ∧ bs r.val = 39 :: (bs word.val).flatMap qB := by
+  obtain ⟨r, hl, hq⟩ := loop_spec (fun (o, i) => quote_loop.body word o i)
+    (fun p => p.2.val ≤ word.val.length ∧
+      bs p.1.val = 39 :: (bs (word.val.take p.2.val)).flatMap qB)
+    (fun _ r => bs r.val = 39 :: (bs word.val).flatMap qB)
+    (fun p => word.val.length - p.2.val) (by
+      rintro ⟨o, i⟩ ⟨hle, ho⟩
+      have hlen : o.val.length ≤ 1 + 4 * i.val := by
+        have h1 := congrArg List.length ho
+        have h2 := flatMap_qB_length (bs (word.val.take i.val))
+        simp only [bs, List.length_map, List.length_cons, List.length_take] at h1 h2
+        omega
+      by_cases hi : i.val < word.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok word i hi
+        right
+        by_cases hb : word.val[i.val].val = 39
+        · have hb' : word.val[i.val] = 39#u8 := by
+            rw [UScalar.eq_equiv]; simp [hb, U8.ofNat, UScalar.ofNat, UScalar.ofNatCore_val_eq]
+          obtain ⟨o1, h1, e1⟩ := push_ok o 39#u8 (by omega)
+          obtain ⟨o2, h2, e2⟩ := push_ok o1 92#u8 (by rw [e1]; simp; omega)
+          obtain ⟨o3, h3, e3⟩ := push_ok o2 39#u8 (by rw [e2, e1]; simp; omega)
+          obtain ⟨o4, h4, e4⟩ := push_ok o3 39#u8 (by rw [e3, e2, e1]; simp; omega)
+          refine ⟨(o4, j), ?_, ⟨show j.val ≤ _ by omega, ?_⟩,
+            show word.val.length - j.val < word.val.length - i.val by omega, fun _ h => h⟩
+          · simp [quote_loop.body, hi, index_ok word i hi, hb', h1, h2, h3, h4, hj]
+          · rw [hjv, bs_take_succ _ _ hi, List.flatMap_append, e4, e3, e2, e1]
+            simp only [bs, List.map_append] at ho ⊢
+            rw [ho]; simp [qB, hb]
+        · obtain ⟨o1, h1, e1⟩ := push_ok o word.val[i.val] (by omega)
+          refine ⟨(o1, j), ?_, ⟨show j.val ≤ _ by omega, ?_⟩,
+            show word.val.length - j.val < word.val.length - i.val by omega, fun _ h => h⟩
+          · simp [quote_loop.body, hi, index_ok word i hi, h1, hj, UScalar.eq_equiv, U8.ofNat,
+              UScalar.ofNat, UScalar.ofNatCore_val_eq, hb]
+          · rw [hjv, bs_take_succ _ _ hi, List.flatMap_append, e1]
+            simp only [bs, List.map_append] at ho ⊢
+            rw [ho]; simp [qB, hb]
+      · left
+        refine ⟨o, by simp [quote_loop.body, hi], ?_⟩
+        simpa [List.take_of_length_le (show word.val.length ≤ i.val by omega)] using ho)
+    (out, 0#usize) ⟨by simp, show bs out.val = _ by rw [hout]; simp [bs]⟩
+  exact ⟨r, hl, hq⟩
+
+theorem quote_ok (word : Slice Std.U8) (room : 4 * word.val.length + 2 ≤ Usize.max) :
+    ∃ v, quote word = ok v ∧ bs v.val = 39 :: ((bs word.val).flatMap qB ++ [39]) := by
+  obtain ⟨o, h0, e0⟩ := push_ok (alloc.vec.Vec.new Std.U8) 39#u8 (by simp; omega)
+  obtain ⟨r, hr, er⟩ := quote_loop_ok word o (by rw [e0]; rfl) room
+  have hlen : r.val.length ≤ 1 + 4 * word.val.length := by
+    have h1 := congrArg List.length er
+    have h2 := flatMap_qB_length (bs word.val)
+    simp only [bs, List.length_map, List.length_cons] at h1 h2
+    omega
+  obtain ⟨v, hv, ev⟩ := push_ok r 39#u8 (by omega)
+  refine ⟨v, by simp [quote, h0, hr, hv], ?_⟩
+  rw [ev]
+  simp only [bs, List.map_append] at er ⊢
+  rw [er]; rfl
+
+/-- `shell_word` on bytes: bare when not empty and every byte may be. -/
+def wordB (ns : List Nat) : List Nat :=
+  if !ns.isEmpty && ns.all bareB then ns else 39 :: (ns.flatMap qB ++ [39])
+
+theorem wordB_length (ns : List Nat) : (wordB ns).length ≤ 4 * ns.length + 2 := by
+  have := flatMap_qB_length ns
+  unfold wordB; split
+  · omega
+  · simp only [List.length_cons, List.length_append, List.length_nil]; omega
+
+theorem shell_word_ok (word : Slice Std.U8) (room : 4 * word.val.length + 2 ≤ Usize.max) :
+    ∃ v, shell_word word = ok v ∧ bs v.val = wordB (bs word.val) := by
+  obtain ⟨q, hq, eq⟩ := quote_ok word room
+  unfold shell_word
+  by_cases he : word.val = []
+  · refine ⟨q, by simp [core.slice.Slice.is_empty, he, hq], ?_⟩
+    rw [eq]; simp [wordB, he, bs]
+  · cases hb : word.val.all fun b => bareB b.val
+    · refine ⟨q, by simp [core.slice.Slice.is_empty, he, all_bare_ok, hb, hq], ?_⟩
+      rw [eq]; simp [wordB, bs, List.all_map, Function.comp_def, hb]
+    · obtain ⟨v, hv, ev⟩ := to_vec_ok word
+      refine ⟨v, by simp [core.slice.Slice.is_empty, he, all_bare_ok, hb, hv], ?_⟩
+      rw [ev]; simp [wordB, bs, List.all_map, Function.comp_def, hb, he]
+
+theorem with_word_ok (out : alloc.vec.Vec Std.U8) (first : Bool) (s : Slice Std.U8)
+    (h : out.val.length + 1 + s.val.length ≤ Usize.max) :
+    ∃ v, with_word out first s = ok v ∧
+      v.val = out.val ++ ((if first then [] else [32#u8]) ++ s.val) := by
+  cases first
+  · obtain ⟨o, ho, eo⟩ := push_ok out 32#u8 (by omega)
+    obtain ⟨v, hv, ev⟩ := extend_ok o s (by rw [eo]; simp; omega)
+    exact ⟨v, by simp [with_word, ho, hv], by rw [ev, eo]; simp⟩
+  · obtain ⟨v, hv, ev⟩ := extend_ok out s (by omega)
+    exact ⟨v, by simp [with_word, hv], by rw [ev]; simp⟩
+
+/-- `shell_command` on bytes: the words, one space between them. -/
+def joinB : List (List Nat) → List Nat
+  | [] => []
+  | [w] => w
+  | w :: ws => w ++ 32 :: joinB ws
+
+theorem joinB_snoc (xs : List (List Nat)) (y : List Nat) :
+    joinB (xs ++ [y]) = if xs = [] then y else joinB xs ++ 32 :: y := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih =>
+    cases xs with
+    | nil => rfl
+    | cons x' xs' =>
+      simp only [List.cons_append, joinB] at ih ⊢
+      rw [ih]; simp
+
+theorem deref_val {α : Type} (v : alloc.vec.Vec α) : (alloc.vec.Vec.deref v).val = v.val := by
+  simp [alloc.vec.Vec.deref]
+
+/-- The most bytes one word takes in the command: quoted, and a space. -/
+def wordRoom (v : alloc.vec.Vec Std.U8) : Nat := 4 * v.val.length + 3
+
+/-- One word of the command, as `shell_word` writes it. -/
+def wordBytes (v : alloc.vec.Vec Std.U8) : List Nat := wordB (bs v.val)
+
+theorem joinB_room (vs : List (alloc.vec.Vec Std.U8)) :
+    (joinB (vs.map wordBytes)).length ≤ (vs.map wordRoom).sum := by
+  induction vs with
+  | nil => simp [joinB]
+  | cons v vs ih =>
+    have hw : (wordBytes v).length + 1 ≤ wordRoom v := by
+      have := wordB_length (bs v.val)
+      simp only [wordBytes, wordRoom, bs, List.length_map] at this ⊢; omega
+    cases vs with
+    | nil => simp [joinB]; omega
+    | cons v' vs' =>
+      simp only [List.map_cons, joinB, List.length_append, List.length_cons, List.sum_cons] at ih ⊢
+      omega
+
+theorem shell_command_ok (words : Slice (alloc.vec.Vec Std.U8))
+    (room : (words.val.map wordRoom).sum ≤ Usize.max) :
+    ∃ v, shell_command words = ok v ∧ bs v.val = joinB (words.val.map wordBytes) := by
+  obtain ⟨r, hl, hq⟩ := loop_spec (fun (o, i) => shell_command_loop.body words o i)
+    (fun p => p.2.val ≤ words.val.length ∧ bs p.1.val = joinB ((words.val.take p.2.val).map wordBytes))
+    (fun _ r => bs r.val = joinB (words.val.map wordBytes))
+    (fun p => words.val.length - p.2.val) (by
+      rintro ⟨o, i⟩ ⟨hle, ho⟩
+      dsimp only at hle ho
+      by_cases hi : i.val < words.val.length
+      · obtain ⟨j, hj, hjv⟩ := succ_ok words i hi
+        right
+        have htake : words.val.take (i.val + 1) = words.val.take i.val ++ [words.val[i.val]] := by
+          rw [List.take_add_one, List.getElem?_eq_getElem hi]; rfl
+        have hsum : ((words.val.take (i.val + 1)).map wordRoom).sum ≤ Usize.max := by
+          have := congrArg List.sum (List.take_append_drop (i.val + 1) (words.val.map wordRoom))
+          rw [List.sum_append, ← List.map_take] at this
+          omega
+        have hroom := joinB_room (words.val.take i.val)
+        rw [← ho] at hroom
+        have hF : ((words.val.take (i.val + 1)).map wordRoom).sum =
+            ((words.val.take i.val).map wordRoom).sum + wordRoom words.val[i.val] := by
+          rw [htake, List.map_append, List.sum_append]; simp
+        have hFi : wordRoom words.val[i.val] = 4 * words.val[i.val].val.length + 3 := rfl
+        simp only [bs, List.length_map] at hroom
+        obtain ⟨w, hw, ew⟩ := shell_word_ok (alloc.vec.Vec.deref words.val[i.val])
+          (by rw [deref_val]; omega)
+        have hwl := congrArg List.length ew
+        have hwb := wordB_length (bs (alloc.vec.Vec.deref words.val[i.val]).val)
+        simp only [bs, List.length_map, deref_val] at hwl hwb
+        obtain ⟨v, hv, ev⟩ := with_word_ok o (i = 0#usize) (alloc.vec.Vec.deref w)
+          (by rw [deref_val]; omega)
+        refine ⟨(v, j), ?_, ⟨show j.val ≤ _ by omega, ?_⟩,
+          show words.val.length - j.val < words.val.length - i.val by omega, fun _ h => h⟩
+        · simp [shell_command_loop.body, hi, index_ok words i hi, hw, hv, hj]
+        · show bs v.val = _
+          rw [hjv, htake, List.map_append, List.map_singleton, joinB_snoc, ev]
+          have eG : bs (alloc.vec.Vec.deref w).val = wordBytes words.val[i.val] := by
+            rw [deref_val, ew, deref_val]; rfl
+          simp only [bs, List.map_append] at eG ho ⊢
+          rw [eG, ho]
+          by_cases h0 : i.val = 0
+          · have hi0 : i = 0#usize := by rw [UScalar.eq_equiv]; simp [h0]
+            simp [hi0, joinB]
+          · have hi0 : ¬ i = 0#usize := by rw [UScalar.eq_equiv]; simp [h0]
+            have hne : (words.val.take i.val).map wordBytes ≠ [] := by
+              intro h; have := congrArg List.length h
+              rw [List.length_map, List.length_take, List.length_nil] at this; omega
+            simp only [hi0, hne, decide_false, Bool.false_eq_true, ↓reduceIte, List.map_cons,
+              List.map_nil]
+            rfl
+      · left
+        refine ⟨o, by simp [shell_command_loop.body, hi], ?_⟩
+        simpa [List.take_of_length_le (show words.val.length ≤ i.val by omega)] using ho)
+    (alloc.vec.Vec.new Std.U8, 0#usize) ⟨by simp, by simp [bs, joinB]⟩
+  exact ⟨r, hl, hq⟩
+
+/-- The bytes `sh_c` puts before the script: `sh -c '`. -/
+def shCPrefix : List Nat := [115, 104, 32, 45, 99, 32, 39]
+
+theorem sh_c_ok (script : Slice Std.U8) (room : script.val.length + 8 ≤ Usize.max) :
+    ∃ o, sh_c script = ok o ∧ o.map (fun v => bs v.val) =
+      if (bs script.val).any (· == 39) then none else some (shCPrefix ++ bs script.val ++ [39]) := by
+  have hq := has_quote_ok script
+  cases hb : script.val.any fun b => b.val == 39
+  · obtain ⟨o1, h1, e1⟩ := push_ok (alloc.vec.Vec.new Std.U8) 115#u8 (by simp; omega)
+    obtain ⟨o2, h2, e2⟩ := push_ok o1 104#u8 (by simp [e1]; omega)
+    obtain ⟨o3, h3, e3⟩ := push_ok o2 32#u8 (by simp [e2, e1]; omega)
+    obtain ⟨o4, h4, e4⟩ := push_ok o3 45#u8 (by simp [e3, e2, e1]; omega)
+    obtain ⟨o5, h5, e5⟩ := push_ok o4 99#u8 (by simp [e4, e3, e2, e1]; omega)
+    obtain ⟨o6, h6, e6⟩ := push_ok o5 32#u8 (by simp [e5, e4, e3, e2, e1]; omega)
+    obtain ⟨o7, h7, e7⟩ := push_ok o6 39#u8 (by simp [e6, e5, e4, e3, e2, e1]; omega)
+    obtain ⟨o8, h8, e8⟩ := extend_ok o7 script (by simp [e7, e6, e5, e4, e3, e2, e1]; omega)
+    obtain ⟨o9, h9, e9⟩ := push_ok o8 39#u8 (by simp [e8, e7, e6, e5, e4, e3, e2, e1]; omega)
+    refine ⟨some o9, by simp [sh_c, hq, hb, h1, h2, h3, h4, h5, h6, h7, h8, h9], ?_⟩
+    have hb' : (bs script.val).any (· == 39) = false := by
+      simpa [bs, List.any_map, Function.comp_def] using hb
+    simp only [hb', Bool.false_eq_true, ↓reduceIte, Option.map_some, e9, e8, e7, e6, e5, e4, e3,
+      e2, e1]
+    simp [bs, shCPrefix]
+  · refine ⟨none, by simp [sh_c, hq, hb], ?_⟩
+    have hb' : (bs script.val).any (· == 39) = true := by
+      simpa [bs, List.any_map, Function.comp_def] using hb
+    simp [hb']
+
+/-! ### From bytes to characters -/
+
+open Headers (utf8 utf8_ascii utf8_high utf8_nil)
+
+theorem char_beq (c d : Char) : (c == d) = (c.toNat == d.toNat) := by
+  rw [Bool.eq_iff_iff, beq_iff_eq, beq_iff_eq]
+  exact ⟨fun h => h ▸ rfl, fun h => Char.ext (UInt32.toNat_inj.mp (show c.val.toNat = d.val.toNat from h))⟩
+
+/-- A character may stand bare exactly when its number is a bare byte. -/
+theorem bareChar_eq (c : Char) : Clew.Ssh.bareChar c = bareB c.toNat := by
+  simp only [Clew.Ssh.bareChar, Clew.Text.isAsciiAlphanumeric, Clew.Text.isAsciiDigit, char_beq]
+  have h0 : ('0' : Char).val.toNat = 48 := rfl
+  have h9 : ('9' : Char).val.toNat = 57 := rfl
+  have ha : ('a' : Char).val.toNat = 97 := rfl
+  have hz : ('z' : Char).val.toNat = 122 := rfl
+  have hA : ('A' : Char).val.toNat = 65 := rfl
+  have hZ : ('Z' : Char).val.toNat = 90 := rfl
+  have e1 : ('-' : Char).val.toNat = 45 := rfl
+  have e2 : ('_' : Char).val.toNat = 95 := rfl
+  have e3 : ('.' : Char).val.toNat = 46 := rfl
+  have e4 : ('/' : Char).val.toNat = 47 := rfl
+  have e5 : ('@' : Char).val.toNat = 64 := rfl
+  have e6 : (':' : Char).val.toNat = 58 := rfl
+  have e7 : (',' : Char).val.toNat = 44 := rfl
+  have e8 : ('+' : Char).val.toNat = 43 := rfl
+  simp only [Char.le_def, UInt32.le_iff_toNat_le, bareB]
+  unfold Char.toNat
+  rw [h0, h9, ha, hz, hA, hZ, e1, e2, e3, e4, e5, e6, e7, e8, Bool.eq_iff_iff]
+  simp only [Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq]
+  omega
+
+theorem bareB_high (n : Nat) (h : 128 ≤ n) : bareB n = false := by
+  simp only [bareB, Bool.or_eq_false_iff, Bool.and_eq_false_iff, decide_eq_false_iff_not,
+    beq_eq_false_iff_ne]
+  omega
+
+theorem char_all_bare (c : Char) :
+    ((String.utf8EncodeChar c).map (·.toNat)).all bareB = Clew.Ssh.bareChar c := by
+  rw [bareChar_eq]
+  by_cases h : c.toNat < 128
+  · rw [utf8_ascii c h]; simp
+  · obtain ⟨hne, hhi⟩ := utf8_high c (by omega)
+    rw [bareB_high _ (by omega)]
+    cases hl : String.utf8EncodeChar c with
+    | nil => exact absurd hl hne
+    | cons b bs => simp [bareB_high b.toNat (hhi b (by rw [hl]; simp))]
+
+theorem utf8_cons (c : Char) (cs : List Char) :
+    utf8 (c :: cs) = (String.utf8EncodeChar c).map (·.toNat) ++ utf8 cs := by
+  simp [utf8]
+
+theorem utf8_append (a b : List Char) : utf8 (a ++ b) = utf8 a ++ utf8 b := by
+  simp [utf8]
+
+theorem utf8_all_bare (w : List Char) : (utf8 w).all bareB = w.all Clew.Ssh.bareChar := by
+  induction w with
+  | nil => rfl
+  | cons c w ih => rw [utf8_cons, List.all_append, ih, char_all_bare, List.all_cons]
+
+theorem utf8_isEmpty (w : List Char) : (utf8 w).isEmpty = w.isEmpty := by
+  cases w with
+  | nil => rfl
+  | cons c w =>
+    have : utf8 (c :: w) ≠ [] := fun h => by simpa using (utf8_nil _).mp h
+    simp [this]
+
+theorem flatMap_qB_id (ns : List Nat) (h : ∀ n ∈ ns, n ≠ 39) : ns.flatMap qB = ns := by
+  induction ns with
+  | nil => rfl
+  | cons n ns ih =>
+    rw [List.flatMap_cons, ih (fun m hm => h m (by simp [hm]))]
+    simp [qB, h n (by simp)]
+
+theorem utf8_quoteChar (c : Char) :
+    utf8 (Clew.Ssh.quoteChar c) = ((String.utf8EncodeChar c).map (·.toNat)).flatMap qB := by
+  by_cases hc : c = '\''
+  · subst hc; decide
+  · have hq : Clew.Ssh.quoteChar c = [c] := by simp [Clew.Ssh.quoteChar, hc]
+    rw [hq, flatMap_qB_id]
+    · simp [utf8]
+    · by_cases h : c.toNat < 128
+      · rw [utf8_ascii c h]
+        intro n hn
+        simp only [List.mem_cons, List.not_mem_nil, or_false] at hn
+        subst hn
+        intro h39
+        exact hc (Char.ext (UInt32.toNat_inj.mp (show c.val.toNat = ('\'' : Char).val.toNat from h39)))
+      · obtain ⟨_, hhi⟩ := utf8_high c (by omega)
+        intro n hn
+        simp only [List.mem_map] at hn
+        obtain ⟨b, hb, rfl⟩ := hn
+        have := hhi b hb; omega
+
+theorem utf8_flatMap_quoteChar (w : List Char) :
+    utf8 (w.flatMap Clew.Ssh.quoteChar) = (utf8 w).flatMap qB := by
+  induction w with
+  | nil => rfl
+  | cons c w ih => rw [List.flatMap_cons, utf8_append, ih, utf8_quoteChar, utf8_cons, List.flatMap_append]
+
+theorem utf8_quote (w : List Char) : utf8 (Clew.Ssh.quote w) = 39 :: ((utf8 w).flatMap qB ++ [39]) := by
+  rw [Clew.Ssh.quote, utf8_cons, utf8_append, utf8_flatMap_quoteChar]
+  rfl
+
+theorem utf8_shellWord (w : List Char) : utf8 (Clew.Ssh.shellWord w) = wordB (utf8 w) := by
+  rw [Clew.Ssh.shellWord, wordB, utf8_isEmpty, utf8_all_bare]
+  split <;> simp [utf8_quote]
+
+theorem utf8_shellCommand (ws : List (List Char)) :
+    utf8 (Clew.Ssh.shellCommand ws) = joinB (ws.map fun w => utf8 (Clew.Ssh.shellWord w)) := by
+  induction ws with
+  | nil => rfl
+  | cons w ws ih =>
+    cases ws with
+    | nil => simp [Clew.Ssh.shellCommand, joinB]
+    | cons w' ws' =>
+      rw [Clew.Ssh.shellCommand.eq_3 w (w' :: ws') (by simp), utf8_append, utf8_cons, ih]
+      simp [joinB]
+      rfl
+
+theorem utf8_any_quote (s : List Char) : (utf8 s).any (· == 39) = s.contains '\'' := by
+  rw [List.contains_eq_any_beq]
+  induction s with
+  | nil => rfl
+  | cons c s ih =>
+    rw [utf8_cons, List.any_append, ih, List.any_cons, char_beq]
+    congr 1
+    by_cases h : c.toNat < 128
+    · rw [utf8_ascii c h]; simp [eq_comm]
+    · obtain ⟨_, hhi⟩ := utf8_high c (by omega)
+      have h1 : (('\'' : Char).toNat == c.toNat) = false := by
+        rw [beq_eq_false_iff_ne]; intro he; rw [← he] at h; exact h (by decide)
+      rw [h1, List.any_eq_false]
+      intro n hn
+      simp only [List.mem_map] at hn
+      obtain ⟨b, hb, rfl⟩ := hn
+      have := hhi b hb
+      simp; omega
+
+/-! ### The theorems -/
+
+/-- **`quote` is the model**: on the UTF-8 bytes of any word short enough to
+quote in memory, it returns, and returns the UTF-8 bytes of `Clew.Ssh.quote`. -/
+theorem quote_is_the_model (w : List Char) (word : Slice Std.U8) (h : bs word.val = utf8 w)
+    (room : 4 * word.val.length + 2 ≤ Usize.max) :
+    ∃ v, quote word = ok v ∧ bs v.val = utf8 (Clew.Ssh.quote w) := by
+  obtain ⟨v, hv, ev⟩ := quote_ok word room
+  exact ⟨v, hv, by rw [ev, h, utf8_quote]⟩
+
+theorem shell_word_is_the_model (w : List Char) (word : Slice Std.U8) (h : bs word.val = utf8 w)
+    (room : 4 * word.val.length + 2 ≤ Usize.max) :
+    ∃ v, shell_word word = ok v ∧ bs v.val = utf8 (Clew.Ssh.shellWord w) := by
+  obtain ⟨v, hv, ev⟩ := shell_word_ok word room
+  exact ⟨v, hv, by rw [ev, h, utf8_shellWord]⟩
+
+/-- **`shell_command` is the model**: on the UTF-8 bytes of any words, it
+returns, and returns the UTF-8 bytes of `Clew.Ssh.shellCommand`, so the
+command reads back as the same words (`Clew.Ssh.readWords_shellCommand`). -/
+theorem shell_command_is_the_model (ws : List (List Char)) (words : Slice (alloc.vec.Vec Std.U8))
+    (h : words.val.map (fun v => bs v.val) = ws.map utf8)
+    (room : (words.val.map fun v => 4 * v.val.length + 3).sum ≤ Usize.max) :
+    ∃ v, shell_command words = ok v ∧ bs v.val = utf8 (Clew.Ssh.shellCommand ws) := by
+  obtain ⟨v, hv, ev⟩ := shell_command_ok words room
+  refine ⟨v, hv, ?_⟩
+  rw [ev, utf8_shellCommand]
+  have : words.val.map wordBytes = (words.val.map fun v => bs v.val).map wordB := by
+    simp [wordBytes, Function.comp_def]
+  rw [this, h]
+  simp [Function.comp_def, utf8_shellWord]
+
+/-- **`sh_c` is the model**: on the UTF-8 bytes of any script, it returns,
+refuses exactly the scripts that hold a `'`, and otherwise returns the UTF-8
+bytes of `Clew.Ssh.shC`. -/
+theorem sh_c_is_the_model (s : List Char) (script : Slice Std.U8) (h : bs script.val = utf8 s)
+    (room : script.val.length + 8 ≤ Usize.max) :
+    ∃ o, sh_c script = ok o ∧ o.map (fun v => bs v.val) = (Clew.Ssh.shC s).map utf8 := by
+  obtain ⟨o, ho, eo⟩ := sh_c_ok script room
+  refine ⟨o, ho, ?_⟩
+  rw [eo, h, utf8_any_quote, Clew.Ssh.shC]
+  split
+  · rfl
+  · simp only [Option.map_some, utf8_append]
+    rfl
+
+end Shell
 
 end Clew.Extracted

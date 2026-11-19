@@ -1009,7 +1009,7 @@ fn swap_script(plan: &SwapPlan) -> String {
 
 /// Single-quote a string for safe interpolation into the shell helper.
 fn quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+    String::from_utf8_lossy(&clew_rules::shell::quote(s.as_bytes())).into_owned()
 }
 
 #[cfg(test)]

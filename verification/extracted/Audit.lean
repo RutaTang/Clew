@@ -11,3 +11,6 @@ does not model (the code proved here calls none of them). -/
 #print axioms Clew.Extracted.Framing.header_is_the_model
 #print axioms Clew.Extracted.Headers.header_name_ok_is_the_model
 #print axioms Clew.Extracted.Headers.header_value_ok_is_the_model
+#print axioms Clew.Extracted.Shell.shell_command_is_the_model
+#print axioms Clew.Extracted.Shell.sh_c_is_the_model
+#print axioms Clew.Extracted.Shell.quote_is_the_model

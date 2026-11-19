@@ -14,6 +14,10 @@ the parse decides what runs. Here that is proved, over every input:
   words hold: spaces, quotes, `$`, newlines. And `sh -c '<script>'`, the
   form every command Clew runs on a remote takes, is read as `sh`, `-c` and
   the script, whenever the script holds no `'` (which `sh_c` refuses).
+  The Rust itself (`clew_rules::shell`), translated to Lean by Charon and
+  Aeneas, is proved in `verification/extracted/Equal.lean` to return what
+  `shellCommand`, `shC` and `quote` return, on the UTF-8 bytes of any
+  string.
 * **ssh's arguments.** A saved connection's fields never reach `ssh` as an
   option, whatever they hold: the options ssh reads are exactly the ones
   Clew wrote, and the destination exactly `user@host`. And the user, host

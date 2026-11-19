@@ -977,6 +977,411 @@ def location.trusted_by
     else ok false
   else ok false
 
+/-- [clew_rules::shell::is_bare_byte]:
+    Source: 'crates/clew-rules/src/shell.rs', lines 15:0-27:1 -/
+def shell.is_bare_byte (b : Std.U8) : Result Bool := do
+  if b >= 48#u8
+  then
+    if b <= 57#u8
+    then ok true
+    else
+      if b >= 65#u8
+      then
+        if b <= 90#u8
+        then ok true
+        else
+          if b >= 97#u8
+          then
+            if b <= 122#u8
+            then ok true
+            else
+              if b = 45#u8
+              then ok true
+              else
+                if b = 95#u8
+                then ok true
+                else
+                  if b = 46#u8
+                  then ok true
+                  else
+                    if b = 47#u8
+                    then ok true
+                    else
+                      if b = 64#u8
+                      then ok true
+                      else
+                        if b = 58#u8
+                        then ok true
+                        else if b = 44#u8
+                             then ok true
+                             else ok (b = 43#u8)
+          else
+            if b = 45#u8
+            then ok true
+            else
+              if b = 95#u8
+              then ok true
+              else
+                if b = 46#u8
+                then ok true
+                else
+                  if b = 47#u8
+                  then ok true
+                  else
+                    if b = 64#u8
+                    then ok true
+                    else
+                      if b = 58#u8
+                      then ok true
+                      else if b = 44#u8
+                           then ok true
+                           else ok (b = 43#u8)
+      else
+        if b >= 97#u8
+        then
+          if b <= 122#u8
+          then ok true
+          else
+            if b = 45#u8
+            then ok true
+            else
+              if b = 95#u8
+              then ok true
+              else
+                if b = 46#u8
+                then ok true
+                else
+                  if b = 47#u8
+                  then ok true
+                  else
+                    if b = 64#u8
+                    then ok true
+                    else
+                      if b = 58#u8
+                      then ok true
+                      else if b = 44#u8
+                           then ok true
+                           else ok (b = 43#u8)
+        else
+          if b = 45#u8
+          then ok true
+          else
+            if b = 95#u8
+            then ok true
+            else
+              if b = 46#u8
+              then ok true
+              else
+                if b = 47#u8
+                then ok true
+                else
+                  if b = 64#u8
+                  then ok true
+                  else
+                    if b = 58#u8
+                    then ok true
+                    else if b = 44#u8
+                         then ok true
+                         else ok (b = 43#u8)
+  else
+    if b >= 65#u8
+    then
+      if b <= 90#u8
+      then ok true
+      else
+        if b >= 97#u8
+        then
+          if b <= 122#u8
+          then ok true
+          else
+            if b = 45#u8
+            then ok true
+            else
+              if b = 95#u8
+              then ok true
+              else
+                if b = 46#u8
+                then ok true
+                else
+                  if b = 47#u8
+                  then ok true
+                  else
+                    if b = 64#u8
+                    then ok true
+                    else
+                      if b = 58#u8
+                      then ok true
+                      else if b = 44#u8
+                           then ok true
+                           else ok (b = 43#u8)
+        else
+          if b = 45#u8
+          then ok true
+          else
+            if b = 95#u8
+            then ok true
+            else
+              if b = 46#u8
+              then ok true
+              else
+                if b = 47#u8
+                then ok true
+                else
+                  if b = 64#u8
+                  then ok true
+                  else
+                    if b = 58#u8
+                    then ok true
+                    else if b = 44#u8
+                         then ok true
+                         else ok (b = 43#u8)
+    else
+      if b >= 97#u8
+      then
+        if b <= 122#u8
+        then ok true
+        else
+          if b = 45#u8
+          then ok true
+          else
+            if b = 95#u8
+            then ok true
+            else
+              if b = 46#u8
+              then ok true
+              else
+                if b = 47#u8
+                then ok true
+                else
+                  if b = 64#u8
+                  then ok true
+                  else
+                    if b = 58#u8
+                    then ok true
+                    else if b = 44#u8
+                         then ok true
+                         else ok (b = 43#u8)
+      else
+        if b = 45#u8
+        then ok true
+        else
+          if b = 95#u8
+          then ok true
+          else
+            if b = 46#u8
+            then ok true
+            else
+              if b = 47#u8
+              then ok true
+              else
+                if b = 64#u8
+                then ok true
+                else
+                  if b = 58#u8
+                  then ok true
+                  else if b = 44#u8
+                       then ok true
+                       else ok (b = 43#u8)
+
+/-- [clew_rules::shell::all_bare]: loop body 0:
+    Source: 'crates/clew-rules/src/shell.rs', lines 32:4-39:1 -/
+@[rust_loop_body]
+def shell.all_bare_loop.body
+  (word : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len word
+  if i < i1
+  then
+    let i2 ← Slice.index_usize word i
+    let b ← shell.is_bare_byte i2
+    if b
+    then let i3 ← i + 1#usize
+         ok (cont i3)
+    else ok (done false)
+  else ok (done true)
+
+/-- [clew_rules::shell::all_bare]: loop 0:
+    Source: 'crates/clew-rules/src/shell.rs', lines 32:4-39:1 -/
+@[rust_loop]
+def shell.all_bare_loop
+  (word : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => shell.all_bare_loop.body word i1)
+    i
+
+/-- [clew_rules::shell::all_bare]:
+    Source: 'crates/clew-rules/src/shell.rs', lines 30:0-39:1 -/
+@[reducible]
+def shell.all_bare (word : Slice Std.U8) : Result Bool := do
+  shell.all_bare_loop word 0#usize
+
+/-- [clew_rules::shell::quote]: loop body 0:
+    Source: 'crates/clew-rules/src/shell.rs', lines 46:4-56:5
+    Visibility: public -/
+@[rust_loop_body]
+def shell.quote_loop.body
+  (word : Slice Std.U8) (out : alloc.vec.Vec Std.U8) (i : Std.Usize) :
+  Result (ControlFlow ((alloc.vec.Vec Std.U8) × Std.Usize) (alloc.vec.Vec
+    Std.U8))
+  := do
+  let i1 := Slice.len word
+  if i < i1
+  then
+    let i2 ← Slice.index_usize word i
+    let out1 ←
+      if i2 = 39#u8
+      then
+        do
+        let out2 ← alloc.vec.Vec.push out 39#u8
+        let out3 ← alloc.vec.Vec.push out2 92#u8
+        let out4 ← alloc.vec.Vec.push out3 39#u8
+        alloc.vec.Vec.push out4 39#u8
+      else alloc.vec.Vec.push out i2
+    let i3 ← i + 1#usize
+    ok (cont (out1, i3))
+  else ok (done out)
+
+/-- [clew_rules::shell::quote]: loop 0:
+    Source: 'crates/clew-rules/src/shell.rs', lines 46:4-56:5
+    Visibility: public -/
+@[rust_loop]
+def shell.quote_loop
+  (word : Slice Std.U8) (out : alloc.vec.Vec Std.U8) (i : Std.Usize) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  loop
+    (fun (out1, i1) => shell.quote_loop.body word out1 i1)
+    (out, i)
+
+/-- [clew_rules::shell::quote]:
+    Source: 'crates/clew-rules/src/shell.rs', lines 42:0-59:1
+    Visibility: public -/
+def shell.quote (word : Slice Std.U8) : Result (alloc.vec.Vec Std.U8) := do
+  let out ← alloc.vec.Vec.push (alloc.vec.Vec.new Std.U8) 39#u8
+  let out1 ← shell.quote_loop word out 0#usize
+  alloc.vec.Vec.push out1 39#u8
+
+/-- [clew_rules::shell::shell_word]:
+    Source: 'crates/clew-rules/src/shell.rs', lines 63:0-69:1
+    Visibility: public -/
+def shell.shell_word
+  (word : Slice Std.U8) : Result (alloc.vec.Vec Std.U8) := do
+  let b ← core.slice.Slice.is_empty word
+  if b
+  then shell.quote word
+  else
+    let b1 ← shell.all_bare word
+    if b1
+    then alloc.slice.Slice.to_vec core.clone.CloneU8 word
+    else shell.quote word
+
+/-- [clew_rules::shell::with_word]:
+    Source: 'crates/clew-rules/src/shell.rs', lines 73:0-79:1 -/
+def shell.with_word
+  (out : alloc.vec.Vec Std.U8) (first : Bool) (word : Slice Std.U8) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  let out1 ← if first
+               then ok out
+               else alloc.vec.Vec.push out 32#u8
+  alloc.vec.Vec.extend_from_slice core.clone.CloneU8 out1 word
+
+/-- [clew_rules::shell::shell_command]: loop body 0:
+    Source: 'crates/clew-rules/src/shell.rs', lines 86:4-89:5
+    Visibility: public -/
+@[rust_loop_body]
+def shell.shell_command_loop.body
+  (words : Slice (alloc.vec.Vec Std.U8)) (out : alloc.vec.Vec Std.U8)
+  (i : Std.Usize) :
+  Result (ControlFlow ((alloc.vec.Vec Std.U8) × Std.Usize) (alloc.vec.Vec
+    Std.U8))
+  := do
+  let i1 := Slice.len words
+  if i < i1
+  then
+    let v ← Slice.index_usize words i
+    let s := alloc.vec.Vec.deref v
+    let v1 ← shell.shell_word s
+    let s1 := alloc.vec.Vec.deref v1
+    let out1 ← shell.with_word out (i = 0#usize) s1
+    let i2 ← i + 1#usize
+    ok (cont (out1, i2))
+  else ok (done out)
+
+/-- [clew_rules::shell::shell_command]: loop 0:
+    Source: 'crates/clew-rules/src/shell.rs', lines 86:4-89:5
+    Visibility: public -/
+@[rust_loop]
+def shell.shell_command_loop
+  (words : Slice (alloc.vec.Vec Std.U8)) (out : alloc.vec.Vec Std.U8)
+  (i : Std.Usize) :
+  Result (alloc.vec.Vec Std.U8)
+  := do
+  loop
+    (fun (out1, i1) => shell.shell_command_loop.body words out1 i1)
+    (out, i)
+
+/-- [clew_rules::shell::shell_command]:
+    Source: 'crates/clew-rules/src/shell.rs', lines 83:0-91:1
+    Visibility: public -/
+@[reducible]
+def shell.shell_command
+  (words : Slice (alloc.vec.Vec Std.U8)) : Result (alloc.vec.Vec Std.U8) := do
+  shell.shell_command_loop words (alloc.vec.Vec.new Std.U8) 0#usize
+
+/-- [clew_rules::shell::has_quote]: loop body 0:
+    Source: 'crates/clew-rules/src/shell.rs', lines 96:4-103:1 -/
+@[rust_loop_body]
+def shell.has_quote_loop.body
+  (script : Slice Std.U8) (i : Std.Usize) :
+  Result (ControlFlow Std.Usize Bool)
+  := do
+  let i1 := Slice.len script
+  if i < i1
+  then
+    let i2 ← Slice.index_usize script i
+    if i2 = 39#u8
+    then ok (done true)
+    else let i3 ← i + 1#usize
+         ok (cont i3)
+  else ok (done false)
+
+/-- [clew_rules::shell::has_quote]: loop 0:
+    Source: 'crates/clew-rules/src/shell.rs', lines 96:4-103:1 -/
+@[rust_loop]
+def shell.has_quote_loop
+  (script : Slice Std.U8) (i : Std.Usize) : Result Bool := do
+  loop
+    (fun i1 => shell.has_quote_loop.body script i1)
+    i
+
+/-- [clew_rules::shell::has_quote]:
+    Source: 'crates/clew-rules/src/shell.rs', lines 94:0-103:1 -/
+@[reducible]
+def shell.has_quote (script : Slice Std.U8) : Result Bool := do
+  shell.has_quote_loop script 0#usize
+
+/-- [clew_rules::shell::sh_c]:
+    Source: 'crates/clew-rules/src/shell.rs', lines 111:0-126:1
+    Visibility: public -/
+def shell.sh_c
+  (script : Slice Std.U8) : Result (Option (alloc.vec.Vec Std.U8)) := do
+  let b ← shell.has_quote script
+  if b
+  then ok none
+  else
+    let out ← alloc.vec.Vec.push (alloc.vec.Vec.new Std.U8) 115#u8
+    let out1 ← alloc.vec.Vec.push out 104#u8
+    let out2 ← alloc.vec.Vec.push out1 32#u8
+    let out3 ← alloc.vec.Vec.push out2 45#u8
+    let out4 ← alloc.vec.Vec.push out3 99#u8
+    let out5 ← alloc.vec.Vec.push out4 32#u8
+    let out6 ← alloc.vec.Vec.push out5 39#u8
+    let out7 ← alloc.vec.Vec.extend_from_slice core.clone.CloneU8 out6 script
+    let out8 ← alloc.vec.Vec.push out7 39#u8
+    ok (some out8)
+
 /-- [clew_rules::voice::QuestionWord]
     Source: 'crates/clew-rules/src/voice.rs', lines 28:0-31:1
     Visibility: public -/

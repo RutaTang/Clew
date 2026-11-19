@@ -26,6 +26,9 @@ trap 'rm -rf "$out"' EXIT
   --start-from crate::framing::header \
   --start-from crate::headers::header_name_ok \
   --start-from crate::headers::header_value_ok \
+  --start-from crate::shell::shell_command \
+  --start-from crate::shell::quote \
+  --start-from crate::shell::sh_c \
   --dest "$out" -- --target-dir "$out/target" -q) >"$out/charon.log" 2>&1 || {
   cat "$out/charon.log" >&2
   exit 1
@@ -34,6 +37,11 @@ aeneas -backend lean -dest "$out/lean" "$out/clew_rules.llbc" >"$out/aeneas.log"
   cat "$out/aeneas.log" >&2
   exit 1
 }
+if grep -q 'partial file\|\[Error\]' "$out/aeneas.log"; then
+  echo "::error::Aeneas could not translate all of crates/clew-rules:" >&2
+  sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$out/aeneas.log" | tr '\r' '\n' | grep -A4 'Error' >&2
+  exit 1
+fi
 if grep -q '^axiom ' "$out/lean/ClewRules.lean"; then
   echo "::error::the translation leans on a Rust function Aeneas does not model:" >&2
   grep -A1 '^axiom ' "$out/lean/ClewRules.lean" >&2
