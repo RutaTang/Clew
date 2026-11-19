@@ -3441,6 +3441,18 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
                                 tr!("Try again"),
                                 Message::Plugin(PluginMsg::RebuildGraph),
                             )),
+                        // Its log, and what fixes it, are in Settings →
+                        // Plugins: Try again alone left a graph that
+                        // fails each time with nowhere to go.
+                        button(text(tr!("See its log")).size(ts::SMALL))
+                            .style(theme::secondary_button)
+                            .padding([3, 10])
+                            .on_press(super::heard::said(
+                                tr!("See its log"),
+                                Message::Settings(SettingsMsg::OpenAt(
+                                    crate::app::state::SettingsPage::Plugins,
+                                )),
+                            )),
                     ]
                     .spacing(8)
                     .align_y(iced::Center)

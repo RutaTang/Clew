@@ -39278,6 +39278,7 @@ fn installed_plugin(enabled: bool) -> crate::app::plugins::Installed {
             later: Default::default(),
         },
         manifest,
+        has_source: true,
     }
 }
 
@@ -39423,6 +39424,135 @@ fn a_running_command_shows_how_far_it_has_come() {
     app.status = "Bookmark added".into();
     let _ = app.update(Message::Plugin(PluginMsg::ProgressTick));
     assert_eq!(app.status, "Bookmark added");
+}
+
+/// A command that fails says so where the user is, and stands: Try again
+/// runs it again as it was run, and Settings opens Settings → Plugins,
+/// where its log is, with a way to copy it and, its source being the
+/// agents', a request to Ask to fix it. One that finishes takes the failure
+/// away. An install that fails after Install is said where the user is
+/// too; what Settings → Plugins said of it goes as Settings is left.
+#[test]
+fn a_failed_plugin_run_stands_with_its_next_steps() {
+    use crate::app::plugins::{Again, PluginMsg, Ran, Reply, Spot};
+    use crate::app::state::FailureOf;
+    use clew_plugin::runtime::{Failure, Outcome};
+    let data = clew_core::testutil::TempDir::new("plugin-run-failed");
+    let _env = data_dir_override(data.path());
+    let mut app = scanned_app("plugin-run-failed");
+    app.plugins.installed = vec![installed_plugin(true)];
+    let again = Again {
+        id: "word-count".into(),
+        command: "count".into(),
+        input: Some("the".into()),
+        at: Some(Spot { pane: 0, line: 4 }),
+    };
+    let ran = |app: &mut App, outcome: Result<Outcome, Failure>| {
+        let _ = app.update(Message::Plugin(PluginMsg::Ran {
+            stamp: app.stamp(),
+            id: "word-count".into(),
+            title: "Count words".into(),
+            again: again.clone(),
+            ran: Arc::new(std::sync::Mutex::new(Some(Ran {
+                outcome,
+                loaded: None,
+                log: Vec::new(),
+            }))),
+        }));
+    };
+    ran(
+        &mut app,
+        Err(Failure::Crashed("index out of bounds".into())),
+    );
+    assert_eq!(
+        app.status,
+        "Count words did not finish: it crashed: index out of bounds"
+    );
+    let notice = app.failure_shown().expect("it stands");
+    assert_eq!(notice.of, FailureOf::PluginRun);
+    assert!(
+        matches!(&notice.retry, Some(Message::Plugin(PluginMsg::RunAgain(a)))
+            if a.command == "count" && a.input.as_deref() == Some("the")
+                && a.at == Some(Spot { pane: 0, line: 4 })),
+        "{:?}",
+        notice.retry
+    );
+    let (bar, _) = crate::ui::heard::gather_all_of(|| crate::ui::statusbar(&app));
+    assert!(
+        bar.iter().any(|t| t.shown == "Settings"
+            && matches!(
+                t.message,
+                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::Plugins))
+            )),
+        "{:?}",
+        bar.iter().map(|t| &t.shown).collect::<Vec<_>>()
+    );
+    assert!(bar.iter().any(|t| t.shown == "Try again"));
+
+    // Its log, in Settings → Plugins: the failure, and what fixes it.
+    assert!(app.plugins.failing("word-count"));
+    assert_eq!(
+        app.plugins.log_text("word-count"),
+        "it crashed: index out of bounds"
+    );
+    let page = |app: &App, words: &str| {
+        iced_test::simulator(crate::ui::plugins_settings(app))
+            .find(words)
+            .is_ok()
+    };
+    assert!(page(&app, "Copy log"));
+    assert!(page(&app, "Ask to fix it"));
+    app.plugins.installed[0].has_source = false;
+    assert!(page(&app, "Copy log"));
+    assert!(
+        !page(&app, "Ask to fix it"),
+        "nothing there for an agent to change"
+    );
+    app.plugins.installed[0].has_source = true;
+
+    // Ask to fix it: the request, with the log, in Ask's field to send.
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        crate::SettingsPage::Plugins,
+    )));
+    let _ = app.update(Message::Plugin(PluginMsg::AskToFix("word-count".into())));
+    assert!(!app.settings.open, "Settings put away for Ask");
+    assert!(app.ask_view.is_open());
+    let asked = &app.proj.ask_input;
+    assert!(
+        asked.contains("Word count") && asked.contains("word-count"),
+        "{asked}"
+    );
+    assert!(asked.contains("it crashed: index out of bounds"), "{asked}");
+    assert!(app.proj.ask_turns.is_empty(), "not sent: the user sends it");
+
+    // A run that finishes takes the failure away.
+    ran(&mut app, Ok(Outcome::Nothing));
+    assert!(app.failure_shown().is_none());
+    assert!(!app.plugins.failing("word-count"));
+
+    // An install that fails after Install is said where the user is.
+    let _ = app.update(Message::Plugin(PluginMsg::Installed {
+        id: "word-count".into(),
+        reply: Reply::None,
+        result: Err("the disk is full".into()),
+    }));
+    let notice = app.failure_shown().expect("said where the user is");
+    assert_eq!(notice.of, FailureOf::PluginInstall);
+    assert!(
+        app.status
+            .ends_with("could not be installed: the disk is full"),
+        "{}",
+        app.status
+    );
+    assert!(app.plugins.failure.is_some());
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        crate::SettingsPage::Plugins,
+    )));
+    let _ = app.close_settings();
+    assert!(
+        app.plugins.failure.is_none(),
+        "read, and gone with Settings"
+    );
 }
 
 /// A link on a plugin's page to a web address is shown whole and asked
@@ -39758,6 +39888,38 @@ fn a_plugins_graph_is_built_when_shown_in_project_graphs() {
         "a plugin turned off offers no graph"
     );
     assert_eq!(app.plugin_map_status(), None);
+}
+
+/// Where Clew cannot set Rust up itself, Settings → Plugins says what to
+/// do outside it, and Check again looks again: it said to open the page
+/// again.
+#[test]
+fn settings_check_again_after_rust_is_set_up_outside_clew() {
+    use crate::app::plugins::{Building, Checked, PluginMsg};
+    use clew_plugin::toolchain::{Missing, Why};
+    let data = clew_core::testutil::TempDir::new("plugin-check-again");
+    let _env = data_dir_override(data.path());
+    let mut app = blank_app();
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        crate::SettingsPage::Plugins,
+    )));
+    let _ = app.update(Message::Plugin(PluginMsg::ToolchainChecked(Checked {
+        found: Err(Missing {
+            why: Why::NoDefault("no default toolchain".into()),
+            setup: None,
+        }),
+        own_installed: false,
+    })));
+    {
+        let mut page = iced_test::simulator(crate::ui::plugins_settings(&app));
+        assert!(
+            page.find("Install Rust from rustup.rs, then check again.")
+                .is_ok()
+        );
+        assert!(page.find("Check again").is_ok());
+    }
+    let _ = app.update(Message::Plugin(PluginMsg::CheckToolchain));
+    assert!(matches!(app.plugins.building, Building::Checking));
 }
 
 /// Settings → Plugins says whether plugins can be built here: it looks as

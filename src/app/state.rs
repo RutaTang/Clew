@@ -925,6 +925,28 @@ pub enum FailureOf {
     /// An Ask answer, failed while Ask was put away to its pill: asked
     /// again, or answered, takes it away.
     Ask,
+    /// A plugin's command: one that finishes takes it away. Its Settings
+    /// is Settings → Plugins, where the plugin's log is.
+    PluginRun,
+    /// A plugin's install, failed after the user said Install: one
+    /// installed takes it away. Its Settings is Settings → Plugins.
+    PluginInstall,
+}
+
+impl FailureOf {
+    /// The page of Settings a failure of it is about, where no Language
+    /// model field is (`FailureNotice::about`).
+    pub fn settings_page(self) -> SettingsPage {
+        match self {
+            FailureOf::PluginRun | FailureOf::PluginInstall => SettingsPage::Plugins,
+            FailureOf::Explain
+            | FailureOf::Walkthrough
+            | FailureOf::Summary
+            | FailureOf::FakeRun
+            | FailureOf::Story
+            | FailureOf::Ask => SettingsPage::LanguageModel,
+        }
+    }
 }
 
 /// they stood when it was asked.

@@ -412,6 +412,10 @@ impl App {
         // Settings is closed it has been read, and it goes.
         self.voice.download_errors.clear();
         self.voice.speech.download_errors.clear();
+        // So is a plugin's that could not be installed, turned on or off,
+        // or removed: left, it stood there at the next visit, after
+        // whatever had been done since.
+        self.plugins.failure = None;
         // Back to reading, as the finder's close does: the motions the
         // form took from the code are the code's again.
         self.code_focused = true;

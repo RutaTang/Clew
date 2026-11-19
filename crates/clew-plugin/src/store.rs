@@ -294,13 +294,17 @@ fn read_capped(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// Why a plugin's approved copy is not run: it is not the file approved
+/// (changed on disk since). Said to the user, who can do what it says.
+pub const CHANGED: &str = "the plugin's file changed after you approved it. Remove it in Settings → Plugins and install it again.";
+
 /// The approved copy of `record`'s plugin, checked to be the file approved.
 pub fn read_approved(data: &Path, record: &Record) -> Result<Vec<u8>, String> {
     let path = installed_path(data, &record.fingerprint);
     let bytes = read_capped(&path).map_err(|e| format!("the plugin's file: {e}"))?;
     let sha256: [u8; 32] = Sha256::digest(&bytes).into();
     if hex(&sha256) != record.sha256 || fingerprint(&sha256) != record.fingerprint {
-        return Err("the plugin's file is not the one you approved; reinstall it".into());
+        return Err(CHANGED.into());
     }
     Ok(bytes)
 }
@@ -421,7 +425,7 @@ mod tests {
         assert!(
             read_approved(&data, &record)
                 .unwrap_err()
-                .contains("not the one you approved")
+                .contains("changed after you approved it")
         );
         let _ = std::fs::remove_dir_all(&data);
     }

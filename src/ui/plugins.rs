@@ -630,6 +630,30 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
                 .width(Fill)
                 .style(theme::editor),
         );
+        // Not working: what fixes it. Its source is the agents' to change
+        // (a plugin is made by an agent): its log, copied for one, or put
+        // to Clew's own in Ask with a request to fix it.
+        if app.plugins.failing(&plugin.id) {
+            let mut fixes = row![
+                text(tr!("It is not working. An agent can fix it from its log."))
+                    .size(ts::SMALL)
+                    .color(theme::dim())
+                    .width(Fill),
+                form::action(
+                    tr!("Copy log"),
+                    Some(Message::Plugin(PluginMsg::CopyLog(id.clone())))
+                ),
+            ]
+            .spacing(8)
+            .align_y(iced::Center);
+            if plugin.has_source {
+                fixes = fixes.push(form::action(
+                    tr!("Ask to fix it"),
+                    Some(Message::Plugin(PluginMsg::AskToFix(id.clone()))),
+                ));
+            }
+            item = item.push(fixes);
+        }
     }
     form::row_of(item)
 }
@@ -695,16 +719,19 @@ fn building_group(app: &App) -> Element<'_, Message> {
                         "Installs Rust from rust-lang.org into Clew's own folder (about 700 MB). Nothing else on this computer changes."
                     ),
                 ),
-                None => (
-                    None,
-                    tr!("Install Rust from rustup.rs, then open this page again."),
-                ),
+                None => (None, tr!("Install Rust from rustup.rs, then check again.")),
             };
+            // What Clew cannot set up itself, the user does outside it:
+            // then one press looks again (it said to open the page again).
             let control: Element<'_, Message> = match action {
                 Some(action) => {
                     form::primary(action, Some(Message::Plugin(PluginMsg::SetUpToolchain))).into()
                 }
-                None => none(),
+                None => form::action(
+                    tr!("Check again"),
+                    Some(Message::Plugin(PluginMsg::CheckToolchain)),
+                )
+                .into(),
             };
             rows.push(form::item_saying(
                 tr!("Rust"),

@@ -821,7 +821,7 @@ fn failure_controls(
             tr!("Settings"),
             Message::Settings(match failure.about {
                 Some(field) => SettingsMsg::Fix(field),
-                None => SettingsMsg::OpenAt(crate::app::state::SettingsPage::LanguageModel),
+                None => SettingsMsg::OpenAt(failure.of.settings_page()),
             }),
         ));
         width += settings_w;

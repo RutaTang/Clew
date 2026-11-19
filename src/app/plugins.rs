@@ -21,6 +21,7 @@ use clew_plugin::{Inspected, Manifest};
 use crate::app::model::Questions;
 use crate::app::plugin_host::{HostEvent, ProjectHost};
 use crate::app::prelude::*;
+use crate::app::state::FailureOf;
 use crate::*;
 
 /// The most log lines kept per plugin.
@@ -32,6 +33,9 @@ pub struct Installed {
     pub(crate) id: String,
     pub(crate) record: Record,
     pub(crate) manifest: Manifest,
+    /// Whether its source is among the agents' plugin sources
+    /// (`authoring::source_dir`): there, an agent can change it.
+    pub(crate) has_source: bool,
 }
 
 impl Installed {
@@ -74,6 +78,16 @@ pub(crate) fn command_label(
     } else {
         format!("{name}: {title}")
     }
+}
+
+/// A command as it was run — its plugin, what was typed for it, where —
+/// so a failed run's Try again runs the same again.
+#[derive(Debug, Clone)]
+pub struct Again {
+    pub(crate) id: String,
+    pub(crate) command: String,
+    pub(crate) input: Option<String>,
+    pub(crate) at: Option<Spot>,
 }
 
 /// Where a command run from the code's right-click menu was asked: the
@@ -309,6 +323,10 @@ pub struct Plugins {
     pub(crate) confirm: Option<Confirm>,
     /// What each plugin wrote to its log, by id, the latest last.
     pub(crate) log: HashMap<String, VecDeque<(Level, String)>>,
+    /// The plugins whose last run or graph build failed, by id: until one
+    /// finishes, or a new build is installed, its Settings row says what
+    /// fixes it.
+    pub(crate) failed: HashSet<String>,
     /// Why the last install from a file, or the last change, failed.
     pub(crate) failure: Option<String>,
     /// The requests of `clew-server mcp` this window took on.
@@ -384,10 +402,13 @@ impl Plugins {
             .into_iter()
             .filter_map(|(id, record)| {
                 let manifest = record.manifest()?;
+                let has_source = clew_plugin::authoring::source_dir(&data, &id)
+                    .is_ok_and(|dir| dir.join("plugin.toml").is_file());
                 Some(Installed {
                     id,
                     record,
                     manifest,
+                    has_source,
                 })
             })
             .collect();
@@ -398,6 +419,26 @@ impl Plugins {
     /// The installed plugin `id`.
     pub(crate) fn get(&self, id: &str) -> Option<&Installed> {
         self.installed.iter().find(|p| p.id == id)
+    }
+
+    /// Plugin `id`'s log, a line each, the latest last: empty when it
+    /// wrote nothing.
+    pub(crate) fn log_text(&self, id: &str) -> String {
+        self.log
+            .get(id)
+            .map(|log| {
+                log.iter()
+                    .map(|(_, line)| line.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether plugin `id`'s last run or graph build failed: it is not
+    /// working, and its row says what fixes it.
+    pub(crate) fn failing(&self, id: &str) -> bool {
+        self.failed.contains(id)
     }
 
     /// Note `line` in plugin `id`'s log.
@@ -466,6 +507,8 @@ pub enum PluginMsg {
         id: String,
         command: String,
     },
+    /// Run a command again as it was run: a failed run's Try again.
+    RunAgain(Again),
     /// The text typed for a command that asks for some.
     PromptEdit(String),
     /// Run the command with what was typed.
@@ -478,6 +521,7 @@ pub enum PluginMsg {
         stamp: Stamp,
         id: String,
         title: String,
+        again: Again,
         ran: Arc<std::sync::Mutex<Option<Ran>>>,
     },
     /// Open the place of row `row` of block `block` of the page shown.
@@ -507,6 +551,11 @@ pub enum PluginMsg {
     /// A link on a plugin's page: a place in the project opens; a web
     /// address is shown whole and asked about first.
     Link(String),
+    /// Settings: copy plugin `id`'s log, to give to whoever fixes it.
+    CopyLog(String),
+    /// Settings: put a request to fix plugin `id`, with its log, in Ask's
+    /// field, and open Ask.
+    AskToFix(String),
     /// Settings: Remove, asked about first.
     AskRemove(String),
     AskRemoveOwnRust,
@@ -548,6 +597,9 @@ pub enum PluginMsg {
     RebuildGraph,
     /// Settings → Plugins: whether plugins can be built here was checked.
     ToolchainChecked(Checked),
+    /// Settings: look again whether plugins can be built — after the user
+    /// set Rust up outside Clew.
+    CheckToolchain,
     /// Take the step that makes plugin building ready.
     SetUpToolchain,
     /// How the step goes.
@@ -734,7 +786,7 @@ impl App {
                 .unwrap_or_else(|_| Checked {
                     found: Err(clew_plugin::toolchain::Missing {
                         why: clew_plugin::toolchain::Why::Other(
-                            "the check failed unexpectedly".into(),
+                            tr!("the check failed unexpectedly").into(),
                         ),
                         setup: None,
                     }),
@@ -927,10 +979,15 @@ impl App {
             Ok(graph) => {
                 entry.built = Some(project_map(map.clone(), &decl, graph));
                 entry.failed = None;
+                if let Some(plugin) = &plugin {
+                    self.plugins.failed.remove(plugin);
+                }
             }
             Err(failure) => {
                 if let Some(plugin) = &plugin {
-                    self.plugins.note(plugin, Level::Error, failure.to_string());
+                    self.plugins
+                        .note(plugin, Level::Error, failure_words(&failure));
+                    self.plugins.failed.insert(plugin.clone());
                 }
                 let entry = self.proj.plugin_maps.get_mut(&map).expect("kept above");
                 entry.failed = Some(failure_words(&failure));
@@ -1050,6 +1107,12 @@ impl App {
                 return Task::none();
             }
         };
+        let again = Again {
+            id: id.to_string(),
+            command: command.to_string(),
+            input: input.clone(),
+            at,
+        };
         let invocation = self.invocation(input, at);
         let loaded = self.plugins.loaded.get(&plugin.record.fingerprint).cloned();
         let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1101,6 +1164,7 @@ impl App {
                     stamp: stamp.clone(),
                     id: done_id.clone(),
                     title: done_title.clone(),
+                    again: again.clone(),
                     ran: Arc::new(std::sync::Mutex::new(Some(ran))),
                 })
             },
@@ -1108,7 +1172,13 @@ impl App {
     }
 
     /// A run's end: show what it gave back.
-    fn on_plugin_ran(&mut self, id: String, title: String, ran: Ran) -> Task<Message> {
+    fn on_plugin_ran(
+        &mut self,
+        id: String,
+        title: String,
+        again: Again,
+        ran: Ran,
+    ) -> Task<Message> {
         self.plugins.running = None;
         self.plugins.progress = None;
         // The run's own word on the status bar goes; another's stays.
@@ -1129,6 +1199,13 @@ impl App {
             .get(&id)
             .map(Installed::name)
             .unwrap_or_default();
+        // A command that finished takes the failure of the last away.
+        if ran.outcome.is_ok() {
+            self.forget_failure_of(FailureOf::PluginRun);
+            self.plugins.failed.remove(&id);
+        } else {
+            self.plugins.failed.insert(id.clone());
+        }
         match ran.outcome {
             Ok(Outcome::Show(view)) => {
                 self.show_plugin_page(PluginPage::new(id, name, view));
@@ -1150,12 +1227,21 @@ impl App {
                 Task::none()
             }
             Err(failure) => {
-                let why = failure_words(&failure);
-                self.plugins.note(&id, Level::Error, why.clone());
-                self.status = tr!(
-                    "{command} did not finish: {reason}",
-                    command = title,
-                    reason = why
+                self.plugins
+                    .note(&id, Level::Error, failure_words(&failure));
+                // It stands, with Try again (the same run) and Settings
+                // (Settings → Plugins, its log and what fixes it): said
+                // in passing, it was gone in seconds, with no way on.
+                self.say_failure_again(
+                    move || {
+                        tr!(
+                            "{command} did not finish: {reason}",
+                            command = title.clone(),
+                            reason = failure_words(&failure)
+                        )
+                    },
+                    Some(Message::Plugin(PluginMsg::RunAgain(again))),
+                    FailureOf::PluginRun,
                 );
                 Task::none()
             }
@@ -1555,11 +1641,20 @@ impl App {
                 self.plugins.prompt = None;
                 Task::none()
             }
-            PluginMsg::Ran { id, title, ran, .. } => {
+            PluginMsg::Ran {
+                id,
+                title,
+                again,
+                ran,
+                ..
+            } => {
                 let Some(ran) = ran.lock().unwrap_or_else(|e| e.into_inner()).take() else {
                     return Task::none();
                 };
-                self.on_plugin_ran(id, title, ran)
+                self.on_plugin_ran(id, title, again, ran)
+            }
+            PluginMsg::RunAgain(again) => {
+                self.run_plugin(&again.id, &again.command, again.input, again.at)
             }
             PluginMsg::Open { block, row } => {
                 let at = self
@@ -1603,7 +1698,7 @@ impl App {
                             })
                         })
                         .await
-                        .unwrap_or_else(|_| Err("the file could not be read".into()))
+                        .unwrap_or_else(|_| Err(tr!("the file could not be read").into()))
                     },
                     move |result| {
                         Message::Plugin(PluginMsg::Read {
@@ -1686,6 +1781,9 @@ impl App {
                     .unwrap_or(id.clone());
                 let answer = match result {
                     Ok(fingerprint) => {
+                        self.forget_failure_of(FailureOf::PluginInstall);
+                        // A new build: whether it works is for its runs to say.
+                        self.plugins.failed.remove(&id);
                         let manifest = self.plugins.get(&id).map(|p| p.manifest.clone());
                         let (commands, graphs) = manifest
                             .as_ref()
@@ -1722,6 +1820,21 @@ impl App {
                             plugin = name.clone(),
                             reason = why.clone()
                         ));
+                        // Said where the user is, too: after Install on an
+                        // agent's card, Settings was not open, and the card
+                        // was gone with nothing said.
+                        let (plugin, reason) = (name.clone(), why.clone());
+                        self.say_failure_again(
+                            move || {
+                                tr!(
+                                    "{plugin} could not be installed: {reason}",
+                                    plugin = plugin.clone(),
+                                    reason = crate::i18n::lookup(&reason).to_string()
+                                )
+                            },
+                            None,
+                            FailureOf::PluginInstall,
+                        );
                         Err(why)
                     }
                 };
@@ -1801,6 +1914,42 @@ impl App {
                 self.plugins.confirm = None;
                 Task::none()
             }
+            PluginMsg::CopyLog(id) => {
+                let lines = self.plugins.log_text(&id);
+                if lines.is_empty() {
+                    return Task::none();
+                }
+                self.status = tr!("Copied its log").into();
+                iced::clipboard::write(lines)
+            }
+            PluginMsg::AskToFix(id) => {
+                let Some(plugin) = self.plugins.get(&id) else {
+                    return Task::none();
+                };
+                // In the reader's words, as if typed: they read it, and
+                // send it, or not (an answer is paid for).
+                let mut ask = tr!(
+                    "The plugin {plugin} (id {id}) does not work. Find out why from its log and its source, fix it, build it and try it, then offer me the fixed build to install.",
+                    plugin = plugin.name(),
+                    id = id.clone()
+                );
+                let log = self.plugins.log_text(&id);
+                if !log.is_empty() {
+                    ask.push_str("\n\n");
+                    ask.push_str(tr!("Its log:"));
+                    ask.push_str("\n```\n");
+                    ask.push_str(&log);
+                    ask.push_str("\n```");
+                }
+                let draft = self.proj.ask_input.trim_end();
+                self.proj.ask_input = match draft.is_empty() {
+                    true => ask,
+                    false => format!("{draft}\n\n{ask}"),
+                };
+                self.proj.ask_spoken = false;
+                let closed = self.close_settings();
+                Task::batch([closed, self.update(Message::Ask(AskMsg::Open))])
+            }
             PluginMsg::Remove(id) => {
                 let removed = data().and_then(|d| {
                     clew_plugin::store::remove(&d, &id)?;
@@ -1816,6 +1965,7 @@ impl App {
                     self.proj.plugin_page = None;
                 }
                 self.plugins.log.remove(&id);
+                self.plugins.failed.remove(&id);
                 self.reload_plugins()
             }
             PluginMsg::Requests(found) => self.on_requests(&found),
@@ -1907,6 +2057,7 @@ impl App {
                 }
                 self.ensure_plugin_map()
             }
+            PluginMsg::CheckToolchain => self.check_toolchain(),
             PluginMsg::ToolchainChecked(checked) => {
                 if matches!(self.plugins.building, Building::SettingUp { .. }) {
                     return Task::none();

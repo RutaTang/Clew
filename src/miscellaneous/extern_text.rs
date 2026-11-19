@@ -18,6 +18,7 @@ pub(crate) fn all() -> Vec<&'static str> {
         MAP_DESCRIPTIONS,
         MAP_KINDS,
         NOTICES,
+        PLUGIN_STOPS,
         STEP_VERBS,
         MAP_WORDS,
     ]
@@ -287,6 +288,12 @@ pub(crate) const NOTICES: &[&str] = &[
     tr_noop!("larger than 64 MB"),
     tr_noop!("not a regular file inside the project (a link, or moved since the scan)"),
 ];
+/// Why clew-plugin did not run a plugin, said as it wrote it: its approved
+/// file changed since (`clew_plugin::store::CHANGED`).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const PLUGIN_STOPS: &[&str] = &[tr_noop!(
+    "the plugin's file changed after you approved it. Remove it in Settings → Plugins and install it again."
+)];
 /// The words an agent step's title starts with, as clew-server writes it
 /// (`read src/lib.rs:1-50`), capitalized as the step shows them.
 pub(crate) const STEP_VERBS: &[&str] = &[
