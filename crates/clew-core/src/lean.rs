@@ -11,6 +11,7 @@
 //! and nothing else.
 
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 /// What a line that continues the command above it can start with, at its
 /// start: a match alternative, a closing bracket, a `where` or `with` clause,
@@ -488,6 +489,38 @@ fn closing_bracket(text: &str) -> Option<usize> {
     None
 }
 
+/// Where the build of the Mathlib a Lake project at `root` depends on — or
+/// is — belongs, when it is not there: `None` for a project without
+/// Mathlib, and for one whose build is in place. Without it, Lean builds
+/// all of Mathlib itself the first time a file importing it is checked,
+/// which takes hours; `lake exe cache get` downloads it in minutes.
+pub fn mathlib_build_missing(root: &Path) -> Option<PathBuf> {
+    use serde_json::Value;
+    let manifest = std::fs::read_to_string(root.join("lake-manifest.json")).ok()?;
+    let manifest: Value = serde_json::from_str(&manifest).ok()?;
+    let named = |v: &Value| v.get("name").and_then(Value::as_str) == Some("mathlib");
+    let mathlib = if named(&manifest) {
+        root.to_path_buf()
+    } else {
+        let packages = manifest
+            .get("packagesDir")
+            .and_then(Value::as_str)
+            .unwrap_or(".lake/packages");
+        manifest
+            .get("packages")?
+            .as_array()?
+            .iter()
+            .any(named)
+            .then(|| root.join(packages).join("mathlib"))?
+    };
+    let build = mathlib.join(".lake").join("build");
+    // `lib/lean/` since Lake 5; `lib/` before.
+    let built = ["lib/lean/Mathlib.olean", "lib/Mathlib.olean"]
+        .iter()
+        .any(|olean| build.join(olean).is_file());
+    (!built).then_some(build)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +672,40 @@ mod tests {
             let want = want.map(|(k, n, s)| (k, n.to_string(), s.to_string()));
             assert_eq!(read(command), want, "{command}");
         }
+    }
+
+    /// A project that uses Mathlib is told apart from one that does not,
+    /// and Mathlib's build missing from one whose build is there — the
+    /// manifest's own packages folder, and Mathlib's repository itself.
+    #[test]
+    fn a_missing_mathlib_build_is_found() {
+        let dir = crate::testutil::TempDir::new("lean-mathlib-cache");
+        let root = dir.to_path_buf();
+        let manifest = |body: &str| std::fs::write(root.join("lake-manifest.json"), body).unwrap();
+        assert_eq!(mathlib_build_missing(&root), None, "no manifest");
+        manifest(
+            r#"{"version": "1.1.0", "packagesDir": ".lake/packages", "packages": [{"name": "batteries"}], "name": "demo"}"#,
+        );
+        assert_eq!(mathlib_build_missing(&root), None, "no Mathlib");
+        manifest(
+            r#"{"version": "1.1.0", "packagesDir": ".lake/packages", "packages": [{"name": "mathlib", "scope": "leanprover-community"}], "name": "demo"}"#,
+        );
+        let build = root.join(".lake/packages/mathlib/.lake/build");
+        assert_eq!(mathlib_build_missing(&root), Some(build.clone()));
+        std::fs::create_dir_all(build.join("lib/lean")).unwrap();
+        std::fs::write(build.join("lib/lean/Mathlib.olean"), "x").unwrap();
+        assert_eq!(mathlib_build_missing(&root), None, "built");
+        // Mathlib's own repository, an older Lake's packages folder.
+        manifest(
+            r#"{"version": 7, "packagesDir": "lake-packages", "packages": [], "name": "mathlib"}"#,
+        );
+        assert_eq!(
+            mathlib_build_missing(&root),
+            Some(root.join(".lake/build")),
+            "Mathlib's own build"
+        );
+        manifest("not json");
+        assert_eq!(mathlib_build_missing(&root), None);
     }
 
     #[test]

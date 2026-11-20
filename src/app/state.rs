@@ -2604,6 +2604,9 @@ pub struct ProjectSession {
     /// The Lean goals at the cursor, the margin's Goals tab
     /// (`app::proof`).
     pub lean_goals: Option<crate::app::proof::LeanGoals>,
+    /// Mathlib's build cache for this project, wanted or being got
+    /// (`app::proof`).
+    pub mathlib: crate::app::proof::MathlibCache,
     /// The weak spots page (`app::weakspots`).
     pub weak: crate::app::weakspots::WeakSpots,
     /// The API documentation view's state (see [`DocsState`]).
@@ -2969,6 +2972,7 @@ impl Default for ProjectSession {
             fake: Default::default(),
             proof: None,
             lean_goals: None,
+            mathlib: Default::default(),
             weak: Default::default(),
             docs: Default::default(),
             glossary: Default::default(),

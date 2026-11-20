@@ -9451,6 +9451,51 @@ async fn the_goals_margin_says_how_far_lean_has_checked_and_offers_restart() {
     );
 }
 
+/// The Goals margin offers a Mathlib project its build cache, says how
+/// the fetch goes, and offers it again when it failed.
+#[test]
+fn the_goals_margin_offers_mathlibs_build_cache() {
+    use crate::app::proof::MathlibCache;
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.rel = "Basic.lean".into();
+        v.lang_key = Some("lean");
+    }
+    app.margin_tab = crate::MarginTab::Goals;
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Starting);
+    app.proj.mathlib = MathlibCache::Ready;
+    assert!(!shows(&mut sim_of(&app), "Get Mathlib's Build Cache"));
+    app.proj.mathlib = MathlibCache::Missing;
+    assert!(shows(&mut sim_of(&app), "This project uses Mathlib"));
+    let sent = click(sim_of(&app), "Get Mathlib's Build Cache");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::GetMathlibCache))),
+        "{sent:?}"
+    );
+    app.proj.mathlib = MathlibCache::Getting("Downloaded: 1200 file(s)".into());
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Getting Mathlib's build cache…"));
+    assert!(shows(&mut sim, "Downloaded: 1200 file(s)"));
+    drop(sim);
+    app.proj.mathlib = MathlibCache::Failed("no network".into());
+    assert!(shows(
+        &mut sim_of(&app),
+        "Could not get Mathlib's build cache: no network"
+    ));
+    let sent = click(sim_of(&app), "Try again");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::GetMathlibCache))),
+        "{sent:?}"
+    );
+}
+
 fn explain_file(root: &std::path::Path, rel: &str) -> crate::explain::Node {
     crate::explain::Node::File(root.join(rel))
 }

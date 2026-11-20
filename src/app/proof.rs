@@ -93,6 +93,120 @@ pub(crate) fn proof_at(
         .map(|(_, name, steps)| (name, steps))
 }
 
+/// Mathlib's build cache for the project: wanted, being got, or neither.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum MathlibCache {
+    /// Not looked at yet.
+    #[default]
+    Unknown,
+    /// Nothing to get: no Mathlib, its build in place, or a project on
+    /// another host.
+    Ready,
+    /// The project uses Mathlib and its build is not there.
+    Missing,
+    /// `lake exe cache get` at work: the last line it said.
+    Getting(String),
+    /// It failed: its last words.
+    Failed(String),
+}
+
+/// How often, at most, a line `lake exe cache get` says is passed on: it
+/// redraws its progress many times a second.
+const MATHLIB_SAID_EVERY: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Run `lake exe cache get` in `root` with `lake`, passing on what it says
+/// (`said`, at most every [`MATHLIB_SAID_EVERY`]); its last words when it
+/// fails.
+pub(crate) fn get_mathlib_cache(
+    lake: &Path,
+    root: &Path,
+    said: &dyn Fn(String),
+) -> Result<(), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut command = clew_core::spawn::command(lake);
+    command
+        .args(["exe", "cache", "get"])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // The toolchain's own `lean` beside its `lake`, first.
+    if let Some(dir) = lake.parent() {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let dirs = std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&path));
+        if let Ok(joined) = std::env::join_paths(dirs) {
+            command.env("PATH", joined);
+        }
+    }
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    // Both streams, as they come, into lines: progress is redrawn with `\r`.
+    let (lines, heard) = std::sync::mpsc::channel::<String>();
+    let readers: Vec<_> = [
+        child
+            .stdout
+            .take()
+            .map(|o| Box::new(o) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|e| Box::new(e) as Box<dyn Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|mut stream| {
+        let lines = lines.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut line = Vec::new();
+            while let Ok(n) = stream.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                for &b in &buf[..n] {
+                    if b == b'\n' || b == b'\r' {
+                        if !line.is_empty() {
+                            let _ = lines.send(String::from_utf8_lossy(&line).into_owned());
+                            line.clear();
+                        }
+                    } else if line.len() < 4096 {
+                        line.push(b);
+                    }
+                }
+            }
+            if !line.is_empty() {
+                let _ = lines.send(String::from_utf8_lossy(&line).into_owned());
+            }
+        })
+    })
+    .collect();
+    drop(lines);
+    let mut last = String::new();
+    let mut passed = std::time::Instant::now() - MATHLIB_SAID_EVERY;
+    for line in heard {
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        last = line;
+        if passed.elapsed() >= MATHLIB_SAID_EVERY {
+            passed = std::time::Instant::now();
+            said(last.clone());
+        }
+    }
+    for reader in readers {
+        let _ = reader.join();
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else if last.is_empty() {
+        Err(format!("lake exited with {status}"))
+    } else {
+        Err(last)
+    }
+}
+
 impl App {
     /// Step Through Proof from the context menu: the proof of the
     /// declaration it was opened on, asked of the Lean server step by step.
@@ -244,6 +358,21 @@ impl App {
     /// or the server having checked more of the file, asks the server
     /// again. Run after every update ([`App::update`]).
     pub(crate) fn sync_lean_goals(&mut self) -> Option<Task<Message>> {
+        // Whether the project wants Mathlib's build cache: looked at once,
+        // when a Lean file is first read.
+        if self.reading_lean() && self.proj.mathlib == MathlibCache::Unknown {
+            let missing = !self.connection.is_remote()
+                && self
+                    .proj
+                    .project
+                    .as_ref()
+                    .is_some_and(|p| clew_core::mathlib_build_missing(&p.root).is_some());
+            self.proj.mathlib = if missing {
+                MathlibCache::Missing
+            } else {
+                MathlibCache::Ready
+            };
+        }
         if self.reading_lean() && !self.lean_goals_offered {
             self.lean_goals_offered = true;
             if self.margin_tab == crate::MarginTab::Notes {
@@ -323,6 +452,81 @@ impl App {
         )
     }
 
+    /// Get Mathlib's build cache: `lake exe cache get` in the project, with
+    /// the project's `lake` — what Lean's own extension offers a Mathlib
+    /// project, whose first file opened otherwise had Lean build all of
+    /// Mathlib, for hours, with nothing said of it.
+    fn on_get_mathlib_cache(&mut self) -> Task<Message> {
+        use iced::futures::channel::mpsc;
+        if matches!(self.proj.mathlib, MathlibCache::Getting(_)) || self.connection.is_remote() {
+            return Task::none();
+        }
+        let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let lake = match self
+            .effective_server("lean")
+            .map(|server| clew_core::lsp::store::locate(&server))
+        {
+            Some(clew_core::lsp::store::Located::Ready(lake)) => lake,
+            _ => {
+                self.status = tr!("Lean's lake was not found: install Lean with elan").into();
+                return Task::none();
+            }
+        };
+        self.proj.mathlib = MathlibCache::Getting(String::new());
+        let stamp = self.stamp();
+        let (tx, rx) = mpsc::unbounded::<Message>();
+        std::thread::spawn(move || {
+            let said_stamp = stamp.clone();
+            let said = tx.clone();
+            let result = get_mathlib_cache(&lake, &root, &move |line| {
+                let _ = said.unbounded_send(Message::Proof(ProofMsg::MathlibSaid {
+                    stamp: said_stamp.clone(),
+                    line,
+                }));
+            });
+            let _ = tx.unbounded_send(Message::Proof(ProofMsg::MathlibGot { stamp, result }));
+        });
+        Task::run(rx, std::convert::identity)
+    }
+
+    /// `lake exe cache get` ended: Mathlib's build is looked for again, and
+    /// the open Lean files are checked afresh against it.
+    fn on_mathlib_got(&mut self, result: Result<(), String>) -> Task<Message> {
+        let root = self.proj.project.as_ref().map(|p| p.root.clone());
+        let still_missing = root.is_some_and(|r| clew_core::mathlib_build_missing(&r).is_some());
+        self.proj.mathlib = match result {
+            Err(why) => MathlibCache::Failed(why),
+            Ok(()) if still_missing => MathlibCache::Failed(
+                tr!("lake finished, and Mathlib's build is still not there").into(),
+            ),
+            Ok(()) => MathlibCache::Ready,
+        };
+        if self.proj.mathlib == MathlibCache::Ready {
+            self.status = tr!("Mathlib's build cache is in place").into();
+            let lean: Vec<(PathBuf, std::sync::Arc<String>)> = self
+                .proj
+                .panes
+                .iter()
+                .flatten()
+                .filter(|v| v.lang_key == Some("lean"))
+                .map(|v| (v.abs.clone(), v.source.clone()))
+                .collect();
+            if let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get("lean") {
+                let client = client.clone();
+                for (abs, source) in lean {
+                    client.did_close(&abs);
+                    self.lsp_doc_rev += 1;
+                    client.did_open(&abs, "lean", self.lsp_doc_rev, &source);
+                    self.proj.link.lsp_opened.insert(abs);
+                }
+                self.proj.lean_goals = None;
+            }
+        }
+        Task::none()
+    }
+
     /// Restart File: the Lean server checks the open Lean file afresh, as
     /// closing and opening it again does — against its imports as they are
     /// built now. What Lean asks for once a file's imports changed ("Imports
@@ -376,6 +580,14 @@ impl App {
             ProofMsg::GoalsDue { token } => self.on_goals_due(token),
             ProofMsg::Goals { token, result, .. } => self.on_goals(token, result),
             ProofMsg::RestartFile => self.on_lean_restart_file(),
+            ProofMsg::GetMathlibCache => self.on_get_mathlib_cache(),
+            ProofMsg::MathlibSaid { line, .. } => {
+                if let MathlibCache::Getting(said) = &mut self.proj.mathlib {
+                    *said = line;
+                }
+                Task::none()
+            }
+            ProofMsg::MathlibGot { result, .. } => self.on_mathlib_got(result),
             ProofMsg::FromMenu => self.on_proof_from_menu(),
             ProofMsg::Answered { token, result, .. } => self.on_proof_answered(token, result),
             ProofMsg::Step(forward) => {

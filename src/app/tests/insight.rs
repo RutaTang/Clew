@@ -595,3 +595,114 @@ async fn restart_file_has_lean_check_the_file_afresh() {
         "{said}"
     );
 }
+
+/// `lake exe cache get` is run as it is written, in the project, with the
+/// toolchain's folder first on PATH; what it says — progress redrawn with
+/// `\r` too — is passed on as lines, and its last words are the failure.
+#[cfg(unix)]
+#[test]
+fn mathlib_cache_get_runs_lake_and_passes_on_what_it_says() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = crate::app::tests::test_dir("mathlib-cache-lake");
+    let bin = dir.join("toolchain/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let lake = bin.join("lake");
+    let write = |script: &str| {
+        std::fs::write(&lake, script).unwrap();
+        std::fs::set_permissions(&lake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write(
+        "#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"$(pwd)\"\n\
+         case \"$PATH\" in \"$(dirname \"$0\")\"*) echo first-on-path ;; esac\n\
+         printf 'Downloaded: 1 file\\rDownloaded: 2 files\\n'\nexit 0\n",
+    );
+    let said = std::sync::Mutex::new(Vec::new());
+    let root = dir.join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    // Every line passed on (the pace set by the clock, not the test).
+    let result =
+        crate::app::proof::get_mathlib_cache(&lake, &root, &|line| said.lock().unwrap().push(line));
+    assert_eq!(result, Ok(()));
+    let said = said.into_inner().unwrap();
+    assert_eq!(
+        said.first().map(String::as_str),
+        Some(format!("exe cache get|{}", root.display()).as_str()),
+        "{said:?}"
+    );
+    write("#!/bin/sh\necho 'error: could not fetch' >&2\nexit 3\n");
+    let result = crate::app::proof::get_mathlib_cache(&lake, &root, &|_| {});
+    assert_eq!(result, Err("error: could not fetch".to_string()));
+    // A lake that is not there says why.
+    let gone = crate::app::proof::get_mathlib_cache(&bin.join("nope"), &root, &|_| {});
+    assert!(gone.is_err());
+}
+
+/// A Lean project that uses Mathlib, whose build is not there, is offered
+/// its build cache in the Goals margin; got, the build is looked for
+/// again — still missing, it says so — and the open Lean files are checked
+/// afresh.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mathlib_project_is_offered_its_build_cache() {
+    let mut app = scanned_app("lean-mathlib-cache");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("lake-manifest.json"),
+        r#"{"version": "1.1.0", "packagesDir": ".lake/packages", "packages": [{"name": "mathlib"}], "name": "demo"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Proof.lean"),
+        "import Mathlib\ntheorem t : 1 = 1 := rfl\n",
+    )
+    .unwrap();
+    scan_synchronously(&mut app, root.clone());
+    open_synchronously(&mut app, "Proof.lean", None);
+    let _ = app.update(Message::Noop);
+    assert_eq!(app.proj.mathlib, crate::app::proof::MathlibCache::Missing);
+
+    // Got, and still not there: said, not taken for done.
+    let stamp = app.stamp();
+    let _ = app.update(Message::Proof(crate::ProofMsg::MathlibSaid {
+        stamp: stamp.clone(),
+        line: "Downloaded: 2 files".into(),
+    }));
+    assert_eq!(
+        app.proj.mathlib,
+        crate::app::proof::MathlibCache::Missing,
+        "a line heard outside a fetch changes nothing"
+    );
+    let _ = app.update(Message::Proof(crate::ProofMsg::MathlibGot {
+        stamp: stamp.clone(),
+        result: Ok(()),
+    }));
+    assert!(
+        matches!(&app.proj.mathlib, crate::app::proof::MathlibCache::Failed(why) if why.contains("still not there")),
+        "{:?}",
+        app.proj.mathlib
+    );
+    // There now: in place, and Lean checks the open file afresh.
+    let olean = root.join(".lake/packages/mathlib/.lake/build/lib/lean");
+    std::fs::create_dir_all(&olean).unwrap();
+    std::fs::write(olean.join("Mathlib.olean"), "x").unwrap();
+    let (client, wire) = scripted_lsp_client(&root).await;
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), LspSlot::Ready(client));
+    let _ = app.update(Message::Proof(crate::ProofMsg::MathlibGot {
+        stamp,
+        result: Ok(()),
+    }));
+    assert_eq!(app.proj.mathlib, crate::app::proof::MathlibCache::Ready);
+    assert!(app.status.contains("in place"), "{}", app.status);
+    let mut said = String::new();
+    for _ in 0..400 {
+        said = wire.lock().unwrap().clone();
+        if said.contains("textDocument/didOpen") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(said.contains("textDocument/didClose"), "{said}");
+    assert!(said.contains("textDocument/didOpen"), "{said}");
+}

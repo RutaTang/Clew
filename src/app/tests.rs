@@ -24555,6 +24555,14 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             token: 1,
             result: Ok(None),
         }),
+        Message::Proof(crate::ProofMsg::MathlibSaid {
+            stamp: s(),
+            line: String::new(),
+        }),
+        Message::Proof(crate::ProofMsg::MathlibGot {
+            stamp: s(),
+            result: Ok(()),
+        }),
         Message::Weak(crate::WeakMsg::Built {
             stamp: s(),
             rev: 1,

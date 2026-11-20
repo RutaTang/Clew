@@ -2718,38 +2718,70 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
         return note(String::new());
     };
     let line = v.caret.map_or(0, |(l, _)| l);
-    match app.proj.link.lsp.get("lean") {
-        Some(crate::LspSlot::Ready(_)) => {}
-        Some(crate::LspSlot::Starting | crate::LspSlot::AwaitingConsent) => {
-            return note(
-                tr!("The Lean server is starting. The goals at the cursor show here once it is ready.")
-                    .into(),
-            );
-        }
-        _ => {
-            let open = button(
-                text(tr!("Language servers…"))
-                    .size(ts::SMALL)
-                    .color(theme::accent()),
-            )
-            .style(theme::icon_button(false))
-            .padding([3, 6])
-            .on_press(super::heard::said(
-                tr!("Language servers…"),
-                Message::Editor(EditorMsg::RunAction(crate::keymap::Action::LspServers)),
-            ));
-            return column![
-                note(tr!("Start the Lean server to see the goals at the cursor here.").into()),
-                container(open).padding([0, 4]),
-            ]
-            .into();
-        }
-    }
     let mut rows = Column::new().spacing(2);
     let snapshot = match app.proj.link.lsp_snapshots.get("lean") {
         Some(Ok(snapshot)) => Some(snapshot),
         _ => None,
     };
+    // Mathlib's build, where the project wants it and it is not there:
+    // without it Lean builds all of Mathlib itself, for hours, the first
+    // time a file importing it is checked.
+    let link = |label: &'static str, msg: Message| -> Element<'_, Message> {
+        container(
+            button(text(label).size(ts::SMALL).color(theme::accent()))
+                .style(theme::icon_button(false))
+                .padding([3, 6])
+                .on_press(super::heard::said(label, msg)),
+        )
+        .padding([0, 4])
+        .into()
+    };
+    let get = || Message::Proof(crate::ProofMsg::GetMathlibCache);
+    match &app.proj.mathlib {
+        crate::app::proof::MathlibCache::Missing => {
+            rows = rows.push(note(
+                tr!("This project uses Mathlib, and Mathlib's build is not here yet. Lean would build all of it itself, which takes hours; its build cache downloads in minutes.")
+                    .into(),
+            ));
+            rows = rows.push(link(tr!("Get Mathlib's Build Cache"), get()));
+        }
+        crate::app::proof::MathlibCache::Getting(said) => {
+            rows = rows.push(note(tr!("Getting Mathlib's build cache…").into()));
+            if !said.is_empty() {
+                rows = rows.push(code(said.clone(), theme::dim()));
+            }
+        }
+        crate::app::proof::MathlibCache::Failed(why) => {
+            rows = rows.push(note(tr!(
+                "Could not get Mathlib's build cache: {error}",
+                error = why
+            )));
+            rows = rows.push(link(tr!("Try again"), get()));
+        }
+        _ => {}
+    }
+    // The server's state, under the Mathlib card: a project whose Lean
+    // would build all of Mathlib wants the card most while Lean starts.
+    match app.proj.link.lsp.get("lean") {
+        Some(crate::LspSlot::Ready(_)) => {}
+        Some(crate::LspSlot::Starting | crate::LspSlot::AwaitingConsent) => {
+            rows = rows.push(note(
+                tr!("The Lean server is starting. The goals at the cursor show here once it is ready.")
+                    .into(),
+            ));
+            return scrollable(rows).height(Fill).into();
+        }
+        _ => {
+            rows = rows.push(note(
+                tr!("Start the Lean server to see the goals at the cursor here.").into(),
+            ));
+            rows = rows.push(link(
+                tr!("Language servers…"),
+                Message::Editor(EditorMsg::RunAction(crate::keymap::Action::LspServers)),
+            ));
+            return scrollable(rows).height(Fill).into();
+        }
+    }
     // Lean says the file's imports changed since it read them: it checks
     // nothing more of it until the file is restarted — the one way on, a
     // click away, where Lean's own words named a command to find.

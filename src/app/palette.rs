@@ -1114,6 +1114,17 @@ impl App {
                     None,
                     send(Message::Proof(crate::ProofMsg::RestartFile)),
                 );
+                if matches!(
+                    self.proj.mathlib,
+                    crate::app::proof::MathlibCache::Missing
+                        | crate::app::proof::MathlibCache::Failed(_)
+                ) {
+                    add(
+                        tr_noop!("Get Mathlib's Build Cache").to_string(),
+                        None,
+                        send(Message::Proof(crate::ProofMsg::GetMathlibCache)),
+                    );
+                }
             }
             let at_caret = |m| PaletteAction::AtCaret(m);
             for (title, keys, message) in [

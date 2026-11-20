@@ -3603,20 +3603,31 @@ pub enum ProofMsg {
     /// Restart File: the Lean server checks the open file afresh, against
     /// its imports as they are now built.
     RestartFile,
+    /// Get Mathlib's build cache (`lake exe cache get`).
+    GetMathlibCache,
+    /// A line `lake exe cache get` said.
+    MathlibSaid { stamp: Stamp, line: String },
+    /// `lake exe cache get` ended: its last words, if it failed.
+    MathlibGot {
+        stamp: Stamp,
+        result: Result<(), String>,
+    },
 }
 
 impl ProofMsg {
     /// Where the message comes from, for `dispatch`'s ownership check.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            ProofMsg::Answered { stamp, .. } | ProofMsg::Goals { stamp, .. } => {
-                Some(Origin::Stamped(stamp))
-            }
+            ProofMsg::Answered { stamp, .. }
+            | ProofMsg::Goals { stamp, .. }
+            | ProofMsg::MathlibSaid { stamp, .. }
+            | ProofMsg::MathlibGot { stamp, .. } => Some(Origin::Stamped(stamp)),
             ProofMsg::FromMenu
             | ProofMsg::Step(_)
             | ProofMsg::Goto(_)
             | ProofMsg::Close
             | ProofMsg::RestartFile
+            | ProofMsg::GetMathlibCache
             | ProofMsg::GoalsDue { .. } => None,
         }
     }
