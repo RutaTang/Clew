@@ -357,7 +357,47 @@ impl App {
     /// after that); while they are shown, the cursor resting somewhere new,
     /// or the server having checked more of the file, asks the server
     /// again. Run after every update ([`App::update`]).
+    /// The Lean file being read: the active one, else any open.
+    pub(crate) fn lean_file(&self) -> Option<PathBuf> {
+        self.active_viewer()
+            .filter(|v| v.lang_key == Some("lean"))
+            .or_else(|| {
+                self.proj
+                    .panes
+                    .iter()
+                    .flatten()
+                    .find(|v| v.lang_key == Some("lean"))
+            })
+            .map(|v| v.abs.clone())
+    }
+
+    /// A Lean file of another Lake project than the one Lean's server was
+    /// started in: the server is started again in that one, where its
+    /// imports resolve (a repository's proofs and its extracted code are
+    /// often two). `None` while it is where it should be.
+    fn sync_lean_root(&mut self) -> Option<Task<Message>> {
+        if self.connection.is_remote() || !self.reading_lean() {
+            return None;
+        }
+        if !matches!(self.proj.link.lsp.get("lean"), Some(LspSlot::Ready(_))) {
+            return None;
+        }
+        let root = self.proj.project.as_ref()?.root.clone();
+        let file = self.lean_file()?;
+        let lake = clew_core::lake_root(&root, &file);
+        let started = self.proj.link.lean_root.as_ref()?;
+        if *started == lake {
+            return None;
+        }
+        self.reset_lsp("lean");
+        self.proj.lean_goals = None;
+        Some(self.ensure_lsp("lean"))
+    }
+
     pub(crate) fn sync_lean_goals(&mut self) -> Option<Task<Message>> {
+        if let Some(restart) = self.sync_lean_root() {
+            return Some(restart);
+        }
         // Whether the project wants Mathlib's build cache: looked at once,
         // when a Lean file is first read.
         if self.reading_lean() && self.proj.mathlib == MathlibCache::Unknown {

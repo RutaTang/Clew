@@ -768,6 +768,19 @@ impl App {
             .lsp
             .insert(language.to_string(), LspSlot::Starting);
         let lang = language.to_string();
+        // Lean's server runs in the Lake project of the Lean file being
+        // read — a folder of its own, in many a repository — where it finds
+        // the project's own modules; started in the opened folder, every
+        // import of them failed.
+        let root = if language == "lean" && !self.connection.is_remote() {
+            let lake = self
+                .lean_file()
+                .map_or_else(|| root.clone(), |file| clew_core::lake_root(&root, &file));
+            self.proj.link.lean_root = Some(lake.clone());
+            lake
+        } else {
+            root
+        };
 
         // Preferred: spawn the language server on clew-server and proxy its
         // stdio, so it runs where the code lives (local today, remote later).

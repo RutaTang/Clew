@@ -489,6 +489,24 @@ fn closing_bracket(text: &str) -> Option<usize> {
     None
 }
 
+/// The Lake project the Lean file `file` belongs to: the nearest folder
+/// above it, up to `root`, holding a lakefile (`lakefile.lean` or
+/// `lakefile.toml`) — where Lean's server must run for the file's imports
+/// of its own project to resolve, in a repository whose Lean is in a
+/// folder of its own. `root` for a file in no Lake project under it.
+pub fn lake_root(root: &Path, file: &Path) -> PathBuf {
+    let lakefile = |dir: &Path| {
+        ["lakefile.lean", "lakefile.toml"]
+            .iter()
+            .any(|name| dir.join(name).is_file())
+    };
+    file.ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(root))
+        .find(|dir| lakefile(dir))
+        .map_or_else(|| root.to_path_buf(), Path::to_path_buf)
+}
+
 /// Where the build of the Mathlib a Lake project at `root` depends on — or
 /// is — belongs, when it is not there: `None` for a project without
 /// Mathlib, and for one whose build is in place. Without it, Lean builds
@@ -706,6 +724,37 @@ mod tests {
         );
         manifest("not json");
         assert_eq!(mathlib_build_missing(&root), None);
+    }
+
+    /// A Lean file's Lake project is the nearest folder above it with a
+    /// lakefile, inside the opened folder: one nested in another is its
+    /// own; a file in none is the opened folder's.
+    #[test]
+    fn a_lean_files_lake_project_is_the_nearest_with_a_lakefile() {
+        let dir = crate::testutil::TempDir::new("lean-lake-root");
+        let root = dir.to_path_buf();
+        let at = |rel: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "").unwrap();
+            path
+        };
+        at("verification/lakefile.lean");
+        at("verification/extracted/lakefile.toml");
+        let proof = at("verification/Proofs/Trust.lean");
+        let extracted = at("verification/extracted/Gen/Funs.lean");
+        let loose = at("scratch/Try.lean");
+        assert_eq!(lake_root(&root, &proof), root.join("verification"));
+        assert_eq!(
+            lake_root(&root, &extracted),
+            root.join("verification/extracted")
+        );
+        assert_eq!(lake_root(&root, &loose), root);
+        // Not past the opened folder, even where a lakefile is above it.
+        let inner = root.join("scratch");
+        at("lakefile.lean");
+        assert_eq!(lake_root(&inner, &loose), inner);
+        assert_eq!(lake_root(&root, &loose), root);
     }
 
     #[test]

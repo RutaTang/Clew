@@ -97,7 +97,7 @@ pub mod imports;
 pub mod inactive;
 pub mod incremental;
 pub(crate) mod lean;
-pub use lean::mathlib_build_missing;
+pub use lean::{lake_root, mathlib_build_missing};
 pub mod leanproof;
 pub mod linerpc;
 pub mod llm;

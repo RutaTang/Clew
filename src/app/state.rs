@@ -3197,6 +3197,10 @@ pub struct ProjectLink {
     pub lsp_log: Option<LspLogTail>,
     /// Documents already sent to a server via didOpen.
     pub lsp_opened: HashSet<PathBuf>,
+    /// The Lake project the Lean server was started in
+    /// ([`clew_core::lake_root`]): a Lean file of another has it started
+    /// again there.
+    pub lean_root: Option<PathBuf>,
     /// Last diagnostics version seen per language, to gate refresh ticks.
     pub seen_diag_version: std::collections::HashMap<String, u64>,
     /// Last inlay-hint refresh epoch seen per language, so a server-requested

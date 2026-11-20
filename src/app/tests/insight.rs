@@ -706,3 +706,41 @@ async fn a_mathlib_project_is_offered_its_build_cache() {
     assert!(said.contains("textDocument/didClose"), "{said}");
     assert!(said.contains("textDocument/didOpen"), "{said}");
 }
+
+/// A Lean file of another Lake project than the one Lean's server runs in
+/// has the server started again in that one — a repository's proofs and
+/// its extracted code are two projects, each with its own lakefile; one
+/// of the same project keeps the server it has.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lean_file_of_another_lake_project_restarts_lean_there() {
+    let mut app = scanned_app("lean-lake-roots");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    for (rel, text) in [
+        ("verification/lakefile.lean", ""),
+        ("verification/extracted/lakefile.lean", ""),
+        ("verification/Proofs.lean", "theorem t : 1 = 1 := rfl\n"),
+        ("verification/More.lean", "theorem u : 2 = 2 := rfl\n"),
+        ("verification/extracted/Funs.lean", "def f := 1\n"),
+    ] {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    scan_synchronously(&mut app, root.clone());
+    open_synchronously(&mut app, "verification/Proofs.lean", None);
+    let (client, _wire) = scripted_lsp_client(&root).await;
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), LspSlot::Ready(client));
+    app.proj.link.lean_root = Some(root.join("verification"));
+    let ready = |app: &App| matches!(app.proj.link.lsp.get("lean"), Some(LspSlot::Ready(_)));
+    let _ = app.update(Message::Noop);
+    assert!(ready(&app), "its own project: the server stays");
+    open_synchronously(&mut app, "verification/More.lean", None);
+    let _ = app.update(Message::Noop);
+    assert!(ready(&app), "the same project: the server stays");
+    open_synchronously(&mut app, "verification/extracted/Funs.lean", None);
+    let _ = app.update(Message::Noop);
+    assert!(!ready(&app), "another project: the server is started again");
+}
