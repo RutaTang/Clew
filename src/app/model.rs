@@ -1711,7 +1711,11 @@ impl LspSlot {
             LspSlot::Ready(_) => match snapshot {
                 Some(Ok(s)) => match &s.error {
                     Some(e) => format!("⚠ {}", lsp_error_summary(e)),
-                    None => s.progress.clone().unwrap_or_else(|| tr!("ready").into()),
+                    None => s
+                        .progress
+                        .clone()
+                        .or_else(|| checking_label(s))
+                        .unwrap_or_else(|| tr!("ready").into()),
                 },
                 Some(Err(_)) => tr!("⚠ internal error — restart this language server").into(),
                 None => tr!("ready").into(),
@@ -1723,6 +1727,19 @@ impl LspSlot {
             LspSlot::AwaitingConsent => tr!("waiting for your answer").into(),
         }
     }
+}
+
+/// What a server still checking files says of them on the status bar
+/// (Lean's `$/lean/fileProgress`): "checking Basic.lean", "checking
+/// Basic.lean and 2 more" — the first by path, so the name holds still.
+fn checking_label(s: &lsp::client::Snapshot) -> Option<String> {
+    let mut files: Vec<&std::path::Path> = s.checking_files().collect();
+    files.sort();
+    let name = files.first()?.file_name()?.to_string_lossy();
+    Some(match files.len() - 1 {
+        0 => tr!("checking {file}", file = name),
+        more => tr!("checking {file} and {n} more", file = name, n = more),
+    })
 }
 
 /// What a language's [`LspSlot::AwaitingConsent`] slot waits on

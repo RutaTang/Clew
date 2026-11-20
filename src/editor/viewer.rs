@@ -868,6 +868,11 @@ impl Viewer {
         self.line_at_row((self.scroll_y / line_height) as usize) + 1
     }
 
+    /// How many lines the source has, folded or not.
+    pub fn line_count(&self) -> usize {
+        self.line_starts.len()
+    }
+
     /// Raw source line (0-based), if present, as `str::lines` would yield it
     /// (without its `\n` / `\r\n` terminator). O(line), not O(file).
     pub fn source_line(&self, line0: usize) -> Option<&str> {

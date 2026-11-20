@@ -2746,9 +2746,51 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
         }
     }
     let mut rows = Column::new().spacing(2);
+    let snapshot = match app.proj.link.lsp_snapshots.get("lean") {
+        Some(Ok(snapshot)) => Some(snapshot),
+        _ => None,
+    };
+    // Lean says the file's imports changed since it read them: it checks
+    // nothing more of it until the file is restarted — the one way on, a
+    // click away, where Lean's own words named a command to find.
+    let stale = snapshot.is_some_and(|s| {
+        s.diagnostics(&v.abs)
+            .iter()
+            .any(|d| d.message.contains("Imports are out of date"))
+    });
+    if stale {
+        let restart = button(
+            text(tr!("Restart File"))
+                .size(ts::SMALL)
+                .color(theme::accent()),
+        )
+        .style(theme::icon_button(false))
+        .padding([3, 6])
+        .on_press(super::heard::said(
+            tr!("Restart File"),
+            Message::Proof(crate::ProofMsg::RestartFile),
+        ));
+        rows = rows.push(note(
+            tr!("This file's imports changed since Lean read them. Restart the file to check it against them.")
+                .into(),
+        ));
+        rows = rows.push(container(restart).padding([0, 4]));
+    }
     let goals = app.proj.lean_goals.as_ref().filter(|g| g.abs == v.abs);
     match goals.and_then(|g| g.answer.as_ref()) {
-        None => rows = rows.push(note(tr!("Asking the Lean server…").into())),
+        // How far Lean has got, where it says: a goal is answered once the
+        // line is checked, and checking the imports of a big project takes
+        // minutes the reader saw only "Asking…" through.
+        None => match snapshot.and_then(|s| s.checking(&v.abs)) {
+            Some(at) => {
+                rows = rows.push(note(tr!(
+                    "Lean is checking this file: line {line} of {total}…",
+                    line = at + 1,
+                    total = v.line_count().max(at + 1)
+                )))
+            }
+            None => rows = rows.push(note(tr!("Asking the Lean server…").into())),
+        },
         Some((_, Err(e))) => {
             rows = rows.push(note(tr!(
                 "The Lean server gave no goals here: {error}",
@@ -2789,7 +2831,7 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
         }
     }
     // What Lean says of the line: an error, a warning, `#eval`'s answer.
-    if let Some(Ok(snapshot)) = app.proj.link.lsp_snapshots.get("lean") {
+    if let Some(snapshot) = snapshot {
         let said: Vec<&clew_core::lsp::client::Diag> = snapshot
             .diagnostics(&v.abs)
             .iter()

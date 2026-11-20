@@ -141,6 +141,7 @@ impl App {
                         // Diagnostics on their way from a server that says
                         // no more of its work: read when they come.
                         snap.progress.is_some()
+                            || snap.checking_files().next().is_some()
                             || snap.awaiting_diagnostics
                             || self.proj.link.seen_diag_version.get(lang).copied()
                                 != Some(snap.diag_version)
@@ -1388,7 +1389,8 @@ impl App {
             Some(LspSlot::Starting) => true,
             Some(LspSlot::Ready(_)) => matches!(
                 self.proj.link.lsp_snapshots.get(language),
-                Some(Ok(s)) if s.error.is_none() && s.progress.is_some()
+                Some(Ok(s)) if s.error.is_none()
+                    && (s.progress.is_some() || s.checking_files().next().is_some())
             ),
             _ => false,
         }

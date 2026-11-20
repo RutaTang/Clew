@@ -3600,6 +3600,9 @@ pub enum ProofMsg {
         token: u64,
         result: Result<Option<clew_core::lsp::client::LeanGoal>, String>,
     },
+    /// Restart File: the Lean server checks the open file afresh, against
+    /// its imports as they are now built.
+    RestartFile,
 }
 
 impl ProofMsg {
@@ -3613,6 +3616,7 @@ impl ProofMsg {
             | ProofMsg::Step(_)
             | ProofMsg::Goto(_)
             | ProofMsg::Close
+            | ProofMsg::RestartFile
             | ProofMsg::GoalsDue { .. } => None,
         }
     }

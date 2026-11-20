@@ -323,6 +323,44 @@ impl App {
         )
     }
 
+    /// Restart File: the Lean server checks the open Lean file afresh, as
+    /// closing and opening it again does — against its imports as they are
+    /// built now. What Lean asks for once a file's imports changed ("Imports
+    /// are out of date and must be rebuilt").
+    fn on_lean_restart_file(&mut self) -> Task<Message> {
+        let Some(v) = self.active_viewer().filter(|v| v.lang_key == Some("lean")) else {
+            return Task::none();
+        };
+        let (abs, source) = (v.abs.clone(), v.source.clone());
+        let client = match self.proj.link.lsp.get("lean") {
+            Some(LspSlot::Ready(c)) => c.clone(),
+            Some(LspSlot::Starting | LspSlot::AwaitingConsent) => {
+                self.status =
+                    tr!("The Lean server is still starting — ask again once it is ready").into();
+                return Task::none();
+            }
+            _ => {
+                self.status = tr!(
+                    "The Lean server is not running — start it from the language servers panel"
+                )
+                .into();
+                return Task::none();
+            }
+        };
+        client.did_close(&abs);
+        self.lsp_doc_rev += 1;
+        client.did_open(&abs, "lean", self.lsp_doc_rev, &source);
+        self.proj.link.lsp_opened.insert(abs.clone());
+        // Asked again once the file is checked anew.
+        self.proj.lean_goals = None;
+        let name = abs
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.status = tr!("Lean is checking {file} again…", file = name);
+        Task::none()
+    }
+
     /// The Lean server's goals at the cursor, for asking `token`.
     fn on_goals(&mut self, token: u64, result: Result<Option<LeanGoal>, String>) -> Task<Message> {
         if let Some(goals) = self.proj.lean_goals.as_mut().filter(|g| g.token == token) {
@@ -337,6 +375,7 @@ impl App {
         match message {
             ProofMsg::GoalsDue { token } => self.on_goals_due(token),
             ProofMsg::Goals { token, result, .. } => self.on_goals(token, result),
+            ProofMsg::RestartFile => self.on_lean_restart_file(),
             ProofMsg::FromMenu => self.on_proof_from_menu(),
             ProofMsg::Answered { token, result, .. } => self.on_proof_answered(token, result),
             ProofMsg::Step(forward) => {

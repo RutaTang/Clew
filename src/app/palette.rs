@@ -1107,6 +1107,13 @@ impl App {
                     None,
                     PaletteAction::AtCaret(Message::Proof(crate::ProofMsg::FromMenu)),
                 );
+                // Lean's own name for it: its message says to use "the
+                // Restart File command" when a file's imports changed.
+                add(
+                    tr_noop!("Restart File").to_string(),
+                    None,
+                    send(Message::Proof(crate::ProofMsg::RestartFile)),
+                );
             }
             let at_caret = |m| PaletteAction::AtCaret(m);
             for (title, keys, message) in [

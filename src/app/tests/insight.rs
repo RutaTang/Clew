@@ -540,3 +540,58 @@ async fn the_margin_follows_the_lean_goals_at_the_cursor() {
     assert_eq!(app.margin_tab, MarginTab::Goals);
     assert_eq!(app.margin_tab_shown(), MarginTab::Notes);
 }
+
+/// Restart File has the Lean server check the open file afresh — closed
+/// and opened again, as Lean asks for when a file's imports changed — and
+/// says so; the goals are asked again once it is checked.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_file_has_lean_check_the_file_afresh() {
+    let mut app = scanned_app("lean-restart-file");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("Proof.lean"), "theorem t : 1 = 1 := by\n  rfl\n").unwrap();
+    scan_synchronously(&mut app, root.clone());
+    open_synchronously(&mut app, "Proof.lean", None);
+    // No server yet: it says how to get one, and sends nothing.
+    let _ = app.update(Message::Proof(crate::ProofMsg::RestartFile));
+    assert!(app.status.contains("not running"), "{}", app.status);
+
+    let (client, wire) = scripted_lsp_client(&root).await;
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), LspSlot::Ready(client));
+    let _ = app.update(Message::Proof(crate::ProofMsg::RestartFile));
+    assert!(
+        app.status.contains("Lean is checking Proof.lean again"),
+        "{}",
+        app.status
+    );
+    assert!(
+        app.proj
+            .lean_goals
+            .as_ref()
+            .is_some_and(|g| g.asking && g.answer.is_none()),
+        "the goals asked again, of the file checked afresh"
+    );
+    let uri = lsp::client::path_to_uri(&root.join("Proof.lean"));
+    let mut said = String::new();
+    for _ in 0..400 {
+        said = wire.lock().unwrap().clone();
+        if said.contains("textDocument/didOpen") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let closed = said
+        .find("\"method\":\"textDocument/didClose\"")
+        .expect("closed");
+    let opened = said
+        .rfind("\"method\":\"textDocument/didOpen\"")
+        .expect("opened");
+    assert!(closed < opened, "closed, then opened again: {said}");
+    assert!(said[opened..].contains(&uri), "{said}");
+    assert!(
+        said[opened..].contains("\"languageId\":\"lean4\""),
+        "{said}"
+    );
+}

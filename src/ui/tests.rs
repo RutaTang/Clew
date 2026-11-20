@@ -9374,6 +9374,83 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
     assert!(app.proj.link.lsp_snapshots.is_empty());
 }
 
+/// The Goals margin says how far Lean has checked the file while a goal
+/// waits — what the reader waited through on "Asking…" while a big
+/// project's imports were checked — and the status bar names the file;
+/// when Lean says the file's imports are out of date, Restart File is a
+/// click away.
+#[tokio::test]
+async fn the_goals_margin_says_how_far_lean_has_checked_and_offers_restart() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let abs = root.join("Basic.lean");
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.abs = abs.clone();
+        v.rel = "Basic.lean".into();
+        v.lang_key = Some("lean");
+    }
+    app.margin_tab = crate::MarginTab::Goals;
+    let uri = crate::lsp::client::path_to_uri(&abs);
+    let progress = format!(
+        r#"{{"jsonrpc":"2.0","method":"$/lean/fileProgress","params":{{"textDocument":{{"uri":"{uri}","version":1}},"processing":[{{"range":{{"start":{{"line":2,"character":0}},"end":{{"line":9,"character":0}}}},"kind":1}}]}}}}"#
+    );
+    let client = stub_lsp_client_saying(&root, vec![progress]).await;
+    for _ in 0..200 {
+        if client.snapshot().is_ok_and(|s| s.checking(&abs).is_some()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Ready(client));
+    let _ = app.update(Message::Noop);
+    let total = app.active_viewer().unwrap().line_count().max(3);
+    assert!(shows(
+        &mut sim_of(&app),
+        &format!("Lean is checking this file: line 3 of {total}…")
+    ));
+    assert_eq!(
+        app.lsp_status("lean").as_deref(),
+        Some("checking Basic.lean")
+    );
+    assert!(app.lsp_busy("lean"), "at work while it checks");
+    assert!(
+        !shows(&mut sim_of(&app), "Restart File"),
+        "nothing to restart"
+    );
+
+    // Lean finds the imports changed: the way on is offered.
+    let stale = format!(
+        r#"{{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{{"uri":"{uri}","diagnostics":[{{"range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":1}}}},"severity":1,"message":"Imports are out of date and must be rebuilt; use the \"Restart File\" command in your editor."}}]}}}}"#
+    );
+    let client = stub_lsp_client_saying(&root, vec![stale]).await;
+    for _ in 0..200 {
+        if client.snapshot().is_ok_and(|s| s.diag_version > 0) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Ready(client));
+    let _ = app.update(Message::Noop);
+    assert!(shows(
+        &mut sim_of(&app),
+        "imports changed since Lean read them"
+    ));
+    let sent = click(sim_of(&app), "Restart File");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::RestartFile))),
+        "{sent:?}"
+    );
+}
+
 fn explain_file(root: &std::path::Path, rel: &str) -> crate::explain::Node {
     crate::explain::Node::File(root.join(rel))
 }
