@@ -1409,8 +1409,7 @@ mod tests {
                     NO_MANIFEST,
                     TWO_MANIFESTS,
                     MANIFEST_NOT_TEXT,
-                    NO_COMMANDS_EXPORT,
-                    NO_GRAPHS_EXPORT,
+                    NO_EXPORT,
                 ]
                 .map(String::from),
             );

@@ -64,6 +64,8 @@ const READ_BUDGET: u64 = 1024 * 1024 * 1024;
 
 /// The most a plugin may keep in its own store, and the longest key.
 const STORE_CAP: u64 = 1024 * 1024;
+/// The file in a plugin's store that one save at a time holds.
+const STORE_LOCK: &str = ".lock";
 const KEY_CAP: usize = clew_rules::plugin::KEY_MAX;
 
 /// What Clew gives a plugin of the open project. The GUI implements it
@@ -233,7 +235,13 @@ impl Runtime {
         config.max_wasm_stack(1024 * 1024);
         config.parallel_compilation(true);
         let engine = Engine::new(&config).map_err(|e| format!("the plugin engine: {e}"))?;
-        start_ticker(&engine);
+        // Without its clock no deadline would ever come, and a plugin that
+        // never ends would run on: no runtime then, and why.
+        start_ticker(&engine)
+            .map_err(|e| format!("the plugin engine: its clock could not be started: {e}"))?;
+        if let Some(data) = &data {
+            sweep_tries(data, std::time::SystemTime::now());
+        }
         Ok(Runtime { engine, data })
     }
 
@@ -362,9 +370,9 @@ impl Runtime {
 }
 
 /// Tick `engine`'s epoch until the engine is dropped.
-fn start_ticker(engine: &Engine) {
+fn start_ticker(engine: &Engine) -> std::io::Result<()> {
     let weak = engine.weak();
-    let _ = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("clew-plugin-epoch".into())
         .spawn(move || {
             loop {
@@ -374,7 +382,8 @@ fn start_ticker(engine: &Engine) {
                     None => return,
                 }
             }
-        });
+        })
+        .map(|_| ())
 }
 
 /// Add to `linker` what every plugin gets — WASI with nothing behind it,
@@ -417,6 +426,41 @@ impl Drop for Loaded {
             && let Some(store) = &self.store
         {
             let _ = std::fs::remove_dir_all(store);
+        }
+    }
+}
+
+/// How old a try's store is before no try can still be using it: a try is
+/// one run, which ends at its deadline, minutes at most.
+const TRY_KEPT: Duration = Duration::from_secs(60 * 60);
+
+/// Take away the stores tries left when Clew ended before they went (a
+/// crash, a kill): made more than [`TRY_KEPT`] before `now`, by the time
+/// in their names ([`trial_dir`]), or else by when they last changed.
+fn sweep_tries(data: &Path, now: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(crate::store::plugins_dir(data).join("tries")) else {
+        return;
+    };
+    let Some(before) = now.checked_sub(TRY_KEPT) else {
+        return;
+    };
+    let before_nanos = before
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    for entry in entries.flatten() {
+        let made = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.split('-').nth(1)?.parse::<u128>().ok());
+        let old = match made {
+            Some(made) => made < before_nanos,
+            None => entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|changed| changed < before),
+        };
+        if old {
+            let _ = std::fs::remove_dir_all(entry.path());
         }
     }
 }
@@ -738,9 +782,13 @@ fn kept_output(text: &str, cut: bool) -> &str {
 /// line cut partway is left out with the rest, and the log says so — it was
 /// cut mid-line with no word.
 fn forward_output(host: &dyn Host, level: Level, capture: &Capture) {
-    let text = without_backtrace_hint(&capture.text());
+    // Cut first, at what was captured: taking out the hint's line first
+    // joined the lines again without the last one's end, and a cut that
+    // fell at a line's end then lost that whole line too.
+    let captured = capture.text();
     let cut = capture.dropped() > 0;
-    let text = kept_output(&text, cut).trim();
+    let text = without_backtrace_hint(kept_output(&captured, cut));
+    let text = text.trim();
     if !text.is_empty() {
         host.log(level, text);
     }
@@ -803,6 +851,15 @@ struct Limiter {
 /// pointer.
 const TABLE_ELEMENT_BYTES: usize = 8;
 
+/// How many modules a run may instantiate, and how many memories and tables
+/// it may have, in all. A plugin Clew builds has 3, 1 and 2; wasmtime's own
+/// limits are 10,000 each, and every memory reserves gigabytes of address
+/// space and its own mappings even when empty, so a component declaring
+/// thousands could exhaust the window's, not only its own.
+const INSTANCES: usize = 64;
+const MEMORIES: usize = 16;
+const TABLES: usize = 64;
+
 impl Limiter {
     /// Grow what is used by `current` → `desired` bytes, if the budget has
     /// room for it: one budget for every memory and table of the run — a
@@ -820,6 +877,18 @@ impl Limiter {
 }
 
 impl ResourceLimiter for Limiter {
+    fn instances(&self) -> usize {
+        INSTANCES
+    }
+
+    fn memories(&self) -> usize {
+        MEMORIES
+    }
+
+    fn tables(&self) -> usize {
+        TABLES
+    }
+
     fn memory_growing(
         &mut self,
         current: usize,
@@ -885,11 +954,29 @@ impl bindings::clew::plugin::host::Host for State {
             .clone()
             .ok_or_else(|| "this plugin has no store here".to_string())?;
         let name = key_file(&key).ok_or_else(|| format!("a key is 1 to {KEY_CAP} bytes"))?;
+        if let Some(parent) = dir.parent() {
+            clew_core::derived::ensure_private_dir(parent).map_err(|e| e.to_string())?;
+        }
+        clew_core::derived::ensure_private_dir(&dir).map_err(|e| e.to_string())?;
+        // One save at a time, in every window: calls run side by side, and
+        // two saving at once each saw the room the other then took. (Where
+        // files cannot be locked, it saves without.)
+        let one = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(STORE_LOCK))
+            .map_err(|e| e.to_string())?;
+        let _ = one.lock();
         let others: u64 = std::fs::read_dir(&dir)
             .map(|entries| {
                 entries
                     .flatten()
-                    .filter(|e| e.file_name().to_string_lossy() != name)
+                    .filter(|e| {
+                        let file = e.file_name();
+                        let file = file.to_string_lossy();
+                        file != name && file.ends_with(".bin")
+                    })
                     .filter_map(|e| e.metadata().ok())
                     .map(|m| m.len())
                     .sum()
@@ -901,10 +988,6 @@ impl bindings::clew::plugin::host::Host for State {
                 STORE_CAP / 1024
             ));
         }
-        if let Some(parent) = dir.parent() {
-            clew_core::derived::ensure_private_dir(parent).map_err(|e| e.to_string())?;
-        }
-        clew_core::derived::ensure_private_dir(&dir).map_err(|e| e.to_string())?;
         clew_core::statefile::write_atomic(&dir.join(name), &value).map_err(|e| e.to_string())
     }
 }
@@ -1212,6 +1295,13 @@ pub fn checked_view(view: View) -> View {
                     .take(MAX_COLUMNS)
                     .map(|c| line(c))
                     .collect();
+                // Its headings are text of the page too: 32 of a kilobyte
+                // each, in each of 500 tables, were 16 MB the budget did
+                // not see.
+                if !left.text(columns.iter().map(String::len).sum()) {
+                    cut = true;
+                    break;
+                }
                 let width = columns.len();
                 let total = t.rows.len();
                 let kept: Vec<Row> = t
@@ -1420,6 +1510,102 @@ mod tests {
         assert_eq!(panic_message("all fine"), None);
     }
 
+    /// Saves side by side (calls run in parallel) never hold more than the
+    /// store's cap between them: each that fits is saved, the rest refused.
+    #[test]
+    fn saves_at_once_keep_to_the_cap() {
+        use bindings::clew::plugin::host::Host as _;
+        let data = clew_core::testutil::TempDir::new("plugin-store-race");
+        let store = data.join("store");
+        let start = Arc::new(std::sync::Barrier::new(8));
+        let saved: Vec<bool> = (0..8)
+            .map(|i| {
+                let (store, start) = (store.clone(), start.clone());
+                std::thread::spawn(move || {
+                    let mut state = State {
+                        wasi: WasiCtxBuilder::new().build(),
+                        table: ResourceTable::new(),
+                        limiter: Limiter {
+                            memory: 0,
+                            used: 0,
+                            hit: false,
+                        },
+                        host: Arc::new(Counting::default()),
+                        store: Some(store),
+                        clock: RunClock::until(Duration::from_secs(5)),
+                        read: 0,
+                        logged: 0,
+                        logged_bytes: 0,
+                        log_dropped: 0,
+                    };
+                    start.wait();
+                    state
+                        .save(format!("k{i}"), vec![0; STORE_CAP as usize / 2 + 1])
+                        .is_ok()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+        assert_eq!(saved.iter().filter(|s| **s).count(), 1, "{saved:?}");
+        let held: u64 = std::fs::read_dir(&store)
+            .unwrap()
+            .flatten()
+            .map(|e| e.metadata().unwrap().len())
+            .sum();
+        assert!(held <= STORE_CAP, "{held}");
+    }
+
+    /// A try's store left by a Clew that ended mid-try goes when a runtime
+    /// starts; one a try may still be using stays.
+    #[test]
+    fn stores_tries_left_behind_are_taken_away() {
+        let data = clew_core::testutil::TempDir::new("plugin-tries");
+        let now = std::time::SystemTime::now();
+        let nanos = |at: std::time::SystemTime| {
+            at.duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        };
+        let tries = crate::store::plugins_dir(&data).join("tries");
+        let old = tries.join(format!("7-{}-0", nanos(now - 2 * TRY_KEPT)));
+        let running = tries.join(format!("7-{}-1", nanos(now - Duration::from_secs(60))));
+        let fresh_trial = trial_dir(&data);
+        for dir in [&old, &running, &fresh_trial] {
+            std::fs::create_dir_all(dir.join("store")).unwrap();
+        }
+        sweep_tries(&data, now);
+        assert!(!old.exists(), "left behind");
+        assert!(
+            running.exists() && fresh_trial.exists(),
+            "may still be used"
+        );
+        // A runtime starting sweeps them.
+        std::fs::create_dir_all(&old).unwrap();
+        let _runtime = Runtime::new(Some(data.to_path_buf())).unwrap();
+        assert!(!old.exists());
+    }
+
+    /// Output cut where a line ends keeps that line: every whole line up to
+    /// the cap reaches the log, and the log says the rest was cut.
+    #[test]
+    fn output_cut_at_a_line_end_keeps_that_line() {
+        let capture = Capture::default();
+        let line = format!("{}\n", "x".repeat(63));
+        for _ in 0..OUTPUT_CAP / line.len() + 1 {
+            capture.take(line.as_bytes());
+        }
+        assert!(capture.dropped() > 0);
+        let counting = Counting::default();
+        forward_output(&counting, Level::Info, &capture);
+        let logged = counting.0.lock().unwrap();
+        assert_eq!(
+            logged[0].lines().count(),
+            OUTPUT_CAP / line.len(),
+            "every whole line"
+        );
+        assert_eq!(logged.len(), 2, "and a note that it was cut: {logged:?}");
+    }
+
     /// Output cut at the cap keeps its whole lines; one line longer than
     /// the cap keeps its start, without the character cut partway.
     #[test]
@@ -1515,7 +1701,11 @@ mod tests {
         let Block::Table(table) = &view.blocks[0] else {
             panic!()
         };
-        assert_eq!(table.rows.len(), MAX_VIEW_TEXT / (LINE_CAP * MAX_COLUMNS));
+        // Its headings, a byte each, are counted before its rows.
+        assert_eq!(
+            table.rows.len(),
+            (MAX_VIEW_TEXT - MAX_COLUMNS) / (LINE_CAP * MAX_COLUMNS)
+        );
         let text: usize = table
             .rows
             .iter()
@@ -1523,6 +1713,34 @@ mod tests {
             .map(String::len)
             .sum();
         assert!(text <= MAX_VIEW_TEXT);
+        assert!(matches!(view.blocks.last(), Some(Block::Notice(_))));
+
+        // Tables of headings alone: the headings are counted too.
+        let headings = (0..MAX_BLOCKS)
+            .map(|_| {
+                Block::Table(Table {
+                    columns: vec!["h".repeat(LINE_CAP); MAX_COLUMNS],
+                    rows: Vec::new(),
+                })
+            })
+            .collect();
+        let view = checked_view(View {
+            title: "t".into(),
+            blocks: headings,
+        });
+        let text: usize = view
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Table(t) => Some(t.columns.iter().map(String::len).sum::<usize>()),
+                _ => None,
+            })
+            .sum();
+        assert!(text <= MAX_VIEW_TEXT, "{text}");
+        assert_eq!(
+            view.blocks.len(),
+            MAX_VIEW_TEXT / (LINE_CAP * MAX_COLUMNS) + 1
+        );
         assert!(matches!(view.blocks.last(), Some(Block::Notice(_))));
 
         // A page within its limits is not marked.
@@ -1603,5 +1821,47 @@ mod tests {
         assert!(!limiter.table_growing(20, 50, None).unwrap());
         assert!(limiter.hit);
         assert_eq!(limiter.used, 800 + 20 * TABLE_ELEMENT_BYTES);
+    }
+
+    /// How many instances, memories and tables a run may have is a few
+    /// dozen, not wasmtime's ten thousand; a plugin Clew builds has fewer
+    /// than a tenth of each (the runtime tests run the fixtures under it).
+    #[test]
+    fn instances_memories_and_tables_are_few() {
+        let limiter = Limiter {
+            memory: 1000,
+            used: 0,
+            hit: false,
+        };
+        assert_eq!(
+            (limiter.instances(), limiter.memories(), limiter.tables()),
+            (INSTANCES, MEMORIES, TABLES)
+        );
+        for (name, wasm) in [
+            ("views", "fixtures/views.wasm"),
+            ("git-log", "fixtures/git-log.wasm"),
+        ] {
+            let bytes = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(wasm)).unwrap();
+            let (mut instantiated, mut memories, mut tables) = (0, 0, 0);
+            for payload in wasmparser::Parser::new(0).parse_all(&bytes) {
+                match payload.unwrap() {
+                    wasmparser::Payload::MemorySection(r) => memories += r.count() as usize,
+                    wasmparser::Payload::TableSection(r) => tables += r.count() as usize,
+                    wasmparser::Payload::InstanceSection(r) => {
+                        instantiated += r
+                            .into_iter()
+                            .filter(|i| matches!(i, Ok(wasmparser::Instance::Instantiate { .. })))
+                            .count()
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                instantiated * 10 <= INSTANCES
+                    && memories * 10 <= MEMORIES
+                    && tables * 10 <= TABLES,
+                "{name}: {instantiated} instances, {memories} memories, {tables} tables"
+            );
+        }
     }
 }

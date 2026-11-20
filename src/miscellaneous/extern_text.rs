@@ -304,8 +304,9 @@ pub(crate) const PLUGIN_STOPS: &[&str] = &[
     tr_noop!("this WebAssembly component is not a Clew plugin: it carries no plugin.toml"),
     tr_noop!("the plugin's file carries more than one plugin.toml"),
     tr_noop!("the plugin's manifest is not UTF-8 text"),
-    tr_noop!("the plugin lists commands but its code exports none (use clew_plugin_sdk::export!)"),
-    tr_noop!("the plugin lists graphs but its code exports none (use clew_plugin_sdk::export!)"),
+    tr_noop!(
+        "the plugin's code does not export what Clew calls (build it with clew_plugin_sdk::export!)"
+    ),
     // Why Clew stopped a run whose answer was too large
     // (`clew_plugin::runtime::ANSWER_TOO_LARGE`).
     tr_noop!("its answer was larger than Clew takes from a plugin"),

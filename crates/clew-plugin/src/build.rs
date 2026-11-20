@@ -1334,11 +1334,87 @@ pub fn build(
     toolchain: &Toolchain,
     cancel: &AtomicBool,
 ) -> Result<Built, BuildError> {
+    let built = build_with(source, work, toolchain, cancel);
+    // The Rust it was built with removed meanwhile (Clew's own, from
+    // Settings → Plugins or another window): said so, not as whatever
+    // cargo said of a file it lost.
+    match built {
+        Err(BuildError::Source(_) | BuildError::Failed(_) | BuildError::Compile(_))
+            if !toolchain.cargo.is_file() || !toolchain.rustc.is_file() =>
+        {
+            Err(rust_removed(toolchain))
+        }
+        built => built,
+    }
+}
+
+/// Why a build failed when the Rust it used went away while it ran.
+fn rust_removed(toolchain: &Toolchain) -> BuildError {
+    match toolchain.cargo_home {
+        Some(_) => BuildError::Toolchain {
+            message: "Clew's own Rust was removed while the plugin was being built.".into(),
+            fix: Some(
+                "ask the user to open Clew's Settings → Plugins, where one button installs Rust into Clew's own folder again; then build again.".into(),
+            ),
+        },
+        None => BuildError::Toolchain {
+            message: format!(
+                "The Rust the plugin was being built with ({}) was removed while it was built.",
+                toolchain.cargo.display()
+            ),
+            fix: Some(
+                "ask the user to install Rust again from https://rustup.rs, or to open Clew's Settings → Plugins, where one button installs Rust into Clew's own folder; then build again.".into(),
+            ),
+        },
+    }
+}
+
+/// The plugin's build folder, one build of it at a time: another build of
+/// the same plugin (another window's, another agent's) is waited for, for
+/// as long as a build may take, and the wait ends when the build is
+/// cancelled. Where locks cannot be had (a file system without them) it is
+/// built without one, as Clew's other shared files are.
+fn build_lock(
+    crate_dir: &Path,
+    id: &str,
+    cancel: &AtomicBool,
+) -> Result<std::fs::File, BuildError> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(crate_dir.join(".build.lock"))
+        .map_err(|e| {
+            BuildError::Failed(format!("the build folder of {id} could not be locked: {e}"))
+        })?;
+    let since = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) | Err(std::fs::TryLockError::Error(_)) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(BuildError::Failed("cancelled".into()));
+        }
+        if since.elapsed() > 2 * METADATA_DEADLINE + BUILD_DEADLINE {
+            return Err(BuildError::Failed(format!(
+                "another build of {id} has been running for longer than a build may; build again when it has ended"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn build_with(
+    source: &Path,
+    work: &Path,
+    toolchain: &Toolchain,
+    cancel: &AtomicBool,
+) -> Result<Built, BuildError> {
     let id = read_manifest(source)?.plugin.id;
     let crate_dir = work.join(&id);
     std::fs::create_dir_all(&crate_dir).map_err(|e| BuildError::Failed(e.to_string()))?;
-    let _exclusive = clew_core::statefile::lock_named(&crate_dir.join("Cargo.toml"), ".build.lock")
-        .map_err(|e| BuildError::Failed(format!("another build of {id} is running ({e})")))?;
+    let _exclusive = build_lock(&crate_dir, &id, cancel)?;
 
     for (name, contents) in SDK {
         write_if_changed(&work.join("sdk/clew-plugin-sdk").join(name), contents)
@@ -1488,7 +1564,8 @@ pub fn build(
     // Which source the build is of (`built_from`): a build that fails
     // leaves the last one's, and its source, changed since, no longer
     // matches it.
-    record_built_from(&crate_dir, made_from).map_err(|e| BuildError::Failed(e.to_string()))?;
+    record_built_from(&crate_dir, made_from, &bytes)
+        .map_err(|e| BuildError::Failed(e.to_string()))?;
     if let Ok(lock) = std::fs::read(crate_dir.join("Cargo.lock")) {
         let _ = std::fs::write(source.join("Cargo.lock"), lock);
     }
@@ -1550,22 +1627,40 @@ pub fn source_digest(source: &Path) -> Option<String> {
 }
 
 /// Note beside the build in `crate_dir` the source it was built from
-/// (`source_digest`); `None`, when that could not be read, notes none.
-pub(crate) fn record_built_from(crate_dir: &Path, digest: Option<String>) -> std::io::Result<()> {
+/// (`source_digest`) and the file it made (`built`, by its digest), so the
+/// two are read as one; `None`, when the source could not be read, notes
+/// none.
+pub(crate) fn record_built_from(
+    crate_dir: &Path,
+    digest: Option<String>,
+    built: &[u8],
+) -> std::io::Result<()> {
     let stamp = crate_dir.join(SOURCE_STAMP);
     match digest {
-        Some(digest) => std::fs::write(&stamp, digest),
+        Some(digest) => std::fs::write(&stamp, format!("{digest} {}\n", artifact_digest(built))),
         None => std::fs::remove_file(&stamp).or(Ok(())),
     }
 }
 
-/// Whether the build in `crate_dir` is of the plugin's source at `source`
-/// as it is now: built from it, and nothing written to it since.
-pub fn built_from(crate_dir: &Path, source: &Path) -> bool {
+fn artifact_digest(built: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    crate::inspect::hex(&Sha256::digest(built))
+}
+
+/// Whether `built`, the file read of the build in `crate_dir`, is the build
+/// of the plugin's source at `source` as it is now: what the build made
+/// from it, and nothing written to it since. The file and its note are
+/// written one after the other; read between, or while another build
+/// writes them, one build's file never passes as another's.
+pub fn built_from(crate_dir: &Path, source: &Path, built: &[u8]) -> bool {
     let Ok(stamp) = std::fs::read_to_string(crate_dir.join(SOURCE_STAMP)) else {
         return false;
     };
-    source_digest(source).is_some_and(|now| now == stamp.trim())
+    let mut parts = stamp.split_whitespace();
+    let (Some(from), Some(made), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    made == artifact_digest(built) && source_digest(source).is_some_and(|now| now == from)
 }
 
 fn quoted(names: &[String]) -> String {
@@ -1883,6 +1978,58 @@ mod tests {
         assert!(matches!(&built, Err(BuildError::Compile(_))), "{built:?}");
         assert!(work.join("targets/other").is_dir() && target.is_dir());
 
+        // The Rust it builds with removed while it builds (Clew's own,
+        // from another window): said so, not cargo's words for a file gone.
+        let removing = script(
+            "cargo-removing",
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  fetch) exit 0 ;;\n  metadata) echo '{{\"packages\":[]}}'; exit 0 ;;\n  build) rm {f}/rustc; echo 'error: could not exec rustc' >&2; exit 101 ;;\nesac\n"
+            ),
+        );
+        let gone = build(
+            &source,
+            &work,
+            &Toolchain {
+                cargo: removing,
+                ..toolchain.clone()
+            },
+            &AtomicBool::new(false),
+        );
+        assert!(
+            matches!(&gone, Err(BuildError::Toolchain { message, .. }) if message.contains("removed while the plugin was being built")),
+            "{gone:?}"
+        );
+        script("rustc", format!("#!/bin/sh\necho {}\n", sysroot.display()));
+
+        // Another build of the plugin holding its folder: waited for, and
+        // the wait ends when this one is cancelled.
+        let holder = std::fs::OpenOptions::new()
+            .write(true)
+            .open(work.join("sample/.build.lock"))
+            .unwrap();
+        holder.lock().unwrap();
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = {
+            let cancel = cancel.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                cancel.store(true, Ordering::Relaxed);
+            })
+        };
+        let started = std::time::Instant::now();
+        let waited = build(&source, &work, &toolchain, &cancel);
+        stop.join().unwrap();
+        assert!(
+            matches!(&waited, Err(BuildError::Failed(why)) if why == "cancelled"),
+            "{waited:?}"
+        );
+        assert!(started.elapsed() >= Duration::from_millis(250), "it waited");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "and stopped when cancelled"
+        );
+        drop(holder);
+
         // A configured [env]: emptied; one forced: refused.
         std::fs::write(
             home.join("config.toml"),
@@ -1913,15 +2060,19 @@ mod tests {
         std::fs::write(source.join("plugin.toml"), "[plugin]\n").unwrap();
         std::fs::write(source.join("src/lib.rs"), "fn a() {}\n").unwrap();
         std::fs::write(source.join("src/parts/b.rs"), "fn b() {}\n").unwrap();
+        let wasm = b"the plugin's file";
         // Never built.
-        assert!(!built_from(&built, &source));
-        record_built_from(&built, source_digest(&source)).unwrap();
-        assert!(built_from(&built, &source));
+        assert!(!built_from(&built, &source, wasm));
+        record_built_from(&built, source_digest(&source), wasm).unwrap();
+        assert!(built_from(&built, &source, wasm));
+        // Another build's file, read as this one's note was written (or
+        // this one's, read before another build's note): not this build.
+        assert!(!built_from(&built, &source, b"another build's file"));
         // What a build does not stage does not change it.
         std::fs::write(source.join("src/notes.md"), "notes").unwrap();
         std::fs::write(source.join("src/.hidden.rs"), "fn h() {}").unwrap();
         std::fs::write(source.join("README.md"), "readme").unwrap();
-        assert!(built_from(&built, &source));
+        assert!(built_from(&built, &source, wasm));
         // What it does, does: the manifest, a file in a folder, a new file,
         // a file moved, a file gone.
         let changes: [&dyn Fn(); 5] = [
@@ -1933,9 +2084,9 @@ mod tests {
         ];
         for (n, change) in changes.iter().enumerate() {
             let before = source_digest(&source);
-            record_built_from(&built, before.clone()).unwrap();
+            record_built_from(&built, before.clone(), wasm).unwrap();
             change();
-            assert!(!built_from(&built, &source), "change {n}");
+            assert!(!built_from(&built, &source, wasm), "change {n}");
             assert_ne!(source_digest(&source), before, "change {n}");
             // Put back for the next.
             let _ = std::fs::remove_file(source.join("src/c.rs"));
@@ -1947,8 +2098,8 @@ mod tests {
         // A source that cannot be read is no build's.
         std::fs::remove_file(source.join("plugin.toml")).unwrap();
         assert_eq!(source_digest(&source), None);
-        assert!(!built_from(&built, &source));
-        record_built_from(&built, None).unwrap();
+        assert!(!built_from(&built, &source, wasm));
+        record_built_from(&built, None, wasm).unwrap();
         assert!(!built.join(SOURCE_STAMP).exists());
     }
 

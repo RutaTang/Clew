@@ -33,10 +33,12 @@ pub const NO_MANIFEST: &str =
     "this WebAssembly component is not a Clew plugin: it carries no plugin.toml";
 pub const TWO_MANIFESTS: &str = "the plugin's file carries more than one plugin.toml";
 pub const MANIFEST_NOT_TEXT: &str = "the plugin's manifest is not UTF-8 text";
-pub const NO_COMMANDS_EXPORT: &str =
-    "the plugin lists commands but its code exports none (use clew_plugin_sdk::export!)";
-pub const NO_GRAPHS_EXPORT: &str =
-    "the plugin lists graphs but its code exports none (use clew_plugin_sdk::export!)";
+/// Clew loads every plugin by the world it was built for, which exports
+/// both its commands and its graphs (`clew_plugin_sdk::export!` writes both,
+/// whatever the manifest lists): one exporting less could be approved and
+/// then never load.
+pub const NO_EXPORT: &str =
+    "the plugin's code does not export what Clew calls (build it with clew_plugin_sdk::export!)";
 
 /// What a plugin's file says of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,11 +262,8 @@ pub fn inspect(bytes: &[u8]) -> Result<Inspected, String> {
         ));
     }
     let exports = |wanted: &str| top.exports.iter().any(|e| split_version(e).0 == wanted);
-    if !manifest.commands.is_empty() && !exports(COMMANDS_EXPORT) {
-        return Err(NO_COMMANDS_EXPORT.into());
-    }
-    if !manifest.graphs.is_empty() && !exports(GRAPHS_EXPORT) {
-        return Err(NO_GRAPHS_EXPORT.into());
+    if !exports(COMMANDS_EXPORT) || !exports(GRAPHS_EXPORT) {
+        return Err(NO_EXPORT.into());
     }
     Ok(Inspected {
         manifest,
@@ -337,5 +336,47 @@ mod tests {
         );
         assert!(inspect(b"hello").unwrap_err().contains("not a plugin"));
         assert!(embed(b"hello", &crate::manifest::tests_support::manifest()).is_err());
+    }
+
+    /// A component exporting less than the world Clew loads it by is
+    /// refused when it is inspected, not after it is approved: each fixture
+    /// with either of its exports renamed, whatever its manifest lists.
+    #[test]
+    fn a_plugin_must_export_all_clew_calls_whatever_it_lists() {
+        for fixture in ["views", "git-log"] {
+            let bytes = std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("fixtures/{fixture}.wasm")),
+            )
+            .unwrap();
+            assert!(inspect(&bytes).is_ok(), "{fixture}");
+            // Each export is in an export section of its own; the name is
+            // renamed there, and nowhere else.
+            let sections: Vec<_> = wasmparser::Parser::new(0)
+                .parse_all(&bytes)
+                .filter_map(|p| match p.unwrap() {
+                    wasmparser::Payload::ComponentExportSection(section) => Some(section.range()),
+                    _ => None,
+                })
+                .collect();
+            for export in [COMMANDS_EXPORT, GRAPHS_EXPORT] {
+                let mut less = bytes.clone();
+                let at = sections
+                    .iter()
+                    .find_map(|range| {
+                        bytes[range.clone()]
+                            .windows(export.len())
+                            .position(|w| w == export.as_bytes())
+                            .map(|at| at + range.start)
+                    })
+                    .unwrap();
+                less[at + export.len() - 1] = b'z';
+                assert_eq!(
+                    inspect(&less).unwrap_err(),
+                    NO_EXPORT,
+                    "{fixture} without {export}"
+                );
+            }
+        }
     }
 }

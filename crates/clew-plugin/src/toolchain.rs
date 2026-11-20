@@ -389,11 +389,19 @@ pub fn hold(data: &Path) -> Option<Held> {
     else {
         return Some(Held(None));
     };
-    match file.try_lock() {
-        Ok(()) => Some(Held(Some(file))),
-        Err(std::fs::TryLockError::WouldBlock) => None,
-        Err(std::fs::TryLockError::Error(_)) => Some(Held(None)),
+    // `busy` takes the lock for an instant to see whether it is free: a
+    // window holding it is told from that by trying a few times over a
+    // fifth of a second.
+    for _ in 0..10 {
+        match file.try_lock() {
+            Ok(()) => return Some(Held(Some(file))),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            Err(std::fs::TryLockError::Error(_)) => return Some(Held(None)),
+        }
     }
+    None
 }
 
 /// Whether another Clew window is setting Rust up or removing it now.
@@ -810,5 +818,22 @@ mod tests {
         let_go.join().unwrap();
         assert!(!busy(data.path()));
         assert!(hold(data.path()).is_some(), "free again");
+
+        // Held for an instant — as `busy` holds it to look — is not held
+        // by another window: the window that asks waits that instant out.
+        let probe = std::fs::OpenOptions::new()
+            .write(true)
+            .open(lock_path(data.path()))
+            .unwrap();
+        probe.lock().unwrap();
+        let let_go = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            probe.unlock().unwrap();
+        });
+        assert!(
+            hold(data.path()).is_some(),
+            "an instant's hold is not a window's"
+        );
+        let_go.join().unwrap();
     }
 }

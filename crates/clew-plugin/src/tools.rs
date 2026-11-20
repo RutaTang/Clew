@@ -347,7 +347,7 @@ pub fn last_build(data: &Path, id: &str) -> Result<Built, String> {
     // was the last good build, an "update" to the version installed.
     let source = authoring::source_dir(data, id)?;
     let crate_dir = artifact.parent().unwrap_or(&artifact);
-    if !crate::build::built_from(crate_dir, &source) {
+    if !crate::build::built_from(crate_dir, &source, &bytes) {
         return Err(format!(
             "the plugin \"{id}\" changed since it was last built, or its last build failed; build it again first (plugin_build)"
         ));
@@ -713,7 +713,12 @@ mod tests {
         for file in ["plugin.toml", "src/lib.rs"] {
             std::fs::copy(fixtures.join("views").join(file), source.join(file)).unwrap();
         }
-        crate::build::record_built_from(&dir, crate::build::source_digest(&source)).unwrap();
+        crate::build::record_built_from(
+            &dir,
+            crate::build::source_digest(&source),
+            &std::fs::read(dir.join("views.wasm")).unwrap(),
+        )
+        .unwrap();
         let cancel = AtomicBool::new(false);
         match call(
             &data,
