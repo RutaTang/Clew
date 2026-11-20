@@ -29,7 +29,7 @@ The agent reads Clew's plugin guide, writes the plugin and builds it. While it w
 >
 > **Don't install** · **Install**
 
-Building a plugin needs Rust 1.82 or later; running one needs nothing. If Rust is missing, the agent says so, and so does Clew's status bar, with **Settings**. In **Settings → Plugins**, click **Install Rust for Clew** (about 700 MB, in Clew's own folder; nothing else on your computer changes), or **Add the WebAssembly target** if you have Rust already. If your Rust is older, run `rustup update` instead. After setting it up outside Clew, click **Check again**. Then ask the agent to build again.
+Building a plugin needs Rust 1.82 or later; running one needs nothing. If Rust is missing, the agent says so, and so does Clew's status bar, with **Settings**. In **Settings → Plugins**, click **Install Rust for Clew** (about 700 MB, in Clew's own folder; nothing else on your computer changes), or **Add the WebAssembly target** if you have Rust already. If your Rust is older and came from rustup, run `rustup update` instead. After setting it up outside Clew, click **Check again**. Then ask the agent to build again.
 
 Once installed, the command is in the command palette. Like any other command, you can run it by voice or the agent can run it for you. Its result opens as a page over the code, drawn by Clew in your theme. Every row opens the line it is about, by mouse, keyboard or "open the third one". A graph a plugin adds is in Project Graphs, beside Clew's own.
 

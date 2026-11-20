@@ -865,6 +865,11 @@ pub struct FailureNotice {
     /// keyboard: "check the base URL in Settings" opened the page and left
     /// the reader to find the field.
     pub about: Option<LlmField>,
+    /// What failed, as its words name it ("TODO count: List TODOs"): what
+    /// failed is cut after it, not at a ": " inside it.
+    pub subject: Option<String>,
+    /// Where in Settings → Plugins it is about: its Settings opens there.
+    pub spot: Option<crate::app::plugins::SettingsSpot>,
     /// While the pointer is on the status line: whether something was said
     /// beside the failure when it came there. The failure is laid out as
     /// it was then until the pointer leaves, so its Try again, Settings

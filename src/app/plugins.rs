@@ -200,6 +200,15 @@ fn project_map(
     }
 }
 
+/// A place in Settings → Plugins that a notice or a link opens at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsSpot {
+    /// A plugin's row, by id: its log, and what fixes it.
+    Plugin(String),
+    /// Building plugins: Rust, and its setup.
+    Rust,
+}
+
 /// A command asking for a line of text before it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prompt {
@@ -352,8 +361,8 @@ pub struct Plugins {
     /// A build of the Ask agent's failed: once the check says Rust is
     /// what is missing, the status line says so, with Settings.
     pub(crate) say_missing_rust: bool,
-    /// Settings opens about this plugin: scrolled to its row.
-    pub(crate) reveal_in_settings: Option<String>,
+    /// Settings opens about this: scrolled to it.
+    pub(crate) reveal_in_settings: Option<SettingsSpot>,
 }
 
 /// Whether plugins can be built on this computer.
@@ -575,9 +584,9 @@ pub enum PluginMsg {
     AskToFix(String),
     /// Stop the command running (its chip's ×).
     StopRun,
-    /// Open Settings → Plugins at plugin `id`'s row: its log, and what
-    /// fixes it.
-    ShowInSettings(String),
+    /// Open Settings → Plugins at a plugin's row (its log, and what fixes
+    /// it), or at Rust's setup.
+    ShowInSettings(SettingsSpot),
     /// Settings: Remove, asked about first.
     AskRemove(String),
     AskRemoveOwnRust,
@@ -588,8 +597,9 @@ pub enum PluginMsg {
     Installed {
         id: String,
         reply: Reply,
-        /// It replaced another build of it: an update, said so.
-        update: bool,
+        /// It replaced another build of it, of this version: an update,
+        /// said so.
+        update: Option<String>,
         result: Result<String, String>,
     },
     SetEnabled(String, bool),
@@ -912,6 +922,7 @@ impl App {
                             tr!("the check failed unexpectedly").into(),
                         ),
                         setup: None,
+                        rustup: false,
                     }),
                     own_installed: false,
                     removal_failed: None,
@@ -1284,6 +1295,9 @@ impl App {
         // it runs: said on the status line, it went as soon as anything
         // else was said, and could not be stopped.
         self.plugins.running = Some(title.clone());
+        // What was said before ("… was stopped") does not stand beside
+        // the new run's chip, saying the opposite.
+        self.status.clear();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.plugins.stop = Some(stop.clone());
         let stamp = self.stamp();
@@ -1399,6 +1413,7 @@ impl App {
                 Level::Error,
                 crate::i18n::lookup(clew_plugin::store::CHANGED).to_string(),
             );
+            let subject = title.clone();
             self.say_failure_again(
                 move || {
                     tr!(
@@ -1410,6 +1425,8 @@ impl App {
                 None,
                 FailureOf::PluginRun,
             );
+            // Its row says what fixes it.
+            self.failure_in(Some(subject), Some(SettingsSpot::Plugin(id)));
             return Task::none();
         }
         // A command that finished, or that answered with a reason of its
@@ -1455,6 +1472,7 @@ impl App {
                 // It stands, with Try again (the same run) and Settings
                 // (Settings → Plugins, its log and what fixes it): said
                 // in passing, it was gone in seconds, with no way on.
+                let subject = title.clone();
                 self.say_failure_again(
                     move || {
                         tr!(
@@ -1466,6 +1484,7 @@ impl App {
                     Some(Message::Plugin(PluginMsg::RunAgain(again))),
                     FailureOf::PluginRun,
                 );
+                self.failure_in(Some(subject), Some(SettingsSpot::Plugin(id)));
                 Task::none()
             }
         }
@@ -1936,8 +1955,8 @@ impl App {
             }
             // Its chip reads how far it has come as it is drawn.
             PluginMsg::ProgressTick => Task::none(),
-            PluginMsg::ShowInSettings(id) => {
-                self.plugins.reveal_in_settings = Some(id);
+            PluginMsg::ShowInSettings(spot) => {
+                self.plugins.reveal_in_settings = Some(spot);
                 self.update(Message::Settings(crate::app::message::SettingsMsg::OpenAt(
                     crate::app::state::SettingsPage::Plugins,
                 )))
@@ -2105,7 +2124,8 @@ impl App {
                 let update = pending
                     .previous
                     .as_ref()
-                    .is_some_and(|p| p.record.fingerprint != pending.inspected.fingerprint());
+                    .filter(|p| p.record.fingerprint != pending.inspected.fingerprint())
+                    .map(|p| p.manifest.plugin.version.clone());
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -2178,8 +2198,13 @@ impl App {
                             .map(|m| m.plugin.version.clone())
                             .unwrap_or_default();
                         self.status = match (commands > 0, graphs > 0) {
-                            // Where its commands are is known already.
-                            _ if update => tr!(
+                            // Where its commands are is known already. A new
+                            // build of the same version is not "updated to"
+                            // the version it was.
+                            _ if update.as_ref().is_some_and(|was| *was == version) => {
+                                tr!("{plugin} is updated", plugin = name.clone())
+                            }
+                            _ if update.is_some() => tr!(
                                 "{plugin} is updated to version {version}",
                                 plugin = name.clone(),
                                 version = version
@@ -2229,6 +2254,13 @@ impl App {
                             None,
                             FailureOf::PluginInstall,
                         );
+                        // An update that failed: its row is there, with its
+                        // log.
+                        let spot = self
+                            .plugins
+                            .get(&id)
+                            .map(|_| SettingsSpot::Plugin(id.clone()));
+                        self.failure_in(Some(name.clone()), spot);
                         Err(why)
                     }
                 };
@@ -2532,7 +2564,13 @@ impl App {
                     return Task::none();
                 }
                 self.plugins.own_rust = checked.own_installed;
-                self.plugins.removal_failure = checked.removal_failed;
+                // Why it could not be removed holds while it is there.
+                self.plugins.removal_failure = checked.removal_failed.or_else(|| {
+                    self.plugins
+                        .removal_failure
+                        .take()
+                        .filter(|_| checked.own_installed)
+                });
                 let say_missing = std::mem::take(&mut self.plugins.say_missing_rust);
                 self.plugins.building = match checked.found {
                     Ok((version, own)) => {
@@ -2558,6 +2596,7 @@ impl App {
                                 None,
                                 FailureOf::PluginBuild,
                             );
+                            self.failure_in(None, Some(SettingsSpot::Rust));
                         }
                         Building::Missing(missing)
                     }
@@ -2646,6 +2685,7 @@ impl App {
                                     tr!("the check failed unexpectedly").into(),
                                 ),
                                 setup: None,
+                                rustup: false,
                             }),
                             own_installed: true,
                             removal_failed: Some(tr!("the removal failed unexpectedly").into()),

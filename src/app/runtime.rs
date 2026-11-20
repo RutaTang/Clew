@@ -627,8 +627,24 @@ impl App {
             of,
             again: Some(crate::app::state::SayAgain(std::sync::Arc::new(say))),
             about: None,
+            subject: None,
+            spot: None,
             held,
         });
+    }
+
+    /// Say what the failure standing now is of, as its words name it, and
+    /// where in Settings → Plugins it is about (`FailureNotice::subject`,
+    /// `FailureNotice::spot`).
+    pub(crate) fn failure_in(
+        &mut self,
+        subject: Option<String>,
+        spot: Option<crate::app::plugins::SettingsSpot>,
+    ) {
+        if let Some(notice) = self.failure_notice.as_mut() {
+            notice.subject = subject;
+            notice.spot = spot;
+        }
     }
 
     /// Say which Language model field the failure standing now is about

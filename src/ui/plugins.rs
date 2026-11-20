@@ -28,6 +28,16 @@ pub(crate) fn plugin_settings_row_id(id: &str) -> iced::widget::Id {
     iced::widget::Id::from(format!("plugin-settings-row:{id}"))
 }
 
+/// Where in Settings → Plugins `spot` is: what is scrolled to.
+pub(crate) fn plugin_settings_spot_id(
+    spot: &crate::app::plugins::SettingsSpot,
+) -> iced::widget::Id {
+    match spot {
+        crate::app::plugins::SettingsSpot::Plugin(id) => plugin_settings_row_id(id),
+        crate::app::plugins::SettingsSpot::Rust => iced::widget::Id::new("plugin-settings-rust"),
+    }
+}
+
 /// The place row `row` of block `block` of `view` opens, if it opens one.
 pub(crate) fn plugin_row_place(view: &View, block: usize, row: usize) -> Option<Location> {
     match view.blocks.get(block)? {
@@ -793,7 +803,10 @@ fn building_group(app: &App) -> Element<'_, Message> {
             rows.push(form::item(tr!("Rust"), Some(said), none()));
         }
         Building::Missing(missing) => {
-            let too_old = matches!(missing.why, clew_plugin::toolchain::Why::TooOld(_));
+            // Too old, and rustup's: updating it is the lighter way. A
+            // package manager's Rust has no `rustup update` to suggest.
+            let too_old =
+                missing.rustup && matches!(missing.why, clew_plugin::toolchain::Why::TooOld(_));
             let (action, about) = match &missing.setup {
                 Some(Setup::AddTarget { .. }) => (
                     Some(tr!("Add the WebAssembly target")),
@@ -957,7 +970,13 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
     if let Some(why) = &app.plugins.failure {
         groups.push(form::note(why.clone()).color(theme::danger()).into());
     }
-    groups.push(building_group(app));
+    groups.push(
+        container(building_group(app))
+            .id(plugin_settings_spot_id(
+                &crate::app::plugins::SettingsSpot::Rust,
+            ))
+            .into(),
+    );
     groups.push(
         form::note(tr!(
             "Plugins run inside Clew, apart from everything else: each can do only what you allowed when you installed it, and never reach the network, other files, programs or your keys."

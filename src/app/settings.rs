@@ -643,10 +643,10 @@ impl App {
                     };
                 // Opened about one plugin: at its row, after the top.
                 let place = match self.plugins.reveal_in_settings.take() {
-                    Some(id) if page == SettingsPage::Plugins => {
+                    Some(spot) if page == SettingsPage::Plugins => {
                         settings_to_top().chain(ui::reveal_container(
                             ui::settings_scroll_id(),
-                            ui::plugin_settings_row_id(&id),
+                            ui::plugin_settings_spot_id(&spot),
                         ))
                     }
                     _ => settings_to_top(),

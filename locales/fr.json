@@ -3618,6 +3618,7 @@
  "{plugin} is installed, in Project Graphs": "{plugin} est installé, dans Graphes du projet",
  "{plugin} is installed, in the command palette": "{plugin} est installé, dans la palette de commandes",
  "{plugin} is installed, in the command palette and Project Graphs": "{plugin} est installé, dans la palette de commandes et Graphes du projet",
+ "{plugin} is updated": "{plugin} est mis à jour",
  "{plugin} is updated to version {version}": "{plugin} est mis à jour vers la version {version}",
  "{plugin} was not installed: the agent that asked stopped waiting": "{plugin} n’a pas été installé : l’agent qui l’a demandé a cessé d’attendre",
  "{program} (no arguments)": "{program} (sans arguments)",

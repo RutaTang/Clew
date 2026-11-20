@@ -88,6 +88,9 @@ pub struct Missing {
     /// The step that fixes it; `None` where Clew cannot take it (a
     /// platform rustup has no installer for).
     pub setup: Option<Setup>,
+    /// The user's Rust is rustup's: `rustup update` brings one too old up
+    /// to date. A package manager's Rust has no rustup to say it of.
+    pub rustup: bool,
 }
 
 impl Missing {
@@ -131,6 +134,7 @@ pub fn find(data: Option<&Path>) -> Result<Toolchain, Missing> {
         Some(Err(why)) => Err(Missing {
             why: Why::OwnBroken(why.sentence()),
             setup: installable().then_some(Setup::Install),
+            rustup: false,
         }),
         None => Err(own),
     }
@@ -151,6 +155,7 @@ fn system() -> Result<Toolchain, Missing> {
             return Err(Missing {
                 why: Why::NoRust,
                 setup: install(),
+                rustup: false,
             });
         };
         // Rust without rustup (a package manager's): its target cannot be
@@ -158,6 +163,7 @@ fn system() -> Result<Toolchain, Missing> {
         return checked(cargo, rustc, None).map_err(|why| Missing {
             why,
             setup: install(),
+            rustup: false,
         });
     };
     let which = |tool| rustup_which(&rustup, tool, &[]);
@@ -167,6 +173,7 @@ fn system() -> Result<Toolchain, Missing> {
             return Err(Missing {
                 why: Why::NoDefault(why),
                 setup: install(),
+                rustup: true,
             });
         }
     };
@@ -175,12 +182,14 @@ fn system() -> Result<Toolchain, Missing> {
         Err(why @ Why::NoTarget(_)) => Err(Missing {
             why,
             setup: Some(Setup::AddTarget { rustup }),
+            rustup: true,
         }),
         // Too old: updating the user's default toolchain is theirs to
         // decide; Clew's own leaves it as it is.
         Err(why) => Err(Missing {
             why,
             setup: install(),
+            rustup: true,
         }),
     }
 }
@@ -623,6 +632,7 @@ mod tests {
         let missing = Missing {
             why: Why::NoRust,
             setup: Some(Setup::Install),
+            rustup: false,
         };
         let said = missing.into_build_error().report();
         assert!(said.contains("Settings → Plugins"), "{said}");
@@ -638,6 +648,7 @@ mod tests {
             setup: Some(Setup::AddTarget {
                 rustup: "/bin/rustup".into(),
             }),
+            rustup: true,
         };
         let said = missing.into_build_error().report();
         assert!(said.contains("rustup target add wasm32-wasip2"), "{said}");

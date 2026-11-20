@@ -635,7 +635,12 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     let failure = app.failure_shown();
     let setup = setup_label(app);
     let explain = explain_label(app);
-    let full_chips: f32 = setup.as_ref().map_or(0.0, |(l, _)| width(l) + CHIP_EXTRA_W)
+    // A plugin's command running is laid out with the other chips: laid
+    // out after a failure standing, with what room it left, its Stop was
+    // gone beside a long one, and nothing said a command ran.
+    let run_chip = plugin_run_chip(app);
+    let full_chips: f32 = run_chip.as_ref().map_or(0.0, |chip| chip.1)
+        + setup.as_ref().map_or(0.0, |(l, _)| width(l) + CHIP_EXTRA_W)
         + explain.as_ref().map_or(0.0, |(_, widest)| {
             // One node's chip has no bar: counted with one, it gave way
             // to "…" with room to spare.
@@ -646,7 +651,9 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             };
             width(widest) + EXPLAIN_EXTRA_W - bar
         });
-    let chips_n = usize::from(setup.is_some()) + usize::from(explain.is_some());
+    let chips_n = usize::from(setup.is_some())
+        + usize::from(explain.is_some())
+        + usize::from(run_chip.is_some());
     // What is under way now comes before an older failure: its chip keeps
     // its words, and the failure's give way (whole where the pointer
     // rests). Beside a run's failure, Explain's progress was squeezed to
@@ -669,11 +676,7 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         let (controls, controls_w) = failure_controls(failure, room - least - STATUS_GAP);
         // What failed: its words before the reason — ": ", or the
         // full-width "：" Chinese and Japanese write.
-        let head = [": ", "："]
-            .iter()
-            .filter_map(|sep| whole.find(sep))
-            .min()
-            .map_or(whole.as_str(), |at| &whole[..at]);
+        let head = failure_head(&whole, failure.subject.as_deref());
         // While the codes are up, what to do with them is said whole —
         // after the failure's words it was cut to "Type the code on a…" —
         // and what failed is said before its controls, in what room is
@@ -802,7 +805,7 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         used += chip.1 + STATUS_GAP;
         row = row.push(chip.0);
     }
-    if let Some(chip) = plugin_run_chip(app).filter(|chip| used + chip.1 <= room) {
+    if let Some(chip) = run_chip.filter(|chip| used + chip.1 <= room) {
         used += chip.1 + STATUS_GAP;
         row = row.push(chip.0);
     }
@@ -818,6 +821,23 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         .align_y(iced::Center)
         .clip(true)
         .into()
+}
+
+/// What failed, of a failure's words: its words before the reason — ": ",
+/// or the full-width "：" Chinese and Japanese write — after what failed
+/// where its words name it (`subject`): a plugin's command is named "TODO
+/// count: List TODOs", and cut at its own ": " what failed read "TODO
+/// count".
+pub(crate) fn failure_head<'a>(whole: &'a str, subject: Option<&str>) -> &'a str {
+    let after = subject
+        .filter(|s| !s.is_empty())
+        .and_then(|s| whole.find(s).map(|at| at + s.len()))
+        .unwrap_or(0);
+    [": ", "："]
+        .iter()
+        .filter_map(|sep| whole[after..].find(sep).map(|at| after + at))
+        .min()
+        .map_or(whole, |at| &whole[..at])
 }
 
 /// What a failure on the status line offers (`App::failure_notice`): try
@@ -868,19 +888,14 @@ fn failure_controls(
     }
     if with_settings {
         // At the field it is about, where it is about one.
-        // A plugin's run: at its row, its log and what fixes it there.
-        let plugin = match &failure.retry {
-            Some(Message::Plugin(crate::app::plugins::PluginMsg::RunAgain(again))) => {
-                Some(again.id.clone())
-            }
-            _ => None,
-        };
+        // At what it is about there: a plugin's row (its log, what fixes
+        // it), or Rust's setup.
         row = row.push(link(
             tr!("Settings"),
-            match (failure.about, plugin) {
+            match (failure.about, &failure.spot) {
                 (Some(field), _) => Message::Settings(SettingsMsg::Fix(field)),
-                (None, Some(id)) => {
-                    Message::Plugin(crate::app::plugins::PluginMsg::ShowInSettings(id))
+                (None, Some(spot)) => {
+                    Message::Plugin(crate::app::plugins::PluginMsg::ShowInSettings(spot.clone()))
                 }
                 (None, None) => Message::Settings(SettingsMsg::OpenAt(failure.of.settings_page())),
             },
@@ -1391,6 +1406,23 @@ mod untagged_kind_tests {
     use std::path::Path;
 
     /// A README says it is Markdown; a file of no known kind is plain text.
+    #[test]
+    fn what_failed_is_cut_after_its_own_name() {
+        use super::failure_head;
+        let whole = "TODO count: List TODOs did not finish: it crashed: boom";
+        assert_eq!(failure_head(whole, None), "TODO count");
+        assert_eq!(
+            failure_head(whole, Some("TODO count: List TODOs")),
+            "TODO count: List TODOs did not finish"
+        );
+        // Named nowhere in its words (another language's): as before.
+        assert_eq!(failure_head(whole, Some("absent")), "TODO count");
+        assert_eq!(
+            failure_head("清单：列出待办 未完成：崩溃", Some("清单：列出待办")),
+            "清单：列出待办 未完成"
+        );
+    }
+
     #[test]
     fn a_readme_is_markdown() {
         assert_eq!(untagged_kind(Path::new("/p/README.md")), "Markdown");

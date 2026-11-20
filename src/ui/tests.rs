@@ -14759,6 +14759,41 @@ fn a_standing_failure_is_said_in_the_language_now_spoken() {
     });
 }
 
+/// A command running keeps its chip, and its Stop, beside a failure that
+/// stands with a long reason: laid out after the failure, with the room it
+/// left, the chip was gone and nothing said a command ran.
+#[test]
+fn a_running_commands_chip_stands_beside_a_long_failure() {
+    let mut app = reader_app();
+    app.say_failure_again(
+        || {
+            format!(
+                "Walkthrough failed: {}",
+                "the server at the address it was given refused the connection, again and again, "
+                    .repeat(4)
+            )
+        },
+        None,
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    app.plugins.running = Some("Word count: Count words".into());
+    app.plugins.stop = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(
+        text_at(
+            &mut sim,
+            |t| t.starts_with("Running Word count: Count words"),
+            0
+        )
+        .is_some(),
+        "the run's chip is laid out"
+    );
+    assert!(
+        text_at(&mut sim, |t| t.starts_with("Walkthrough failed"), 0).is_some(),
+        "and the failure beside it"
+    );
+}
+
 /// What voice could not do is said in the reader's language: on the card,
 /// on the pill, and under a model in Settings.
 #[test]

@@ -616,7 +616,9 @@ fn plugin_graph_failure(
                 tr!("See its log"),
                 // At its row, where its log is.
                 match plugin {
-                    Some(id) => Message::Plugin(crate::app::plugins::PluginMsg::ShowInSettings(id)),
+                    Some(id) => Message::Plugin(crate::app::plugins::PluginMsg::ShowInSettings(
+                        crate::app::plugins::SettingsSpot::Plugin(id),
+                    )),
                     None => Message::Settings(SettingsMsg::OpenAt(
                         crate::app::state::SettingsPage::Plugins,
                     )),

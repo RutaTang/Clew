@@ -3618,6 +3618,7 @@
  "{plugin} is installed, in Project Graphs": "{plugin} をインストールしました。プロジェクトグラフにあります",
  "{plugin} is installed, in the command palette": "{plugin} をインストールしました。コマンドパレットにあります",
  "{plugin} is installed, in the command palette and Project Graphs": "{plugin} をインストールしました。コマンドパレットとプロジェクトグラフにあります",
+ "{plugin} is updated": "{plugin} を更新しました",
  "{plugin} is updated to version {version}": "{plugin} をバージョン {version} に更新しました",
  "{plugin} was not installed: the agent that asked stopped waiting": "{plugin} はインストールされませんでした: 依頼したエージェントが待つのをやめました",
  "{program} (no arguments)": "{program}（引数なし）",

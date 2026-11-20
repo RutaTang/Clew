@@ -3618,6 +3618,7 @@
  "{plugin} is installed, in Project Graphs": "已安装 {plugin}，见项目图",
  "{plugin} is installed, in the command palette": "已安装 {plugin}，见命令面板",
  "{plugin} is installed, in the command palette and Project Graphs": "已安装 {plugin}，见命令面板和项目图",
+ "{plugin} is updated": "{plugin} 已更新",
  "{plugin} is updated to version {version}": "{plugin} 已更新到 {version} 版本",
  "{plugin} was not installed: the agent that asked stopped waiting": "未安装 {plugin}：提出请求的智能体已停止等待",
  "{program} (no arguments)": "{program}（无参数）",

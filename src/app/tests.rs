@@ -39174,14 +39174,22 @@ fn an_update_says_its_version_and_that_it_turns_the_plugin_on() {
     let _ = app.update(Message::Plugin(PluginMsg::Installed {
         id: "views".into(),
         reply: Reply::None,
-        update: true,
+        update: Some("0.0.9".into()),
         result: Ok(record.fingerprint.clone()),
     }));
     assert_eq!(app.status, "Views is updated to version 0.1.0");
+    // A new build of the version it was: not "updated to" it.
     let _ = app.update(Message::Plugin(PluginMsg::Installed {
         id: "views".into(),
         reply: Reply::None,
-        update: false,
+        update: Some("0.1.0".into()),
+        result: Ok(record.fingerprint.clone()),
+    }));
+    assert_eq!(app.status, "Views is updated");
+    let _ = app.update(Message::Plugin(PluginMsg::Installed {
+        id: "views".into(),
+        reply: Reply::None,
+        update: None,
         result: Ok(record.fingerprint),
     }));
     assert!(
@@ -39374,7 +39382,7 @@ fn an_agents_install_is_answered_as_the_user_decides() {
     let _ = app.update(Message::Plugin(crate::app::plugins::PluginMsg::Installed {
         id: "word-count".into(),
         reply: Reply::Request(allowed.clone()),
-        update: false,
+        update: None,
         result: Ok("fp-word-count".into()),
     }));
     assert_eq!(
@@ -39683,6 +39691,14 @@ fn a_running_command_stopped_ends_at_once_and_says_so() {
     assert!(app.failure_shown().is_none());
     assert!(!app.plugins.failing("views"));
     assert!(app.plugin_run().is_none(), "nothing runs now");
+    // Run again: "was stopped" does not stand beside the new run's chip.
+    let ran = app.update(Message::Plugin(PluginMsg::Run {
+        id: "views".into(),
+        command: "sleep".into(),
+    }));
+    assert_eq!(app.status, "", "the earlier word goes as it runs again");
+    let _ = app.update(Message::Plugin(PluginMsg::StopRun));
+    settle(&mut app, ran);
     // Another runs again at once: nothing is "still running".
     let ran = app.update(Message::Plugin(PluginMsg::Run {
         id: "views".into(),
@@ -39780,14 +39796,14 @@ fn a_failed_plugin_run_stands_with_its_next_steps() {
         bar.iter().any(|t| t.shown == "Settings"
             && matches!(
                 &t.message,
-                Message::Plugin(PluginMsg::ShowInSettings(id)) if id == "word-count"
+                Message::Plugin(PluginMsg::ShowInSettings(crate::app::plugins::SettingsSpot::Plugin(id))) if id == "word-count"
             )),
         "{:?}",
         bar.iter().map(|t| &t.shown).collect::<Vec<_>>()
     );
     assert!(bar.iter().any(|t| t.shown == "Try again"));
     let _ = app.update(Message::Plugin(PluginMsg::ShowInSettings(
-        "word-count".into(),
+        crate::app::plugins::SettingsSpot::Plugin("word-count".into()),
     )));
     assert!(app.settings.open);
     assert_eq!(app.settings.page, crate::SettingsPage::Plugins);
@@ -39878,7 +39894,7 @@ fn a_failed_plugin_run_stands_with_its_next_steps() {
     let _ = app.update(Message::Plugin(PluginMsg::Installed {
         id: "word-count".into(),
         reply: Reply::None,
-        update: false,
+        update: None,
         result: Err("the disk is full".into()),
     }));
     let notice = app.failure_shown().expect("said where the user is");
@@ -39914,7 +39930,7 @@ fn a_failed_plugin_run_stands_with_its_next_steps() {
     let _ = app.update(Message::Plugin(PluginMsg::Installed {
         id: "another".into(),
         reply: Reply::None,
-        update: false,
+        update: None,
         result: Ok("its build".into()),
     }));
     assert_eq!(
@@ -39926,7 +39942,7 @@ fn a_failed_plugin_run_stands_with_its_next_steps() {
     let _ = app.update(Message::Plugin(PluginMsg::Installed {
         id: "word-count".into(),
         reply: Reply::None,
-        update: false,
+        update: None,
         result: Ok("a newer build".into()),
     }));
     assert!(app.plugins.log_text("word-count").is_empty());
@@ -40112,6 +40128,16 @@ fn a_plugin_withdrawn_elsewhere_is_not_run_here() {
     );
     let notice = app.failure_shown().expect("it stands");
     assert!(notice.retry.is_none(), "Try again fails the same way");
+    // Its Settings opens at its row, where what fixes it is said; what
+    // failed is the command, named whole.
+    assert_eq!(
+        notice.spot,
+        Some(crate::app::plugins::SettingsSpot::Plugin("views".into()))
+    );
+    assert_eq!(
+        crate::ui::failure_head(&notice.shown(), notice.subject.as_deref()),
+        "Views: Say something did not run"
+    );
     assert!(!app.plugins.failing("views"));
     let row = |app: &App, words: &str| {
         iced_test::simulator(crate::ui::plugins_settings(app))
@@ -40124,7 +40150,7 @@ fn a_plugin_withdrawn_elsewhere_is_not_run_here() {
     let _ = app.update(Message::Plugin(PluginMsg::Installed {
         id: "views".into(),
         reply: crate::app::plugins::Reply::None,
-        update: false,
+        update: None,
         result: Ok(record.fingerprint.clone()),
     }));
     assert!(app.failure_shown().is_none(), "it stood after the install");
@@ -40457,7 +40483,7 @@ fn a_plugins_graph_is_built_when_shown_in_project_graphs() {
         targets.iter().any(|t| t.shown == "See its log"
             && matches!(
                 &t.message,
-                Message::Plugin(PluginMsg::ShowInSettings(plugin)) if plugin == "views"
+                Message::Plugin(PluginMsg::ShowInSettings(crate::app::plugins::SettingsSpot::Plugin(plugin))) if plugin == "views"
             )),
         "{:?}",
         targets.iter().map(|t| &t.shown).collect::<Vec<_>>()
@@ -40474,7 +40500,7 @@ fn a_plugins_graph_is_built_when_shown_in_project_graphs() {
                 && targets.iter().any(|t| t.shown == "See its log"
                     && matches!(
                         &t.message,
-                        Message::Plugin(PluginMsg::ShowInSettings(plugin)) if plugin == "views"
+                        Message::Plugin(PluginMsg::ShowInSettings(crate::app::plugins::SettingsSpot::Plugin(plugin))) if plugin == "views"
                     )),
             "{shown:?}"
         );
@@ -40549,6 +40575,7 @@ fn settings_check_again_after_rust_is_set_up_outside_clew() {
         found: Err(Missing {
             why: Why::NoDefault("no default toolchain".into()),
             setup: None,
+            rustup: false,
         }),
         own_installed: false,
         removal_failed: None,
@@ -40602,6 +40629,7 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
         Err(Missing {
             why: Why::NoRust,
             setup: Some(Setup::Install),
+            rustup: false,
         }),
         false,
     );
@@ -40617,6 +40645,7 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
             setup: Some(Setup::AddTarget {
                 rustup: "/usr/bin/rustup".into(),
             }),
+            rustup: true,
         }),
         false,
     );
@@ -40629,6 +40658,7 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
         Err(Missing {
             why: Why::TooOld("1.70.0".into()),
             setup: Some(Setup::Install),
+            rustup: true,
         }),
         false,
     );
@@ -40639,6 +40669,28 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
     assert!(says(
         &app,
         "Run “rustup update”, then check again. Or install Rust into Clew's own folder (about 700 MB); nothing else on this computer changes."
+    ));
+    // A package manager's Rust has no rustup: no `rustup update` said.
+    checked(
+        &mut app,
+        Err(Missing {
+            why: Why::TooOld("1.70.0".into()),
+            setup: Some(Setup::Install),
+            rustup: false,
+        }),
+        false,
+    );
+    assert!(says(
+        &app,
+        "Rust 1.70.0 is installed, but building plugins needs Rust 1.82 or later."
+    ));
+    assert!(!says(
+        &app,
+        "Run “rustup update”, then check again. Or install Rust into Clew's own folder (about 700 MB); nothing else on this computer changes."
+    ));
+    assert!(says(
+        &app,
+        "Installs Rust from rust-lang.org into Clew's own folder (about 700 MB). Nothing else on this computer changes."
     ));
 
     // Clew's own Rust that could not be removed says why, where it is.
@@ -40651,7 +40703,14 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
         &app,
         "Clew's Rust could not be removed: permission denied"
     ));
+    // Looked at again while it is still there: why holds.
     checked(&mut app, Ok(("1.95.0".into(), true)), true);
+    assert!(says(
+        &app,
+        "Clew's Rust could not be removed: permission denied"
+    ));
+    // Gone: so is why it was not.
+    checked(&mut app, Ok(("1.95.0".into(), false)), false);
     assert!(!says(
         &app,
         "Clew's Rust could not be removed: permission denied"
@@ -40665,6 +40724,7 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
         Err(Missing {
             why: Why::NoRust,
             setup: Some(Setup::Install),
+            rustup: false,
         }),
         false,
     );
@@ -40674,6 +40734,8 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
         "Plugins cannot be built here: Rust is not installed on this computer."
     );
     assert_eq!(notice.of.settings_page(), crate::SettingsPage::Plugins);
+    // Its Settings opens at Rust's setup, under the plugins.
+    assert_eq!(notice.spot, Some(crate::app::plugins::SettingsSpot::Rust));
     assert!(!app.plugins.say_missing_rust, "said once");
     // Rust set up (outside Clew, then Check again): it goes.
     checked(&mut app, Ok(("1.95.0".into(), false)), false);
@@ -40715,6 +40777,7 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
         Err(Missing {
             why: Why::NoRust,
             setup: Some(Setup::Install),
+            rustup: false,
         }),
         false,
     );
