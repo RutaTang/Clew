@@ -317,6 +317,8 @@ pub struct Plugins {
     pub(crate) running: Option<String>,
     /// How far it has come, as it says (`plugin_host::unpack_progress`).
     pub(crate) progress: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Set to stop it (`Host::stop_asked`): its chip's Stop.
+    pub(crate) stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) install: Questions<PendingInstall>,
     pub(crate) prompt: Option<Prompt>,
     /// What is being asked before it is done.
@@ -327,6 +329,10 @@ pub struct Plugins {
     /// finishes, or a new build is installed, its Settings row says what
     /// fixes it.
     pub(crate) failed: HashSet<String>,
+    /// The plugins whose approved copy changed on disk, by id: not run,
+    /// until installed again — nothing an agent's fix or a Try again
+    /// changes.
+    pub(crate) damaged: HashSet<String>,
     /// Why the last install from a file, or the last change, failed.
     pub(crate) failure: Option<String>,
     /// The requests of `clew-server mcp` this window took on.
@@ -341,6 +347,13 @@ pub struct Plugins {
     /// Why the last setup step did not work, until one works or another
     /// starts.
     pub(crate) setup_failure: Option<String>,
+    /// Why Clew's own Rust could not be removed, until it is.
+    pub(crate) removal_failure: Option<String>,
+    /// A build of the Ask agent's failed: once the check says Rust is
+    /// what is missing, the status line says so, with Settings.
+    pub(crate) say_missing_rust: bool,
+    /// Settings opens about this plugin: scrolled to its row.
+    pub(crate) reveal_in_settings: Option<String>,
 }
 
 /// Whether plugins can be built on this computer.
@@ -369,6 +382,8 @@ pub struct Checked {
     pub(crate) found: Result<(String, bool), clew_plugin::toolchain::Missing>,
     /// Clew's own Rust is installed, used or not.
     pub(crate) own_installed: bool,
+    /// Asked to remove it: why it is still there.
+    pub(crate) removal_failed: Option<String>,
 }
 
 impl std::fmt::Debug for Plugins {
@@ -531,6 +546,8 @@ pub enum PluginMsg {
     },
     /// Put the page away.
     ClosePage,
+    /// Show again the page put away by opening one of its rows.
+    BackToPage,
     /// Settings: install a plugin from a file.
     InstallFromFile,
     Picked(Option<PathBuf>),
@@ -556,6 +573,11 @@ pub enum PluginMsg {
     /// Settings: put a request to fix plugin `id`, with its log, in Ask's
     /// field, and open Ask.
     AskToFix(String),
+    /// Stop the command running (its chip's ×).
+    StopRun,
+    /// Open Settings → Plugins at plugin `id`'s row: its log, and what
+    /// fixes it.
+    ShowInSettings(String),
     /// Settings: Remove, asked about first.
     AskRemove(String),
     AskRemoveOwnRust,
@@ -566,6 +588,8 @@ pub enum PluginMsg {
     Installed {
         id: String,
         reply: Reply,
+        /// It replaced another build of it: an update, said so.
+        update: bool,
         result: Result<String, String>,
     },
     SetEnabled(String, bool),
@@ -583,6 +607,8 @@ pub enum PluginMsg {
     ToolAnswered {
         stream: u64,
         call: u64,
+        /// The tool called, for its step's chip.
+        tool: String,
         answer: Arc<std::sync::Mutex<Option<clew_plugin::tools::Step>>>,
     },
     /// A try for an agent ran: the answer for the agent.
@@ -673,6 +699,29 @@ fn withdrawn(data: &std::path::Path, id: &str, record: &Record) -> Option<&'stat
 /// stands (`withdrawn`): nothing the plugin did.
 fn is_withdrawn(failure: &Failure) -> bool {
     matches!(failure, Failure::Stopped(why) if WITHDRAWN.contains(&why.as_str()))
+}
+
+/// What a plugin tool's step says: as it runs, and once done.
+fn plugin_step_title(tool: &str, done: bool) -> String {
+    match (tool, done) {
+        ("plugin_guide", false) => tr!("Reading the plugin guide…"),
+        ("plugin_guide", true) => tr!("Read the plugin guide"),
+        ("plugin_new", false) => tr!("Starting a plugin…"),
+        ("plugin_new", true) => tr!("Started a plugin"),
+        ("plugin_files" | "plugin_read", false) => tr!("Reading a plugin's source…"),
+        ("plugin_files" | "plugin_read", true) => tr!("Read a plugin's source"),
+        ("plugin_write", false) => tr!("Writing a plugin's source…"),
+        ("plugin_write", true) => tr!("Wrote a plugin's source"),
+        ("plugin_build", false) => tr!("Building a plugin…"),
+        ("plugin_build", true) => tr!("Built a plugin"),
+        ("plugin_try", false) => tr!("Trying a plugin…"),
+        ("plugin_try", true) => tr!("Tried a plugin"),
+        ("plugin_install", false) => tr!("Asking to install a plugin…"),
+        ("plugin_install", true) => tr!("Installed a plugin"),
+        (_, false) => tr!("Looking at the plugins…"),
+        (_, true) => tr!("Looked at the plugins"),
+    }
+    .to_string()
 }
 
 /// The data folder, or why there is none.
@@ -807,6 +856,29 @@ impl App {
         })
     }
 
+    /// The command running, how far it has come in percent when it says,
+    /// and whether it was asked to stop: for its chip.
+    pub(crate) fn plugin_run(&self) -> Option<(&str, Option<u32>, bool)> {
+        let title = self.plugins.running.as_deref()?;
+        let percent = self.plugins.progress.as_ref().and_then(|p| {
+            let (done, total) = crate::app::plugin_host::unpack_progress(
+                p.load(std::sync::atomic::Ordering::Relaxed),
+            );
+            (total > 0).then(|| (u64::from(done.min(total)) * 100 / u64::from(total)) as u32)
+        });
+        let stopping = self
+            .plugins
+            .stop
+            .as_ref()
+            .is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed));
+        Some((title, percent, stopping))
+    }
+
+    /// The plugin that adds the graph shown, by its id.
+    pub(crate) fn shown_graph_plugin_id(&self) -> Option<String> {
+        self.shown_plugin_graph().map(|(_, p, _)| p.id.clone())
+    }
+
     /// The plugin that adds the graph shown, by its name.
     pub(crate) fn shown_graph_plugin(&self) -> Option<String> {
         self.shown_plugin_graph().map(|(_, p, _)| p.name())
@@ -831,6 +903,7 @@ impl App {
                     found: clew_plugin::toolchain::find(Some(&data))
                         .map(|t| (t.version, t.cargo_home.is_some())),
                     own_installed: clew_plugin::toolchain::managed_installed(&data),
+                    removal_failed: None,
                 })
                 .await
                 .unwrap_or_else(|_| Checked {
@@ -841,6 +914,7 @@ impl App {
                         setup: None,
                     }),
                     own_installed: false,
+                    removal_failed: None,
                 })
             },
             |checked| Message::Plugin(PluginMsg::ToolchainChecked(checked)),
@@ -1064,6 +1138,12 @@ impl App {
                     if let Failure::Plugin(said) = &failure {
                         self.plugins.note(plugin, Level::Info, said.clone());
                         self.plugins.failed.remove(plugin);
+                    } else if matches!(&failure, Failure::Stopped(why) if why == clew_plugin::store::CHANGED)
+                    {
+                        self.plugins
+                            .note(plugin, Level::Error, failure_words(&failure));
+                        self.plugins.failed.remove(plugin);
+                        self.plugins.damaged.insert(plugin.clone());
                     } else {
                         self.plugins
                             .note(plugin, Level::Error, failure_words(&failure));
@@ -1149,7 +1229,9 @@ impl App {
             self.status = tr!("{plugin} has no such command", plugin = plugin.name());
             return Task::none();
         };
-        let title = command_title(&cmd);
+        // Named with its plugin: two plugins' "List" are told apart on the
+        // status line, the prompt and the page.
+        let title = command_label(&plugin, &cmd);
         // What would stop the run, said before the user types for it.
         if let Some(running) = &self.plugins.running {
             self.status = tr!("{command} is still running", command = running.clone());
@@ -1198,8 +1280,12 @@ impl App {
         let loaded = self.plugins.loaded.get(&plugin.record.fingerprint).cloned();
         let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
         self.plugins.progress = Some(progress.clone());
+        // Said by its chip on the status bar, with its Stop, for as long as
+        // it runs: said on the status line, it went as soon as anything
+        // else was said, and could not be stopped.
         self.plugins.running = Some(title.clone());
-        self.status = tr!("Running {command}…", command = title.clone());
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.plugins.stop = Some(stop.clone());
         let stamp = self.stamp();
         let id = id.to_string();
         let command = command.to_string();
@@ -1217,7 +1303,7 @@ impl App {
                             log: Vec::new(),
                         };
                     }
-                    let host = Arc::new(host(handle).with_progress(progress));
+                    let host = Arc::new(host(handle).with_progress(progress).with_stop(stop));
                     let (loaded, fresh) = match loaded {
                         Some(loaded) => (loaded, false),
                         None => match load(&runtime, &data, &record) {
@@ -1269,13 +1355,7 @@ impl App {
     ) -> Task<Message> {
         self.plugins.running = None;
         self.plugins.progress = None;
-        // The run's own word on the status bar goes; another's stays.
-        if self
-            .status
-            .starts_with(&tr!("Running {command}…", command = title.clone()))
-        {
-            self.status.clear();
-        }
+        self.plugins.stop = None;
         for HostEvent::Log(level, line) in ran.log {
             self.plugins.note(&id, level, line);
         }
@@ -1287,6 +1367,13 @@ impl App {
             .get(&id)
             .map(Installed::name)
             .unwrap_or_default();
+        // Stopped by the user: what it did so far is in its log; it did
+        // not fail, and what it gave back is not shown.
+        if matches!(&ran.outcome, Err(Failure::Stopped(why)) if why == clew_plugin::runtime::STOPPED_BY_USER)
+        {
+            self.status = tr!("{command} was stopped", command = title);
+            return Task::none();
+        }
         // Not run at all: turned off, removed or replaced since this window
         // read the list (in another copy of Clew). The list is read again;
         // nothing failed, and there is nothing to try again.
@@ -1299,6 +1386,31 @@ impl App {
                 reason = failure_words(failure)
             );
             return self.reload_plugins();
+        }
+        // Its approved copy changed on disk: not run. Trying again fails the
+        // same way, and its source is not what is wrong; installed again, it
+        // is written anew — said so, here and in its Settings row.
+        if matches!(&ran.outcome, Err(Failure::Stopped(why)) if why == clew_plugin::store::CHANGED)
+        {
+            self.plugins.failed.remove(&id);
+            self.plugins.damaged.insert(id.clone());
+            self.plugins.note(
+                &id,
+                Level::Error,
+                crate::i18n::lookup(clew_plugin::store::CHANGED).to_string(),
+            );
+            self.say_failure_again(
+                move || {
+                    tr!(
+                        "{command} did not run: {reason}",
+                        command = title.clone(),
+                        reason = crate::i18n::lookup(clew_plugin::store::CHANGED)
+                    )
+                },
+                None,
+                FailureOf::PluginRun,
+            );
+            return Task::none();
         }
         // A command that finished, or that answered with a reason of its
         // own, works: the failure of its last run goes. A plugin's own
@@ -1362,12 +1474,15 @@ impl App {
     /// Take a run of plugin `id` that did not finish off the status line,
     /// and only one of it: another plugin's finishing said nothing of it.
     pub(crate) fn forget_run_failure_of(&mut self, id: &str) {
+        let damaged = self.plugins.damaged.contains(id);
         let of_it = self.failure_notice.as_ref().is_some_and(|f| {
             f.of == FailureOf::PluginRun
-                && matches!(
-                    &f.retry,
-                    Some(Message::Plugin(PluginMsg::RunAgain(again))) if again.id == id
-                )
+                && match &f.retry {
+                    Some(Message::Plugin(PluginMsg::RunAgain(again))) => again.id == id,
+                    // A damaged copy's: nothing to try again.
+                    None => damaged,
+                    _ => false,
+                }
         });
         if of_it {
             self.forget_failure_of(FailureOf::PluginRun);
@@ -1382,6 +1497,7 @@ impl App {
         self.proj.glossary.showing = false;
         self.proj.docs.page = None;
         self.proj.plugin_page = Some(page);
+        self.proj.last_plugin_page = None;
     }
 
     /// Ask the user whether to install `prepared`.
@@ -1426,6 +1542,11 @@ impl App {
                     (Ok((_, words)), _) => (words.clone(), false),
                     (Err(why), _) => (why.clone(), true),
                 };
+                let state = match (&answer, declined) {
+                    (Ok(_), false) => crate::app::model::StepState::Done,
+                    _ => crate::app::model::StepState::Failed,
+                };
+                self.finish_plugin_step(*stream, *call, "plugin_install", state);
                 let _ = self.send_to_server(clew_protocol::Request::AgentToolResult {
                     stream: *stream,
                     call: *call,
@@ -1559,7 +1680,8 @@ impl App {
                 return Task::none();
             }
         };
-        self.push_plugin_step(stream, &tool);
+        self.push_plugin_step(stream, call, &tool);
+        let chip = tool.clone();
         let cancel = self
             .plugins
             .tool_cancels
@@ -1580,31 +1702,56 @@ impl App {
                 Message::Plugin(PluginMsg::ToolAnswered {
                     stream,
                     call,
+                    tool: chip.clone(),
                     answer: Arc::new(std::sync::Mutex::new(Some(step))),
                 })
             },
         )
     }
 
-    /// A step chip for a plugin tool the agent used.
-    fn push_plugin_step(&mut self, stream: u64, tool: &str) {
-        let title = match tool {
-            "plugin_guide" => tr!("Read the plugin guide"),
-            "plugin_new" => tr!("Started a plugin"),
-            "plugin_files" | "plugin_read" => tr!("Read a plugin's source"),
-            "plugin_write" => tr!("Wrote a plugin's source"),
-            "plugin_build" => tr!("Built a plugin"),
-            "plugin_try" => tr!("Tried a plugin"),
-            "plugin_install" => tr!("Asked to install a plugin"),
-            _ => tr!("Looked at the plugins"),
-        };
+    /// A step chip for a plugin tool the agent called, running until its
+    /// answer comes (`finish_plugin_step`): it was ticked as it was called —
+    /// "Built a plugin" green as a build of minutes began, and green still
+    /// when it failed; "Asked to install a plugin" ticked while the card
+    /// waited, and after the user said no.
+    fn push_plugin_step(&mut self, stream: u64, call: u64, tool: &str) {
         if let Some(turn) = self.proj.ask_turns.iter_mut().find(|t| t.stream == stream) {
+            turn.extras
+                .step_ids
+                .insert(format!("plugin:{call}"), turn.steps.len());
             turn.steps.push(crate::app::model::AgentStep {
                 tool: "plugin".into(),
-                title: title.to_string(),
+                title: plugin_step_title(tool, false),
                 refs: Vec::new(),
-                state: crate::app::model::StepState::Done,
+                state: crate::app::model::StepState::Running,
             });
+        }
+    }
+
+    /// Plugin tool call `call` of `stream`'s turn stands as `state` now:
+    /// done is said in the past, as the agent's other steps are.
+    fn finish_plugin_step(
+        &mut self,
+        stream: u64,
+        call: u64,
+        tool: &str,
+        state: crate::app::model::StepState,
+    ) {
+        use crate::app::model::StepState;
+        if let Some(turn) = self.proj.ask_turns.iter_mut().find(|t| t.stream == stream)
+            && let Some(&at) = turn.extras.step_ids.get(&format!("plugin:{call}"))
+            && let Some(step) = turn.steps.get_mut(at)
+        {
+            step.state = state;
+            step.title = match state {
+                StepState::Done => plugin_step_title(tool, true),
+                StepState::Failed if tool == "plugin_install" => {
+                    tr!("The plugin was not installed").to_string()
+                }
+                _ => plugin_step_title(tool, false)
+                    .trim_end_matches('…')
+                    .to_string(),
+            };
         }
     }
 
@@ -1787,20 +1934,17 @@ impl App {
                 };
                 self.run_plugin(&id, &command, None, Some(at))
             }
-            PluginMsg::ProgressTick => {
-                let (Some(title), Some(progress)) = (&self.plugins.running, &self.plugins.progress)
-                else {
-                    return Task::none();
-                };
-                let (done, total) = crate::app::plugin_host::unpack_progress(
-                    progress.load(std::sync::atomic::Ordering::Relaxed),
-                );
-                let running = tr!("Running {command}…", command = title.clone());
-                // Only over the run's own word: what the user did meanwhile
-                // stays said.
-                if total > 0 && self.status.starts_with(&running) {
-                    let percent = (u64::from(done.min(total)) * 100 / u64::from(total)) as u32;
-                    self.status = format!("{running} {percent}%");
+            // Its chip reads how far it has come as it is drawn.
+            PluginMsg::ProgressTick => Task::none(),
+            PluginMsg::ShowInSettings(id) => {
+                self.plugins.reveal_in_settings = Some(id);
+                self.update(Message::Settings(crate::app::message::SettingsMsg::OpenAt(
+                    crate::app::state::SettingsPage::Plugins,
+                )))
+            }
+            PluginMsg::StopRun => {
+                if let Some(stop) = &self.plugins.stop {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Task::none()
             }
@@ -1811,6 +1955,16 @@ impl App {
                 Task::none()
             }
             PluginMsg::PromptRun => {
+                // Nothing typed is nothing to run on: the question stays,
+                // its field still focused (Run said by voice, or Enter).
+                if self
+                    .plugins
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|p| p.text.trim().is_empty())
+                {
+                    return iced::widget::operation::focus(crate::ui::plugin_prompt_id());
+                }
                 let Some(prompt) = self.plugins.prompt.take() else {
                     return Task::none();
                 };
@@ -1847,11 +2001,24 @@ impl App {
                     return Task::none();
                 };
                 let line = (at.line > 0).then_some(at.line as usize);
-                // Opening the file puts the page away, as it does every page.
-                self.open_file(root.join(&at.path), line, true)
+                // Opening the file puts the page away, as it does every page
+                // — kept, to go back to for the next row (the trail's Back
+                // to): put away for good, the next row of a list of TODOs
+                // meant running the command again.
+                let page = self.proj.plugin_page.take();
+                let opened = self.open_file(root.join(&at.path), line, true);
+                self.proj.last_plugin_page = page;
+                opened
+            }
+            PluginMsg::BackToPage => {
+                if let Some(page) = self.proj.last_plugin_page.take() {
+                    self.show_plugin_page(page);
+                }
+                Task::none()
             }
             PluginMsg::ClosePage => {
                 self.proj.plugin_page = None;
+                self.proj.last_plugin_page = None;
                 Task::none()
             }
             PluginMsg::InstallFromFile => {
@@ -1935,6 +2102,10 @@ impl App {
                 }
                 let id = pending.inspected.manifest.plugin.id.clone();
                 let reply = pending.reply.clone();
+                let update = pending
+                    .previous
+                    .as_ref()
+                    .is_some_and(|p| p.record.fingerprint != pending.inspected.fingerprint());
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -1953,6 +2124,7 @@ impl App {
                         Message::Plugin(PluginMsg::Installed {
                             id: id.clone(),
                             reply: reply.clone(),
+                            update,
                             result,
                         })
                     },
@@ -1964,7 +2136,12 @@ impl App {
                 }
                 Task::none()
             }
-            PluginMsg::Installed { id, reply, result } => {
+            PluginMsg::Installed {
+                id,
+                reply,
+                update,
+                result,
+            } => {
                 if result.is_ok() {
                     store_changed();
                 }
@@ -1987,6 +2164,7 @@ impl App {
                         // new build, its Try again and Settings about the
                         // old one.
                         self.forget_run_failure_of(&id);
+                        self.plugins.damaged.remove(&id);
                         let manifest = self.plugins.get(&id).map(|p| p.manifest.clone());
                         let (commands, graphs) = manifest
                             .as_ref()
@@ -1995,7 +2173,17 @@ impl App {
                         // Said in few words: said in many ("…: its commands
                         // are in the command palette, its graphs in Project
                         // Graphs"), it was cut beside the status bar's chips.
+                        let version = manifest
+                            .as_ref()
+                            .map(|m| m.plugin.version.clone())
+                            .unwrap_or_default();
                         self.status = match (commands > 0, graphs > 0) {
+                            // Where its commands are is known already.
+                            _ if update => tr!(
+                                "{plugin} is updated to version {version}",
+                                plugin = name.clone(),
+                                version = version
+                            ),
                             (true, true) => tr!(
                                 "{plugin} is installed, in the command palette and Project Graphs",
                                 plugin = name.clone()
@@ -2024,7 +2212,7 @@ impl App {
                         self.plugins.failure = Some(tr!(
                             "{plugin} could not be installed: {reason}",
                             plugin = name.clone(),
-                            reason = why.clone()
+                            reason = crate::i18n::lookup(&why).to_string()
                         ));
                         // Said where the user is, too: after Install on an
                         // agent's card, Settings was not open, and the card
@@ -2132,8 +2320,18 @@ impl App {
                 if lines.is_empty() {
                     return Task::none();
                 }
+                // Which plugin, and which build: pasted to an agent, the
+                // bare lines did not say what they were the log of.
+                let named = match self.plugins.get(&id) {
+                    Some(p) => format!(
+                        "{} ({id}) {}:\n{lines}",
+                        p.name(),
+                        p.manifest.plugin.version
+                    ),
+                    None => lines,
+                };
                 self.status = tr!("Copied its log").into();
-                iced::clipboard::write(lines)
+                iced::clipboard::write(named)
             }
             PluginMsg::AskToFix(id) => {
                 let Some(plugin) = self.plugins.get(&id) else {
@@ -2184,6 +2382,14 @@ impl App {
                 if self.proj.plugin_page.as_ref().is_some_and(|p| p.id == id) {
                     self.proj.plugin_page = None;
                 }
+                if self
+                    .proj
+                    .last_plugin_page
+                    .as_ref()
+                    .is_some_and(|p| p.id == id)
+                {
+                    self.proj.last_plugin_page = None;
+                }
                 self.plugins.log.remove(&id);
                 self.plugins.failed.remove(&id);
                 self.reload_plugins()
@@ -2204,6 +2410,7 @@ impl App {
             PluginMsg::ToolAnswered {
                 stream,
                 call,
+                tool,
                 answer,
             } => {
                 let Some(step) = answer.lock().unwrap_or_else(|e| e.into_inner()).take() else {
@@ -2229,6 +2436,24 @@ impl App {
                             Ok(text) => (text, false),
                             Err(why) => (why, true),
                         };
+                        self.finish_plugin_step(
+                            stream,
+                            call,
+                            &tool,
+                            if is_error {
+                                crate::app::model::StepState::Failed
+                            } else {
+                                crate::app::model::StepState::Done
+                            },
+                        );
+                        // A build that failed may have failed for want of
+                        // Rust: looked at, and said with Settings if so.
+                        let check = if is_error && tool == "plugin_build" {
+                            self.plugins.say_missing_rust = true;
+                            self.check_toolchain()
+                        } else {
+                            Task::none()
+                        };
                         let _ = self.send_to_server(clew_protocol::Request::AgentToolResult {
                             stream,
                             call,
@@ -2237,7 +2462,7 @@ impl App {
                         });
                         // A build or a write may have changed what is
                         // listed; an install changes it only once allowed.
-                        Task::none()
+                        check
                     }
                     clew_plugin::tools::Step::Try {
                         built,
@@ -2258,6 +2483,13 @@ impl App {
                         reply,
                     ),
                     clew_plugin::tools::Step::Install { built } => {
+                        // Waiting for the user, at the card.
+                        self.finish_plugin_step(
+                            stream,
+                            call,
+                            &tool,
+                            crate::app::model::StepState::Waiting,
+                        );
                         self.offer_install(
                             Prepared {
                                 bytes: Arc::new(built.bytes),
@@ -2300,12 +2532,35 @@ impl App {
                     return Task::none();
                 }
                 self.plugins.own_rust = checked.own_installed;
+                self.plugins.removal_failure = checked.removal_failed;
+                let say_missing = std::mem::take(&mut self.plugins.say_missing_rust);
                 self.plugins.building = match checked.found {
                     Ok((version, own)) => {
                         self.plugins.setup_failure = None;
+                        // Rust is ready: "cannot be built here" is not so.
+                        self.forget_failure_of(FailureOf::PluginBuild);
                         Building::Ready { version, own }
                     }
-                    Err(missing) => Building::Missing(missing),
+                    Err(missing) => {
+                        // The agent's build failed for want of Rust: what
+                        // sets it up is in Settings → Plugins, said here
+                        // with a way there (the agent relays it, perhaps
+                        // in words the user does not see).
+                        if say_missing {
+                            let why = missing.why.clone();
+                            self.say_failure_again(
+                                move || {
+                                    tr!(
+                                        "Plugins cannot be built here: {reason}",
+                                        reason = crate::ui::missing_words(&why)
+                                    )
+                                },
+                                None,
+                                FailureOf::PluginBuild,
+                            );
+                        }
+                        Building::Missing(missing)
+                    }
                 };
                 Task::none()
             }
@@ -2371,21 +2626,29 @@ impl App {
                         tokio::task::spawn_blocking(move || {
                             let dir = clew_plugin::toolchain::managed_dir(&data);
                             let removed = std::fs::remove_dir_all(&dir);
+                            // Still there: why is said by its row, not
+                            // dropped with the row left as it was.
+                            let removal_failed = removed
+                                .err()
+                                .filter(|_| dir.exists())
+                                .map(|e| e.to_string());
                             Checked {
                                 found: clew_plugin::toolchain::find(Some(&data))
                                     .map(|t| (t.version, t.cargo_home.is_some())),
-                                own_installed: removed.is_err() && dir.exists(),
+                                own_installed: removal_failed.is_some(),
+                                removal_failed,
                             }
                         })
                         .await
                         .unwrap_or_else(|_| Checked {
                             found: Err(clew_plugin::toolchain::Missing {
                                 why: clew_plugin::toolchain::Why::Other(
-                                    "the removal failed unexpectedly".into(),
+                                    tr!("the check failed unexpectedly").into(),
                                 ),
                                 setup: None,
                             }),
                             own_installed: true,
+                            removal_failed: Some(tr!("the removal failed unexpectedly").into()),
                         })
                     },
                     |checked| Message::Plugin(PluginMsg::ToolchainChecked(checked)),
@@ -2398,6 +2661,16 @@ impl App {
                             Ok(text) => (text, false),
                             Err(why) => (why, true),
                         };
+                        self.finish_plugin_step(
+                            *stream,
+                            *call,
+                            "plugin_try",
+                            if is_error {
+                                crate::app::model::StepState::Failed
+                            } else {
+                                crate::app::model::StepState::Done
+                            },
+                        );
                         let _ = self.send_to_server(clew_protocol::Request::AgentToolResult {
                             stream: *stream,
                             call: *call,

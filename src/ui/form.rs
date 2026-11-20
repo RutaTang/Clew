@@ -382,6 +382,17 @@ pub(crate) fn action<'a>(label: &str, msg: Option<Message>) -> Press<'a> {
         .on_press_maybe(msg)
 }
 
+/// [`action`] done to `item`, one of several rows that each have it:
+/// heard and jumped to as "Remove: TODO count", not as one of several
+/// buttons all called "Remove".
+pub(crate) fn action_to<'a>(label: &str, item: &str, msg: Option<Message>) -> Press<'a> {
+    let msg = msg.map(|m| super::heard::said_to(label, item, m));
+    button(text(label.to_string()).size(ts::BODY))
+        .style(theme::secondary_button)
+        .padding([5, 12])
+        .on_press_maybe(msg)
+}
+
 /// [`action`] that spends an AI call: marked with the sparkle, as every
 /// such control is.
 pub(crate) fn ai_action<'a>(label: &str, msg: Option<Message>) -> Press<'a> {

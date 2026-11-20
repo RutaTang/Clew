@@ -36,6 +36,8 @@ pub(crate) struct ProjectHost {
     /// How far a run has come, as the plugin said: done in the high half,
     /// the total in the low; read by the window while it runs.
     progress: Arc<std::sync::atomic::AtomicU64>,
+    /// Set when the user asks the run to stop.
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// `done` of `total`, packed as [`ProjectHost`] keeps it.
@@ -64,6 +66,7 @@ impl ProjectHost {
             partial,
             events: Default::default(),
             progress: Default::default(),
+            stop: Default::default(),
         }
     }
 
@@ -83,7 +86,14 @@ impl ProjectHost {
             partial,
             events: Default::default(),
             progress: Default::default(),
+            stop: Default::default(),
         }
+    }
+
+    /// What the window sets when the user stops the run.
+    pub(crate) fn with_stop(mut self, stop: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.stop = stop;
+        self
     }
 
     /// Where the plugin's progress is told, for the window to read.
@@ -299,5 +309,8 @@ impl Host for ProjectHost {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(HostEvent::Log(level, message.to_string()));
+    }
+    fn stop_asked(&self) -> bool {
+        self.stop.load(std::sync::atomic::Ordering::Relaxed)
     }
 }

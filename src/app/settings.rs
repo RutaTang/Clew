@@ -641,13 +641,17 @@ impl App {
                     } else {
                         Task::none()
                     };
-                Task::batch([
-                    opened,
-                    self.sync_server_listing(),
-                    settings_to_top(),
-                    key,
-                    usage,
-                ])
+                // Opened about one plugin: at its row, after the top.
+                let place = match self.plugins.reveal_in_settings.take() {
+                    Some(id) if page == SettingsPage::Plugins => {
+                        settings_to_top().chain(ui::reveal_container(
+                            ui::settings_scroll_id(),
+                            ui::plugin_settings_row_id(&id),
+                        ))
+                    }
+                    _ => settings_to_top(),
+                };
+                Task::batch([opened, self.sync_server_listing(), place, key, usage])
             }
             SettingsMsg::Fix(field) => {
                 use crate::app::state::LlmField;

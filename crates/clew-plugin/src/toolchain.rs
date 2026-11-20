@@ -95,11 +95,13 @@ impl Missing {
     /// that the user sets it up in Clew.
     pub fn into_build_error(self) -> BuildError {
         let fix = match &self.setup {
+            // Where to go, not a button's English name: the user may read
+            // Clew in another language.
             Some(Setup::AddTarget { .. }) => Some(format!(
-                "ask the user to click \"Add the WebAssembly target\" in Clew's Settings → Plugins, or to run `rustup target add {TARGET}`; then build again."
+                "ask the user to open Clew's Settings → Plugins, where one button adds the WebAssembly target, or to run `rustup target add {TARGET}`; then build again."
             )),
             Some(Setup::Install) => Some(
-                "ask the user to click \"Install Rust for Clew\" in Clew's Settings → Plugins (it installs Rust into Clew's own folder, changing nothing else); then build again.".into(),
+                "ask the user to open Clew's Settings → Plugins, where one button installs Rust into Clew's own folder (changing nothing else on the computer); then build again.".into(),
             ),
             None => Some("ask the user to install Rust from https://rustup.rs; then build again.".into()),
         };
@@ -624,7 +626,13 @@ mod tests {
         };
         let said = missing.into_build_error().report();
         assert!(said.contains("Settings → Plugins"), "{said}");
-        assert!(said.contains("Install Rust for Clew"), "{said}");
+        assert!(
+            said.contains("installs Rust into Clew's own folder"),
+            "{said}"
+        );
+        // No English button name to look for: the user may read Clew in
+        // another language.
+        assert!(!said.contains("click"), "{said}");
         let missing = Missing {
             why: Why::NoTarget("1.90.0".into()),
             setup: Some(Setup::AddTarget {

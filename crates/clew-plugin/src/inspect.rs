@@ -25,6 +25,19 @@ pub const API_VERSION: &str = "0.1";
 pub const COMMANDS_EXPORT: &str = "clew:plugin/commands";
 pub const GRAPHS_EXPORT: &str = "clew:plugin/graphs";
 
+/// Why a file is not a plugin, in words that are the same every time —
+/// so the app can say them in the reader's language.
+pub const NOT_A_COMPONENT: &str =
+    "this is not a plugin: a plugin is a WebAssembly component (built for wasm32-wasip2)";
+pub const NO_MANIFEST: &str =
+    "this WebAssembly component is not a Clew plugin: it carries no plugin.toml";
+pub const TWO_MANIFESTS: &str = "the plugin's file carries more than one plugin.toml";
+pub const MANIFEST_NOT_TEXT: &str = "the plugin's manifest is not UTF-8 text";
+pub const NO_COMMANDS_EXPORT: &str =
+    "the plugin lists commands but its code exports none (use clew_plugin_sdk::export!)";
+pub const NO_GRAPHS_EXPORT: &str =
+    "the plugin lists graphs but its code exports none (use clew_plugin_sdk::export!)";
+
 /// What a plugin's file says of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Inspected {
@@ -178,10 +191,7 @@ pub fn inspect(bytes: &[u8]) -> Result<Inspected, String> {
         ));
     }
     if !Parser::is_component(bytes) {
-        return Err(
-            "this is not a plugin: a plugin is a WebAssembly component (built for wasm32-wasip2)"
-                .into(),
-        );
+        return Err(NOT_A_COMPONENT.into());
     }
     Validator::new_with_features(WasmFeatures::default())
         .validate_all(bytes)
@@ -189,16 +199,13 @@ pub fn inspect(bytes: &[u8]) -> Result<Inspected, String> {
     let top = top_level(bytes)?;
     let manifest = match (top.manifests, top.manifest) {
         (1, Some(text)) => {
-            let text = String::from_utf8(text)
-                .map_err(|_| "the plugin's manifest is not UTF-8 text".to_string())?;
+            let text = String::from_utf8(text).map_err(|_| MANIFEST_NOT_TEXT.to_string())?;
             Manifest::parse(&text)?
         }
         (0, _) => {
-            return Err(
-                "this WebAssembly component is not a Clew plugin: it carries no plugin.toml".into(),
-            );
+            return Err(NO_MANIFEST.into());
         }
-        _ => return Err("the plugin's file carries more than one plugin.toml".into()),
+        _ => return Err(TWO_MANIFESTS.into()),
     };
 
     for name in top.imports.iter().chain(&top.exports) {
@@ -237,16 +244,10 @@ pub fn inspect(bytes: &[u8]) -> Result<Inspected, String> {
     }
     let exports = |wanted: &str| top.exports.iter().any(|e| split_version(e).0 == wanted);
     if !manifest.commands.is_empty() && !exports(COMMANDS_EXPORT) {
-        return Err(
-            "the plugin lists commands but its code exports none (use clew_plugin_sdk::export!)"
-                .into(),
-        );
+        return Err(NO_COMMANDS_EXPORT.into());
     }
     if !manifest.graphs.is_empty() && !exports(GRAPHS_EXPORT) {
-        return Err(
-            "the plugin lists graphs but its code exports none (use clew_plugin_sdk::export!)"
-                .into(),
-        );
+        return Err(NO_GRAPHS_EXPORT.into());
     }
     Ok(Inspected {
         manifest,

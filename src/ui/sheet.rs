@@ -855,6 +855,36 @@ fn trail_row(app: &App) -> Element<'_, Message> {
             )),
         );
     }
+    // The plugin's page the reader came here from, put away by the row
+    // they opened: the next row is a click away, not another run.
+    if let Some(page) = &app.proj.last_plugin_page {
+        let title = super::steady::cut(&page.view.title, 220.0, ts::BODY, crate::fonts::UI);
+        let label = tr!("Back to {page}", page = title);
+        line = line.push(space().width(Fill)).push(
+            button(
+                row![
+                    glyph::icon(Glyph::ChevronLeft, theme::accent(), 11.0),
+                    ts::set_in(
+                        text(label.clone())
+                            .font(crate::fonts::in_control(crate::fonts::UI))
+                            .color(theme::accent())
+                            .wrapping(Wrapping::None),
+                        TRAIL_STOP_H,
+                        ts::INTER,
+                        ts::BODY,
+                    ),
+                ]
+                .spacing(4)
+                .align_y(iced::Center),
+            )
+            .style(theme::icon_button(false))
+            .padding([0, 5])
+            .on_press(super::heard::said(
+                &label,
+                Message::Plugin(crate::app::plugins::PluginMsg::BackToPage),
+            )),
+        );
+    }
     container(line)
         .height(Length::Fixed(TRAIL_ROW_H))
         .align_y(iced::Center)

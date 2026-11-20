@@ -15,6 +15,8 @@ use clew_rules::plugin::{GIT, READ};
 struct FakeHost {
     log: Mutex<Vec<(Level, String)>>,
     reads: Mutex<Vec<String>>,
+    /// The user asks the run to stop this long after it starts.
+    stop_after: Option<(Instant, Duration)>,
 }
 
 impl Host for FakeHost {
@@ -55,6 +57,10 @@ impl Host for FakeHost {
     }
     fn log(&self, level: Level, message: &str) {
         self.log.lock().unwrap().push((level, message.to_string()));
+    }
+    fn stop_asked(&self) -> bool {
+        self.stop_after
+            .is_some_and(|(started, after)| started.elapsed() >= after)
     }
 }
 
@@ -238,6 +244,33 @@ fn a_call_that_sleeps_is_stopped_at_its_deadline() {
         ),
         "a short sleep was cut"
     );
+}
+
+#[test]
+fn a_run_the_user_stops_ends_at_once_asleep_or_busy() {
+    let runtime = Runtime::new(None).unwrap();
+    let loaded = views(&runtime);
+    for (command, line) in [("sleep", None), ("spin", Some(1))] {
+        let host = FakeHost {
+            stop_after: Some((Instant::now(), Duration::from_millis(200))),
+            ..FakeHost::default()
+        };
+        let started = Instant::now();
+        let stopped = loaded
+            .run(Arc::new(host), command, &at(None, line), Limits::COMMAND)
+            .unwrap_err();
+        assert_eq!(
+            stopped,
+            Failure::Stopped(clew_plugin::runtime::STOPPED_BY_USER.into()),
+            "{command}"
+        );
+        // Well before its 30 s deadline.
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{command}: {:?}",
+            started.elapsed()
+        );
+    }
 }
 
 #[test]

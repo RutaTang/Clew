@@ -1400,6 +1400,20 @@ mod tests {
         }
         written.push(clew_voice::wake::MODEL.name.into());
         written.push(clew_plugin::store::CHANGED.into());
+        {
+            use clew_plugin::inspect::*;
+            written.extend(
+                [
+                    NOT_A_COMPONENT,
+                    NO_MANIFEST,
+                    TWO_MANIFESTS,
+                    MANIFEST_NOT_TEXT,
+                    NO_COMMANDS_EXPORT,
+                    NO_GRAPHS_EXPORT,
+                ]
+                .map(String::from),
+            );
+        }
         written.extend(clew_core::mcp::config::Approve::ALL.map(|a| a.label().to_string()));
         written.push(clew_core::llm::Provider::Custom.label().into());
         written.extend(

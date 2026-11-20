@@ -295,8 +295,10 @@ fn read_capped(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 /// Why a plugin's approved copy is not run: it is not the file approved
-/// (changed on disk since). Said to the user, who can do what it says.
-pub const CHANGED: &str = "the plugin's file changed after you approved it. Remove it in Settings → Plugins and install it again.";
+/// (changed on disk since). Said to the user, who can do what it says:
+/// installed again, the copy is written anew. Removed first, as this said
+/// to, the plugin's saved data went with it, for nothing.
+pub const CHANGED: &str = "Clew's copy of it changed after you approved it. Install it again from its file, or ask the agent that made it to install it again.";
 
 /// The approved copy of `record`'s plugin, checked to be the file approved.
 pub fn read_approved(data: &Path, record: &Record) -> Result<Vec<u8>, String> {

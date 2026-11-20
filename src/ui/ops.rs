@@ -80,6 +80,60 @@ pub(crate) fn reveal_operation(target: Id, top: f32, bottom: f32) -> impl Operat
     }
 }
 
+/// Scroll the scrollable `scroll` minimally so the container `row` in it
+/// is seen: where the row is is found where it is laid out, then it is
+/// revealed (Settings opened about one plugin, at its row).
+pub(crate) fn reveal_container(scroll: Id, row: Id) -> Task<Message> {
+    struct Find {
+        scroll: Id,
+        row: Id,
+        /// The scrollable's content's top, where its rows are laid out from.
+        content_top: Option<f32>,
+        /// The row's span, laid out.
+        span: Option<(f32, f32)>,
+    }
+    impl Operation for Find {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn scrollable(
+            &mut self,
+            id: Option<&Id>,
+            _bounds: Rectangle,
+            content_bounds: Rectangle,
+            _translation: Vector,
+            _state: &mut dyn Scrollable,
+        ) {
+            if id == Some(&self.scroll) {
+                self.content_top = Some(content_bounds.y);
+            }
+        }
+        fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
+            if id == Some(&self.row) {
+                self.span = Some((bounds.y, bounds.y + bounds.height));
+            }
+        }
+        fn finish(&self) -> iced::advanced::widget::operation::Outcome<()> {
+            use iced::advanced::widget::operation::Outcome;
+            match (self.content_top, self.span) {
+                (Some(origin), Some((top, bottom))) => Outcome::Chain(Box::new(reveal_operation(
+                    self.scroll.clone(),
+                    top - origin,
+                    bottom - origin,
+                ))),
+                _ => Outcome::None,
+            }
+        }
+    }
+    iced::advanced::widget::operate(Find {
+        scroll,
+        row,
+        content_top: None,
+        span: None,
+    })
+    .discard()
+}
+
 /// Keep the finder's selected row in view (arrow keys move the selection past
 /// the visible rows). Rows have a fixed height, so row `i` spans
 /// `i * FINDER_ROW_H ..` in the list's content, plus a [`FINDER_HEAD_H`] for

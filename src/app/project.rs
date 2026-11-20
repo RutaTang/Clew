@@ -629,6 +629,10 @@ impl App {
         self.plugins.running = None;
         self.plugins.progress = None;
         self.plugins.prompt = None;
+        // The run itself stops: it read the project left.
+        if let Some(stop) = self.plugins.stop.take() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         // So does the sheet asking about it ("Set Up Project…", Explain All
         // asking first): left up, its Apply acted on whatever project was
         // open by then, at a cost the user had not seen. A first open's sheet

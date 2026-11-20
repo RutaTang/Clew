@@ -885,6 +885,11 @@ impl App {
         if let Some(cancel) = self.plugins.tool_cancels.remove(&stream) {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        // Its install card goes with it: Install pressed after the turn
+        // ended installed for an agent no longer asking.
+        self.plugins.install.withdraw(|p| {
+            matches!(p.reply, crate::app::plugins::Reply::AskTool { stream: s, .. } if s == stream)
+        });
         self.proj.link.mcp_pending.retain(|(s, _), _| *s != stream);
         self.proj
             .link

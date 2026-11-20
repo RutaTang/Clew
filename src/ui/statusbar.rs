@@ -802,6 +802,10 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         used += chip.1 + STATUS_GAP;
         row = row.push(chip.0);
     }
+    if let Some(chip) = plugin_run_chip(app).filter(|chip| used + chip.1 <= room) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
     let left = room - used;
     if let Some(said) = said
         && left >= least
@@ -864,12 +868,22 @@ fn failure_controls(
     }
     if with_settings {
         // At the field it is about, where it is about one.
+        // A plugin's run: at its row, its log and what fixes it there.
+        let plugin = match &failure.retry {
+            Some(Message::Plugin(crate::app::plugins::PluginMsg::RunAgain(again))) => {
+                Some(again.id.clone())
+            }
+            _ => None,
+        };
         row = row.push(link(
             tr!("Settings"),
-            Message::Settings(match failure.about {
-                Some(field) => SettingsMsg::Fix(field),
-                None => SettingsMsg::OpenAt(failure.of.settings_page()),
-            }),
+            match (failure.about, plugin) {
+                (Some(field), _) => Message::Settings(SettingsMsg::Fix(field)),
+                (None, Some(id)) => {
+                    Message::Plugin(crate::app::plugins::PluginMsg::ShowInSettings(id))
+                }
+                (None, None) => Message::Settings(SettingsMsg::OpenAt(failure.of.settings_page())),
+            },
         ));
         width += settings_w;
     }
@@ -940,6 +954,77 @@ fn session_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
         ),
         width,
     ))
+}
+
+/// The most of its width a running command's name takes on its chip: a
+/// long one left no room for its Stop.
+const RUN_NAME_MAX_W: f32 = 200.0;
+
+/// A plugin's command running: its name, how far it has come when it says,
+/// and its Stop, for as long as it runs. Said on the status line, it went as
+/// soon as anything else was said, and could not be stopped.
+fn plugin_run_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
+    let (title, percent, stopping) = app.plugin_run()?;
+    let font = crate::fonts::UI;
+    let name = super::steady::cut(title, RUN_NAME_MAX_W, ts::SMALL, font);
+    let said = match (stopping, percent) {
+        (true, _) => tr!("Stopping {command}…", command = name.clone()),
+        (false, Some(p)) => tr!(
+            "Running {command}… {percent}%",
+            command = name.clone(),
+            percent = p
+        ),
+        (false, None) => tr!("Running {command}…", command = name.clone()),
+    };
+    // At its widest from the start: it does not shift as the count grows.
+    let widest = tr!(
+        "Running {command}… {percent}%",
+        command = name.clone(),
+        percent = 100
+    );
+    let words_w = super::steady::width_of(&widest, ts::SMALL, font).max(super::steady::width_of(
+        &said,
+        ts::SMALL,
+        font,
+    ));
+    let mut width = 11.0 + 5.0 + words_w;
+    let mut chip = row![
+        container(glyph::icon(Glyph::Plug, theme::accent(), 11.0))
+            .width(Length::Fixed(11.0))
+            .height(Length::Fixed(11.0)),
+        container(
+            text(said)
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .wrapping(iced::widget::text::Wrapping::None),
+        )
+        .width(Length::Fixed(words_w)),
+    ]
+    .spacing(5)
+    .align_y(iced::Center);
+    // Asked to stop, it is stopping: no second Stop.
+    if !stopping {
+        width += 5.0 + 19.0;
+        let stop = tr!("Stop {command}", command = title.to_string());
+        chip = chip.push(super::toolbar::tip_at(
+            button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
+                .style(theme::icon_button(false))
+                .padding([1, 4])
+                .on_press(super::heard::said(
+                    &stop,
+                    Message::Plugin(crate::app::plugins::PluginMsg::StopRun),
+                )),
+            stop.clone(),
+            None,
+            tooltip::Position::Top,
+        ));
+    }
+    let chip: Element<'_, Message> = if name == title {
+        chip.into()
+    } else {
+        super::toolbar::tip_at(chip, title.to_string(), None, tooltip::Position::Top)
+    };
+    Some((chip, width))
 }
 
 /// What the setting-up chip says, and whether it is a button: setting up,

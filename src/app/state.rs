@@ -937,6 +937,10 @@ pub enum FailureOf {
     /// A plugin's install, failed after the user said Install: one
     /// installed takes it away. Its Settings is Settings → Plugins.
     PluginInstall,
+    /// Plugins cannot be built here (the agent's build failed for want of
+    /// Rust): Rust found ready takes it away. Its Settings is Settings →
+    /// Plugins, where Rust is set up.
+    PluginBuild,
 }
 
 impl FailureOf {
@@ -944,7 +948,9 @@ impl FailureOf {
     /// model field is (`FailureNotice::about`).
     pub fn settings_page(self) -> SettingsPage {
         match self {
-            FailureOf::PluginRun | FailureOf::PluginInstall => SettingsPage::Plugins,
+            FailureOf::PluginRun | FailureOf::PluginInstall | FailureOf::PluginBuild => {
+                SettingsPage::Plugins
+            }
             FailureOf::Explain
             | FailureOf::Walkthrough
             | FailureOf::Summary
@@ -2577,6 +2583,10 @@ pub struct ProjectSession {
     /// The page a plugin's command showed over the code
     /// (`app::plugins`).
     pub plugin_page: Option<crate::app::plugins::PluginPage>,
+    /// The plugin's page put away by opening one of its rows, to go back
+    /// to: put away for good, the next row meant running the command
+    /// again (`PluginMsg::BackToPage`).
+    pub last_plugin_page: Option<crate::app::plugins::PluginPage>,
     /// Auto-refresh throttle: when the last refresh pass began (`None` until the
     /// first). A watched-file change starts a pass only once the cooldown has
     /// lifted; a manual refresh ignores it. Runtime-only (not persisted).
@@ -2932,6 +2942,7 @@ impl Default for ProjectSession {
             docs: Default::default(),
             glossary: Default::default(),
             plugin_page: None,
+            last_plugin_page: None,
             last_auto_refresh: Default::default(),
             refresh_pending: Default::default(),
             embed_index: Default::default(),

@@ -22,6 +22,12 @@ pub(crate) fn plugin_prompt_id() -> iced::widget::Id {
     iced::widget::Id::new("plugin-prompt")
 }
 
+/// Plugin `id`'s row in Settings → Plugins: what is scrolled to when
+/// Settings is opened about it.
+pub(crate) fn plugin_settings_row_id(id: &str) -> iced::widget::Id {
+    iced::widget::Id::from(format!("plugin-settings-row:{id}"))
+}
+
 /// The place row `row` of block `block` of `view` opens, if it opens one.
 pub(crate) fn plugin_row_place(view: &View, block: usize, row: usize) -> Option<Location> {
     match view.blocks.get(block)? {
@@ -337,11 +343,17 @@ pub(crate) fn plugin_install_modal(
     let mut adds: Vec<String> = manifest
         .commands
         .iter()
-        .map(|c| {
-            tr!(
+        .map(|c| match c.place {
+            // Where it is found: one of the code's menu was looked for in
+            // the palette only, and its menu entry came as a surprise.
+            clew_plugin::manifest::Place::Code => tr!(
+                "A command, also in the code's right-click menu: {title}",
+                title = crate::app::plugins::command_title(c)
+            ),
+            clew_plugin::manifest::Place::Palette => tr!(
                 "A command: {title}",
                 title = crate::app::plugins::command_title(c)
-            )
+            ),
         })
         .collect();
     adds.extend(manifest.graphs.iter().map(|g| {
@@ -403,6 +415,22 @@ pub(crate) fn plugin_install_modal(
             text(manifest.description_in(lang).to_string())
                 .size(ts::BASE)
                 .color(theme::fg()),
+        ]
+        // Turned off, it is turned on by this: said, not found out later
+        // in the palette.
+        .extend(
+            pending
+                .previous
+                .as_ref()
+                .filter(|p| !p.record.enabled)
+                .map(|_| {
+                    text(tr!("It is turned off now. This turns it on."))
+                        .size(ts::BODY)
+                        .color(theme::warning())
+                        .into()
+                }),
+        )
+        .push(
             column![section(tr!("What it adds").to_string())]
                 .extend(adds.into_iter().map(|a| {
                     text(format!("• {a}"))
@@ -411,16 +439,22 @@ pub(crate) fn plugin_install_modal(
                         .into()
                 }))
                 .spacing(4),
+        )
+        .push(
             column![section(tr!("What it may do").to_string())]
                 .extend(can)
                 .spacing(4),
+        )
+        .push(
             text(tr!(
                 "It can never reach the network, other files, programs or your keys."
             ))
             .size(ts::BODY)
             .color(theme::dim()),
-            // Who made it, and which version: apart, as "Made by Claude
-            // Code, version 0.1.0" read as Claude Code's version.
+        )
+        // Who made it, and which version: apart, as "Made by Claude
+        // Code, version 0.1.0" read as Claude Code's version.
+        .push(
             row![
                 text(origin_words(&pending.origin))
                     .size(ts::SMALL)
@@ -433,13 +467,17 @@ pub(crate) fn plugin_install_modal(
                 .color(theme::dim()),
             ]
             .spacing(16),
-        ]
+        )
         .push(
             row![
                 super::explain_view::more_questions(waiting),
                 space().width(Fill),
+                // As on Clew's other permission cards, the yes is the
+                // primary button: held back until the card has been read
+                // (`fresh::allow`), so a click meant for what was under it
+                // does not install.
                 button(text(decline).size(ts::BASE))
-                    .style(theme::primary_button)
+                    .style(theme::toolbar_button)
                     .padding([6, 16])
                     .on_press(heard::answer(
                         decline,
@@ -449,7 +487,7 @@ pub(crate) fn plugin_install_modal(
                 crate::ui::fresh::allow(
                     ready,
                     button(text(accept).size(ts::BASE))
-                        .style(theme::toolbar_button)
+                        .style(theme::primary_button)
                         .padding([6, 16])
                         .on_press_maybe(heard::answer_when(
                             ready,
@@ -480,7 +518,14 @@ pub(crate) fn plugin_confirm_modal(confirm: &Confirm) -> Element<'_, Message> {
     let detail = text(confirm.detail.clone()).size(ts::BODY);
     let detail: Element<'_, Message> =
         if matches!(confirm.then, crate::app::plugins::Then::OpenLink(_)) {
-            // A long address breaks anywhere, so all of it is seen.
+            // Why it is asked, then the address: a long one breaks
+            // anywhere, so all of it is seen.
+            column![
+            text(tr!(
+                "A plugin wrote this link. Opening it sends anything in the address to that site."
+            ))
+            .size(ts::BODY)
+            .color(theme::dim()),
             container(
                 detail
                     .font(crate::fonts::CODE)
@@ -489,7 +534,9 @@ pub(crate) fn plugin_confirm_modal(confirm: &Confirm) -> Element<'_, Message> {
             )
             .padding([8, 10])
             .width(Fill)
-            .style(theme::trough)
+            .style(theme::trough),
+        ]
+            .spacing(8)
             .into()
         } else {
             detail.color(theme::dim()).into()
@@ -555,6 +602,7 @@ pub(crate) fn plugin_prompt_modal(prompt: &Prompt) -> Element<'_, Message> {
         submit_label: tr!("Run"),
         cancel: Message::Plugin(PluginMsg::PromptCancel),
         remove: None,
+        needs_value: true,
     })
 }
 
@@ -584,6 +632,7 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
         (!graphs.is_empty()).then(|| tr!("Graphs in Project Graphs: {list}", list = graphs)),
     ];
     let id = plugin.id.clone();
+    let name = plugin.name();
     let mut item = column![
         row![
             column![
@@ -606,12 +655,19 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
             .push(text(can).size(ts::SMALL).color(theme::dim()))
             .spacing(3)
             .width(Fill),
-            form::switch(
-                plugin.record.enabled,
-                Message::Plugin(PluginMsg::SetEnabled(id.clone(), !plugin.record.enabled))
-            ),
-            form::action(
+            {
+                // Heard by its plugin's name: "turn off TODO count".
+                super::heard::switch(&name, plugin.record.enabled, |on| {
+                    Message::Plugin(PluginMsg::SetEnabled(id.clone(), on))
+                });
+                form::switch(
+                    plugin.record.enabled,
+                    Message::Plugin(PluginMsg::SetEnabled(id.clone(), !plugin.record.enabled)),
+                )
+            },
+            form::action_to(
                 tr!("Remove"),
+                &name,
                 Some(Message::Plugin(PluginMsg::AskRemove(id.clone())))
             ),
         ]
@@ -646,32 +702,46 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
         // (a plugin is made by an agent): its log, copied for one, or put
         // to Clew's own in Ask with a request to fix it.
         if app.plugins.failing(&plugin.id) {
+            // With no source here, no agent of Clew's can change it: its
+            // log goes to whoever made it.
+            let said = if plugin.has_source {
+                tr!("It is not working. An agent can fix it from its log.")
+            } else {
+                tr!("It is not working. Send its log to whoever made it.")
+            };
             let mut fixes = row![
-                text(tr!("It is not working. An agent can fix it from its log."))
-                    .size(ts::SMALL)
-                    .color(theme::dim())
-                    .width(Fill),
-                form::action(
+                text(said).size(ts::SMALL).color(theme::dim()).width(Fill),
+                form::action_to(
                     tr!("Copy log"),
+                    &name,
                     Some(Message::Plugin(PluginMsg::CopyLog(id.clone())))
                 ),
             ]
             .spacing(8)
             .align_y(iced::Center);
             if plugin.has_source {
-                fixes = fixes.push(form::action(
+                fixes = fixes.push(form::action_to(
                     tr!("Ask to fix it"),
+                    &name,
                     Some(Message::Plugin(PluginMsg::AskToFix(id.clone()))),
                 ));
             }
             item = item.push(fixes);
         }
     }
+    // Its copy changed on disk: what does it, and nothing that would not.
+    if app.plugins.damaged.contains(&plugin.id) {
+        item = item.push(
+            text(crate::i18n::lookup(clew_plugin::store::CHANGED).to_string())
+                .size(ts::SMALL)
+                .color(theme::warning()),
+        );
+    }
     form::row_of(item)
 }
 
 /// Why plugins cannot be built here, in the reader's words.
-fn missing_words(why: &clew_plugin::toolchain::Why) -> String {
+pub(crate) fn missing_words(why: &clew_plugin::toolchain::Why) -> String {
     use clew_plugin::toolchain::Why;
     match why {
         Why::NoRust => tr!("Rust is not installed on this computer.").into(),
@@ -681,8 +751,13 @@ fn missing_words(why: &clew_plugin::toolchain::Why) -> String {
             version = version.clone()
         ),
         Why::TooOld(version) => tr!(
-            "Rust {version} is installed, but it is too old to build plugins.",
-            version = version.clone()
+            "Rust {version} is installed, but building plugins needs Rust {needed} or later.",
+            version = version.clone(),
+            needed = format!(
+                "{}.{}",
+                clew_plugin::build::MIN_RUST.0,
+                clew_plugin::build::MIN_RUST.1
+            )
         ),
         Why::OwnBroken(_) => tr!("The Rust Clew installed does not work.").into(),
         Why::Other(why) => tr!(
@@ -718,11 +793,19 @@ fn building_group(app: &App) -> Element<'_, Message> {
             rows.push(form::item(tr!("Rust"), Some(said), none()));
         }
         Building::Missing(missing) => {
+            let too_old = matches!(missing.why, clew_plugin::toolchain::Why::TooOld(_));
             let (action, about) = match &missing.setup {
                 Some(Setup::AddTarget { .. }) => (
                     Some(tr!("Add the WebAssembly target")),
                     tr!(
                         "Runs “rustup target add wasm32-wasip2”, which adds about 100 MB to your Rust."
+                    ),
+                ),
+                // Their own Rust, updated, is the lighter way: said first.
+                Some(Setup::Install) if too_old => (
+                    Some(tr!("Install Rust for Clew")),
+                    tr!(
+                        "Run “rustup update”, then check again. Or install Rust into Clew's own folder (about 700 MB); nothing else on this computer changes."
                     ),
                 ),
                 Some(Setup::Install) => (
@@ -733,17 +816,22 @@ fn building_group(app: &App) -> Element<'_, Message> {
                 ),
                 None => (None, tr!("Install Rust from rustup.rs, then check again.")),
             };
-            // What Clew cannot set up itself, the user does outside it:
-            // then one press looks again (it said to open the page again).
+            // Check again always: what Clew offers to do, the user may do
+            // outside it (`rustup target add`, as the agent says), and
+            // only leaving the page and coming back looked again.
+            let check = form::action(
+                tr!("Check again"),
+                Some(Message::Plugin(PluginMsg::CheckToolchain)),
+            );
             let control: Element<'_, Message> = match action {
-                Some(action) => {
-                    form::primary(action, Some(Message::Plugin(PluginMsg::SetUpToolchain))).into()
-                }
-                None => form::action(
-                    tr!("Check again"),
-                    Some(Message::Plugin(PluginMsg::CheckToolchain)),
-                )
+                Some(action) => row![
+                    check,
+                    form::primary(action, Some(Message::Plugin(PluginMsg::SetUpToolchain))),
+                ]
+                .spacing(8)
+                .align_y(iced::Center)
                 .into(),
+                None => check.into(),
             };
             rows.push(form::item_saying(
                 tr!("Rust"),
@@ -774,6 +862,15 @@ fn building_group(app: &App) -> Element<'_, Message> {
             rows.push(form::item(tr!("Rust"), Some(said.into()), cancel));
         }
     }
+    if let Some(why) = &app.plugins.removal_failure {
+        rows.push(form::row_of(
+            form::note(tr!(
+                "Clew's Rust could not be removed: {reason}",
+                reason = why.clone()
+            ))
+            .color(theme::danger()),
+        ));
+    }
     if let Some(why) = &app.plugins.setup_failure {
         rows.push(form::row_of(
             form::note(tr!(
@@ -802,8 +899,9 @@ fn building_group(app: &App) -> Element<'_, Message> {
         rows.push(form::item(
             tr!("Clew's own Rust"),
             Some(said.into()),
-            form::action(
+            form::action_to(
                 tr!("Remove"),
+                tr!("Clew's own Rust"),
                 Some(Message::Plugin(PluginMsg::AskRemoveOwnRust)),
             ),
         ));
@@ -843,7 +941,11 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
             app.plugins
                 .installed
                 .iter()
-                .map(|p| installed_row(app, p))
+                .map(|p| {
+                    container(installed_row(app, p))
+                        .id(plugin_settings_row_id(&p.id))
+                        .into()
+                })
                 .chain(std::iter::once(form::item(
                     tr!("Have a plugin's file?"),
                     None,

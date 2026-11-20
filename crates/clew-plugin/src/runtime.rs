@@ -81,7 +81,15 @@ pub trait Host: Send + Sync {
     fn progress(&self, _done: u32, _total: u32) {}
     /// A line of the plugin's log.
     fn log(&self, _level: Level, _message: &str) {}
+    /// Whether the user asked the run to stop: it is stopped within a
+    /// tick, a wait of the plugin's included ([`STOPPED_BY_USER`]).
+    fn stop_asked(&self) -> bool {
+        false
+    }
 }
+
+/// Why a run the user stopped gave nothing back ([`Failure::Stopped`]).
+pub const STOPPED_BY_USER: &str = "the user stopped it";
 
 /// How long a call may run, and how much memory it may take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -416,7 +424,7 @@ impl Loaded {
             },
             host: host.clone(),
             store: self.store.clone(),
-            clock: RunClock::until(limits.deadline),
+            clock: RunClock::until(limits.deadline).asked_by(host.clone()),
             read: 0,
             logged: 0,
             logged_bytes: 0,
@@ -424,9 +432,18 @@ impl Loaded {
         };
         let mut store = Store::new(self.pre.engine(), state);
         store.limiter(|s| &mut s.limiter);
-        let ticks = (limits.deadline.as_millis() / TICK.as_millis()).max(1) as u64;
-        store.set_epoch_deadline(ticks);
-        store.epoch_deadline_trap();
+        // Looked at every tick: past its deadline, or stopped by the user,
+        // the code is interrupted where it is.
+        let ends = Instant::now() + limits.deadline;
+        let asker = host.clone();
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(move |_| {
+            Ok(if asker.stop_asked() || Instant::now() >= ends {
+                wasmtime::UpdateDeadline::Interrupt
+            } else {
+                wasmtime::UpdateDeadline::Continue(1)
+            })
+        });
 
         let result = self
             .pre
@@ -440,6 +457,10 @@ impl Loaded {
                 Level::Warning,
                 &format!("{dropped} more log lines were left out: a run keeps {LOG_LINES_PER_CALL} lines at most"),
             );
+        }
+        // Stopped by the user: nothing it gave back counts, whatever it was.
+        if host.stop_asked() {
+            return Err(Failure::Stopped(STOPPED_BY_USER.into()));
         }
         // A wait cut short at the deadline used the run's time up: what the
         // plugin did after it, it did believing it had waited.
@@ -462,6 +483,8 @@ struct RunClock {
     ends: Instant,
     /// Set once a wait went on to the deadline.
     out: Arc<AtomicBool>,
+    /// Who may ask the run to stop: its waits end when it does.
+    asker: Option<Arc<dyn Host>>,
 }
 
 impl RunClock {
@@ -471,7 +494,14 @@ impl RunClock {
             started,
             ends: started + deadline,
             out: Arc::default(),
+            asker: None,
         }
+    }
+
+    /// Its waits end, too, when `host` asks the run to stop.
+    fn asked_by(mut self, host: Arc<dyn Host>) -> Self {
+        self.asker = Some(host);
+        self
     }
 
     /// Whether a wait went on to the deadline.
@@ -501,6 +531,7 @@ impl ClockView<'_> {
                 .then(|| tokio::time::Instant::from_std(now + wanted.min(left))),
             yielded: false,
             out: (wanted >= left).then(|| self.clock.out.clone()),
+            asker: self.clock.asker.clone(),
         };
         let wait = self.table.push(wait)?;
         wasmtime_wasi::p2::subscribe(self.table, wait)
@@ -541,13 +572,30 @@ struct Wait {
     yielded: bool,
     /// Where to say it went on to the deadline, if it was cut to it.
     out: Option<Arc<AtomicBool>>,
+    /// Who may ask the run to stop: the wait ends then.
+    asker: Option<Arc<dyn Host>>,
 }
+
+/// How often a wait looks whether the user asked its run to stop.
+const STOP_LOOK: Duration = Duration::from_millis(50);
 
 #[wasmtime_wasi::async_trait]
 impl Pollable for Wait {
     async fn ready(&mut self) {
         match self.until {
-            Some(until) => tokio::time::sleep_until(until).await,
+            // In steps, looking between them whether the run was stopped:
+            // it is, as soon as the plugin runs again.
+            Some(until) => loop {
+                let step = tokio::time::Instant::now() + STOP_LOOK;
+                if step >= until {
+                    tokio::time::sleep_until(until).await;
+                    break;
+                }
+                tokio::time::sleep_until(step).await;
+                if self.asker.as_ref().is_some_and(|h| h.stop_asked()) {
+                    return;
+                }
+            },
             None if !self.yielded => {
                 self.yielded = true;
                 tokio::task::yield_now().await;

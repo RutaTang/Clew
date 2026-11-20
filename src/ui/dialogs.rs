@@ -58,6 +58,7 @@ pub(crate) fn bp_condition_modal<'a>(
         cancel: Message::Debug(DebugMsg::BpConditionCancel),
         // A breakpoint already there can be taken away where its condition
         // is: the dialog offered only to set one.
+        needs_value: false,
         remove: app
             .debug
             .breakpoints
@@ -85,6 +86,7 @@ pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_,
         submit: Message::Reading(ReadingMsg::BookmarkNoteSave),
         submit_label: tr!("Save"),
         cancel: Message::Reading(ReadingMsg::BookmarkNoteCancel),
+        needs_value: false,
         remove: None,
     })
 }
@@ -102,6 +104,7 @@ pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_,
         submit: Message::Reading(ReadingMsg::NoteEditSave),
         submit_label: tr!("Save"),
         cancel: Message::Reading(ReadingMsg::NoteEditCancel),
+        needs_value: false,
         remove: None,
     })
 }

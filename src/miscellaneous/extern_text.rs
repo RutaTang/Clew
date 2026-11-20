@@ -291,9 +291,19 @@ pub(crate) const NOTICES: &[&str] = &[
 /// Why clew-plugin did not run a plugin, said as it wrote it: its approved
 /// file changed since (`clew_plugin::store::CHANGED`).
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const PLUGIN_STOPS: &[&str] = &[tr_noop!(
-    "the plugin's file changed after you approved it. Remove it in Settings → Plugins and install it again."
-)];
+pub(crate) const PLUGIN_STOPS: &[&str] = &[
+    tr_noop!(
+        "Clew's copy of it changed after you approved it. Install it again from its file, or ask the agent that made it to install it again."
+    ),
+    // Why a file picked to install is not a plugin
+    // (`clew_plugin::inspect::NOT_A_COMPONENT` and the rest).
+    tr_noop!("this is not a plugin: a plugin is a WebAssembly component (built for wasm32-wasip2)"),
+    tr_noop!("this WebAssembly component is not a Clew plugin: it carries no plugin.toml"),
+    tr_noop!("the plugin's file carries more than one plugin.toml"),
+    tr_noop!("the plugin's manifest is not UTF-8 text"),
+    tr_noop!("the plugin lists commands but its code exports none (use clew_plugin_sdk::export!)"),
+    tr_noop!("the plugin lists graphs but its code exports none (use clew_plugin_sdk::export!)"),
+];
 /// The words an agent step's title starts with, as clew-server writes it
 /// (`read src/lib.rs:1-50`), capitalized as the step shows them.
 pub(crate) const STEP_VERBS: &[&str] = &[
