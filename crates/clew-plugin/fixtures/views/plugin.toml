@@ -39,6 +39,14 @@ id = "spin"
 title = "Never end"
 
 [[command]]
+id = "sleep"
+title = "Sleep for an hour"
+
+[[command]]
+id = "nap"
+title = "Nap"
+
+[[command]]
 id = "hog"
 title = "Use all memory"
 

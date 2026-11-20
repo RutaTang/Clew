@@ -39326,6 +39326,43 @@ fn an_agents_install_is_answered_as_the_user_decides() {
         Some(Answer::Failed { why }) => assert!(why.contains("newer build"), "{why}"),
         other => panic!("the first asker is answered: {other:?}"),
     }
+
+    // Its agent stops waiting (a quarter of an hour, or its client was
+    // stopped): it was told the install was withdrawn, and the card goes —
+    // it stood, and Install, pressed later, installed it after all.
+    let withdraw = |nonce: &str| {
+        let _ = std::fs::remove_file(
+            requests::requests_dir(data.path()).join(format!("{nonce}.taken.json")),
+        );
+    };
+    withdraw(&second);
+    let _ = app.update(Message::Plugin(
+        crate::app::plugins::PluginMsg::TakenChanged,
+    ));
+    assert_eq!(asked(&app), None, "the card stood on");
+    assert_eq!(
+        app.status,
+        "Word count was not installed: the agent that asked stopped waiting"
+    );
+    // And withdrawn between the watch's looks, as Install is pressed.
+    let third = filed();
+    offer(&mut app, &third);
+    let _ = app.update(Message::Noop);
+    let number = asked(&app).expect("the install is asked");
+    read_for(&mut app, delay);
+    withdraw(&third);
+    let install = app.update(Message::Plugin(
+        crate::app::plugins::PluginMsg::InstallAllowed(number),
+    ));
+    assert!(
+        run_task(install).is_empty(),
+        "installed for an agent that stopped waiting"
+    );
+    assert_eq!(
+        app.status,
+        "Word count was not installed: the agent that asked stopped waiting"
+    );
+    assert!(app.plugins.handling.is_empty());
 }
 
 /// Plugin `word-count`, installed, on or off.
@@ -39688,6 +39725,152 @@ fn a_failed_plugin_run_stands_with_its_next_steps() {
     }));
     assert!(app.plugins.log_text("word-count").is_empty());
     assert!(app.failure_shown().is_none());
+}
+
+/// What a plugin says why it did nothing (`Err("…")`, as the guide asks)
+/// is its answer, said as it wrote it: it read as a crash, with Try again
+/// (which failed the same way) and "It is not working". A run that
+/// finishes takes only its own plugin's failure away, and a plugin turned
+/// off or removed takes its own.
+#[test]
+fn a_plugins_own_reason_is_its_answer_and_failures_stay_with_their_plugin() {
+    use crate::app::plugins::{Again, PluginMsg, Ran};
+    use crate::app::state::FailureOf;
+    use clew_plugin::runtime::{Failure, Outcome};
+    let data = clew_core::testutil::TempDir::new("plugin-own-reason");
+    let _env = data_dir_override(data.path());
+    let mut app = scanned_app("plugin-own-reason");
+    let mut other = installed_plugin(true);
+    other.id = "other".into();
+    app.plugins.installed = vec![installed_plugin(true), other];
+    let ran = |app: &mut App, id: &str, outcome: Result<Outcome, Failure>| {
+        let _ = app.update(Message::Plugin(PluginMsg::Ran {
+            stamp: app.stamp(),
+            id: id.into(),
+            title: "Count words".into(),
+            again: Again {
+                id: id.into(),
+                command: "count".into(),
+                input: None,
+                at: None,
+            },
+            ran: Arc::new(std::sync::Mutex::new(Some(Ran {
+                outcome,
+                loaded: None,
+                log: Vec::new(),
+            }))),
+        }));
+    };
+    ran(
+        &mut app,
+        "word-count",
+        Err(Failure::Plugin("The project has no git history".into())),
+    );
+    assert_eq!(app.status, "Count words: The project has no git history");
+    assert!(app.failure_shown().is_none(), "said as a failure");
+    assert!(!app.plugins.failing("word-count"), "marked not working");
+    assert_eq!(
+        app.plugins.log_text("word-count"),
+        "The project has no git history"
+    );
+
+    // A crash stands; another plugin finishing leaves it.
+    ran(&mut app, "word-count", Err(Failure::Crashed("boom".into())));
+    assert_eq!(
+        app.failure_shown().map(|f| f.of),
+        Some(FailureOf::PluginRun)
+    );
+    ran(&mut app, "other", Ok(Outcome::Nothing));
+    assert_eq!(
+        app.failure_shown().map(|f| f.of),
+        Some(FailureOf::PluginRun),
+        "another plugin's run took it away"
+    );
+    assert!(app.plugins.failing("word-count"));
+    // Its own answer, now, says it works.
+    ran(
+        &mut app,
+        "word-count",
+        Err(Failure::Plugin("Nothing to count".into())),
+    );
+    assert!(app.failure_shown().is_none());
+    assert!(!app.plugins.failing("word-count"));
+
+    // Turned off, or removed: its failure goes with it, Try again a run
+    // of a plugin that is not there.
+    for gone in [
+        PluginMsg::SetEnabled("word-count".into(), false),
+        PluginMsg::Remove("word-count".into()),
+    ] {
+        ran(&mut app, "word-count", Err(Failure::Crashed("boom".into())));
+        assert!(app.failure_shown().is_some());
+        let _ = app.update(Message::Plugin(gone));
+        assert!(app.failure_shown().is_none(), "it stood on");
+        app.plugins.installed = vec![installed_plugin(true)];
+    }
+}
+
+/// A plugin turned off, removed or replaced since this window read its
+/// list — in another copy of Clew, which no message reaches — is not run,
+/// from the copy this window keeps loaded either; nothing failed, and the
+/// window reads the list again.
+#[test]
+fn a_plugin_withdrawn_elsewhere_is_not_run_here() {
+    use crate::app::plugins::PluginMsg;
+    let data = clew_core::testutil::TempDir::new("plugin-withdrawn");
+    let _env = data_dir_override(data.path());
+    let mut app = scanned_app("plugin-withdrawn");
+    let bytes = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/clew-plugin/fixtures/views.wasm"),
+    )
+    .unwrap();
+    let inspected = clew_plugin::inspect(&bytes).unwrap();
+    let install = || {
+        clew_plugin::store::install(
+            data.path(),
+            &bytes,
+            &inspected,
+            clew_plugin::store::Origin::Ask,
+        )
+        .unwrap();
+    };
+    install();
+    let reloaded = app.reload_plugins();
+    settle(&mut app, reloaded);
+    let run = |app: &mut App| {
+        app.status.clear();
+        let ran = app.update(Message::Plugin(PluginMsg::Run {
+            id: "views".into(),
+            command: "say".into(),
+        }));
+        settle(app, ran);
+    };
+    run(&mut app);
+    assert_eq!(app.status, "Say something: Said in two lines");
+    assert!(!app.plugins.loaded.is_empty(), "kept loaded");
+
+    // Turned off elsewhere: this window still lists it on.
+    clew_plugin::store::set_enabled(data.path(), "views", false).unwrap();
+    assert!(app.plugins.get("views").is_some_and(|p| p.record.enabled));
+    run(&mut app);
+    assert_eq!(app.status, "Say something did not run: it is turned off");
+    assert!(app.failure_shown().is_none());
+    assert!(!app.plugins.failing("views"));
+    assert!(
+        app.plugins.get("views").is_some_and(|p| !p.record.enabled),
+        "the list was not read again"
+    );
+
+    // On again, run once more (and loaded), then removed elsewhere.
+    clew_plugin::store::set_enabled(data.path(), "views", true).unwrap();
+    let reloaded = app.reload_plugins();
+    settle(&mut app, reloaded);
+    run(&mut app);
+    assert_eq!(app.status, "Say something: Said in two lines");
+    clew_plugin::store::remove(data.path(), "views").unwrap();
+    run(&mut app);
+    assert_eq!(app.status, "Say something did not run: it was removed");
+    assert!(app.plugins.get("views").is_none());
 }
 
 /// A link on a plugin's page to a web address is shown whole and asked

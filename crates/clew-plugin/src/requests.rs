@@ -175,6 +175,32 @@ pub fn pending(data: &Path) -> Vec<(String, Request)> {
     found
 }
 
+/// Whether request `nonce` is taken on and still waited for: answered, or
+/// withdrawn by its asker, who stopped waiting, it is not.
+pub fn is_taken(data: &Path, nonce: &str) -> bool {
+    is_nonce(nonce)
+        && requests_dir(data)
+            .join(format!("{nonce}.taken.json"))
+            .exists()
+}
+
+/// The requests taken on and still waited for, sorted.
+pub fn taken(data: &Path) -> Vec<String> {
+    let mut found: Vec<String> = std::fs::read_dir(requests_dir(data))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.strip_suffix(".taken.json")
+                .filter(|nonce| is_nonce(nonce))
+                .map(str::to_string)
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 /// Take request `nonce` on, if no one has: whether this caller has it now.
 /// The rename is atomic, so of several windows one wins.
 pub fn claim(data: &Path, nonce: &str) -> bool {

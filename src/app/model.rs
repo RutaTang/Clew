@@ -1849,6 +1849,16 @@ impl<T> Questions<T> {
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.waiting.iter().map(|(_, q)| q)
     }
+
+    /// Take the questions no longer to be asked (`gone`) away, and give
+    /// them back: whoever asked one is owed nothing more, or an answer.
+    pub fn withdraw(&mut self, gone: impl Fn(&T) -> bool) -> Vec<T> {
+        let (out, kept) = std::mem::take(&mut self.waiting)
+            .into_iter()
+            .partition(|(_, q)| gone(q));
+        self.waiting = kept;
+        out.into_iter().map(|(_, q)| q).collect()
+    }
 }
 
 /// The provisionings awaiting the user's consent, asked one at a time in

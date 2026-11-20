@@ -35,7 +35,7 @@ Once installed, the command is in the command palette. Like any other command, y
 
 To change a plugin, ask for the change. The agent edits it, and Clew asks again before the new version runs. If the new version asks for a permission the last one did not have, the card marks it **Newly asked**.
 
-If a command fails, the status bar says why, with **Try again** and **Settings**, which opens the plugin's log in Settings → Plugins. There, **Copy log** copies it for the agent that made the plugin, and **Ask to fix it** puts a request to fix it, with the log, in Ask's field for you to send.
+A command that can't do what it was asked says why in the status bar, as it wrote it ("TODOs by author: The project has no git history"). If a command fails, because it crashed, ran out of time or used too much memory, the status bar says why, with **Try again** and **Settings**, which opens the plugin's log in Settings → Plugins. There, **Copy log** copies it for the agent that made the plugin, and **Ask to fix it** puts a request to fix it, with the log, in Ask's field for you to send.
 
 ## What a plugin can add
 
@@ -147,10 +147,11 @@ The permissions the user approves are the ones derived from the imports. The man
 
 ### Runtime
 
-- **Engine:** one per process. Cranelift, component model, epoch interruption, and a 1 MiB wasm stack.
-- **Compile cache:** compiled code is cached by `(sha256 of the file, Engine::precompile_compatibility_hash)` under `<data>/plugins/compiled/`, written atomically into Clew's private data folder. That folder is the trust boundary, since loading compiled code is code execution. Compiling happens in the background when a plugin is installed and when Clew starts. A later load is a deserialize: about 0.4 ms for a small plugin.
+- **Engine:** one per window, made the first time the window runs a plugin, with its own 10 ms epoch thread. Cranelift, component model, epoch interruption, and a 1 MiB wasm stack.
+- **Compile cache:** compiled code is cached by `(sha256 of the file, Engine::precompile_compatibility_hash)` under `<data>/plugins/compiled/`, written atomically into Clew's private data folder. That folder is the trust boundary, since loading compiled code is code execution. A plugin is compiled the first time it runs, and the cache is shared by every window. A later load is a deserialize: about 0.4 ms for a small plugin.
+- **Each run is checked against the record first:** a plugin turned off, removed or replaced since the window read its list (in another window, or another copy of Clew) is not run, from the copy the window keeps loaded either. Every window reads the list again when one changes it.
 - **Calls are stateless:** each call gets a new `Store` and instance from a cached `InstancePre` (about 12 µs). Nothing leaks between calls, a crashed call takes nothing down with it, and calls run in parallel on blocking threads. State a plugin wants to keep goes through `host.save`.
-- **Limits per call:** memory (`StoreLimits`) and a deadline enforced by a 10 ms epoch ticker. A command gets 256 MiB and 30 s, a graph 512 MiB and 60 s. A trap, a deadline or an exhausted limit becomes a sentence the user can read: "TODOs by author did not finish: it took longer than 30 s and was stopped". It stands on the status bar with Try again and a way to the plugin's log.
+- **Limits per call:** memory, counting every memory and table the plugin grows, and a deadline enforced by a 10 ms epoch ticker. A wait in WASI's clock (`thread::sleep`, a poll) ends at the deadline too, and a call that waited until then has used its time up. A command gets 256 MiB and 30 s, a graph 512 MiB and 60 s. A trap, a deadline or an exhausted limit becomes a sentence the user can read: "TODOs by author did not finish: it took longer than 30 s and was stopped". It stands on the status bar with Try again and a way to the plugin's log.
 - **Output is capped and checked before it is drawn:** 500 blocks and 10 000 rows per view, 4 MiB of text per page (what is past it is left out, and the page says so), 4000 graph nodes and 20 000 edges, lines cut at 1 KiB and text blocks at 64 KiB, a run's log kept to 1000 lines, and locations confined to the project (`confine::check_lexical`).
 
 Measured on the prototype (wasmtime 48, a 47 KB plugin): 28 ms to compile, 0.4 ms to load from the cache, 12 µs to instantiate, 0.12 µs per empty call, and 14 ms to pass 10 MB of text in and count its lines.

@@ -129,7 +129,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "plugin_install",
-            description: "Ask the user, in Clew, to install the plugin's latest build. They see its name, description, what it adds and its permissions, and decide. Answers whether they installed it, and where what it adds is. Needs Clew open.",
+            description: "Ask the user, in Clew, to install the plugin's latest build. They see its name, description, what it adds and its permissions, and decide. Answers whether they installed it, and where what it adds is. Needs Clew open. Before calling it, tell the user to switch to Clew to answer: the question waits there, not here.",
             schema: json!({"type": "object", "properties": {"id": id}, "required": ["id"]}),
             read_only: false,
         },

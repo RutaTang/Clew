@@ -21,13 +21,16 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
+use wasmtime::component::{Component, HasData, HasSelf, Linker, Resource, ResourceTable};
 use wasmtime::{Config, Engine, ResourceLimiter, Store, Trap};
 use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
+use wasmtime_wasi::p2::bindings::clocks::monotonic_clock;
+use wasmtime_wasi::p2::{DynPollable, Pollable};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::inspect::{Inspected, hex};
@@ -301,6 +304,16 @@ fn start_ticker(engine: &Engine) {
 /// the types, the host — and the interfaces `granted` covers.
 fn link(linker: &mut Linker<State>, granted: u8) -> wasmtime::Result<()> {
     wasmtime_wasi::p2::add_to_linker_sync(linker)?;
+    // WASI's own clock waits as long as it is asked to, in the host, where
+    // the deadline does not reach: a plugin that slept (`thread::sleep`,
+    // a poll on a far deadline) was never stopped, and held its run — and
+    // every run after it — for good. Its waits end at the deadline.
+    linker.allow_shadowing(true);
+    monotonic_clock::add_to_linker::<State, RunClock>(linker, |s| ClockView {
+        table: &mut s.table,
+        clock: s.clock.clone(),
+    })?;
+    linker.allow_shadowing(false);
     bindings::clew::plugin::types::add_to_linker::<State, HasSelf<State>>(linker, |s| s)?;
     bindings::clew::plugin::host::add_to_linker::<State, HasSelf<State>>(linker, |s| s)?;
     if granted & clew_rules::plugin::READ != 0 {
@@ -403,6 +416,7 @@ impl Loaded {
             },
             host: host.clone(),
             store: self.store.clone(),
+            clock: RunClock::until(limits.deadline),
             read: 0,
             logged: 0,
             logged_bytes: 0,
@@ -427,10 +441,121 @@ impl Loaded {
                 &format!("{dropped} more log lines were left out: a run keeps {LOG_LINES_PER_CALL} lines at most"),
             );
         }
+        // A wait cut short at the deadline used the run's time up: what the
+        // plugin did after it, it did believing it had waited.
+        if store.data().clock.ran_out() {
+            return Err(Failure::TimedOut(limits.deadline.as_secs()));
+        }
         match result {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(why)) => Err(Failure::Plugin(capped(&why, 4096))),
             Err(e) => Err(stopped(&e, limits, store.data().limiter.hit, &stderr)),
+        }
+    }
+}
+
+/// A run's `wasi:clocks/monotonic-clock`: time from the run's start, and
+/// waits that end at its deadline at the latest.
+#[derive(Clone)]
+struct RunClock {
+    started: Instant,
+    ends: Instant,
+    /// Set once a wait went on to the deadline.
+    out: Arc<AtomicBool>,
+}
+
+impl RunClock {
+    fn until(deadline: Duration) -> Self {
+        let started = Instant::now();
+        RunClock {
+            started,
+            ends: started + deadline,
+            out: Arc::default(),
+        }
+    }
+
+    /// Whether a wait went on to the deadline.
+    fn ran_out(&self) -> bool {
+        self.out.load(Ordering::Relaxed)
+    }
+}
+
+impl HasData for RunClock {
+    type Data<'a> = ClockView<'a>;
+}
+
+/// What the clock's calls need of a run's state.
+struct ClockView<'a> {
+    table: &'a mut ResourceTable,
+    clock: RunClock,
+}
+
+impl ClockView<'_> {
+    /// A pollable that is ready after `wanted`, or at the deadline if that
+    /// comes first.
+    fn wait(&mut self, wanted: Duration) -> wasmtime::Result<Resource<DynPollable>> {
+        let now = Instant::now();
+        let left = self.clock.ends.saturating_duration_since(now);
+        let wait = Wait {
+            until: (!wanted.is_zero())
+                .then(|| tokio::time::Instant::from_std(now + wanted.min(left))),
+            yielded: false,
+            out: (wanted >= left).then(|| self.clock.out.clone()),
+        };
+        let wait = self.table.push(wait)?;
+        wasmtime_wasi::p2::subscribe(self.table, wait)
+    }
+}
+
+impl monotonic_clock::Host for ClockView<'_> {
+    fn now(&mut self) -> wasmtime::Result<monotonic_clock::Instant> {
+        Ok(u64::try_from(self.clock.started.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    }
+
+    fn resolution(&mut self) -> wasmtime::Result<monotonic_clock::Duration> {
+        Ok(1)
+    }
+
+    fn subscribe_instant(
+        &mut self,
+        when: monotonic_clock::Instant,
+    ) -> wasmtime::Result<Resource<DynPollable>> {
+        let now = self.now()?;
+        self.wait(Duration::from_nanos(when.saturating_sub(now)))
+    }
+
+    fn subscribe_duration(
+        &mut self,
+        duration: monotonic_clock::Duration,
+    ) -> wasmtime::Result<Resource<DynPollable>> {
+        self.wait(Duration::from_nanos(duration))
+    }
+}
+
+/// A clock's wait (`RunClock`).
+struct Wait {
+    /// When it is over; `None` at once.
+    until: Option<tokio::time::Instant>,
+    /// Ready at once, it gives the runtime one turn first, as WASI's own
+    /// does: a plugin polling in a loop does not starve it.
+    yielded: bool,
+    /// Where to say it went on to the deadline, if it was cut to it.
+    out: Option<Arc<AtomicBool>>,
+}
+
+#[wasmtime_wasi::async_trait]
+impl Pollable for Wait {
+    async fn ready(&mut self) {
+        match self.until {
+            Some(until) => tokio::time::sleep_until(until).await,
+            None if !self.yielded => {
+                self.yielded = true;
+                tokio::task::yield_now().await;
+            }
+            None => {}
+        }
+        if let Some(out) = &self.out {
+            out.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -506,6 +631,8 @@ struct State {
     host: Arc<dyn Host>,
     /// The plugin's own store's folder.
     store: Option<PathBuf>,
+    /// The run's clock: its waits end at the deadline.
+    clock: RunClock,
     /// The bytes of the project read so far.
     read: u64,
     /// The log lines passed on so far, their bytes, and those left out.
@@ -530,6 +657,26 @@ struct Limiter {
     hit: bool,
 }
 
+/// What a table's element takes of the host's memory, at the least: a
+/// pointer.
+const TABLE_ELEMENT_BYTES: usize = 8;
+
+impl Limiter {
+    /// Grow what is used by `current` → `desired` bytes, if the budget has
+    /// room for it: one budget for every memory and table of the run — a
+    /// table counted for nothing let a plugin take gigabytes of the
+    /// window's memory in tables of a million elements each.
+    fn grow(&mut self, current: usize, desired: usize) -> bool {
+        let after = (self.used + desired).saturating_sub(current);
+        if after > self.memory {
+            self.hit = true;
+            return false;
+        }
+        self.used = after;
+        true
+    }
+}
+
 impl ResourceLimiter for Limiter {
     fn memory_growing(
         &mut self,
@@ -537,22 +684,20 @@ impl ResourceLimiter for Limiter {
         desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        let after = self.used - current.min(self.used) + desired;
-        if after > self.memory {
-            self.hit = true;
-            return Ok(false);
-        }
-        self.used = after;
-        Ok(true)
+        Ok(self.grow(current, desired))
     }
 
     fn table_growing(
         &mut self,
-        _current: usize,
+        current: usize,
         desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        Ok(desired <= 1_000_000)
+        Ok(desired <= 1_000_000
+            && self.grow(
+                current.saturating_mul(TABLE_ELEMENT_BYTES),
+                desired.saturating_mul(TABLE_ELEMENT_BYTES),
+            ))
     }
 }
 
@@ -1033,6 +1178,7 @@ mod tests {
             },
             host: counting.clone(),
             store: None,
+            clock: RunClock::until(Duration::from_secs(1)),
             read: 0,
             logged: 0,
             logged_bytes: 0,
@@ -1235,5 +1381,25 @@ mod tests {
         assert!(limiter.memory_growing(60, 90, None).unwrap());
         assert!(!limiter.memory_growing(90, 120, None).unwrap());
         assert!(limiter.hit);
+    }
+
+    /// Tables are counted in the same budget as memories, and each memory
+    /// and table grows it by its own growth: a table of a million elements
+    /// cost nothing, and a second memory was counted as replacing the first.
+    #[test]
+    fn tables_and_every_memory_share_the_budget() {
+        let mut limiter = Limiter {
+            memory: 1000,
+            used: 0,
+            hit: false,
+        };
+        assert!(limiter.memory_growing(0, 400, None).unwrap());
+        assert!(limiter.memory_growing(0, 400, None).unwrap());
+        assert_eq!(limiter.used, 800);
+        assert!(limiter.table_growing(0, 20, None).unwrap());
+        assert_eq!(limiter.used, 800 + 20 * TABLE_ELEMENT_BYTES);
+        assert!(!limiter.table_growing(20, 50, None).unwrap());
+        assert!(limiter.hit);
+        assert_eq!(limiter.used, 800 + 20 * TABLE_ELEMENT_BYTES);
     }
 }

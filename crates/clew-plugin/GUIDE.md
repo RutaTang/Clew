@@ -109,7 +109,7 @@ clew_plugin_sdk::export!(Todos);
 | `Outcome::Open(Location)` | open the code at a place |
 | `Outcome::Say(String)` | one line in the status bar |
 | `Outcome::Nothing` | nothing to show |
-| `Err(String)` | it could not; the user sees your sentence |
+| `Err(String)` | it could not; the user sees your sentence in the status bar, after the command's title, as an answer rather than a failure |
 
 ### Pages: `View`
 
@@ -175,7 +175,7 @@ fn graph(id: &str) -> Result<Graph, String> {
 
 ## Limits
 
-- A command has 30 seconds and 256 MB of memory. A graph has 60 seconds and 512 MB.
+- A command has 30 seconds and 256 MB of memory. A graph has 60 seconds and 512 MB. Time spent sleeping counts: a sleep ends when the time is up, and the run is stopped.
 - A page shows 10 000 rows and 4 MB of text at most; past that it is cut, and says so. A run's log keeps 1000 lines.
 - A crash or a panic stops only that run. The user, and you in `plugin_try`, see the panic message and where it happened.
 - No network, no files outside the project, no processes, no environment variables. `std::fs`, `std::net` and `std::process` fail; use `project` and `git`.

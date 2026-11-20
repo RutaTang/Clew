@@ -101,7 +101,7 @@ fn permissions_are_read_from_the_code() {
     let (_, views) = fixture("views");
     assert_eq!(views.needs, READ);
     assert_eq!(views.permissions(), ["read"]);
-    assert_eq!(views.manifest.commands.len(), 11);
+    assert_eq!(views.manifest.commands.len(), 13);
     let (_, git) = fixture("git-log");
     assert_eq!(git.needs, GIT);
     assert!(
@@ -201,6 +201,42 @@ fn each_kind_of_answer() {
     assert!(
         !host.reads.lock().unwrap().iter().any(|p| p.contains("..")),
         "the host never saw a path out of the project"
+    );
+}
+
+/// A plugin that sleeps waits in the host, where the deadline does not
+/// reach: it was never stopped, and held its run — and every run after
+/// it — for good. Its waits end at the deadline, which it has then used
+/// up; a short one is slept whole.
+#[test]
+fn a_call_that_sleeps_is_stopped_at_its_deadline() {
+    let runtime = Runtime::new(None).unwrap();
+    let loaded = views(&runtime);
+    let limits = Limits {
+        deadline: Duration::from_millis(300),
+        memory: 64 * 1024 * 1024,
+    };
+    let started = Instant::now();
+    let stopped = loaded
+        .run(
+            Arc::new(FakeHost::default()),
+            "sleep",
+            &at(None, None),
+            limits,
+        )
+        .unwrap_err();
+    assert!(matches!(&stopped, Failure::TimedOut(_)), "{stopped:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        matches!(
+            loaded.run(Arc::new(FakeHost::default()), "nap", &at(None, None), limits),
+            Ok(Outcome::Say(ref slept)) if slept == "true"
+        ),
+        "a short sleep was cut"
     );
 }
 

@@ -1296,6 +1296,9 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             // the others', which listened for the old one and, saving any
             // voice setting of their own, wrote it back over the choice.
             let voice_before = clew.windows.get(&id).map(|app| app.voice.prefs.clone());
+            // And the plugins: one installed, turned off or removed in one
+            // window was still offered — and run — in the others.
+            let plugins_before = crate::app::plugins::store_revision();
             // And the language, which the menu bar is built in.
             #[cfg(target_os = "macos")]
             let lang_before = crate::i18n::current();
@@ -1353,6 +1356,23 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
                     })
                     .collect();
                 Task::batch([task, Task::batch(resync)])
+            };
+            let task = if crate::app::plugins::store_revision() == plugins_before {
+                task
+            } else {
+                let reload: Vec<Task<Shell>> = clew
+                    .windows
+                    .keys()
+                    .copied()
+                    .filter(|other| *other != id)
+                    .map(|other| {
+                        Task::done(Shell::Window(
+                            other,
+                            Message::Plugin(crate::app::plugins::PluginMsg::StoreChanged),
+                        ))
+                    })
+                    .collect();
+                Task::batch([task, Task::batch(reload)])
             };
             // It may have been the host's answer a close or a quit waits on.
             Task::batch([task, clew.settle(id)])
@@ -2382,6 +2402,31 @@ mod tests {
         assert_eq!(
             rt.clew.windows[&second].voice.prefs,
             rt.clew.windows[&first].voice.prefs
+        );
+    }
+
+    /// A plugin turned off, removed or installed in one window is every
+    /// window's: the others read the list as they opened, and went on
+    /// offering — and running — a plugin turned off in another.
+    #[tokio::test]
+    async fn a_plugin_turned_off_in_one_window_is_off_in_the_others() {
+        let mut rt = Runtime::new();
+        let mut stale = blank_app();
+        stale.plugins.installed = vec![crate::app::tests::installed_plugin(true)];
+        let first = rt.window(blank_app());
+        let second = rt.window(stale);
+        assert!(!rt.clew.windows[&second].plugins.installed.is_empty());
+        rt.send(Shell::Window(
+            first,
+            Message::Plugin(crate::app::plugins::PluginMsg::SetEnabled(
+                "word-count".into(),
+                false,
+            )),
+        ));
+        rt.settle();
+        assert!(
+            rt.clew.windows[&second].plugins.installed.is_empty(),
+            "the other window kept its list"
         );
     }
 

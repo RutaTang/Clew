@@ -916,8 +916,7 @@ pub fn build(
     toolchain: &Toolchain,
     cancel: &AtomicBool,
 ) -> Result<Built, BuildError> {
-    let manifest = read_manifest(source)?;
-    let id = manifest.plugin.id.clone();
+    let id = read_manifest(source)?.plugin.id;
     let crate_dir = work.join(&id);
     std::fs::create_dir_all(&crate_dir).map_err(|e| BuildError::Failed(e.to_string()))?;
     let _exclusive = clew_core::statefile::lock_named(&crate_dir.join("Cargo.toml"), ".build.lock")
@@ -927,9 +926,19 @@ pub fn build(
         write_if_changed(&work.join("sdk/clew-plugin-sdk").join(name), contents)
             .map_err(|e| BuildError::Failed(e.to_string()))?;
     }
-    // What this build is made from, read before it is staged: a write
-    // while it builds makes the source newer than the build.
+    // What this build is made from, read once the build is this one's and
+    // before anything of the source is: a write meanwhile makes the source
+    // newer than the build, never the build newer than it says. Read
+    // before the lock, a plugin.toml written while another build held it
+    // was built in its old words and recorded in its new ones.
     let made_from = source_digest(source);
+    let manifest = read_manifest(source)?;
+    if manifest.plugin.id != id {
+        return Err(BuildError::Failed(format!(
+            "plugin.toml changed its id from \"{id}\" to \"{}\" while the build waited: build again",
+            manifest.plugin.id
+        )));
+    }
     stage_sources(source, &crate_dir)?;
     write_if_changed(&crate_dir.join("Cargo.toml"), &cargo_toml(&manifest))
         .map_err(|e| BuildError::Failed(e.to_string()))?;

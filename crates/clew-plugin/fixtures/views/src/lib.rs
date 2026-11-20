@@ -59,6 +59,17 @@ impl Plugin for Views {
                     }
                 }
             }
+            // Sleeps in the host, where the deadline does not reach.
+            "sleep" => {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+                Ok(Outcome::Say("woke up".into()))
+            }
+            // A short sleep is slept whole.
+            "nap" => {
+                let started = std::time::Instant::now();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                Ok(Outcome::Say(format!("{}", started.elapsed().as_millis() >= 50)))
+            }
             "hog" => {
                 let mut kept: Vec<Vec<u8>> = Vec::new();
                 loop {

@@ -312,7 +312,7 @@ pub struct Plugins {
     runtime: Option<Arc<Runtime>>,
     pub(crate) installed: Vec<Installed>,
     /// Plugins ready to run, by their file's fingerprint.
-    loaded: HashMap<String, Arc<Loaded>>,
+    pub(crate) loaded: HashMap<String, Arc<Loaded>>,
     /// The command running, by its title, as the status bar says it.
     pub(crate) running: Option<String>,
     /// How far it has come, as it says (`plugin_host::unpack_progress`).
@@ -570,9 +570,15 @@ pub enum PluginMsg {
     },
     SetEnabled(String, bool),
     Remove(String),
+    /// Another window changed what is installed or turned on: read the
+    /// list again (`STORE_REVISION`).
+    StoreChanged,
     /// Requests `clew-server mcp` filed, as [`requests_subscription`] found
     /// them.
     Requests(Arc<Vec<(String, clew_plugin::requests::Request)>>),
+    /// The requests taken on changed: one answered, or withdrawn by its
+    /// agent, who stopped waiting (`App::drop_withdrawn_installs`).
+    TakenChanged,
     /// An Ask agent's plugin tool call has its answer.
     ToolAnswered {
         stream: u64,
@@ -623,6 +629,50 @@ impl PluginMsg {
             _ => None,
         }
     }
+}
+
+/// Bumped whenever this process changes what is installed or turned on: a
+/// window read the list as it opened, and went on offering — and running,
+/// from its own copy — a plugin another window had turned off, removed or
+/// replaced. The shell tells the others (`PluginMsg::StoreChanged`).
+static STORE_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The plugins' store's revision (`STORE_REVISION`).
+pub(crate) fn store_revision() -> u64 {
+    STORE_REVISION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn store_changed() {
+    STORE_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Why a run of `record` stopped before it started because its approval
+/// no longer stands as this window read it.
+const WITHDRAWN: [&str; 3] = [
+    tr_noop!("it was removed"),
+    tr_noop!("it was updated: run it again"),
+    tr_noop!("it is turned off"),
+];
+
+/// Why `id`'s plugin, as `record` has it, may no longer run: turned off,
+/// removed or replaced since this window read the list — by another copy
+/// of Clew, which no message reaches. Asked as each run starts, of the
+/// copy this window keeps loaded too.
+fn withdrawn(data: &std::path::Path, id: &str, record: &Record) -> Option<&'static str> {
+    match Store::load(data).plugin.get(id) {
+        None => Some(WITHDRAWN[0]),
+        Some(now) if now.fingerprint != record.fingerprint || now.sha256 != record.sha256 => {
+            Some(WITHDRAWN[1])
+        }
+        Some(now) if !now.enabled => Some(WITHDRAWN[2]),
+        Some(_) => None,
+    }
+}
+
+/// Whether `failure` is a run refused because its approval no longer
+/// stands (`withdrawn`): nothing the plugin did.
+fn is_withdrawn(failure: &Failure) -> bool {
+    matches!(failure, Failure::Stopped(why) if WITHDRAWN.contains(&why.as_str()))
 }
 
 /// The data folder, or why there is none.
@@ -853,6 +903,7 @@ impl App {
         }
         let graph = decl.id.clone();
         let record = plugin.record.clone();
+        let record_id = plugin.id.clone();
         let entry = self.proj.plugin_maps.entry(id.clone()).or_default();
         if entry.fingerprint != fingerprint {
             // Another copy of the plugin: what the last one built is not
@@ -884,6 +935,13 @@ impl App {
             async move {
                 let handle = tokio::runtime::Handle::current();
                 tokio::task::spawn_blocking(move || {
+                    if let Some(why) = withdrawn(&data, &record_id, &record) {
+                        return GraphRan {
+                            outcome: Err(Failure::Stopped(why.to_string())),
+                            loaded: None,
+                            log: Vec::new(),
+                        };
+                    }
                     let host = Arc::new(host(handle));
                     let (loaded, fresh) = match loaded {
                         Some(loaded) => (loaded, false),
@@ -945,6 +1003,22 @@ impl App {
         if let Some((fp, loaded)) = ran.loaded {
             self.plugins.loaded.insert(fp, loaded);
         }
+        // Not built at all: turned off, removed or replaced since this
+        // window read the list. The build is over, and the list is read
+        // again, which takes the graph away or builds the new one's.
+        if let Err(failure) = &ran.outcome
+            && is_withdrawn(failure)
+        {
+            if let Some(entry) = self
+                .proj
+                .plugin_maps
+                .get_mut(&map)
+                .filter(|m| m.fingerprint == fingerprint)
+            {
+                entry.building = false;
+            }
+            return self.reload_plugins();
+        }
         let decl = plugin
             .as_deref()
             .and_then(|p| self.plugins.get(p))
@@ -985,9 +1059,16 @@ impl App {
             }
             Err(failure) => {
                 if let Some(plugin) = &plugin {
-                    self.plugins
-                        .note(plugin, Level::Error, failure_words(&failure));
-                    self.plugins.failed.insert(plugin.clone());
+                    // Why it drew nothing, in its own words, is its answer:
+                    // it works.
+                    if let Failure::Plugin(said) = &failure {
+                        self.plugins.note(plugin, Level::Info, said.clone());
+                        self.plugins.failed.remove(plugin);
+                    } else {
+                        self.plugins
+                            .note(plugin, Level::Error, failure_words(&failure));
+                        self.plugins.failed.insert(plugin.clone());
+                    }
                 }
                 let entry = self.proj.plugin_maps.get_mut(&map).expect("kept above");
                 entry.failed = Some(failure_words(&failure));
@@ -1129,6 +1210,13 @@ impl App {
             async move {
                 let handle = tokio::runtime::Handle::current();
                 tokio::task::spawn_blocking(move || {
+                    if let Some(why) = withdrawn(&data, &id, &record) {
+                        return Ran {
+                            outcome: Err(Failure::Stopped(why.to_string())),
+                            loaded: None,
+                            log: Vec::new(),
+                        };
+                    }
                     let host = Arc::new(host(handle).with_progress(progress));
                     let (loaded, fresh) = match loaded {
                         Some(loaded) => (loaded, false),
@@ -1199,9 +1287,25 @@ impl App {
             .get(&id)
             .map(Installed::name)
             .unwrap_or_default();
-        // A command that finished takes the failure of the last away.
-        if ran.outcome.is_ok() {
-            self.forget_failure_of(FailureOf::PluginRun);
+        // Not run at all: turned off, removed or replaced since this window
+        // read the list (in another copy of Clew). The list is read again;
+        // nothing failed, and there is nothing to try again.
+        if let Err(failure) = &ran.outcome
+            && is_withdrawn(failure)
+        {
+            self.status = tr!(
+                "{command} did not run: {reason}",
+                command = title,
+                reason = failure_words(failure)
+            );
+            return self.reload_plugins();
+        }
+        // A command that finished, or that answered with a reason of its
+        // own, works: the failure of its last run goes. A plugin's own
+        // "The project has no git history" read as a crash, with Try
+        // again (which failed the same way) and "It is not working".
+        if matches!(ran.outcome, Ok(_) | Err(Failure::Plugin(_))) {
+            self.forget_run_failure_of(&id);
             self.plugins.failed.remove(&id);
         } else {
             self.plugins.failed.insert(id.clone());
@@ -1226,6 +1330,13 @@ impl App {
                 self.status = tr!("{command} is done", command = title);
                 Task::none()
             }
+            // What the plugin says why it did nothing is said as it wrote
+            // it, as what it says when it did: its answer, not a failure.
+            Err(Failure::Plugin(said)) => {
+                self.plugins.note(&id, Level::Info, said.clone());
+                self.status = format!("{title}: {said}");
+                Task::none()
+            }
             Err(failure) => {
                 self.plugins
                     .note(&id, Level::Error, failure_words(&failure));
@@ -1245,6 +1356,21 @@ impl App {
                 );
                 Task::none()
             }
+        }
+    }
+
+    /// Take a run of plugin `id` that did not finish off the status line,
+    /// and only one of it: another plugin's finishing said nothing of it.
+    pub(crate) fn forget_run_failure_of(&mut self, id: &str) {
+        let of_it = self.failure_notice.as_ref().is_some_and(|f| {
+            f.of == FailureOf::PluginRun
+                && matches!(
+                    &f.retry,
+                    Some(Message::Plugin(PluginMsg::RunAgain(again))) if again.id == id
+                )
+        });
+        if of_it {
+            self.forget_failure_of(FailureOf::PluginRun);
         }
     }
 
@@ -1493,16 +1619,10 @@ impl App {
             // A try is for the window with its project open: another window
             // leaves it for that one. `clew-server mcp` runs on this machine,
             // so a remote project is never the one it means.
-            if let Ask::Try { root, .. } = &request.ask {
-                let open = self.local_project_state()
-                    && self
-                        .proj
-                        .project
-                        .as_ref()
-                        .is_some_and(|p| same_folder(&p.root, Path::new(root)));
-                if !open {
-                    continue;
-                }
+            if let Ask::Try { root, .. } = &request.ask
+                && !self.has_open(root)
+            {
+                continue;
             }
             if self.plugins.handling.contains(nonce) || !clew_plugin::requests::claim(&data, nonce)
             {
@@ -1545,6 +1665,39 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// Take away the install cards whose agent stopped waiting (it gave up
+    /// after a quarter of an hour, or its client was stopped): it was told
+    /// the install was withdrawn, and the card stood on — Install, pressed
+    /// later, installed it after all.
+    pub(crate) fn drop_withdrawn_installs(&mut self) {
+        let Ok(data) = data() else {
+            return;
+        };
+        let gone = self.plugins.install.withdraw(|p| {
+            matches!(&p.reply, Reply::Request(nonce) if !clew_plugin::requests::is_taken(&data, nonce))
+        });
+        for pending in gone {
+            if let Reply::Request(nonce) = &pending.reply {
+                self.plugins.handling.remove(nonce);
+            }
+            self.status = tr!(
+                "{plugin} was not installed: the agent that asked stopped waiting",
+                plugin = pending.inspected.manifest.plugin.name.clone()
+            );
+        }
+    }
+
+    /// Whether the project at `root` is the one open here, on this machine
+    /// — where `clew-server mcp`'s agents are.
+    fn has_open(&self, root: &str) -> bool {
+        self.local_project_state()
+            && self
+                .proj
+                .project
+                .as_ref()
+                .is_some_and(|p| same_folder(&p.root, Path::new(root)))
+    }
+
     /// A request's build read: tried, or asked about, as it asked; or
     /// answered at once with why not.
     fn on_request_read(
@@ -1558,6 +1711,15 @@ impl App {
             return Task::none();
         };
         let reply = Reply::Request(nonce.clone());
+        // The project it was claimed for may have been put away while the
+        // build was read: tried then, the plugin read another project, and
+        // what it read went to the agent of the first.
+        let built = match built {
+            Ok(_) if matches!(&request.ask, Ask::Try { root, .. } if !self.has_open(root)) => {
+                Err("The project the plugin was to be tried on was closed in Clew meanwhile. Open it again, then try again.".to_string())
+            }
+            built => built,
+        };
         let built = match built {
             Ok(built) => built,
             Err(why) => {
@@ -1595,7 +1757,17 @@ impl App {
                         Source::Agent(request.agent.clone()),
                         reply,
                     );
-                    Task::none()
+                    // An agent outside Clew asked: the window may be behind
+                    // its terminal, or minimized, and the card waited there
+                    // unseen until the agent gave up. It asks for attention
+                    // (the Dock, the taskbar), without taking the keyboard.
+                    match self.main_window.filter(|_| !self.window_focused) {
+                        Some(window) => iced::window::request_user_attention(
+                            window,
+                            Some(iced::window::UserAttention::Informational),
+                        ),
+                        None => Task::none(),
+                    }
                 }
             }
         }
@@ -1748,6 +1920,19 @@ impl App {
                         return Task::none();
                     }
                 };
+                // Its agent may have stopped waiting a moment ago: it was
+                // told the install was withdrawn, and is not to find it
+                // installed after all.
+                if let Reply::Request(nonce) = &pending.reply
+                    && !clew_plugin::requests::is_taken(&data, nonce)
+                {
+                    self.plugins.handling.remove(nonce);
+                    self.status = tr!(
+                        "{plugin} was not installed: the agent that asked stopped waiting",
+                        plugin = pending.inspected.manifest.plugin.name.clone()
+                    );
+                    return Task::none();
+                }
                 let id = pending.inspected.manifest.plugin.id.clone();
                 let reply = pending.reply.clone();
                 Task::perform(
@@ -1780,6 +1965,9 @@ impl App {
                 Task::none()
             }
             PluginMsg::Installed { id, reply, result } => {
+                if result.is_ok() {
+                    store_changed();
+                }
                 let composed = self.reload_plugins();
                 let name = self
                     .plugins
@@ -1798,16 +1986,7 @@ impl App {
                         // finish: it stood on the status bar beside the
                         // new build, its Try again and Settings about the
                         // old one.
-                        let replaced_run = self.failure_notice.as_ref().is_some_and(|f| {
-                            f.of == FailureOf::PluginRun
-                                && matches!(
-                                    &f.retry,
-                                    Some(Message::Plugin(PluginMsg::RunAgain(again))) if again.id == id
-                                )
-                        });
-                        if replaced_run {
-                            self.forget_failure_of(FailureOf::PluginRun);
-                        }
+                        self.forget_run_failure_of(&id);
                         let manifest = self.plugins.get(&id).map(|p| p.manifest.clone());
                         let (commands, graphs) = manifest
                             .as_ref()
@@ -1873,8 +2052,15 @@ impl App {
                 {
                     self.plugins.failure = Some(why);
                 }
+                // A run of it that did not finish stood on, its Try again
+                // a run of a plugin turned off.
+                if !on {
+                    self.forget_run_failure_of(&id);
+                }
+                store_changed();
                 self.reload_plugins()
             }
+            PluginMsg::StoreChanged => self.reload_plugins(),
             PluginMsg::Link(url) => {
                 // A plugin read the project and wrote this page: a web
                 // address can carry what it read away, so it is shown in
@@ -1993,6 +2179,8 @@ impl App {
                 if let Err(why) = removed {
                     self.plugins.failure = Some(why);
                 }
+                store_changed();
+                self.forget_run_failure_of(&id);
                 if self.proj.plugin_page.as_ref().is_some_and(|p| p.id == id) {
                     self.proj.plugin_page = None;
                 }
@@ -2001,6 +2189,10 @@ impl App {
                 self.reload_plugins()
             }
             PluginMsg::Requests(found) => self.on_requests(&found),
+            PluginMsg::TakenChanged => {
+                self.drop_withdrawn_installs();
+                Task::none()
+            }
             PluginMsg::RequestRead {
                 nonce,
                 request,
@@ -2018,6 +2210,19 @@ impl App {
                     return Task::none();
                 };
                 let reply = Reply::AskTool { stream, call };
+                // A try or an install for a conversation put away meanwhile
+                // (another project opened): tried, the plugin read the
+                // project opened since.
+                let current = self.proj.ask_turns.iter().any(|t| t.stream == stream);
+                if !current && !matches!(step, clew_plugin::tools::Step::Done(_)) {
+                    let _ = self.send_to_server(clew_protocol::Request::AgentToolResult {
+                        stream,
+                        call,
+                        content: "This conversation's project is no longer open in Clew.".into(),
+                        is_error: true,
+                    });
+                    return Task::none();
+                }
                 match step {
                     clew_plugin::tools::Step::Done(result) => {
                         let (content, is_error) = match result {
@@ -2290,13 +2495,32 @@ fn watch_requests(data: &PathBuf) -> impl iced::futures::Stream<Item = Message> 
         move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
             use iced::futures::SinkExt;
             let mut seen: Vec<String> = Vec::new();
+            let mut seen_taken: Vec<String> = Vec::new();
             loop {
                 tokio::time::sleep(REQUESTS_EVERY).await;
                 let looking = data.clone();
-                let found =
-                    tokio::task::spawn_blocking(move || clew_plugin::requests::pending(&looking))
-                        .await
-                        .unwrap_or_default();
+                let (found, taken) = tokio::task::spawn_blocking(move || {
+                    (
+                        clew_plugin::requests::pending(&looking),
+                        clew_plugin::requests::taken(&looking),
+                    )
+                })
+                .await
+                .unwrap_or_default();
+                // One no longer taken on was answered or withdrawn: the
+                // window takes away a card still asking about it.
+                if taken != seen_taken {
+                    let gone = seen_taken.iter().any(|n| !taken.contains(n));
+                    seen_taken = taken;
+                    if gone
+                        && output
+                            .send(Message::Plugin(PluginMsg::TakenChanged))
+                            .await
+                            .is_err()
+                    {
+                        break;
+                    }
+                }
                 let nonces: Vec<String> = found.iter().map(|(n, _)| n.clone()).collect();
                 if nonces == seen {
                     continue;
