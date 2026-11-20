@@ -441,49 +441,56 @@ pub(crate) fn command_said(said: &str, commands: &[PaletteCommand]) -> Option<us
 /// What `said` names among `commands`: the title it plainly names, or the
 /// name a command had ([`formerly`]); of commands named alike — each
 /// plugin's titled with its id after the name they share ("Word count:
-/// Count words (word-count)") — the one the words fit best
-/// ([`told_apart`]), or all those they fit as well.
+/// Count words (word-count)") — the one the words name best
+/// ([`told_apart`]), or all those they name as well; or, when the words
+/// name their title but none of them better than the others, all of them,
+/// so the one saying them is asked which.
 pub(crate) fn command_named(said: &str, commands: &[PaletteCommand]) -> Named {
     let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
-    let alike = |name: &str| -> Vec<usize> {
-        let key = crate::app::plugins::alike_key(name);
-        (0..commands.len())
-            .filter(|&i| crate::app::plugins::alike_key(alike_named(&commands[i]).0) == key)
-            .collect()
-    };
+    let keys: Vec<String> = commands
+        .iter()
+        .map(|c| crate::app::plugins::alike_key(alike_named(c).0))
+        .collect();
+    let alike =
+        |key: &str| -> Vec<usize> { (0..commands.len()).filter(|&i| keys[i] == key).collect() };
     let tied = clew_voice::intent::command_ties(said, &titles);
-    match tied[..] {
-        [one] => {
-            let group = alike(alike_named(&commands[one]).0);
-            match group.len() > 1 {
-                true => told_apart(said, commands, &group),
-                false => Named::One(one),
-            }
+    if let Some(&first) = tied.first() {
+        // Named as well as each other, and not named alike: none.
+        if tied.iter().any(|&i| keys[i] != keys[first]) {
+            return Named::Nothing;
         }
-        // None named: by the name one had, which only Clew's own had.
-        [] => {
-            let (names, at): (Vec<&str>, Vec<usize>) = commands
-                .iter()
-                .enumerate()
-                .filter_map(|(i, c)| formerly(&c.title).map(|name| (name, i)))
-                .unzip();
-            match clew_voice::intent::command(said, &names) {
-                Some(k) => Named::One(at[k]),
-                None => Named::Nothing,
-            }
+        let group = alike(&keys[first]);
+        return match group[..] {
+            [_] => Named::One(first),
+            _ => told_apart(said, commands, &group).unwrap_or(Named::Alike(group)),
+        };
+    }
+    // No title named as a whole: one of commands named alike, by its name
+    // and the words in its brackets read apart ("… todo close", which as a
+    // whole would close something).
+    let mut groups: Vec<&str> = Vec::new();
+    for key in &keys {
+        if !groups.contains(&key.as_str()) && keys.iter().filter(|k| *k == key).count() > 1 {
+            groups.push(key);
         }
-        // Named as well as each other: commands named alike are told apart
-        // by their ids; others, as before, are none.
-        _ => {
-            let name = crate::app::plugins::alike_key(alike_named(&commands[tied[0]]).0);
-            let same = tied
-                .iter()
-                .all(|&i| crate::app::plugins::alike_key(alike_named(&commands[i]).0) == name);
-            match same {
-                true => told_apart(said, commands, &alike(alike_named(&commands[tied[0]]).0)),
-                false => Named::Nothing,
-            }
-        }
+    }
+    let mut found = groups
+        .into_iter()
+        .filter_map(|key| told_apart(said, commands, &alike(key)));
+    match (found.next(), found.next()) {
+        (Some(named), None) => return named,
+        (Some(_), Some(_)) => return Named::Nothing,
+        (None, _) => {}
+    }
+    // None named: by the name one had, which only Clew's own had.
+    let (names, at): (Vec<&str>, Vec<usize>) = commands
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| formerly(&c.title).map(|name| (name, i)))
+        .unzip();
+    match clew_voice::intent::command(said, &names) {
+        Some(k) => Named::One(at[k]),
+        None => Named::Nothing,
     }
 }
 
@@ -505,68 +512,17 @@ fn alike_named(command: &PaletteCommand) -> (&str, Option<&str>) {
 }
 
 /// Which of the commands at `group`, named alike, `said` names, as the
-/// voice's own reading fits words to a title ([`clew_voice::intent::fits`]):
-/// of those it fits at all (a word said that a title has no place for
-/// rules it out: "call graph call graph" is the plugin's "Call Graph
-/// (call-graph)", not Clew's "Call Graph"), the one more of whose words in
-/// brackets — its plugin's id — were said; as many said, the one whose id
-/// was said whole; else Clew's own, named as it is; else the one whose id
-/// has a word said that only says "do it" ("view", "open"), which the
-/// reading leaves out, and no other's has. When that names more than one,
-/// none: they are told which to say.
-fn told_apart(said: &str, commands: &[PaletteCommand], group: &[usize]) -> Named {
-    let fitting: Vec<(usize, usize, usize)> = group
-        .iter()
-        .filter_map(|&i| {
-            clew_voice::intent::fits(said, &commands[i].title).map(|(of_id, id)| (i, of_id, id))
-        })
-        .collect();
-    let Some(most) = fitting.iter().map(|(_, of_id, _)| *of_id).max() else {
-        return Named::Nothing;
-    };
-    let best: Vec<usize> = fitting
-        .iter()
-        .filter(|(_, of_id, _)| *of_id == most)
-        .map(|(i, _, _)| *i)
-        .collect();
-    let whole: Vec<usize> = fitting
-        .iter()
-        .filter(|(_, of_id, id)| *of_id == most && of_id == id)
-        .map(|(i, _, _)| *i)
-        .collect();
-    let clews: Vec<usize> = best
-        .iter()
-        .copied()
-        .filter(|&i| alike_named(&commands[i]).1.is_none())
-        .collect();
-    let words = |text: &str| -> Vec<String> {
-        text.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| !w.is_empty())
-            .map(str::to_string)
-            .collect()
-    };
-    let said_words = words(said);
-    let id_words = |i: usize| alike_named(&commands[i]).1.map(words).unwrap_or_default();
-    let by_verb: Vec<usize> = best
-        .iter()
-        .copied()
-        .filter(|&i| {
-            id_words(i).iter().any(|w| {
-                said_words.contains(w)
-                    && best
-                        .iter()
-                        .filter(|&&other| other != i)
-                        .all(|&other| !id_words(other).contains(w))
-            })
-        })
-        .collect();
-    match (&best[..], &whole[..], &clews[..], &by_verb[..]) {
-        ([one], ..) => Named::One(*one),
-        (_, [one], ..) => Named::One(*one),
-        (_, _, [one], _) => Named::One(*one),
-        (_, _, _, [one]) => Named::One(*one),
-        _ => Named::Alike(best),
+/// voice's own reading tells them apart by the words in their brackets —
+/// a plugin's id — and their name ([`clew_voice::intent::alike_ties`]):
+/// one, those it names as well as each other, or `None` when it names
+/// none of them.
+fn told_apart(said: &str, commands: &[PaletteCommand], group: &[usize]) -> Option<Named> {
+    let named: Vec<(&str, Option<&str>)> =
+        group.iter().map(|&i| alike_named(&commands[i])).collect();
+    match clew_voice::intent::alike_ties(said, &named)[..] {
+        [] => None,
+        [one] => Some(Named::One(group[one])),
+        ref ties => Some(Named::Alike(ties.iter().map(|&k| group[k]).collect())),
     }
 }
 

@@ -40094,41 +40094,96 @@ fn plugin_commands_named_alike_are_not_run_on_a_guess() {
         said("word count count words acme").as_deref(),
         Some("Word count: Count words (acme-wc)")
     );
+    // An id of the name's own words: the name said is no more its than the
+    // other's, in any order; said with the id after it, it is.
+    app.plugins.installed[1].id = "word-count".into();
+    let commands = app.palette_commands();
+    let named = |words: &str| crate::app::palette::command_named(words, &commands);
+    for words in [
+        "word count count words",
+        "count words word count",
+        "count words",
+    ] {
+        assert!(
+            matches!(named(words), crate::app::palette::Named::Alike(ref alike) if alike.len() == 2),
+            "{words}"
+        );
+    }
+    assert!(matches!(
+        named("word count count words word count"),
+        crate::app::palette::Named::One(i) if commands[i].title == "Word count: Count words (word-count)"
+    ));
 }
 
-/// Ids that differ only by a word that only says "do it" (view, open):
-/// that word said tells them apart, though it tips nothing else.
+/// Ids that differ by a word that only says "do it" or which way to turn
+/// something (view, open, close): said with the rest of an id, that word
+/// tells them apart; said alone, it is the speaker's. Each is reached, the
+/// plain one too, and "close" said with an id closes nothing.
 #[test]
 fn plugin_commands_named_alike_are_told_apart_by_a_verb_of_their_ids() {
     let mut app = blank_app();
-    let mut plain = installed_plugin(true);
-    plain.id = "todo".into();
-    let mut view = installed_plugin(true);
-    view.id = "todo-view".into();
-    app.plugins.installed = vec![plain, view];
+    app.plugins.installed = ["todo", "todo-view", "todo-open", "todo-close"]
+        .into_iter()
+        .map(|id| {
+            let mut plugin = installed_plugin(true);
+            plugin.id = id.into();
+            plugin
+        })
+        .collect();
     let commands = app.palette_commands();
     let said = |words: &str| {
         crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
     };
-    assert_eq!(
-        said("view word count count words").as_deref(),
-        Some("Word count: Count words (todo-view)")
-    );
-    assert_eq!(said("word count count words"), None);
+    for (words, id) in [
+        ("word count count words todo", "todo"),
+        ("view word count count words todo", "todo-view"),
+        ("open word count count words todo", "todo-open"),
+        ("word count count words todo close", "todo-close"),
+    ] {
+        assert_eq!(
+            said(words),
+            Some(format!("Word count: Count words ({id})")),
+            "{words}"
+        );
+    }
+    assert!(matches!(
+        crate::app::palette::command_named("word count count words", &commands),
+        crate::app::palette::Named::Alike(ref alike) if alike.len() == 4
+    ));
+    // Asked which, each name as given is that one.
+    for command in &commands {
+        if let Some(id) = command
+            .title
+            .strip_suffix(')')
+            .and_then(|t| t.rsplit_once('('))
+        {
+            assert_eq!(
+                said(&command.title).as_deref(),
+                Some(command.title.as_str()),
+                "{}",
+                id.1
+            );
+        }
+    }
 }
 
-/// A plugin titled as one of Clew's own but for its case or the "?" at its
-/// end carries its id too, and Clew's own is still run by its name; one
-/// titled as a command was before it was renamed leaves the name it had to
-/// Clew's own.
+/// A plugin titled as one of Clew's own but for its case and a "?" at its
+/// end carries its id too, and Clew's own is still run by its name; a
+/// plugin named alike with a command of Clew's that was renamed, whose id
+/// is the name that command had, does not take that name from it.
 #[test]
 fn clews_own_commands_stay_theirs_beside_plugins_named_nearly_alike() {
     let mut app = scanned_app("plugin-named-nearly");
-    let taken = app.clews_commands()[0].title.clone();
+    let taken = app
+        .clews_commands()
+        .into_iter()
+        .map(|c| c.title)
+        .find(|t| !t.ends_with('…'))
+        .unwrap();
     let mut nearly = installed_plugin(true);
     nearly.id = "nearly".into();
-    nearly.manifest.plugin.name = taken.to_lowercase();
-    nearly.manifest.commands[0].title = taken.to_lowercase();
+    nearly.manifest.plugin.name = format!("{}?", taken.to_lowercase());
+    nearly.manifest.commands[0].title = format!("{}?", taken.to_lowercase());
     let mut stats = installed_plugin(true);
     stats.id = "stats".into();
     stats.manifest.plugin.name = "Code Statistics".into();
@@ -40136,14 +40191,16 @@ fn clews_own_commands_stay_theirs_beside_plugins_named_nearly_alike() {
     app.plugins.installed = vec![nearly, stats];
     let commands = app.palette_commands();
     let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
-    assert!(
-        titles.contains(&format!("{} (nearly)", taken.to_lowercase()).as_str()),
-        "{titles:?}"
-    );
+    let nearly = format!("{}? (nearly)", taken.to_lowercase());
+    assert!(titles.contains(&nearly.as_str()), "{titles:?}");
     let said = |words: &str| {
         crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
     };
     assert_eq!(said(&taken.to_lowercase()).as_deref(), Some(taken.as_str()));
+    assert_eq!(
+        said(&format!("{} nearly", taken.to_lowercase())).as_deref(),
+        Some(nearly.as_str())
+    );
     // Code Statistics was Stats: Clew's own, as only it had that name.
     assert!(titles.contains(&"Code Statistics (stats)"), "{titles:?}");
     assert_eq!(said("show the stats").as_deref(), Some("Code Statistics"));

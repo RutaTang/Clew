@@ -109,8 +109,6 @@ struct Title {
     required: Vec<String>,
     /// Words that may be said: its category, its parenthetical.
     optional: Vec<String>,
-    /// How many of `optional`, the last ones, are its parenthetical's.
-    aside: usize,
     polarity: Polarity,
     /// Whether what must be said is its category: the rest of it only says
     /// what it does ("Ask: Hide").
@@ -136,46 +134,23 @@ pub fn command(utterance: &str, titles: &[&str]) -> Option<usize> {
 /// well as each other: one when it plainly names one, none when it names
 /// none.
 pub fn command_ties(utterance: &str, titles: &[&str]) -> Vec<usize> {
-    let (said, polarity) = utterance_words(utterance);
-    if said.is_empty() {
-        return Vec::new();
-    }
-    // Every word said, the ones that only say "do it" too: which of a
-    // title's own such words were said tells "add to ask" from "ask".
-    let all_said = words(utterance);
-    let mut best: Option<Score> = None;
+    best_of(titles.iter().map(|title| score(utterance, title)))
+}
+
+/// The indices of the greatest of `ranks`, all as great as each other;
+/// none when there is none.
+fn best_of<R: Ord>(ranks: impl Iterator<Item = Option<R>>) -> Vec<usize> {
+    let mut best: Option<R> = None;
     let mut tied: Vec<usize> = Vec::new();
-    for (index, text) in titles.iter().enumerate() {
-        let title = read_title(text);
-        let Some((exact, optional, _)) = fits_read(&said, polarity, &title) else {
+    for (index, rank) in ranks.enumerate() {
+        let Some(rank) = rank else {
             continue;
         };
-        // Equally well said, the title that says no more than was said wins:
-        // "view docs" is "View Docs", not "Sidebar: Docs"; "ask" is "Ask",
-        // not "Add to Ask".
-        let own = words(text);
-        // Its own verbs, not the small words between them: "go to ask" is
-        // Ask, "add to ask" Add to Ask.
-        let verbs_said = own
-            .iter()
-            .filter(|w| {
-                VERBS.contains(&w.as_str())
-                    && !LINKING.contains(&w.as_str())
-                    && all_said.contains(w)
-            })
-            .count();
-        let score = (
-            exact,
-            optional,
-            Reverse(title.optional.len() - optional),
-            verbs_said,
-            Reverse(own.len()),
-        );
-        match best {
-            Some(top) if score < top => {}
-            Some(top) if score == top => tied.push(index),
+        match &best {
+            Some(top) if rank < *top => {}
+            Some(top) if rank == *top => tied.push(index),
             _ => {
-                best = Some(score);
+                best = Some(rank);
                 tied = vec![index];
             }
         }
@@ -183,20 +158,99 @@ pub fn command_ties(utterance: &str, titles: &[&str]) -> Vec<usize> {
     tied
 }
 
-/// How `utterance` fits `title`, read as [`command`] reads both: `None`
-/// when it does not (a word of the title not said, a word said that is not
-/// the title's, or said to turn it the other way); else how many of the
-/// words in its brackets were said, of how many there are (its words that
-/// only say "do it" left out, as everywhere). Commands named alike but for
-/// what is in their brackets are told apart by it.
-pub fn fits(utterance: &str, title: &str) -> Option<(usize, usize)> {
+/// How well `utterance` names the command titled `text`; `None` when it
+/// does not.
+fn score(utterance: &str, text: &str) -> Option<Score> {
     let (said, polarity) = utterance_words(utterance);
-    let title = read_title(title);
-    fits_read(&said, polarity, &title).map(|(_, _, aside)| (aside, title.aside))
+    let title = read_title(text);
+    let (exact, optional) = fits_read(&said, polarity, &title)?;
+    // Equally well said, the title that says no more than was said wins:
+    // "view docs" is "View Docs", not "Sidebar: Docs"; "ask" is "Ask",
+    // not "Add to Ask".
+    let own = words(text);
+    // Its own verbs, not the small words between them, said (every word
+    // said counts here, the ones that only say "do it" too): "go to ask"
+    // is Ask, "add to ask" Add to Ask.
+    let all_said = words(utterance);
+    let verbs_said = own
+        .iter()
+        .filter(|w| {
+            VERBS.contains(&w.as_str()) && !LINKING.contains(&w.as_str()) && all_said.contains(w)
+        })
+        .count();
+    Some((
+        exact,
+        optional,
+        Reverse(title.optional.len() - optional),
+        verbs_said,
+        Reverse(own.len()),
+    ))
+}
+
+/// How well what was said names one of the commands named alike: how well
+/// its name was said, then how many of the words in its brackets that say
+/// what it is were said, whether all of them were, and then how many of
+/// those that only say "do it" ("view", "open") — those counted only when
+/// all were said, as a word like "a" or "open" said on its own is read as
+/// the speaker's, not the id's.
+type AlikeRank = (Score, usize, bool, usize);
+
+/// The indices in `commands` — commands named alike: each the name and,
+/// for some, words of their own in brackets after it (a plugin's id) —
+/// of those `utterance` names best, all as well as each other; none when
+/// it names none.
+///
+/// What was said is read as the name alone, and as the words in a
+/// command's brackets with the name: the better reading counts. So "call
+/// graph" is Clew's own "Call Graph", and "call graph call graph" the
+/// plugin `call-graph`'s; "word count count words" is no more the plugin
+/// `word-count`'s "Word count: Count words" than another's; "… todo" is
+/// `todo`'s, "… todo view" `todo-view`'s, and "… todo close" `todo-close`'s,
+/// though "close" said with a command's name alone would close it.
+pub fn alike_ties(utterance: &str, commands: &[(&str, Option<&str>)]) -> Vec<usize> {
+    best_of(
+        commands
+            .iter()
+            .map(|(name, aside)| alike_rank(utterance, name, *aside)),
+    )
+}
+
+/// How well `utterance` names the command `name` with `aside` in brackets
+/// after it ([`alike_ties`]).
+fn alike_rank(utterance: &str, name: &str, aside: Option<&str>) -> Option<AlikeRank> {
+    let aside = aside.map(words).unwrap_or_default();
+    let bare = score(utterance, name).map(|s| (s, 0, aside.is_empty(), 0));
+    if aside.is_empty() {
+        return bare;
+    }
+    let said = words(utterance);
+    let mut used = vec![false; said.len()];
+    let (mut telling, mut doing, mut all) = (0, 0, true);
+    for w in &aside {
+        match place(&said, &mut used, w) {
+            Some(_) if only_does(w) => doing += 1,
+            Some(_) => telling += 1,
+            None => all = false,
+        }
+    }
+    let rest: Vec<&str> = said
+        .iter()
+        .zip(&used)
+        .filter(|(_, used)| !**used)
+        .map(|(w, _)| w.as_str())
+        .collect();
+    let with_aside =
+        score(&rest.join(" "), name).map(|s| (s, telling, all, if all { doing } else { 0 }));
+    bare.max(with_aside)
+}
+
+/// Whether `word` only says "do it", or which way to turn something.
+fn only_does(word: &str) -> bool {
+    VERBS.contains(&word) || SHOW.contains(&word) || HIDE.contains(&word)
 }
 
 /// [`fit`], when the way the words turn things agrees with the title's.
-fn fits_read(said: &[String], polarity: Polarity, title: &Title) -> Option<(usize, usize, usize)> {
+fn fits_read(said: &[String], polarity: Polarity, title: &Title) -> Option<(usize, usize)> {
     if said.is_empty() || title.required.is_empty() {
         return None;
     }
@@ -281,7 +335,6 @@ fn read_title(title: &str) -> Title {
         .into_iter()
         .filter(|w| !VERBS.contains(&w.as_str()))
         .collect();
-    let in_aside = aside.len();
     // Nothing but a verb after the category ("Ask: Hide", "Find: Close"):
     // the category is what is named, and must be said.
     let by_category = required.is_empty();
@@ -298,17 +351,16 @@ fn read_title(title: &str) -> Title {
     Title {
         required,
         optional,
-        aside: in_aside,
         polarity,
         by_category,
     }
 }
 
-/// How well the words said fit `title`: `(exact, optional, aside)` — how
-/// many of its words were said exactly as spelled, how many of its optional
-/// ones were said, and how many of those its parenthetical's — or `None` if
-/// one of its words was not said, or a word was said that is not its.
-fn fit(said: &[String], title: &Title) -> Option<(usize, usize, usize)> {
+/// How well the words said fit `title`: `(exact, optional)` — how many of
+/// its words were said exactly as spelled, and how many of its optional
+/// ones were said — or `None` if one of its words was not said, or a word
+/// was said that is not its.
+fn fit(said: &[String], title: &Title) -> Option<(usize, usize)> {
     let mut used = vec![false; said.len()];
     let mut exact = 0;
     for w in &title.required {
@@ -317,17 +369,12 @@ fn fit(said: &[String], title: &Title) -> Option<(usize, usize, usize)> {
         }
     }
     let mut optional = 0;
-    let mut aside = 0;
-    let aside_from = title.optional.len() - title.aside;
-    for (at, w) in title.optional.iter().enumerate() {
+    for w in &title.optional {
         if place(said, &mut used, w).is_some() {
             optional += 1;
-            if at >= aside_from {
-                aside += 1;
-            }
         }
     }
-    used.iter().all(|u| *u).then_some((exact, optional, aside))
+    used.iter().all(|u| *u).then_some((exact, optional))
 }
 
 /// Find `word` among the words said not yet placed — as spelled, then
@@ -400,35 +447,67 @@ fn edits_at_most_one(a: &[char], b: &[char]) -> bool {
 mod tests {
     use super::*;
 
-    /// What of a title's brackets the words fit, apart from its category's
-    /// words; a title they do not fit, none; titles named as well, all.
+    /// Commands named alike are told apart by the words in their brackets,
+    /// read with the name or not, whichever reads better — never by a
+    /// word the name has too, or that only says "do it", alone.
     #[test]
-    fn the_words_in_brackets_are_counted_apart() {
-        let title = "Word count: Count words (acme-wc)";
-        assert_eq!(fits("count words wc", title), Some((1, 2)));
-        assert_eq!(fits("word count count words acme wc", title), Some((2, 2)));
-        assert_eq!(fits("count words", title), Some((0, 2)));
-        assert_eq!(
-            fits("count words too", title),
-            None,
-            "a word it has no place for"
-        );
-        // "view" only says do it, in the brackets as anywhere.
-        assert_eq!(
-            fits("count words", "Word count: Count words (wc-view)"),
-            Some((0, 1))
-        );
-        assert_eq!(fits("call graph", "Call Graph"), Some((0, 0)));
-        let titles = [
-            "Word count: Count words (acme-wc)",
-            "Word count: Count words (beta-wc)",
-            "Call Graph",
+    fn commands_named_alike_are_told_apart_by_the_words_in_their_brackets() {
+        const NAME: &str = "Word count: Count words";
+        let ties = |said: &str, asides: &[Option<&str>]| {
+            let commands: Vec<(&str, Option<&str>)> = asides.iter().map(|a| (NAME, *a)).collect();
+            alike_ties(said, &commands)
+        };
+        let both = [Some("word-count"), Some("acme-wc")];
+        // The name said: its words are the name's, not an id's.
+        assert_eq!(ties("word count count words", &both), [0, 1]);
+        assert_eq!(ties("count words word count", &both), [0, 1]);
+        assert_eq!(ties("count words", &both), [0, 1]);
+        // The name and an id, or the id's own word.
+        assert_eq!(ties("word count count words word count", &both), [0]);
+        assert_eq!(ties("word count count words acme wc", &both), [1]);
+        assert_eq!(ties("count words acme", &both), [1]);
+        assert!(ties("make coffee", &both).is_empty());
+        assert!(ties("word count count words too", &both).is_empty());
+        // Clew's own beside them: the name said is its.
+        let with_own = [None, Some("word-count"), Some("acme-wc")];
+        assert_eq!(ties("word count count words", &with_own), [0]);
+        assert_eq!(ties("count words word count", &with_own), [0]);
+        assert_eq!(ties("word count count words word count", &with_own), [1]);
+        // A word both ids have names neither; one id inside another, the
+        // one said whole.
+        let ids = [Some("acme-wc"), Some("beta-wc")];
+        assert_eq!(ties("word count count words wc", &ids), [0, 1]);
+        let ids = [Some("acme-wc"), Some("wc")];
+        assert_eq!(ties("word count count words wc", &ids), [1]);
+        assert_eq!(ties("count words wc", &ids), [1]);
+        assert_eq!(ties("word count count words acme", &ids), [0]);
+        // Words that only say "do it", or which way to turn something:
+        // they tell ids apart said with the rest of one, never alone.
+        let todo = [
+            Some("todo"),
+            Some("todo-view"),
+            Some("todo-open"),
+            Some("todo-close"),
         ];
-        assert_eq!(command_ties("count words wc", &titles), [0, 1]);
-        assert_eq!(command_ties("count words acme", &titles), [0]);
-        assert_eq!(command_ties("call graph", &titles), [2]);
-        assert!(command_ties("make coffee", &titles).is_empty());
-        assert_eq!(command("count words wc", &titles), None);
+        assert_eq!(ties("word count count words todo", &todo), [0]);
+        assert_eq!(ties("word count count words todo view", &todo), [1]);
+        assert_eq!(ties("open word count count words todo", &todo), [2]);
+        assert_eq!(ties("word count count words todo close", &todo), [3]);
+        assert_eq!(ties("word count count words", &todo), [0, 1, 2, 3]);
+        let tools = [Some("a-tools"), Some("b-tools")];
+        let ties =
+            |said: &str| alike_ties(said, &[("Run checks", tools[0]), ("Run checks", tools[1])]);
+        assert_eq!(ties("run checks"), [0, 1]);
+        assert_eq!(ties("run a check"), [0, 1], "a is the speaker's");
+        assert_eq!(ties("run checks tools"), [0, 1]);
+        assert_eq!(ties("run checks a tools"), [0]);
+        assert_eq!(ties("run checks b tools"), [1]);
+        // An id only of the name's words: the name said is Clew's own.
+        let graphs = [("Call Graph", None), ("Call graph", Some("call-graph"))];
+        assert_eq!(alike_ties("call graph", &graphs), [0]);
+        assert_eq!(alike_ties("open the call graph", &graphs), [0]);
+        assert_eq!(alike_ties("call graph call graph", &graphs), [1]);
+        assert!(alike_ties("explain the call graph", &graphs).is_empty());
     }
 
     /// A window's worth of titles, as the palette lists them.

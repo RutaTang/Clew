@@ -411,7 +411,7 @@ fn unparsed_at(crate_dir: &Path, stop: &str) -> Option<String> {
     let text = std::fs::read_to_string(crate_dir.join(&file)).ok()?;
     // syn descends once per nested expression or type: a file of deep
     // nesting would overflow a thread's stack, and a huge one would take
-    // long. Such a file gets the compiler's own words only.
+    // long. Of such a file, only where the compiler stopped is said.
     if crate::reads::tokens(&text) > PARSED_TOKENS {
         return None;
     }
@@ -1032,11 +1032,20 @@ fn unit_of(message: &serde_json::Value) -> String {
         .as_array()
         .is_some_and(|kinds| kinds.iter().any(|k| k == "custom-build"));
     let name = match build_script {
-        // `registry+…#serde@1.0.228`, or before cargo 1.77 `serde 1.0.228 (…)`.
+        // `registry+…#serde@1.0.228`; `path+file:///…/serde#1.0.228`, its
+        // name left out as the last part of its source's path; or before
+        // cargo 1.77 `serde 1.0.228 (…)`.
         true => {
             let id = message["package_id"].as_str().unwrap_or_default();
             match id.rsplit_once('#') {
-                Some((_, rest)) => rest.split('@').next().unwrap_or_default(),
+                Some((source, rest)) => match rest.split_once('@') {
+                    Some((name, _)) => name,
+                    None => source
+                        .split('?')
+                        .next()
+                        .and_then(|path| path.rsplit('/').next())
+                        .unwrap_or_default(),
+                },
                 None => id.split(' ').next().unwrap_or_default(),
             }
         }
@@ -2253,6 +2262,15 @@ mod tests {
             ("generics", fit("type T = ", "V<", "u8", ">", ";")),
             ("patterns", fit("fn f() { let ", "(", "x", ",)", " = 1; }")),
             ("modules", fit("", "mod m {", "", "}", "")),
+            ("returns", fit("fn f() { ", "return ", "1", "", "; }")),
+            (
+                "breaks",
+                fit("fn f() { loop { ", "break ", "1", "", "; } }"),
+            ),
+            (
+                "ref patterns",
+                fit("fn f() { let ", "&", "x", "", " = 1; }"),
+            ),
             ("bounds", fit("fn f() -> ", "impl T<", "u8", ">", " {}")),
             ("qualified", fit("type T = ", "<", "u8", " as T>::A", ";")),
         ] {
@@ -2283,6 +2301,9 @@ mod tests {
         for id in [
             "registry+https://github.com/rust-lang/crates.io-index#serde-json@1.0.0",
             "serde-json 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+            "path+file:///home/u/serde-json#1.0.0",
+            "path+file:///home/u/json#serde-json@1.0.0",
+            "git+https://github.com/u/serde-json?branch=main#1.0.0",
         ] {
             let script = serde_json::json!({
                 "package_id": id,
@@ -2297,6 +2318,28 @@ mod tests {
             .replace('-', "_"),
             "serde_json"
         );
+    }
+
+    /// A dep-info file's first prerequisite is the file its crate is
+    /// compiled from, as rustc writes it: a space in a path escaped, none in
+    /// the file it writes (macOS's "Application Support"), a Windows path.
+    #[test]
+    fn a_dep_info_file_names_first_the_file_its_crate_is_compiled_from() {
+        assert_eq!(
+            dep_info_root("/t/deps/a-1.d: src/lib.rs src/b.rs\n\nsrc/lib.rs:\n").as_deref(),
+            Some("src/lib.rs")
+        );
+        assert_eq!(
+            dep_info_root("/Users/u/Library/Application Support/clew/deps/a-1.d: /x\\ y/lib.rs\n")
+                .as_deref(),
+            Some("/x y/lib.rs")
+        );
+        assert_eq!(
+            dep_info_root("C:\\t\\deps\\a-1.d: src\\lib.rs\n").as_deref(),
+            Some("src\\lib.rs")
+        );
+        assert_eq!(dep_info_root("/t/deps/a-1.d:\n"), None, "nothing read");
+        assert_eq!(dep_info_root(""), None);
     }
 
     /// The whole build, with a cargo that reports what a real one would:
