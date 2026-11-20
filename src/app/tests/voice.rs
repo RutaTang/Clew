@@ -273,7 +273,7 @@ fn commands_named_alike_are_asked_which() {
     say(&mut app, &script);
     assert_eq!(
         app.status,
-        "More than one command has that name. Say which: Word count: Count words (acme-wc) or Word count: Count words (beta-wc)"
+        "More than one command has that name. Say which: “Word count: Count words (acme-wc)” or “Word count: Count words (beta-wc)”"
     );
     assert!(
         matches!(

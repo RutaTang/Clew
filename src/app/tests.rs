@@ -40051,8 +40051,20 @@ fn plugin_commands_named_alike_are_not_run_on_a_guess() {
     let said = |words: &str| {
         crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
     };
+    // Not run, and asked which: not taken for nothing at all.
+    let named = |words: &str| crate::app::palette::command_named(words, &commands);
+    assert!(matches!(
+        named("word count count words"),
+        crate::app::palette::Named::Alike(_)
+    ));
+    assert!(
+        matches!(
+            named("word count count words wc"),
+            crate::app::palette::Named::Alike(_)
+        ),
+        "both say wc"
+    );
     assert_eq!(said("word count count words"), None);
-    assert_eq!(said("word count count words wc"), None, "both say wc");
     assert_eq!(
         said("word count count words acme").as_deref(),
         Some("Word count: Count words (acme-wc)")
@@ -40073,10 +40085,68 @@ fn plugin_commands_named_alike_are_not_run_on_a_guess() {
         said("word count count words wc").as_deref(),
         Some("Word count: Count words (wc)")
     );
+    // The name said short, without its category: the id said whole.
+    assert_eq!(
+        said("count words wc").as_deref(),
+        Some("Word count: Count words (wc)")
+    );
     assert_eq!(
         said("word count count words acme").as_deref(),
         Some("Word count: Count words (acme-wc)")
     );
+}
+
+/// Ids that differ only by a word that only says "do it" (view, open):
+/// that word said tells them apart, though it tips nothing else.
+#[test]
+fn plugin_commands_named_alike_are_told_apart_by_a_verb_of_their_ids() {
+    let mut app = blank_app();
+    let mut plain = installed_plugin(true);
+    plain.id = "todo".into();
+    let mut view = installed_plugin(true);
+    view.id = "todo-view".into();
+    app.plugins.installed = vec![plain, view];
+    let commands = app.palette_commands();
+    let said = |words: &str| {
+        crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
+    };
+    assert_eq!(
+        said("view word count count words").as_deref(),
+        Some("Word count: Count words (todo-view)")
+    );
+    assert_eq!(said("word count count words"), None);
+}
+
+/// A plugin titled as one of Clew's own but for its case or the "?" at its
+/// end carries its id too, and Clew's own is still run by its name; one
+/// titled as a command was before it was renamed leaves the name it had to
+/// Clew's own.
+#[test]
+fn clews_own_commands_stay_theirs_beside_plugins_named_nearly_alike() {
+    let mut app = scanned_app("plugin-named-nearly");
+    let taken = app.clews_commands()[0].title.clone();
+    let mut nearly = installed_plugin(true);
+    nearly.id = "nearly".into();
+    nearly.manifest.plugin.name = taken.to_lowercase();
+    nearly.manifest.commands[0].title = taken.to_lowercase();
+    let mut stats = installed_plugin(true);
+    stats.id = "stats".into();
+    stats.manifest.plugin.name = "Code Statistics".into();
+    stats.manifest.commands[0].title = "Code Statistics".into();
+    app.plugins.installed = vec![nearly, stats];
+    let commands = app.palette_commands();
+    let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+    assert!(
+        titles.contains(&format!("{} (nearly)", taken.to_lowercase()).as_str()),
+        "{titles:?}"
+    );
+    let said = |words: &str| {
+        crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
+    };
+    assert_eq!(said(&taken.to_lowercase()).as_deref(), Some(taken.as_str()));
+    // Code Statistics was Stats: Clew's own, as only it had that name.
+    assert!(titles.contains(&"Code Statistics (stats)"), "{titles:?}");
+    assert_eq!(said("show the stats").as_deref(), Some("Code Statistics"));
 }
 
 /// A plugin whose id is only its name's words, named as one of Clew's own

@@ -61,6 +61,11 @@ struct Token {
     line: usize,
 }
 
+/// How many tokens `text` has, as Rust reads them, comments left out.
+pub(crate) fn tokens(text: &str) -> usize {
+    lex(text).len()
+}
+
 /// `text`'s tokens, as Rust reads them, comments left out.
 fn lex(text: &str) -> Vec<Token> {
     let s: Vec<char> = text.chars().collect();

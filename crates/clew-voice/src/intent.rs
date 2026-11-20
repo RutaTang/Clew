@@ -109,6 +109,8 @@ struct Title {
     required: Vec<String>,
     /// Words that may be said: its category, its parenthetical.
     optional: Vec<String>,
+    /// How many of `optional`, the last ones, are its parenthetical's.
+    aside: usize,
     polarity: Polarity,
     /// Whether what must be said is its category: the rest of it only says
     /// what it does ("Ask: Hide").
@@ -124,18 +126,28 @@ type Score = (usize, usize, Reverse<usize>, usize, Reverse<usize>);
 /// The index in `titles` of the command `utterance` names, if it plainly
 /// names exactly one.
 pub fn command(utterance: &str, titles: &[&str]) -> Option<usize> {
+    match command_ties(utterance, titles)[..] {
+        [one] => Some(one),
+        _ => None,
+    }
+}
+
+/// The indices in `titles` of the commands `utterance` names best, all as
+/// well as each other: one when it plainly names one, none when it names
+/// none.
+pub fn command_ties(utterance: &str, titles: &[&str]) -> Vec<usize> {
     let (said, polarity) = utterance_words(utterance);
     if said.is_empty() {
-        return None;
+        return Vec::new();
     }
     // Every word said, the ones that only say "do it" too: which of a
     // title's own such words were said tells "add to ask" from "ask".
     let all_said = words(utterance);
-    let mut best: Option<(Score, usize)> = None;
-    let mut tied = false;
+    let mut best: Option<Score> = None;
+    let mut tied: Vec<usize> = Vec::new();
     for (index, text) in titles.iter().enumerate() {
         let title = read_title(text);
-        let Some((exact, optional)) = fits_read(&said, polarity, &title) else {
+        let Some((exact, optional, _)) = fits_read(&said, polarity, &title) else {
             continue;
         };
         // Equally well said, the title that says no more than was said wins:
@@ -160,31 +172,31 @@ pub fn command(utterance: &str, titles: &[&str]) -> Option<usize> {
             Reverse(own.len()),
         );
         match best {
-            Some((top, _)) if score < top => {}
-            Some((top, _)) if score == top => tied = true,
+            Some(top) if score < top => {}
+            Some(top) if score == top => tied.push(index),
             _ => {
-                best = Some((score, index));
-                tied = false;
+                best = Some(score);
+                tied = vec![index];
             }
         }
     }
-    if tied { None } else { best.map(|(_, i)| i) }
+    tied
 }
 
 /// How `utterance` fits `title`, read as [`command`] reads both: `None`
 /// when it does not (a word of the title not said, a word said that is not
 /// the title's, or said to turn it the other way); else how many of the
-/// title's optional words (its category, what it has in brackets) were
-/// said, of how many it has. Commands named alike but for what is in their
-/// brackets are told apart by it.
+/// words in its brackets were said, of how many there are (its words that
+/// only say "do it" left out, as everywhere). Commands named alike but for
+/// what is in their brackets are told apart by it.
 pub fn fits(utterance: &str, title: &str) -> Option<(usize, usize)> {
     let (said, polarity) = utterance_words(utterance);
     let title = read_title(title);
-    fits_read(&said, polarity, &title).map(|(_, optional)| (optional, title.optional.len()))
+    fits_read(&said, polarity, &title).map(|(_, _, aside)| (aside, title.aside))
 }
 
 /// [`fit`], when the way the words turn things agrees with the title's.
-fn fits_read(said: &[String], polarity: Polarity, title: &Title) -> Option<(usize, usize)> {
+fn fits_read(said: &[String], polarity: Polarity, title: &Title) -> Option<(usize, usize, usize)> {
     if said.is_empty() || title.required.is_empty() {
         return None;
     }
@@ -265,9 +277,11 @@ fn read_title(title: &str) -> Title {
         .into_iter()
         .filter(|w| !VERBS.contains(&w.as_str()))
         .collect();
-    let aside = words(aside)
+    let aside: Vec<String> = words(aside)
         .into_iter()
-        .filter(|w| !VERBS.contains(&w.as_str()));
+        .filter(|w| !VERBS.contains(&w.as_str()))
+        .collect();
+    let in_aside = aside.len();
     // Nothing but a verb after the category ("Ask: Hide", "Find: Close"):
     // the category is what is named, and must be said.
     let by_category = required.is_empty();
@@ -284,16 +298,17 @@ fn read_title(title: &str) -> Title {
     Title {
         required,
         optional,
+        aside: in_aside,
         polarity,
         by_category,
     }
 }
 
-/// How well the words said fit `title`: `(exact, optional)` — how many of
-/// its words were said exactly as spelled, and how many of its optional
-/// ones were said — or `None` if one of its words was not said, or a word
-/// was said that is not its.
-fn fit(said: &[String], title: &Title) -> Option<(usize, usize)> {
+/// How well the words said fit `title`: `(exact, optional, aside)` — how
+/// many of its words were said exactly as spelled, how many of its optional
+/// ones were said, and how many of those its parenthetical's — or `None` if
+/// one of its words was not said, or a word was said that is not its.
+fn fit(said: &[String], title: &Title) -> Option<(usize, usize, usize)> {
     let mut used = vec![false; said.len()];
     let mut exact = 0;
     for w in &title.required {
@@ -302,12 +317,17 @@ fn fit(said: &[String], title: &Title) -> Option<(usize, usize)> {
         }
     }
     let mut optional = 0;
-    for w in &title.optional {
+    let mut aside = 0;
+    let aside_from = title.optional.len() - title.aside;
+    for (at, w) in title.optional.iter().enumerate() {
         if place(said, &mut used, w).is_some() {
             optional += 1;
+            if at >= aside_from {
+                aside += 1;
+            }
         }
     }
-    used.iter().all(|u| *u).then_some((exact, optional))
+    used.iter().all(|u| *u).then_some((exact, optional, aside))
 }
 
 /// Find `word` among the words said not yet placed — as spelled, then
@@ -379,6 +399,37 @@ fn edits_at_most_one(a: &[char], b: &[char]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What of a title's brackets the words fit, apart from its category's
+    /// words; a title they do not fit, none; titles named as well, all.
+    #[test]
+    fn the_words_in_brackets_are_counted_apart() {
+        let title = "Word count: Count words (acme-wc)";
+        assert_eq!(fits("count words wc", title), Some((1, 2)));
+        assert_eq!(fits("word count count words acme wc", title), Some((2, 2)));
+        assert_eq!(fits("count words", title), Some((0, 2)));
+        assert_eq!(
+            fits("count words too", title),
+            None,
+            "a word it has no place for"
+        );
+        // "view" only says do it, in the brackets as anywhere.
+        assert_eq!(
+            fits("count words", "Word count: Count words (wc-view)"),
+            Some((0, 1))
+        );
+        assert_eq!(fits("call graph", "Call Graph"), Some((0, 0)));
+        let titles = [
+            "Word count: Count words (acme-wc)",
+            "Word count: Count words (beta-wc)",
+            "Call Graph",
+        ];
+        assert_eq!(command_ties("count words wc", &titles), [0, 1]);
+        assert_eq!(command_ties("count words acme", &titles), [0]);
+        assert_eq!(command_ties("call graph", &titles), [2]);
+        assert!(command_ties("make coffee", &titles).is_empty());
+        assert_eq!(command("count words wc", &titles), None);
+    }
 
     /// A window's worth of titles, as the palette lists them.
     const TITLES: &[&str] = &[

@@ -3748,6 +3748,7 @@
  "“Why does {name} trim {what}?”": "「{name} はなぜ{what}を取り除くの？」",
  "“Why is this function here?”": "「この関数はなぜここにあるの？」",
  "“Why is {name} written this way?”": "「{name} はなぜこう書かれているの？」",
+ "“{command}”": "「{command}」",
  "“{graph}” is hidden: the plugin {plugin} is turned off.": "「{graph}」は表示されていません：プラグイン「{plugin}」がオフです。",
  "“{name}” is no longer in {file}": "「{name}」は {file} にもうありません",
  "“{name}” is not in any commit yet.": "「{name}」はまだどのコミットにも入っていません。",

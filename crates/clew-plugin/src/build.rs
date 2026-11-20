@@ -402,19 +402,42 @@ fn unparsed_at(crate_dir: &Path, stop: &str) -> Option<String> {
     let mut parts = stop.rsplitn(3, ':');
     let (_, line, file) = (parts.next()?, parts.next()?, parts.next()?);
     let line: usize = line.parse().ok()?;
-    // One of the plugin's own files, staged under `src/`.
-    if !file.starts_with("src/")
-        || file
-            .split(['/', '\\'])
-            .any(|part| part == ".." || part.is_empty())
-    {
+    // One of the plugin's own files, staged under `src/` (rustc writes
+    // `\\` between the parts on Windows).
+    let file = file.replace('\\', "/");
+    if !file.starts_with("src/") || file.split('/').any(|part| part == ".." || part.is_empty()) {
         return None;
     }
-    let text = std::fs::read_to_string(crate_dir.join(file)).ok()?;
-    let err = syn::parse_file(&text).err()?;
-    let at = err.span().start();
-    (at.line == line).then(|| format!("{file}:{}:{}: {err}", at.line, at.column + 1))
+    let text = std::fs::read_to_string(crate_dir.join(&file)).ok()?;
+    // syn descends once per nested expression or type: a file of deep
+    // nesting would overflow a thread's stack, and a huge one would take
+    // long. Such a file gets the compiler's own words only.
+    if crate::reads::tokens(&text) > PARSED_TOKENS {
+        return None;
+    }
+    let (at, column, err) = std::thread::Builder::new()
+        .stack_size(PARSE_STACK)
+        .spawn(move || {
+            syn::parse_file(&text).err().map(|err| {
+                let at = err.span().start();
+                (at.line, at.column, err.to_string())
+            })
+        })
+        .ok()?
+        .join()
+        .ok()??;
+    (at == line).then(|| format!("{file}:{at}:{}: {err}", column + 1))
 }
+
+/// The most tokens in a file Clew parses itself to say where it stops (a
+/// file of several hundred lines).
+const PARSED_TOKENS: usize = 8_000;
+
+/// The stack Clew parses a file on. Each token opens at most one level of
+/// nesting, and the deepest syn goes for one token is about 27 KiB, for a
+/// `&` before a type, unoptimized. This leaves 64 KiB a token; it is only
+/// reserved, its pages taken as a parse goes deep.
+const PARSE_STACK: usize = 512 * 1024 * 1024;
 
 /// Each Rust file staged in `dir` (`rel` from the plugin's folder) whose
 /// brackets do not pair up, where ([`crate::reads::unpaired`]).
@@ -1242,13 +1265,44 @@ fn rewritten_dep_infos(
 /// out of time, Clew closed), and nothing it compiled is built on.
 const UNCHECKED: &str = ".unchecked";
 
+/// The file a dep-info file says its crate is compiled from: the first one
+/// its first rule names after what was made (rustc names the crate's root
+/// first, the files it reads after).
+fn dep_info_root(text: &str) -> Option<String> {
+    let line = text.lines().find(|line| !line.is_empty())?;
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&' ') => {
+                word.push(' ');
+                chars.next();
+            }
+            ' ' | '\t' => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            _ => word.push(c),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    let made = words.iter().position(|w| w.ends_with(':'))?;
+    words.get(made + 1).cloned()
+}
+
 /// The files a dep-info file names: every path on its lines, what was made
 /// and what it was made from. rustc's `# env-dep:` and `# checksum:` lines
 /// name no file; any other line is read for files — a path with a line
 /// break in it is not taken for one of those, its rest unread.
 fn dep_info_files(text: &str) -> Vec<String> {
-    // rustc's `#` lines are the last ones, after an empty line: a line so
-    // begun anywhere else is a path's, broken by a line break in it.
+    // rustc's `#` lines are the last ones, after an empty line (a nightly's
+    // checksums alone may follow no empty line: read for files then, they
+    // name none outside). A line so begun anywhere else is a path's,
+    // broken by a line break in it.
     let lines: Vec<&str> = text.lines().collect();
     let mut notes = lines.len();
     while notes > 0 && lines[notes - 1].is_empty() {
@@ -1781,20 +1835,27 @@ fn build_with(
         // recursion's end) — and a message of its from before the stop can
         // hold what it read (a `compile_error!` given an include). So none
         // of what the compiler said is passed on then.
-        // Each failed unit is tied to a dep-info file this build wrote
-        // (word for word as before or not) that names the file it is
-        // compiled from — not to one of another unit of its name (another
-        // version of the crate, cached and not built now).
-        let said: std::collections::HashSet<PathBuf> = rewritten_dep_infos(&target, &before)
+        // Each failed unit is tied to its own dep-info file, written this
+        // build (word for word as before or not): of its crate's name, and
+        // compiled from the file it is (rustc names the crate's root first).
+        // Not another crate's that read that file too (one handed another
+        // package's lib.rs to include), nor a unit of its name cached and
+        // not built now (another version of the crate).
+        let own: Vec<(String, PathBuf)> = rewritten_dep_infos(&target, &before)
             .iter()
-            .filter_map(|d| std::fs::read_to_string(d).ok())
-            .flat_map(|text| dep_info_files(&text))
-            .map(|file| resolved(&crate_dir.join(file)))
+            .filter_map(|d| {
+                let root = dep_info_root(&std::fs::read_to_string(d).ok()?)?;
+                Some((
+                    crate_of(d).replace('-', "_"),
+                    resolved(&crate_dir.join(root)),
+                ))
+            })
             .collect();
-        let unsaid = messages.failed.iter().find(|(_, from)| {
-            !from
-                .as_ref()
-                .is_some_and(|from| said.contains(&resolved(&crate_dir.join(from))))
+        let unsaid = messages.failed.iter().find(|(unit, from)| {
+            !from.as_ref().is_some_and(|from| {
+                let from = resolved(&crate_dir.join(from));
+                own.iter().any(|(of, root)| of == unit && *root == from)
+            })
         });
         if let Some((unit, _)) = unsaid {
             return Err(unread_failure(
@@ -2151,8 +2212,62 @@ mod tests {
         );
         assert_eq!(unparsed_at(dir.path(), "../src/lib.rs:2:1"), None);
         assert_eq!(unparsed_at(dir.path(), "/etc/passwd:2:1"), None);
+        assert_eq!(
+            unparsed_at(dir.path(), "src\\lib.rs:2:1").as_deref(),
+            Some(said.as_str()),
+            "as rustc names it on Windows"
+        );
+        assert_eq!(unparsed_at(dir.path(), "src\\..\\src\\lib.rs:2:1"), None);
         std::fs::write(dir.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
         assert_eq!(unparsed_at(dir.path(), "src/lib.rs:1:1"), None, "it parses");
+    }
+
+    /// Code nested as deep as its tokens allow, every way Rust nests, is
+    /// parsed without overflowing the stack (each would on a thread's
+    /// usual one); a longer file is left to the compiler's own words.
+    #[test]
+    fn deep_code_is_parsed_without_overflowing_and_long_code_is_not_parsed() {
+        let dir = clew_core::testutil::TempDir::new("plugin-unparsed-deep");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let fit = |head: &str, open: &str, middle: &str, close: &str, tail: &str| {
+            let unparsed = "\nlet x = 1;\n";
+            let fixed = crate::reads::tokens(&format!("{head}{middle}{tail}{unparsed}"));
+            let per = crate::reads::tokens(&format!("{open}{close}"));
+            let deep = (PARSED_TOKENS - fixed) / per;
+            let text = format!(
+                "{head}{}{middle}{}{tail}{unparsed}",
+                open.repeat(deep),
+                close.repeat(deep)
+            );
+            assert!(crate::reads::tokens(&text) > PARSED_TOKENS - per);
+            assert!(crate::reads::tokens(&text) <= PARSED_TOKENS);
+            text
+        };
+        for (what, text) in [
+            ("unary", fit("fn f() { ", "-", "1", "", "; }")),
+            ("brackets", fit("fn f() { ", "(", "1", ")", "; }")),
+            ("arrays", fit("fn f() { ", "[", "1", "]", "; }")),
+            ("blocks", fit("fn f() ", "{", "", "}", "")),
+            ("closures", fit("fn f() { ", "|| ", "1", "", "; }")),
+            ("references", fit("type T = ", "&", "u8", "", ";")),
+            ("generics", fit("type T = ", "V<", "u8", ">", ";")),
+            ("patterns", fit("fn f() { let ", "(", "x", ",)", " = 1; }")),
+            ("modules", fit("", "mod m {", "", "}", "")),
+            ("bounds", fit("fn f() -> ", "impl T<", "u8", ">", " {}")),
+            ("qualified", fit("type T = ", "<", "u8", " as T>::A", ";")),
+        ] {
+            std::fs::write(dir.join("src/lib.rs"), &text).unwrap();
+            let stop = format!("src/lib.rs:{}:1", text.lines().count());
+            let said = unparsed_at(dir.path(), &stop);
+            assert!(
+                said.as_ref().is_some_and(|said| said.contains("expected")),
+                "{what}: {said:?}"
+            );
+        }
+        let long = "fn f() {}\n".repeat(PARSED_TOKENS / 6 + 1) + "let x = 1;\n";
+        std::fs::write(dir.join("src/lib.rs"), &long).unwrap();
+        let stop = format!("src/lib.rs:{}:1", long.lines().count());
+        assert_eq!(unparsed_at(dir.path(), &stop), None, "too long to parse");
     }
 
     /// A unit of the build is named alike in a compiler message and by its
@@ -2225,7 +2340,7 @@ mod tests {
         let cargo = script(
             "cargo",
             format!(
-                "#!/bin/sh\ncase \"$1\" in\n  fetch) exit 0 ;;\n  metadata) echo '{{\"packages\":[]}}'; exit 0 ;;\n  build)\n    env > {f}/env\n    mkdir -p \"$CARGO_TARGET_DIR/wasm32-wasip2/release/deps\"\n    cp {f}/sample.d \"$CARGO_TARGET_DIR/wasm32-wasip2/release/deps/sample.d\"\n    cat {f}/messages\n    exit $(cat {f}/status) ;;\nesac\n"
+                "#!/bin/sh\ncase \"$1\" in\n  fetch) exit 0 ;;\n  metadata) echo '{{\"packages\":[]}}'; exit 0 ;;\n  build)\n    env > {f}/env\n    mkdir -p \"$CARGO_TARGET_DIR/wasm32-wasip2/release/deps\"\n    cp {f}/sample.d \"$CARGO_TARGET_DIR/wasm32-wasip2/release/deps/$(cat {f}/unit).d\"\n    cat {f}/messages\n    exit $(cat {f}/status) ;;\nesac\n"
             ),
         );
         let rustc = script("rustc", format!("#!/bin/sh\necho {}\n", sysroot.display()));
@@ -2250,6 +2365,9 @@ mod tests {
             })
             .to_string()
         };
+        // As rustc writes it: the file the crate is compiled from first.
+        let own = format!("{}/sample.d: src/lib.rs\n\nsrc/lib.rs:\n", target.display());
+        std::fs::write(fake.join("unit"), "sample").unwrap();
         let attempt = |dep_info: String, messages: String| {
             std::fs::write(fake.join("sample.d"), dep_info).unwrap();
             std::fs::write(fake.join("messages"), messages + "\n").unwrap();
@@ -2292,7 +2410,7 @@ mod tests {
 
         // A message pointing into a file outside.
         let refused = attempt(
-            "src/lib.rs:\n".into(),
+            own.clone(),
             message(&secret, "error: expected item, found `machine`"),
         );
         assert!(
@@ -2302,7 +2420,7 @@ mod tests {
 
         // All inside: the compiler's errors, as it said them.
         let compiled = attempt(
-            "src/lib.rs:\n".into(),
+            own.clone(),
             message("src/lib.rs", "error[E0425]: cannot find value `x`"),
         );
         assert!(
@@ -2326,10 +2444,7 @@ mod tests {
         // Checked, its marker goes; built again unchanged, it is not read
         // again as this build's, and what the compiler said is said again.
         for _ in 0..2 {
-            let checked = attempt(
-                "src/lib.rs:\n".into(),
-                message("src/lib.rs", "error[E0425]: x"),
-            );
+            let checked = attempt(own.clone(), message("src/lib.rs", "error[E0425]: x"));
             assert!(
                 matches!(&checked, Err(BuildError::Compile(errors)) if errors[0].contains("E0425")),
                 "{checked:?}"
@@ -2387,6 +2502,31 @@ mod tests {
         );
         std::fs::write(source.join("src/lib.rs"), "// a plugin").unwrap();
 
+        // What another crate read, though it names the plugin's file first,
+        // does not say what the plugin's crate read; nor does a dep-info of
+        // the plugin's name compiled from another file.
+        let elsewhere = |unit: &str, dep_info: String| {
+            std::fs::write(fake.join("unit"), unit).unwrap();
+            let built = attempt(dep_info, stopped("src/lib.rs"));
+            std::fs::write(fake.join("unit"), "sample").unwrap();
+            built
+        };
+        for (unit, root) in [("helper", "src/lib.rs"), ("sample", "src/other.rs")] {
+            let dep_info = format!("{}/{unit}.d: {root}\n\n{root}:\n", target.display());
+            let withheld = elsewhere(unit, dep_info);
+            assert!(
+                matches!(&withheld, Err(BuildError::Compile(errors))
+                    if errors[0].contains("src/lib.rs:3:5: the compiler stopped here")
+                        && !errors[0].contains("password")),
+                "{unit}: {withheld:?}"
+            );
+        }
+        let said = elsewhere("sample", own.clone());
+        assert!(
+            matches!(&said, Err(BuildError::Compile(errors)) if errors[0].contains("password")),
+            "its own: {said:?}"
+        );
+
         // Another plugin built just after, in the same folder: its own
         // build folder, and the first plugin's files are none of its.
         let other = root.join("other");
@@ -2401,9 +2541,13 @@ mod tests {
         std::fs::write(other.join("src/lib.rs"), "// another").unwrap();
         std::fs::write(
             fake.join("sample.d"),
-            format!("{}/src/lib.rs:\n", work.join("other").display()),
+            format!(
+                "{}/other.d: src/lib.rs\n\nsrc/lib.rs:\n",
+                work.join("targets/other").display()
+            ),
         )
         .unwrap();
+        std::fs::write(fake.join("unit"), "other").unwrap();
         std::fs::write(
             fake.join("messages"),
             serde_json::json!({
@@ -2416,6 +2560,7 @@ mod tests {
         )
         .unwrap();
         let built = build(&other, &work, &toolchain, &AtomicBool::new(false));
+        std::fs::write(fake.join("unit"), "sample").unwrap();
         assert!(
             matches!(&built, Err(BuildError::Compile(errors)) if errors[0].contains("E0425")),
             "{built:?}"
@@ -2480,7 +2625,7 @@ mod tests {
             "[env]\nCLEW_TEST_SECRET = \"from-config\"\nPATH = \"/nowhere\"\n",
         )
         .unwrap();
-        let _ = attempt("src/lib.rs:\n".into(), String::new());
+        let _ = attempt(own.clone(), String::new());
         let env = std::fs::read_to_string(fake.join("env")).unwrap();
         assert!(env.contains("CLEW_TEST_SECRET=\n"), "{env}");
         // One the build is given already stays as given.
@@ -2494,7 +2639,7 @@ mod tests {
             "[env]\nCLEW_TEST_SECRET = { value = \"x\", force = true }\n",
         )
         .unwrap();
-        let refused = attempt("src/lib.rs:\n".into(), String::new());
+        let refused = attempt(own.clone(), String::new());
         assert!(
             matches!(&refused, Err(BuildError::Policy(why)) if why.contains("force = true")),
             "{refused:?}"

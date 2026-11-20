@@ -3748,6 +3748,7 @@
  "“Why does {name} trim {what}?”": "“{name} 为什么要去除首尾的{what}？”",
  "“Why is this function here?”": "“为什么会有这个函数？”",
  "“Why is {name} written this way?”": "“{name} 为什么要这样写？”",
+ "“{command}”": "“{command}”",
  "“{graph}” is hidden: the plugin {plugin} is turned off.": "“{graph}”已隐藏：插件“{plugin}”已关闭。",
  "“{name}” is no longer in {file}": "{file} 中已没有“{name}”",
  "“{name}” is not in any commit yet.": "“{name}”还没有进入任何提交。",

@@ -3748,6 +3748,7 @@
  "“Why does {name} trim {what}?”": "“{name}에서 {what} 문자를 왜 잘라 내?”",
  "“Why is this function here?”": "“이 함수는 왜 여기 있어?”",
  "“Why is {name} written this way?”": "“{name} 함수는 왜 이렇게 작성됐어?”",
+ "“{command}”": "“{command}”",
  "“{graph}” is hidden: the plugin {plugin} is turned off.": "“{graph}”이(가) 숨겨져 있습니다: 플러그인 {plugin}이(가) 꺼져 있습니다.",
  "“{name}” is no longer in {file}": "{file}에 “{name}” 항목이 더 이상 없습니다",
  "“{name}” is not in any commit yet.": "“{name}”은(는) 아직 어떤 커밋에도 없습니다.",

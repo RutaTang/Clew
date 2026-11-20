@@ -118,9 +118,9 @@ pub(crate) fn offered_commands<'a>(
             })
         })
         .collect();
-    // Read alike whether or not one ends in "…", in English as the voice
-    // reads titles, and as shown.
-    let bare = |shown: &str| shown.trim_end_matches('…').trim_end().to_string();
+    // Read alike as the voice reads titles — whatever their case, or a
+    // "…", "?" at their end — in English, and as shown.
+    let bare = |name: &str| alike_key(name);
     let count = |names: Vec<String>| {
         let mut named: HashMap<String, usize> = HashMap::new();
         for name in names {
@@ -139,7 +139,7 @@ pub(crate) fn offered_commands<'a>(
         clews
             .iter()
             .map(|(_, shown)| bare(shown))
-            .chain(offered.iter().map(|o| o.shown.clone()))
+            .chain(offered.iter().map(|o| bare(&o.shown)))
             .collect(),
     );
     for o in &mut offered {
@@ -148,7 +148,7 @@ pub(crate) fn offered_commands<'a>(
         if titled_alike {
             o.title = format!("{} ({id})", o.title);
         }
-        if titled_alike || shown.get(&o.shown).is_some_and(|n| *n > 1) {
+        if titled_alike || shown.get(&bare(&o.shown)).is_some_and(|n| *n > 1) {
             o.shown = format!("{} ({id})", o.shown);
         }
         // The id is part of its name; what it asks for comes after.
@@ -157,6 +157,16 @@ pub(crate) fn offered_commands<'a>(
         }
     }
     offered
+}
+
+/// A command's name as the voice reads it, to tell names alike: lowercase,
+/// without a "…", ".", "?" or "!" at its end, its words one space apart.
+pub(crate) fn alike_key(name: &str) -> String {
+    name.trim_end_matches(['…', '.', '?', '!'])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 /// An install done, as whoever asked for it is told: its fingerprint, in

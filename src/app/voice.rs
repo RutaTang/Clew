@@ -2408,7 +2408,12 @@ impl App {
         if let crate::app::palette::Named::Alike(alike) = &named {
             let names: Vec<String> = alike
                 .iter()
-                .map(|&i| commands[i].shown().trim_end_matches('…').to_string())
+                .map(|&i| {
+                    tr!(
+                        "“{command}”",
+                        command = commands[i].shown().trim_end_matches('…')
+                    )
+                })
                 .collect();
             let which = tr!(
                 "More than one command has that name. Say which: {commands}",
