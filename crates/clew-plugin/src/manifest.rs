@@ -299,6 +299,41 @@ impl Manifest {
                 return Err(format!("two [[command]]s have the title \"{}\"", c.title));
             }
         }
+        // Two commands listed by names of the same words — in English, or
+        // in a language they are translated to — are told apart by neither
+        // the voice nor their rows: both would carry the plugin's id.
+        let langs: BTreeSet<&str> = std::iter::once("")
+            .chain(
+                self.commands
+                    .iter()
+                    .flat_map(|c| c.translations.keys().map(String::as_str)),
+            )
+            .chain(p.translations.keys().map(String::as_str))
+            .collect();
+        for lang in langs {
+            let name = self.name_in(lang);
+            let mut listed: BTreeMap<String, &str> = BTreeMap::new();
+            for c in &self.commands {
+                let title = c.translations.get(lang).unwrap_or(&c.title);
+                let as_listed = if title == name {
+                    title.clone()
+                } else {
+                    format!("{name}: {title}")
+                };
+                if let Some(other) = listed.insert(words_of(&as_listed), &c.title) {
+                    let r#in = match lang {
+                        "" => String::new(),
+                        lang => format!(" in {lang}"),
+                    };
+                    return Err(format!(
+                        "two [[command]]s, \"{other}\" and \"{}\", are named{in} with the same words; \
+                         name them apart by a word, not only by case or punctuation",
+                        c.title,
+                        r#in = r#in,
+                    ));
+                }
+            }
+        }
 
         if self.graphs.len() > MAX_GRAPHS {
             return Err(format!(
@@ -396,6 +431,17 @@ fn check_id(field: &str, id: &str, min: usize) -> Result<(), String> {
 
 /// One line of text: not empty, no control characters, `max` characters at
 /// most.
+/// `text`'s words as the voice reads them: lowercase, without
+/// apostrophes, whatever else stands between them.
+fn words_of(text: &str) -> String {
+    text.to_lowercase()
+        .replace(['\'', '’'], "")
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn check_line(field: &str, text: &str, max: usize) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err(format!("{field} is empty"));
@@ -576,6 +622,63 @@ regex = "1"
         let mut m = Manifest::parse(GOOD).unwrap();
         edit(&mut m);
         m.check().unwrap_err()
+    }
+
+    /// Two commands named alike, in English or in a language they are
+    /// translated to, or listed alike once the plugin's name is before
+    /// them, are refused: neither the voice nor the rows could tell them
+    /// apart.
+    #[test]
+    fn commands_named_with_the_same_words_are_refused() {
+        // Listed after a plugin name of their own ("Todo tools: …").
+        let second = |title: &str| {
+            refusal(|m| {
+                m.plugin.name = "Todo tools".into();
+                let mut c = m.commands[0].clone();
+                c.id = "again".into();
+                c.title = title.into();
+                c.translations.clear();
+                m.commands.push(c);
+            })
+        };
+        assert!(second("TODOs by author").contains("have the title"));
+        let why = second("TODOs by Author!");
+        assert!(
+            why.contains("\"TODOs by author\" and \"TODOs by Author!\"")
+                && why.contains("same words"),
+            "{why}"
+        );
+        // As listed, the plugin's name before a title not its own: one
+        // titled as the plugin is named and one of its words otherwise
+        // cased are listed apart ("TODOs", "TODOs: todos").
+        let mut m = Manifest::parse(GOOD).unwrap();
+        m.plugin.name = "TODOs".into();
+        m.plugin.translations.clear();
+        m.commands[0].title = "TODOs".into();
+        m.commands[0].translations.clear();
+        let mut c = m.commands[0].clone();
+        c.id = "again".into();
+        c.title = "todos".into();
+        m.commands.push(c);
+        assert_eq!(m.check(), Ok(()));
+        // Apart in English, alike in Chinese ("…TODO", "…todo").
+        let why = refusal(|m| {
+            m.plugin.translations.clear();
+            let mut c = m.commands[0].clone();
+            c.id = "again".into();
+            c.title = "Authors' TODOs".into();
+            c.translations.insert("zh".into(), "按作者列出 todo".into());
+            m.commands.push(c);
+        });
+        assert!(why.contains(" in zh "), "{why}");
+        // Apart by a word, in every language: taken.
+        let mut m = Manifest::parse(GOOD).unwrap();
+        let mut c = m.commands[0].clone();
+        c.id = "again".into();
+        c.title = "TODOs by file".into();
+        c.translations.insert("zh".into(), "按文件列出 TODO".into());
+        m.commands.push(c);
+        assert_eq!(m.check(), Ok(()));
     }
 
     #[test]

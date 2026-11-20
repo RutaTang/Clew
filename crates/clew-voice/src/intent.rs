@@ -190,11 +190,12 @@ fn score(utterance: &str, text: &str) -> Option<Score> {
 /// How well what was said names one of the commands named alike: how well
 /// its name was said; then how many of the words in its brackets that say
 /// what it is were said, each as spelled ("todos" is not `todo`'s);
-/// whether all of them were; and how many of those that only say "do it"
-/// or which way to turn something ("view", "close") — counted only when
-/// all the rest were said, as a word like "a" or "close" said without the
-/// rest is the speaker's, not the id's.
-type AlikeRank = (Score, usize, bool, usize);
+/// whether all of them were; how many of those that only say "do it" or
+/// which way to turn something ("view", "close") — counted only when all
+/// the rest were said, as a word like "a" or "close" said without the rest
+/// is the speaker's, not the id's; and whether its words were said in
+/// their order (`acme-wc`, not `wc-acme`).
+type AlikeRank = (Score, usize, bool, usize, bool);
 
 /// The indices in `commands` — commands named alike: each the name and,
 /// for some, words of their own in brackets after it (a plugin's id) —
@@ -220,7 +221,7 @@ pub fn alike_ties(utterance: &str, commands: &[(&str, Option<&str>)]) -> Vec<usi
 /// after it ([`alike_ties`]).
 fn alike_rank(utterance: &str, name: &str, aside: Option<&str>) -> Option<AlikeRank> {
     let aside = aside.map(words).unwrap_or_default();
-    let bare = score(utterance, name).map(|s| (s, 0, aside.is_empty(), 0));
+    let bare = score(utterance, name).map(|s| (s, 0, aside.is_empty(), 0, aside.is_empty()));
     if aside.is_empty() {
         return bare;
     }
@@ -235,42 +236,63 @@ fn alike_rank(utterance: &str, name: &str, aside: Option<&str>) -> Option<AlikeR
         }
     }
     let mut used = names.clone();
-    // Each word of the id where it was said as spelled; one said close to
-    // it is another id's ("todos", "acme 2").
-    let place_spelled = |used: &mut Vec<bool>, w: &str| -> bool {
-        let before = used.clone();
-        match place(&said, used, w) {
-            Some(true) => true,
-            _ => {
-                *used = before;
-                false
-            }
+    // Where each word of the id was said, in the id's order: its words
+    // that say what it is first, then, when all of those were said, the
+    // others.
+    let mut at: Vec<Option<usize>> = vec![None; aside.len()];
+    for (k, w) in aside.iter().enumerate() {
+        if !only_does(w) {
+            at[k] = place_spelled(&said, &mut used, w);
         }
-    };
-    let (telling, doing): (Vec<&String>, Vec<&String>) = aside.iter().partition(|w| !only_does(w));
-    let told = telling
-        .iter()
-        .filter(|w| place_spelled(&mut used, w))
-        .count();
-    let mut all = told == telling.len();
+    }
+    let telling = aside.iter().filter(|w| !only_does(w)).count();
+    let told = at.iter().flatten().count();
+    let mut all = told == telling;
     let mut did = 0;
     if all {
         let before = used.clone();
-        did = doing.iter().filter(|w| place_spelled(&mut used, w)).count();
-        if did < doing.len() {
+        for (k, w) in aside.iter().enumerate() {
+            if only_does(w) {
+                at[k] = place_spelled(&said, &mut used, w);
+            }
+        }
+        did = at.iter().flatten().count() - told;
+        if did < aside.len() - telling {
             used = before;
+            for (k, w) in aside.iter().enumerate() {
+                if only_does(w) {
+                    at[k] = None;
+                }
+            }
             did = 0;
             all = false;
         }
     }
+    let placed: Vec<usize> = at.iter().flatten().copied().collect();
+    let in_order = all && placed.windows(2).all(|pair| pair[0] < pair[1]);
     let rest: Vec<&str> = said
         .iter()
         .zip(used.iter().zip(&names))
         .filter(|(_, (used, name))| !**used || **name)
         .map(|(w, _)| w.as_str())
         .collect();
-    let with_aside = score(&rest.join(" "), name).map(|s| (s, told, all, did));
+    let with_aside = score(&rest.join(" "), name).map(|s| (s, told, all, did, in_order));
     bare.max(with_aside)
+}
+
+/// Where `word` was said as spelled among the words not yet placed — as
+/// one word, or as two run together ("acme 2" for `acme2`) — marked
+/// placed. Never a word only close to it: "notes" is not `notes2`.
+fn place_spelled(said: &[String], used: &mut [bool], word: &str) -> Option<usize> {
+    if let Some(i) = (0..said.len()).find(|&i| !used[i] && said[i] == word) {
+        used[i] = true;
+        return Some(i);
+    }
+    let i = (0..said.len().saturating_sub(1))
+        .find(|&i| !used[i] && !used[i + 1] && format!("{}{}", said[i], said[i + 1]) == word)?;
+    used[i] = true;
+    used[i + 1] = true;
+    Some(i)
 }
 
 /// A text as the voice reads it: its words, lowercase, one space apart —
@@ -595,6 +617,25 @@ mod tests {
         );
         assert_eq!(
             spelled("word count count words views", ["view", "views"]),
+            [1]
+        );
+        // Two words run together as spelled, though one is close to it.
+        assert_eq!(
+            spelled("word count count words notes 2", ["notes1", "notes2"]),
+            [1]
+        );
+        assert!(spelled("word count count words notes", ["notes1", "notes2"]).is_empty());
+        // The same words in another order: the id said in its order.
+        assert_eq!(
+            spelled("word count count words acme wc", ["acme-wc", "wc-acme"]),
+            [0]
+        );
+        assert_eq!(
+            spelled("word count count words wc acme", ["acme-wc", "wc-acme"]),
+            [1]
+        );
+        assert_eq!(
+            spelled("word count count words todo todo", ["todo", "todo-todo"]),
             [1]
         );
     }

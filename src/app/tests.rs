@@ -40150,6 +40150,12 @@ fn plugin_commands_named_alike_are_told_apart_by_a_verb_of_their_ids() {
         crate::app::palette::command_named("word count count words", &commands),
         crate::app::palette::Named::Alike(ref alike) if alike.len() == 4
     ));
+    // An id said only close to how it is spelled names none of them: the
+    // words are a request, not one of these commands.
+    assert!(matches!(
+        crate::app::palette::command_named("word count count words todos", &commands),
+        crate::app::palette::Named::Nothing
+    ));
     // "close" said without the rest of an id: nothing is closed, and no
     // plugin is run for it.
     assert!(matches!(
@@ -40243,6 +40249,41 @@ fn clews_own_commands_stay_theirs_beside_plugins_named_nearly_alike() {
     assert_eq!(
         said("call graph graphs").as_deref(),
         Some("Call-Graph (graphs)")
+    );
+    // Named with the same words but for a ":": read against Clew's own
+    // name, Clew's own keeps it, said or written in another case.
+    let mut window = installed_plugin(true);
+    window.id = "acme".into();
+    window.manifest.plugin.name = "Window Minimize".into();
+    window.manifest.commands[0].title = "Window Minimize".into();
+    // Two plugins named so, Clew's not among them: neither on a guess.
+    let mut lint = installed_plugin(true);
+    lint.id = "lint-a".into();
+    lint.manifest.plugin.name = "Lint".into();
+    lint.manifest.commands[0].title = "Run checks".into();
+    let mut lint_too = installed_plugin(true);
+    lint_too.id = "lint-b".into();
+    lint_too.manifest.plugin.name = "Lint Run checks".into();
+    lint_too.manifest.commands[0].title = "Lint Run checks".into();
+    app.plugins.installed = vec![window, lint, lint_too];
+    let commands = app.palette_commands();
+    let said = |words: &str| {
+        crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
+    };
+    for words in ["window minimize", "window: minimize", "Window: minimize"] {
+        assert_eq!(said(words).as_deref(), Some("Window: Minimize"), "{words}");
+    }
+    assert_eq!(
+        said("window minimize acme").as_deref(),
+        Some("Window Minimize (acme)")
+    );
+    assert!(matches!(
+        crate::app::palette::command_named("lint run checks", &commands),
+        crate::app::palette::Named::Alike(ref alike) if alike.len() == 2
+    ));
+    assert_eq!(
+        said("lint run checks lint b").as_deref(),
+        Some("Lint Run checks (lint-b)")
     );
 }
 
