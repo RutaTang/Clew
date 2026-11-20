@@ -976,12 +976,17 @@ fn plugin_run_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
         ),
         (false, None) => tr!("Running {command}…", command = name.clone()),
     };
-    // At its widest from the start: it does not shift as the count grows.
-    let widest = tr!(
-        "Running {command}… {percent}%",
-        command = name.clone(),
-        percent = 100
-    );
+    // At its widest once it counts: it does not shift as the count grows.
+    // One that never counts keeps no room for a count (its Stop stood
+    // apart from its words).
+    let widest = match percent {
+        Some(_) if !stopping => tr!(
+            "Running {command}… {percent}%",
+            command = name.clone(),
+            percent = 100
+        ),
+        _ => said.clone(),
+    };
     let words_w = super::steady::width_of(&widest, ts::SMALL, font).max(super::steady::width_of(
         &said,
         ts::SMALL,
@@ -989,7 +994,9 @@ fn plugin_run_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
     ));
     let mut width = 11.0 + 5.0 + words_w;
     let mut chip = row![
-        container(glyph::icon(Glyph::Plug, theme::accent(), 11.0))
+        // Plugins' own mark (Settings → Plugins): the plug beside it is
+        // the language servers' setup.
+        container(glyph::icon(Glyph::Cube, theme::accent(), 11.0))
             .width(Length::Fixed(11.0))
             .height(Length::Fixed(11.0)),
         container(
