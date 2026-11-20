@@ -459,6 +459,10 @@ pub struct Checked {
     /// Another Clew window is setting Rust up or removing it: nothing
     /// else was looked at.
     pub(crate) elsewhere: bool,
+    /// What removing Clew's own Rust came to — not a check that ended
+    /// while it went, which read the removal's own lock as another
+    /// window's.
+    pub(crate) removal: bool,
 }
 
 impl Checked {
@@ -473,6 +477,7 @@ impl Checked {
             own_installed: clew_plugin::toolchain::managed_installed(data),
             removal_failed: None,
             elsewhere: false,
+            removal: false,
         }
     }
 
@@ -486,6 +491,7 @@ impl Checked {
             own_installed: false,
             removal_failed: None,
             elsewhere: true,
+            removal: false,
         }
     }
 
@@ -502,6 +508,7 @@ impl Checked {
             own_installed: false,
             removal_failed: None,
             elsewhere: false,
+            removal: false,
         }
     }
 }
@@ -875,6 +882,15 @@ fn withdrawn(data: &std::path::Path, id: &str, record: &Record) -> Option<&'stat
         Some(now) if !now.enabled => Some(WITHDRAWN[2]),
         Some(_) => None,
     }
+}
+
+/// Whether a run or build that ended with `outcome` read the list of
+/// plugins this window could not: past the check every run starts with
+/// (`withdrawn`), it reads now. Said of it, and noted in Settings, stood on
+/// after a run that worked.
+fn list_read_again<T>(plugins: &Plugins, outcome: &Result<T, Failure>) -> bool {
+    plugins.list_error.is_some()
+        && !matches!(outcome, Err(Failure::Stopped(why)) if why == WITHDRAWN[3])
 }
 
 /// Whether `failure` is a run refused because its approval no longer
@@ -1524,7 +1540,11 @@ impl App {
         // built again when next shown — unless a newer build of it runs.
         if matches!(&ran.outcome, Err(Failure::Stopped(why)) if why == clew_plugin::runtime::STOPPED_BY_USER)
         {
-            if let Some(entry) = self.proj.plugin_maps.get_mut(&map)
+            if let Some(entry) = self
+                .proj
+                .plugin_maps
+                .get_mut(&map)
+                .filter(|m| m.fingerprint == fingerprint)
                 && !entry.building
             {
                 entry.rev = u64::MAX;
@@ -2672,7 +2692,12 @@ impl App {
                 let Some(ran) = ran.lock().unwrap_or_else(|e| e.into_inner()).take() else {
                     return Task::none();
                 };
-                self.on_plugin_ran(id, title, again, fingerprint, ran)
+                let read = list_read_again(&self.plugins, &ran.outcome);
+                let shown = self.on_plugin_ran(id, title, again, fingerprint, ran);
+                match read {
+                    true => Task::batch([shown, self.reload_plugins()]),
+                    false => shown,
+                }
             }
             PluginMsg::RunAgain(again) => self.run_plugin(
                 &again.id,
@@ -3289,7 +3314,12 @@ impl App {
                 let Some(ran) = ran.lock().unwrap_or_else(|e| e.into_inner()).take() else {
                     return Task::none();
                 };
-                self.on_plugin_graph_built(map, rev, fingerprint, ran)
+                let read = list_read_again(&self.plugins, &ran.outcome);
+                let built = self.on_plugin_graph_built(map, rev, fingerprint, ran);
+                match read {
+                    true => Task::batch([built, self.reload_plugins()]),
+                    false => built,
+                }
             }
             PluginMsg::RebuildGraph => {
                 // What the last build gave, forgotten: the graph shown is
@@ -3314,6 +3344,11 @@ impl App {
             PluginMsg::CheckToolchain => self.check_toolchain(),
             PluginMsg::ToolchainChecked(checked) => {
                 if matches!(self.plugins.building, Building::SettingUp { .. }) {
+                    return Task::none();
+                }
+                // A check that ended while Clew's own Rust was being
+                // removed: the removal's own result follows.
+                if matches!(self.plugins.building, Building::Removing) && !checked.removal {
                     return Task::none();
                 }
                 // What it is is known when the other window is done; an
@@ -3455,7 +3490,10 @@ impl App {
                             // Not while another window sets Rust up or
                             // removes it: its row says so, and updates.
                             let Some(_held) = clew_plugin::toolchain::hold(&data) else {
-                                return Checked::elsewhere();
+                                return Checked {
+                                    removal: true,
+                                    ..Checked::elsewhere()
+                                };
                             };
                             let dir = clew_plugin::toolchain::managed_dir(&data);
                             let removed = std::fs::remove_dir_all(&dir);
@@ -3471,12 +3509,14 @@ impl App {
                                 own_installed: removal_failed.is_some(),
                                 removal_failed,
                                 elsewhere: false,
+                                removal: true,
                             }
                         })
                         .await
                         .unwrap_or_else(|_| Checked {
                             own_installed: true,
                             removal_failed: Some(tr!("the removal failed unexpectedly").into()),
+                            removal: true,
                             ..Checked::failed()
                         })
                     },

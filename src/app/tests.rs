@@ -41515,6 +41515,8 @@ fn an_unreadable_plugin_list_is_said_and_runs_and_deletes_nothing() {
     std::fs::write(saved.join("kept"), "1").unwrap();
     let list = clew_plugin::store::store_path(data.path());
     let good = std::fs::read(&list).unwrap();
+    let list_copy = data.path().join("plugins.toml.good");
+    std::fs::write(&list_copy, &good).unwrap();
     std::fs::write(&list, "[plugin.views\nthis is not TOML").unwrap();
 
     let reloaded = app.reload_plugins();
@@ -41612,6 +41614,30 @@ fn an_unreadable_plugin_list_is_said_and_runs_and_deletes_nothing() {
     assert!(app.plugins.list_error.is_none());
     assert!(app.failure_shown().is_none(), "said of it no more");
     let _ = app.close_settings();
+
+    // Unreadable again, then fixed with Settings never opened: the run that
+    // works reads the list again, and what was said of it goes.
+    std::fs::write(&list, "[plugin.views\nthis is not TOML").unwrap();
+    let reloaded = app.reload_plugins();
+    settle(&mut app, reloaded);
+    let refused = app.update(Message::Plugin(PluginMsg::Run {
+        id: "views".into(),
+        command: "say".into(),
+    }));
+    settle(&mut app, refused);
+    assert!(app.failure_shown().is_some());
+    std::fs::write(&list, std::fs::read(&list_copy).unwrap()).unwrap();
+    app.status.clear();
+    let ran = app.update(Message::Plugin(PluginMsg::Run {
+        id: "views".into(),
+        command: "say".into(),
+    }));
+    settle(&mut app, ran);
+    assert!(
+        app.plugins.list_error.is_none(),
+        "read again by the run that worked"
+    );
+    assert!(app.failure_shown().is_none());
     app.status.clear();
     let ran = app.update(Message::Plugin(PluginMsg::Run {
         id: "views".into(),
@@ -41891,6 +41917,23 @@ fn a_plugin_graph_refused_or_replaced_is_not_built_on() {
     assert!(!app.plugins.failing("views"));
     settle(&mut app, rebuilt);
     assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
+    // The older copy's build ends as stopped after the new one was built:
+    // the new graph is not asked for again.
+    let built_at = app.proj.plugin_maps[&id].rev;
+    let _ = app.update(Message::Plugin(PluginMsg::GraphBuilt {
+        stamp: app.stamp(),
+        map: id.clone(),
+        rev,
+        fingerprint: "an older copy".into(),
+        ran: Arc::new(std::sync::Mutex::new(Some(GraphRan {
+            outcome: Err(Failure::Stopped(
+                clew_plugin::runtime::STOPPED_BY_USER.into(),
+            )),
+            loaded: None,
+            log: Vec::new(),
+        }))),
+    }));
+    assert_eq!(app.proj.plugin_maps[&id].rev, built_at);
 }
 
 /// Another window set Rust up or removed Clew's own: a window that showed
@@ -41978,6 +42021,25 @@ fn rust_changed_in_another_window_is_waited_for() {
     );
     assert!(app.failure_notice.is_none(), "nothing failed");
 
+    // A check that ended while this window removed its Rust is not the
+    // removal's result, though it read the removal's lock as another's.
+    let waiting = std::mem::replace(&mut app.plugins.building, Building::Removing);
+    let _ = app.update(Message::Plugin(PluginMsg::ToolchainChecked(
+        crate::app::plugins::Checked {
+            found: Err(clew_plugin::toolchain::Missing {
+                why: clew_plugin::toolchain::Why::NoRust,
+                setup: None,
+                rustup: false,
+            }),
+            own_installed: false,
+            removal_failed: None,
+            elsewhere: true,
+            removal: false,
+        },
+    )));
+    assert!(matches!(app.plugins.building, Building::Removing));
+    app.plugins.building = waiting;
+
     // Check again and Remove meanwhile start nothing more.
     let again = app.update(Message::Plugin(PluginMsg::CheckToolchain));
     assert!(iced_test::runtime::task::into_stream(again).is_none());
@@ -42038,6 +42100,7 @@ fn settings_check_again_after_rust_is_set_up_outside_clew() {
         own_installed: false,
         removal_failed: None,
         elsewhere: false,
+        removal: false,
     })));
     {
         let mut page = iced_test::simulator(crate::ui::plugins_settings(&app));
@@ -42082,6 +42145,7 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
             own_installed,
             removal_failed: None,
             elsewhere: false,
+            removal: false,
         })));
     };
     checked(
@@ -42159,6 +42223,7 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
         own_installed: true,
         removal_failed: Some("permission denied".into()),
         elsewhere: false,
+        removal: false,
     })));
     assert!(says(
         &app,

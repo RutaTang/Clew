@@ -685,17 +685,25 @@ fn panic_message(stderr: &str) -> Option<String> {
     })
 }
 
+/// What of `text` is kept: cut past [`OUTPUT_CAP`], up to its last whole
+/// line — or, one line longer than all of it, its start rather than
+/// nothing, without a character cut partway.
+fn kept_output(text: &str, cut: bool) -> &str {
+    match cut {
+        true => text
+            .rsplit_once('\n')
+            .map_or(text.trim_end_matches('\u{FFFD}'), |(whole, _)| whole),
+        false => text,
+    }
+}
+
 /// Write what a call printed to the plugin's log; past [`OUTPUT_CAP`], the
 /// line cut partway is left out with the rest, and the log says so — it was
 /// cut mid-line with no word.
 fn forward_output(host: &dyn Host, level: Level, capture: &Capture) {
     let text = without_backtrace_hint(&capture.text());
     let cut = capture.dropped() > 0;
-    let text = match cut {
-        true => text.rsplit_once('\n').map_or("", |(whole, _)| whole),
-        false => text.as_str(),
-    };
-    let text = text.trim();
+    let text = kept_output(&text, cut).trim();
     if !text.is_empty() {
         host.log(level, text);
     }
@@ -1344,6 +1352,18 @@ mod tests {
             "no such file (at src/lib.rs:12:5)"
         );
         assert_eq!(panic_message("all fine"), None);
+    }
+
+    /// Output cut at the cap keeps its whole lines; one line longer than
+    /// the cap keeps its start, without the character cut partway.
+    #[test]
+    fn output_cut_at_the_cap_keeps_whole_lines_or_a_start() {
+        assert_eq!(kept_output("one\ntwo\nthr", true), "one\ntwo");
+        assert_eq!(kept_output("one\ntwo\nthr", false), "one\ntwo\nthr");
+        assert_eq!(
+            kept_output("{\"a\": 1, \"b\u{FFFD}", true),
+            "{\"a\": 1, \"b"
+        );
     }
 
     #[test]
