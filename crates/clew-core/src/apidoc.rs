@@ -348,6 +348,9 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     // and a class member follow OPPOSITE defaults, and judging both by the
     // member rule published every unexported top-level helper as public API.
     let exported = reexported_names(source, lang);
+    // A Python module that says what it exports (`__all__`) is taken at its
+    // word for its own names: the listed ones, and only those.
+    let python_all = (lang == Lang::Python).then(|| python_all(source)).flatten();
 
     // In index order, so a parent's verdict exists before its members'.
     let mut public: Vec<bool> = vec![false; n];
@@ -375,6 +378,9 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             // C++ access is section-based, so a member's own declaration line
             // says nothing about it; its type's `public:`/`private:` labels do.
             (Lang::Cpp, _) if member_of.is_some() => located[i].cpp_public.unwrap_or(true),
+            (Lang::Python, _) if parent[i].is_none() && python_all.is_some() => python_all
+                .as_ref()
+                .is_some_and(|all| all.contains(raws[i].name.as_str())),
             _ => {
                 is_public(&raws[i].signature, &raws[i].name, lang, member_of.is_some())
                     || (parent[i].is_none() && exported.contains(raws[i].name.as_str()))
@@ -917,6 +923,73 @@ struct PendingExport {
     /// Whether an unbalanced `{` in this statement opens something that still
     /// names exports on later lines (decided once, from the statement's head).
     continues: bool,
+}
+
+/// The names a Python module's `__all__` lists — what `from m import *`
+/// brings in, and the module's API by its own word — when it lists them
+/// as written strings (`__all__ = ["a", "b"]`, a tuple, `+=` more, over
+/// as many lines as it takes). `None` without one, or with one computed
+/// (`[f.__name__ for f in …]`): there the names say nothing, and the
+/// underscore rule stands.
+fn python_all(source: &str) -> Option<HashSet<String>> {
+    let mut names = HashSet::new();
+    let mut listed = false;
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        // At the module's top level only, as `__all__` means there.
+        let Some(rest) = line.strip_prefix("__all__") else {
+            continue;
+        };
+        let Some((target, value)) = rest.split_once('=') else {
+            continue;
+        };
+        let target = target.trim();
+        if !(target.is_empty() || target == "+" || target.starts_with(':')) {
+            continue;
+        }
+        // The whole value: until its brackets close, a few hundred lines at most.
+        let mut text = value.to_string();
+        let open = |t: &str| {
+            t.chars().filter(|c| matches!(c, '[' | '(')).count() as isize
+                - t.chars().filter(|c| matches!(c, ']' | ')')).count() as isize
+        };
+        let mut depth = open(&text);
+        let mut more = 0;
+        while depth > 0 && more < 500 {
+            let Some(next) = lines.next() else { break };
+            text.push('\n');
+            text.push_str(next);
+            depth += open(next);
+            more += 1;
+        }
+        let before = names.len();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '#' {
+                // A comment runs to its line's end.
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if c == '"' || c == '\'' {
+                let name: String = chars.by_ref().take_while(|&d| d != c).collect();
+                if !name.is_empty() {
+                    names.insert(name);
+                }
+            }
+        }
+        let empty = matches!(text.split('#').next().unwrap_or("").trim(), "[]" | "()");
+        if names.len() > before || empty {
+            listed = true;
+        } else {
+            // Computed: what it lists cannot be read here.
+            return None;
+        }
+    }
+    listed.then_some(names)
 }
 
 /// Names a JS/TS file exports through a separate statement rather than an
@@ -2218,6 +2291,37 @@ module.exports = {
             counted <= src.len(),
             "brace-counted {counted} bytes of a {}-byte file",
             src.len()
+        );
+    }
+
+    /// A Python module's `__all__` is its API by its own word: the names it
+    /// lists, an underscore's or not, and no others at the top level; a
+    /// listed class's members still by their names. Without one, or with
+    /// one computed, the underscore rule stands.
+    #[test]
+    fn a_python_modules_all_says_what_it_exports() {
+        let src = "__all__ = [\n    \"Cart\",  # the cart\n    '_make',\n]\n__all__ += (\"total\",)\n\n\
+                   class Cart:\n    def add(self):\n        pass\n    def _check(self):\n        pass\n\n\
+                   def _make():\n    pass\n\ndef total():\n    pass\n\ndef helper():\n    pass\n";
+        let items = build_file(src, "python");
+        assert!(find(&items, "Cart").public);
+        assert!(find(&items, "_make").public, "listed, underscore and all");
+        assert!(find(&items, "total").public, "added with +=");
+        assert!(!find(&items, "helper").public, "public by name, not listed");
+        let cart = find(&items, "Cart");
+        assert!(find(&cart.children, "add").public);
+        assert!(!find(&cart.children, "_check").public);
+
+        assert_eq!(python_all("x = 1\n"), None);
+        assert_eq!(python_all("__all__ = [f.__name__ for f in FNS]\n"), None);
+        assert_eq!(
+            python_all("__all__: list[str] = []\n"),
+            Some(HashSet::new())
+        );
+        assert_eq!(
+            python_all("def f():\n    __all__ = ['no']\n"),
+            None,
+            "a local of that name"
         );
     }
 

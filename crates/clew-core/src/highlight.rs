@@ -409,7 +409,7 @@ impl Lang {
     fn tags_parts(self) -> &'static [&'static str] {
         match self {
             Lang::Rust => &[RUST_TAGS],
-            Lang::Python => &[tree_sitter_python::TAGS_QUERY],
+            Lang::Python => &[tree_sitter_python::TAGS_QUERY, PYTHON_EXTRA_TAGS],
             Lang::JavaScript => &[tree_sitter_javascript::TAGS_QUERY, JS_EXTRA_TAGS],
             // The crate's bundled TAGS_QUERY only captures declaration-file
             // constructs (function_signature, method_signature, interface, …),
@@ -761,6 +761,18 @@ const JS_EXTRA_TAGS: &str = r#"
 (field_definition
   property: (property_identifier) @name
   value: [(arrow_function) (function_expression)]) @definition.method
+"#;
+
+/// Added to tree-sitter-python's own tags query, which has a module's
+/// assignments, its classes and its functions: a class's fields — a
+/// dataclass's, a pydantic or Django model's, an enum's members, each an
+/// assignment in the class's body. A model read in the outline showed its
+/// methods and none of what it holds.
+const PYTHON_EXTRA_TAGS: &str = r#"
+(class_definition
+  body: (block
+    (expression_statement
+      (assignment left: (identifier) @name) @definition.field)))
 "#;
 
 /// Added to tree-sitter-java's own tags query, which has no constructors: the

@@ -4234,6 +4234,37 @@ fn build_inner() -> B { B }
         );
     }
 
+    /// A Python class's fields — a dataclass's, a model's, an enum's
+    /// members — are its items, as a module's assignments are the module's;
+    /// a function's local and a method's assignment to `self` are not.
+    #[test]
+    fn python_class_fields_and_module_constants_are_outlined() {
+        let src = "MAX_RETRIES = 3\nlogger = make()\n\n\
+                   @dataclass\nclass Point:\n    x: float\n    y: float = 0.0\n    label = 'p'\n\n    \
+                   def norm(self):\n        total = self.x + self.y\n        self.cached = total\n        return total\n\n\
+                   class Colour(Enum):\n    RED = 1\n    GREEN = 2\n";
+        let symbols = extract(src, "python");
+        let seen: Vec<(&str, &str)> = symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("MAX_RETRIES", "constant"),
+                ("logger", "constant"),
+                ("Point", "class"),
+                ("x", "field"),
+                ("y", "field"),
+                ("label", "field"),
+                ("norm", "function"),
+                ("Colour", "class"),
+                ("RED", "field"),
+                ("GREEN", "field"),
+            ]
+        );
+    }
+
     #[test]
     fn rust_methods_know_their_container() {
         let src = "trait T {\n  fn provided(&self) {}\n  fn required(&self);\n}\nstruct S;\nimpl T for S {\n  fn required(&self) {}\n}\nimpl S {\n  fn inherent(&self) {}\n}\nfn free() {}\n";

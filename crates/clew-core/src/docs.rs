@@ -1041,12 +1041,12 @@ fn py_docstring(lines: &[&str], sig_line: usize) -> Option<String> {
                 work::add(1);
                 if let Some(e) = lines[j].find(q) {
                     buf.push(lines[j][..e].to_string());
-                    return non_empty(&dedent(&buf));
+                    return non_empty(&python_doc_markdown(&dedent(&buf)));
                 }
                 buf.push(lines[j].to_string());
                 j += 1;
             }
-            return non_empty(&dedent(&buf));
+            return non_empty(&python_doc_markdown(&dedent(&buf)));
         }
     }
     // A one-line single/double-quoted docstring.
@@ -1058,6 +1058,401 @@ fn py_docstring(lines: &[&str], sig_line: usize) -> Option<String> {
         }
     }
     None
+}
+
+/// Google style's section headings, as their line reads less its colon.
+const GOOGLE_SECTIONS: &[&str] = &[
+    "Args",
+    "Arguments",
+    "Parameters",
+    "Params",
+    "Keyword Args",
+    "Keyword Arguments",
+    "Kwargs",
+    "Other Parameters",
+    "Attributes",
+    "Raises",
+    "Exceptions",
+    "Warns",
+    "Returns",
+    "Return",
+    "Yields",
+    "Yield",
+    "Example",
+    "Examples",
+    "Note",
+    "Notes",
+    "Warning",
+    "Warnings",
+    "See Also",
+    "Todo",
+    "References",
+];
+
+/// NumPy style's section headings, each over a rule of dashes.
+const NUMPY_SECTIONS: &[&str] = &[
+    "Parameters",
+    "Other Parameters",
+    "Returns",
+    "Yields",
+    "Receives",
+    "Raises",
+    "Warns",
+    "Attributes",
+    "Methods",
+    "See Also",
+    "Notes",
+    "References",
+    "Examples",
+    "Warnings",
+];
+
+/// A Python docstring's sections as Markdown, as the Docs view and the
+/// cards render it: Google style's (`Args:` over indented `name (type):
+/// text` entries), NumPy style's (`Parameters` over a rule of dashes,
+/// `name : type` lines with their text indented under them) and Sphinx
+/// fields (`:param name: text`, `:returns:`, `:raises E:`) — each section a
+/// bold heading, each entry a bullet with its name in code, an example of
+/// `>>>` lines a block of Python. As written, an indented entry rendered as
+/// a code block and Sphinx's fields as one run-on paragraph. Prose is left
+/// as it is.
+pub fn python_doc_markdown(doc: &str) -> String {
+    let lines: Vec<&str> = doc.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let head = line.trim();
+        // Google: `Args:` alone on a line of its own, its body indented.
+        if indent_of(line) == 0
+            && let Some(name) = head
+                .strip_suffix(':')
+                .filter(|n| GOOGLE_SECTIONS.contains(n))
+        {
+            let mut end = i + 1;
+            while end < lines.len() && (lines[end].trim().is_empty() || indent_of(lines[end]) > 0) {
+                end += 1;
+            }
+            while end > i + 1 && lines[end - 1].trim().is_empty() {
+                end -= 1;
+            }
+            if end > i + 1 {
+                push_block(
+                    &mut out,
+                    doc_section(name, &dedent_lines(&lines[i + 1..end]), false),
+                );
+                i = end;
+                continue;
+            }
+        }
+        // NumPy: a heading over a rule of dashes, its body to the next one.
+        if indent_of(line) == 0
+            && NUMPY_SECTIONS.contains(&head)
+            && lines.get(i + 1).is_some_and(|l| is_rule(l))
+        {
+            let mut end = i + 2;
+            while end < lines.len() && !numpy_heading_at(&lines, end) {
+                end += 1;
+            }
+            let next = end;
+            while end > i + 2 && lines[end - 1].trim().is_empty() {
+                end -= 1;
+            }
+            push_block(
+                &mut out,
+                doc_section(head, &dedent_lines(&lines[i + 2..end]), true),
+            );
+            i = next;
+            continue;
+        }
+        // Sphinx: a run of `:field:` lines, each with its indented
+        // continuation.
+        if sphinx_field(head).is_some() {
+            let mut end = i;
+            let mut fields: Vec<(String, String)> = Vec::new();
+            while end < lines.len() {
+                let l = lines[end];
+                if let Some(field) = sphinx_field(l.trim()) {
+                    fields.push(field);
+                } else if indent_of(l) > 0 && !l.trim().is_empty() && !fields.is_empty() {
+                    let last = fields.last_mut().expect("a field before");
+                    last.1.push(' ');
+                    last.1.push_str(l.trim());
+                } else {
+                    break;
+                }
+                end += 1;
+            }
+            push_block(&mut out, sphinx_markdown(&fields));
+            i = end;
+            continue;
+        }
+        out.push(line.to_string());
+        i += 1;
+    }
+    let mut text = out.join("\n");
+    while text.contains("\n\n\n") {
+        text = text.replace("\n\n\n", "\n\n");
+    }
+    text.trim().to_string()
+}
+
+/// A line's leading whitespace, in chars.
+fn indent_of(line: &str) -> usize {
+    line.chars().take_while(|c| c.is_whitespace()).count()
+}
+
+/// A rule of dashes under a NumPy heading.
+fn is_rule(line: &str) -> bool {
+    let t = line.trim();
+    t.len() >= 3 && t.chars().all(|c| c == '-')
+}
+
+/// Whether a NumPy section's heading starts at `lines[at]`.
+fn numpy_heading_at(lines: &[&str], at: usize) -> bool {
+    indent_of(lines[at]) == 0
+        && NUMPY_SECTIONS.contains(&lines[at].trim())
+        && lines.get(at + 1).is_some_and(|l| is_rule(l))
+}
+
+/// `lines` less the indentation they all share.
+fn dedent_lines(lines: &[&str]) -> Vec<String> {
+    let common = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| indent_of(l))
+        .min()
+        .unwrap_or(0);
+    lines
+        .iter()
+        .map(|l| {
+            l.chars()
+                .skip(common)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+/// `block` set apart by blank lines from what is around it.
+fn push_block(out: &mut Vec<String>, block: Vec<String>) {
+    if out.last().is_some_and(|l| !l.trim().is_empty()) {
+        out.push(String::new());
+    }
+    out.extend(block);
+    out.push(String::new());
+}
+
+/// A section of `name` with its dedented `body`: a list of entries where
+/// the section lists them (NumPy's returns and yields too, a type over its
+/// text), a block of Python for doctest examples, else its paragraphs —
+/// never indented, which Markdown would show as code.
+fn doc_section(name: &str, body: &[String], numpy: bool) -> Vec<String> {
+    let mut out = vec![format!("**{name}**"), String::new()];
+    let lists = matches!(
+        name,
+        "Args"
+            | "Arguments"
+            | "Parameters"
+            | "Params"
+            | "Keyword Args"
+            | "Keyword Arguments"
+            | "Kwargs"
+            | "Other Parameters"
+            | "Attributes"
+            | "Raises"
+            | "Exceptions"
+            | "Warns"
+            | "Receives"
+            | "Methods"
+    ) || (numpy && matches!(name, "Returns" | "Yields"));
+    if lists {
+        // An entry starts unindented; what is indented under it is its text.
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for line in body {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if indent_of(line) == 0 || entries.is_empty() {
+                entries.push((line.trim().to_string(), String::new()));
+            } else if let Some(last) = entries.last_mut() {
+                if !last.1.is_empty() {
+                    last.1.push(' ');
+                }
+                last.1.push_str(line.trim());
+            }
+        }
+        for (head, more) in entries {
+            out.push(doc_entry(&head, &more, numpy));
+        }
+    } else if name.starts_with("Example") && body.iter().any(|l| l.trim_start().starts_with(">>>"))
+    {
+        out.push("```python".to_string());
+        out.extend(body.iter().cloned());
+        out.push("```".to_string());
+    } else {
+        out.extend(body.iter().map(|l| l.trim().to_string()));
+    }
+    out
+}
+
+/// One entry of a section as a bullet: `- `name` (type): text`. Google
+/// writes `name (type): text`; NumPy `name : type` over its text.
+fn doc_entry(head: &str, more: &str, numpy: bool) -> String {
+    let join = |a: &str, b: &str| match (a.is_empty(), b.is_empty()) {
+        (true, _) => b.to_string(),
+        (_, true) => a.to_string(),
+        _ => format!("{a} {b}"),
+    };
+    let (name, kind, text) = if numpy {
+        match head.split_once(" : ").or_else(|| head.split_once(": ")) {
+            Some((name, kind)) => (name.trim(), kind.trim(), more.to_string()),
+            None => (head.trim(), "", more.to_string()),
+        }
+    } else {
+        match head.split_once(':') {
+            Some((name, text)) => {
+                let (name, kind) = match name.split_once('(') {
+                    Some((n, k)) => (n.trim(), k.trim_end().trim_end_matches(')').trim()),
+                    None => (name.trim(), ""),
+                };
+                (name, kind, join(text.trim(), more))
+            }
+            None => (head.trim(), "", more.to_string()),
+        }
+    };
+    let mut out = format!("- `{name}`");
+    if !kind.is_empty() {
+        out.push_str(&format!(" ({kind})"));
+    }
+    if !text.is_empty() {
+        out.push_str(": ");
+        out.push_str(&text);
+    }
+    out
+}
+
+/// A Sphinx field (`:param int x: text`) as its role and words: the role
+/// with its argument (`param int x`), and the text after the closing colon.
+fn sphinx_field(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix(':')?;
+    let (role, text) = rest.split_once(':')?;
+    let word = role.split_whitespace().next()?;
+    matches!(
+        word,
+        "param"
+            | "parameter"
+            | "arg"
+            | "argument"
+            | "key"
+            | "keyword"
+            | "type"
+            | "returns"
+            | "return"
+            | "rtype"
+            | "raises"
+            | "raise"
+            | "except"
+            | "exception"
+            | "var"
+            | "ivar"
+            | "cvar"
+            | "vartype"
+            | "yields"
+            | "yield"
+    )
+    .then(|| (role.trim().to_string(), text.trim().to_string()))
+}
+
+/// Sphinx fields as sections: the parameters (with the types `:type:`
+/// gives them), what is returned or yielded, what is raised, the
+/// attributes.
+fn sphinx_markdown(fields: &[(String, String)]) -> Vec<String> {
+    let mut types: HashMap<String, String> = HashMap::new();
+    let mut rtype = String::new();
+    for (role, text) in fields {
+        let mut words = role.split_whitespace();
+        match (words.next(), words.next_back()) {
+            (Some("type" | "vartype"), Some(name)) => {
+                types.insert(name.to_string(), text.clone());
+            }
+            (Some("rtype"), _) => rtype = text.clone(),
+            _ => {}
+        }
+    }
+    let mut params: Vec<String> = Vec::new();
+    let mut attrs: Vec<String> = Vec::new();
+    let mut raises: Vec<String> = Vec::new();
+    let mut returns: Vec<String> = Vec::new();
+    for (role, text) in fields {
+        let words: Vec<&str> = role.split_whitespace().collect();
+        let entry = |name: &str, kind: &str| {
+            let kind = if kind.is_empty() {
+                types.get(name).map(String::as_str).unwrap_or("")
+            } else {
+                kind
+            };
+            doc_entry(
+                &if kind.is_empty() {
+                    format!("{name}: {text}")
+                } else {
+                    format!("{name} ({kind}): {text}")
+                },
+                "",
+                false,
+            )
+        };
+        let name = words.last().copied().unwrap_or("");
+        let kind = if words.len() > 2 {
+            words[1..words.len() - 1].join(" ")
+        } else {
+            String::new()
+        };
+        match words.first().copied() {
+            Some("param" | "parameter" | "arg" | "argument" | "key" | "keyword")
+                if words.len() > 1 =>
+            {
+                params.push(entry(name, &kind));
+            }
+            Some("var" | "ivar" | "cvar") if words.len() > 1 => attrs.push(entry(name, &kind)),
+            Some("raises" | "raise" | "except" | "exception") => raises.push(doc_entry(
+                &format!(
+                    "{}: {text}",
+                    words.get(1..).map(|w| w.join(" ")).unwrap_or_default()
+                ),
+                "",
+                false,
+            )),
+            Some("returns" | "return" | "yields" | "yield") => returns.push(text.clone()),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    let mut section = |name: &str, items: Vec<String>| {
+        if items.is_empty() {
+            return;
+        }
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+        out.push(format!("**{name}**"));
+        out.push(String::new());
+        out.extend(items);
+    };
+    section("Parameters", params);
+    if !returns.is_empty() || !rtype.is_empty() {
+        let text = returns.join(" ");
+        let line = match (rtype.is_empty(), text.is_empty()) {
+            (true, _) => text,
+            (false, true) => format!("`{rtype}`"),
+            (false, false) => format!("`{rtype}`: {text}"),
+        };
+        section("Returns", vec![line]);
+    }
+    section("Raises", raises);
+    section("Attributes", attrs);
+    out
 }
 
 /// Strip the common leading indentation from a docstring's lines.
@@ -1326,6 +1721,51 @@ def request(
     }
 
     #[test]
+    fn google_docstring_sections_read_as_markdown() {
+        let doc = "Move the cart.\n\nArgs:\n    cart (Cart): the cart to move.\n    to: where it goes,\n        a place name.\n\nReturns:\n    bool: whether it moved,\n    once.\n\nRaises:\n    ValueError: if `to` is empty.\n\nExample:\n    >>> move(c, \"home\")\n    True\n\nNote:\n    Slow on\n    large carts.";
+        assert_eq!(
+            python_doc_markdown(doc),
+            "Move the cart.\n\n**Args**\n\n- `cart` (Cart): the cart to move.\n- `to`: where it goes, a place name.\n\n\
+             **Returns**\n\nbool: whether it moved,\nonce.\n\n**Raises**\n\n- `ValueError`: if `to` is empty.\n\n\
+             **Example**\n\n```python\n>>> move(c, \"home\")\nTrue\n```\n\n**Note**\n\nSlow on\nlarge carts."
+        );
+    }
+
+    #[test]
+    fn numpy_docstring_sections_read_as_markdown() {
+        let doc = "Scale a vector.\n\nParameters\n----------\nv : array_like\n    The vector.\nk : float, optional\n    The factor,\n    1 by default.\n\nReturns\n-------\nndarray\n    The scaled vector.";
+        assert_eq!(
+            python_doc_markdown(doc),
+            "Scale a vector.\n\n**Parameters**\n\n- `v` (array_like): The vector.\n- `k` (float, optional): The factor, 1 by default.\n\n\
+             **Returns**\n\n- `ndarray`: The scaled vector."
+        );
+    }
+
+    #[test]
+    fn sphinx_fields_read_as_markdown() {
+        let doc = "Open a file.\n\n:param path: where it is.\n:type path: str\n:param int mode: how,\n    as os.open takes it.\n:returns: the handle.\n:rtype: File\n:raises OSError: if it cannot.";
+        assert_eq!(
+            python_doc_markdown(doc),
+            "Open a file.\n\n**Parameters**\n\n- `path` (str): where it is.\n- `mode` (int): how, as os.open takes it.\n\n\
+             **Returns**\n\n`File`: the handle.\n\n**Raises**\n\n- `OSError`: if it cannot."
+        );
+    }
+
+    /// Prose, a word ending in a colon that names no section, and a heading
+    /// with nothing under it are left as they are.
+    #[test]
+    fn plain_docstrings_are_left_as_they_are() {
+        for doc in [
+            "Just a summary.",
+            "Summary.\n\nMore words: here.\n\n- a list\n- of things",
+            "Summary.\n\nNote:",
+            "Summary.\n\nCaveats:\n    not a section.",
+        ] {
+            assert_eq!(python_doc_markdown(doc), doc, "{doc:?}");
+        }
+    }
+
+    #[test]
     fn python_docstring_with_a_summary_on_the_opening_line_is_dedented() {
         // PEP 257's layout: the summary follows the opening quotes, so that line
         // has no indent. Counted in, it made the common indent 0, and the body
@@ -1333,7 +1773,7 @@ def request(
         let src = "def f(x):\n    \"\"\"Return x doubled.\n\n    Args:\n        x: the value.\n    \"\"\"\n    return 2 * x\n";
         let docs = docs_of(src, "python");
         let d = docs.values().next().expect("a docstring");
-        assert_eq!(d, "Return x doubled.\n\nArgs:\n    x: the value.");
+        assert_eq!(d, "Return x doubled.\n\n**Args**\n\n- `x`: the value.");
     }
 
     #[test]
