@@ -156,6 +156,21 @@ pub(crate) enum PluginMapStatus {
     Built,
 }
 
+/// Why the graph picked last in Project Graphs is not among them now, for
+/// the note that says so where it stood: it went with no word, and the
+/// first graph stood in its place as if picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HiddenGraph {
+    /// Its plugin is turned off; on again, the graph is back.
+    TurnedOff {
+        plugin_id: String,
+        plugin: String,
+        graph: String,
+    },
+    /// Its plugin, as installed now, no longer adds it.
+    Dropped { plugin: String },
+}
+
 /// The map id of plugin `plugin`'s graph `graph`, as Project Graphs keeps
 /// it.
 pub(crate) fn map_id(plugin: &str, graph: &str) -> String {
@@ -637,6 +652,9 @@ pub enum PluginMsg {
     },
     /// Build the plugin graph shown again, whatever came of the last build.
     RebuildGraph,
+    /// Project Graphs: the note on a graph no longer offered, read; the
+    /// graph shown in its place is the one kept.
+    ForgetHiddenGraph,
     /// Settings → Plugins: whether plugins can be built here was checked.
     ToolchainChecked(Checked),
     /// Settings: look again whether plugins can be built — after the user
@@ -734,6 +752,17 @@ fn plugin_step_title(tool: &str, done: bool) -> String {
     .to_string()
 }
 
+/// A plugin step its turn ended before it was answered: said as one that
+/// failed is (`finish_plugin_step`), not as one still going.
+pub(crate) fn plugin_step_cut_short(title: &str) -> String {
+    // Waiting at its card it reads without the "…": it is not going.
+    let title = title.trim_end_matches('…');
+    if title == plugin_step_title("plugin_install", false).trim_end_matches('…') {
+        return tr!("The plugin was not installed").to_string();
+    }
+    title.to_string()
+}
+
 /// The data folder, or why there is none.
 fn data() -> Result<PathBuf, String> {
     clew_core::lsp::store::data_root().ok_or_else(|| tr!("Clew has no data folder").to_string())
@@ -792,7 +821,50 @@ impl App {
         }
         // The graphs offered follow the plugins: one turned off or removed
         // takes its own away, one installed brings its own.
-        self.compose_maps()
+        let shown = |app: &App| {
+            app.selected_map_index()
+                .and_then(|at| app.proj.maps.get(at))
+                .cloned()
+        };
+        let open = self.proj.overlay == Some(Overlay::ProjectMaps);
+        let before = open.then(|| shown(self));
+        let composed = self.compose_maps();
+        // Drawn as it is now: the graph of a plugin turned off stood drawn
+        // under the title of the one that took its place, and a plugin's
+        // new copy never built the graph it shows.
+        let relayout = match open && Some(shown(self)) != before {
+            true => {
+                self.proj.graph_pick = None;
+                self.refresh_graph_layout()
+            }
+            false => Task::none(),
+        };
+        Task::batch([composed, relayout, self.ensure_plugin_map()])
+    }
+
+    /// The plugin graph picked last in Project Graphs, if it is not offered
+    /// now, and why. `None` while it is offered, or before the project's
+    /// graphs are read, or when its plugin was removed: removing said its
+    /// graphs go.
+    pub(crate) fn hidden_plugin_graph(&self) -> Option<HiddenGraph> {
+        let id = self.proj.maps_selected.as_deref()?;
+        if self.proj.maps.iter().any(|m| m.id == id) {
+            return None;
+        }
+        let (plugin, graph) = map_of(id)?;
+        let installed = self.plugins.get(plugin)?;
+        match installed.manifest.graph(graph) {
+            None => Some(HiddenGraph::Dropped {
+                plugin: installed.name(),
+            }),
+            Some(decl) if !installed.record.enabled => Some(HiddenGraph::TurnedOff {
+                plugin_id: installed.id.clone(),
+                plugin: installed.name(),
+                graph: decl.title_in(crate::i18n::current().code()).to_string(),
+            }),
+            // On, and adding it: offered once the project's are read.
+            Some(_) => None,
+        }
     }
 
     /// The graphs the plugins on now add: each plugin with its declaration.
@@ -2557,6 +2629,14 @@ impl App {
                     entry.rev = u64::MAX;
                 }
                 self.ensure_plugin_map()
+            }
+            PluginMsg::ForgetHiddenGraph => {
+                // What is shown stays: the first graph, picked now.
+                self.proj.maps_selected = self
+                    .selected_map_index()
+                    .and_then(|at| self.proj.maps.get(at))
+                    .map(|m| m.id.clone());
+                Task::none()
             }
             PluginMsg::CheckToolchain => self.check_toolchain(),
             PluginMsg::ToolchainChecked(checked) => {

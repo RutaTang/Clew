@@ -325,6 +325,12 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
             crate::Overlay::ProjectMaps => project_maps_body(app),
         }
     };
+    // Over the graph or list shown in its place: what became of the graph
+    // picked last, in either view.
+    let body = match hidden_graph_note(app).filter(|_| overlay == crate::Overlay::ProjectMaps) {
+        Some(note) => column![container(note).padding([6, 8]), body].into(),
+        None => body,
+    };
     // The node picked: what it is and where, and the way into it.
     let picked = app.proj.graph_pick.as_ref().filter(|_| app.graph_mode).map(
         |pick| -> Element<'_, Message> {
@@ -628,6 +634,73 @@ fn plugin_graph_failure(
     .spacing(8)
     .align_y(iced::Center)
     .into()
+}
+
+/// The graph picked last in Project Graphs, when its plugin no longer
+/// offers it: why, the way back while there is one (its plugin turned off),
+/// and a × that keeps the graph shown in its place. It went with no word,
+/// the first graph drawn as if picked.
+pub(crate) fn hidden_graph_note(app: &App) -> Option<Element<'static, Message>> {
+    use crate::app::plugins::{HiddenGraph, PluginMsg};
+    let hidden = app.hidden_plugin_graph()?;
+    let (said, item, turn_on) = match hidden {
+        HiddenGraph::TurnedOff {
+            plugin_id,
+            plugin,
+            graph,
+        } => (
+            tr!(
+                "“{graph}” is hidden: the plugin {plugin} is turned off.",
+                graph = graph,
+                plugin = plugin
+            ),
+            graph,
+            Some((plugin, plugin_id)),
+        ),
+        HiddenGraph::Dropped { plugin } => (
+            tr!(
+                "The graph picked last is gone: the plugin {plugin} no longer adds it.",
+                plugin = plugin
+            ),
+            plugin,
+            None,
+        ),
+    };
+    let turn_on = turn_on.map(|(plugin, id)| {
+        button(text(tr!("Turn on")).size(ts::SMALL))
+            .style(theme::secondary_button)
+            .padding([3, 10])
+            .on_press(super::heard::said_to(
+                tr!("Turn on"),
+                &plugin,
+                Message::Plugin(PluginMsg::SetEnabled(id, true)),
+            ))
+    });
+    let dismiss = button(crate::glyph::icon(
+        crate::glyph::Glyph::Close,
+        theme::dim(),
+        10.0,
+    ))
+    .style(theme::toolbar_button)
+    .padding([4, 6])
+    .on_press(super::heard::said_to(
+        tr!("Dismiss"),
+        &item,
+        Message::Plugin(PluginMsg::ForgetHiddenGraph),
+    ));
+    Some(
+        row![text(said).size(ts::CAPTION).color(theme::fg()).width(Fill),]
+            .extend(turn_on.map(Into::into))
+            .push(super::toolbar::tip_at(
+                dismiss,
+                tr!("Dismiss"),
+                None,
+                iced::widget::tooltip::Position::Bottom,
+            ))
+            .spacing(8)
+            .align_y(iced::Center)
+            .into(),
+    )
 }
 
 /// The node-link map: a force-directed canvas plus a legend.

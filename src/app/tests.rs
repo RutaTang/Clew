@@ -39122,6 +39122,139 @@ pub(crate) fn pending_plugin_install(
     }
 }
 
+/// Ask's plugin steps stand as they are, as its other steps do: running
+/// while the tool works ("Building a plugin…"), done in the past ("Read the
+/// plugin guide"), failed without the "…" of one still going, waiting at an
+/// install card, not installed when declined — and, the turn stopped, its
+/// card taken away and its steps ended as failed, not "…" beside a ✕.
+#[test]
+fn asks_plugin_steps_say_where_they_stand() {
+    use crate::app::model::StepState;
+    use crate::app::plugins::PluginMsg;
+    let data = clew_core::testutil::TempDir::new("plugin-ask-steps");
+    let _env = data_dir_override(data.path());
+    let mut app = scanned_app("plugin-ask-steps");
+    let stream = 41;
+    app.proj.ask_turns.push(AskTurn {
+        stream,
+        question: "make me a plugin".into(),
+        spoken: false,
+        answer_md: String::new(),
+        answer: Vec::new(),
+        settled: 0,
+        draft_from: None,
+        sources: Vec::new(),
+        steps: Vec::new(),
+        streaming: true,
+        extras: Default::default(),
+    });
+    app.proj.link.agent_stream = Some(stream);
+    let steps = |app: &App| -> Vec<(String, StepState)> {
+        app.proj
+            .ask_turns
+            .iter()
+            .find(|t| t.stream == stream)
+            .unwrap()
+            .steps
+            .iter()
+            .map(|s| (s.title.clone(), s.state))
+            .collect()
+    };
+    let step = |title: &str, state: StepState| (title.to_string(), state);
+
+    // The guide: running, then read.
+    let task = app.on_plugin_tool(stream, 1, "plugin_guide".into(), serde_json::json!({}));
+    assert_eq!(
+        steps(&app),
+        [step("Reading the plugin guide…", StepState::Running)]
+    );
+    settle(&mut app, task);
+    assert_eq!(
+        steps(&app),
+        [step("Read the plugin guide", StepState::Done)]
+    );
+
+    // A build of a plugin that is not there: failed, not "Built a plugin".
+    let task = app.on_plugin_tool(
+        stream,
+        2,
+        "plugin_build".into(),
+        serde_json::json!({"plugin": "no-such-plugin"}),
+    );
+    assert_eq!(
+        steps(&app)[1],
+        step("Building a plugin…", StepState::Running)
+    );
+    settle(&mut app, task);
+    assert_eq!(steps(&app)[1], step("Building a plugin", StepState::Failed));
+
+    // An install: waiting at its card while the user reads it.
+    let bytes = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/clew-plugin/fixtures/views.wasm"),
+    )
+    .unwrap();
+    let built = || clew_plugin::build::Built {
+        bytes: bytes.clone(),
+        inspected: clew_plugin::inspect(&bytes).unwrap(),
+        artifact: PathBuf::from("views.wasm"),
+        warnings: Vec::new(),
+    };
+    let offer = |app: &mut App, call: u64| {
+        // The tool's own task (a real install request) is not run: its
+        // answer is given here.
+        let _ = app.on_plugin_tool(stream, call, "plugin_install".into(), serde_json::json!({}));
+        let asked = app.update(Message::Plugin(PluginMsg::ToolAnswered {
+            stream,
+            call,
+            tool: "plugin_install".into(),
+            answer: Arc::new(std::sync::Mutex::new(Some(
+                clew_plugin::tools::Step::Install {
+                    built: Box::new(built()),
+                },
+            ))),
+        }));
+        settle(app, asked);
+    };
+    offer(&mut app, 3);
+    assert_eq!(
+        steps(&app)[2],
+        step("Asking to install a plugin", StepState::Waiting)
+    );
+    assert_eq!(app.plugins.install.len(), 1);
+    // Declined: not installed, said so.
+    let number = app.plugins.install.asked().unwrap();
+    let _ = app.update(Message::Plugin(PluginMsg::InstallDismissed(number)));
+    assert_eq!(
+        steps(&app)[2],
+        step("The plugin was not installed", StepState::Failed)
+    );
+    assert_eq!(app.plugins.install.len(), 0);
+
+    // Asked again, and the turn stopped while the card waits: the card goes
+    // with the turn, and its step ends as not installed.
+    offer(&mut app, 4);
+    assert_eq!(app.plugins.install.len(), 1);
+    let building = app.on_plugin_tool(
+        stream,
+        5,
+        "plugin_build".into(),
+        serde_json::json!({"plugin": "no-such-plugin"}),
+    );
+    let stopped = app.update(Message::Ask(AskMsg::Stop));
+    assert_eq!(app.plugins.install.len(), 0, "its card went with the turn");
+    assert_eq!(
+        &steps(&app)[3..],
+        [
+            step("The plugin was not installed", StepState::Failed),
+            step("Building a plugin", StepState::Failed),
+        ]
+    );
+    settle(&mut app, stopped);
+    // The build's own answer, coming after: the step stays as it ended.
+    settle(&mut app, building);
+    assert_eq!(steps(&app)[4].1, StepState::Failed);
+}
+
 /// An Ask turn stopped takes its install card with it: Install pressed
 /// after the turn ended installed for an agent no longer asking. Another
 /// turn's card stays.
@@ -40424,6 +40557,176 @@ fn a_plugin_page_draws_every_block_and_its_rows_open_the_code() {
 /// built by the plugin when it is shown, drawn like any other, built again
 /// on Try again after a failure, and offered no more once the plugin is
 /// turned off.
+/// A plugin turned off while its graph is the one picked: the graph it
+/// drew goes from the screen (it stood drawn under the title of the one
+/// that took its place), a note says where it went and turns it back on,
+/// and on again it is drawn — built, not waiting. A × keeps the graph shown
+/// instead; a graph its plugin no longer adds says so, with no way back to
+/// offer; a removed plugin's says nothing (removing said its graphs go).
+#[test]
+fn a_plugin_graph_turned_off_while_picked_says_so_and_comes_back() {
+    use crate::app::plugins::{HiddenGraph, PluginMapStatus, PluginMsg};
+    let data = clew_core::testutil::TempDir::new("plugin-graph-off");
+    let _env = data_dir_override(data.path());
+    let mut app = scanned_app("plugin-graph-off");
+    let bytes = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/clew-plugin/fixtures/views.wasm"),
+    )
+    .unwrap();
+    let inspected = clew_plugin::inspect(&bytes).unwrap();
+    clew_plugin::store::install(
+        data.path(),
+        &bytes,
+        &inspected,
+        clew_plugin::store::Origin::Ask,
+    )
+    .unwrap();
+    let reloaded = app.reload_plugins();
+    settle(&mut app, reloaded);
+    let opened = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
+    settle(&mut app, opened);
+    let id = crate::app::plugins::map_id("views", "pair");
+    let picked = app.update(Message::Graph(GraphMsg::SelectMap(id.clone())));
+    settle(&mut app, picked);
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
+    let drawn = |app: &App| -> Vec<String> {
+        app.proj
+            .graph_layout
+            .as_ref()
+            .map(|l| l.nodes.iter().map(|n| n.label.clone()).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(drawn(&app), ["a", "b"], "the plugin's graph is drawn");
+    app.proj.graph_pick = Some(crate::app::model::GraphPick {
+        node: 0,
+        label: "a".into(),
+        file: PathBuf::from("a.rs"),
+        open: Box::new(Message::Noop),
+    });
+    assert_eq!(app.hidden_plugin_graph(), None);
+
+    let set = |app: &mut App, on: bool| {
+        let task = app.update(Message::Plugin(PluginMsg::SetEnabled("views".into(), on)));
+        settle(app, task);
+    };
+    set(&mut app, false);
+    assert!(!app.proj.maps.iter().any(|m| m.id == id));
+    assert_ne!(drawn(&app), ["a", "b"], "its graph is not drawn on");
+    assert!(app.proj.graph_pick.is_none(), "nor its node picked");
+    assert_eq!(
+        app.hidden_plugin_graph(),
+        Some(HiddenGraph::TurnedOff {
+            plugin_id: "views".into(),
+            plugin: "Views".into(),
+            graph: "A pair".into(),
+        })
+    );
+    // Said over either view, with its way back and its ×.
+    let note = "“A pair” is hidden: the plugin Views is turned off.";
+    for list in [false, true] {
+        app.graph_mode = !list;
+        let view = || crate::ui::project_graph_modal(&app, Overlay::ProjectMaps);
+        assert!(
+            iced_test::simulator(view()).find(note).is_ok(),
+            "list: {list}"
+        );
+        let (targets, _) = crate::ui::heard::gather_all_of(view);
+        assert!(
+            targets.iter().any(|t| t.shown == "Turn on: Views"
+                && matches!(&t.message, Message::Plugin(PluginMsg::SetEnabled(p, true)) if p == "views")),
+            "{:?}",
+            targets.iter().map(|t| &t.shown).collect::<Vec<_>>()
+        );
+        assert!(targets.iter().any(|t| t.shown == "Dismiss: A pair"
+            && matches!(t.message, Message::Plugin(PluginMsg::ForgetHiddenGraph))));
+    }
+
+    // Turned on from the note: back, picked, drawn as built.
+    set(&mut app, true);
+    assert_eq!(app.hidden_plugin_graph(), None);
+    let at = app.selected_map_index().unwrap();
+    assert_eq!(app.proj.maps[at].id, id, "the graph picked is back");
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
+    assert_eq!(drawn(&app), ["a", "b"]);
+
+    // A new copy of the plugin while its graph is shown: built by it, not
+    // left "Building…" until picked again.
+    app.proj.plugin_maps.get_mut(&id).unwrap().fingerprint = "an older copy".into();
+    let reloaded = app.reload_plugins();
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Building));
+    settle(&mut app, reloaded);
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
+    assert_eq!(drawn(&app), ["a", "b"]);
+
+    // Off again, and the note dismissed: the graph shown is the one kept,
+    // and the note goes.
+    set(&mut app, false);
+    let shown_now = app
+        .selected_map_index()
+        .and_then(|at| app.proj.maps.get(at))
+        .map(|m| m.id.clone());
+    let dismissed = app.update(Message::Plugin(PluginMsg::ForgetHiddenGraph));
+    settle(&mut app, dismissed);
+    assert_eq!(app.hidden_plugin_graph(), None);
+    assert_eq!(app.proj.maps_selected, shown_now);
+    assert!(
+        iced_test::simulator(crate::ui::project_graph_modal(&app, Overlay::ProjectMaps))
+            .find(note)
+            .is_err()
+    );
+
+    // On, and adding the graph picked no more: said, with no Turn on.
+    set(&mut app, true);
+    app.proj.maps_selected = Some(crate::app::plugins::map_id("views", "gone"));
+    assert_eq!(
+        app.hidden_plugin_graph(),
+        Some(HiddenGraph::Dropped {
+            plugin: "Views".into()
+        })
+    );
+    let view = || crate::ui::project_graph_modal(&app, Overlay::ProjectMaps);
+    assert!(
+        iced_test::simulator(view())
+            .find("The graph picked last is gone: the plugin Views no longer adds it.")
+            .is_ok()
+    );
+    let (targets, _) = crate::ui::heard::gather_all_of(view);
+    assert!(!targets.iter().any(|t| t.shown.starts_with("Turn on")));
+    // A removed plugin's: nothing to say.
+    app.proj.maps_selected = Some(crate::app::plugins::map_id("gone", "pair"));
+    assert_eq!(app.hidden_plugin_graph(), None);
+}
+
+/// Picking another graph lets go of the node picked on the one before: its
+/// name and Open stood over the graph picked next.
+#[test]
+fn picking_another_project_graph_lets_go_of_the_node_picked() {
+    let mut app = scanned_app("graph-pick-other");
+    app.proj.maps = Arc::new(vec![
+        clew_protocol::ProjectMap {
+            id: "one".into(),
+            title: "One".into(),
+            ..Default::default()
+        },
+        clew_protocol::ProjectMap {
+            id: "two".into(),
+            title: "Two".into(),
+            ..Default::default()
+        },
+    ]);
+    let pick = || crate::app::model::GraphPick {
+        node: 0,
+        label: "a".into(),
+        file: PathBuf::from("a.rs"),
+        open: Box::new(Message::Noop),
+    };
+    app.proj.graph_pick = Some(pick());
+    let _ = app.update(Message::Graph(GraphMsg::SelectMap("one".into())));
+    assert!(app.proj.graph_pick.is_some(), "the same graph keeps it");
+    let _ = app.update(Message::Graph(GraphMsg::SelectMap("two".into())));
+    assert!(app.proj.graph_pick.is_none());
+}
+
 #[test]
 fn a_plugins_graph_is_built_when_shown_in_project_graphs() {
     use crate::app::plugins::{PluginMapStatus, PluginMsg};

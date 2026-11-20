@@ -43,7 +43,7 @@ While a command runs, the status bar shows it, with how far it has come when the
 |---|---|---|
 | **Commands** | The command palette, voice and the agent's `run_command`. A command marked `where = "code"` also appears in the code's right-click menu and is told the file, the line and the selection. | now |
 | **Views** | What a command shows: headings, Markdown, lists that open code, trees, tables, facts, code, notices. Clew draws them, so they follow the theme, the language, the keyboard ring, jump badges and voice. | now |
-| **Graphs** | In Project Graphs, beside Clew's own: built when shown, and again after the project changes. | now |
+| **Graphs** | In Project Graphs, beside Clew's own: built when shown, and again after the project changes. Turn its plugin off while its graph is picked and Project Graphs says so where it was, with **Turn on** to bring it back. | now |
 | **Checks** | Findings in the code (a mark in the gutter, a note in the margin) and in Weak Spots. | later |
 | **Ask tools** | A tool your Ask agent may call. | later |
 | **Settings** | The plugin's own options, on its page in Settings → Plugins. | later |

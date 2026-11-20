@@ -2788,6 +2788,15 @@ impl App {
             GraphMsg::ProjectCallsBuilt { graph, .. } => self.on_project_calls_built(graph),
             GraphMsg::MapsBuilt { rev, maps, .. } => self.on_maps_built(rev, maps),
             GraphMsg::SelectMap(id) => {
+                // A node picked on another graph is not on this one: its
+                // name and Open stood over the graph picked next.
+                let shown = self
+                    .selected_map_index()
+                    .and_then(|at| self.proj.maps.get(at))
+                    .is_some_and(|m| m.id == id);
+                if !shown {
+                    self.proj.graph_pick = None;
+                }
                 self.proj.maps_selected = Some(id);
                 let built = self.ensure_plugin_map();
                 Task::batch([built, self.refresh_graph_layout()])

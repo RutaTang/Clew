@@ -904,6 +904,10 @@ impl App {
             for step in &mut turn.steps {
                 if matches!(step.state, StepState::Running | StepState::Waiting) {
                     step.state = StepState::Failed;
+                    // Said as ended: "Building a plugin…" stood beside its ✕.
+                    if step.tool == "plugin" {
+                        step.title = crate::app::plugins::plugin_step_cut_short(&step.title);
+                    }
                 }
             }
         }
@@ -1693,6 +1697,10 @@ impl App {
             for step in &mut turn.steps {
                 if matches!(step.state, StepState::Running | StepState::Waiting) {
                     step.state = StepState::Failed;
+                    // Said as ended: "Building a plugin…" stood beside its ✕.
+                    if step.tool == "plugin" {
+                        step.title = crate::app::plugins::plugin_step_cut_short(&step.title);
+                    }
                 }
             }
             let note = match &result {
