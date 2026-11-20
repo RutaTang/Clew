@@ -4170,6 +4170,7 @@ fn escape_names_the_topmost_overlay() {
 
     app.proj.hover = Some(crate::HoverState {
         text: Some("fn line_1()".into()),
+        prepared: Vec::new(),
         ..hover_at(10.0, 10.0)
     });
     assert!(matches!(
@@ -4232,6 +4233,7 @@ fn hover_at(x: f32, y: f32) -> crate::HoverState {
         x,
         y,
         text: None,
+        prepared: Vec::new(),
         summary: None,
         diagnostic: None,
     }
@@ -4809,6 +4811,7 @@ fn a_hover_peek_stays_off_the_panel_under_the_code() {
     let doc = "class Decimal(value='0', context=None)\n".repeat(6);
     app.proj.hover = Some(crate::HoverState {
         text: Some(doc),
+        prepared: Vec::new(),
         ..hover_at(300.0, panel_top - 30.0)
     });
     let mut sim = sim_of(&app);
@@ -7211,6 +7214,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
         x: 10.0,
         y: 10.0,
         text: Some("fn origin()".into()),
+        prepared: Vec::new(),
         summary: None,
         diagnostic: None,
     });

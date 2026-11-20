@@ -284,6 +284,7 @@ fn python_source_index(s: &PythonSource) -> usize {
         PythonSource::LspToml => 2,
         PythonSource::ProjectVenv => 3,
         PythonSource::Activated => 4,
+        PythonSource::Managed(_) => 5,
     }
 }
 
@@ -408,6 +409,7 @@ fn python_environments() -> Vec<PythonEnvironments> {
         PythonSource::LspToml,
         PythonSource::ProjectVenv,
         PythonSource::Activated,
+        PythonSource::Managed(PythonEnvKind::Poetry),
     ]
     .into_iter()
     .map(|source| PythonEnvironments {

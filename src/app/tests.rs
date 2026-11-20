@@ -1588,6 +1588,7 @@ fn a_file_loaded_into_a_pane_closes_the_peek_over_the_last() {
         x: 0.0,
         y: 0.0,
         text: Some("pub fn origin()".into()),
+        prepared: Vec::new(),
         summary: None,
         diagnostic: None,
     });
@@ -5474,6 +5475,7 @@ async fn a_ready_language_server_answers_a_hover_the_peek_only_names() {
             line: 2,
             col,
             text: text.map(str::to_string),
+            markdown: false,
         }));
         app.proj.hover.as_ref().and_then(|h| h.text.clone())
     };
@@ -8879,6 +8881,7 @@ fn a_hover_result_from_a_superseded_peek_is_dropped() {
         x: 0.0,
         y: 0.0,
         text: None,
+        prepared: Vec::new(),
         summary: None,
         diagnostic: None,
     };
@@ -8895,6 +8898,7 @@ fn a_hover_result_from_a_superseded_peek_is_dropped() {
         line: 3,
         col: 5,
         text: Some("stale type".into()),
+        markdown: false,
     }));
     assert!(
         app.proj.hover.as_ref().unwrap().text.is_none(),
@@ -8908,11 +8912,81 @@ fn a_hover_result_from_a_superseded_peek_is_dropped() {
         line: 3,
         col: 5,
         text: Some("fresh type".into()),
+        markdown: false,
     }));
     assert_eq!(
         app.proj.hover.as_ref().unwrap().text.as_deref(),
         Some("fresh type")
     );
+}
+
+/// A language server's hover is markdown, set as such: rust-analyzer's
+/// module path and signature show as code, its docs as text, and no fence
+/// or rule is left raw; the local peek gives way to it.
+#[test]
+fn a_language_servers_hover_is_set_as_markdown() {
+    use crate::app::model::PreparedSeg;
+    let mut app = scanned_app("hover-markdown");
+    app.proj.hover = Some(HoverState {
+        line: 3,
+        col: 5,
+        x: 0.0,
+        y: 0.0,
+        text: Some("the local peek".into()),
+        prepared: Vec::new(),
+        summary: None,
+        diagnostic: None,
+    });
+    let _ = app.update(Message::Hover(HoverMsg::Answered {
+        stamp: app.stamp(),
+        hover_gen: app.proj.hover_gen,
+        line: 3,
+        col: 5,
+        text: Some(
+            "\n```rust\nprobe::shapes\n```\n\n```rust\npub fn area(r: f64) -> f64\n```\n\n---\n\n\
+             The area of a circle.\n\n# Examples\n\n```rust\nlet a = area(1.0);\n```"
+                .into(),
+        ),
+        markdown: true,
+    }));
+    let h = app.proj.hover.as_ref().unwrap();
+    assert!(h.text.is_none(), "the local peek gave way");
+    let code: Vec<String> = h
+        .prepared
+        .iter()
+        .filter_map(|s| match s {
+            PreparedSeg::Code(lines) => Some(
+                lines
+                    .iter()
+                    .flat_map(|l| l.spans.iter().map(|(t, _)| t.as_str()))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        code,
+        [
+            "probe::shapes",
+            "pub fn area(r: f64) -> f64",
+            "let a = area(1.0);"
+        ]
+    );
+    let prose = format!("{:?}", h.prepared);
+    assert!(prose.contains("The area of a circle."), "{prose}");
+    assert!(!prose.contains("```"), "{prose}");
+    // A debugger's value stays plain text.
+    let _ = app.update(Message::Hover(HoverMsg::Answered {
+        stamp: app.stamp(),
+        hover_gen: app.proj.hover_gen,
+        line: 3,
+        col: 5,
+        text: Some("r = 2".into()),
+        markdown: false,
+    }));
+    let h = app.proj.hover.as_ref().unwrap();
+    assert_eq!(h.text.as_deref(), Some("r = 2"));
+    assert!(h.prepared.is_empty());
 }
 
 /// A markdown link is untrusted text — an LLM answer or the repository's own
@@ -24013,6 +24087,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             line: 0,
             col: 0,
             text: Some("stale".into()),
+            markdown: false,
         }),
         Message::Hover(HoverMsg::InsightAnswered {
             stamp: s(),
@@ -32042,6 +32117,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         x: 10.0,
         y: 10.0,
         text: Some("fn origin()".into()),
+        prepared: Vec::new(),
         summary: None,
         diagnostic: None,
     });
@@ -35398,6 +35474,7 @@ fn the_peek_and_the_menu_open_at_the_pointer_of_a_scrolled_pane() {
         x: 0.0,
         y: 0.0,
         text: Some("fn origin()".into()),
+        prepared: Vec::new(),
         summary: None,
         diagnostic: None,
     });

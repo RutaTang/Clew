@@ -143,7 +143,11 @@ pub use payload::*;
 /// v26: every model call the server makes for the client says what it used
 /// ([`Event::Usage`]), and [`Request::Chat`] / [`Request::ChatStream`] say
 /// what they are for (`purpose`): the client's ledger of what its key spent.
-pub const PROTOCOL_VERSION: u32 = 27;
+///
+/// v28: [`PythonSource::Managed`] — the Python a project's language server
+/// is given may be its own environment kept by its tool (Poetry, Pipenv,
+/// pyenv), found by where that tool keeps it.
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -1766,8 +1770,12 @@ pub enum PythonSource {
     /// it is a copy or link of, its packages read rather than its start-up
     /// code run, as it came with the project.
     ProjectVenv,
-    /// The virtualenv activated where clew was started (`VIRTUAL_ENV`).
+    /// The virtualenv activated where clew was started (`VIRTUAL_ENV`), or
+    /// the conda environment (`CONDA_PREFIX`).
     Activated,
+    /// This project's own environment, kept by its tool outside the project:
+    /// its Poetry or Pipenv environment, or the pyenv Python it pins.
+    Managed(PythonEnvKind),
 }
 
 /// The server-side state of a language server, as an explicit enum — the

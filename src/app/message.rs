@@ -687,6 +687,9 @@ pub enum HoverMsg {
         line: usize,
         col: usize,
         text: Option<String>,
+        /// Whether `text` is markdown (a language server's answer), to be
+        /// set as the insight popups' are; else plain (a debugger's value).
+        markdown: bool,
     },
 }
 

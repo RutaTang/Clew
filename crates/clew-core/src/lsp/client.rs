@@ -123,6 +123,26 @@ pub struct Diag {
     pub char_end: usize,
     pub severity: u8, // 1 error, 2 warning, 3 info, 4 hint
     pub message: String,
+    /// The last line it spans (0-based): `line` for one on one line.
+    pub end_line: usize,
+    /// What reported it (`rustc`, `clippy`, `Pyright`, `Lean 4`), and its
+    /// code there (`E0308`, `reportAttributeAccessIssue`), when the server
+    /// says: what to look it up by.
+    pub source: Option<String>,
+    pub code: Option<String>,
+}
+
+impl Diag {
+    /// Who said it and under what code, as editors write it after the
+    /// message: `rustc(E0308)`, `Pyright(reportOptionalMemberAccess)`,
+    /// `clippy`; `None` when the server said neither.
+    pub fn origin(&self) -> Option<String> {
+        match (self.source.as_deref(), self.code.as_deref()) {
+            (Some(source), Some(code)) => Some(format!("{source}({code})")),
+            (Some(one), None) | (None, Some(one)) => Some(one.to_string()),
+            (None, None) => None,
+        }
+    }
 }
 
 /// Diagnostics per file, shared rather than copied: a [`Snapshot`] holds the
@@ -1323,6 +1343,11 @@ fn initialize_params(
             },
             "textDocument": {
                 "definition": { "linkSupport": true },
+                // Hovers as markdown, which Clew sets as text: asked for
+                // nothing, rust-analyzer and pyright answer in plain text —
+                // rust-analyzer's with its examples' code run into their
+                // headings ("Exampleslet a = area(1.0);").
+                "hover": { "contentFormat": ["markdown", "plaintext"] },
                 // Declare inlay-hint support so the server provides them.
                 "inlayHint": { "dynamicRegistration": false },
                 // Declare call-hierarchy support. Some servers (e.g.
@@ -1867,7 +1892,23 @@ fn parse_diag(v: &Value) -> Option<Diag> {
                 .to_string(),
             MAX_DIAG_MESSAGE,
         ),
+        end_line: end_line.max(line),
+        source: short_field(v.get("source")),
+        // A string or a number, as the protocol allows either.
+        code: short_field(v.get("code")),
     })
+}
+
+/// A short field of a diagnostic, a string or a number, as a string: empty,
+/// or longer than any code is, it is left out.
+fn short_field(v: Option<&Value>) -> Option<String> {
+    let text = match v? {
+        Value::String(s) => s.trim().to_string(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    (!text.is_empty() && text.chars().count() <= 64 && !text.contains(char::is_control))
+        .then_some(text)
 }
 
 /// Extract plain text from a hover response (MarkupContent | MarkedString[]).
@@ -2711,6 +2752,37 @@ mod tests {
             (4, 8, 13, 1)
         );
         assert!(d.message.contains("cannot find"));
+        assert_eq!(d.origin(), None);
+        // Who said it and its code, a string or a number; across lines,
+        // where it ends.
+        let d = parse_diag(&json!({
+            "range": {"start": {"line": 4, "character": 8}, "end": {"line": 6, "character": 1}},
+            "message": "mismatched types",
+            "source": "rustc",
+            "code": "E0308"
+        }))
+        .unwrap();
+        assert_eq!((d.line, d.end_line), (4, 6));
+        assert_eq!(d.origin().as_deref(), Some("rustc(E0308)"));
+        let d = parse_diag(&json!({
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+            "message": "m",
+            "code": 2304
+        }))
+        .unwrap();
+        assert_eq!(d.origin().as_deref(), Some("2304"));
+        let d = parse_diag(&json!({
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+            "message": "m",
+            "source": "Pyright",
+            "code": "x\ny"
+        }))
+        .unwrap();
+        assert_eq!(
+            d.origin().as_deref(),
+            Some("Pyright"),
+            "no control characters"
+        );
     }
 
     /// F9: positions are the server's numbers. `character + 1` on
@@ -3125,6 +3197,11 @@ mod session_tests {
         // Server-initiated progress is advertised; without it servers report
         // none, and "indexing" looks the same as "no answer".
         assert_eq!(params["capabilities"]["window"]["workDoneProgress"], true);
+        // Hovers are asked for as markdown, which Clew sets as text.
+        assert_eq!(
+            params["capabilities"]["textDocument"]["hover"]["contentFormat"][0],
+            "markdown"
+        );
     }
 
     /// The project root is the one workspace folder, in `initialize` and

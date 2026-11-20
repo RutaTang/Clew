@@ -613,6 +613,12 @@ pub fn launched_in(program: PathBuf, args: Vec<String>, dir: &Path) -> (PathBuf,
 ///
 /// The login shell is asked once, bounded, and only by an app bundle on
 /// macOS — a process started from a terminal already has the user's `PATH`.
+///
+/// Last, the folders the usual toolchain installers put a user's tools in
+/// ([`user_tool_dirs`]), those that exist: their installers add them to a
+/// shell's profile, which an app started from a desktop menu on Linux never
+/// read — `cargo`, `rust-analyzer` and Lean's `lake` were "not found" there,
+/// installed as their own guides say.
 pub fn spawn_path() -> Option<OsString> {
     static PATH: OnceLock<Option<OsString>> = OnceLock::new();
     PATH.get_or_init(|| {
@@ -622,9 +628,36 @@ pub fn spawn_path() -> Option<OsString> {
         } else {
             None
         };
-        merge_paths(login, own)
+        let tools = user_tool_dirs(crate::home_dir().as_deref(), &|name| std::env::var_os(name))
+            .into_iter()
+            .filter(|dir| dir.is_dir());
+        merge_paths(merge_paths(login, own), std::env::join_paths(tools).ok())
     })
     .clone()
+}
+
+/// Where the usual installers put a user's own toolchains, in `home` or
+/// where their variable (`var`) moves them: rustup's (`~/.cargo/bin`),
+/// elan's for Lean (`~/.elan/bin`), pipx's, uv's and pip's `--user`
+/// (`~/.local/bin`), Go's (`~/go/bin`) and GHCup's (`~/.ghcup/bin`).
+fn user_tool_dirs(home: Option<&Path>, var: &dyn Fn(&str) -> Option<OsString>) -> Vec<PathBuf> {
+    let at = |name: &str, default: &str| -> Option<PathBuf> {
+        var(name)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| home.map(|h| h.join(default)))
+    };
+    [
+        at("CARGO_HOME", ".cargo").map(|d| d.join("bin")),
+        at("ELAN_HOME", ".elan").map(|d| d.join("bin")),
+        home.map(|h| h.join(".local/bin")),
+        at("GOPATH", "go").map(|d| d.join("bin")),
+        at("GHCUP_INSTALL_BASE_PREFIX", "").map(|d| d.join(".ghcup/bin")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|d| d.is_absolute())
+    .collect()
 }
 
 /// The `PATH` a child is given, and a bare program name is looked up on:
@@ -879,6 +912,51 @@ mod tests {
                 "{path:?}"
             );
         }
+    }
+
+    /// A user's own toolchains are looked for where their installers put
+    /// them, or where their variable moves them: last on the path, after
+    /// the user's own.
+    #[test]
+    fn a_users_toolchains_are_found_where_their_installers_put_them() {
+        use std::ffi::OsString;
+        use std::path::{Path, PathBuf};
+        let home = Path::new("/home/me");
+        let none = |_: &str| None;
+        assert_eq!(
+            super::user_tool_dirs(Some(home), &none),
+            [
+                "/home/me/.cargo/bin",
+                "/home/me/.elan/bin",
+                "/home/me/.local/bin",
+                "/home/me/go/bin",
+                "/home/me/.ghcup/bin",
+            ]
+            .map(PathBuf::from)
+        );
+        let moved = |name: &str| match name {
+            "CARGO_HOME" => Some(OsString::from("/opt/cargo")),
+            "ELAN_HOME" => Some(OsString::from("relative/elan")),
+            _ => None,
+        };
+        let dirs = super::user_tool_dirs(Some(home), &moved);
+        assert_eq!(dirs[0], Path::new("/opt/cargo/bin"));
+        assert_eq!(
+            dirs[1],
+            Path::new("/home/me/.elan/bin"),
+            "relative is ignored"
+        );
+        assert_eq!(
+            super::user_tool_dirs(None, &moved),
+            [PathBuf::from("/opt/cargo/bin")]
+        );
+        // After the user's own path, never before it.
+        let merged = super::merge_paths(
+            super::merge_paths(None, Some("/usr/bin".into())),
+            Some("/home/me/.cargo/bin:/usr/bin".into()),
+        )
+        .unwrap();
+        assert_eq!(merged, "/usr/bin:/home/me/.cargo/bin");
     }
 
     /// The login shell's `PATH` is read once the shell exits, though a job

@@ -837,13 +837,20 @@ pub enum GotoKind {
 }
 
 /// An active hover tooltip.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct HoverState {
     pub line: usize,
     pub col: usize,
     pub x: f32,
     pub y: f32,
     pub text: Option<String>,
+    /// The language server's answer, markdown, prepared as the insight
+    /// popups' answers are — its signature and examples highlighted as code,
+    /// its docs set as text — and shown in place of `text`. Shown raw, a
+    /// fence and a `---` were read as code; asked for as plain text,
+    /// rust-analyzer ran an example's code into its heading
+    /// ("Exampleslet a = area(1.0);").
+    pub prepared: Vec<PreparedSeg>,
     /// The cached one-line LLM summary of the hovered symbol, if it's an
     /// explained function/method. Set synchronously; shown above the LSP text.
     pub summary: Option<String>,

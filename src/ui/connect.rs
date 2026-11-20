@@ -905,6 +905,16 @@ fn python_block<'a>(
             PythonSource::LspToml => tr!("Set in the project's .clew/lsp.toml"),
             PythonSource::ProjectVenv => tr!("Found in the project"),
             PythonSource::Activated => tr!("Active in the shell Clew was started from"),
+            PythonSource::Managed(PythonEnvKind::Poetry) => {
+                tr!("This project's Poetry environment")
+            }
+            PythonSource::Managed(PythonEnvKind::Pipenv) => {
+                tr!("This project's Pipenv environment")
+            }
+            PythonSource::Managed(PythonEnvKind::Pyenv) => {
+                tr!("The pyenv Python this project pins")
+            }
+            PythonSource::Managed(_) => tr!("Found for this project"),
             // Nobody named one: the server looks for its own. "None" read
             // as though Python went without an interpreter.
             PythonSource::Server => tr!("Chosen by the language server"),

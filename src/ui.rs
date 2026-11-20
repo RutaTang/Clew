@@ -725,7 +725,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Finder => finder_modal(app),
             Self::ContextMenu(menu) => context_menu(app, menu),
             Self::TreeMenu(menu) => overlays::tree_menu(app, menu),
-            Self::Hover(hover) => hover_tooltip(hover, code_floor(app)),
+            Self::Hover(hover) => hover_tooltip(app, hover, code_floor(app)),
         }
     }
 

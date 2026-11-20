@@ -9,10 +9,14 @@ const MENU_W: f32 = 210.0;
 
 /// The code's hover peek, kept above `floor` where it fits there (see
 /// [`Anchored::floor`]).
-pub(crate) fn hover_tooltip(h: &crate::HoverState, floor: f32) -> Element<'_, Message> {
+pub(crate) fn hover_tooltip<'a>(
+    app: &'a App,
+    h: &'a crate::HoverState,
+    floor: f32,
+) -> Element<'a, Message> {
     // Nothing to say (no summary, no LSP text, no diagnostic): show nothing
     // rather than an empty box — an empty peek reads as "hover is broken".
-    if h.diagnostic.is_none() && h.summary.is_none() && h.text.is_none() {
+    if h.diagnostic.is_none() && h.summary.is_none() && h.text.is_none() && h.prepared.is_empty() {
         return slot();
     }
     let mut parts: Vec<Element<'_, Message>> = Vec::new();
@@ -25,7 +29,11 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState, floor: f32) -> Element<'_, Me
     if let Some(s) = &h.summary {
         parts.push(text(s.clone()).size(ts::BODY).color(theme::accent()).into());
     }
-    // The LSP / local-peek text below (monospace), trimmed if very long.
+    // The language server's answer, set as markdown: its signature as
+    // code, its docs as text.
+    parts.extend(super::explain_view::render_prepared(app, &h.prepared));
+    // The local peek's or the debugger's text below (monospace), trimmed if
+    // very long.
     if let Some(t) = &h.text {
         let shown: String = if t.chars().count() > 1200 {
             t.chars().take(1200).collect::<String>() + "…"

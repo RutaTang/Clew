@@ -645,9 +645,16 @@ struct Vetted {
     /// Found through `VIRTUAL_ENV`, the environment the user activated, not
     /// by a name inside the project.
     activated: bool,
+    /// Kept for this project by its tool, outside it ([`find_managed`]): the
+    /// user's own install, run as found, as an activated one is.
+    managed: Option<PythonEnvKind>,
 }
 
 fn find_vetted(root: &Path) -> Option<Vetted> {
+    find_vetted_on(root, &PythonHost::current())
+}
+
+fn find_vetted_on(root: &Path, host: &PythonHost) -> Option<Vetted> {
     const DIRS: [&str; 4] = PROJECT_VENV_DIRS;
     const EXES: [&str; 3] = ["bin/python", "bin/python3", "Scripts/python.exe"];
     // Containment is only decidable against the real root; without it there is
@@ -662,6 +669,7 @@ fn find_vetted(root: &Path) -> Option<Vetted> {
             interpreter: cand,
             base,
             activated,
+            managed: None,
         })
     };
     // Project-local virtualenvs, most-conventional first.
@@ -672,13 +680,121 @@ fn find_vetted(root: &Path) -> Option<Vetted> {
             }
         }
     }
-    // An already-activated virtualenv in the environment. Held to the SAME
-    // check: `VIRTUAL_ENV` routinely names the project's own `.venv`, and one
-    // file must not get two different answers depending on which name reached
-    // it.
-    let venv = std::env::var_os("VIRTUAL_ENV")?;
-    EXES.into_iter()
-        .find_map(|exe| vet(Path::new(&venv).join(exe), true))
+    // An already-activated virtualenv in the environment, or conda
+    // environment. Held to the SAME check: `VIRTUAL_ENV` routinely names the
+    // project's own `.venv`, and one file must not get two different answers
+    // depending on which name reached it.
+    for var in ["VIRTUAL_ENV", "CONDA_PREFIX"] {
+        if let Some(env) = host.dir(var)
+            && let Some(found) = EXES
+                .into_iter()
+                .chain(["python.exe"])
+                .find_map(|exe| vet(env.join(exe), true))
+        {
+            return Some(found);
+        }
+    }
+    // This project's environment as its tool keeps it, outside the project:
+    // a Poetry project opened with nothing activated had its imports read
+    // against whatever `python3` came first, and every import of its
+    // packages was unresolved.
+    let (interpreter, kind) = find_managed(root, host)?;
+    Some(Vetted {
+        base: interpreter.clone(),
+        interpreter,
+        activated: true,
+        managed: Some(kind),
+    })
+}
+
+/// This project's own environment as the tool that made it keeps it,
+/// outside the project — found by working out where that tool put it, the
+/// way it names it, never by running the tool: its Poetry environment
+/// (`<name>-<hash of its folder>-py3.x`, the Python Poetry's `envs.toml`
+/// records as in use first), its Pipenv one (`<folder>-<hash of its
+/// Pipfile>`), and the pyenv Python its `.python-version` pins. Each is the
+/// user's own install, outside the repository: what the repository says
+/// only picks among them.
+fn find_managed(root: &Path, host: &PythonHost) -> Option<(PathBuf, PythonEnvKind)> {
+    let real_root = std::fs::canonicalize(root).ok()?;
+    let real = real_root.to_string_lossy().into_owned();
+    if let Some(dir) = poetry_dir(host) {
+        let name = format!(
+            "{}-{}",
+            poetry_sanitized(&project_name(root)),
+            path_hash(real.as_bytes(), 32)
+        );
+        let name_prefix = name.clone();
+        // The Python Poetry uses for it (`poetry env use`), else the newest.
+        let in_use = crate::statefile::read_capped(&dir.join("envs.toml"), MAX_PYPROJECT_BYTES)
+            .and_then(|text| text.parse::<toml::Table>().ok())
+            .and_then(|envs| {
+                let minor = envs.get(&name)?.get("minor")?.as_str()?.to_string();
+                Some(format!("{name}-py{minor}"))
+            });
+        // Its Pythons, by version (`-py3.9` before `-py3.12`), the one in
+        // use last.
+        let python_of = |env: &PathBuf| -> Option<Vec<u32>> {
+            let name = dir_name(env);
+            let version = name
+                .strip_prefix(&name_prefix)?
+                .strip_prefix("-py")?
+                .to_string();
+            version.split('.').map(|n| n.parse().ok()).collect()
+        };
+        let mut envs: Vec<(bool, Vec<u32>, PathBuf)> = sorted_dirs(&dir)
+            .into_iter()
+            .filter_map(|env| {
+                let version = python_of(&env)?;
+                Some((Some(dir_name(&env)) == in_use, version, env))
+            })
+            .collect();
+        envs.sort();
+        if let Some(found) = envs
+            .iter()
+            .rev()
+            .find_map(|(_, _, env)| interpreter_in(env))
+        {
+            return Some((found, PythonEnvKind::Poetry));
+        }
+    }
+    let pipfile = real_root.join("Pipfile");
+    if pipfile.is_file()
+        && let Some(dir) = host
+            .dir("WORKON_HOME")
+            .or_else(|| host.home().map(|h| h.join(".local/share/virtualenvs")))
+    {
+        let folder = real_root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = format!(
+            "{}-{}",
+            pipenv_sanitized(&folder),
+            path_hash(pipfile.to_string_lossy().as_bytes(), 6)
+        );
+        if let Some(found) = interpreter_in(&dir.join(name)) {
+            return Some((found, PythonEnvKind::Pipenv));
+        }
+    }
+    let pinned = crate::statefile::read_capped(&root.join(".python-version"), 4096)
+        .and_then(|t| t.split_whitespace().next().map(str::to_string))
+        .filter(|v| !v.contains(['/', '\\']) && v != "." && v != "..")?;
+    let pyenv = host
+        .dir("PYENV_ROOT")
+        .or_else(|| host.home().map(|h| h.join(".pyenv")))?;
+    interpreter_in(&pyenv.join("versions").join(pinned)).map(|found| (found, PythonEnvKind::Pyenv))
+}
+
+/// The first eight characters of the URL-safe base64 of `bytes`' SHA-256,
+/// cut to its first `keep` bytes: how Poetry (all 32) and Pipenv (6) tell a
+/// project's environment from another of the same name.
+fn path_hash(bytes: &[u8], keep: usize) -> String {
+    use base64::Engine;
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    let encoded = base64::engine::general_purpose::URL_SAFE.encode(&digest[..keep.min(32)]);
+    encoded.chars().take(8).collect()
 }
 
 /// The Python environment the user chose (`chosen`, a path on this host, as
@@ -774,9 +890,10 @@ pub fn python_in_effect(
         None => match find_vetted(root) {
             Some(found) => (
                 Some(found.interpreter.to_string_lossy().into_owned()),
-                match found.activated {
-                    true => PythonSource::Activated,
-                    false => PythonSource::ProjectVenv,
+                match (found.managed, found.activated) {
+                    (Some(kind), _) => PythonSource::Managed(kind),
+                    (None, true) => PythonSource::Activated,
+                    (None, false) => PythonSource::ProjectVenv,
                 },
             ),
             None => (None, PythonSource::Server),
@@ -2398,6 +2515,116 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// Poetry and Pipenv name a project's environment by its name and a hash
+    /// of where it is, as here: checked against what Poetry made.
+    #[test]
+    fn a_projects_environment_is_named_as_its_tool_names_it() {
+        assert_eq!(path_hash(b"/home/me/Demo Proj", 32), "DzMhrzig");
+        assert_eq!(path_hash(b"/home/me/demo/Pipfile", 6), "W2e2KVS-");
+    }
+
+    /// With no virtualenv in the project and none activated, the project's
+    /// own environment as its tool keeps it is used: its Poetry one (the
+    /// Python Poetry has in use, else the newest), its Pipenv one, or the
+    /// pyenv Python it pins — never one the repository names by a path.
+    #[test]
+    fn this_projects_tool_environment_is_found_where_its_tool_keeps_it() {
+        let python_at = |dir: &Path, exe: &str| {
+            std::fs::create_dir_all(dir.join("bin")).unwrap();
+            std::fs::write(dir.join("bin").join(exe), "").unwrap();
+        };
+        let home = scratch("managed-home");
+        let root = scratch("managed-root").join("Demo Proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("pyproject.toml"),
+            "[tool.poetry]\nname = \"Demo App\"\n",
+        )
+        .unwrap();
+        let real = std::fs::canonicalize(&root).unwrap();
+        let cache = home.join("cache");
+        let poetry = cache.join("pypoetry/virtualenvs");
+        let name = format!(
+            "demo_app-{}",
+            path_hash(real.to_string_lossy().as_bytes(), 32)
+        );
+        for py in ["3.9", "3.12", "3.11"] {
+            python_at(&poetry.join(format!("{name}-py{py}")), "python");
+        }
+        // Another project's of the same name: not this one's.
+        python_at(&poetry.join("demo_app-AAAAAAAA-py3.13"), "python");
+        let host = |vars: Vec<(&'static str, OsString)>| PythonHost {
+            home: Some(home.clone()),
+            path: None,
+            vars,
+            macos: false,
+        };
+        let cached = || vec![("XDG_CACHE_HOME", cache.clone().into_os_string())];
+        let found = |host: &PythonHost| {
+            find_vetted_on(&root, host).map(|v| (v.interpreter, v.managed, v.activated))
+        };
+        let python = |env: &Path| Some(env.join("bin/python"));
+        assert_eq!(
+            found(&host(cached())),
+            Some((
+                python(&poetry.join(format!("{name}-py3.12"))).unwrap(),
+                Some(PythonEnvKind::Poetry),
+                true
+            )),
+            "the newest: 3.12, not 3.9"
+        );
+        std::fs::write(
+            poetry.join("envs.toml"),
+            format!("[{name}]\nminor = \"3.11\"\npatch = \"3.11.4\"\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            found(&host(cached())).map(|f| f.0),
+            python(&poetry.join(format!("{name}-py3.11"))),
+            "the one Poetry has in use"
+        );
+        // One activated comes first.
+        let active = home.join("active-env");
+        python_at(&active, "python");
+        let mut vars = cached();
+        vars.push(("VIRTUAL_ENV", active.clone().into_os_string()));
+        assert_eq!(
+            found(&host(vars)),
+            Some((python(&active).unwrap(), None, true))
+        );
+        // Pipenv: by its Pipfile.
+        std::fs::remove_dir_all(&poetry).unwrap();
+        std::fs::write(root.join("Pipfile"), "").unwrap();
+        let workon = home.join("venvs");
+        let pipenv = workon.join(format!(
+            "Demo_Proj-{}",
+            path_hash(real.join("Pipfile").to_string_lossy().as_bytes(), 6)
+        ));
+        python_at(&pipenv, "python");
+        let workon_host = || host(vec![("WORKON_HOME", workon.clone().into_os_string())]);
+        assert_eq!(
+            found(&workon_host()),
+            Some((python(&pipenv).unwrap(), Some(PythonEnvKind::Pipenv), true))
+        );
+        // pyenv: the version it pins, by name only.
+        std::fs::remove_file(root.join("Pipfile")).unwrap();
+        let pyenv = home.join("pyenv");
+        python_at(&pyenv.join("versions/3.11.9"), "python");
+        let pyenv_host = || host(vec![("PYENV_ROOT", pyenv.clone().into_os_string())]);
+        assert_eq!(found(&pyenv_host()), None, "nothing pinned");
+        std::fs::write(root.join(".python-version"), "3.11.9\n").unwrap();
+        assert_eq!(
+            found(&pyenv_host()),
+            Some((
+                python(&pyenv.join("versions/3.11.9")).unwrap(),
+                Some(PythonEnvKind::Pyenv),
+                true
+            ))
+        );
+        std::fs::write(root.join(".python-version"), "../../active-env\n").unwrap();
+        assert_eq!(found(&pyenv_host()), None, "a path is no version");
     }
 
     /// The same python3 by two folders of the search path, one a link to

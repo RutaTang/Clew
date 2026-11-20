@@ -144,6 +144,7 @@ impl App {
             x,
             y,
             text: None,
+            prepared: Vec::new(),
             // The Explain one-liner is cached, so attach it synchronously;
             // any LSP text arrives later and renders below it.
             summary: self.hover_summary(pane, line, col),
@@ -190,6 +191,7 @@ impl App {
                                 .ok()
                                 .filter(|v| !v.is_empty())
                                 .map(|v| format!("{w} = {v}")),
+                            markdown: false,
                         })
                     },
                 );
@@ -256,9 +258,10 @@ impl App {
                     line,
                     col,
                     text: result.ok().flatten().map(|text| match &structure {
-                        Some(structure) => format!("{text}\n\n{structure}"),
+                        Some(structure) => format!("{text}\n\n```text\n{structure}\n```"),
                         None => text,
                     }),
+                    markdown: true,
                 })
             },
         )
@@ -426,8 +429,14 @@ impl App {
             // Severity 1 is error (most severe) → lowest number sorts first.
             .min_by_key(|d| d.severity)
             .map(|d| {
-                // The server's message as it sent it, under our label.
-                let message = d.message.trim();
+                // The server's message as it sent it, under our label, and
+                // who said it under what code (`rustc(E0308)`): what to look
+                // it up by.
+                let message = match d.origin() {
+                    Some(origin) => format!("{} {origin}", d.message.trim()),
+                    None => d.message.trim().to_string(),
+                };
+                let message = message.as_str();
                 match d.severity {
                     1 => tr!("Error: {message}", message = message),
                     2 => tr!("Warning: {message}", message = message),
@@ -613,21 +622,30 @@ impl App {
                 line,
                 col,
                 text,
+                markdown,
                 ..
             } => {
                 // The peek this text was fetched for must still be the open
                 // one; line/col stays as a cheap consistency check.
-                if hover_gen == self.proj.hover_gen
-                    && let Some(h) = &mut self.proj.hover
-                    && h.line == line
-                    && h.col == col
-                {
-                    // No answer leaves the local peek shown, if there is one.
-                    if text.is_some() {
-                        h.text = text;
-                    }
+                let open = hover_gen == self.proj.hover_gen
+                    && self
+                        .proj
+                        .hover
+                        .as_ref()
+                        .is_some_and(|h| h.line == line && h.col == col);
+                // No answer leaves the local peek shown, if there is one.
+                let Some(text) = text.filter(|_| open) else {
+                    return Task::none();
+                };
+                let (prepared, task) = match markdown {
+                    true => self.prepare_segments(&text),
+                    false => (Vec::new(), Task::none()),
+                };
+                if let Some(h) = &mut self.proj.hover {
+                    h.text = (!markdown).then_some(text);
+                    h.prepared = prepared;
                 }
-                Task::none()
+                task
             }
             HoverMsg::Cleared => self.on_hover_cleared(),
             HoverMsg::Gutter { pane, line, x, y } => self.on_gutter_hover(pane, line, x, y),
