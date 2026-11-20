@@ -36945,7 +36945,7 @@ fn a_remote_projects_php_classes_resolve_by_the_hosts_composer_map() {
             "composer.json".into(),
             vec![(prefix.into(), vec![dir.into()])],
         )],
-        haskell: Vec::new(),
+        ..Default::default()
     };
     let publish = |app: &mut App, seq: u64, manifests: clew_protocol::Patch<_>| {
         let published = app.handle_server_event(clew_protocol::Event::ProjectSymbols {

@@ -947,6 +947,15 @@ fn project_symbols(
                     vec![("App\\".into(), vec!["src/".into()])],
                 )],
                 haskell: vec![("acme.cabal".into(), vec!["lib".into()])],
+                cargo: vec![(
+                    "crates/acme-core/Cargo.toml".into(),
+                    CargoTargets {
+                        lib_name: "acme_core".into(),
+                        lib_path: "src/lib.rs".into(),
+                        target_paths: vec!["tools/gen.rs".into()],
+                    },
+                )],
+                python: vec![("pyproject.toml".into(), vec!["src".into()])],
             })),
             _ => Patch::Unchanged,
         },
