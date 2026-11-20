@@ -199,7 +199,7 @@ fn popular_crates_build_and_reading_the_computer_does_not() {
          [dependencies]\nregex = \"1\"\nserde = \"1\"\nserde_json = \"1\"\nitertools = \"0.14\"\n\
          unicode-segmentation = \"1\"\nchrono = \"0.4\"\nurl = \"2\"\nindexmap = \"2\"\n\
          smallvec = \"1\"\nsemver = \"1\"\nglob = \"0.3\"\nsimilar = \"2\"\ntoml = \"0.8\"\n\
-         heck = \"0.5\"\nstrsim = \"0.11\"\nonce_cell = \"1\"\n",
+         heck = \"0.5\"\nstrsim = \"0.11\"\nonce_cell = \"1\"\nzerocopy = \"0.8\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -222,8 +222,11 @@ impl Plugin for P {
         let diff = similar::TextDiff::from_lines("a\n", "b\n").ratio();
         let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).map(|d| d.to_string());
         static ONCE: once_cell::sync::Lazy<u8> = once_cell::sync::Lazy::new(|| 1);
+        // zerocopy's `include_value!` reads a path from wherever it is
+        // used: what it reads is the compiler's to say, not a refusal.
+        let bytes = zerocopy::IntoBytes::as_bytes(&7u32).len();
         Ok(Outcome::Say(format!(
-            "{} {url} {v} {t} {words} {joined} {map:?} {small:?} {version} {} {diff} {day:?} {}",
+            "{} {url} {v} {t} {words} {joined} {map:?} {small:?} {version} {} {diff} {day:?} {} {bytes}",
             re.is_match("1"),
             pattern.matches("a.rs"),
             *ONCE
@@ -257,4 +260,77 @@ clew_plugin_sdk::export!(P);
         "{}",
         refused.report()
     );
+}
+
+/// What a plugin's macro puts together to read a file of the computer's —
+/// an attribute made from its input, which no reading of the source can
+/// see whole — is caught by what the compiler says it read: refused,
+/// nothing the compiler said passed on (here, the size a type error would
+/// have told), and what was compiled from it gone. Whether the build then
+/// failed, or would have succeeded, is the same.
+///
+///     cargo test -p clew-plugin --test plugins macro_built -- --ignored --nocapture
+#[test]
+#[ignore = "builds plugins: needs Rust 1.95.0 with wasm32-wasip2, and the network"]
+fn macro_built_reads_of_the_computer_are_refused() {
+    let toolchain = toolchain();
+    let root = clew_core::testutil::TempDir::new("macro-built-reads");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.rs"), "pub const X: usize = 5;\n").unwrap();
+    std::fs::write(outside.join("secret.txt"), "machine x password y\n").unwrap();
+    let source = root.join("source");
+    std::fs::create_dir_all(source.join("src")).unwrap();
+    std::fs::write(
+        source.join("plugin.toml"),
+        "[plugin]\nid = \"reads\"\nname = \"Reads\"\nversion = \"0.1.0\"\n\
+         description = \"Reads what it may not.\"\n\n[[command]]\nid = \"run\"\ntitle = \"Run\"\n",
+    )
+    .unwrap();
+    let work = root.join("work");
+    let plugin = |body: &str| {
+        format!(
+            "use clew_plugin_sdk::{{Invocation, Outcome, Plugin}};\n\
+             macro_rules! load {{ ($a:meta) => {{ #[$a] mod leak; }} }}\n{body}\nstruct P;\n\
+             impl Plugin for P {{\n    fn run(_c: &str, _i: Invocation) -> Result<Outcome, String> {{\n\
+             Ok(Outcome::Say(String::new()))\n    }}\n}}\nclew_plugin_sdk::export!(P);\n"
+        )
+    };
+    let secret_rs = outside.join("secret.rs").display().to_string();
+    let secret_txt = outside.join("secret.txt").display().to_string();
+    for (body, read, not_told) in [
+        // Read, and its value told by a type error.
+        (
+            format!("load!(path = {secret_rs:?});\nconst _: [(); 0] = [(); leak::X];"),
+            &secret_rs,
+            "size of 5",
+        ),
+        // Read as Rust, and its words told by the parse error.
+        (
+            format!("load!(path = {secret_txt:?});"),
+            &secret_txt,
+            "password",
+        ),
+        // Read, and compiled into the plugin.
+        (
+            format!("load!(path = {secret_rs:?});\npub fn x() -> usize {{ leak::X }}"),
+            &secret_rs,
+            "leak::X",
+        ),
+    ] {
+        std::fs::write(source.join("src/lib.rs"), plugin(&body)).unwrap();
+        let refused =
+            clew_plugin::build::build(&source, &work, &toolchain, &AtomicBool::new(false))
+                .expect_err("refused");
+        let report = refused.report();
+        assert!(
+            matches!(&refused, clew_plugin::build::BuildError::Policy(why) if why.contains(read.as_str())),
+            "{body}: {report}"
+        );
+        assert!(!report.contains(not_told), "{body}: {report}");
+        assert!(
+            work.join("targets").is_dir() && !work.join("targets/reads").exists(),
+            "{body}: what was compiled is kept"
+        );
+    }
 }

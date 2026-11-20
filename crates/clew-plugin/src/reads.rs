@@ -285,21 +285,31 @@ fn lex(text: &str) -> Vec<Token> {
 }
 
 /// Where each token is: in an attribute, in a macro's input, in a
-/// `macro_rules!` definition (whose code runs wherever the macro is used).
+/// `macro_rules!` definition (whose code runs wherever the macro is used),
+/// in a module written inline (`mod name { … }`).
 #[derive(Debug, Clone, Copy, Default)]
 struct Place {
     attribute: bool,
+    /// In a `#[doc = "…"]`, whose strings are words, not code.
+    doc: bool,
     macro_input: bool,
     rules: bool,
+    inline_mod: bool,
 }
+
+/// The attributes that read a file, by their name: what is checked of an
+/// attribute's words, and what marks brackets handed to a macro as one
+/// (`m!([path = "…"])`, to be put after a `#` there).
+const READING_ATTRIBUTES: &[&str] = &["path", "link", "debugger_visualizer", "cfg_attr"];
 
 fn places(toks: &[Token]) -> Vec<Place> {
     #[derive(Clone, Copy, PartialEq)]
     enum Group {
         Plain,
-        Attribute,
+        Attribute { doc: bool },
         Macro,
         Rules,
+        InlineMod,
     }
     let mut stack: Vec<Group> = Vec::new();
     let mut out = Vec::with_capacity(toks.len());
@@ -308,13 +318,27 @@ fn places(toks: &[Token]) -> Vec<Place> {
         match &t.tok {
             Tok::Open(c) => {
                 let back = |n: usize| i.checked_sub(n).and_then(tok);
-                // #[…] and #![…].
+                let in_macro = stack
+                    .iter()
+                    .any(|g| matches!(g, Group::Macro | Group::Rules));
+                // #[…] and #![…]; and in a macro's input, brackets that
+                // read as an attribute's, without the `#`.
                 let attribute = *c == '['
                     && (back(1) == Some(&Tok::Punct('#'))
                         || (back(1) == Some(&Tok::Punct('!'))
-                            && back(2) == Some(&Tok::Punct('#'))));
+                            && back(2) == Some(&Tok::Punct('#')))
+                        || (in_macro
+                            && matches!(tok(i + 1),
+                                Some(Tok::Ident(name)) if READING_ATTRIBUTES.contains(&name.as_str()))));
                 let group = if attribute {
-                    Group::Attribute
+                    Group::Attribute {
+                        doc: tok(i + 1) == Some(&Tok::Ident("doc".into())),
+                    }
+                } else if *c == '{'
+                    && matches!(back(1), Some(Tok::Ident(_)))
+                    && back(2) == Some(&Tok::Ident("mod".into()))
+                {
+                    Group::InlineMod
                 } else if matches!(back(1), Some(Tok::Ident(_)))
                     && back(2) == Some(&Tok::Punct('!'))
                     && back(3) == Some(&Tok::Ident("macro_rules".into()))
@@ -338,12 +362,18 @@ fn places(toks: &[Token]) -> Vec<Place> {
         }
     }
     fn place(stack: &[Group]) -> Place {
+        let attribute = stack.iter().rev().find_map(|g| match g {
+            Group::Attribute { doc } => Some(*doc),
+            _ => None,
+        });
         Place {
-            attribute: stack.contains(&Group::Attribute),
+            attribute: attribute.is_some(),
+            doc: attribute == Some(true),
             macro_input: stack
                 .iter()
                 .any(|g| matches!(g, Group::Macro | Group::Rules)),
             rules: stack.contains(&Group::Rules),
+            inline_mod: stack.contains(&Group::InlineMod),
         }
     }
     out
@@ -379,6 +409,45 @@ fn after_path(toks: &[Token], i: usize) -> bool {
     i >= 2 && is(toks, i - 1, &Tok::Punct(':')) && is(toks, i - 2, &Tok::Punct(':'))
 }
 
+// -- strings read as code -------------------------------------------------------
+
+/// Whether `text`, a string an attribute holds, would read a file or the
+/// environment where a derive reads it as code (serde's `bound = "…"`,
+/// `from = "…"`, zerocopy's `crate = "…"`): a file or environment macro
+/// called or renamed in it, a macro called by a name handed in (`$m!`), an
+/// attribute in it that reads a file, or a string of its own that would.
+/// Words about them — a deprecation's "use `Arg::env`" — read nothing.
+/// `depth` bounds strings in strings; deeper than any attribute writes is
+/// taken as reading.
+fn string_reads(text: &str, depth: u8) -> bool {
+    if depth >= 4 {
+        return true;
+    }
+    let toks = lex(text);
+    let places = places(&toks);
+    toks.iter().enumerate().any(|(i, t)| match &t.tok {
+        Tok::Ident(name)
+            if FILE_MACROS.contains(&name.as_str()) || ENV_MACROS.contains(&name.as_str()) =>
+        {
+            is(&toks, i + 1, &Tok::Punct('!')) || is(&toks, i + 1, &Tok::Ident("as".into()))
+        }
+        Tok::Ident(name)
+            if places[i].attribute
+                && matches!(name.as_str(), "path" | "link" | "debugger_visualizer") =>
+        {
+            is(&toks, i + 1, &Tok::Punct('=')) || is(&toks, i + 1, &Tok::Open('('))
+        }
+        Tok::Punct('$') => {
+            matches!(toks.get(i + 1).map(|t| &t.tok), Some(Tok::Ident(_)))
+                && is(&toks, i + 2, &Tok::Punct('!'))
+        }
+        Tok::Str(Some(inner)) => {
+            places[i].attribute && !places[i].doc && string_reads(inner, depth + 1)
+        }
+        _ => false,
+    })
+}
+
 // -- the plugin's own code ------------------------------------------------------
 
 /// What in `text`, the plugin's file `rel`, would read the building
@@ -388,8 +457,19 @@ pub(crate) fn own_code(rel: &str, text: &str) -> Vec<String> {
     let places = places(&toks);
     let mut found = Vec::new();
     for (i, t) in toks.iter().enumerate() {
-        let Tok::Ident(name) = &t.tok else { continue };
         let at = format!("{rel}:{}", t.line);
+        // A string in an attribute, which a derive may read as code.
+        if let Tok::Str(Some(string)) = &t.tok
+            && places[i].attribute
+            && !places[i].doc
+            && string_reads(string, 0)
+        {
+            found.push(format!(
+                "{at}: this attribute's string is read as code when the plugin is built, and that code would read a file or the environment of the computer, which a plugin may not do"
+            ));
+            continue;
+        }
+        let Tok::Ident(name) = &t.tok else { continue };
         let file = FILE_MACROS.contains(&name.as_str());
         let env = ENV_MACROS.contains(&name.as_str());
         if file || env {
@@ -399,12 +479,19 @@ pub(crate) fn own_code(rel: &str, text: &str) -> Vec<String> {
             }
             // The macro: called, renamed, named by its path, or handed to
             // a macro that could call it.
-            let the_macro = is(&toks, i + 1, &Tok::Punct('!'))
+            let called = is(&toks, i + 1, &Tok::Punct('!'))
                 || is(&toks, i + 1, &Tok::Ident("as".into()))
                 || after_path(&toks, i)
-                || places[i].macro_input
                 || places[i].attribute;
-            if !the_macro {
+            if !called && !places[i].macro_input {
+                continue;
+            }
+            // Only handed to a macro: most often a variable of that name,
+            // which the agent can rename.
+            if !called {
+                found.push(format!(
+                    "{at}: `{name}` handed to a macro could be the `{name}!` macro, which reads a file or the environment of the computer the plugin is built on; if it is a variable, give it another name"
+                ));
                 continue;
             }
             found.push(if file {
@@ -538,9 +625,8 @@ impl Check {
     }
 
     /// `literal`, a path the compiler reads from `dir`, if it stays in the
-    /// package: the file it names. `climb` is how far up it may go, when
-    /// where it is read from is not `dir` but wherever a macro is used.
-    fn inside(&self, dir: &Path, literal: &str, climb: Option<usize>) -> Result<PathBuf, String> {
+    /// package: the file it names.
+    fn inside(&self, dir: &Path, literal: &str) -> Result<PathBuf, String> {
         if literal.is_empty() || absolute(literal) {
             return Err(format!("\"{literal}\" is not a path in the package"));
         }
@@ -553,8 +639,6 @@ impl Check {
                 _ => None,
             })
             .collect();
-        let start = at.len() as isize;
-        let mut lowest = start;
         for part in literal.split(['/', '\\']) {
             match part {
                 "" | "." => {}
@@ -562,17 +646,9 @@ impl Check {
                     if at.pop().is_none() {
                         return Err(format!("\"{literal}\" names a file outside the package"));
                     }
-                    lowest = lowest.min(at.len() as isize);
                 }
                 part => at.push(part.to_string()),
             }
-        }
-        if let Some(climb) = climb
-            && start - lowest > climb as isize
-        {
-            return Err(format!(
-                "\"{literal}\", in a macro, could name a file outside the package"
-            ));
         }
         let path = at.iter().fold(self.root.clone(), |p, part| p.join(part));
         match path.canonicalize() {
@@ -601,34 +677,35 @@ impl Check {
         let places = places(&toks);
         let dir = path.parent().unwrap_or(&self.root).to_path_buf();
         for (i, t) in toks.iter().enumerate() {
-            let Tok::Ident(name) = &t.tok else { continue };
             let at = format!("{rel}:{}", t.line);
+            // A string in an attribute, which a derive may read as code.
+            if let Tok::Str(Some(string)) = &t.tok
+                && places[i].attribute
+                && !places[i].doc
+                && string_reads(string, 0)
+            {
+                return Err(format!(
+                    "{at}: an attribute's string is read as code when it is built, and that code would read a file or the environment of the computer"
+                ));
+            }
+            let Tok::Ident(name) = &t.tok else { continue };
             if FILE_MACROS.contains(&name.as_str()) {
                 if i > 0 && is(&toks, i - 1, &Tok::Punct('.')) {
                     continue;
                 }
                 if is(&toks, i + 1, &Tok::Punct('!')) {
+                    // Not called with its input here (a macro's pattern):
+                    // what it reads, the compiler says as it builds.
                     let Some((input, _)) = group(&toks, i + 2) else {
-                        return Err(format!("{at}: `{name}!` is not called as Clew can read"));
+                        continue;
                     };
                     self.include(name, input, &dir, places[i].rules)
                         .map_err(|why| format!("{at}: {name}!: {why}"))?;
                     continue;
                 }
-                // `include` is a common name for other things; the macro
-                // is only reached through it renamed, named by its path,
-                // or handed to a macro that could call it. The other two
-                // names are only ever the macros.
-                let reached = name != "include"
-                    || is(&toks, i + 1, &Tok::Ident("as".into()))
-                    || after_path(&toks, i)
-                    || places[i].macro_input
-                    || places[i].attribute;
-                if reached {
-                    return Err(format!(
-                        "{at}: `{name}` is used in a way Clew cannot follow, to check what it reads"
-                    ));
-                }
+                // Renamed, named by its path, or handed to a macro that
+                // could call it: what it reads then, the compiler says as
+                // it builds, and the build checks.
                 continue;
             }
             if !places[i].attribute {
@@ -641,12 +718,34 @@ impl Check {
                         && i > 0
                         && matches!(toks[i - 1].tok, Tok::Open('[') | Tok::Punct(',')) =>
                 {
+                    // Put together otherwise: checked as the compiler reads.
                     let Some(Tok::Str(Some(literal))) = toks.get(i + 2).map(|t| &t.tok) else {
-                        return Err(format!("{at}: #[path] is not a plain path"));
+                        continue;
                     };
+                    // In a module written inline, or on one, a path is
+                    // read from a folder of the module's own, not followed
+                    // here: what the compiler reads from it is checked as
+                    // it builds (`build`, by what it says it read), as is
+                    // anything else these checks cannot follow.
+                    if places[i].inline_mod || on_inline_module(&toks, &places, i) {
+                        continue;
+                    }
                     let file = self
-                        .inside(&dir, literal, None)
+                        .inside(&dir, literal)
                         .map_err(|why| format!("{at}: #[path]: {why}"))?;
+                    // A file of the package that is no Rust (a page of
+                    // documentation, as a module only for rustdoc) is not
+                    // read here as Rust.
+                    if !literal.ends_with(".rs") {
+                        continue;
+                    }
+                    // The file is a module whose own modules are beside it.
+                    if let Some(folder) = file.parent()
+                        && folder.starts_with(&self.root)
+                        && folder.is_dir()
+                    {
+                        self.walk(folder)?;
+                    }
                     self.add(file);
                 }
                 "debugger_visualizer" if is(&toks, i + 1, &Tok::Open('(')) => {
@@ -657,9 +756,6 @@ impl Check {
                                 return Err(format!(
                                     "{at}: #[debugger_visualizer]: \"{literal}\" is not a path in the package"
                                 ));
-                            }
-                            Tok::Str(None) => {
-                                return Err(format!("{at}: #[debugger_visualizer] is not plain"));
                             }
                             _ => {}
                         }
@@ -672,10 +768,13 @@ impl Check {
                         if !is(input, k + 1, &Tok::Punct('=')) {
                             continue;
                         }
-                        let value = match input.get(k + 2).map(|t| &t.tok) {
-                            Some(Tok::Str(Some(v))) => v.as_str(),
-                            _ => return Err(format!("{at}: #[link] is not plain")),
+                        // A library is looked for only in the compiler's
+                        // own folders, by its name: one put together
+                        // otherwise reads nothing else.
+                        let Some(Tok::Str(Some(value))) = input.get(k + 2).map(|t| &t.tok) else {
+                            continue;
                         };
+                        let value = value.as_str();
                         let bad = match key.as_str() {
                             "name" => value.contains(['/', '\\']) || value.contains(".."),
                             "modifiers" => value.contains("verbatim"),
@@ -711,26 +810,30 @@ impl Check {
             input = &input[..input.len() - 1];
         }
         let code = name == "include";
-        let plain = || "its path is not one Clew can check".to_string();
-        let path = match parse_path(input).ok_or_else(plain)? {
+        // A path put together otherwise, or read from wherever a macro is
+        // used: which file it is, Clew cannot tell from here. The build
+        // checks every file the compiler says it read (`build`), so that
+        // is no reason to refuse; only a path that names a file outside
+        // wherever it is read from is.
+        let Some(named) = parse_path(input) else {
+            return Ok(());
+        };
+        let path = match named {
             Named::Literal(literal) => {
-                // Code included from wherever a macro is used: Clew cannot
-                // tell which file that is, to check it too.
-                if rules && code {
-                    return Err(
-                        "it is in a macro, so Clew cannot tell which file it includes".into(),
-                    );
+                if rules {
+                    if literal.is_empty() || absolute(&literal) {
+                        return Err(format!("\"{literal}\" is not a path in the package"));
+                    }
+                    return Ok(());
                 }
-                self.inside(dir, &literal, rules.then_some(1))?
+                self.inside(dir, &literal)?
             }
             Named::Manifest(literal) => {
-                if rules && code {
-                    return Err(
-                        "it is in a macro, so Clew cannot tell which file it includes".into(),
-                    );
+                if rules {
+                    return Ok(());
                 }
                 let rest = literal.trim_start_matches(['/', '\\']);
-                self.inside(&self.root.clone(), rest, Some(0))?
+                self.inside(&self.root.clone(), rest)?
             }
             // What a build script wrote (only the few allowed may run), in
             // its own folder.
@@ -753,6 +856,32 @@ impl Check {
             self.add(path);
         }
         Ok(())
+    }
+}
+
+/// Whether the attribute holding the token at `i` is on a module written
+/// inline (`mod name { … }`): further attributes and `pub(…)` passed over.
+fn on_inline_module(toks: &[Token], places: &[Place], i: usize) -> bool {
+    let mut k = i;
+    while k < toks.len() && places[k].attribute {
+        k += 1;
+    }
+    loop {
+        match toks.get(k).map(|t| &t.tok) {
+            Some(Tok::Punct('#' | '!')) => k += 1,
+            Some(_) if places[k].attribute => k += 1,
+            Some(Tok::Ident(word)) if word == "pub" => {
+                k += 1;
+                if is(toks, k, &Tok::Open('(')) {
+                    k = group(toks, k).map_or(toks.len(), |(_, end)| end);
+                }
+            }
+            Some(Tok::Ident(word)) if word == "mod" => {
+                return matches!(toks.get(k + 1).map(|t| &t.tok), Some(Tok::Ident(_)))
+                    && is(toks, k + 2, &Tok::Open('{'));
+            }
+            _ => return false,
+        }
     }
 }
 
@@ -975,6 +1104,46 @@ mod tests {
         );
     }
 
+    /// A derive that reads a string as code (serde's `bound = "…"`) can be
+    /// handed a read of a file as surely as `include_str!`, and a macro's
+    /// input can carry an attribute in brackets: both refused before
+    /// anything is built. (What a macro puts together from its input in
+    /// any other way, the compiler is asked what it read: see the build's
+    /// `what_the_compiler_read_outside_the_build_is_refused_…` and the real
+    /// builds of `macro_built_reads_of_the_computer_are_refused`.) What
+    /// macros commonly do with attributes, and strings that are words, are
+    /// not refused.
+    #[test]
+    fn a_plugin_may_not_build_what_reads_a_file_from_a_string_or_a_macros_brackets() {
+        for refused in [
+            "macro_rules! m { ($b:tt) => { # $b mod leak; } } m!([path = \"/x\"]);",
+            "macro_rules! m { ($h:tt, $b:tt, $n:ident) => { $h $b mod $n; } } m!(#, [path = \"/x\"], leak);",
+            "#[derive(serde_derive::Serialize)] #[serde(bound = \"[(); include!(\\\"/home/u/.netrc\\\")]: Sized\")] struct S;",
+            "#[serde(bound = \"[(); \\u{69}nclude_bytes!(\\\"/x\\\")[0] as usize]: Sized\")] struct S;",
+            "#[serde(bound = \"[(); { #[path = \\\"/x.rs\\\"] mod m; 0 }]: Sized\")] struct S;",
+            "#[zerocopy(crate = \"a::<[(); core::include!(\\\"/x\\\")]>\")] struct Z;",
+        ] {
+            assert!(!own(refused).is_empty(), "{refused}");
+        }
+        for allowed in [
+            "macro_rules! s { ($(#[$m:meta])* $v:vis struct $n:ident) => { $(#[$m])* $v struct $n; } } s!(#[derive(Debug)] pub struct A);",
+            "macro_rules! i { ($a:expr, $i:expr) => { $a[$i] } } fn f(v: &[u8]) -> u8 { i!(v, 0) }",
+            "macro_rules! d { ($d:expr) => { #[doc = $d] pub fn f() {} } } d!(\"Says hello.\");",
+            "macro_rules! c { ($c:meta) => { #[cfg($c)] mod m {} } } c!(test);",
+            "macro_rules! v { ($($x:expr),*) => { vec![$($x),*] } } fn g() -> Vec<u8> { v![1, 2] }",
+            "#[serde(rename = \"include\")] #[serde(bound = \"T: Serialize\")] struct A<T>(T);",
+            "#[doc = \"Use include_str!(\\\"x\\\") in your code.\"] pub struct D;",
+            "#[error(\"{path} could not be read\")] struct E { path: String }",
+        ] {
+            assert!(own(allowed).is_empty(), "{allowed}: {:?}", own(allowed));
+        }
+        // A variable named as a macro, handed to one: said so, with what
+        // fixes it.
+        let found = own("let env = 3; println!(\"{}\", env);");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("if it is a variable, give it another name"));
+    }
+
     /// A package laid out in a temporary folder.
     struct Package {
         root: PathBuf,
@@ -1037,6 +1206,18 @@ mod tests {
             "#[cfg(custom)] include!(concat!(core::env!(\"ICU4X_DATA_DIR\"), \"/mod.rs\"));",
             // As url does: the file only goes into its own metadata.
             "#![cfg_attr(feature = \"v\", debugger_visualizer(natvis_file = \"../../debug_metadata/url.natvis\"))]",
+            // What Clew cannot tell from here — a path from wherever a
+            // macro is used (zerocopy's `include_value!`), an include
+            // renamed or handed on — the build checks as the compiler
+            // reads it, refused there if outside
+            // (`build::…what_the_compiler_read_outside_the_build_is_refused…`).
+            "macro_rules! inc { ($p:expr) => { include_str!($p) } }",
+            "macro_rules! doc { () => { include_str!(\"../../x\") } }",
+            "macro_rules! code { () => { include!(\"gen.rs\") } }",
+            "macro_rules! call { ($m:ident) => { $m!(\"/etc/passwd\") } } call!(include);",
+            "use core::include_str as text;",
+            "pub use std::include;",
+            "#[link(name = $name)] extern \"C\" {}",
         ] {
             assert!(ok(allowed).is_ok(), "{allowed}: {:?}", ok(allowed));
         }
@@ -1046,12 +1227,7 @@ mod tests {
             "const K: &str = include_str!(\"C:\\\\Users\\\\u\\\\key\");",
             "const K: &str = include_str!(concat!(env!(\"HOME\"), \"/.ssh/id_ed25519\"));",
             "const K: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../x\"));",
-            "macro_rules! inc { ($p:expr) => { include_str!($p) } }",
-            "macro_rules! doc { () => { include_str!(\"../../x\") } }",
-            "macro_rules! code { () => { include!(\"gen.rs\") } }",
-            "macro_rules! call { ($m:ident) => { $m!(\"/etc/passwd\") } } call!(include);",
-            "use core::include_str as text;",
-            "pub use std::include;",
+            "macro_rules! abs { () => { include_str!(\"/etc/passwd\") } }",
             "#[path = \"../../../x.rs\"] mod x;",
             "#[link(name = \"x\", kind = \"static\", modifiers = \"+verbatim\")] extern \"C\" {}",
             "#[link(name = \"../../../../etc/x\")] extern \"C\" {}",
@@ -1131,5 +1307,93 @@ mod tests {
         let lib_outside = Package::new("lib-outside", &[("Cargo.toml", "")]);
         let why = dependency(&lib_outside.root, &outside.root.join("secret.rs")).unwrap_err();
         assert!(why.contains("outside the package"), "{why}");
+    }
+
+    /// A dependency may not hide a read of a file in a string a derive
+    /// reads as code; a module a `#[path]` names has its own modules beside
+    /// it, read too; and a `#[path]` to a file that is no Rust is still one
+    /// in the package. What crates commonly do — `cfg_if!` with a `#[path]`,
+    /// passing attributes on as bitflags does, a `#[path]` in a module
+    /// written inline as hashbrown and libc have, a page of documentation as
+    /// a module as shlex has — is not refused: what the compiler reads from
+    /// those is checked as it builds.
+    #[test]
+    fn a_dependency_may_not_build_what_reads_a_file() {
+        let refused = |name: &str, files: &[(&str, &str)], says: &str| {
+            let why = Package::new(name, files).check().unwrap_err();
+            assert!(why.contains(says), "{name}: {why}");
+        };
+        refused(
+            "serde-bound",
+            &[(
+                "src/lib.rs",
+                "#[derive(Serialize)]\n#[serde(bound = \"[(); include!(\\\"/x\\\")]: Sized\")]\nstruct S;",
+            )],
+            "src/lib.rs:2: an attribute's string is read as code",
+        );
+        refused(
+            "path-module-folder",
+            &[
+                ("src/lib.rs", "#[path = \"../gen/x.rs\"] mod x;"),
+                ("gen/x.rs", "mod y;"),
+                (
+                    "gen/y.rs",
+                    "pub const K: &str = include_str!(\"/etc/passwd\");",
+                ),
+            ],
+            "gen/y.rs:1:",
+        );
+        refused(
+            "path-not-rust-outside",
+            &[("src/lib.rs", "#[path = \"../../../x.md\"] mod m;")],
+            "names a file outside the package",
+        );
+
+        let allowed = Package::new(
+            "common-macros",
+            &[
+                (
+                    "src/lib.rs",
+                    r#"
+macro_rules! cfg_if {
+    ($(if #[cfg($meta:meta)] { $($tokens:tt)* }) else * else { $($tokens2:tt)* }) => {
+        cfg_if! { @__items () ; $( ( ($meta) ($($tokens)*) ), )* ( () ($($tokens2)*) ), }
+    };
+    (@__items ($($not:meta,)*) ; ) => {};
+    (@__items ($($not:meta,)*) ; ( ($($m:meta),*) ($($tokens:tt)*) ), $($rest:tt)*) => {
+        #[cfg(all($($m,)* not(any($($not),*))))] cfg_if! { @__identity $($tokens)* }
+        cfg_if! { @__items ($($not,)* $($m,)*) ; $($rest)* }
+    };
+    (@__identity $($tokens:tt)*) => { $($tokens)* };
+}
+cfg_if! { if #[cfg(unix)] { #[path = "unix.rs"] mod imp; } else { mod imp; } }
+macro_rules! flags {
+    ($(#[$outer:meta])* $vis:vis struct $name:ident;) => { $(#[$outer])* $vis struct $name; };
+}
+flags! { #[derive(Debug)] pub struct Flags; }
+#[serde(rename_all = "camelCase", bound = "T: Serialize")]
+struct S<T>(T);
+pub mod raw {
+    #[path = "mod.rs"]
+    mod inner;
+}
+mod sys {
+    #[cfg_attr(target_arch = "mips", path = "../mips/bits.rs")]
+    mod bits {}
+}
+#[cfg(all(doc, not(doctest)))]
+#[path = "quoting_warning.md"]
+pub mod quoting_warning;
+"#,
+                ),
+                ("src/unix.rs", "pub fn f() {}"),
+                ("src/imp.rs", "pub fn f() {}"),
+                (
+                    "src/quoting_warning.md",
+                    "Use `include_str!(\"../../x\")` with care.",
+                ),
+            ],
+        );
+        assert_eq!(allowed.check(), Ok(()));
     }
 }
