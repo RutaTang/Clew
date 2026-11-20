@@ -334,3 +334,60 @@ fn macro_built_reads_of_the_computer_are_refused() {
         );
     }
 }
+
+/// What the compiler said comes back when it said what it read: a type
+/// error, built once and built again unchanged (its dep-info file written
+/// again word for word). A bracket left open stops it before it says what
+/// it read: Clew says where, in its own words.
+///
+///     cargo test -p clew-plugin --test plugins compilers_words -- --ignored --nocapture
+#[test]
+#[ignore = "builds plugins: needs Rust 1.95.0 with wasm32-wasip2, and the network"]
+fn the_compilers_words_are_passed_on_when_it_said_what_it_read() {
+    let toolchain = toolchain();
+    let root = clew_core::testutil::TempDir::new("compilers-words");
+    let source = root.join("source");
+    std::fs::create_dir_all(source.join("src")).unwrap();
+    std::fs::write(
+        source.join("plugin.toml"),
+        "[plugin]\nid = \"words\"\nname = \"Words\"\nversion = \"0.1.0\"\n\
+         description = \"Does not compile.\"\n\n[[command]]\nid = \"run\"\ntitle = \"Run\"\n",
+    )
+    .unwrap();
+    let work = root.join("work");
+    let plugin = |body: &str| {
+        format!(
+            "use clew_plugin_sdk::{{Invocation, Outcome, Plugin}};\n{body}\nstruct P;\n\
+             impl Plugin for P {{\n    fn run(_c: &str, _i: Invocation) -> Result<Outcome, String> {{\n\
+             Ok(Outcome::Say(String::new()))\n    }}\n}}\nclew_plugin_sdk::export!(P);\n"
+        )
+    };
+    let build = || clew_plugin::build::build(&source, &work, &toolchain, &AtomicBool::new(false));
+    std::fs::write(
+        source.join("src/lib.rs"),
+        plugin("pub fn f() -> u32 {\n    \"x\"\n}"),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let failed = build().expect_err("a type error");
+        assert!(
+            matches!(&failed, clew_plugin::build::BuildError::Compile(errors)
+                if errors.iter().any(|e| e.contains("E0308"))),
+            "{}",
+            failed.report()
+        );
+    }
+    std::fs::write(
+        source.join("src/lib.rs"),
+        plugin("pub fn f() -> u32 {\n    (1\n}"),
+    )
+    .unwrap();
+    let failed = build().expect_err("a bracket left open");
+    assert!(
+        matches!(&failed, clew_plugin::build::BuildError::Compile(errors)
+            if errors.len() == 1
+                && errors[0].starts_with("error: src/lib.rs:4: this `}` closes the `(` of line 3")),
+        "{}",
+        failed.report()
+    );
+}

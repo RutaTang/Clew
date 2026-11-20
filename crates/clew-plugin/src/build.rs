@@ -358,6 +358,57 @@ fn stage_sources(source: &Path, crate_dir: &Path) -> Result<(), BuildError> {
     }
 }
 
+/// Why the build failed, when `unit` failed before saying what it read: in
+/// Clew's own words, as nothing the compiler said is passed on. The plugin
+/// itself: a bracket of its own files not closed, as Clew reads them, or
+/// where the compiler stopped (`stops`); a crate it uses, which one.
+fn unread_failure(
+    crate_dir: &Path,
+    plugin: &str,
+    unit: &str,
+    metadata: &str,
+    stops: &[String],
+) -> BuildError {
+    const WITHHELD: &str =
+        "The compiler stopped before it said which files it read, so nothing it said is passed on.";
+    match package_of(metadata, unit, plugin) {
+        Some(package) => BuildError::Failed(format!(
+            "compiling {package}, a crate the plugin uses, failed. {WITHHELD} Use another crate in place of it, or another version of it."
+        )),
+        None => {
+            let mut unpaired = Vec::new();
+            unpaired_in(&crate_dir.join("src"), "src", &mut unpaired);
+            unpaired.sort();
+            let said = match (unpaired.first(), stops.first()) {
+                (Some(unpaired), _) => format!("error: {unpaired}"),
+                (None, Some(stop)) => format!(
+                    "error: {stop}: the compiler stopped here. Look at the code there: a bracket not closed, or a macro whose expansion does not end or does not parse."
+                ),
+                (None, None) => "error: the plugin did not compile.".to_string(),
+            };
+            BuildError::Compile(vec![format!("{said}\n{WITHHELD}")])
+        }
+    }
+}
+
+/// Each Rust file staged in `dir` (`rel` from the plugin's folder) whose
+/// brackets do not pair up, where ([`crate::reads::unpaired`]).
+fn unpaired_in(dir: &Path, rel: &str, found: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        let rel = format!("{rel}/{name}");
+        if path.is_dir() {
+            unpaired_in(&path, &rel, found);
+        } else if let Ok(text) = std::fs::read_to_string(&path) {
+            found.extend(crate::reads::unpaired(&rel, &text));
+        }
+    }
+}
+
 /// What the Rust files staged in `dir` (`rel` from the plugin's folder)
 /// would read of the computer they are built on.
 fn check_own_code(dir: &Path, rel: &str, found: &mut Vec<String>) {
@@ -561,10 +612,17 @@ fn cargo(toolchain: &Toolchain, dir: &Path, target: &Path, network: bool) -> Com
     }
     cmd.env("RUSTC", &toolchain.rustc)
         .env("CARGO_TARGET_DIR", target)
+        // Where rustc writes what it made and what it read (its `.d`
+        // files, a build script's `OUT_DIR`): the plugin's own folder,
+        // which is checked and wiped — not one a configuration's
+        // `build.build-dir` moved out of it. Cargo's own copy of a `.d`
+        // names files from the plugin's folder, as the check reads it.
+        .env("CARGO_BUILD_BUILD_DIR", target)
+        .env("CARGO_BUILD_DEP_INFO_BASEDIR", dir)
         .env("CARGO_TERM_COLOR", "never")
         .env("CARGO_TERM_PROGRESS_WHEN", "never")
         // A cargo configuration of the user's (`~/.cargo/config.toml`, read
-        // wherever the build is) steers no build of a plugin: no flags, no
+        // wherever the build is) gives a plugin's build no flags and no
         // wrapper. Set, even empty, these come before any configuration.
         .env("CARGO_ENCODED_RUSTFLAGS", "")
         .env("RUSTC_WRAPPER", "")
@@ -909,6 +967,32 @@ struct Messages {
     /// The dep-info files (`.d`) of every unit the build used, built now
     /// or before (`outside_read`).
     dep_infos: Vec<PathBuf>,
+    /// The units an error was said of ([`unit_of`]): each that wrote no
+    /// dep-info file said nothing of what it read (`unread_failure`).
+    failed: Vec<String>,
+    /// Where in the plugin's own files its errors are, `file:line:column`.
+    stops: Vec<String>,
+}
+
+/// The name a unit of the build goes by, alike in a compiler message and in
+/// the name of its dep-info file ([`crate_of`]): its crate's, `-` read as
+/// `_`; a build script's, its package's.
+fn unit_of(message: &serde_json::Value) -> String {
+    let build_script = message["target"]["kind"]
+        .as_array()
+        .is_some_and(|kinds| kinds.iter().any(|k| k == "custom-build"));
+    let name = match build_script {
+        // `registry+…#serde@1.0.228`, or before cargo 1.77 `serde 1.0.228 (…)`.
+        true => {
+            let id = message["package_id"].as_str().unwrap_or_default();
+            match id.rsplit_once('#') {
+                Some((_, rest)) => rest.split('@').next().unwrap_or_default(),
+                None => id.split(' ').next().unwrap_or_default(),
+            }
+        }
+        false => message["target"]["name"].as_str().unwrap_or_default(),
+    };
+    name.replace('-', "_")
 }
 
 fn read_messages(stdout: &str, plugin: &str) -> Messages {
@@ -919,6 +1003,8 @@ fn read_messages(stdout: &str, plugin: &str) -> Messages {
         warnings: Vec::new(),
         files: Vec::new(),
         dep_infos: Vec::new(),
+        failed: Vec::new(),
+        stops: Vec::new(),
     };
     for line in stdout.lines() {
         let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -948,12 +1034,37 @@ fn read_messages(stdout: &str, plugin: &str) -> Messages {
                 messages
                     .files
                     .extend(files.into_iter().map(|file| (of.to_string(), file)));
+                let own = message["target"]["name"] == lib.as_str();
+                if message["message"]["level"]
+                    .as_str()
+                    .is_some_and(|level| level.starts_with("error"))
+                {
+                    let unit = unit_of(&message);
+                    if !messages.failed.contains(&unit) {
+                        messages.failed.push(unit);
+                    }
+                    let primary = message["message"]["spans"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|s| s["is_primary"] == true);
+                    if let Some(span) = primary
+                        && own
+                        && let Some(file) = span["file_name"].as_str()
+                        && Path::new(file).is_relative()
+                        && messages.stops.len() < MAX_MESSAGES
+                    {
+                        messages.stops.push(format!(
+                            "{file}:{}:{}",
+                            span["line_start"], span["column_start"]
+                        ));
+                    }
+                }
                 let rendered = message["message"]["rendered"].as_str().unwrap_or_default();
                 let rendered = rendered.trim_end().to_string();
                 if rendered.is_empty() {
                     continue;
                 }
-                let own = message["target"]["name"] == lib.as_str();
                 match message["message"]["level"].as_str() {
                     Some("error") | Some("error: internal compiler error")
                         if messages.errors.len() < MAX_MESSAGES
@@ -1084,11 +1195,13 @@ fn written_dep_infos(
 const UNCHECKED: &str = ".unchecked";
 
 /// The files a dep-info file names: every path on its lines, what was made
-/// and what it was made from. `# env-dep:` and other `#` lines name no file.
+/// and what it was made from. rustc's `# env-dep:` and `# checksum:` lines
+/// name no file; any other line is read for files — a path with a line
+/// break in it is not taken for one of those, its rest unread.
 fn dep_info_files(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in text.lines() {
-        if line.starts_with('#') {
+        if line.starts_with("# env-dep:") || line.starts_with("# checksum:") {
             continue;
         }
         let mut word = String::new();
@@ -1133,6 +1246,10 @@ impl Readable {
     /// Clew's build folder: another plugin's source is not this one's.
     fn new(target: &Path, base: &Path, metadata: &str, sysroot: Option<PathBuf>) -> Self {
         let mut roots = vec![base.to_path_buf(), target.to_path_buf()];
+        // Of the toolchain, its library only (`lib/rustlib`: the standard
+        // library's sources and what it compiled): a toolchain installed
+        // with `--prefix ~/.local` has all of `~/.local` for its root.
+        let sysroot = sysroot.map(|s| s.join("lib").join("rustlib"));
         if let Ok(metadata) = serde_json::from_str::<serde_json::Value>(metadata) {
             for package in metadata["packages"].as_array().into_iter().flatten() {
                 if let Some(root) = package["manifest_path"]
@@ -1144,22 +1261,30 @@ impl Readable {
             }
         }
         roots.extend(sysroot);
-        let roots = roots
-            .into_iter()
-            .map(|r| r.canonicalize().unwrap_or(r))
-            .collect();
+        let roots = roots.iter().map(|r| resolved(r)).collect();
         Self {
             roots,
             base: base.to_path_buf(),
         }
     }
 
-    /// Whether `file`, as the compiler named it, is one it may read.
+    /// Whether `file`, as the compiler named it, is one it may read: it
+    /// is, once its links are followed, in one of the folders it may read
+    /// (followed alike: a folder reached through a link, as macOS's
+    /// `/var` is `/private/var`, or Windows' `\\?\` form of every path).
     fn allows(&self, file: &str) -> bool {
-        // The standard library as the compiler names it from its own build
-        // ("/rustc/<hash>/library/…"), and names that are no file
-        // ("<anon>"), are nothing of the computer's.
-        if file.starts_with('<') || file.starts_with("/rustc/") || file.starts_with("\\rustc\\") {
+        // Names that are no file ("<anon>", "<macro expansion>"), and the
+        // standard library as the compiler names it from its own build
+        // ("/rustc/<hash>/library/…"), are nothing of the computer's —
+        // with no `..` in them, which Windows takes out before it reads
+        // ("/rustc/../Users/…" is `C:\Users\…` there).
+        let parts = || file.split(['/', '\\']);
+        if file.starts_with('<') && file.ends_with('>') && !file.contains(['/', '\\']) {
+            return true;
+        }
+        if (file.starts_with("/rustc/") || file.starts_with("\\rustc\\"))
+            && parts().all(|part| part != ".." && part != ".")
+        {
             return true;
         }
         let path = Path::new(file);
@@ -1168,8 +1293,35 @@ impl Readable {
         } else {
             self.base.join(path)
         };
-        let real = path.canonicalize().unwrap_or_else(|_| lexically(&path));
+        let real = resolved(&path);
         self.roots.iter().any(|root| real.starts_with(root))
+    }
+}
+
+/// `path` with its links followed: as the system resolves it when it is
+/// there; when it is not, its nearest folder that is, resolved, and the
+/// rest as written, `..` taken out — so a file and the folders it may be in
+/// are compared in the same form.
+fn resolved(path: &Path) -> PathBuf {
+    if let Ok(real) = path.canonicalize() {
+        return real;
+    }
+    let path = lexically(path);
+    let mut rest = Vec::new();
+    let mut at = path.as_path();
+    loop {
+        if let Ok(real) = at.canonicalize() {
+            let mut out = real;
+            out.extend(rest.iter().rev());
+            return out;
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                at = parent;
+            }
+            _ => return path,
+        }
     }
 }
 
@@ -1499,18 +1651,27 @@ fn build_with(
     ]);
     // A cargo configuration's `[env]` reaches the build only through
     // variables it does not set already: each is set, empty.
+    // Those the build is given already (PATH, HOME…) stay as given: a
+    // configuration's `[env]` does not come before them, and emptied they
+    // broke the build.
+    let given: Vec<String> = build
+        .get_envs()
+        .map(|(name, _)| name.to_string_lossy().to_ascii_uppercase())
+        .collect();
     for name in configured_env(&crate_dir, toolchain.cargo_home.as_deref())? {
-        build.env(name, "");
+        if !given.contains(&name.to_ascii_uppercase()) {
+            build.env(name, "");
+        }
     }
-    let readable = Readable::new(
-        &target,
-        &crate_dir,
-        &metadata,
-        Some(sysroot(toolchain, cancel)?),
-    );
+    let sysroot = sysroot(toolchain, cancel)?;
     let before = dep_infos(&target);
     std::fs::create_dir_all(&target).map_err(|e| BuildError::Failed(e.to_string()))?;
     std::fs::write(target.join(UNCHECKED), "").map_err(|e| BuildError::Failed(e.to_string()))?;
+    // With its folder there: what the build makes in it is compared with
+    // the folder as resolved, not as written (a first build's folder was
+    // not there to resolve, and every file it made was taken for outside).
+    let readable = Readable::new(&target, &crate_dir, &metadata, Some(sysroot));
+    let started = std::time::SystemTime::now();
     let ran = run(build, BUILD_DEADLINE, cancel)?;
     let mut messages = read_messages(&ran.stdout, &id);
     // What the compiler read, before anything it said is used: a file of
@@ -1521,8 +1682,13 @@ fn build_with(
         .extend(written_dep_infos(&target, &before));
     if let Some((file, of)) = outside_read(&readable, &messages.dep_infos, &messages.files) {
         // Nothing of it is kept: what was compiled from it, cached for the
-        // next build, goes with the rest of the build's folder.
-        let _ = std::fs::remove_dir_all(&target);
+        // next build, goes with the rest of the build's folder. What could
+        // not be removed (a file held open) is marked unchecked again, as
+        // the removal may have taken the mark first: wiped by the next
+        // build, not built on, its `.d` taken for one checked.
+        if std::fs::remove_dir_all(&target).is_err() && target.exists() {
+            let _ = std::fs::write(target.join(UNCHECKED), "");
+        }
         let outside = format!(
             "{file}, which is outside the plugin and the packages it uses: a file of the computer's. Nothing the compiler said is passed on."
         );
@@ -1537,6 +1703,34 @@ fn build_with(
     }
     let _ = std::fs::remove_file(target.join(UNCHECKED));
     if !ran.success {
+        // A unit whose compiling stopped before it wrote its dep-info file
+        // said nothing of what it read (a bracket left open, a macro's
+        // recursion's end) — and a message of its from before the stop can
+        // hold what it read (a `compile_error!` given an include). So none
+        // of what the compiler said is passed on then.
+        // Written now: new or changed (`dep_infos`), or written again word
+        // for word, as a failing crate built again unchanged writes it.
+        let rewritten = dep_infos(&target).into_keys().filter(|d| {
+            std::fs::metadata(d)
+                .and_then(|m| m.modified())
+                .is_ok_and(|at| at >= started)
+        });
+        let written: std::collections::HashSet<String> = messages
+            .dep_infos
+            .iter()
+            .cloned()
+            .chain(rewritten)
+            .map(|d| crate_of(&d).replace('-', "_"))
+            .collect();
+        if let Some(unit) = messages.failed.iter().find(|u| !written.contains(*u)) {
+            return Err(unread_failure(
+                &crate_dir,
+                &id,
+                unit,
+                &metadata,
+                &messages.stops,
+            ));
+        }
         if !messages.errors.is_empty() {
             return Err(BuildError::Compile(messages.errors));
         }
@@ -1681,6 +1875,12 @@ mod tests {
     /// and macro expansions' too.
     #[test]
     fn what_the_compiler_says_it_read_is_read_whole() {
+        // A line begun with `#` that is none of rustc's is read for files:
+        // a path with a line break in it is not half read.
+        assert_eq!(
+            dep_info_files("src/lib.rs: /a/x\n#y/../../etc/passwd\n# checksum:abc\n"),
+            ["src/lib.rs", "/a/x", "#y/../../etc/passwd"]
+        );
         assert_eq!(
             dep_info_files(
                 "/t/deps/a-1.d: src/lib.rs /x\\ y/z.rs\n\nsrc/lib.rs:\n# env-dep:HOME=/root\n/x\\ y/z.rs:\n"
@@ -1798,6 +1998,17 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
             "/etc/passwd".to_string(),
+            // rustc's name for the standard library, climbing out of it: on
+            // Windows `..` is taken out before the file is read.
+            "/rustc/../etc/passwd".to_string(),
+            "/rustc/0123abcd/../../home/u/.netrc".to_string(),
+            // Windows reads `\rustc\..\Users\…` as `C:\Users\…` (on Unix it is
+            // one name, of a file in the plugin's folder).
+            #[cfg(windows)]
+            "\\rustc\\..\\Users\\u\\secret.rs".to_string(),
+            "<a/../../etc/passwd>".to_string(),
+            // Of the toolchain's folder, its library only.
+            sysroot.join("share/secret").to_string_lossy().into_owned(),
         ] {
             assert!(!readable.allows(&refused), "{refused}");
         }
@@ -1807,6 +2018,62 @@ mod tests {
                 .unwrap();
             assert!(!readable.allows("src/link.rs"), "a link out of the build");
         }
+        // The folders reached through a link (macOS's `/var` is
+        // `/private/var`), what the build makes there not made yet: in the
+        // same form as the files, alike there or not.
+        #[cfg(unix)]
+        {
+            let linked = root.join("linked");
+            std::os::unix::fs::symlink(&work, &linked).unwrap();
+            std::fs::create_dir_all(work.join("target")).unwrap();
+            let readable = Readable::new(
+                &linked.join("target"),
+                &linked.join("sample"),
+                &metadata,
+                Some(sysroot.clone()),
+            );
+            for allowed in [
+                linked.join("target/release/sample.wasm"),
+                work.join("target/release/sample.wasm"),
+                linked.join("sample/src/lib.rs"),
+                work.join("sample/src/missing.rs"),
+            ] {
+                let allowed = allowed.to_string_lossy().into_owned();
+                assert!(readable.allows(&allowed), "{allowed}");
+            }
+            let refused = linked.join("target/../../outside/secret");
+            let refused = refused.to_string_lossy().into_owned();
+            assert!(!readable.allows(&refused), "{refused}");
+        }
+    }
+
+    /// A unit of the build is named alike in a compiler message and by its
+    /// dep-info file: a crate by its name, a build script by its package.
+    #[test]
+    fn a_unit_is_named_as_its_dep_info_file_names_it() {
+        let lib = serde_json::json!({"target": {"name": "word-count", "kind": ["cdylib"]}});
+        assert_eq!(unit_of(&lib), "word_count");
+        assert_eq!(
+            crate_of(Path::new("/t/deps/word_count-0123abcd0123abcd.d")),
+            "word_count"
+        );
+        for id in [
+            "registry+https://github.com/rust-lang/crates.io-index#serde-json@1.0.0",
+            "serde-json 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+        ] {
+            let script = serde_json::json!({
+                "package_id": id,
+                "target": {"name": "build-script-build", "kind": ["custom-build"]}
+            });
+            assert_eq!(unit_of(&script), "serde_json", "{id}");
+        }
+        assert_eq!(
+            crate_of(Path::new(
+                "/t/build/serde-json-0123abcd0123abcd/build_script_build-0123abcd0123abcd.d"
+            ))
+            .replace('-', "_"),
+            "serde_json"
+        );
     }
 
     /// The whole build, with a cargo that reports what a real one would:
@@ -1896,11 +2163,17 @@ mod tests {
         assert!(!target.exists(), "what was compiled from it is kept");
         let env = std::fs::read_to_string(fake.join("env")).unwrap();
         for given in [
-            "CARGO_ENCODED_RUSTFLAGS=\n",
-            "RUSTC_WRAPPER=\n",
-            "NIX_CFLAGS_COMPILE=-O1\n",
+            "CARGO_ENCODED_RUSTFLAGS=\n".to_string(),
+            "RUSTC_WRAPPER=\n".to_string(),
+            "NIX_CFLAGS_COMPILE=-O1\n".to_string(),
+            // What rustc writes stays in the plugin's folder, checked.
+            format!("CARGO_BUILD_BUILD_DIR={}\n", target.display()),
+            format!(
+                "CARGO_BUILD_DEP_INFO_BASEDIR={}\n",
+                work.join("sample").display()
+            ),
         ] {
-            assert!(env.contains(given), "{given}: {env}");
+            assert!(env.contains(&given), "{given}: {env}");
         }
         assert!(
             !env.contains("NIX_CONFIG") && !env.contains("s3cret"),
@@ -1941,16 +2214,58 @@ mod tests {
         );
 
         // Checked, its marker goes; built again unchanged, it is not read
-        // again as this build's.
-        let checked = attempt(
-            "src/lib.rs:\n".into(),
-            message("src/lib.rs", "error[E0425]: x"),
-        );
+        // again as this build's, and what the compiler said is said again.
+        for _ in 0..2 {
+            let checked = attempt(
+                "src/lib.rs:\n".into(),
+                message("src/lib.rs", "error[E0425]: x"),
+            );
+            assert!(
+                matches!(&checked, Err(BuildError::Compile(errors)) if errors[0].contains("E0425")),
+                "{checked:?}"
+            );
+            assert!(!target.join(UNCHECKED).exists());
+        }
+
+        // The compiler stopped before it wrote what it read (a recursion's
+        // end after a `compile_error!` handed an include): none of its
+        // words are passed on — where it stopped, and an unclosed bracket
+        // as Clew reads the plugin's files, are.
+        let stopped = |file: &str| {
+            serde_json::json!({
+                "reason": "compiler-message",
+                "target": {"name": "sample"},
+                "message": {
+                    "level": "error",
+                    "rendered": "error: machine x password y",
+                    "spans": [{"file_name": file, "is_primary": true, "line_start": 3, "column_start": 5}]
+                }
+            })
+            .to_string()
+        };
+        let unwritten = |messages: String| {
+            let _ = std::fs::remove_file(fake.join("sample.d"));
+            std::fs::write(fake.join("messages"), messages + "\n").unwrap();
+            std::fs::write(fake.join("status"), "101").unwrap();
+            build(&source, &work, &toolchain, &AtomicBool::new(false))
+        };
+        let withheld = unwritten(stopped("src/lib.rs"));
         assert!(
-            matches!(&checked, Err(BuildError::Compile(_))),
-            "{checked:?}"
+            matches!(&withheld, Err(BuildError::Compile(errors))
+                if errors.len() == 1
+                    && errors[0].contains("src/lib.rs:3:5: the compiler stopped here")
+                    && !errors[0].contains("password")),
+            "{withheld:?}"
         );
-        assert!(!target.join(UNCHECKED).exists());
+        std::fs::write(source.join("src/lib.rs"), "fn f() {\n    let x = (1;\n}\n").unwrap();
+        let unpaired = unwritten(stopped("src/lib.rs"));
+        assert!(
+            matches!(&unpaired, Err(BuildError::Compile(errors))
+                if errors[0].starts_with("error: src/lib.rs:3: this `}` closes the `(` of line 2, which `)` closes")
+                    && !errors[0].contains("password")),
+            "{unpaired:?}"
+        );
+        std::fs::write(source.join("src/lib.rs"), "// a plugin").unwrap();
 
         // Another plugin built just after, in the same folder: its own
         // build folder, and the first plugin's files are none of its.
@@ -2033,12 +2348,18 @@ mod tests {
         // A configured [env]: emptied; one forced: refused.
         std::fs::write(
             home.join("config.toml"),
-            "[env]\nCLEW_TEST_SECRET = \"from-config\"\n",
+            "[env]\nCLEW_TEST_SECRET = \"from-config\"\nPATH = \"/nowhere\"\n",
         )
         .unwrap();
         let _ = attempt("src/lib.rs:\n".into(), String::new());
         let env = std::fs::read_to_string(fake.join("env")).unwrap();
         assert!(env.contains("CLEW_TEST_SECRET=\n"), "{env}");
+        // One the build is given already stays as given.
+        assert!(
+            env.lines()
+                .any(|l| l.starts_with("PATH=") && l.len() > "PATH=".len()),
+            "{env}"
+        );
         std::fs::write(
             home.join("config.toml"),
             "[env]\nCLEW_TEST_SECRET = { value = \"x\", force = true }\n",

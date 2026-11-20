@@ -389,9 +389,9 @@ pub fn hold(data: &Path) -> Option<Held> {
     else {
         return Some(Held(None));
     };
-    // `busy` takes the lock for an instant to see whether it is free: a
-    // window holding it is told from that by trying a few times over a
-    // fifth of a second.
+    // `busy` holds the lock, shared, for an instant to see whether it is
+    // free: a window holding it is told from that by trying a few times
+    // over a fifth of a second.
     for _ in 0..10 {
         match file.try_lock() {
             Ok(()) => return Some(Held(Some(file))),
@@ -404,12 +404,15 @@ pub fn hold(data: &Path) -> Option<Held> {
     None
 }
 
-/// Whether another Clew window is setting Rust up or removing it now.
+/// Whether another Clew window is setting Rust up or removing it now:
+/// looked at with a shared hold of its lock, which two windows looking at
+/// once both get — an exclusive one, taken for an instant to look, read
+/// as busy to the other window looking that instant.
 pub fn busy(data: &Path) -> bool {
     let Ok(file) = std::fs::File::open(lock_path(data)) else {
         return false;
     };
-    match file.try_lock() {
+    match file.try_lock_shared() {
         Ok(()) => {
             let _ = file.unlock();
             false
@@ -424,7 +427,7 @@ pub fn wait_while_busy(data: &Path) {
     let Ok(file) = std::fs::File::open(lock_path(data)) else {
         return;
     };
-    if file.lock().is_ok() {
+    if file.lock_shared().is_ok() {
         let _ = file.unlock();
     }
 }
@@ -860,7 +863,9 @@ mod tests {
             .write(true)
             .open(lock_path(data.path()))
             .unwrap();
-        probe.lock().unwrap();
+        probe.lock_shared().unwrap();
+        // Two windows looking at once: neither is told the other is busy.
+        assert!(!busy(data.path()), "a look is not a hold");
         let let_go = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
             probe.unlock().unwrap();

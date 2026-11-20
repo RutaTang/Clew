@@ -22,8 +22,11 @@
 //!   there is refused.
 //!
 //! It reads Rust's tokens, so comments and strings are not taken for code
-//! and the layout of the code does not matter. A use it cannot follow (a
-//! macro passed `include_str` to call) is refused rather than guessed at.
+//! and the layout of the code does not matter. What a dependency reads that
+//! it cannot tell from the source (an include whose path a macro is handed)
+//! is left to the build, which checks every file the compiler says it read
+//! (`crate::build`); a `#[link]` name it cannot tell is refused, as the
+//! compiler does not say it read one.
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -358,6 +361,18 @@ fn places(toks: &[Token]) -> Vec<Place> {
                 out.push(place(&stack));
                 stack.pop();
             }
+            // A doc string inside an attribute's words (`cfg_attr(docsrs,
+            // doc = "…")`) is a doc string as one on its own is: words for
+            // rustdoc, not code a derive reads.
+            Tok::Str(_)
+                if i >= 2
+                    && toks[i - 1].tok == Tok::Punct('=')
+                    && toks[i - 2].tok == Tok::Ident("doc".into()) =>
+            {
+                let mut here = place(&stack);
+                here.doc |= here.attribute;
+                out.push(here);
+            }
             _ => out.push(place(&stack)),
         }
     }
@@ -449,6 +464,40 @@ fn string_reads(text: &str, depth: u8) -> bool {
 }
 
 // -- the plugin's own code ------------------------------------------------------
+
+/// Where `text`, the plugin's file `rel`, has a bracket that does not pair
+/// up — a `{`, `(` or `[` never closed, or one closed by the wrong kind or
+/// by none — in a sentence for the agent: what the compiler stops at
+/// before it says which files it read, said in Clew's own words.
+pub(crate) fn unpaired(rel: &str, text: &str) -> Option<String> {
+    let closer = |open: char| match open {
+        '(' => ')',
+        '[' => ']',
+        _ => '}',
+    };
+    let mut open: Vec<(char, usize)> = Vec::new();
+    for t in lex(text) {
+        match t.tok {
+            Tok::Open(c) => open.push((c, t.line)),
+            Tok::Close(c) => match open.pop() {
+                Some((o, _)) if closer(o) == c => {}
+                Some((o, line)) => {
+                    return Some(format!(
+                        "{rel}:{}: this `{c}` closes the `{o}` of line {line}, which `{}` closes",
+                        t.line,
+                        closer(o)
+                    ));
+                }
+                None => {
+                    return Some(format!("{rel}:{}: this `{c}` closes nothing", t.line));
+                }
+            },
+            _ => {}
+        }
+    }
+    open.pop()
+        .map(|(o, line)| format!("{rel}:{line}: this `{o}` is never closed"))
+}
 
 /// What in `text`, the plugin's file `rel`, would read the building
 /// computer's files or environment: one sentence per place, for the agent.
@@ -768,11 +817,20 @@ impl Check {
                         if !is(input, k + 1, &Tok::Punct('=')) {
                             continue;
                         }
-                        // A library is looked for only in the compiler's
-                        // own folders, by its name: one put together
-                        // otherwise reads nothing else.
-                        let Some(Tok::Str(Some(value))) = input.get(k + 2).map(|t| &t.tok) else {
-                            continue;
+                        // A library is looked for in the compiler's own
+                        // folders, by its name — unless the name is a path,
+                        // or `+verbatim` takes it as written (an absolute
+                        // one read wherever it is). Neither is in a `.d`
+                        // file, so the build could not tell: a name or
+                        // modifiers put together by a macro is refused.
+                        let value = match input.get(k + 2).map(|t| &t.tok) {
+                            Some(Tok::Str(Some(value))) => value,
+                            _ if matches!(key.as_str(), "name" | "modifiers") => {
+                                return Err(format!(
+                                    "{at}: #[link({key} = …)] is not a plain string, so what it names cannot be told"
+                                ));
+                            }
+                            _ => continue,
                         };
                         let value = value.as_str();
                         let bad = match key.as_str() {
@@ -1144,6 +1202,29 @@ mod tests {
         assert!(found[0].contains("if it is a variable, give it another name"));
     }
 
+    /// A bracket that does not pair up is said where, as the agent fixes it.
+    #[test]
+    fn unpaired_brackets_are_said_where() {
+        assert_eq!(unpaired("src/lib.rs", "fn f() { (\"}\") }"), None);
+        assert_eq!(
+            unpaired("src/lib.rs", "fn f(\n{\n"),
+            Some("src/lib.rs:2: this `{` is never closed".into())
+        );
+        assert_eq!(
+            unpaired("src/a.rs", "fn f() {}\n}"),
+            Some("src/a.rs:2: this `}` closes nothing".into())
+        );
+        assert_eq!(
+            unpaired("src/lib.rs", "fn f() {\n  g(1];\n}"),
+            Some("src/lib.rs:2: this `]` closes the `(` of line 2, which `)` closes".into())
+        );
+        // In a comment or a string, a bracket is no bracket.
+        assert_eq!(
+            unpaired("src/lib.rs", "// {\nconst S: &str = r#\"(\"#;"),
+            None
+        );
+    }
+
     /// A package laid out in a temporary folder.
     struct Package {
         root: PathBuf,
@@ -1217,7 +1298,8 @@ mod tests {
             "macro_rules! call { ($m:ident) => { $m!(\"/etc/passwd\") } } call!(include);",
             "use core::include_str as text;",
             "pub use std::include;",
-            "#[link(name = $name)] extern \"C\" {}",
+            // A doc string in cfg_attr is words, as one on its own is.
+            "#[cfg_attr(docsrs, doc = \"Set it with `env!(\\\"X\\\")`.\")] pub struct S;",
         ] {
             assert!(ok(allowed).is_ok(), "{allowed}: {:?}", ok(allowed));
         }
@@ -1231,6 +1313,10 @@ mod tests {
             "#[path = \"../../../x.rs\"] mod x;",
             "#[link(name = \"x\", kind = \"static\", modifiers = \"+verbatim\")] extern \"C\" {}",
             "#[link(name = \"../../../../etc/x\")] extern \"C\" {}",
+            // A library named by a macro: a path, or `+verbatim`, the
+            // compiler does not say it read.
+            "#[link(name = $name)] extern \"C\" {}",
+            "macro_rules! l { ($n:expr, $m:expr) => { #[link(name = $n, kind = \"static\", modifiers = $m)] extern \"C\" {} } }",
             "#![debugger_visualizer(gdb_script_file = \"/etc/passwd\")]",
             "include!(concat!(env!(\"OUT_DIR\"), \"/../../../release/deps/x.rlib\"));",
             "const K: &str = include_str!(concat!(env!(\"USERPROFILE\"), \"/key\"));",
