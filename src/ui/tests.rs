@@ -18088,6 +18088,69 @@ fn each_init_in_the_outline_has_a_note_of_its_own() {
     assert_eq!(toggled(1).as_deref(), Some("Inventory.__init__"));
 }
 
+/// A Rust file's outline heads each `impl` block's items with what the
+/// block says — `fmt` was nobody's, and two `new`s one name twice — and
+/// every row stands in as deep as what holds it: a method under its
+/// `impl`, a module's items under the module. A block's row jumps to its
+/// line, and the outline's follow counts it.
+#[test]
+fn a_rust_outline_heads_each_impl_blocks_items() {
+    let mut app = reader_app();
+    let src = "struct Point;\n\
+               impl Point {\n    fn new() -> Self { Point }\n}\n\
+               impl std::fmt::Display for Point {\n    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n        Ok(())\n    }\n}\n\
+               mod tests {\n    fn check() {}\n}\n";
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.lang_key = Some("rust");
+        v.source = std::sync::Arc::new(src.to_string());
+        v.symbols = crate::outline::extract(src, "rust");
+    }
+    let mut sim = sim_elem(super::outline_content(&app));
+    for said in ["Display for Point", "new", "fmt", "check"] {
+        assert!(shows(&mut sim, said), "{said}");
+    }
+    // The struct, then its `impl Point` block's row: its kind says impl.
+    let x = |sim: &mut _, name: &str| text_at(sim, |t| t == name, 0).unwrap().x;
+    let point = x(&mut sim, "Point");
+    let block = text_at(&mut sim, |t| t == "Point", 1)
+        .expect("the impl Point row")
+        .x;
+    let method = x(&mut sim, "new");
+    let module = x(&mut sim, "tests");
+    let inside = x(&mut sim, "check");
+    assert!(
+        (block - point).abs() < 0.5,
+        "a block at the top level: {block} / {point}"
+    );
+    assert!(
+        method > point + 8.0,
+        "a method under its impl: {method} / {point}"
+    );
+    assert!(
+        inside > module + 8.0,
+        "a module's item under it: {inside} / {module}"
+    );
+    drop(sim);
+    // The block's row jumps to its line.
+    let msgs = click_left_of(
+        || sim_elem(super::outline_content(&app)),
+        "Display for Point",
+        0,
+        |m| matches!(m, Message::Editor(EditorMsg::OutlineJump(_))),
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::Editor(EditorMsg::OutlineJump(5)))),
+        "{msgs:?}"
+    );
+    // The follow counts the two block rows above `fmt`: Point, impl Point,
+    // new, impl Display, then fmt.
+    let v = app.active_viewer().unwrap();
+    let y = app.outline_offset(v, "fmt", 0).expect("fmt in the outline");
+    assert!((y - 4.0 * 27.0).abs() < 0.5, "{y}");
+}
+
 /// A setting whose value is words — the interpreter in use — has them on
 /// its label's line, not 7 above it.
 #[test]

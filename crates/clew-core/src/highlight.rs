@@ -776,7 +776,10 @@ const JAVA_EXTRA_TAGS: &str = r#"
 /// (same patterns / order, so method-vs-function dedup is unchanged) but tags
 /// each ADT and traits with their real kind. A function is a method in an
 /// `impl` or a trait only: any `declaration_list` — an inline `mod`'s body,
-/// an `extern` block's — made the functions of a module methods.
+/// an `extern` block's — made the functions of a module methods. A trait's
+/// required methods (`fn area(&self) -> f64;`) are its items too, declared
+/// without a body as an interface's are: a trait's outline listed only the
+/// methods it provides.
 const RUST_TAGS: &str = r#"
 (struct_item name: (type_identifier) @name) @definition.struct
 (enum_item name: (type_identifier) @name) @definition.enum
@@ -786,6 +789,8 @@ const RUST_TAGS: &str = r#"
     (function_item name: (identifier) @name) @definition.method))
 (trait_item body: (declaration_list
     (function_item name: (identifier) @name) @definition.method))
+(trait_item body: (declaration_list
+    (function_signature_item name: (identifier) @name) @definition.method))
 (function_item name: (identifier) @name) @definition.function
 (trait_item name: (type_identifier) @name) @definition.trait
 (mod_item name: (identifier) @name) @definition.module

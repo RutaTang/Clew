@@ -3134,7 +3134,19 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         notes.entry(n.symbol.as_str()).or_insert(n);
     }
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    for ((symbol, &ordinal), key) in v.symbols.iter().zip(&ordinals).zip(&keys) {
+    // A Rust file's `impl` blocks head their items, and every row sits as
+    // deep as what holds it: a method under its class or its `impl`.
+    let groups = app.outline_groups(v);
+    for entry in crate::app::outline_entries(&v.symbols, &groups) {
+        let (index, depth) = match entry {
+            crate::app::OutlineEntry::Group { group, depth } => {
+                rows.push(outline_group_row(app, &groups[group], depth));
+                continue;
+            }
+            crate::app::OutlineEntry::Symbol { index, depth } => (index, depth),
+        };
+        let (symbol, ordinal, key) = (&v.symbols[index], ordinals[index], &keys[index]);
+        let indent = outline_indent(depth);
         let is_fn = matches!(symbol.kind.as_str(), "function" | "method");
         let is_current = is_fn && current == Some((symbol.name.as_str(), ordinal));
         // The reader's note/progress on this symbol (anchored by name, so it
@@ -3185,7 +3197,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         // What a row's second line has, beside its indent and the list's
         // scrollbar: its words cut to it with an ellipsis — cut at 52
         // characters, then at the panel's edge, they ended mid-word.
-        let line_room = (app.sidebar_width - 44.0 - 6.0 - SCROLLBAR_W - 12.0).max(40.0);
+        let line_room = (app.sidebar_width - 44.0 - 6.0 - SCROLLBAR_W - 12.0 - indent).max(40.0);
         let fit = |s: &str| super::steady::cut(s, line_room, ts::CAPTION, crate::fonts::UI);
         if let Some(full) = summary {
             // A one-line table-of-contents entry: the first sentence, truncated
@@ -3319,7 +3331,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         // Top-align so the toggle circle and pencil sit on the kind-badge/name
         // line rather than floating in the middle of the multi-line row.
         let jump = button(
-            row![toggle, col.width(Fill), pencil]
+            row![space().width(indent), toggle, col.width(Fill), pencil]
                 .spacing(2)
                 .align_y(iced::alignment::Vertical::Top),
         )
@@ -3374,6 +3386,75 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     ]
     .height(Fill)
     .into()
+}
+
+/// How far an outline row at `depth` stands in: a step per level, four at
+/// most, so a deep item keeps room for its name.
+fn outline_indent(depth: usize) -> f32 {
+    depth.min(4) as f32 * OUTLINE_INDENT_STEP
+}
+
+/// One level of an outline's indent.
+const OUTLINE_INDENT_STEP: f32 = 12.0;
+
+/// The room an outline row's understood circle takes, and its note pencil.
+const OUTLINE_TOGGLE_W: f32 = 21.0;
+const OUTLINE_PENCIL_W: f32 = 20.0;
+
+/// The outline's row heading a Rust `impl` block's items — `impl Display
+/// for Point` — as deep as what holds it, and as tall as an item's row: a
+/// jump to the block's line. It has no circle or pencil: a block is not
+/// read and ticked off, its items are.
+fn outline_group_row<'a>(
+    app: &App,
+    group: &clew_core::outline::ImplBlock,
+    depth: usize,
+) -> Element<'a, Message> {
+    let indent = outline_indent(depth);
+    let room = (app.sidebar_width
+        - indent
+        - OUTLINE_TOGGLE_W
+        - OUTLINE_PENCIL_W
+        - 34.0
+        - 4.0
+        - 6.0
+        - SCROLLBAR_W
+        - 12.0)
+        .max(40.0);
+    let shown = super::steady::cut(&group.label, room, ts::BODY, crate::fonts::UI);
+    let label = row![
+        text(short_kind("implementation"))
+            .size(ts::CAPTION)
+            .color(theme::kind_color("implementation"))
+            .width(34),
+        text(shown)
+            .size(ts::BODY)
+            .color(theme::fg_muted())
+            .wrapping(Wrapping::None),
+    ]
+    .spacing(4)
+    .align_y(iced::Center);
+    let face = row![
+        space().width(indent),
+        space().width(OUTLINE_TOGGLE_W).height(OUTLINE_TOGGLE_W),
+        container(label)
+            .width(Fill)
+            .height(OUTLINE_TOGGLE_W)
+            .align_y(iced::Center),
+        space().width(OUTLINE_PENCIL_W),
+    ]
+    .spacing(2)
+    .align_y(iced::alignment::Vertical::Top);
+    let name = format!("impl {}", group.label);
+    button(face)
+        .style(theme::list_row(false))
+        .width(Fill)
+        .padding(2.0)
+        .on_press(super::heard::row(
+            move || name.clone(),
+            Message::Editor(EditorMsg::OutlineJump(group.line)),
+        ))
+        .into()
 }
 
 /// A commit's id as the reader sees it: git's own seven characters, the same

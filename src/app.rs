@@ -75,6 +75,7 @@ pub(crate) mod runs;
 pub(crate) mod setup;
 pub(crate) mod suggest;
 pub(crate) mod weakspots;
+pub(crate) use content::{OutlineEntry, outline_entries};
 #[cfg(test)]
 pub(crate) use graph::project_map_layout;
 mod hover;
