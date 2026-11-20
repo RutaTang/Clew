@@ -285,6 +285,42 @@ fn commands_named_alike_are_asked_which() {
     );
 }
 
+/// A plugin's command named as the voice key's own "Talk": "talk" said is
+/// still Clew's — never run by voice — and not the plugin's in its place;
+/// said with its id, it is the plugin's.
+#[test]
+fn a_plugin_named_as_the_voice_key_is_not_run_for_it() {
+    let (mut app, script, _) = voice_app("voice-talk-plugin", "");
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        ["Talk.", "Talk, talker."].map(String::from).into(),
+    )));
+    let mut talk = crate::app::tests::installed_plugin(true);
+    talk.id = "talker".into();
+    talk.manifest.plugin.name = "Talk".into();
+    talk.manifest.commands[0].title = "Talk".into();
+    app.plugins.installed = vec![talk];
+    let titles: Vec<String> = app
+        .palette_commands()
+        .into_iter()
+        .map(|c| c.title)
+        .collect();
+    assert!(titles.iter().any(|t| t == "Talk (talker)"), "{titles:?}");
+    say(&mut app, &script);
+    assert!(
+        !matches!(
+            app.voice.heard.as_ref().map(|h| &h.outcome),
+            Some(HeardOutcome::Ran(_) | HeardOutcome::Confirm(_))
+        ),
+        "{:?}",
+        app.voice.heard
+    );
+    say(&mut app, &script);
+    assert_eq!(
+        app.voice.heard.as_ref().map(|h| &h.outcome),
+        Some(&HeardOutcome::Ran("Talk (talker)".into()))
+    );
+}
+
 /// A command that costs something waits for a yes — listened for, the
 /// microphone on; Esc is a no, and the microphone listens on.
 #[test]
@@ -1289,6 +1325,17 @@ fn a_command_is_heard_in_the_language_the_palette_shows() {
         Some(0)
     );
     assert_eq!(said_as_shown(Lang::Fr, "Masquer la minimap", &fr), Some(1));
+    // Clew's own as shown, beside a plugin's shown alike but for its id in
+    // brackets: the title said whole is Clew's; with the id, the plugin's.
+    let alike = ["Graphe d’appels (acme)", "Graphe d’appels"];
+    assert_eq!(
+        said_as_shown(Lang::Fr, "Ouvre le graphe d'appels", &alike),
+        Some(1)
+    );
+    assert_eq!(
+        said_as_shown(Lang::Fr, "Graphe d'appels acme", &alike),
+        Some(0)
+    );
     // Said formally, or to a group: the longer word is the one left out
     // ("ouvrez", not "ouvre" and a "z").
     assert_eq!(

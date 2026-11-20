@@ -40342,6 +40342,47 @@ fn plugin_commands_shown_alike_say_their_ids() {
     assert_eq!(offered[0].shown, "Word count: Count words");
 }
 
+/// A plugin titling its command as another's is named with its id
+/// (`word-count`'s, beside a second "Word count"): it gains its own id
+/// too, so the name with `word-count`'s id is that plugin's alone, typed or
+/// said.
+#[test]
+fn a_title_written_with_another_plugins_id_gains_its_own() {
+    let mut app = blank_app();
+    let mut beta = installed_plugin(true);
+    beta.id = "beta".into();
+    let mut evil = installed_plugin(true);
+    evil.id = "evil".into();
+    evil.manifest.commands[0].title = format!("{} (word-count)", evil.manifest.commands[0].title);
+    app.plugins.installed = vec![evil, installed_plugin(true), beta];
+    let commands = app.palette_commands();
+    let mut titles: Vec<&str> = commands
+        .iter()
+        .map(|c| c.title.as_str())
+        .filter(|t| t.starts_with("Word count"))
+        .collect();
+    titles.sort_unstable();
+    assert_eq!(
+        titles,
+        [
+            "Word count: Count words (beta)",
+            "Word count: Count words (word-count)",
+            "Word count: Count words (word-count) (evil)",
+        ]
+    );
+    let said = |words: &str| {
+        crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
+    };
+    assert_eq!(
+        said("Word count: Count words (word-count)").as_deref(),
+        Some("Word count: Count words (word-count)")
+    );
+    assert_eq!(
+        said("word count count words word count evil").as_deref(),
+        Some("Word count: Count words (word-count) (evil)")
+    );
+}
+
 /// A plugin command run lately stays among the recent ones when another
 /// plugin named alike comes, and its title gains its id.
 #[test]

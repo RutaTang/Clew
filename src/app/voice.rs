@@ -1035,8 +1035,10 @@ pub(crate) fn said_as_shown(lang: crate::i18n::Lang, said: &str, shown: &[&str])
         return None;
     }
     // The title as it is written is a better fit than the title without its
-    // category: "Raccourcis clavier" is "Raccourcis clavier…", not
-    // "Réglages : Raccourcis clavier". Two equally good: neither.
+    // aside, and that than the title without its category: "Raccourcis
+    // clavier" is "Raccourcis clavier…", not "Réglages : Raccourcis
+    // clavier"; "X" is Clew's own "X", not a plugin's "X (acme)". Two
+    // equally good: neither.
     let mut found: Option<(usize, usize)> = None;
     let mut tied = false;
     for (index, title) in shown.iter().enumerate() {
@@ -1050,14 +1052,10 @@ pub(crate) fn said_as_shown(lang: crate::i18n::Lang, said: &str, shown: &[&str])
                 None => t.to_string(),
             }
         };
-        let fit = if [*title, &plain(title)]
+        let Some(fit) = [*title, &plain(title), main, &plain(main)]
             .iter()
-            .any(|form| bare(form) == said)
-        {
-            0
-        } else if [main, &plain(main)].iter().any(|form| bare(form) == said) {
-            1
-        } else {
+            .position(|form| bare(form) == said)
+        else {
             continue;
         };
         match found {
@@ -2369,13 +2367,12 @@ impl App {
         // Not the voice key's own "Talk", wherever it is offered — the
         // command bar lists it: the microphone is let go of by "Bye, Clew"
         // alone.
-        let (talk, commands): (Vec<_>, Vec<_>) = self
-            .palette_commands()
-            .into_iter()
-            .partition(|c| c.is_the_voice_key());
+        let commands = self.palette_commands();
         let turns_the_microphone = |message: &Message| match message {
             Message::Voice(VoiceMsg::Toggle) => true,
-            Message::Nav(NavMsg::PaletteRun(title)) => talk.iter().any(|c| c.title == *title),
+            Message::Nav(NavMsg::PaletteRun(title)) => commands
+                .iter()
+                .any(|c| c.is_the_voice_key() && c.title == *title),
             _ => false,
         };
         // What is on screen, as it is drawn now.
@@ -2404,8 +2401,26 @@ impl App {
         // Commands named alike, the words naming more than one: none run
         // on a guess, and nothing else taken for them (a search, Ask) —
         // the one saying them is told which to say.
-        let named = crate::app::palette::command_named(text, &commands);
-        if let crate::app::palette::Named::Alike(alike) = &named {
+        //
+        // Named among all of them, "Talk" too, so that words naming it name
+        // nothing here, not a command named like it in its place (a
+        // plugin's "Talk"): it is not run by voice, nor what it is taken
+        // for as well as another.
+        use crate::app::palette::Named;
+        let talk = |i: usize| commands[i].is_the_voice_key();
+        let named = match crate::app::palette::command_named(text, &commands) {
+            Named::One(i) if talk(i) => Named::Nothing,
+            Named::Alike(alike) if alike.iter().any(|&i| talk(i)) => {
+                let others: Vec<usize> = alike.into_iter().filter(|&i| !talk(i)).collect();
+                if others.len() > 1 {
+                    Named::Alike(others)
+                } else {
+                    Named::Nothing
+                }
+            }
+            named => named,
+        };
+        if let Named::Alike(alike) = &named {
             let names: Vec<String> = alike
                 .iter()
                 .map(|&i| {
@@ -2427,10 +2442,10 @@ impl App {
             return Some(Task::none());
         }
         let found = match named {
-            crate::app::palette::Named::One(i) => Some(i),
+            Named::One(i) => Some(i),
             _ => {
                 let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
-                said_as_shown(crate::i18n::current(), text, &shown)
+                said_as_shown(crate::i18n::current(), text, &shown).filter(|&i| !talk(i))
             }
         };
         if let Some(i) = found {

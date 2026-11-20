@@ -312,7 +312,9 @@ impl Manifest {
             .collect();
         for lang in langs {
             let name = self.name_in(lang);
-            let mut listed: BTreeMap<String, &str> = BTreeMap::new();
+            // Each as listed in `lang`, and where its title there is
+            // written: what to change.
+            let mut listed: BTreeMap<String, String> = BTreeMap::new();
             for c in &self.commands {
                 let title = c.translations.get(lang).unwrap_or(&c.title);
                 let as_listed = if title == name {
@@ -320,15 +322,22 @@ impl Manifest {
                 } else {
                     format!("{name}: {title}")
                 };
-                if let Some(other) = listed.insert(words_of(&as_listed), &c.title) {
+                let written = match lang {
+                    "" => "its title".to_string(),
+                    lang if c.translations.contains_key(lang) => {
+                        format!("its translations.{lang}")
+                    }
+                    lang => format!("its title, as it has no translations.{lang}"),
+                };
+                let this = format!("\"{}\" as \"{as_listed}\" ({written})", c.id);
+                if let Some(other) = listed.insert(words_of(&as_listed), this.clone()) {
                     let r#in = match lang {
                         "" => String::new(),
                         lang => format!(" in {lang}"),
                     };
                     return Err(format!(
-                        "two [[command]]s, \"{other}\" and \"{}\", are named{in} with the same words; \
+                        "two [[command]]s are listed{in} by the same words: {other} and {this}; \
                          name them apart by a word, not only by case or punctuation",
-                        c.title,
                         r#in = r#in,
                     ));
                 }
@@ -644,7 +653,8 @@ regex = "1"
         assert!(second("TODOs by author").contains("have the title"));
         let why = second("TODOs by Author!");
         assert!(
-            why.contains("\"TODOs by author\" and \"TODOs by Author!\"")
+            why.contains("\"Todo tools: TODOs by author\" (its title)")
+                && why.contains("\"again\" as \"Todo tools: TODOs by Author!\" (its title)")
                 && why.contains("same words"),
             "{why}"
         );
@@ -671,6 +681,26 @@ regex = "1"
             m.commands.push(c);
         });
         assert!(why.contains(" in zh "), "{why}");
+        // Named there as listed in that language, with what to change.
+        assert!(
+            why.contains("\"again\" as \"")
+                && why.contains("按作者列出 todo\" (its translations.zh)"),
+            "{why}"
+        );
+        // Not translated, its title stands in: that is said too.
+        let why = refusal(|m| {
+            m.commands[0].translations.remove("zh");
+            let mut c = m.commands[0].clone();
+            c.id = "again".into();
+            c.title = "TODOs by author, again".into();
+            c.translations.insert("zh".into(), "todos BY author".into());
+            m.commands.push(c);
+        });
+        assert!(
+            why.contains("\"list\" as \"按作者列出 TODO: TODOs by author\" (its title, as it has no translations.zh)")
+                && why.contains("\"again\" as \"按作者列出 TODO: todos BY author\" (its translations.zh)"),
+            "{why}"
+        );
         // Apart by a word, in every language: taken.
         let mut m = Manifest::parse(GOOD).unwrap();
         let mut c = m.commands[0].clone();

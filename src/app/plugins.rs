@@ -128,30 +128,47 @@ pub(crate) fn offered_commands<'a>(
         }
         named
     };
-    let titles = count(
-        clews
-            .iter()
-            .map(|(title, _)| bare(title))
-            .chain(offered.iter().map(|o| bare(&o.title)))
-            .collect(),
-    );
-    let shown = count(
-        clews
-            .iter()
-            .map(|(_, shown)| bare(shown))
-            .chain(offered.iter().map(|o| bare(&o.shown)))
-            .collect(),
-    );
+    // Read again once ids are added, until none is alike: a title made
+    // alike by another's id — a plugin titling its command "Count words
+    // (word-count)" — gains its own too, so no two are ever named alike,
+    // and none is taken for another's by the id it wrote.
+    let mut tagged = vec![(false, false); offered.len()];
+    loop {
+        let titles = count(
+            clews
+                .iter()
+                .map(|(title, _)| bare(title))
+                .chain(offered.iter().map(|o| bare(&o.title)))
+                .collect(),
+        );
+        let shown = count(
+            clews
+                .iter()
+                .map(|(_, shown)| bare(shown))
+                .chain(offered.iter().map(|o| bare(&o.shown)))
+                .collect(),
+        );
+        let mut added = false;
+        for (o, (title_has, shown_has)) in offered.iter_mut().zip(&mut tagged) {
+            let id = &o.plugin.id;
+            let titled_alike = !*title_has && titles.get(&bare(&o.title)).is_some_and(|n| *n > 1);
+            if titled_alike {
+                o.title = format!("{} ({id})", o.title);
+                *title_has = true;
+                added = true;
+            }
+            if !*shown_has && (titled_alike || shown.get(&bare(&o.shown)).is_some_and(|n| *n > 1)) {
+                o.shown = format!("{} ({id})", o.shown);
+                *shown_has = true;
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    // The id is part of its name; what it asks for comes after.
     for o in &mut offered {
-        let id = &o.plugin.id;
-        let titled_alike = titles.get(&bare(&o.title)).is_some_and(|n| *n > 1);
-        if titled_alike {
-            o.title = format!("{} ({id})", o.title);
-        }
-        if titled_alike || shown.get(&bare(&o.shown)).is_some_and(|n| *n > 1) {
-            o.shown = format!("{} ({id})", o.shown);
-        }
-        // The id is part of its name; what it asks for comes after.
         if o.command.input.is_some() {
             o.shown.push('…');
         }
@@ -2247,6 +2264,11 @@ impl App {
         if let Err(failure) = &ran.outcome
             && is_withdrawn(failure)
         {
+            // The list read again first: what this window kept of the copy
+            // that was there goes with it (`forget_copy_of`), and what is
+            // said now, of the one there now, stays. Read after, it took
+            // "did not run: it was updated" and its Try again with it.
+            let reload = self.reload_plugins();
             if matches!(failure, Failure::Stopped(why) if why == WITHDRAWN[1]) {
                 // Replaced since: the new build is there to run, one
                 // click away rather than found again in the palette.
@@ -2298,7 +2320,7 @@ impl App {
                     reason = failure_words(failure)
                 );
             }
-            return self.reload_plugins();
+            return reload;
         }
         // Its approved copy changed on disk: not run. Trying again fails the
         // same way, and its source is not what is wrong; installed again, it
