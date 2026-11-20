@@ -740,7 +740,7 @@ fn overview_to_write(app: &App) -> Element<'_, Message> {
     } else if app.proj.explain.cache.is_empty() {
         (
             tr!(
-                "A short tour of this project's main parts and how they fit together, written by an AI model from the project's explanations, which Explain All writes first."
+                "A short tour of this project's main parts and how they fit together, written by an AI model from the project's explanations. Run Explain All first to write them."
             )
             .to_string(),
             Some(step(

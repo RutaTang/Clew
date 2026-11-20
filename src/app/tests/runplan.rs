@@ -400,4 +400,6 @@ async fn a_lean_files_main_runs_through_lake() {
         "{said:?}"
     );
     assert!(said.iter().any(|t| t.contains("careful")), "{said:?}");
+    // Ended: the status line no longer says it runs.
+    assert!(!app.status.contains("Running"), "{}", app.status);
 }

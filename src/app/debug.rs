@@ -864,6 +864,12 @@ impl App {
             None if no_debug => tr!("Starting the program on the remote host…").into(),
             None => tr!("Starting debugger on the remote host…").into(),
         };
+        // No adapter comes to say a Lean run is running: what is said now
+        // is its running state, taken down when the program ends — it
+        // said "Running Main.lean with Lean…" long after Main.lean exited.
+        if matches!(plan, Some(RunPlan::Lean { .. })) {
+            self.say_debug_state(self.status.clone());
+        }
         // This run's identity: every message the adapter stream produces carries
         // it, so a late event from a previous run can't land on this session.
         self.bump_debug_run();

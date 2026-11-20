@@ -3297,7 +3297,13 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     for entry in crate::app::outline_entries(&v.symbols, &groups) {
         let (index, depth) = match entry {
             crate::app::OutlineEntry::Group { group, depth } => {
-                rows.push(outline_group_row(app, &groups[group], depth));
+                let g = &groups[group];
+                rows.push(outline_group_row(
+                    app,
+                    g,
+                    depth,
+                    holds_nothing(&v.symbols, g),
+                ));
                 continue;
             }
             crate::app::OutlineEntry::Symbol { index, depth } => (index, depth),
@@ -3577,10 +3583,22 @@ const OUTLINE_PENCIL_W: f32 = 20.0;
 /// for Point` — as deep as what holds it, and as tall as an item's row: a
 /// jump to the block's line. It has no circle or pencil: a block is not
 /// read and ticked off, its items are.
+/// Whether an `impl` block holds none of the outline's items:
+/// `impl Eq for P {}` heads no rows.
+fn holds_nothing(
+    symbols: &[crate::outline::Symbol],
+    group: &clew_core::outline::ImplBlock,
+) -> bool {
+    !symbols
+        .iter()
+        .any(|s| s.line >= group.line && s.line <= group.end_line)
+}
+
 fn outline_group_row<'a>(
     app: &App,
     group: &clew_core::outline::ImplBlock,
     depth: usize,
+    empty: bool,
 ) -> Element<'a, Message> {
     let indent = outline_indent(depth);
     let room = (app.sidebar_width
@@ -3594,14 +3612,26 @@ fn outline_group_row<'a>(
         - 12.0)
         .max(40.0);
     let shown = super::steady::cut(&group.label, room, ts::BODY, crate::fonts::UI);
+    // Cut ("From<HashMap<…") — the whole of it where the pointer rests.
+    let cut = shown != group.label;
     let label = row![
+        // An empty one stays, quieter: it says what the type implements,
+        // with nothing under it to read.
         text(short_kind("implementation"))
             .size(ts::CAPTION)
-            .color(theme::kind_color("implementation"))
+            .color(if empty {
+                theme::dim()
+            } else {
+                theme::kind_color("implementation")
+            })
             .width(34),
         text(shown)
             .size(ts::BODY)
-            .color(theme::fg_muted())
+            .color(if empty {
+                theme::dim()
+            } else {
+                theme::fg_muted()
+            })
             .wrapping(Wrapping::None),
     ]
     .spacing(4)
@@ -3618,15 +3648,20 @@ fn outline_group_row<'a>(
     .spacing(2)
     .align_y(iced::alignment::Vertical::Top);
     let name = format!("impl {}", group.label);
-    button(face)
+    let whole = name.clone();
+    let row = button(face)
         .style(theme::list_row(false))
         .width(Fill)
         .padding(2.0)
         .on_press(super::heard::row(
             move || name.clone(),
             Message::Editor(EditorMsg::OutlineJump(group.line)),
-        ))
-        .into()
+        ));
+    if cut {
+        super::toolbar::tip_at(row, whole, None, tooltip::Position::Bottom)
+    } else {
+        row.into()
+    }
 }
 
 /// A commit's id as the reader sees it: git's own seven characters, the same
@@ -3639,6 +3674,18 @@ pub(crate) fn short_sha(sha: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `impl Eq for P {}` holds nothing; `impl P { fn new() }` holds its
+    /// method, one line or many.
+    #[test]
+    fn an_impl_with_no_items_is_told_from_one_with_some() {
+        let src = "struct P;\nimpl Eq for P {}\nunsafe impl Send for P {\n}\n\
+                   impl P {\n    fn new() -> Self { P }\n}\nimpl Clone for P { fn clone(&self) -> P { P } }\n";
+        let symbols = crate::outline::extract(src, "rust");
+        let groups = clew_core::outline::rust_impl_blocks(src);
+        let empty: Vec<bool> = groups.iter().map(|g| holds_nothing(&symbols, g)).collect();
+        assert_eq!(empty, [true, true, false, false], "{groups:?}");
+    }
 
     /// One commit has one short name: git's seven characters, wherever it
     /// shows.
