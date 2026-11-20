@@ -114,6 +114,38 @@ pub(crate) struct PaletteCommand {
     pub(crate) shown_as: Option<String>,
 }
 
+/// A palette command run lately: by its title — a plugin's by its plugin
+/// and command, as its title says the plugin's id only while another
+/// command is named as it is, and lost its place among the recent ones
+/// each time that changed.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Recent {
+    Titled(String),
+    Plugin { id: String, command: String },
+}
+
+impl Recent {
+    /// How `command` is kept among the recent ones.
+    pub(crate) fn of(command: &PaletteCommand) -> Recent {
+        match &command.action {
+            PaletteAction::Send(Message::Plugin(crate::app::plugins::PluginMsg::Run {
+                id,
+                command,
+            })) => Recent::Plugin {
+                id: id.clone(),
+                command: command.clone(),
+            },
+            _ => Recent::Titled(command.title.clone()),
+        }
+    }
+
+    /// Its command among `commands`, as titled now; none when they do not
+    /// offer it now.
+    pub(crate) fn among<'a>(&self, commands: &'a [PaletteCommand]) -> Option<&'a PaletteCommand> {
+        commands.iter().find(|c| Recent::of(c) == *self)
+    }
+}
+
 impl PaletteCommand {
     /// Whether running it uses the AI model (and so costs money): its row
     /// is marked so, as every control that does is.
@@ -385,16 +417,127 @@ fn formerly(title: &str) -> Option<&'static str> {
 
 /// The index in `commands` of the command `said` plainly names: by its
 /// title, or, when no title is named, by the name it had ([`formerly`]).
+/// Of commands named alike — two plugins', or a plugin's and one of
+/// Clew's own, each plugin's titled with its id after it — the one whose
+/// id the words name ([`told_apart`]); none when they name none of them.
 pub(crate) fn command_said(said: &str, commands: &[PaletteCommand]) -> Option<usize> {
     let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
-    clew_voice::intent::command(said, &titles).or_else(|| {
+    let found = clew_voice::intent::command(said, &titles).or_else(|| {
         let (names, at): (Vec<&str>, Vec<usize>) = commands
             .iter()
             .enumerate()
             .filter_map(|(i, c)| formerly(&c.title).map(|name| (name, i)))
             .unzip();
         clew_voice::intent::command(said, &names).map(|k| at[k])
-    })
+    });
+    let alike = |name: &str| -> Vec<usize> {
+        (0..commands.len())
+            .filter(|&i| alike_named(&commands[i]).0 == name)
+            .collect()
+    };
+    match found {
+        Some(i) => {
+            let name = alike_named(&commands[i]).0;
+            let group = alike(name);
+            match group.len() > 1 {
+                true => told_apart(said, name, commands, &group),
+                false => Some(i),
+            }
+        }
+        // Two named alike, their ids said alike (or not said), tie: the
+        // name they share is what was said, and their ids tell them apart.
+        None => {
+            let mut shared: Vec<&str> = Vec::new();
+            for c in commands {
+                let (name, id) = alike_named(c);
+                if id.is_some() && !shared.contains(&name) {
+                    shared.push(name);
+                }
+            }
+            let k = clew_voice::intent::command(said, &shared)?;
+            told_apart(said, shared[k], commands, &alike(shared[k]))
+        }
+    }
+}
+
+/// The name `command` shares with the commands named alike, and its
+/// plugin's id when its title carries it after that name ("Word count:
+/// Count words (word-count)"); else its title, and none.
+fn alike_named(command: &PaletteCommand) -> (&str, Option<&str>) {
+    if let PaletteAction::Send(Message::Plugin(crate::app::plugins::PluginMsg::Run { id, .. })) =
+        &command.action
+        && let Some(name) = command
+            .title
+            .strip_suffix(')')
+            .and_then(|t| t.strip_suffix(id.as_str()))
+            .and_then(|t| t.strip_suffix(" ("))
+    {
+        return (name, Some(id));
+    }
+    (&command.title, None)
+}
+
+/// Which of the commands at `group`, all named `name`, `said` names: by the
+/// words of a plugin's id beyond its name ("word count count words too"
+/// is `word-count-too`'s), all of them said before some of them. Words of
+/// no id said: the one whose id adds no words of its own, or Clew's own
+/// command of that name. None when that names none of them, or more than
+/// one: not one run on a guess.
+fn told_apart(
+    said: &str,
+    name: &str,
+    commands: &[PaletteCommand],
+    group: &[usize],
+) -> Option<usize> {
+    let words = |text: &str| -> std::collections::BTreeSet<String> {
+        text.to_lowercase()
+            .replace(['\'', '’'], "")
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let named_by = words(name);
+    // The words each id adds to the name.
+    let own: Vec<std::collections::BTreeSet<String>> = group
+        .iter()
+        .map(|&i| match alike_named(&commands[i]).1 {
+            Some(id) => words(id).difference(&named_by).cloned().collect(),
+            None => Default::default(),
+        })
+        .collect();
+    let any_own: std::collections::BTreeSet<String> = own.iter().flatten().cloned().collect();
+    let said: std::collections::BTreeSet<String> =
+        words(said).intersection(&any_own).cloned().collect();
+    let fits: Vec<(usize, bool)> = group
+        .iter()
+        .zip(&own)
+        .filter(|(_, own)| match said.is_empty() {
+            true => own.is_empty(),
+            false => said.is_subset(own),
+        })
+        .map(|(&i, own)| (i, *own == said))
+        .collect();
+    let whole: Vec<usize> = fits
+        .iter()
+        .filter(|(_, all)| *all)
+        .map(|(i, _)| *i)
+        .collect();
+    let fits: Vec<usize> = fits.into_iter().map(|(i, _)| i).collect();
+    // Clew's own command of that name: the name said as it is.
+    let clews: Vec<usize> = fits
+        .iter()
+        .copied()
+        .filter(|&i| alike_named(&commands[i]).1.is_none())
+        .collect();
+    match (&fits[..], &whole[..], &clews[..]) {
+        ([one], _, _) => Some(*one),
+        // Several the words fit: the one whose id was said whole ("wc", of
+        // `wc` and `acme-wc`), else Clew's own.
+        (_, [one], _) if !said.is_empty() => Some(*one),
+        (_, _, [one]) => Some(*one),
+        _ => None,
+    }
 }
 
 /// `row`, and the words the command titled `title` also goes by.
@@ -609,7 +752,9 @@ impl App {
         for title in self
             .palette_recent
             .iter()
-            .filter(|t| listed(t) && !shown.contains(t))
+            .filter_map(|r| r.among(&self.palette))
+            .map(|c| &c.title)
+            .filter(|t| !shown.contains(t))
             .take(SUGGESTED_RECENT)
         {
             out.push(Suggestion::Command {
@@ -664,7 +809,7 @@ impl App {
         let recent: Vec<&PaletteCommand> = self
             .palette_recent
             .iter()
-            .filter_map(|t| self.palette.iter().find(|c| &c.title == t))
+            .filter_map(|r| r.among(&self.palette))
             .collect();
         let recent_english: Vec<String> = recent.iter().map(|c| c.searched_in_english()).collect();
         let recent: Vec<String> = recent.iter().map(|c| c.searched()).collect();
@@ -774,8 +919,9 @@ impl App {
         else {
             return Task::none();
         };
-        self.palette_recent.retain(|r| r != title);
-        self.palette_recent.insert(0, title.to_string());
+        let recent = Recent::of(&command);
+        self.palette_recent.retain(|r| *r != recent);
+        self.palette_recent.insert(0, recent);
         self.palette_recent.truncate(MAX_RECENT);
         match command.action {
             PaletteAction::Send(message) => self.update(message),
@@ -852,7 +998,10 @@ impl App {
         &self,
         clews: &[PaletteCommand],
     ) -> Vec<crate::app::plugins::Offered<'_>> {
-        let clews: Vec<&str> = clews.iter().map(|c| c.title.as_str()).collect();
+        let clews: Vec<(&str, &str)> = clews
+            .iter()
+            .map(|c| (c.title.as_str(), c.shown()))
+            .collect();
         crate::app::plugins::offered_commands(&self.plugins.installed, &clews)
     }
 

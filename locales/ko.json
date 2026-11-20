@@ -390,7 +390,7 @@
  "Clew can't run it: {why}": "Clew에서 실행할 수 없습니다: {why}",
  "Clew can't update itself here: {reason} — opening the release page": "여기서는 Clew가 스스로 업데이트할 수 없습니다: {reason} — 릴리스 페이지를 엽니다",
  "Clew cannot read proxy passwords from the keychain: put them in environment variables ({PERCENT_ENCODING}); Clew then uses those instead of all of the system's proxy settings, so set {arg1}": "Clew는 키체인에서 프록시 비밀번호를 읽을 수 없습니다. 환경 변수에 넣으세요({PERCENT_ENCODING}). 그러면 Clew는 시스템의 모든 프록시 설정 대신 이를 사용하므로 {arg1}을(를) 설정하세요",
- "Clew cannot read what this plugin is, so it does not run: {reason}. A later version of Clew may have installed it: update Clew to use it, or remove it.": "Clew가 이 플러그인이 무엇인지 읽을 수 없어 실행하지 않습니다: {reason}. 더 새로운 버전의 Clew가 설치했을 수 있습니다. 사용하려면 Clew를 업데이트하고, 아니면 제거하세요.",
+ "Clew cannot read this plugin, so it does not run. A later version of Clew may have installed it: update Clew to use it, or remove it.": "Clew가 이 플러그인을 읽을 수 없어 실행하지 않습니다. 더 새로운 버전의 Clew가 설치했을 수 있습니다. 사용하려면 Clew를 업데이트하고, 아니면 제거하세요.",
  "Clew cannot use {other}:// proxies": "Clew는 {other}:// 프록시를 사용할 수 없음",
  "Clew could not fetch the host key of {label} ({host}:{port}).": "Clew가 {label}의 호스트 키를 가져오지 못했습니다({host}:{port}).",
  "Clew could not read its list of plugins": "Clew가 플러그인 목록을 읽지 못했습니다",

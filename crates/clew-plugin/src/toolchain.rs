@@ -457,11 +457,7 @@ pub fn set_up(
     match setup {
         Setup::AddTarget { rustup } => {
             stage(Stage::AddingTarget);
-            let mut cmd = Command::new(rustup);
-            cmd.args(["target", "add", TARGET])
-                .current_dir(clew_core::linerpc::neutral_dir())
-                .env_remove("RUSTUP_TOOLCHAIN");
-            run(cmd, TARGET_DEADLINE, cancel).map_err(SetUpError::Failed)?;
+            add_target(rustup).map_err(SetUpError::Failed)?;
         }
         Setup::Install => install(data, cancel, stage).map_err(SetUpError::Failed)?,
     }
@@ -469,6 +465,19 @@ pub fn set_up(
 }
 
 /// Install Rust of Clew's own, with the target, into [`managed_dir`].
+/// Add the target to the user's own Rust, with its `rustup`. Nothing
+/// stops it partway — not Cancel, not a window closing — which is why it
+/// takes no `cancel`: it changes the user's own Rust, and rustup can refuse
+/// to add a target again once stopped while adding it. It is quick, and
+/// runs to its end or its deadline.
+fn add_target(rustup: &Path) -> Result<(), String> {
+    let mut cmd = Command::new(rustup);
+    cmd.args(["target", "add", TARGET])
+        .current_dir(clew_core::linerpc::neutral_dir())
+        .env_remove("RUSTUP_TOOLCHAIN");
+    run(cmd, TARGET_DEADLINE, &AtomicBool::new(false))
+}
+
 fn install(data: &Path, cancel: &AtomicBool, stage: &mut dyn FnMut(Stage)) -> Result<(), String> {
     let triple = host_triple().ok_or(NO_INSTALLER)?;
     install_from(data, &installer_url(triple), cancel, stage)
@@ -792,6 +801,32 @@ mod tests {
         };
         let said = missing.into_build_error().report();
         assert!(said.contains("rustup target add wasm32-wasip2"), "{said}");
+    }
+
+    /// The target is added with the user's own rustup, as `rustup target
+    /// add` is asked, outside any project's own toolchain file; what it
+    /// said when it failed is the reason.
+    #[cfg(unix)]
+    #[test]
+    fn the_target_is_added_with_the_users_rustup() {
+        let dir = clew_core::testutil::TempDir::new("add-target");
+        let rustup = dir.path().join("rustup");
+        let args = dir.path().join("args");
+        clew_core::testutil::write_script(
+            &rustup,
+            &format!(
+                "echo \"$@ ${{RUSTUP_TOOLCHAIN-unset}}\" > '{}'",
+                args.display()
+            ),
+        );
+        add_target(&rustup).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&args).unwrap().trim(),
+            "target add wasm32-wasip2 unset"
+        );
+        let failing = dir.path().join("failing");
+        clew_core::testutil::write_script(&failing, "echo 'error: no network' >&2\nexit 1");
+        assert_eq!(add_target(&failing).unwrap_err(), "no network");
     }
 
     /// One window at a time sets Rust up or removes it: another sees it

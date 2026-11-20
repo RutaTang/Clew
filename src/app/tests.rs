@@ -39118,6 +39118,7 @@ pub(crate) fn pending_plugin_install(
         },
         origin: clew_plugin::store::Origin::Agent("Claude Code".into()),
         previous: None,
+        unreadable: None,
         reply: reply.unwrap_or(crate::app::plugins::Reply::None),
     }
 }
@@ -39630,7 +39631,9 @@ fn an_agents_install_is_answered_as_the_user_decides() {
     assert_eq!(
         answered(&allowed),
         Some(Answer::Installed {
-            fingerprint: "fp-word-count".into()
+            fingerprint: "fp-word-count".into(),
+            // Not in the store, so not offered: no palette names.
+            palette: Vec::new(),
         })
     );
     assert!(app.status.contains("installed"), "{}", app.status);
@@ -39968,12 +39971,141 @@ fn plugin_commands_named_alike_each_run_by_a_name_of_their_own() {
         own.action,
         PaletteAction::Send(Message::Plugin(_))
     ));
+    // Said or named by an agent without the id, the one whose id adds no
+    // word to the name is meant; with its own words, the other. Clew's own
+    // keeps its name.
+    let said = |words: &str| {
+        crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
+    };
+    assert_eq!(
+        said("word count count words").as_deref(),
+        Some("Word count: Count words (word-count)")
+    );
+    assert_eq!(
+        said("word count count words too").as_deref(),
+        Some("Word count: Count words (word-count-too)")
+    );
+    assert_eq!(said(&taken).as_deref(), Some(taken.as_str()));
+    assert_eq!(
+        said(&format!("{taken} shadow")).as_deref(),
+        Some(format!("{taken} (shadow)").as_str())
+    );
+    // An agent is told the names the palette gives, id and all.
+    assert_eq!(
+        app.palette_names_of("word-count-too"),
+        ["Word count: Count words (word-count-too)"]
+    );
+    // A command that asks first: the id is part of its name, "…" after.
+    let mut asks = installed_plugin(true);
+    asks.id = "asks".into();
+    asks.manifest.commands[0].input = Some("Which words?".into());
+    app.plugins.installed.push(asks);
+    assert!(
+        app.palette_commands()
+            .iter()
+            .any(|c| c.shown_as.as_deref() == Some("Word count: Count words (asks)…")),
+        "{:?}",
+        app.palette_commands()
+            .iter()
+            .filter_map(|c| c.shown_as.clone())
+            .collect::<Vec<_>>()
+    );
     // A plugin alone keeps its plain name.
     app.plugins.installed.truncate(1);
     assert!(
         app.palette_commands()
             .iter()
             .any(|c| c.title == "Word count: Count words")
+    );
+}
+
+/// Two plugins whose ids both add words to the name they share: said
+/// without either, neither is run; said with one's own word, that one.
+#[test]
+fn plugin_commands_named_alike_are_not_run_on_a_guess() {
+    let mut app = blank_app();
+    let mut acme = installed_plugin(true);
+    acme.id = "acme-wc".into();
+    let mut beta = installed_plugin(true);
+    beta.id = "beta-wc".into();
+    app.plugins.installed = vec![acme, beta];
+    let commands = app.palette_commands();
+    let said = |words: &str| {
+        crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
+    };
+    assert_eq!(said("word count count words"), None);
+    assert_eq!(said("word count count words wc"), None, "both say wc");
+    assert_eq!(
+        said("word count count words acme").as_deref(),
+        Some("Word count: Count words (acme-wc)")
+    );
+    assert_eq!(
+        said("beta word count count words").as_deref(),
+        Some("Word count: Count words (beta-wc)")
+    );
+    // One id inside the other: the name alone names neither; the shorter
+    // id said whole names it, the longer one's own word the other.
+    app.plugins.installed[1].id = "wc".into();
+    let commands = app.palette_commands();
+    let said = |words: &str| {
+        crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
+    };
+    assert_eq!(said("word count count words"), None);
+    assert_eq!(
+        said("word count count words wc").as_deref(),
+        Some("Word count: Count words (wc)")
+    );
+    assert_eq!(
+        said("word count count words acme").as_deref(),
+        Some("Word count: Count words (acme-wc)")
+    );
+}
+
+/// Named alike only as the reader's language shows them (two names, or a
+/// plugin's and one of Clew's, translated alike): the rows say the id,
+/// while the English names, by which they are run, stay as they are.
+#[test]
+fn plugin_commands_shown_alike_say_their_ids() {
+    let plugin = installed_plugin(true);
+    let installed = vec![plugin];
+    let offered = crate::app::plugins::offered_commands(
+        &installed,
+        &[("Count Words", "Word count: Count words…")],
+    );
+    assert_eq!(offered[0].title, "Word count: Count words");
+    assert_eq!(offered[0].shown, "Word count: Count words (word-count)");
+    let offered = crate::app::plugins::offered_commands(&installed, &[("Other", "Other")]);
+    assert_eq!(offered[0].shown, "Word count: Count words");
+}
+
+/// A plugin command run lately stays among the recent ones when another
+/// plugin named alike comes, and its title gains its id.
+#[test]
+fn a_recent_plugin_command_is_kept_when_its_title_gains_its_id() {
+    use crate::app::palette::{Recent, Suggestion};
+    let mut app = blank_app();
+    app.plugins.installed = vec![installed_plugin(true)];
+    app.refresh_suggestions();
+    let _ = app.run_palette("Word count: Count words");
+    assert_eq!(
+        app.palette_recent.first(),
+        Some(&Recent::Plugin {
+            id: "word-count".into(),
+            command: installed_plugin(true).manifest.commands[0].id.clone(),
+        })
+    );
+    let mut second = installed_plugin(true);
+    second.id = "word-count-too".into();
+    app.plugins.installed.push(second);
+    app.refresh_suggestions();
+    assert!(
+        app.palette_home.iter().any(|s| matches!(
+            s,
+            Suggestion::Command { title, recent: true }
+                if title == "Word count: Count words (word-count)"
+        )),
+        "{:?}",
+        app.palette_home
     );
 }
 
@@ -42481,6 +42613,36 @@ fn a_window_closed_mid_setup_stops_setting_rust_up() {
     };
     let _ = app.on_window_closed();
     assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+    // Adding the target to the user's own Rust runs to its end: stopped
+    // partway, rustup can refuse to add it again.
+    let mut app = blank_app();
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.plugins.building = Building::SettingUp {
+        stage: clew_plugin::toolchain::Stage::AddingTarget,
+        cancel: cancel.clone(),
+    };
+    let _ = app.on_window_closed();
+    assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+/// Clew's own Rust that could not be removed says so on the status bar,
+/// where its removal is said: Settings may be closed by then.
+#[test]
+fn rust_not_removed_says_why_on_the_status_bar() {
+    use crate::app::plugins::{Building, Checked, PluginMsg};
+    let mut app = blank_app();
+    app.plugins.building = Building::Removing;
+    let _ = app.update(Message::Plugin(PluginMsg::ToolchainChecked(Checked {
+        found: Ok(("1.95.0".into(), true)),
+        own_installed: true,
+        removal_failed: Some("a file is in use".into()),
+        elsewhere: false,
+        removal: true,
+    })));
+    assert_eq!(
+        app.status,
+        "Clew's own Rust could not be removed: a file is in use"
+    );
 }
 
 /// A plugin whose manifest this Clew cannot read (a later Clew installed
@@ -42504,27 +42666,50 @@ fn a_plugin_this_clew_cannot_read_is_listed_and_can_be_removed() {
     let read = app.reload_plugins();
     settle(&mut app, read);
     assert!(app.plugins.get("from-later").is_none(), "not run");
-    assert_eq!(app.plugins.unreadable.len(), 1);
-    assert_eq!(app.plugins.unreadable[0].0, "from-later");
-    let why = app.plugins.unreadable[0].1.clone();
-    let said = crate::i18n::quoted(&format!(
-        "Clew cannot read what this plugin is, so it does not run: {why}. A later version of Clew may have installed it: update Clew to use it, or remove it."
-    ))
-    .into_owned();
-    {
-        let mut page = iced_test::simulator(crate::ui::plugins_settings(&app));
-        assert!(page.find("from-later").is_ok());
-        assert!(page.find(said.as_str()).is_ok(), "{said}");
-        assert!(
-            page.find("A plugin adds what you need to Clew. Ask your agent for one, in your own words: “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before installing it.")
-                .is_err(),
-            "not shown as no plugins at all"
-        );
+    // Named as its manifest names it, as much as reads.
+    let name = clew_plugin::manifest::Manifest::name_of(&later.manifest).unwrap();
+    assert_eq!(
+        app.plugins.unreadable,
+        [("from-later".to_string(), name.clone())]
+    );
+    // A newer build of the same id offered meanwhile replaces it, and says
+    // so — not an install as if new.
+    let mut pending = pending_plugin_install("from-later", 0, None);
+    pending.inspected.manifest.plugin.name = name.clone();
+    app.offer_install(
+        crate::app::plugins::Prepared {
+            bytes: pending.bytes,
+            inspected: pending.inspected,
+        },
+        clew_plugin::store::Origin::Agent("Claude Code".into()),
+        crate::app::plugins::Reply::None,
+    );
+    let _ = app.update(Message::Noop);
+    match crate::ui::active_overlay(&app) {
+        Some(crate::ui::ActiveOverlay::PluginInstall(shown, _, _)) => {
+            assert_eq!(shown.unreadable.as_deref(), Some(name.as_str()));
+        }
+        _ => panic!("the install is asked"),
     }
-    let _ = app.update(Message::Plugin(PluginMsg::AskRemove("from-later".into())));
+    app.plugins.install = Default::default();
+    let said = "Clew cannot read this plugin, so it does not run. A later version of Clew may have installed it: update Clew to use it, or remove it.";
+    let mut page = iced_test::simulator(crate::ui::plugins_settings(&app));
+    assert!(page.find(name.as_str()).is_ok());
+    assert!(page.find(said).is_ok(), "{said}");
+    assert!(
+        page.find("A plugin adds what you need to Clew. Ask your agent for one, in your own words: “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before installing it.")
+            .is_err(),
+        "not shown as no plugins at all"
+    );
+    // Its Remove, pressed, asks to remove it by that name.
+    let _ = page.click("Remove").expect("its Remove");
+    let pressed: Vec<Message> = page.into_messages().collect();
+    for message in pressed {
+        let _ = app.update(message);
+    }
     assert_eq!(
         app.plugins.confirm.as_ref().map(|c| c.title.as_str()),
-        Some("Remove “from-later”?")
+        Some(format!("Remove “{name}”?").as_str())
     );
     let removed = app.update(Message::Plugin(PluginMsg::Confirmed));
     settle(&mut app, removed);

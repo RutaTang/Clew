@@ -1076,9 +1076,7 @@ impl App {
         // Rust being set up from this window stops, as its Cancel stops it:
         // left, it downloaded hundreds of megabytes for no one, the other
         // windows waiting on it all the while.
-        if let crate::app::plugins::Building::SettingUp { cancel, .. } = &self.plugins.building {
-            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
+        self.cancel_toolchain_setup();
         // Settings open as the window goes: closed as Close closes it, what
         // was typed in it kept.
         if self.settings.open {

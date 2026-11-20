@@ -167,8 +167,9 @@ impl CodeTools {
             // Unnamed, the window says "an agent" in the user's language.
             client.clone()
         };
-        // What an install says once the user allowed it.
-        let mut installed = String::new();
+        // What an install says once the user allowed it: by the plugin's
+        // manifest, its commands named as the window's palette names them.
+        let mut installed = None;
         let (ask, wait) = match clew_plugin::tools::call(&data, name, args, stop) {
             Step::Done(result) => return result,
             Step::Try {
@@ -193,7 +194,7 @@ impl CodeTools {
             ),
             Step::Install { built } => {
                 let manifest = &built.inspected.manifest;
-                installed = manifest.installed_words();
+                installed = Some(manifest.clone());
                 (
                     Ask::Install {
                         plugin: manifest.plugin.id.clone(),
@@ -210,7 +211,9 @@ impl CodeTools {
         // than after the whole wait.
         match clew_plugin::requests::wait_taken(&data, &nonce, TAKE_WITHIN, wait, stop) {
             Waited::Answered(Answer::Tried { result }) => Ok(result),
-            Waited::Answered(Answer::Installed { .. }) => Ok(installed),
+            Waited::Answered(Answer::Installed { palette, .. }) => Ok(installed
+                .map(|m| m.installed_words_as(&palette))
+                .unwrap_or_default()),
             Waited::Answered(Answer::Declined) => Ok("The user chose not to install it.".into()),
             Waited::Answered(Answer::Failed { why }) => Err(why),
             Waited::NotTaken if installing => Err(

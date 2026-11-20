@@ -80,20 +80,6 @@ pub(crate) fn command_label(
     }
 }
 
-/// [`command_label`] where Clew offers the command to run — the palette,
-/// the code's menu — with "…" when it asks for something first, as Clew's
-/// own commands that open a question are named.
-pub(crate) fn command_offer_label(
-    plugin: &Installed,
-    command: &clew_plugin::manifest::Command,
-) -> String {
-    let label = command_label(plugin, command);
-    match command.input {
-        Some(_) => format!("{label}…"),
-        None => label,
-    }
-}
-
 /// An enabled plugin's command where Clew offers it: the palette, the
 /// code's menu.
 pub(crate) struct Offered<'a> {
@@ -102,49 +88,83 @@ pub(crate) struct Offered<'a> {
     /// Its name in English, by which the palette, the agent's
     /// `run_command` and the voice run it.
     pub(crate) title: String,
-    /// Its name as shown ([`command_offer_label`]).
+    /// Its name as shown: [`command_label`], with "…" when it asks for
+    /// something first, as Clew's own commands that open a question are
+    /// named.
     pub(crate) shown: String,
 }
 
 /// The enabled plugins' commands, each with a name no other command has:
 /// the plugin's name and the command's, and, where that names two
 /// commands alike — two plugins', or a plugin's and one of Clew's own
-/// (`clews`) — its plugin's id after it, which no other plugin has (a
-/// plugin's own commands are titled apart). Run by name, the second of
-/// two alike ran the first.
-pub(crate) fn offered_commands<'a>(installed: &'a [Installed], clews: &[&str]) -> Vec<Offered<'a>> {
+/// (`clews`, each its English title and the name its row shows) — its
+/// plugin's id after it, which no other plugin has (a plugin's own
+/// commands are titled apart). Run by name, the second of two alike ran
+/// the first. Alike in English, by which they are run, both names say the
+/// id; alike only as shown in the reader's language, the row says it.
+pub(crate) fn offered_commands<'a>(
+    installed: &'a [Installed],
+    clews: &[(&str, &str)],
+) -> Vec<Offered<'a>> {
     let mut offered: Vec<Offered> = installed
         .iter()
         .filter(|p| p.record.enabled)
         .flat_map(|plugin| {
-            let name = &plugin.manifest.plugin.name;
             plugin.manifest.commands.iter().map(move |command| Offered {
                 plugin,
                 command,
-                title: if command.title == *name {
-                    name.clone()
-                } else {
-                    format!("{name}: {}", command.title)
-                },
-                shown: command_offer_label(plugin, command),
+                title: plugin.manifest.palette_title(command),
+                shown: command_label(plugin, command),
             })
         })
         .collect();
-    let mut named: HashMap<String, usize> = HashMap::new();
-    for title in clews
-        .iter()
-        .map(|t| t.to_string())
-        .chain(offered.iter().map(|o| o.title.clone()))
-    {
-        *named.entry(title).or_default() += 1;
-    }
+    // Rows read alike whether or not one ends in "…".
+    let bare = |shown: &str| shown.trim_end_matches('…').trim_end().to_string();
+    let count = |names: Vec<String>| {
+        let mut named: HashMap<String, usize> = HashMap::new();
+        for name in names {
+            *named.entry(name).or_default() += 1;
+        }
+        named
+    };
+    let titles = count(
+        clews
+            .iter()
+            .map(|(title, _)| title.to_string())
+            .chain(offered.iter().map(|o| o.title.clone()))
+            .collect(),
+    );
+    let shown = count(
+        clews
+            .iter()
+            .map(|(_, shown)| bare(shown))
+            .chain(offered.iter().map(|o| o.shown.clone()))
+            .collect(),
+    );
     for o in &mut offered {
-        if named.get(&o.title).is_some_and(|n| *n > 1) {
-            o.title = format!("{} ({})", o.title, o.plugin.id);
-            o.shown = format!("{} ({})", o.shown, o.plugin.id);
+        let id = &o.plugin.id;
+        let titled_alike = titles.get(&o.title).is_some_and(|n| *n > 1);
+        if titled_alike {
+            o.title = format!("{} ({id})", o.title);
+        }
+        if titled_alike || shown.get(&o.shown).is_some_and(|n| *n > 1) {
+            o.shown = format!("{} ({id})", o.shown);
+        }
+        // The id is part of its name; what it asks for comes after.
+        if o.command.input.is_some() {
+            o.shown.push('…');
         }
     }
     offered
+}
+
+/// An install done, as whoever asked for it is told: its fingerprint, in
+/// words for an agent, and its commands by the names the palette gives
+/// them (in the order of its `[[command]]`s).
+pub(crate) struct Installation {
+    pub(crate) fingerprint: String,
+    pub(crate) words: String,
+    pub(crate) palette: Vec<String>,
 }
 
 /// A command as it was run — its plugin, what was typed for it, where —
@@ -188,6 +208,10 @@ pub struct PendingInstall {
     pub(crate) origin: Source,
     /// The version installed now, if this replaces one.
     pub(crate) previous: Option<Installed>,
+    /// The name of the plugin this replaces that this Clew cannot read (a
+    /// later Clew installed it), if it replaces one: the card said
+    /// "Install", and the later build went with no word.
+    pub(crate) unreadable: Option<String>,
     pub(crate) reply: Reply,
 }
 
@@ -451,8 +475,9 @@ pub struct Plugins {
     /// kept is the last one read, and Settings says so.
     pub(crate) list_error: Option<String>,
     /// Plugins installed whose manifest this Clew cannot read (a later one
-    /// installed them, or their record was changed), by id, with why: not
-    /// run, and listed in Settings with what to do — they vanished.
+    /// installed them, or their record was changed), by id, with the name
+    /// it gives them where that much reads, else the id: not run, and
+    /// listed in Settings with what to do — they vanished.
     pub(crate) unreadable: Vec<(String, String)>,
     /// The plugins whose last command run failed, by id: until one
     /// finishes, or a new build is installed, its Settings row says what
@@ -623,7 +648,12 @@ impl Plugins {
             let manifest = match clew_plugin::manifest::Manifest::parse(&record.manifest) {
                 Ok(manifest) => manifest,
                 Err(why) => {
-                    unreadable.push((id, why));
+                    // Why, for whoever reads the log: the row says what
+                    // the reader can do, not the parser's words.
+                    eprintln!("[clew] plugin {id} is not run, its manifest unread: {why}");
+                    let name = clew_plugin::manifest::Manifest::name_of(&record.manifest)
+                        .unwrap_or_else(|| id.clone());
+                    unreadable.push((id, name));
                     continue;
                 }
             };
@@ -637,7 +667,7 @@ impl Plugins {
             });
         }
         installed.sort_by_key(|p| p.name().to_lowercase());
-        unreadable.sort();
+        unreadable.sort_by_key(|(_, name)| name.to_lowercase());
         Ok((installed, unreadable))
     }
 
@@ -1288,21 +1318,26 @@ impl App {
         // "Newly asked" or "This turns it on" of what was there before:
         // asked again, of what is there now.
         let installed = self.plugins.installed.clone();
+        let unreadable = self.plugins.unreadable.clone();
         self.plugins.install.renew(|pending| {
-            let now = installed
+            let id = &pending.inspected.manifest.plugin.id;
+            let now = installed.iter().find(|p| p.id == *id).cloned();
+            let unreadable = unreadable
                 .iter()
-                .find(|p| p.id == pending.inspected.manifest.plugin.id)
-                .cloned();
-            let same = match (&now, &pending.previous) {
-                (None, None) => true,
-                (Some(a), Some(b)) => {
-                    a.record.fingerprint == b.record.fingerprint
-                        && a.record.enabled == b.record.enabled
-                }
-                _ => false,
-            };
+                .find(|(at, _)| at == id)
+                .map(|(_, name)| name.clone());
+            let same = unreadable == pending.unreadable
+                && match (&now, &pending.previous) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => {
+                        a.record.fingerprint == b.record.fingerprint
+                            && a.record.enabled == b.record.enabled
+                    }
+                    _ => false,
+                };
             (!same).then(|| PendingInstall {
                 previous: now,
+                unreadable,
                 ..pending.clone()
             })
         });
@@ -1556,6 +1591,46 @@ impl App {
             let _ = tx.unbounded_send(Message::Plugin(PluginMsg::ToolchainSetUp(done)));
         });
         Task::run(rx, std::convert::identity)
+    }
+
+    /// Stop setting Rust up, as its Cancel does — closing the window too.
+    /// Adding the target to the user's own Rust is not stopped: it runs to
+    /// its end ([`clew_plugin::toolchain::set_up`] does not stop it either),
+    /// and a failure of it is said, not taken for a cancel.
+    pub(crate) fn cancel_toolchain_setup(&self) {
+        if let Building::SettingUp { cancel, stage } = &self.plugins.building
+            && *stage != clew_plugin::toolchain::Stage::AddingTarget
+        {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Plugin `id`'s commands by the names the palette gives them now, in
+    /// the order of its `[[command]]`s; none while it is not offered (off,
+    /// or not installed).
+    pub(crate) fn palette_names_of(&self, id: &str) -> Vec<String> {
+        let Some(plugin) = self.plugins.get(id) else {
+            return Vec::new();
+        };
+        let palette = self.palette_commands();
+        let named: Vec<String> = plugin
+            .manifest
+            .commands
+            .iter()
+            .filter_map(|command| {
+                palette.iter().find_map(|c| match &c.action {
+                    crate::app::palette::PaletteAction::Send(Message::Plugin(PluginMsg::Run {
+                        id: of,
+                        command: which,
+                    })) if of == id && *which == command.id => Some(c.title.clone()),
+                    _ => None,
+                })
+            })
+            .collect();
+        match named.len() == plugin.manifest.commands.len() {
+            true => named,
+            false => Vec::new(),
+        }
     }
 
     /// Build the plugin graph Project Graphs shows if what it was built
@@ -2421,15 +2496,20 @@ impl App {
 
     /// Ask the user whether to install `prepared`.
     pub(crate) fn offer_install(&mut self, prepared: Prepared, origin: Source, reply: Reply) {
-        let previous = self
+        let id = &prepared.inspected.manifest.plugin.id;
+        let previous = self.plugins.get(id).cloned();
+        let unreadable = self
             .plugins
-            .get(&prepared.inspected.manifest.plugin.id)
-            .cloned();
+            .unreadable
+            .iter()
+            .find(|(at, _)| at == id)
+            .map(|(_, name)| name.clone());
         let replaced = self.plugins.install.offer(PendingInstall {
             bytes: prepared.bytes,
             inspected: prepared.inspected,
             origin,
             previous,
+            unreadable,
             reply,
         });
         // The build asked about before, of the same plugin, is not asked
@@ -2450,7 +2530,7 @@ impl App {
     fn answer_install(
         &mut self,
         reply: &Reply,
-        answer: Result<(String, String), String>,
+        answer: Result<Installation, String>,
         declined: bool,
     ) {
         match reply {
@@ -2458,7 +2538,7 @@ impl App {
             Reply::AskTool { stream, call } => {
                 let (content, is_error) = match (&answer, declined) {
                     (_, true) => ("The user chose not to install it.".to_string(), false),
-                    (Ok((_, words)), _) => (words.clone(), false),
+                    (Ok(done), _) => (done.words.clone(), false),
                     (Err(why), _) => (why.clone(), true),
                 };
                 let state = match (&answer, declined) {
@@ -2476,9 +2556,10 @@ impl App {
             Reply::Request(nonce) => {
                 let answer = match (answer, declined) {
                     (_, true) => clew_plugin::requests::Answer::Declined,
-                    (Ok((fingerprint, _)), _) => {
-                        clew_plugin::requests::Answer::Installed { fingerprint }
-                    }
+                    (Ok(done), _) => clew_plugin::requests::Answer::Installed {
+                        fingerprint: done.fingerprint,
+                        palette: done.palette,
+                    },
                     (Err(why), _) => clew_plugin::requests::Answer::Failed { why },
                 };
                 if let Ok(data) = data() {
@@ -3202,8 +3283,12 @@ impl App {
                                 plugin = name.clone()
                             ),
                         };
+                        // Its commands by the names the palette gives them:
+                        // one named as another plugin's command is, or as
+                        // one of Clew's own, carries its plugin's id there.
+                        let palette = self.palette_names_of(&id);
                         let mut words = manifest
-                            .map(|m| m.installed_words())
+                            .map(|m| m.installed_words_as(&palette))
                             .unwrap_or_else(|| format!("The user installed {name}."));
                         if commands > 0 {
                             words.push_str(&format!(
@@ -3211,7 +3296,11 @@ impl App {
                                 crate::app::windowtools::RUN_COMMAND
                             ));
                         }
-                        Ok((fingerprint, words))
+                        Ok(Installation {
+                            fingerprint,
+                            words,
+                            palette,
+                        })
                     }
                     Err(why) => {
                         self.plugins.failure = Some(tr!(
@@ -3312,11 +3401,18 @@ impl App {
                 opened
             }
             PluginMsg::AskRemove(id) => {
-                // One this Clew cannot read is named by its id.
+                // One this Clew cannot read is named as its row names it.
                 let name = self
                     .plugins
                     .get(&id)
                     .map(Installed::name)
+                    .or_else(|| {
+                        self.plugins
+                            .unreadable
+                            .iter()
+                            .find(|(at, _)| *at == id)
+                            .map(|(_, name)| name.clone())
+                    })
                     .unwrap_or_else(|| id.clone());
                 self.plugins.confirm = Some(Confirm {
                     title: tr!("Remove “{plugin}”?", plugin = name),
@@ -3661,8 +3757,19 @@ impl App {
                 // other windows look again.
                 if matches!(self.plugins.building, Building::Removing) {
                     toolchain_changed();
-                    if checked.removal_failed.is_none() && !checked.own_installed {
-                        self.status = tr!("Clew's own Rust was removed").into();
+                    match &checked.removal_failed {
+                        // Said where its success is said: Settings may be
+                        // closed by then, its row the only other word.
+                        Some(why) => {
+                            self.status = tr!(
+                                "Clew's own Rust could not be removed: {reason}",
+                                reason = why.clone()
+                            );
+                        }
+                        None if !checked.own_installed => {
+                            self.status = tr!("Clew's own Rust was removed").into();
+                        }
+                        None => {}
                     }
                 }
                 self.plugins.own_rust = checked.own_installed;
@@ -3764,14 +3871,7 @@ impl App {
                 self.check_toolchain()
             }
             PluginMsg::CancelToolchainSetup => {
-                // Adding the target changes the user's own Rust: stopped
-                // partway, rustup can refuse to add it again. It is quick,
-                // and runs to its end.
-                if let Building::SettingUp { cancel, stage } = &self.plugins.building
-                    && *stage != clew_plugin::toolchain::Stage::AddingTarget
-                {
-                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
+                self.cancel_toolchain_setup();
                 Task::none()
             }
             PluginMsg::RemoveOwnRust => {

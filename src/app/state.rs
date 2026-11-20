@@ -1749,8 +1749,8 @@ pub struct App {
     pub proof_seq: u64,
     /// The command palette's list, as last built (see `app::palette`).
     pub(crate) palette: Vec<crate::app::palette::PaletteCommand>,
-    /// The titles of the palette commands run last, most recent first.
-    pub palette_recent: Vec<String>,
+    /// The palette commands run last, most recent first.
+    pub(crate) palette_recent: Vec<crate::app::palette::Recent>,
     /// The command bar's suggestions, as last built: what it offers with
     /// nothing typed (see `app::palette`).
     pub(crate) palette_home: Vec<crate::app::palette::Suggestion>,

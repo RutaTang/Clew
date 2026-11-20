@@ -396,7 +396,21 @@ pub(crate) fn plugin_install_modal(
             version = manifest.plugin.version.clone()
         ),
         Some(_) => tr!("Update “{plugin}”?", plugin = name.clone()),
-        None => tr!("Install “{plugin}”?", plugin = name.clone()),
+        // In place of one this Clew cannot read: replaced, as an older
+        // version replaces a newer one — not installed as if new.
+        None => match &pending.unreadable {
+            Some(old) if *old != name && *old != manifest.plugin.name => tr!(
+                "Replace “{old}” with “{plugin}”?",
+                old = old.clone(),
+                plugin = name.clone()
+            ),
+            Some(_) => tr!(
+                "Replace “{plugin}” with version {version}?",
+                plugin = name.clone(),
+                version = manifest.plugin.version.clone()
+            ),
+            None => tr!("Install “{plugin}”?", plugin = name.clone()),
+        },
     };
     let mut adds: Vec<String> = manifest
         .commands
@@ -469,6 +483,7 @@ pub(crate) fn plugin_install_modal(
         Some(_) if again => (tr!("Don't install"), tr!("Install again")),
         Some(_) if older || renamed.is_some() => (tr!("Don't replace"), tr!("Replace")),
         Some(_) => (tr!("Don't update"), tr!("Update")),
+        None if pending.unreadable.is_some() => (tr!("Don't replace"), tr!("Replace")),
         None => (tr!("Don't install"), tr!("Install")),
     };
     let panel = container(
@@ -1065,7 +1080,7 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
     // not offered as a first one to make.
     if let Some(why) = &app.plugins.list_error {
         // Nothing read before it (as the window opened): nothing to show.
-        let said = match app.plugins.installed.is_empty() {
+        let said = match app.plugins.installed.is_empty() && app.plugins.unreadable.is_empty() {
             true => tr!(
                 "Clew could not read its list of plugins, so none of them run: {reason}",
                 reason = why.clone()
@@ -1107,19 +1122,22 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
                 })
                 // Those this Clew cannot read: said, and removable — not
                 // gone from the list while still installed.
-                .chain(app.plugins.unreadable.iter().map(|(id, why)| {
+                // Named as much as its manifest reads; what is wrong with it
+                // is in the log, as the reader can do nothing with a
+                // parser's words.
+                .chain(app.plugins.unreadable.iter().map(|(id, name)| {
                     form::item_saying(
-                        id.clone(),
+                        name.clone(),
                         Some(
                             tr!(
-                                "Clew cannot read what this plugin is, so it does not run: {reason}. A later version of Clew may have installed it: update Clew to use it, or remove it.",
-                                reason = why.clone()
-                            ),
+                                "Clew cannot read this plugin, so it does not run. A later version of Clew may have installed it: update Clew to use it, or remove it."
+                            )
+                            .to_string(),
                         ),
                         true,
                         form::action_to(
                             tr!("Remove"),
-                            id,
+                            name,
                             app.plugins
                                 .list_error
                                 .is_none()

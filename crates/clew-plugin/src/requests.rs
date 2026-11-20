@@ -67,8 +67,15 @@ pub struct Request {
 pub enum Answer {
     /// The command's result, as the agent reads it.
     Tried { result: String },
-    /// The user installed it.
-    Installed { fingerprint: String },
+    /// The user installed it; its commands by the names the palette gives
+    /// them, in the order of its `[[command]]`s
+    /// ([`crate::manifest::Manifest::installed_words_as`]). Absent from an
+    /// answer a Clew without them wrote.
+    Installed {
+        fingerprint: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        palette: Vec<String>,
+    },
     /// The user said no.
     Declined,
     /// It could not be done, and why.
@@ -402,6 +409,7 @@ mod tests {
                     &nonce,
                     &Answer::Installed {
                         fingerprint: "f".into(),
+                        palette: vec!["Word count: Count words (word-count-too)".into()],
                     },
                 )
                 .unwrap();
@@ -417,7 +425,8 @@ mod tests {
         assert_eq!(
             got,
             Some(Answer::Installed {
-                fingerprint: "f".into()
+                fingerprint: "f".into(),
+                palette: vec!["Word count: Count words (word-count-too)".into()],
             })
         );
         assert!(pending(&data).is_empty());

@@ -390,7 +390,7 @@
  "Clew can't run it: {why}": "Clew では実行できません: {why}",
  "Clew can't update itself here: {reason} — opening the release page": "この環境では Clew を自動で更新できません: {reason}。リリースページを開きます",
  "Clew cannot read proxy passwords from the keychain: put them in environment variables ({PERCENT_ENCODING}); Clew then uses those instead of all of the system's proxy settings, so set {arg1}": "Clew はキーチェーンからプロキシのパスワードを読めません。環境変数に設定してください（{PERCENT_ENCODING}）。Clew はシステムのプロキシ設定すべての代わりにそれを使うので、{arg1} を設定してください",
- "Clew cannot read what this plugin is, so it does not run: {reason}. A later version of Clew may have installed it: update Clew to use it, or remove it.": "Clew はこのプラグインが何かを読み取れないため、実行しません: {reason}。より新しいバージョンの Clew がインストールした可能性があります。使うには Clew を更新するか、削除してください。",
+ "Clew cannot read this plugin, so it does not run. A later version of Clew may have installed it: update Clew to use it, or remove it.": "Clew はこのプラグインを読み取れないため、実行しません。より新しいバージョンの Clew がインストールした可能性があります。使うには Clew を更新するか、削除してください。",
  "Clew cannot use {other}:// proxies": "Clew は {other}:// プロキシを使用できません",
  "Clew could not fetch the host key of {label} ({host}:{port}).": "Clew は {label} のホスト鍵を取得できませんでした（{host}:{port}）。",
  "Clew could not read its list of plugins": "Clew がプラグインの一覧を読み取れませんでした",

@@ -240,7 +240,7 @@ fn a_command_heard_runs_as_the_palette_runs_it() {
     assert!(
         app.palette_recent
             .first()
-            .is_some_and(|t| t == "Call Graph")
+            .is_some_and(|t| *t == crate::app::palette::Recent::Titled("Call Graph".into()))
     );
 }
 

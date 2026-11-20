@@ -115,6 +115,15 @@ impl GraphDecl {
 }
 
 impl Manifest {
+    /// The name `plugin.toml`'s text gives its plugin, read as loosely as it
+    /// can be: from a manifest [`Manifest::parse`] refuses (a later Clew's,
+    /// with fields this one does not know), so a list can still name it.
+    pub fn name_of(text: &str) -> Option<String> {
+        let value: toml::Table = toml::from_str(text).ok()?;
+        let name = value.get("plugin")?.get("name")?.as_str()?.trim();
+        (!name.is_empty()).then(|| name.to_string())
+    }
+
     /// Read and check `plugin.toml`'s text.
     pub fn parse(text: &str) -> Result<Manifest, String> {
         if text.len() > MAX_MANIFEST_BYTES {
@@ -165,6 +174,15 @@ impl Manifest {
     /// What an agent is told once the user installed this plugin: where
     /// each command and graph it adds now is.
     pub fn installed_words(&self) -> String {
+        self.installed_words_as(&[])
+    }
+
+    /// [`Manifest::installed_words`], its commands named as the palette
+    /// names them, a title each in the order of its `[[command]]`s: the
+    /// window tells two plugins' commands named alike apart by the
+    /// plugin's id, and an agent told the name without it ran the other
+    /// one. Empty (or not one each), by their [`Manifest::palette_title`]s.
+    pub fn installed_words_as(&self, palette: &[String]) -> String {
         let quoted = |names: Vec<String>| {
             names
                 .into_iter()
@@ -176,12 +194,14 @@ impl Manifest {
         if !self.commands.is_empty() {
             said.push_str(&format!(
                 " Its commands are in Clew's command palette as {}.",
-                quoted(
-                    self.commands
+                quoted(match palette.len() == self.commands.len() {
+                    true => palette.to_vec(),
+                    false => self
+                        .commands
                         .iter()
                         .map(|c| self.palette_title(c))
-                        .collect()
-                )
+                        .collect(),
+                })
             ));
         }
         if !self.graphs.is_empty() {
