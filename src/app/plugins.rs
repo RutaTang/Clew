@@ -102,6 +102,9 @@ pub struct Again {
     pub(crate) command: String,
     pub(crate) input: Option<String>,
     pub(crate) at: Option<Spot>,
+    /// The file, line and selection it was run on, once it ran: run again
+    /// on them, not on whatever file a row opened since.
+    pub(crate) context: Option<Invocation>,
 }
 
 /// Where a command run from the code's right-click menu was asked: the
@@ -160,6 +163,9 @@ pub struct PluginMap {
     /// What the plugin answered in its own words instead of a graph ("This
     /// project has no Kafka topics"): its answer, not a failure.
     pub(crate) said: Option<String>,
+    /// Set to stop the build running: a graph no longer shown is not built
+    /// on for a minute, with its memory, beside the one that is.
+    pub(crate) stop: Option<Arc<AtomicBool>>,
 }
 
 /// Where a plugin graph stands, for Project Graphs to say.
@@ -373,10 +379,19 @@ pub struct Plugins {
     pub(crate) confirm: Option<Confirm>,
     /// What each plugin wrote to its log, by id, the latest last.
     pub(crate) log: HashMap<String, VecDeque<(Level, String)>>,
-    /// The plugins whose last run or graph build failed, by id: until one
+    /// How many of each plugin's earliest log lines were let go to keep it
+    /// to [`LOG_LINES`].
+    pub(crate) log_dropped: HashMap<String, usize>,
+    /// Why `plugins.toml` could not be read, when it could not: the list
+    /// kept is the last one read, and Settings says so.
+    pub(crate) list_error: Option<String>,
+    /// The plugins whose last command run failed, by id: until one
     /// finishes, or a new build is installed, its Settings row says what
     /// fixes it.
     pub(crate) failed: HashSet<String>,
+    /// The plugins whose last graph build failed: a graph built well says
+    /// nothing of a command that crashed, nor the other way round.
+    pub(crate) graph_failed: HashSet<String>,
     /// The plugins whose approved copy changed on disk, by id: not run,
     /// until installed again — nothing an agent's fix or a Try again
     /// changes.
@@ -428,6 +443,9 @@ pub(crate) enum Building {
     /// Clew's own Rust being removed: "Checking…" said nothing of the
     /// 700 MB going.
     Removing,
+    /// Another Clew window is setting Rust up or removing it: looked at
+    /// again when it is done.
+    Elsewhere,
 }
 
 /// What a check of the toolchain found.
@@ -438,6 +456,54 @@ pub struct Checked {
     pub(crate) own_installed: bool,
     /// Asked to remove it: why it is still there.
     pub(crate) removal_failed: Option<String>,
+    /// Another Clew window is setting Rust up or removing it: nothing
+    /// else was looked at.
+    pub(crate) elsewhere: bool,
+}
+
+impl Checked {
+    /// Rust as it is now, unless another window is changing it.
+    fn now(data: &Path) -> Checked {
+        if clew_plugin::toolchain::busy(data) {
+            return Checked::elsewhere();
+        }
+        Checked {
+            found: clew_plugin::toolchain::find(Some(data))
+                .map(|t| (t.version, t.cargo_home.is_some())),
+            own_installed: clew_plugin::toolchain::managed_installed(data),
+            removal_failed: None,
+            elsewhere: false,
+        }
+    }
+
+    fn elsewhere() -> Checked {
+        Checked {
+            found: Err(clew_plugin::toolchain::Missing {
+                why: clew_plugin::toolchain::Why::Other(clew_plugin::toolchain::ELSEWHERE.into()),
+                setup: None,
+                rustup: false,
+            }),
+            own_installed: false,
+            removal_failed: None,
+            elsewhere: true,
+        }
+    }
+
+    /// The check's thread ended without a word.
+    fn failed() -> Checked {
+        Checked {
+            found: Err(clew_plugin::toolchain::Missing {
+                why: clew_plugin::toolchain::Why::Other(
+                    tr!("the check failed unexpectedly").into(),
+                ),
+                setup: None,
+                rustup: false,
+            }),
+            own_installed: false,
+            removal_failed: None,
+            elsewhere: false,
+        }
+    }
 }
 
 impl std::fmt::Debug for Plugins {
@@ -454,18 +520,24 @@ impl std::fmt::Debug for Plugins {
 impl Plugins {
     /// The window's plugins: the ones installed.
     pub(crate) fn new() -> Self {
+        let (installed, list_error) = match Self::read_installed() {
+            Ok(installed) => (installed, None),
+            Err(why) => (Vec::new(), Some(why)),
+        };
         Plugins {
-            installed: Self::read_installed(),
+            installed,
+            list_error,
             ..Default::default()
         }
     }
 
-    /// The plugins installed, as `plugins.toml` lists them.
-    pub(crate) fn read_installed() -> Vec<Installed> {
+    /// The plugins installed, as `plugins.toml` lists them; why not, when
+    /// it is there and cannot be read — never taken for no plugins.
+    pub(crate) fn read_installed() -> Result<Vec<Installed>, String> {
         let Some(data) = clew_core::lsp::store::data_root() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let store = Store::load(&data);
+        let store = Store::load_checked(&data)?;
         let mut installed: Vec<Installed> = store
             .plugin
             .into_iter()
@@ -482,7 +554,7 @@ impl Plugins {
             })
             .collect();
         installed.sort_by_key(|p| p.name().to_lowercase());
-        installed
+        Ok(installed)
     }
 
     /// The installed plugin `id`.
@@ -493,30 +565,55 @@ impl Plugins {
     /// Plugin `id`'s log, a line each, the latest last: empty when it
     /// wrote nothing.
     pub(crate) fn log_text(&self, id: &str) -> String {
-        self.log
-            .get(id)
-            .map(|log| {
-                log.iter()
-                    .map(|(_, line)| line.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default()
+        let Some(log) = self.log.get(id).filter(|l| !l.is_empty()) else {
+            return String::new();
+        };
+        let lines = log
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Copied for an agent, which should know it is not the whole log.
+        match self.log_dropped.get(id) {
+            Some(1) => format!("(1 earlier line was not kept)\n{lines}"),
+            Some(n) => format!("({n} earlier lines were not kept)\n{lines}"),
+            None => lines,
+        }
     }
 
     /// Whether plugin `id`'s last run or graph build failed: it is not
     /// working, and its row says what fixes it.
     pub(crate) fn failing(&self, id: &str) -> bool {
-        self.failed.contains(id)
+        self.failed.contains(id) || self.graph_failed.contains(id)
     }
 
     /// Note `line` in plugin `id`'s log.
     fn note(&mut self, id: &str, level: Level, line: String) {
         let log = self.log.entry(id.to_string()).or_default();
-        log.push_back((level, line));
+        // A line each: what a plugin printed came as one block, and its
+        // "last five lines" were one entry of up to 64 KiB.
+        for line in line.lines().filter(|l| !l.trim().is_empty()) {
+            log.push_back((level, line.to_string()));
+        }
+        let mut dropped = 0;
         while log.len() > LOG_LINES {
             log.pop_front();
+            dropped += 1;
         }
+        if dropped > 0 {
+            *self.log_dropped.entry(id.to_string()).or_default() += dropped;
+        }
+    }
+
+    /// Forget what this window kept of plugin `id`'s copy: replaced or
+    /// removed, its log, failure and damaged copy are not the next one's.
+    fn forget_copy(&mut self, id: &str) {
+        self.log.remove(id);
+        self.log_dropped.remove(id);
+        self.log_open.remove(id);
+        self.failed.remove(id);
+        self.graph_failed.remove(id);
+        self.damaged.remove(id);
     }
 }
 
@@ -591,6 +688,8 @@ pub enum PluginMsg {
         id: String,
         title: String,
         again: Again,
+        /// The copy of the plugin it ran.
+        fingerprint: String,
         ran: Arc<std::sync::Mutex<Option<Ran>>>,
     },
     /// Open the place of row `row` of block `block` of the page shown.
@@ -736,10 +835,11 @@ fn store_changed() {
 
 /// Why a run of `record` stopped before it started because its approval
 /// no longer stands as this window read it.
-const WITHDRAWN: [&str; 3] = [
+const WITHDRAWN: [&str; 4] = [
     tr_noop!("it was removed"),
     tr_noop!("it was updated"),
     tr_noop!("it is turned off"),
+    tr_noop!("Clew could not read its list of plugins"),
 ];
 
 /// Why `id`'s plugin, as `record` has it, may no longer run: turned off,
@@ -747,7 +847,11 @@ const WITHDRAWN: [&str; 3] = [
 /// of Clew, which no message reaches. Asked as each run starts, of the
 /// copy this window keeps loaded too.
 fn withdrawn(data: &std::path::Path, id: &str, record: &Record) -> Option<&'static str> {
-    match Store::load(data).plugin.get(id) {
+    // Unreadable is not "removed": nothing is taken from what it saved.
+    let Ok(store) = Store::load_checked(data) else {
+        return Some(WITHDRAWN[3]);
+    };
+    match store.plugin.get(id) {
         None => Some(WITHDRAWN[0]),
         Some(now) if now.fingerprint != record.fingerprint || now.sha256 != record.sha256 => {
             Some(WITHDRAWN[1])
@@ -835,6 +939,9 @@ fn setup_error_words(why: &clew_plugin::toolchain::SetUpError) -> String {
             crate::ui::missing_words(&missing.why)
         }
         clew_plugin::toolchain::SetUpError::Failed(why) => crate::i18n::lookup(why).to_string(),
+        clew_plugin::toolchain::SetUpError::Elsewhere => {
+            crate::i18n::lookup(clew_plugin::toolchain::ELSEWHERE).to_string()
+        }
     }
 }
 
@@ -851,7 +958,9 @@ fn removed_store_of(id: &str) {
     let Ok(data) = data() else {
         return;
     };
-    if !Store::load(&data).plugin.contains_key(id) {
+    // Only when the list is read and does not name it: an unreadable list
+    // deleted the saved data of a plugin still installed.
+    if Store::load_checked(&data).is_ok_and(|store| !store.plugin.contains_key(id)) {
         forget_store_of(&data, id);
     }
 }
@@ -960,7 +1069,54 @@ impl App {
 
     /// Read the installed plugins again (after an install, a change).
     pub(crate) fn reload_plugins(&mut self) -> Task<Message> {
-        self.plugins.installed = Plugins::read_installed();
+        match Plugins::read_installed() {
+            Ok(installed) => {
+                // A plugin replaced or removed (here or in another window):
+                // what this window kept of the copy it had — its log, its
+                // failure, its damaged copy — is not the new copy's.
+                let now: HashMap<&str, &str> = installed
+                    .iter()
+                    .map(|p| (p.id.as_str(), p.record.fingerprint.as_str()))
+                    .collect();
+                let gone: Vec<String> = self
+                    .plugins
+                    .installed
+                    .iter()
+                    .filter(|p| now.get(p.id.as_str()) != Some(&p.record.fingerprint.as_str()))
+                    .map(|p| p.id.clone())
+                    .collect();
+                for id in &gone {
+                    self.plugins.forget_copy(id);
+                }
+                self.plugins.installed = installed;
+                self.plugins.list_error = None;
+            }
+            // Unreadable: the list read last stands, and Settings says why.
+            Err(why) => self.plugins.list_error = Some(why),
+        }
+        // A card waiting to install a plugin turned off, removed or
+        // replaced meanwhile (here or in another window) said "Update",
+        // "Newly asked" or "This turns it on" of what was there before:
+        // asked again, of what is there now.
+        let installed = self.plugins.installed.clone();
+        self.plugins.install.renew(|pending| {
+            let now = installed
+                .iter()
+                .find(|p| p.id == pending.inspected.manifest.plugin.id)
+                .cloned();
+            let same = match (&now, &pending.previous) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.record.fingerprint == b.record.fingerprint
+                        && a.record.enabled == b.record.enabled
+                }
+                _ => false,
+            };
+            (!same).then(|| PendingInstall {
+                previous: now,
+                ..pending.clone()
+            })
+        });
         let keep: HashSet<&str> = self
             .plugins
             .installed
@@ -1133,9 +1289,13 @@ impl App {
     /// Look again at whether plugins can be built here, unless a setup
     /// step is running (it looks when it ends).
     pub(crate) fn check_toolchain(&mut self) -> Task<Message> {
+        // Waiting on another window already looks again when it is done.
         if matches!(
             self.plugins.building,
-            Building::Checking | Building::SettingUp { .. } | Building::Removing
+            Building::Checking
+                | Building::SettingUp { .. }
+                | Building::Removing
+                | Building::Elsewhere
         ) {
             return Task::none();
         }
@@ -1145,24 +1305,29 @@ impl App {
         self.plugins.building = Building::Checking;
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || Checked {
-                    found: clew_plugin::toolchain::find(Some(&data))
-                        .map(|t| (t.version, t.cargo_home.is_some())),
-                    own_installed: clew_plugin::toolchain::managed_installed(&data),
-                    removal_failed: None,
+                tokio::task::spawn_blocking(move || Checked::now(&data))
+                    .await
+                    .unwrap_or_else(|_| Checked::failed())
+            },
+            |checked| Message::Plugin(PluginMsg::ToolchainChecked(checked)),
+        )
+    }
+
+    /// Another window is setting Rust up or removing it: look again when
+    /// it is done, with nothing to press meanwhile.
+    fn check_toolchain_when_free(&mut self) -> Task<Message> {
+        let Ok(data) = data() else {
+            return Task::none();
+        };
+        self.plugins.building = Building::Elsewhere;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    clew_plugin::toolchain::wait_while_busy(&data);
+                    Checked::now(&data)
                 })
                 .await
-                .unwrap_or_else(|_| Checked {
-                    found: Err(clew_plugin::toolchain::Missing {
-                        why: clew_plugin::toolchain::Why::Other(
-                            tr!("the check failed unexpectedly").into(),
-                        ),
-                        setup: None,
-                        rustup: false,
-                    }),
-                    own_installed: false,
-                    removal_failed: None,
-                })
+                .unwrap_or_else(|_| Checked::failed())
             },
             |checked| Message::Plugin(PluginMsg::ToolchainChecked(checked)),
         )
@@ -1209,8 +1374,15 @@ impl App {
     /// twice at once.
     pub(crate) fn ensure_plugin_map(&mut self) -> Task<Message> {
         if self.proj.overlay != Some(Overlay::ProjectMaps) {
+            self.stop_plugin_map_builds(None);
             return Task::none();
         }
+        let Some((id, _, _)) = self.shown_plugin_graph() else {
+            self.stop_plugin_map_builds(None);
+            return Task::none();
+        };
+        // Only the graph shown is built: one picked before it stops.
+        self.stop_plugin_map_builds(Some(&id));
         let Some((id, plugin, decl)) = self.shown_plugin_graph() else {
             return Task::none();
         };
@@ -1249,6 +1421,8 @@ impl App {
             }
         };
         entry.building = true;
+        let stop = Arc::new(AtomicBool::new(false));
+        entry.stop = Some(stop.clone());
         let loaded = self.plugins.loaded.get(&fingerprint).cloned();
         let stamp = self.stamp();
         let done_fp = fingerprint.clone();
@@ -1263,7 +1437,7 @@ impl App {
                             log: Vec::new(),
                         };
                     }
-                    let host = Arc::new(host(handle));
+                    let host = Arc::new(host(handle).with_stop(stop));
                     let (loaded, fresh) = match loaded {
                         Some(loaded) => (loaded, false),
                         None => match load(&runtime, &data, &record) {
@@ -1315,6 +1489,17 @@ impl App {
         fingerprint: String,
         ran: GraphRan,
     ) -> Task<Message> {
+        // Stopped because it was no longer shown: nothing to say of it, and
+        // built again when next shown — unless a newer build of it runs.
+        if matches!(&ran.outcome, Err(Failure::Stopped(why)) if why == clew_plugin::runtime::STOPPED_BY_USER)
+        {
+            if let Some(entry) = self.proj.plugin_maps.get_mut(&map)
+                && !entry.building
+            {
+                entry.rev = u64::MAX;
+            }
+            return Task::none();
+        }
         let plugin = map_of(&map).map(|(plugin, _)| plugin.to_string());
         if let Some(plugin) = &plugin {
             for HostEvent::Log(level, line) in ran.log {
@@ -1390,7 +1575,7 @@ impl App {
                 entry.failed = None;
                 entry.said = None;
                 if let Some(plugin) = &plugin {
-                    self.plugins.failed.remove(plugin);
+                    self.plugins.graph_failed.remove(plugin);
                 }
             }
             Err(failure) => {
@@ -1399,17 +1584,17 @@ impl App {
                     // it works.
                     if let Failure::Plugin(said) = &failure {
                         self.plugins.note(plugin, Level::Info, said.clone());
-                        self.plugins.failed.remove(plugin);
+                        self.plugins.graph_failed.remove(plugin);
                     } else if matches!(&failure, Failure::Stopped(why) if why == clew_plugin::store::CHANGED)
                     {
                         self.plugins
                             .note(plugin, Level::Error, failure_words(&failure));
-                        self.plugins.failed.remove(plugin);
+                        self.plugins.graph_failed.remove(plugin);
                         self.plugins.damaged.insert(plugin.clone());
                     } else {
                         self.plugins
                             .note(plugin, Level::Error, failure_words(&failure));
-                        self.plugins.failed.insert(plugin.clone());
+                        self.plugins.graph_failed.insert(plugin.clone());
                     }
                 }
                 let entry = self.proj.plugin_maps.get_mut(&map).expect("kept above");
@@ -1437,6 +1622,22 @@ impl App {
             false => Task::none(),
         };
         Task::batch([composed, relayout, self.ensure_plugin_map()])
+    }
+
+    /// Stop the plugin graphs being built, but the one `keep`: not shown
+    /// any more, each was built on for up to a minute, with its memory.
+    /// Each is asked for again when next shown.
+    pub(crate) fn stop_plugin_map_builds(&mut self, keep: Option<&str>) {
+        for (id, map) in self.proj.plugin_maps.iter_mut() {
+            if !map.building || keep == Some(id.as_str()) {
+                continue;
+            }
+            if let Some(stop) = map.stop.take() {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            map.building = false;
+            map.rev = u64::MAX;
+        }
     }
 
     /// The open project, as plugins see it; `None` with none open.
@@ -1493,6 +1694,7 @@ impl App {
         command: &str,
         input: Option<String>,
         at: Option<Spot>,
+        context: Option<Invocation>,
     ) -> Task<Message> {
         let Some(plugin) = self.plugins.get(id).filter(|p| p.record.enabled).cloned() else {
             self.status = tr!("That plugin is not installed, or is turned off").into();
@@ -1543,13 +1745,23 @@ impl App {
                 return Task::none();
             }
         };
+        // Run again on what it was first run on: the file a row opened
+        // since is not what the page was about.
+        let invocation = match context {
+            Some(context) => Invocation {
+                input: input.clone(),
+                ..context
+            },
+            None => self.invocation(input.clone(), at),
+        };
         let again = Again {
             id: id.to_string(),
             command: command.to_string(),
-            input: input.clone(),
+            input,
             at,
+            context: Some(invocation.clone()),
         };
-        let invocation = self.invocation(input, at);
+        let fingerprint = plugin.record.fingerprint.clone();
         let loaded = self.plugins.loaded.get(&plugin.record.fingerprint).cloned();
         let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
         self.plugins.progress = Some(progress.clone());
@@ -1615,6 +1827,7 @@ impl App {
                     id: done_id.clone(),
                     title: done_title.clone(),
                     again: again.clone(),
+                    fingerprint: fingerprint.clone(),
                     ran: Arc::new(std::sync::Mutex::new(Some(ran))),
                 })
             },
@@ -1627,16 +1840,27 @@ impl App {
         id: String,
         title: String,
         again: Again,
+        fingerprint: String,
         ran: Ran,
     ) -> Task<Message> {
         self.plugins.running = None;
         self.plugins.progress = None;
         self.plugins.stop = None;
-        for HostEvent::Log(level, line) in ran.log {
-            self.plugins.note(&id, level, line);
-        }
-        if let Some((fingerprint, loaded)) = ran.loaded {
-            self.plugins.loaded.insert(fingerprint, loaded);
+        // Replaced while it ran (its update installed meanwhile): what the
+        // copy that ran wrote, and its loaded code, are not the new
+        // build's — its log read as the new one's, its crash marked the new
+        // one as not working.
+        let current = self
+            .plugins
+            .get(&id)
+            .is_some_and(|p| p.record.fingerprint == fingerprint);
+        if current {
+            for HostEvent::Log(level, line) in ran.log {
+                self.plugins.note(&id, level, line);
+            }
+            if let Some((fingerprint, loaded)) = ran.loaded {
+                self.plugins.loaded.insert(fingerprint, loaded);
+            }
         }
         // Removed while it ran: what it gave back is not shown (a page
         // headed by no name), nor counted against a plugin that is gone.
@@ -1645,11 +1869,18 @@ impl App {
             // What it saved while it ran went after its removal had taken
             // its store: a later install of the same id found it.
             removed_store_of(&id);
-            self.status = tr!(
-                "{command} did not run: {reason}",
-                command = title,
-                reason = tr!("it was removed")
-            );
+            self.status = match &ran.outcome {
+                // Refused at its start: removed before it could run.
+                Err(failure) if is_withdrawn(failure) => tr!(
+                    "{command} did not run: {reason}",
+                    command = title,
+                    reason = tr!("it was removed")
+                ),
+                _ => tr!(
+                    "{command} ran, but its plugin was removed meanwhile",
+                    command = title
+                ),
+            };
             return Task::none();
         };
         // Stopped by the user: what it did so far is in its log; it did
@@ -1679,6 +1910,22 @@ impl App {
                     Some(Message::Plugin(PluginMsg::RunAgain(again))),
                     FailureOf::PluginRun,
                 );
+            } else if matches!(failure, Failure::Stopped(why) if why == WITHDRAWN[2]) {
+                // Turned off in another window: its Settings row, where it
+                // is turned on again, is one click away.
+                let subject = title.clone();
+                self.say_failure_again(
+                    move || {
+                        tr!(
+                            "{command} did not run: {reason}",
+                            command = title.clone(),
+                            reason = crate::i18n::lookup(WITHDRAWN[2])
+                        )
+                    },
+                    None,
+                    FailureOf::PluginRun,
+                );
+                self.failure_in(Some(subject), Some(SettingsSpot::Plugin(id)));
             } else {
                 self.status = tr!(
                     "{command} did not run: {reason}",
@@ -1716,11 +1963,28 @@ impl App {
             self.failure_in(Some(subject), Some(SettingsSpot::Plugin(id)));
             return Task::none();
         }
+        // A failure of the copy replaced is not the new build's: the run is
+        // offered again, on the new build, and nothing is marked failing.
+        if !current && !matches!(ran.outcome, Ok(_) | Err(Failure::Plugin(_))) {
+            self.say_failure_again(
+                move || {
+                    tr!(
+                        "{command} was updated while it ran: run it again for the new version",
+                        command = title.clone()
+                    )
+                },
+                Some(Message::Plugin(PluginMsg::RunAgain(again))),
+                FailureOf::PluginRun,
+            );
+            return Task::none();
+        }
         // A command that finished, or that answered with a reason of its
         // own, works: the failure of its last run goes. A plugin's own
         // "The project has no git history" read as a crash, with Try
         // again (which failed the same way) and "It is not working".
-        if matches!(ran.outcome, Ok(_) | Err(Failure::Plugin(_))) {
+        if !current {
+            // An answer of the copy replaced says nothing of the new one.
+        } else if matches!(ran.outcome, Ok(_) | Err(Failure::Plugin(_))) {
             self.forget_run_failure_of(&id);
             self.plugins.failed.remove(&id);
         } else {
@@ -1751,7 +2015,9 @@ impl App {
             // What the plugin says why it did nothing is said as it wrote
             // it, as what it says when it did: its answer, not a failure.
             Err(Failure::Plugin(said)) => {
-                self.plugins.note(&id, Level::Info, said.clone());
+                if current {
+                    self.plugins.note(&id, Level::Info, said.clone());
+                }
                 self.status = format!("{title}: {said}");
                 Task::none()
             }
@@ -1787,8 +2053,9 @@ impl App {
             f.of == FailureOf::PluginRun
                 && match &f.retry {
                     Some(Message::Plugin(PluginMsg::RunAgain(again))) => again.id == id,
-                    // A damaged copy's: nothing to try again.
-                    None => damaged,
+                    // A damaged copy's, or one turned off: nothing to try
+                    // again; its own by the row it points to.
+                    None => damaged || matches!(&f.spot, Some(SettingsSpot::Plugin(p)) if p == id),
                     _ => false,
                 }
         });
@@ -2276,7 +2543,7 @@ impl App {
     /// Handle a [`PluginMsg`].
     pub(crate) fn update_plugins(&mut self, message: PluginMsg) -> Task<Message> {
         match message {
-            PluginMsg::Run { id, command } => self.run_plugin(&id, &command, None, None),
+            PluginMsg::Run { id, command } => self.run_plugin(&id, &command, None, None, None),
             PluginMsg::RunFromMenu { id, command } => {
                 let Some(menu) = self.proj.context_menu.take() else {
                     return Task::none();
@@ -2285,7 +2552,7 @@ impl App {
                     pane: menu.pane,
                     line: menu.line,
                 };
-                self.run_plugin(&id, &command, None, Some(at))
+                self.run_plugin(&id, &command, None, Some(at), None)
             }
             // Its chip reads how far it has come as it is drawn.
             PluginMsg::ProgressTick => Task::none(),
@@ -2321,7 +2588,13 @@ impl App {
                 let Some(prompt) = self.plugins.prompt.take() else {
                     return Task::none();
                 };
-                self.run_plugin(&prompt.id, &prompt.command, Some(prompt.text), prompt.at)
+                self.run_plugin(
+                    &prompt.id,
+                    &prompt.command,
+                    Some(prompt.text),
+                    prompt.at,
+                    None,
+                )
             }
             PluginMsg::PromptCancel => {
                 self.plugins.prompt = None;
@@ -2331,17 +2604,22 @@ impl App {
                 id,
                 title,
                 again,
+                fingerprint,
                 ran,
                 ..
             } => {
                 let Some(ran) = ran.lock().unwrap_or_else(|e| e.into_inner()).take() else {
                     return Task::none();
                 };
-                self.on_plugin_ran(id, title, again, ran)
+                self.on_plugin_ran(id, title, again, fingerprint, ran)
             }
-            PluginMsg::RunAgain(again) => {
-                self.run_plugin(&again.id, &again.command, again.input, again.at)
-            }
+            PluginMsg::RunAgain(again) => self.run_plugin(
+                &again.id,
+                &again.command,
+                again.input,
+                again.at,
+                again.context,
+            ),
             PluginMsg::Open { block, row } => {
                 let at = self
                     .proj
@@ -2520,14 +2798,12 @@ impl App {
                         // A new build: whether it works is for its runs to say,
                         // and its log starts empty. The last build's crash,
                         // kept under the new version, read as the new one's.
-                        self.plugins.failed.remove(&id);
-                        self.plugins.log.remove(&id);
+                        self.plugins.forget_copy(&id);
                         // So does a run of the build replaced that did not
                         // finish: it stood on the status bar beside the
                         // new build, its Try again and Settings about the
                         // old one.
                         self.forget_run_failure_of(&id);
-                        self.plugins.damaged.remove(&id);
                         let manifest = self.plugins.get(&id).map(|p| p.manifest.clone());
                         let (commands, graphs) = manifest
                             .as_ref()
@@ -2627,10 +2903,9 @@ impl App {
                     self.plugins.failure = Some(why);
                 }
                 // A run of it that did not finish stood on, its Try again
-                // a run of a plugin turned off.
-                if !on {
-                    self.forget_run_failure_of(&id);
-                }
+                // a run of a plugin turned off; and turned on, "it is
+                // turned off" is said of it no more.
+                self.forget_run_failure_of(&id);
                 store_changed();
                 self.reload_plugins()
             }
@@ -2649,7 +2924,14 @@ impl App {
                     });
                     return Task::none();
                 }
-                self.on_open_link(url)
+                // A link to a file opens it as a row does: the page is kept
+                // to go back to ("Back to"), not lost with no way back.
+                let page = self.proj.plugin_page.clone();
+                let opened = self.on_open_link(url);
+                if self.proj.plugin_page.is_none() && page.is_some() {
+                    self.proj.last_plugin_page = page;
+                }
+                opened
             }
             PluginMsg::AskRemove(id) => {
                 let name = self
@@ -2780,8 +3062,7 @@ impl App {
                 {
                     self.proj.last_plugin_page = None;
                 }
-                self.plugins.log.remove(&id);
-                self.plugins.failed.remove(&id);
+                self.plugins.forget_copy(&id);
                 self.reload_plugins()
             }
             PluginMsg::Requests(found) => self.on_requests(&found),
@@ -2816,9 +3097,13 @@ impl App {
                 // its card came after Stop had taken the turn's cards away,
                 // and a try ran the plugin with no one waiting for it.
                 let live = self.plugins.tool_cancels.contains_key(&stream);
-                // A plain answer is passed on whatever: it runs nothing.
                 let acts = !matches!(step, clew_plugin::tools::Step::Done(_));
                 let gone = !(current && live);
+                // A plain answer for a turn that is over: its step stays as
+                // Stop ended it ("Tried a plugin ✓" after a stopped try).
+                if !acts && !live {
+                    return Task::none();
+                }
                 if acts && gone {
                     let content = match current {
                         false => "This conversation's project is no longer open in Clew.",
@@ -2964,6 +3249,11 @@ impl App {
                 if matches!(self.plugins.building, Building::SettingUp { .. }) {
                     return Task::none();
                 }
+                // What it is is known when the other window is done; an
+                // agent's failed build is said then, if Rust is missing.
+                if checked.elsewhere {
+                    return self.check_toolchain_when_free();
+                }
                 // Removed: said, as its 700 MB went with no word.
                 if matches!(self.plugins.building, Building::Removing)
                     && checked.removal_failed.is_none()
@@ -3037,6 +3327,12 @@ impl App {
                         self.plugins.setup_failure = None;
                         self.status = tr!("Setting up Rust was cancelled").into();
                     }
+                    // Another window got there first: nothing failed, and
+                    // the row says so until it is done.
+                    Err(Some(clew_plugin::toolchain::SetUpError::Elsewhere)) => {
+                        self.plugins.setup_failure = None;
+                        return self.check_toolchain_when_free();
+                    }
                     // Said on the status bar too: an install takes minutes,
                     // and Settings may be closed by its end.
                     Err(Some(why)) => {
@@ -3079,7 +3375,7 @@ impl App {
                 };
                 if matches!(
                     self.plugins.building,
-                    Building::SettingUp { .. } | Building::Removing
+                    Building::SettingUp { .. } | Building::Removing | Building::Elsewhere
                 ) {
                     return Task::none();
                 }
@@ -3087,6 +3383,11 @@ impl App {
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
+                            // Not while another window sets Rust up or
+                            // removes it: its row says so, and updates.
+                            let Some(_held) = clew_plugin::toolchain::hold(&data) else {
+                                return Checked::elsewhere();
+                            };
                             let dir = clew_plugin::toolchain::managed_dir(&data);
                             let removed = std::fs::remove_dir_all(&dir);
                             // Still there: why is said by its row, not
@@ -3100,19 +3401,14 @@ impl App {
                                     .map(|t| (t.version, t.cargo_home.is_some())),
                                 own_installed: removal_failed.is_some(),
                                 removal_failed,
+                                elsewhere: false,
                             }
                         })
                         .await
                         .unwrap_or_else(|_| Checked {
-                            found: Err(clew_plugin::toolchain::Missing {
-                                why: clew_plugin::toolchain::Why::Other(
-                                    tr!("the check failed unexpectedly").into(),
-                                ),
-                                setup: None,
-                                rustup: false,
-                            }),
                             own_installed: true,
                             removal_failed: Some(tr!("the removal failed unexpectedly").into()),
+                            ..Checked::failed()
                         })
                     },
                     |checked| Message::Plugin(PluginMsg::ToolchainChecked(checked)),
@@ -3120,6 +3416,10 @@ impl App {
             }
             PluginMsg::Tried { reply, answer } => {
                 match &reply {
+                    // Its turn stopped meanwhile: its step stays as Stop
+                    // ended it, and nothing is sent to a turn that is over.
+                    Reply::AskTool { stream, .. }
+                        if !self.plugins.tool_cancels.contains_key(stream) => {}
                     Reply::AskTool { stream, call } => {
                         let (content, is_error) = match answer {
                             Ok(text) => (text, false),

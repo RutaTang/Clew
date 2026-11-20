@@ -737,6 +737,9 @@ impl App {
         // The LSP refine holds CLONES of the old project's language-server
         // clients, so dropping them with the session does not stop it.
         self.abort_refine();
+        // A plugin graph being built reads the old project for up to a
+        // minute, with its memory, for nobody.
+        self.stop_plugin_map_builds(None);
         // The agent runs ON THE SERVER against the old root. Its cancel flag
         // lives in the server's map keyed by the stream id, so forgetting the
         // id locally would leave it looping with no way to stop it. (The

@@ -1415,9 +1415,10 @@ mod tests {
             );
         }
         written.push(clew_plugin::runtime::ANSWER_TOO_LARGE.into());
+        written.push(clew_plugin::runtime::OUTSIDE_PLACE.into());
         {
             use clew_plugin::toolchain::*;
-            written.extend([NO_INSTALLER, NO_CHECKSUM, NOT_PUBLISHED].map(String::from));
+            written.extend([NO_INSTALLER, NO_CHECKSUM, NOT_PUBLISHED, ELSEWHERE].map(String::from));
         }
         written.extend(clew_core::mcp::config::Approve::ALL.map(|a| a.label().to_string()));
         written.push(clew_core::llm::Provider::Custom.label().into());

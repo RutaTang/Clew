@@ -253,8 +253,17 @@ fn build_report(data: &Path, id: &str, cancel: &AtomicBool) -> Result<String, St
             "there is no plugin \"{id}\"; make it first (plugin_new)"
         ));
     }
-    let toolchain = crate::toolchain::find(Some(data))
-        .map_err(|missing| missing.into_build_error().report())?;
+    let found = crate::toolchain::find(Some(data));
+    // Rust being set up, or Clew's own removed, is half there: why it is
+    // not ready yet, not what it lacks partway. (Said of Clew, not of
+    // another window: the window the agent works in may be the one.)
+    if !matches!(&found, Ok(t) if t.cargo_home.is_none()) && crate::toolchain::busy(data) {
+        return Err(
+            "Rust cannot build plugins yet: Clew is setting it up or removing it right now. Build again when that is done; Clew's Settings → Plugins shows when."
+                .into(),
+        );
+    }
+    let toolchain = found.map_err(|missing| missing.into_build_error().report())?;
     let work = authoring::build_dir(data);
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let built = build::build(&source, &work, &toolchain, cancel).map_err(|e| e.report())?;
@@ -371,8 +380,18 @@ fn commands_list(inspected: &Inspected) -> String {
 
 /// The plugins there is source for, and those installed.
 fn status(data: &Path) -> String {
-    let store = Store::load(data);
     let mut lines = Vec::new();
+    // Unreadable is not "no plugins": the agent is told, and does not make
+    // a new one in place of plugins it cannot see.
+    let store = match Store::load_checked(data) {
+        Ok(store) => store,
+        Err(why) => {
+            lines.push(format!(
+                "Clew could not read its list of installed plugins ({why}); ask the user to look at Settings → Plugins."
+            ));
+            Store::default()
+        }
+    };
     for (id, record) in &store.plugin {
         let version = record
             .manifest()

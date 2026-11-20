@@ -294,7 +294,7 @@ pub(crate) const NOTICES: &[&str] = &[
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const PLUGIN_STOPS: &[&str] = &[
     tr_noop!(
-        "Clew's copy of it changed after you approved it. Install it again from its file, or ask the agent that made it to install it again."
+        "Clew's copy of it is missing or changed since you approved it. Install it again from its file, or ask the agent that made it to install it again."
     ),
     // Why a file picked to install is not a plugin
     // (`clew_plugin::inspect::NOT_A_COMPONENT` and the rest).
@@ -307,11 +307,17 @@ pub(crate) const PLUGIN_STOPS: &[&str] = &[
     // Why Clew stopped a run whose answer was too large
     // (`clew_plugin::runtime::ANSWER_TOO_LARGE`).
     tr_noop!("its answer was larger than Clew takes from a plugin"),
+    // A command refused an open outside the project
+    // (`clew_plugin::runtime::OUTSIDE_PLACE`).
+    tr_noop!("it asked to open a place outside the project"),
     // Why setting up Rust for plugins failed
     // (`clew_plugin::toolchain::NO_INSTALLER` and the rest).
     tr_noop!("rustup publishes no installer for this computer"),
     tr_noop!("the installer's published SHA-256 could not be read"),
     tr_noop!("the installer downloaded is not the one rust-lang.org published; nothing was run"),
+    // Rust being set up or removed in another Clew window
+    // (`clew_plugin::toolchain::ELSEWHERE`).
+    tr_noop!("another Clew window is setting up Rust or removing it"),
 ];
 /// The words an agent step's title starts with, as clew-server writes it
 /// (`read src/lib.rs:1-50`), capitalized as the step shows them.

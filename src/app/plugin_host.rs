@@ -40,6 +40,9 @@ pub(crate) struct ProjectHost {
     stop: Arc<std::sync::atomic::AtomicBool>,
     /// When the run must end: a remote call waited on gives up then.
     ends: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Each file's place in `files`, by its path, made at the first read:
+    /// a plugin reading every file looked each up across all of them.
+    index: std::sync::OnceLock<std::collections::HashMap<String, usize>>,
 }
 
 /// `done` of `total`, packed as [`ProjectHost`] keeps it.
@@ -70,6 +73,7 @@ impl ProjectHost {
             progress: Default::default(),
             stop: Default::default(),
             ends: Default::default(),
+            index: Default::default(),
         }
     }
 
@@ -91,6 +95,7 @@ impl ProjectHost {
             progress: Default::default(),
             stop: Default::default(),
             ends: Default::default(),
+            index: Default::default(),
         }
     }
 
@@ -112,7 +117,14 @@ impl ProjectHost {
     }
 
     fn entry(&self, rel: &str) -> Option<&FileEntry> {
-        self.files.iter().find(|f| f.rel == rel)
+        let index = self.index.get_or_init(|| {
+            self.files
+                .iter()
+                .enumerate()
+                .map(|(at, f)| (f.rel.clone(), at))
+                .collect()
+        });
+        index.get(rel).and_then(|&at| self.files.get(at))
     }
 
     /// Wait for `future` on the remote runtime — until the user stops the

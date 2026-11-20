@@ -294,16 +294,18 @@ fn read_capped(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// Why a plugin's approved copy is not run: it is not the file approved
-/// (changed on disk since). Said to the user, who can do what it says:
+/// Why a plugin's approved copy is not run: it is gone, unreadable, or not
+/// the file approved (changed on disk since) — each fixed the same way. Said to the user, who can do what it says:
 /// installed again, the copy is written anew. Removed first, as this said
 /// to, the plugin's saved data went with it, for nothing.
-pub const CHANGED: &str = "Clew's copy of it changed after you approved it. Install it again from its file, or ask the agent that made it to install it again.";
+pub const CHANGED: &str = "Clew's copy of it is missing or changed since you approved it. Install it again from its file, or ask the agent that made it to install it again.";
 
 /// The approved copy of `record`'s plugin, checked to be the file approved.
 pub fn read_approved(data: &Path, record: &Record) -> Result<Vec<u8>, String> {
     let path = installed_path(data, &record.fingerprint);
-    let bytes = read_capped(&path).map_err(|e| format!("the plugin's file: {e}"))?;
+    // Gone or unreadable is no crash to try again, nor its source's fault:
+    // installed again, the copy is written anew.
+    let bytes = read_capped(&path).map_err(|_| CHANGED.to_string())?;
     let sha256: [u8; 32] = Sha256::digest(&bytes).into();
     if hex(&sha256) != record.sha256 || fingerprint(&sha256) != record.fingerprint {
         return Err(CHANGED.into());
@@ -424,11 +426,10 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         std::fs::write(&path, b"changed").unwrap();
-        assert!(
-            read_approved(&data, &record)
-                .unwrap_err()
-                .contains("changed after you approved it")
-        );
+        assert_eq!(read_approved(&data, &record).unwrap_err(), CHANGED);
+        // Gone is the same: installed again, not tried again.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read_approved(&data, &record).unwrap_err(), CHANGED);
         let _ = std::fs::remove_dir_all(&data);
     }
 

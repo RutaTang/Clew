@@ -393,9 +393,15 @@ fn printing_a_lot_is_kept_in_part_and_never_fails() {
     let runtime = Runtime::new(None).unwrap();
     let loaded = views(&runtime);
     let host = Arc::new(FakeHost::default());
+    // Thousands of lines through a debug build's WASI, beside the other
+    // tests' compiles: what is kept is under test here, not how fast.
+    let roomy = Limits {
+        deadline: Duration::from_secs(60),
+        ..quick()
+    };
     assert_eq!(
         loaded
-            .run(host.clone(), "chatter", &at(None, None), quick())
+            .run(host.clone(), "chatter", &at(None, None), roomy)
             .unwrap(),
         Outcome::Nothing
     );

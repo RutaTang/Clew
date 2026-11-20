@@ -1850,6 +1850,18 @@ impl<T> Questions<T> {
         self.waiting.iter().map(|(_, q)| q)
     }
 
+    /// Ask again each question `change` gives a new form of — under a new
+    /// number, so what changed on it is read again before it can be
+    /// answered.
+    pub fn renew(&mut self, mut change: impl FnMut(&T) -> Option<T>) {
+        for (number, question) in self.waiting.iter_mut() {
+            if let Some(new) = change(question) {
+                *number = LAST_QUESTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                *question = new;
+            }
+        }
+    }
+
     /// Take the questions no longer to be asked (`gone`) away, and give
     /// them back: whoever asked one is owed nothing more, or an answer.
     pub fn withdraw(&mut self, gone: impl Fn(&T) -> bool) -> Vec<T> {
@@ -2281,5 +2293,30 @@ mod tests {
         assert_eq!(questions.answer(a2), None, "answered twice");
         assert_eq!(questions.answer(b), Some("b"));
         assert!(questions.is_empty() && questions.asked().is_none());
+    }
+
+    /// A question whose subject changed while it waited is asked again in
+    /// its new form, under a new number, where it stood: an answer given to
+    /// what it said before answers nothing. One that did not change keeps
+    /// its number.
+    #[test]
+    fn a_question_renewed_is_asked_again() {
+        let mut questions = Questions::default();
+        let _ = questions.ask("update a", |_, _| false);
+        let _ = questions.ask("install b", |_, _| false);
+        let first = questions.asked().unwrap();
+        questions.renew(|q| (*q == "install b").then_some("update b"));
+        assert_eq!(questions.asked(), Some(first), "unchanged, same number");
+        assert_eq!(
+            questions.iter().copied().collect::<Vec<_>>(),
+            ["update a", "update b"],
+            "in its place"
+        );
+        questions.renew(|q| (*q == "update a").then_some("install a"));
+        let renewed = questions.asked().unwrap();
+        assert_ne!(renewed, first);
+        assert_eq!(questions.answer(first), None, "answered as it was");
+        assert_eq!(questions.answer(renewed), Some("install a"));
+        assert_eq!(questions.front(), Some(&"update b"));
     }
 }

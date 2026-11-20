@@ -1,7 +1,8 @@
 //! Running plugins, in Clew's own process, with wasmtime.
 //!
-//! - One [`Runtime`] per process: one engine, and a thread that ticks its
-//!   epoch every 10 ms, which is how a call's deadline is kept.
+//! - One [`Runtime`] per Clew window, made when it first runs a plugin:
+//!   one engine, and a thread that ticks its epoch every 10 ms, which is
+//!   how a call's deadline is kept.
 //! - A plugin is compiled once, and the compiled code cached under
 //!   `<data>/plugins/compiled/` by the file's digest and the engine's
 //!   settings: a later start is a load of that, under a millisecond.
@@ -134,6 +135,10 @@ const ANSWER_BYTES: usize = 64 * 1024 * 1024;
 /// [`Limits::answer`].
 pub const ANSWER_TOO_LARGE: &str = "its answer was larger than Clew takes from a plugin";
 
+/// Why a command that asked to open a place outside the project was
+/// refused.
+pub const OUTSIDE_PLACE: &str = "it asked to open a place outside the project";
+
 /// Why a call gave nothing back. Each case the window says in the
 /// reader's words; [`Display`](std::fmt::Display) says it in English, for
 /// an agent.
@@ -169,7 +174,8 @@ impl std::fmt::Display for Failure {
     }
 }
 
-/// The plugin runtime: one per process.
+/// The plugin runtime: one per Clew window, made when it first runs a
+/// plugin.
 pub struct Runtime {
     engine: Engine,
     data: Option<PathBuf>,
@@ -1000,11 +1006,8 @@ pub fn checked_outcome(outcome: Outcome) -> Result<Outcome, Failure> {
         Outcome::Show(view) => Outcome::Show(checked_view(view)),
         Outcome::Open(at) => match place(Some(at)) {
             Some(at) => Outcome::Open(at),
-            None => {
-                return Err(Failure::Plugin(
-                    "the plugin asked to open a place outside the project".into(),
-                ));
-            }
+            // Its fault, not its answer: a failure, said in Clew's words.
+            None => return Err(Failure::Stopped(OUTSIDE_PLACE.into())),
         },
         Outcome::Say(text) => Outcome::Say(line(&text)),
         Outcome::Nothing => Outcome::Nothing,
@@ -1329,7 +1332,9 @@ mod tests {
             path: "../x".into(),
             line: 1,
         }));
-        assert!(matches!(open, Err(Failure::Plugin(_))));
+        // Refused by Clew, in Clew's words (translated where shown): not
+        // the plugin's own answer.
+        assert!(matches!(open, Err(Failure::Stopped(why)) if why == OUTSIDE_PLACE));
     }
 
     #[test]

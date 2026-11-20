@@ -328,8 +328,6 @@ const TARGET_DEADLINE: Duration = Duration::from_secs(20 * 60);
 /// The largest installer accepted.
 const INSTALLER_MAX: u64 = 64 * 1024 * 1024;
 
-/// Take the step `setup`, telling `stage` how it goes, until it is done or
-/// `cancel` is set; then check that plugins can be built.
 /// Why setting Rust up did not work.
 #[derive(Debug, Clone)]
 pub enum SetUpError {
@@ -339,6 +337,9 @@ pub enum SetUpError {
     /// The step failed: rustup's own words, or one of [`NO_INSTALLER`],
     /// [`NO_CHECKSUM`], [`NOT_PUBLISHED`].
     Failed(String),
+    /// Another Clew window is setting Rust up or removing Clew's own
+    /// ([`hold`]): nothing was done.
+    Elsewhere,
 }
 
 impl SetUpError {
@@ -347,7 +348,76 @@ impl SetUpError {
         match self {
             SetUpError::Missing(missing) => missing.why.sentence(),
             SetUpError::Failed(why) => why.clone(),
+            SetUpError::Elsewhere => ELSEWHERE.into(),
         }
+    }
+}
+
+/// Said when another Clew window is setting Rust up or removing it.
+pub const ELSEWHERE: &str = "another Clew window is setting up Rust or removing it";
+
+/// Rust set up or removed by one Clew window at a time, all windows
+/// sharing Clew's data folder: held while one is (an exclusive lock on a
+/// file beside [`managed_dir`], which removing that folder leaves).
+/// Released when dropped, or when the window's process ends.
+pub struct Held(Option<std::fs::File>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(file) = &self.0 {
+            let _ = file.unlock();
+        }
+    }
+}
+
+fn lock_path(data: &Path) -> PathBuf {
+    crate::store::plugins_dir(data).join("rust.lock")
+}
+
+/// Hold Rust's setup for this window: `None` while another holds it.
+/// Where locks cannot be had (a folder that cannot be written, a file
+/// system without locks) it is held without one, as Clew's other shared
+/// files are, and the step says what fails.
+pub fn hold(data: &Path) -> Option<Held> {
+    let path = lock_path(data);
+    let _ = clew_core::derived::ensure_private_dir(&crate::store::plugins_dir(data));
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+    else {
+        return Some(Held(None));
+    };
+    match file.try_lock() {
+        Ok(()) => Some(Held(Some(file))),
+        Err(std::fs::TryLockError::WouldBlock) => None,
+        Err(std::fs::TryLockError::Error(_)) => Some(Held(None)),
+    }
+}
+
+/// Whether another Clew window is setting Rust up or removing it now.
+pub fn busy(data: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(lock_path(data)) else {
+        return false;
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(_)) => false,
+    }
+}
+
+/// Wait while another Clew window sets Rust up or removes it.
+pub fn wait_while_busy(data: &Path) {
+    let Ok(file) = std::fs::File::open(lock_path(data)) else {
+        return;
+    };
+    if file.lock().is_ok() {
+        let _ = file.unlock();
     }
 }
 
@@ -358,12 +428,18 @@ pub const NO_CHECKSUM: &str = "the installer's published SHA-256 could not be re
 pub const NOT_PUBLISHED: &str =
     "the installer downloaded is not the one rust-lang.org published; nothing was run";
 
+/// Take the step `setup`, telling `stage` how it goes, until it is done or
+/// `cancel` is set; then check that plugins can be built. Refused while
+/// another Clew window sets Rust up or removes it ([`hold`]).
 pub fn set_up(
     data: &Path,
     setup: &Setup,
     cancel: &AtomicBool,
     stage: &mut dyn FnMut(Stage),
 ) -> Result<Toolchain, SetUpError> {
+    let Some(_held) = hold(data) else {
+        return Err(SetUpError::Elsewhere);
+    };
     match setup {
         Setup::AddTarget { rustup } => {
             stage(Stage::AddingTarget);
@@ -702,5 +778,31 @@ mod tests {
         };
         let said = missing.into_build_error().report();
         assert!(said.contains("rustup target add wasm32-wasip2"), "{said}");
+    }
+
+    /// One window at a time sets Rust up or removes it: another sees it
+    /// held, is refused, and waits until it is let go.
+    #[test]
+    fn rust_is_set_up_by_one_window_at_a_time() {
+        let data = clew_core::testutil::TempDir::new("rust-held");
+        assert!(!busy(data.path()), "nothing held yet");
+        let held = hold(data.path()).expect("free");
+        assert!(busy(data.path()));
+        assert!(hold(data.path()).is_none(), "held by the first");
+        let cancel = AtomicBool::new(false);
+        let refused = set_up(data.path(), &Setup::Install, &cancel, &mut |_| {
+            panic!("no step runs while another window holds it")
+        });
+        assert!(matches!(refused, Err(SetUpError::Elsewhere)), "{refused:?}");
+        let let_go = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        let started = std::time::Instant::now();
+        wait_while_busy(data.path());
+        assert!(started.elapsed() >= Duration::from_millis(150), "it waited");
+        let_go.join().unwrap();
+        assert!(!busy(data.path()));
+        assert!(hold(data.path()).is_some(), "free again");
     }
 }

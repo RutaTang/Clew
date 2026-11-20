@@ -363,8 +363,20 @@ pub(crate) fn plugin_install_modal(
         clew_plugin::manifest::version_order(&manifest.plugin.version, &p.manifest.plugin.version)
             == std::cmp::Ordering::Less
     });
+    // Another plugin under the same id: said as what it replaces, by name,
+    // not as an update of a plugin it does not name.
+    let renamed = pending
+        .previous
+        .as_ref()
+        .map(|p| p.manifest.name_in(lang).to_string())
+        .filter(|old| *old != name);
     let title = match &pending.previous {
         Some(_) if again => tr!("Install “{plugin}” again?", plugin = name.clone()),
+        Some(_) if renamed.is_some() => tr!(
+            "Replace “{old}” with “{plugin}”?",
+            old = renamed.clone().unwrap_or_default(),
+            plugin = name.clone()
+        ),
         Some(_) if older => tr!(
             "Replace “{plugin}” with version {version}?",
             plugin = name.clone(),
@@ -447,7 +459,7 @@ pub(crate) fn plugin_install_modal(
     // An update's answers say so, as its title does.
     let (decline, accept) = match pending.previous {
         Some(_) if again => (tr!("Don't install"), tr!("Install again")),
-        Some(_) if older => (tr!("Don't replace"), tr!("Replace")),
+        Some(_) if older || renamed.is_some() => (tr!("Don't replace"), tr!("Replace")),
         Some(_) => (tr!("Don't update"), tr!("Update")),
         None => (tr!("Don't install"), tr!("Install")),
     };
@@ -726,10 +738,25 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
         } else {
             LOG_LINES.min(log.len())
         };
-        let last: Vec<Element<'_, Message>> = log
-            .iter()
-            .skip(log.len() - shown)
-            .map(|(level, line)| {
+        // All of it, as far as it was kept: said where it begins.
+        let dropped = app
+            .plugins
+            .log_dropped
+            .get(&plugin.id)
+            .filter(|_| open)
+            .map(|n| -> Element<'_, Message> {
+                text(trn!(
+                    "1 earlier line is not kept",
+                    "{n} earlier lines are not kept",
+                    *n
+                ))
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .into()
+            });
+        let last: Vec<Element<'_, Message>> = dropped
+            .into_iter()
+            .chain(log.iter().skip(log.len() - shown).map(|(level, line)| {
                 text(line.clone())
                     .size(ts::SMALL)
                     .font(crate::fonts::CODE)
@@ -738,7 +765,7 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
                         other => level_color(*other),
                     })
                     .into()
-            })
+            }))
             .collect();
         item = item.push(
             container(Column::with_children(last).spacing(2))
@@ -844,6 +871,14 @@ fn building_group(app: &App) -> Element<'_, Message> {
             rows.push(form::item(
                 tr!("Rust"),
                 Some(tr!("Removing Clew's own Rust…").into()),
+                none(),
+            ));
+        }
+        // Nothing to press: the row looks again by itself when it is done.
+        Building::Elsewhere => {
+            rows.push(form::item(
+                tr!("Rust"),
+                Some(tr!("Another Clew window is setting up Rust or removing it. This updates when it is done.").into()),
                 none(),
             ));
         }
@@ -961,7 +996,10 @@ fn building_group(app: &App) -> Element<'_, Message> {
     if app.plugins.own_rust
         && !matches!(
             app.plugins.building,
-            Building::SettingUp { .. } | Building::Checking | Building::Removing
+            Building::SettingUp { .. }
+                | Building::Checking
+                | Building::Removing
+                | Building::Elsewhere
         )
     {
         let said = match &app.plugins.building {
@@ -998,7 +1036,19 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
         Some(Message::Plugin(PluginMsg::InstallFromFile)),
     );
     let mut groups: Vec<Element<'_, Message>> = Vec::new();
-    if app.plugins.installed.is_empty() {
+    // Its list unreadable: said, with where — not shown as no plugins, and
+    // not offered as a first one to make.
+    if let Some(why) = &app.plugins.list_error {
+        groups.push(
+            form::note(tr!(
+                "Clew could not read its list of plugins, so it shows what it read last and runs none of them: {reason}",
+                reason = why.clone()
+            ))
+            .color(theme::danger())
+            .into(),
+        );
+    }
+    if app.plugins.installed.is_empty() && app.plugins.list_error.is_none() {
         groups.push(form::group(
             "",
             Some(

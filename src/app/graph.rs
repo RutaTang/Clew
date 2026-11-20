@@ -2744,6 +2744,8 @@ impl App {
                 self.proj.overlay = None;
                 self.proj.graph_pick = None;
                 self.graph_search.clear();
+                // A plugin graph being built for it is not built on unseen.
+                self.stop_plugin_map_builds(None);
                 Task::none()
             }
             GraphMsg::Picked(pick) => {
@@ -2776,6 +2778,7 @@ impl App {
             GraphMsg::OverlayOpenImports(path) => {
                 self.proj.overlay = None;
                 self.proj.graph_pick = None;
+                self.stop_plugin_map_builds(None);
                 // The sidebar stays as the reader had it: opening a module
                 // from a map swapped their Files for the Imports view.
                 self.open_file(path, None, true)
@@ -2783,6 +2786,7 @@ impl App {
             GraphMsg::OverlayOpenAt { abs, line } => {
                 self.proj.overlay = None;
                 self.proj.graph_pick = None;
+                self.stop_plugin_map_builds(None);
                 self.open_file(abs, Some(line), true)
             }
             GraphMsg::ProjectCallsBuilt { graph, .. } => self.on_project_calls_built(graph),
