@@ -21,6 +21,7 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
         "view" => "view",
         "trigger" => "trig",
         "theorem" => "thm",
+        "example" => "ex",
         "instance" => "inst",
         "inductive" => "ind",
         "axiom" => "axiom",

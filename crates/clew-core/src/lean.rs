@@ -249,8 +249,10 @@ pub(crate) struct Head {
 }
 
 /// The declaration `command` starts with — past its attributes and
-/// modifiers, its keyword and its name — or `None` for another command, and
-/// for an instance without a name.
+/// modifiers, its keyword and its name — or `None` for another command.
+/// An `example` has no name: it is listed as itself. An instance without
+/// one — Lean makes one up (`instInhabitedNat`) — is listed by the class
+/// it is an instance of, its statement's first line (`Inhabited Nat`).
 pub(crate) fn head(command: &str) -> Option<Head> {
     let mut at = command.len() - command.trim_start().len();
     loop {
@@ -279,8 +281,18 @@ pub(crate) fn head(command: &str) -> Option<Head> {
         "inductive" => "inductive",
         "axiom" => "axiom",
         "constant" => "constant",
+        "example" => "example",
         _ => return None,
     };
+    if word == "example" {
+        let name = keyword..keyword + word.len();
+        return Some(Head {
+            kind,
+            signature_end: statement_end(command, name.end),
+            name,
+            keyword,
+        });
+    }
     at += word.len();
     at += command[at..].len() - command[at..].trim_start().len();
     if word == "class" && command[at..].starts_with("inductive") {
@@ -294,7 +306,7 @@ pub(crate) fn head(command: &str) -> Option<Head> {
     }
     let name_len = name_length(&command[at..]);
     if name_len == 0 {
-        return None;
+        return (word == "instance").then(|| unnamed_instance(command, at, keyword))?;
     }
     let name = at..at + name_len;
     Some(Head {
@@ -302,6 +314,33 @@ pub(crate) fn head(command: &str) -> Option<Head> {
         signature_end: statement_end(command, name.end),
         name,
         keyword,
+    })
+}
+
+/// The head of an instance with no name, whose binders or `:` start at
+/// `at`: named by its class, the statement after its `:` up to `:=` or
+/// `where`, on that first line.
+fn unnamed_instance(command: &str, at: usize, keyword: usize) -> Option<Head> {
+    let end = statement_end(command, at);
+    let mut depth = 0i32;
+    let colon = command[at..end].char_indices().find_map(|(i, c)| {
+        match c {
+            '(' | '[' | '{' | '⦃' | '⟨' => depth += 1,
+            ')' | ']' | '}' | '⦄' | '⟩' => depth -= 1,
+            ':' if depth <= 0 => return Some(at + i),
+            _ => {}
+        }
+        None
+    })?;
+    let rest = &command[colon + 1..end];
+    let start = colon + 1 + (rest.len() - rest.trim_start().len());
+    let line_end = command[start..end].find('\n').map_or(end, |i| start + i);
+    let stop = start + command[start..line_end].trim_end().len();
+    (stop > start).then_some(Head {
+        kind: "instance",
+        name: start..stop,
+        keyword,
+        signature_end: end,
     })
 }
 
@@ -576,7 +615,23 @@ mod tests {
                 "theorem «sum ≤» : True := trivial",
                 Some(("theorem", "«sum ≤»", "theorem «sum ≤» : True")),
             ),
-            ("instance : Inhabited Nat := ⟨0⟩", None),
+            (
+                "instance : Inhabited Nat := ⟨0⟩",
+                Some(("instance", "Inhabited Nat", "instance : Inhabited Nat")),
+            ),
+            (
+                "instance [ToString α] : ToString (List α) where\n  toString := fun _ => \"\"\n",
+                Some((
+                    "instance",
+                    "ToString (List α)",
+                    "instance [ToString α] : ToString (List α)",
+                )),
+            ),
+            (
+                "example : 2 + 2 = 4 := by\n  decide\n",
+                Some(("example", "example", "example : 2 + 2 = 4")),
+            ),
+            ("instance", None),
             ("assert_not_exists Field", None),
             ("namespace Foo", None),
         ];

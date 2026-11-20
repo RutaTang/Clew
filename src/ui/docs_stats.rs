@@ -242,6 +242,7 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
         "class" => "class",
         "constant" | "const" => "const",
         "theorem" => "thm",
+        "example" => "ex",
         "instance" => "inst",
         "inductive" => "ind",
         "module" | "mod" | "namespace" => "mod",

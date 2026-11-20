@@ -4293,6 +4293,8 @@ fn build_inner() -> B { B }
                    class Shape (α : Type) where\n  area : α → Nat\n\
                    inductive Color where\n  | red\n  | green\n\
                    axiom choice : True\n\
+                   example : 2 + 2 = 4 := by\n  decide\n\
+                   instance : Inhabited Point := ⟨⟨0, 0⟩⟩\n\
                    end Geo\n";
         let items = extract_located(src, "lean");
         let got: Vec<(&str, &str)> = items
@@ -4317,6 +4319,10 @@ fn build_inner() -> B { B }
                 ("red", "constructor"),
                 ("green", "constructor"),
                 ("choice", "axiom"),
+                // Listed too, where they are: an example as itself, an
+                // instance with no name by its class.
+                ("example", "example"),
+                ("Inhabited Point", "instance"),
             ],
             "{items:#?}"
         );
@@ -4328,6 +4334,14 @@ fn build_inner() -> B { B }
         );
         assert_eq!(signature(find("hidden")), "private def hidden");
         assert_eq!(signature(find("Point")), "structure Point");
+        assert_eq!(signature(find("example")), "example : 2 + 2 = 4");
+        assert_eq!(
+            find("Inhabited Point").symbol.line,
+            src.lines()
+                .position(|l| l.starts_with("instance :"))
+                .unwrap()
+                + 1
+        );
     }
 
     /// Mathlib's way of writing Lean: a command the grammar does not know
