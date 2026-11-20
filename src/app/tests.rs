@@ -39382,6 +39382,7 @@ fn an_update_says_its_version_and_that_it_turns_the_plugin_on() {
         id: "views".into(),
         reply: Reply::None,
         update: Some("0.0.9".into()),
+        replaced: false,
         result: Ok(record.fingerprint.clone()),
     }));
     assert_eq!(app.status, "Views is updated to version 0.1.0");
@@ -39390,6 +39391,7 @@ fn an_update_says_its_version_and_that_it_turns_the_plugin_on() {
         id: "views".into(),
         reply: Reply::None,
         update: Some("0.1.0".into()),
+        replaced: false,
         result: Ok(record.fingerprint.clone()),
     }));
     assert_eq!(app.status, "Views is updated");
@@ -39398,6 +39400,7 @@ fn an_update_says_its_version_and_that_it_turns_the_plugin_on() {
         id: "views".into(),
         reply: Reply::None,
         update: Some("0.2.0".into()),
+        replaced: false,
         result: Ok(record.fingerprint.clone()),
     }));
     assert_eq!(app.status, "Views is replaced with version 0.1.0");
@@ -39405,6 +39408,7 @@ fn an_update_says_its_version_and_that_it_turns_the_plugin_on() {
         id: "views".into(),
         reply: Reply::None,
         update: None,
+        replaced: false,
         result: Ok(record.fingerprint),
     }));
     assert!(
@@ -39626,6 +39630,7 @@ fn an_agents_install_is_answered_as_the_user_decides() {
         id: "word-count".into(),
         reply: Reply::Request(allowed.clone()),
         update: None,
+        replaced: false,
         result: Ok("fp-word-count".into()),
     }));
     assert_eq!(
@@ -39971,14 +39976,27 @@ fn plugin_commands_named_alike_each_run_by_a_name_of_their_own() {
         own.action,
         PaletteAction::Send(Message::Plugin(_))
     ));
-    // Said or named by an agent without the id, the one whose id adds no
-    // word to the name is meant; with its own words, the other. Clew's own
-    // keeps its name.
+    // Said or named without the id, neither is run on a guess: both are
+    // offered. With the words of one's id, that one; Clew's own keeps its
+    // name.
     let said = |words: &str| {
         crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
     };
+    match crate::app::palette::command_named("word count count words", &commands) {
+        crate::app::palette::Named::Alike(alike) => {
+            let titles: Vec<&str> = alike.iter().map(|&i| commands[i].title.as_str()).collect();
+            assert_eq!(
+                titles,
+                [
+                    "Word count: Count words (word-count)",
+                    "Word count: Count words (word-count-too)"
+                ]
+            );
+        }
+        other => panic!("{other:?}"),
+    }
     assert_eq!(
-        said("word count count words").as_deref(),
+        said("word count count words word count").as_deref(),
         Some("Word count: Count words (word-count)")
     );
     assert_eq!(
@@ -40059,6 +40077,39 @@ fn plugin_commands_named_alike_are_not_run_on_a_guess() {
         said("word count count words acme").as_deref(),
         Some("Word count: Count words (acme-wc)")
     );
+}
+
+/// A plugin whose id is only its name's words, named as one of Clew's own
+/// commands: the name said is Clew's; said with its id, or with a word
+/// that only says "do it" (view, open), it stays so.
+#[test]
+fn a_plugin_named_as_clews_own_command_is_reached_by_its_id() {
+    let mut app = blank_app();
+    let taken = app.clews_commands()[0].title.clone();
+    let slug = taken.to_lowercase().replace(' ', "-");
+    for id in [slug.clone(), format!("{slug}-view")] {
+        let mut shadow = installed_plugin(true);
+        shadow.id = id.clone();
+        shadow.manifest.plugin.name = taken.clone();
+        shadow.manifest.commands[0].title = taken.clone();
+        app.plugins.installed = vec![shadow];
+        let commands = app.palette_commands();
+        let said = |words: &str| {
+            crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
+        };
+        let own = taken.to_lowercase();
+        assert_eq!(said(&own).as_deref(), Some(taken.as_str()), "{id}");
+        assert_eq!(
+            said(&format!("view {own}")).as_deref(),
+            Some(taken.as_str()),
+            "{id}"
+        );
+        assert_eq!(
+            said(&format!("{own} {}", id.replace('-', " "))).as_deref(),
+            Some(format!("{taken} ({id})").as_str()),
+            "{id}"
+        );
+    }
 }
 
 /// Named alike only as the reader's language shows them (two names, or a
@@ -40651,6 +40702,7 @@ fn a_failed_plugin_run_stands_with_its_next_steps() {
         id: "word-count".into(),
         reply: Reply::None,
         update: None,
+        replaced: false,
         result: Err("the disk is full".into()),
     }));
     let notice = app.failure_shown().expect("said where the user is");
@@ -40691,6 +40743,7 @@ fn a_failed_plugin_run_stands_with_its_next_steps() {
         id: "another".into(),
         reply: Reply::None,
         update: None,
+        replaced: false,
         result: Ok("its build".into()),
     }));
     assert_eq!(
@@ -40703,6 +40756,7 @@ fn a_failed_plugin_run_stands_with_its_next_steps() {
         id: "word-count".into(),
         reply: Reply::None,
         update: None,
+        replaced: false,
         result: Ok("a newer build".into()),
     }));
     assert!(app.plugins.log_text("word-count").is_empty());
@@ -40967,6 +41021,7 @@ fn a_plugin_withdrawn_elsewhere_is_not_run_here() {
         id: "views".into(),
         reply: crate::app::plugins::Reply::None,
         update: None,
+        replaced: false,
         result: Ok(record.fingerprint.clone()),
     }));
     assert!(app.failure_shown().is_none(), "it stood after the install");
@@ -42367,6 +42422,7 @@ fn a_long_log_says_how_much_of_it_was_let_go() {
         id: "word-count".into(),
         reply: Reply::None,
         update: None,
+        replaced: false,
         result: Ok("fp-word-count".into()),
     }));
     assert!(app.plugins.get("word-count").is_some());
@@ -42688,13 +42744,24 @@ fn a_plugin_this_clew_cannot_read_is_listed_and_can_be_removed() {
     match crate::ui::active_overlay(&app) {
         Some(crate::ui::ActiveOverlay::PluginInstall(shown, _, _)) => {
             assert_eq!(shown.unreadable.as_deref(), Some(name.as_str()));
+            let mut card = iced_test::simulator(crate::ui::plugin_install_modal(shown, 1, 0, true));
+            for said in [
+                format!("Replace “{name}” with version 0.1.0?"),
+                "Replace".to_string(),
+                "Don't replace".to_string(),
+            ] {
+                assert!(card.find(said.as_str()).is_ok(), "{said}");
+            }
+            assert!(card.find("Install").is_err(), "not installed as if new");
         }
         _ => panic!("the install is asked"),
     }
     app.plugins.install = Default::default();
     let said = "Clew cannot read this plugin, so it does not run. A later version of Clew may have installed it: update Clew to use it, or remove it.";
+    // Named as its manifest names it, with its id: an installed plugin may
+    // have its name.
     let mut page = iced_test::simulator(crate::ui::plugins_settings(&app));
-    assert!(page.find(name.as_str()).is_ok());
+    assert!(page.find(format!("{name} (from-later)").as_str()).is_ok());
     assert!(page.find(said).is_ok(), "{said}");
     assert!(
         page.find("A plugin adds what you need to Clew. Ask your agent for one, in your own words: “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before installing it.")
@@ -42716,6 +42783,22 @@ fn a_plugin_this_clew_cannot_read_is_listed_and_can_be_removed() {
     assert!(app.plugins.unreadable.is_empty());
     let store = clew_plugin::store::Store::load_checked(data.path()).unwrap();
     assert!(!store.plugin.contains_key("from-later"));
+    // A build installed in place of one it could not read is said to
+    // replace it, as its card asked.
+    let readable = installed_plugin(true).record;
+    clew_plugin::store::Store::update(data.path(), |store| {
+        store.plugin.insert("from-later".into(), readable.clone());
+        Ok(())
+    })
+    .unwrap();
+    let _ = app.update(Message::Plugin(PluginMsg::Installed {
+        id: "from-later".into(),
+        reply: crate::app::plugins::Reply::None,
+        update: None,
+        replaced: true,
+        result: Ok(readable.fingerprint.clone()),
+    }));
+    assert_eq!(app.status, "Word count is replaced with version 0.1.0");
 }
 
 /// Rust is set up or removed by one Clew window at a time, all of them

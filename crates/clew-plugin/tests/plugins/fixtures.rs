@@ -390,4 +390,14 @@ fn the_compilers_words_are_passed_on_when_it_said_what_it_read() {
         "{}",
         failed.report()
     );
+    // A statement where an item goes stops it too: Clew says what does not
+    // parse there, as it reads the file.
+    std::fs::write(source.join("src/lib.rs"), plugin("let x = 1;")).unwrap();
+    let failed = build().expect_err("a statement where an item goes");
+    assert!(
+        matches!(&failed, clew_plugin::build::BuildError::Compile(errors)
+            if errors.len() == 1 && errors[0].starts_with("error: src/lib.rs:2:1: expected")),
+        "{}",
+        failed.report()
+    );
 }

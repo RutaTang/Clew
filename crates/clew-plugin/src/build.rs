@@ -381,14 +381,39 @@ fn unread_failure(
             unpaired.sort();
             let said = match (unpaired.first(), stops.first()) {
                 (Some(unpaired), _) => format!("error: {unpaired}"),
-                (None, Some(stop)) => format!(
-                    "error: {stop}: the compiler stopped here. Look at the code there: a bracket not closed, or a macro whose expansion does not end or does not parse."
-                ),
+                (None, Some(stop)) => match unparsed_at(crate_dir, stop) {
+                    Some(why) => format!("error: {why}"),
+                    None => {
+                        format!("error: {stop}: the compiler stopped here. Look at the code there.")
+                    }
+                },
                 (None, None) => "error: the plugin did not compile.".to_string(),
             };
             BuildError::Compile(vec![format!("{said}\n{WITHHELD}")])
         }
     }
+}
+
+/// Why the plugin's file does not parse as Rust, as Clew reads it, where
+/// the compiler stopped (`stop`, `file:line:column`): `file:line:column:
+/// what was expected`, in words made of the file's own code only. None when
+/// Clew reads it as Rust there (the compiler stopped for another reason).
+fn unparsed_at(crate_dir: &Path, stop: &str) -> Option<String> {
+    let mut parts = stop.rsplitn(3, ':');
+    let (_, line, file) = (parts.next()?, parts.next()?, parts.next()?);
+    let line: usize = line.parse().ok()?;
+    // One of the plugin's own files, staged under `src/`.
+    if !file.starts_with("src/")
+        || file
+            .split(['/', '\\'])
+            .any(|part| part == ".." || part.is_empty())
+    {
+        return None;
+    }
+    let text = std::fs::read_to_string(crate_dir.join(file)).ok()?;
+    let err = syn::parse_file(&text).err()?;
+    let at = err.span().start();
+    (at.line == line).then(|| format!("{file}:{}:{}: {err}", at.line, at.column + 1))
 }
 
 /// Each Rust file staged in `dir` (`rel` from the plugin's folder) whose
@@ -875,7 +900,7 @@ fn check_dependencies(metadata: &str, ours: &[PathBuf]) -> Result<(), BuildError
 
 /// The version of [`check_dependency_reads`]'s rules: what passed under
 /// other rules is checked again.
-const READS_RULES: &str = "reads 2";
+const READS_RULES: &str = "reads 3";
 
 /// Refuse a build in which a dependency would read a file outside its own
 /// package (`reads`). A crates.io package is the same wherever it is used,
@@ -967,9 +992,11 @@ struct Messages {
     /// The dep-info files (`.d`) of every unit the build used, built now
     /// or before (`outside_read`).
     dep_infos: Vec<PathBuf>,
-    /// The units an error was said of ([`unit_of`]): each that wrote no
-    /// dep-info file said nothing of what it read (`unread_failure`).
-    failed: Vec<String>,
+    /// The units an error was said of ([`unit_of`]), each with the file
+    /// it is compiled from (its `target.src_path`): one whose compiling
+    /// wrote no dep-info file naming that file said nothing of what it read
+    /// (`unread_failure`).
+    failed: Vec<(String, Option<String>)>,
     /// Where in the plugin's own files its errors are, `file:line:column`.
     stops: Vec<String>,
 }
@@ -1039,7 +1066,10 @@ fn read_messages(stdout: &str, plugin: &str) -> Messages {
                     .as_str()
                     .is_some_and(|level| level.starts_with("error"))
                 {
-                    let unit = unit_of(&message);
+                    let unit = (
+                        unit_of(&message),
+                        message["target"]["src_path"].as_str().map(str::to_string),
+                    );
                     if !messages.failed.contains(&unit) {
                         messages.failed.push(unit);
                     }
@@ -1138,9 +1168,12 @@ fn dep_info_of(artifact: &Path) -> Vec<PathBuf> {
     .collect()
 }
 
-/// The dep-info files under `target`, each with what it says.
-fn dep_infos(target: &Path) -> std::collections::HashMap<PathBuf, Vec<u8>> {
-    fn walk(dir: &Path, depth: usize, out: &mut std::collections::HashMap<PathBuf, Vec<u8>>) {
+/// A dep-info file's words, and when it was last written.
+type DepInfo = (Vec<u8>, Option<std::time::SystemTime>);
+
+/// The dep-info files under `target`, each with what it says and when.
+fn dep_infos(target: &Path) -> std::collections::HashMap<PathBuf, DepInfo> {
+    fn walk(dir: &Path, depth: usize, out: &mut std::collections::HashMap<PathBuf, DepInfo>) {
         if depth > 6 || out.len() > 50_000 {
             return;
         }
@@ -1163,7 +1196,8 @@ fn dep_infos(target: &Path) -> std::collections::HashMap<PathBuf, Vec<u8>> {
                 && path.extension().is_some_and(|e| e == "d")
                 && let Ok(bytes) = std::fs::read(&path)
             {
-                out.insert(path, bytes);
+                let at = entry.metadata().and_then(|m| m.modified()).ok();
+                out.insert(path, (bytes, at));
             }
         }
     }
@@ -1178,15 +1212,29 @@ fn dep_infos(target: &Path) -> std::collections::HashMap<PathBuf, Vec<u8>> {
 /// what was checked already: every one there before was (`UNCHECKED`).
 fn written_dep_infos(
     target: &Path,
-    before: &std::collections::HashMap<PathBuf, Vec<u8>>,
+    before: &std::collections::HashMap<PathBuf, DepInfo>,
 ) -> Vec<PathBuf> {
     let mut written: Vec<PathBuf> = dep_infos(target)
         .into_iter()
-        .filter(|(path, bytes)| before.get(path) != Some(bytes))
+        .filter(|(path, (bytes, _))| before.get(path).map(|(was, _)| was) != Some(bytes))
         .map(|(path, _)| path)
         .collect();
     written.sort();
     written
+}
+
+/// The dep-info files this build wrote, word for word as before or not:
+/// new, or written since (their time of writing changed). A failing crate
+/// built again unchanged writes its own again, the same.
+fn rewritten_dep_infos(
+    target: &Path,
+    before: &std::collections::HashMap<PathBuf, DepInfo>,
+) -> Vec<PathBuf> {
+    dep_infos(target)
+        .into_iter()
+        .filter(|(path, (_, at))| before.get(path).is_none_or(|(_, was)| was != at))
+        .map(|(path, _)| path)
+        .collect()
 }
 
 /// In a plugin's build folder while the build runs, until what it read is
@@ -1199,11 +1247,25 @@ const UNCHECKED: &str = ".unchecked";
 /// name no file; any other line is read for files — a path with a line
 /// break in it is not taken for one of those, its rest unread.
 fn dep_info_files(text: &str) -> Vec<String> {
+    // rustc's `#` lines are the last ones, after an empty line: a line so
+    // begun anywhere else is a path's, broken by a line break in it.
+    let lines: Vec<&str> = text.lines().collect();
+    let mut notes = lines.len();
+    while notes > 0 && lines[notes - 1].is_empty() {
+        notes -= 1;
+    }
+    let end = notes;
+    while notes > 0
+        && (lines[notes - 1].starts_with("# env-dep:")
+            || lines[notes - 1].starts_with("# checksum:"))
+    {
+        notes -= 1;
+    }
+    if notes == end || (notes > 0 && !lines[notes - 1].is_empty()) {
+        notes = end;
+    }
     let mut out = Vec::new();
-    for line in text.lines() {
-        if line.starts_with("# env-dep:") || line.starts_with("# checksum:") {
-            continue;
-        }
+    for line in &lines[..notes] {
         let mut word = String::new();
         let mut chars = line.chars().peekable();
         let mut push = |word: &mut String| {
@@ -1249,7 +1311,13 @@ impl Readable {
         // Of the toolchain, its library only (`lib/rustlib`: the standard
         // library's sources and what it compiled): a toolchain installed
         // with `--prefix ~/.local` has all of `~/.local` for its root.
-        let sysroot = sysroot.map(|s| s.join("lib").join("rustlib"));
+        let rustlib = sysroot.map(|s| s.join("lib").join("rustlib"));
+        // Its library's sources, where a link there leads (a toolchain built
+        // locally, or a distribution's, links `src/rust` elsewhere).
+        let sysroot = rustlib
+            .iter()
+            .flat_map(|r| [r.clone(), r.join("src").join("rust")])
+            .collect::<Vec<_>>();
         if let Ok(metadata) = serde_json::from_str::<serde_json::Value>(metadata) {
             for package in metadata["packages"].as_array().into_iter().flatten() {
                 if let Some(root) = package["manifest_path"]
@@ -1399,8 +1467,9 @@ fn crate_of(dep_info: &Path) -> String {
         return unhashed(&folder).to_string();
     }
     if name == stem {
-        // Unhashed: cargo's copy beside what it made of the plugin.
-        return name.strip_prefix("lib").unwrap_or(name).to_string();
+        // Unhashed: the plugin's own (a cdylib, which has no `lib` before
+        // its name on wasm), rustc's or cargo's copy beside it.
+        return name.to_string();
     }
     name.to_string()
 }
@@ -1654,12 +1723,17 @@ fn build_with(
     // Those the build is given already (PATH, HOME…) stay as given: a
     // configuration's `[env]` does not come before them, and emptied they
     // broke the build.
+    // (Windows' names are one whatever their case; others' are not.)
+    let named = |name: &str| match cfg!(windows) {
+        true => name.to_ascii_uppercase(),
+        false => name.to_string(),
+    };
     let given: Vec<String> = build
         .get_envs()
-        .map(|(name, _)| name.to_string_lossy().to_ascii_uppercase())
+        .map(|(name, _)| named(&name.to_string_lossy()))
         .collect();
     for name in configured_env(&crate_dir, toolchain.cargo_home.as_deref())? {
-        if !given.contains(&name.to_ascii_uppercase()) {
+        if !given.contains(&named(&name)) {
             build.env(name, "");
         }
     }
@@ -1671,7 +1745,6 @@ fn build_with(
     // the folder as resolved, not as written (a first build's folder was
     // not there to resolve, and every file it made was taken for outside).
     let readable = Readable::new(&target, &crate_dir, &metadata, Some(sysroot));
-    let started = std::time::SystemTime::now();
     let ran = run(build, BUILD_DEADLINE, cancel)?;
     let mut messages = read_messages(&ran.stdout, &id);
     // What the compiler read, before anything it said is used: a file of
@@ -1708,21 +1781,22 @@ fn build_with(
         // recursion's end) — and a message of its from before the stop can
         // hold what it read (a `compile_error!` given an include). So none
         // of what the compiler said is passed on then.
-        // Written now: new or changed (`dep_infos`), or written again word
-        // for word, as a failing crate built again unchanged writes it.
-        let rewritten = dep_infos(&target).into_keys().filter(|d| {
-            std::fs::metadata(d)
-                .and_then(|m| m.modified())
-                .is_ok_and(|at| at >= started)
-        });
-        let written: std::collections::HashSet<String> = messages
-            .dep_infos
+        // Each failed unit is tied to a dep-info file this build wrote
+        // (word for word as before or not) that names the file it is
+        // compiled from — not to one of another unit of its name (another
+        // version of the crate, cached and not built now).
+        let said: std::collections::HashSet<PathBuf> = rewritten_dep_infos(&target, &before)
             .iter()
-            .cloned()
-            .chain(rewritten)
-            .map(|d| crate_of(&d).replace('-', "_"))
+            .filter_map(|d| std::fs::read_to_string(d).ok())
+            .flat_map(|text| dep_info_files(&text))
+            .map(|file| resolved(&crate_dir.join(file)))
             .collect();
-        if let Some(unit) = messages.failed.iter().find(|u| !written.contains(*u)) {
+        let unsaid = messages.failed.iter().find(|(_, from)| {
+            !from
+                .as_ref()
+                .is_some_and(|from| said.contains(&resolved(&crate_dir.join(from))))
+        });
+        if let Some((unit, _)) = unsaid {
             return Err(unread_failure(
                 &crate_dir,
                 &id,
@@ -1876,14 +1950,20 @@ mod tests {
     #[test]
     fn what_the_compiler_says_it_read_is_read_whole() {
         // A line begun with `#` that is none of rustc's is read for files:
-        // a path with a line break in it is not half read.
+        // a path with a line break in it is not half read. rustc's own are
+        // the last lines, after an empty one; one so begun elsewhere (a
+        // path's rest made to look like one) is read for files too.
         assert_eq!(
-            dep_info_files("src/lib.rs: /a/x\n#y/../../etc/passwd\n# checksum:abc\n"),
+            dep_info_files("src/lib.rs: /a/x\n#y/../../etc/passwd\n\n# checksum:abc\n"),
             ["src/lib.rs", "/a/x", "#y/../../etc/passwd"]
         );
         assert_eq!(
+            dep_info_files("src/lib.rs: /a/x\n# env-dep:/../../home/u/.netrc\n"),
+            ["src/lib.rs", "/a/x", "#", "env-dep:/../../home/u/.netrc"]
+        );
+        assert_eq!(
             dep_info_files(
-                "/t/deps/a-1.d: src/lib.rs /x\\ y/z.rs\n\nsrc/lib.rs:\n# env-dep:HOME=/root\n/x\\ y/z.rs:\n"
+                "/t/deps/a-1.d: src/lib.rs /x\\ y/z.rs\n\nsrc/lib.rs:\n/x\\ y/z.rs:\n\n# env-dep:HOME=/root\n"
             ),
             [
                 "/t/deps/a-1.d",
@@ -1923,8 +2003,13 @@ mod tests {
                 format!("/t/release/build/serde-json-{h}/build_script_build-{h}.d"),
                 "serde-json",
             ),
-            ("/t/wasm32-wasip2/release/libsample.d".to_string(), "sample"),
             ("/t/wasm32-wasip2/release/sample.d".to_string(), "sample"),
+            // A plugin's id may begin with "lib": a cdylib on wasm has no
+            // `lib` before its name, so none is taken off.
+            (
+                "/t/wasm32-wasip2/release/deps/library_index.d".to_string(),
+                "library_index",
+            ),
         ] {
             assert_eq!(crate_of(Path::new(&dep_info)), of, "{dep_info}");
         }
@@ -2047,6 +2132,29 @@ mod tests {
         }
     }
 
+    /// Where the compiler stopped without saying what it read, Clew's own
+    /// reading of the plugin's file says what does not parse there — in
+    /// words of the file's own code — and nothing when it parses there, or
+    /// the file is not the plugin's.
+    #[test]
+    fn where_the_compiler_stopped_clew_says_what_does_not_parse() {
+        let dir = clew_core::testutil::TempDir::new("plugin-unparsed");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "pub fn f() {}\nlet x = 1;\n").unwrap();
+        let said = unparsed_at(dir.path(), "src/lib.rs:2:1").expect("does not parse");
+        assert!(said.starts_with("src/lib.rs:2:1: "), "{said}");
+        assert!(said.contains("expected"), "{said}");
+        assert_eq!(
+            unparsed_at(dir.path(), "src/lib.rs:1:1"),
+            None,
+            "another line"
+        );
+        assert_eq!(unparsed_at(dir.path(), "../src/lib.rs:2:1"), None);
+        assert_eq!(unparsed_at(dir.path(), "/etc/passwd:2:1"), None);
+        std::fs::write(dir.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+        assert_eq!(unparsed_at(dir.path(), "src/lib.rs:1:1"), None, "it parses");
+    }
+
     /// A unit of the build is named alike in a compiler message and by its
     /// dep-info file: a crate by its name, a build script by its package.
     #[test]
@@ -2132,10 +2240,12 @@ mod tests {
             .set("NIX_CFLAGS_COMPILE", "-O1")
             .set("CLEW_TEST_SECRET", "s3cret");
         let target = work.join("targets/sample");
+        // As cargo names it: the file the plugin's crate is compiled from.
+        let src_path = work.join("sample/src/lib.rs").display().to_string();
         let message = |file: &str, text: &str| {
             serde_json::json!({
                 "reason": "compiler-message",
-                "target": {"name": "sample"},
+                "target": {"name": "sample", "src_path": src_path},
                 "message": {"level": "error", "rendered": text, "spans": [{"file_name": file}]}
             })
             .to_string()
@@ -2234,7 +2344,7 @@ mod tests {
         let stopped = |file: &str| {
             serde_json::json!({
                 "reason": "compiler-message",
-                "target": {"name": "sample"},
+                "target": {"name": "sample", "src_path": src_path},
                 "message": {
                     "level": "error",
                     "rendered": "error: machine x password y",
@@ -2249,7 +2359,17 @@ mod tests {
             std::fs::write(fake.join("status"), "101").unwrap();
             build(&source, &work, &toolchain, &AtomicBool::new(false))
         };
-        let withheld = unwritten(stopped("src/lib.rs"));
+        // A unit of the same name cached and not built now (another version
+        // of the crate, its dep-info file from an earlier build) does not
+        // say what this one read.
+        let cached = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": {"name": "sample", "src_path": "/elsewhere/sample-1.0/src/lib.rs"},
+            "filenames": [target.join("wasm32-wasip2/release/deps/sample.wasm")]
+        })
+        .to_string();
+        assert!(target.join("wasm32-wasip2/release/deps/sample.d").is_file());
+        let withheld = unwritten(format!("{cached}\n{}", stopped("src/lib.rs")));
         assert!(
             matches!(&withheld, Err(BuildError::Compile(errors))
                 if errors.len() == 1
@@ -2286,11 +2406,20 @@ mod tests {
         .unwrap();
         std::fs::write(
             fake.join("messages"),
-            message("src/lib.rs", "error[E0425]: y") + "\n",
+            serde_json::json!({
+                "reason": "compiler-message",
+                "target": {"name": "other", "src_path": work.join("other/src/lib.rs")},
+                "message": {"level": "error", "rendered": "error[E0425]: y", "spans": [{"file_name": "src/lib.rs"}]}
+            })
+            .to_string()
+                + "\n",
         )
         .unwrap();
         let built = build(&other, &work, &toolchain, &AtomicBool::new(false));
-        assert!(matches!(&built, Err(BuildError::Compile(_))), "{built:?}");
+        assert!(
+            matches!(&built, Err(BuildError::Compile(errors)) if errors[0].contains("E0425")),
+            "{built:?}"
+        );
         assert!(work.join("targets/other").is_dir() && target.is_dir());
 
         // The Rust it builds with removed while it builds (Clew's own,

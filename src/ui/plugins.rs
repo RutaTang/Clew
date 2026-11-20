@@ -1126,6 +1126,11 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
                 // is in the log, as the reader can do nothing with a
                 // parser's words.
                 .chain(app.plugins.unreadable.iter().map(|(id, name)| {
+                    // With its id: an installed plugin may have its name.
+                    let name = match name == id {
+                        true => id.clone(),
+                        false => format!("{name} ({id})"),
+                    };
                     form::item_saying(
                         name.clone(),
                         Some(
@@ -1137,7 +1142,7 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
                         true,
                         form::action_to(
                             tr!("Remove"),
-                            name,
+                            &name,
                             app.plugins
                                 .list_error
                                 .is_none()

@@ -135,22 +135,7 @@ pub fn command(utterance: &str, titles: &[&str]) -> Option<usize> {
     let mut tied = false;
     for (index, text) in titles.iter().enumerate() {
         let title = read_title(text);
-        if title.required.is_empty() {
-            continue;
-        }
-        let agrees = match (title.polarity, polarity) {
-            (Polarity::Show, Polarity::Hide) | (Polarity::Hide, Polarity::Show) => false,
-            // "Close the call graph" does not open it.
-            (Polarity::Neither, Polarity::Hide) => false,
-            // A title that is only its category and what it does ("Find:
-            // Close"): what it does is said, or "find" would close it.
-            (Polarity::Show | Polarity::Hide, said) if title.by_category => said == title.polarity,
-            _ => true,
-        };
-        if !agrees {
-            continue;
-        }
-        let Some((exact, optional)) = fit(&said, &title) else {
+        let Some((exact, optional)) = fits_read(&said, polarity, &title) else {
             continue;
         };
         // Equally well said, the title that says no more than was said wins:
@@ -184,6 +169,38 @@ pub fn command(utterance: &str, titles: &[&str]) -> Option<usize> {
         }
     }
     if tied { None } else { best.map(|(_, i)| i) }
+}
+
+/// How `utterance` fits `title`, read as [`command`] reads both: `None`
+/// when it does not (a word of the title not said, a word said that is not
+/// the title's, or said to turn it the other way); else how many of the
+/// title's optional words (its category, what it has in brackets) were
+/// said, of how many it has. Commands named alike but for what is in their
+/// brackets are told apart by it.
+pub fn fits(utterance: &str, title: &str) -> Option<(usize, usize)> {
+    let (said, polarity) = utterance_words(utterance);
+    let title = read_title(title);
+    fits_read(&said, polarity, &title).map(|(_, optional)| (optional, title.optional.len()))
+}
+
+/// [`fit`], when the way the words turn things agrees with the title's.
+fn fits_read(said: &[String], polarity: Polarity, title: &Title) -> Option<(usize, usize)> {
+    if said.is_empty() || title.required.is_empty() {
+        return None;
+    }
+    let agrees = match (title.polarity, polarity) {
+        (Polarity::Show, Polarity::Hide) | (Polarity::Hide, Polarity::Show) => false,
+        // "Close the call graph" does not open it.
+        (Polarity::Neither, Polarity::Hide) => false,
+        // A title that is only its category and what it does ("Find:
+        // Close"): what it does is said, or "find" would close it.
+        (Polarity::Show | Polarity::Hide, said) if title.by_category => said == title.polarity,
+        _ => true,
+    };
+    if !agrees {
+        return None;
+    }
+    fit(said, title)
 }
 
 /// Lowercase words, apostrophes dropped (`let's` → `lets`).

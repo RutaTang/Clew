@@ -257,6 +257,34 @@ fn a_command_is_heard_by_the_name_it_had() {
     );
 }
 
+/// Two plugins' commands named alike, said without either's id: neither
+/// runs, nothing else is made of the words, and the status says which to
+/// say.
+#[test]
+fn commands_named_alike_are_asked_which() {
+    let (mut app, script, _) = voice_app("voice-alike", "Word count, count words.");
+    let (mut acme, mut beta) = (
+        crate::app::tests::installed_plugin(true),
+        crate::app::tests::installed_plugin(true),
+    );
+    acme.id = "acme-wc".into();
+    beta.id = "beta-wc".into();
+    app.plugins.installed = vec![acme, beta];
+    say(&mut app, &script);
+    assert_eq!(
+        app.status,
+        "More than one command has that name. Say which: Word count: Count words (acme-wc) or Word count: Count words (beta-wc)"
+    );
+    assert!(
+        matches!(
+            app.voice.heard.as_ref().map(|h| &h.outcome),
+            Some(HeardOutcome::Failed(_))
+        ),
+        "{:?}",
+        app.voice.heard
+    );
+}
+
 /// A command that costs something waits for a yes — listened for, the
 /// microphone on; Esc is a no, and the microphone listens on.
 #[test]

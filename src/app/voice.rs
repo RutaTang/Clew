@@ -2401,10 +2401,33 @@ impl App {
         }
         // Said in English, or as the palette shows it in the reader's
         // language.
-        let found = crate::app::palette::command_said(text, &commands).or_else(|| {
-            let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
-            said_as_shown(crate::i18n::current(), text, &shown)
-        });
+        // Commands named alike, the words naming more than one: none run
+        // on a guess, and nothing else taken for them (a search, Ask) —
+        // the one saying them is told which to say.
+        let named = crate::app::palette::command_named(text, &commands);
+        if let crate::app::palette::Named::Alike(alike) = &named {
+            let names: Vec<String> = alike
+                .iter()
+                .map(|&i| commands[i].shown().trim_end_matches('…').to_string())
+                .collect();
+            let which = tr!(
+                "More than one command has that name. Say which: {commands}",
+                commands = crate::app::palette::or_list(&names)
+            );
+            self.status = which.clone();
+            self.voice.hear(Heard {
+                text: text.to_string(),
+                outcome: HeardOutcome::Failed(which),
+            });
+            return Some(Task::none());
+        }
+        let found = match named {
+            crate::app::palette::Named::One(i) => Some(i),
+            _ => {
+                let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
+                said_as_shown(crate::i18n::current(), text, &shown)
+            }
+        };
         if let Some(i) = found {
             let command = &commands[i];
             let title = command.title.clone();

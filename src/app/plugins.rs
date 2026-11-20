@@ -118,7 +118,8 @@ pub(crate) fn offered_commands<'a>(
             })
         })
         .collect();
-    // Rows read alike whether or not one ends in "…".
+    // Read alike whether or not one ends in "…", in English as the voice
+    // reads titles, and as shown.
     let bare = |shown: &str| shown.trim_end_matches('…').trim_end().to_string();
     let count = |names: Vec<String>| {
         let mut named: HashMap<String, usize> = HashMap::new();
@@ -130,8 +131,8 @@ pub(crate) fn offered_commands<'a>(
     let titles = count(
         clews
             .iter()
-            .map(|(title, _)| title.to_string())
-            .chain(offered.iter().map(|o| o.title.clone()))
+            .map(|(title, _)| bare(title))
+            .chain(offered.iter().map(|o| bare(&o.title)))
             .collect(),
     );
     let shown = count(
@@ -143,7 +144,7 @@ pub(crate) fn offered_commands<'a>(
     );
     for o in &mut offered {
         let id = &o.plugin.id;
-        let titled_alike = titles.get(&o.title).is_some_and(|n| *n > 1);
+        let titled_alike = titles.get(&bare(&o.title)).is_some_and(|n| *n > 1);
         if titled_alike {
             o.title = format!("{} ({id})", o.title);
         }
@@ -650,7 +651,17 @@ impl Plugins {
                 Err(why) => {
                     // Why, for whoever reads the log: the row says what
                     // the reader can do, not the parser's words.
-                    eprintln!("[clew] plugin {id} is not run, its manifest unread: {why}");
+                    // Once a process: every window reads the list again
+                    // at every change of it.
+                    static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+                    let line = format!("[clew] plugin {id} is not run, its manifest unread: {why}");
+                    let mut said = SAID
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !said.contains(&line) {
+                        eprintln!("{line}");
+                        said.push(line);
+                    }
                     let name = clew_plugin::manifest::Manifest::name_of(&record.manifest)
                         .unwrap_or_else(|| id.clone());
                     unreadable.push((id, name));
@@ -860,6 +871,9 @@ pub enum PluginMsg {
         /// It replaced another build of it, of this version: an update,
         /// said so.
         update: Option<String>,
+        /// It replaced a plugin of its id this Clew could not read: said
+        /// so, as the card that asked said Replace.
+        replaced: bool,
         result: Result<String, String>,
     },
     SetEnabled(String, bool),
@@ -3177,6 +3191,7 @@ impl App {
                     .as_ref()
                     .filter(|p| p.record.fingerprint != pending.inspected.fingerprint())
                     .map(|p| p.manifest.plugin.version.clone());
+                let replaced = pending.previous.is_none() && pending.unreadable.is_some();
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -3196,6 +3211,7 @@ impl App {
                             id: id.clone(),
                             reply: reply.clone(),
                             update,
+                            replaced,
                             result,
                         })
                     },
@@ -3211,6 +3227,7 @@ impl App {
                 id,
                 reply,
                 update,
+                replaced,
                 result,
             } => {
                 if result.is_ok() {
@@ -3254,10 +3271,11 @@ impl App {
                             _ if update.as_ref().is_some_and(|was| *was == version) => {
                                 tr!("{plugin} is updated", plugin = name.clone())
                             }
-                            _ if update.as_ref().is_some_and(|was| {
-                                clew_plugin::manifest::version_order(&version, was)
-                                    == std::cmp::Ordering::Less
-                            }) =>
+                            _ if replaced
+                                || update.as_ref().is_some_and(|was| {
+                                    clew_plugin::manifest::version_order(&version, was)
+                                        == std::cmp::Ordering::Less
+                                }) =>
                             {
                                 tr!(
                                     "{plugin} is replaced with version {version}",

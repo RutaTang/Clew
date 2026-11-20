@@ -415,12 +415,35 @@ fn formerly(title: &str) -> Option<&'static str> {
     }
 }
 
+/// What words said name among `commands` ([`command_named`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Named {
+    /// The command at this index.
+    One(usize),
+    /// Commands named alike — two plugins', or a plugin's and one of Clew's
+    /// own — that the words name equally: none is run on a guess, and the
+    /// one saying them is told which to say.
+    Alike(Vec<usize>),
+    /// None.
+    Nothing,
+}
+
 /// The index in `commands` of the command `said` plainly names: by its
 /// title, or, when no title is named, by the name it had ([`formerly`]).
-/// Of commands named alike — two plugins', or a plugin's and one of
-/// Clew's own, each plugin's titled with its id after it — the one whose
-/// id the words name ([`told_apart`]); none when they name none of them.
+#[cfg(test)]
 pub(crate) fn command_said(said: &str, commands: &[PaletteCommand]) -> Option<usize> {
+    match command_named(said, commands) {
+        Named::One(i) => Some(i),
+        Named::Alike(_) | Named::Nothing => None,
+    }
+}
+
+/// What `said` names among `commands`: the title it plainly names, or the
+/// name a command had ([`formerly`]), and,
+/// of commands named alike — each plugin's titled with its id after the
+/// name they share ("Word count: Count words (word-count)") — the one the
+/// words fit best ([`told_apart`]), or all those they fit as well.
+pub(crate) fn command_named(said: &str, commands: &[PaletteCommand]) -> Named {
     let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
     let found = clew_voice::intent::command(said, &titles).or_else(|| {
         let (names, at): (Vec<&str>, Vec<usize>) = commands
@@ -437,25 +460,44 @@ pub(crate) fn command_said(said: &str, commands: &[PaletteCommand]) -> Option<us
     };
     match found {
         Some(i) => {
-            let name = alike_named(&commands[i]).0;
-            let group = alike(name);
+            let group = alike(alike_named(&commands[i]).0);
             match group.len() > 1 {
-                true => told_apart(said, name, commands, &group),
-                false => Some(i),
+                true => told_apart(said, commands, &group),
+                false => Named::One(i),
             }
         }
-        // Two named alike, their ids said alike (or not said), tie: the
-        // name they share is what was said, and their ids tell them apart.
+        // Named equally well by more than one title: when what they share
+        // is a name of commands named alike, read as that name among every
+        // command's (an unrelated title as well named still ties), then
+        // told apart; else nothing.
         None => {
-            let mut shared: Vec<&str> = Vec::new();
+            let mut names: Vec<&str> = Vec::new();
             for c in commands {
-                let (name, id) = alike_named(c);
-                if id.is_some() && !shared.contains(&name) {
-                    shared.push(name);
+                let name = alike_named(c).0;
+                if !names.contains(&name) {
+                    names.push(name);
                 }
             }
-            let k = clew_voice::intent::command(said, &shared)?;
-            told_apart(said, shared[k], commands, &alike(shared[k]))
+            match clew_voice::intent::command(said, &names) {
+                Some(k) if alike(names[k]).len() > 1 => {
+                    told_apart(said, commands, &alike(names[k]))
+                }
+                _ => Named::Nothing,
+            }
+        }
+    }
+}
+
+/// "a", "a or b", "a, b or c", as the reader's language writes a list.
+pub(crate) fn or_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [first, middle @ .., last] => {
+            let list = middle.iter().fold(first.clone(), |list, item| {
+                tr!("{list}, {item}", list = list, item = item)
+            });
+            tr!("{list} or {last}", list = list, last = last)
         }
     }
 }
@@ -477,66 +519,43 @@ fn alike_named(command: &PaletteCommand) -> (&str, Option<&str>) {
     (&command.title, None)
 }
 
-/// Which of the commands at `group`, all named `name`, `said` names: by the
-/// words of a plugin's id beyond its name ("word count count words too"
-/// is `word-count-too`'s), all of them said before some of them. Words of
-/// no id said: the one whose id adds no words of its own, or Clew's own
-/// command of that name. None when that names none of them, or more than
-/// one: not one run on a guess.
-fn told_apart(
-    said: &str,
-    name: &str,
-    commands: &[PaletteCommand],
-    group: &[usize],
-) -> Option<usize> {
-    let words = |text: &str| -> std::collections::BTreeSet<String> {
-        text.to_lowercase()
-            .replace(['\'', '’'], "")
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| !w.is_empty())
-            .map(str::to_string)
-            .collect()
+/// Which of the commands at `group`, named alike, `said` names, as the
+/// voice's own reading fits words to a title ([`clew_voice::intent::fits`]):
+/// of those it fits at all (a word said that a title has no place for
+/// rules it out: "call graph call graph" is the plugin's "Call Graph
+/// (call-graph)", not Clew's "Call Graph"), the one more of whose words in
+/// brackets — its plugin's id — were said; as many said, the one whose id
+/// was said whole; else Clew's own, named as it is. When that names more
+/// than one, none: they are told which to say.
+fn told_apart(said: &str, commands: &[PaletteCommand], group: &[usize]) -> Named {
+    let fitting: Vec<(usize, usize, usize)> = group
+        .iter()
+        .filter_map(|&i| {
+            clew_voice::intent::fits(said, &commands[i].title).map(|(of_id, id)| (i, of_id, id))
+        })
+        .collect();
+    let Some(most) = fitting.iter().map(|(_, of_id, _)| *of_id).max() else {
+        return Named::Nothing;
     };
-    let named_by = words(name);
-    // The words each id adds to the name.
-    let own: Vec<std::collections::BTreeSet<String>> = group
-        .iter()
-        .map(|&i| match alike_named(&commands[i]).1 {
-            Some(id) => words(id).difference(&named_by).cloned().collect(),
-            None => Default::default(),
-        })
+    let best: Vec<(usize, usize, usize)> = fitting
+        .into_iter()
+        .filter(|(_, of_id, _)| *of_id == most)
         .collect();
-    let any_own: std::collections::BTreeSet<String> = own.iter().flatten().cloned().collect();
-    let said: std::collections::BTreeSet<String> =
-        words(said).intersection(&any_own).cloned().collect();
-    let fits: Vec<(usize, bool)> = group
+    let whole: Vec<usize> = best
         .iter()
-        .zip(&own)
-        .filter(|(_, own)| match said.is_empty() {
-            true => own.is_empty(),
-            false => said.is_subset(own),
-        })
-        .map(|(&i, own)| (i, *own == said))
+        .filter(|(_, of_id, id)| of_id == id)
+        .map(|(i, _, _)| *i)
         .collect();
-    let whole: Vec<usize> = fits
+    let clews: Vec<usize> = best
         .iter()
-        .filter(|(_, all)| *all)
-        .map(|(i, _)| *i)
-        .collect();
-    let fits: Vec<usize> = fits.into_iter().map(|(i, _)| i).collect();
-    // Clew's own command of that name: the name said as it is.
-    let clews: Vec<usize> = fits
-        .iter()
-        .copied()
+        .map(|(i, _, _)| *i)
         .filter(|&i| alike_named(&commands[i]).1.is_none())
         .collect();
-    match (&fits[..], &whole[..], &clews[..]) {
-        ([one], _, _) => Some(*one),
-        // Several the words fit: the one whose id was said whole ("wc", of
-        // `wc` and `acme-wc`), else Clew's own.
-        (_, [one], _) if !said.is_empty() => Some(*one),
-        (_, _, [one]) => Some(*one),
-        _ => None,
+    match (&best[..], &whole[..], &clews[..]) {
+        ([(one, _, _)], _, _) => Named::One(*one),
+        (_, _, [one]) => Named::One(*one),
+        (_, [one], _) => Named::One(*one),
+        _ => Named::Alike(best.iter().map(|(i, _, _)| *i).collect()),
     }
 }
 

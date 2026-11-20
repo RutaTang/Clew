@@ -467,12 +467,11 @@ pub fn set_up(
     find(Some(data)).map_err(SetUpError::Missing)
 }
 
-/// Install Rust of Clew's own, with the target, into [`managed_dir`].
-/// Add the target to the user's own Rust, with its `rustup`. Nothing
-/// stops it partway — not Cancel, not a window closing — which is why it
-/// takes no `cancel`: it changes the user's own Rust, and rustup can refuse
-/// to add a target again once stopped while adding it. It is quick, and
-/// runs to its end or its deadline.
+/// Add the target to the user's own Rust, with its `rustup`. Neither Cancel
+/// nor a window closing stops it partway — which is why it takes no
+/// `cancel`: it changes the user's own Rust, and rustup can refuse to add a
+/// target again once stopped while adding it. It is quick, and runs to its
+/// end, or to its deadline (a rustup hung on the network).
 fn add_target(rustup: &Path) -> Result<(), String> {
     let mut cmd = Command::new(rustup);
     cmd.args(["target", "add", TARGET])
@@ -481,6 +480,7 @@ fn add_target(rustup: &Path) -> Result<(), String> {
     run(cmd, TARGET_DEADLINE, &AtomicBool::new(false))
 }
 
+/// Install Rust of Clew's own, with the target, into [`managed_dir`].
 fn install(data: &Path, cancel: &AtomicBool, stage: &mut dyn FnMut(Stage)) -> Result<(), String> {
     let triple = host_triple().ok_or(NO_INSTALLER)?;
     install_from(data, &installer_url(triple), cancel, stage)

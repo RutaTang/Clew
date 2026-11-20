@@ -121,7 +121,9 @@ impl Manifest {
     pub fn name_of(text: &str) -> Option<String> {
         let value: toml::Table = toml::from_str(text).ok()?;
         let name = value.get("plugin")?.get("name")?.as_str()?.trim();
-        (!name.is_empty()).then(|| name.to_string())
+        // As a name read whole is checked: one short line.
+        check_line("name", name, 60).ok()?;
+        Some(name.to_string())
     }
 
     /// Read and check `plugin.toml`'s text.
