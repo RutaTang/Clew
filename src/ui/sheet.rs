@@ -166,68 +166,18 @@ fn file_tool_w(label: &str, short: bool) -> f32 {
         + text_width(label, ts::BODY, FILE_TOOL_FONT)
 }
 
-/// The least room the file's name keeps beside the header's tools: its
-/// width, up to this.
-const TITLE_MIN_W: f32 = 160.0;
-
 /// The least room the file's folder is shown in, cut short from its start:
 /// its width, up to this. With less, it gives way whole — before the
 /// header's tools give up their words, which at 1100 px went to glyphs
 /// alone for a folder's sake; and rather than as a stub ("…op").
 const FOLDER_MIN_W: f32 = 96.0;
 
-/// What the header's tools say beside their glyphs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolWords {
-    /// Explain its name, the others their glyphs alone, their names in
-    /// their tooltips: Explain is the one that spends an AI call, and what
-    /// a reader new to Clew looks for. The tools as glyphs and the margin's
-    /// tabs as words tell the row's actions from its views: as nine words
-    /// in a line, they read as one group.
-    Explain,
-    /// Their glyphs alone, Explain's too: a window too narrow for its name.
-    None,
-}
-
-impl ToolWords {
-    /// Whether the tool named `explain` (or another) is said short.
-    fn short(self, explain: bool) -> bool {
-        match self {
-            ToolWords::Explain => !explain,
-            ToolWords::None => true,
-        }
-    }
-}
-
-/// Width of the header's tools, Explain through View, saying `words`.
-fn file_tools_w(words: ToolWords) -> f32 {
-    let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
-        .iter()
-        .enumerate()
-        .map(|(i, l)| file_tool_w(l, words.short(i == 0)))
-        .sum::<f32>();
-    tools + TOOLS_RULE_W + view_button_w() + 5.0 * TOOLS_SPACING
-}
-
-/// What the header's tools say: Explain its name, where the file's name
-/// keeps its room beside it; else their glyphs alone. One look in every
-/// window it fits: the tools said their names where a file's name was
-/// short and gave them up where it was long ("test_pricing.py" showed
-/// ✦ ⤫ ⟲ ◷ where "pricing.py" showed their names).
-fn file_tool_words(app: &App) -> ToolWords {
-    let Some(v) = app.active_viewer() else {
-        return ToolWords::Explain;
-    };
-    let (name, _) = title_parts(v);
-    // The name: its folder gives way before Explain's name does
-    // (`folder_shown`), Explain being what a reader new to Clew reads.
-    let title = text_width(&name, ts::EMPHASIS, TITLE_FONT).min(TITLE_MIN_W);
-    let room = header_right(app) - HEADER_PAD_RIGHT - (sheet_content_left(app) + HEADER_PAD_X);
-    if room - TITLE_GAP / 2.0 - file_tools_w(ToolWords::Explain) >= title {
-        ToolWords::Explain
-    } else {
-        ToolWords::None
-    }
+/// Width of the header's tools, Explain through View: their glyphs, their
+/// names in their tooltips. The row's actions as glyphs, the margin's views
+/// as glyphs with the shown one named: as nine words in a line, they read
+/// as one group, and they changed form with the length of a file's name.
+fn file_tools_w() -> f32 {
+    4.0 * file_tool_w("", true) + TOOLS_RULE_W + view_button_w() + 5.0 * TOOLS_SPACING
 }
 
 /// The open file's `folder` as the header has room to show it beside
@@ -237,7 +187,6 @@ fn folder_shown(app: &App, name: &str, folder: &str) -> String {
     if folder.is_empty() {
         return String::new();
     }
-    let words = file_tool_words(app);
     let markdown = app.active_viewer().is_some_and(|v| v.md.is_some());
     let toggle = if markdown {
         file_tool_w(tr!("Rendered"), false).max(file_tool_w(tr!("Source"), false)) + TITLE_SPACING
@@ -248,7 +197,7 @@ fn folder_shown(app: &App, name: &str, folder: &str) -> String {
         - HEADER_PAD_RIGHT
         - (sheet_content_left(app) + HEADER_PAD_X)
         - TITLE_GAP
-        - file_tools_w(words)
+        - file_tools_w()
         - text_width(name, ts::EMPHASIS, TITLE_FONT)
         - TITLE_SPACING
         - toggle;
@@ -307,7 +256,7 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
         return None;
     }
     let row_left = sheet_content_left(app) + HEADER_PAD_X;
-    let width = file_tools_w(file_tool_words(app));
+    let width = file_tools_w();
     let x = (header_right(app) - HEADER_PAD_RIGHT - width).max(row_left);
     Some(iced::Rectangle {
         x,
@@ -323,13 +272,10 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
 #[cfg(test)]
 pub(crate) fn file_tool_rect(app: &App, nth: usize) -> Option<iced::Rectangle> {
     let tools = file_tools_rect(app)?;
-    let words = file_tool_words(app);
-    let labels = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")];
-    let w = |i: usize| file_tool_w(labels[i], words.short(i == 0));
-    let x = tools.x + (0..nth).map(|i| w(i) + TOOLS_SPACING).sum::<f32>();
+    let w = file_tool_w("", true);
     Some(iced::Rectangle {
-        x,
-        width: w(nth),
+        x: tools.x + nth as f32 * (w + TOOLS_SPACING),
+        width: w,
         ..tools
     })
 }
@@ -465,74 +411,86 @@ fn file_tool<'a>(
     }
 }
 
-/// The margin's tabs — Notes, Calls, History — in the header, over the
-/// margin they switch.
+/// The margin's tabs — a Lean file's Goals, Explanations, Calls, History —
+/// in the header, over the margin they switch: each its glyph, named in its
+/// tooltip; the one shown, its name beside its glyph too, in the room the
+/// others leave it (cut short there, whole in its tooltip). Where the reader
+/// is, said; the row as compact as the tools beside it.
 pub(crate) fn margin_tabs(app: &App, room: f32) -> Element<'_, Message> {
+    use crate::MarginTab;
     // A Lean file's own first: the proof's goals where the cursor is.
     let goals = app
         .reading_lean()
-        .then_some((tr!("Goals"), crate::MarginTab::Goals));
-    let labels: Vec<(&'static str, crate::MarginTab)> = goals
+        .then_some((Glyph::Turnstile, tr!("Goals"), MarginTab::Goals));
+    let tabs: Vec<(Glyph, &'static str, MarginTab)> = goals
         .into_iter()
         .chain([
-            (tr!("Explanations"), crate::MarginTab::Notes),
-            (tr!("Calls"), crate::MarginTab::Calls),
-            (tr!("History"), crate::MarginTab::History),
+            (Glyph::Explanations, tr!("Explanations"), MarginTab::Notes),
+            (Glyph::Network, tr!("Calls"), MarginTab::Calls),
+            (Glyph::Branch, tr!("History"), MarginTab::History),
         ])
         .collect();
-    // As much room round each name as the margin has: in French at 1100,
-    // "Explications · Appels · Historique" ran past the margin's edge, the
-    // last tab's background cut there. Tighter first; then, where even
-    // that is too wide, each name cut short, whole in its tip.
-    let widths: Vec<f32> = labels
-        .iter()
-        .map(|(l, _)| super::steady::width_of(l, ts::BODY, FILE_TOOL_FONT))
-        .collect();
-    let words: f32 = widths.iter().sum();
-    let gaps = 2.0 * (labels.len() - 1) as f32;
-    let pad = ((room - words - gaps) / (2.0 * labels.len() as f32)).clamp(4.0, 10.0);
-    let over = words + gaps + 2.0 * pad * labels.len() as f32 - room;
-    let tab = |label: &'static str, width: f32, this: crate::MarginTab| {
-        let chosen = app.margin_tab_shown() == this;
-        // Each name gives up its share of what is over, by its width.
-        let keep = if over > 0.0 {
-            (width - over * width / words).max(0.0)
+    let shown = app.margin_tab_shown();
+    let gaps = MARGIN_TAB_GAP * (tabs.len() - 1) as f32;
+    let name_room =
+        (room - MARGIN_TAB_ICON_W * tabs.len() as f32 - gaps - MARGIN_TAB_SPACING).max(0.0);
+    let tab = |(glyph, label, this): (Glyph, &'static str, MarginTab)| -> Element<'_, Message> {
+        let chosen = shown == this;
+        let tint = if chosen {
+            theme::fg()
         } else {
-            width
+            theme::fg_muted()
         };
-        let shown = super::steady::cut(label, keep, ts::BODY, FILE_TOOL_FONT);
-        let face = button(ts::set_in(
-            text(shown.clone())
-                .font(FILE_TOOL_FONT)
-                .color(if chosen {
-                    theme::fg()
-                } else {
-                    theme::fg_muted()
-                })
-                .wrapping(Wrapping::None),
-            MARGIN_TAB_H,
-            ts::INTER,
-            ts::BODY,
-        ))
+        let mut face = row![glyph::icon(glyph, tint, MARGIN_TAB_GLYPH)]
+            .spacing(MARGIN_TAB_SPACING)
+            .align_y(iced::Center);
+        let mut whole = false;
+        if chosen {
+            let name = super::steady::cut(label, name_room, ts::BODY, FILE_TOOL_FONT);
+            whole = name == label;
+            if !name.is_empty() {
+                face = face.push(ts::set_in(
+                    text(name)
+                        .font(FILE_TOOL_FONT)
+                        .color(tint)
+                        .wrapping(Wrapping::None),
+                    MARGIN_TAB_H,
+                    ts::INTER,
+                    ts::BODY,
+                ));
+            }
+        }
+        let face = button(
+            container(face)
+                .height(Length::Fixed(MARGIN_TAB_H))
+                .align_y(iced::Center),
+        )
         .style(theme::segment(chosen))
-        .padding([0.0, pad])
+        .padding([0.0, MARGIN_TAB_PAD])
         .on_press(super::heard::said(
             label,
             Message::Window(WindowMsg::MarginTabPicked(this)),
         ));
-        if shown == label {
+        if whole {
             face.into()
         } else {
             tip_at(face, label, None, tooltip::Position::Bottom)
         }
     };
-    let tabs: Vec<Element<'_, Message>> = labels
-        .iter()
-        .zip(&widths)
-        .map(|((label, this), w)| tab(label, *w, *this))
-        .collect();
-    iced::widget::Row::with_children(tabs).spacing(2).into()
+    iced::widget::Row::with_children(tabs.into_iter().map(tab))
+        .spacing(MARGIN_TAB_GAP)
+        .align_y(iced::Center)
+        .into()
 }
+
+/// A margin tab's padding across, its glyph's size, the gap between its
+/// glyph and its name, and between tabs; and a tab's width as its glyph
+/// alone.
+pub(crate) const MARGIN_TAB_PAD: f32 = 8.0;
+const MARGIN_TAB_GLYPH: f32 = 14.0;
+const MARGIN_TAB_SPACING: f32 = 6.0;
+pub(crate) const MARGIN_TAB_GAP: f32 = 2.0;
+pub(crate) const MARGIN_TAB_ICON_W: f32 = 2.0 * MARGIN_TAB_PAD + MARGIN_TAB_GLYPH;
 
 /// The sheet's header: the open file's name and folder, the tools that act
 /// on it — Explain, Skim, Diff, Time Travel, and the View menu of reading
@@ -600,10 +558,8 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             }),
     )
     .padding([0.0, (TOOLS_RULE_W - 1.0) / 2.0]);
-    // Glyphs, their names in their tooltips; Explain's said where the
-    // file's name keeps its room beside it.
-    let words = file_tool_words(app);
-    let short = words.short(false);
+    // Glyphs, their names in their tooltips.
+    let short = true;
     let view_face = row![
         glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0),
         glyph::icon(Glyph::ChevronDown, theme::dim(), VIEW_CHEVRON),
@@ -646,7 +602,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             Message::Explain(ExplainMsg::Explain(crate::explain::Node::File(
                 v.abs.clone(),
             ))),
-            words.short(true),
+            short,
         ),
         file_tool(
             Glyph::Skim,

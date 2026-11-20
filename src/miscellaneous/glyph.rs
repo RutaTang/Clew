@@ -125,6 +125,11 @@ pub enum Glyph {
     Braces,
     /// What leans on a function: one box over the boxes under it.
     Network,
+    /// ⊢, the sign a Lean goal is stated after: a proof's goals.
+    Turnstile,
+    /// A note, and a spark: what the AI wrote of the code (the margin's
+    /// explanations).
+    Explanations,
     /// When something was: a clock face.
     Clock,
     /// A line of work forking off another: a git branch.
@@ -432,6 +437,14 @@ fn body(g: Glyph) -> &'static str {
              <path d='M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3'/><path d='M12 12V8'/>"
         }
         Clock => "<circle cx='12' cy='12' r='10'/><path d='M12 6v6l4 2'/>",
+        Turnstile => "<path d='M7 5 V19'/><path d='M7 12 H18'/>",
+        // Note's page, smaller, and the spark Fake Run and Ask carry.
+        Explanations => {
+            "<g transform='translate(0.4 5.4) scale(0.76)' stroke-width='2.6'>\
+             <rect x='5' y='3.5' width='14' height='17' rx='2'/>\
+             <path d='M8.5 8 H15.5'/><path d='M8.5 11.5 H15.5'/><path d='M8.5 15 H13'/></g>\
+             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
+        }
         Branch => {
             "<circle cx='6' cy='5' r='2.5'/><circle cx='6' cy='19' r='2.5'/><circle cx='18' cy='7' r='2.5'/>\
              <path d='M6 7.5v9'/><path d='M18 9.5c0 4.5-4 5.5-9.5 7.5'/>"

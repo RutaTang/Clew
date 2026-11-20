@@ -3553,7 +3553,8 @@ fn the_trail_row_does_not_move_the_code_when_the_trail_begins() {
 
 /// L16: the margin's tabs fit over the margin in French at 1100 —
 /// "Explications · Appels · Historique" ran past its edge, the last tab's
-/// background cut there — and in English as they were.
+/// background cut there. Each tab is its glyph, the one shown named beside
+/// it too, in the room the others leave it; the others are not words.
 #[test]
 fn the_margin_tabs_fit_over_the_margin_in_french() {
     let mut app = reader_app();
@@ -3570,21 +3571,22 @@ fn the_margin_tabs_fit_over_the_margin_in_french() {
                 Size::new(room + 200.0, 60.0),
                 super::sheet::margin_tabs(&app, room),
             );
-            for name in [
-                crate::tr!("Explanations"),
-                crate::tr!("Calls"),
-                crate::tr!("History"),
-            ] {
-                let at = text_at(&mut sim, |t| t == name || t.ends_with('…'), 0)
-                    .unwrap_or_else(|| panic!("{name} shown"));
-                assert!(at.x >= 0.0, "{name}: {at:?}");
-            }
-            let last = text_at(&mut sim, |t| t == crate::tr!("History"), 0)
-                .expect("the last tab named whole");
+            // Explanations is shown: named, whole or cut short.
+            let name = crate::tr!("Explanations");
+            let at = text_at(&mut sim, |t| t == name || t.ends_with('…'), 0)
+                .unwrap_or_else(|| panic!("{name} named"));
+            // The two glyphs after it, and the padding round them, fit.
+            let end = at.x
+                + at.width
+                + super::sheet::MARGIN_TAB_PAD
+                + 2.0 * (super::sheet::MARGIN_TAB_GAP + super::sheet::MARGIN_TAB_ICON_W);
             assert!(
-                last.x + last.width + 4.0 <= room,
-                "{lang:?}: past the margin's edge: {last:?} of {room}"
+                end <= room + 0.5,
+                "{lang:?}: past the margin's edge: {end} of {room}"
             );
+            for other in [crate::tr!("Calls"), crate::tr!("History")] {
+                assert!(!shows(&mut sim, other), "{lang:?}: {other} as a word");
+            }
         });
     }
 }
@@ -3611,15 +3613,15 @@ fn an_empty_file_says_so_and_offers_nothing_to_explain() {
         n
     };
     assert_eq!(count(&app, "This file is empty"), 0);
-    // The file's card, with its Explain beside the header's.
+    // The file's card, with its Explain (the header's is its glyph).
     assert_eq!(count(&app, "file"), 1, "a file's card");
-    assert_eq!(count(&app, "Explain"), 2);
+    assert_eq!(count(&app, "Explain"), 1);
     if let Some(v) = app.proj.panes[0].as_mut() {
         v.source = std::sync::Arc::new(String::new());
     }
     assert_eq!(count(&app, "This file is empty"), 1);
     assert_eq!(count(&app, "file"), 0, "no card");
-    assert_eq!(count(&app, "Explain"), 1, "the header's alone");
+    assert_eq!(count(&app, "Explain"), 0, "the card's gone");
 }
 
 /// L9: a file found no longer there is left out of the reading trail: it
@@ -13239,8 +13241,7 @@ fn the_explanation_in_blocks_has_the_margin_to_be_read_in() {
             basis: None,
         },
     );
-    // Where the card ends: its actions' row, the lowest "Calls" (the
-    // other is the margin's tab).
+    // Where the card ends: its actions' row, the lowest "Calls".
     let card_foot = |app: &App| {
         let mut sim = sim_of(app);
         (0..)
@@ -16049,13 +16050,11 @@ fn the_files_name_keeps_its_room_in_the_header() {
         let tools = super::file_tools_rect(&app).unwrap();
         assert!(tools.x > name.x + name.width, "{tools:?} over {name:?}");
     });
-    // With room, Explain says its name; the others are their glyphs,
-    // whatever the room.
+    // With room, they are their glyphs still: one look whatever the room.
     let mut app = reader_app();
     app.show_left_sidebar = true;
     app.window_width = WINDOW.width;
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "Explain"));
     assert!(!shows(&mut sim, "Time Travel"));
     let name = text_at(&mut sim, |t| t == "lib.rs", 0).unwrap();
     assert!(name.width > 20.0);
@@ -17661,8 +17660,8 @@ fn the_view_menus_inert_row_says_why() {
 
 /// The header's folder tag is cut short with "…" where the tools leave
 /// it too little room — never clipped under them mid-word ("test" for
-/// "tests", in French, whose tools are longer) — and the tools give up
-/// their words before the folder is cut to nothing ("…op").
+/// "tests", in French, whose tools were longer) — and not to a stub
+/// ("…op").
 #[test]
 fn the_headers_folder_is_cut_with_an_ellipsis_not_clipped() {
     use crate::i18n::{Lang, with_lang};
@@ -17671,17 +17670,10 @@ fn the_headers_folder_is_cut_with_an_ellipsis_not_clipped() {
         app.show_left_sidebar = true;
         app.show_right_panel = true;
         app.proj.panes[0].as_mut().unwrap().rel = "tests/integration/test_pricing.py".into();
-        let mut words_given_up = false;
         for width in (760..=1280).rev().step_by(20) {
             app.window_width = width as f32;
             let mut sim = sim_of(&app);
-            // Skim's name goes before Explain's (L15).
-            if text_at(&mut sim, |t| t == "Survol", 0).is_none() {
-                words_given_up = true;
-            }
-            let Some(tools) = text_at(&mut sim, |t| t == "Expliquer", 0) else {
-                continue;
-            };
+            let tools = super::file_tools_rect(&app).expect("the header's tools");
             let full = text_at(&mut sim, |t| t == "tests/integration", 0);
             let elided = text_at(
                 &mut sim,
@@ -17692,10 +17684,7 @@ fn the_headers_folder_is_cut_with_an_ellipsis_not_clipped() {
                 0,
             );
             if let Some(cut) = elided {
-                assert!(
-                    cut.width >= 60.0,
-                    "{width}: the folder cut to {cut:?} while the tools keep their words"
-                );
+                assert!(cut.width >= 60.0, "{width}: the folder cut to {cut:?}");
             }
             let Some(folder) = full.or(elided) else {
                 continue;
@@ -17706,10 +17695,6 @@ fn the_headers_folder_is_cut_with_an_ellipsis_not_clipped() {
                 tools.x
             );
         }
-        assert!(
-            words_given_up,
-            "a narrow window's tools give up their words"
-        );
     });
 }
 
@@ -17843,31 +17828,27 @@ fn recent_folders_and_close_folder_are_in_the_app_menu() {
     assert!(!shows(&mut tall_menu(&app), "Close Folder"));
 }
 
-/// L15: Explain keeps its name the longest — the one that spends an AI
-/// call, and what a reader new to Clew looks for; the other tools are
-/// their glyphs. At 1100 px "test_pricing.py" showed ✦ ⤫ ⟲ ◷ alone, where
-/// "pricing.py" showed their names.
+/// The header's tools are their glyphs at every width, their names in
+/// their tooltips, and the file's name never gives way to them: they said
+/// their names where a name was short and gave them up where it was long
+/// ("test_pricing.py" showed ✦ ⤫ ⟲ ◷ where "pricing.py" showed words).
 #[test]
-fn explain_keeps_its_name_the_longest() {
+fn the_header_tools_are_glyphs_at_every_width() {
     let mut app = reader_app();
     app.show_left_sidebar = true;
     app.show_right_panel = true;
-    let mut kept_alone = false;
-    for width in (760..=1440).rev().step_by(10) {
+    app.proj.panes[0].as_mut().unwrap().rel = "tests/test_pricing.py".into();
+    for width in (760..=1440).rev().step_by(40) {
         app.window_width = width as f32;
-        app.proj.panes[0].as_mut().unwrap().rel = "tests/test_pricing.py".into();
         let mut sim = sim_of(&app);
-        let explain = text_at(&mut sim, |t| t == "Explain", 0).is_some();
-        let skim = text_at(&mut sim, |t| t == "Skim", 0).is_some();
-        assert!(explain || !skim, "{width}: Skim named, Explain not");
-        kept_alone |= explain && !skim;
-        // The file's name is never what gave way for it.
+        for word in ["Skim", "Diff", "Time Travel", "View"] {
+            assert!(!shows(&mut sim, word), "{width}: {word} as a word");
+        }
         assert!(
             text_at(&mut sim, |t| t == "test_pricing.py", 0).is_some(),
-            "{width}: the name cut for the tools' words"
+            "{width}: the name cut for the tools"
         );
     }
-    assert!(kept_alone, "Explain never kept its name alone");
 }
 
 /// A file's card has no way to a function's calls: the margin's Calls tab
@@ -17889,18 +17870,15 @@ fn a_files_card_offers_no_calls() {
     );
     app.proj.explain.view = Some(crate::explain::Node::File(abs));
     let mut sim = sim_of(&app);
-    // The card is up: its History beside the margin's own tab of the name.
+    // The card is up — its History — and has no Calls (the margin's tabs
+    // are glyphs, the shown one Explanations).
     assert!(
-        text_at(&mut sim, |t| t == "History", 1).is_some(),
-        "the card's History, after the tab's"
+        text_at(&mut sim, |t| t == "History", 0).is_some(),
+        "the card's History"
     );
     assert!(
-        text_at(&mut sim, |t| t == "Calls", 0).is_some(),
-        "the margin's own tab"
-    );
-    assert!(
-        text_at(&mut sim, |t| t == "Calls", 1).is_none(),
-        "and no second Calls, on the card"
+        text_at(&mut sim, |t| t == "Calls", 0).is_none(),
+        "no Calls on the card"
     );
 }
 
@@ -21326,13 +21304,13 @@ fn every_note_card_has_one_layout_under_its_words() {
         let mut sim = sim_sized(&app, size);
         let head = text_at(&mut sim, |t| t == kind, 0).expect("its head");
         let date = text_at(&mut sim, |t| t.contains("2025"), 0).expect("its date");
-        let explain = text_at(&mut sim, |t| t == "Explain", 1).expect("its Explain");
+        let explain = text_at(&mut sim, |t| t == "Explain", 0).expect("its Explain");
         let ask = text_at(&mut sim, |t| t == "Ask", 0).expect("its Ask");
         // Facts over actions, each pair on one line.
         assert!((explain.y - ask.y).abs() < 1.0, "{explain:?} {ask:?}");
         assert!(explain.y > date.y + 20.0, "{explain:?} under {date:?}");
         if calls {
-            let count = text_at(&mut sim, |t| t == "Calls", 1).expect("its callers");
+            let count = text_at(&mut sim, |t| t == "Calls", 0).expect("its callers");
             assert!((count.y - date.y).abs() < 1.0, "{count:?} {date:?}");
             assert!(count.x > date.x, "the date first");
         }
