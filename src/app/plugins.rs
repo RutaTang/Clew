@@ -118,8 +118,8 @@ pub(crate) fn offered_commands<'a>(
             })
         })
         .collect();
-    // Read alike as the voice reads titles — whatever their case, or a
-    // "…", "?" at their end — in English, and as shown.
+    // Read alike as the voice reads titles — by their words, whatever their
+    // case or what stands between them — in English, and as shown.
     let bare = |name: &str| alike_key(name);
     let count = |names: Vec<String>| {
         let mut named: HashMap<String, usize> = HashMap::new();
@@ -159,14 +159,10 @@ pub(crate) fn offered_commands<'a>(
     offered
 }
 
-/// A command's name as the voice reads it, to tell names alike: lowercase,
-/// without a "…", ".", "?" or "!" at its end, its words one space apart.
+/// A command's name as the voice reads it, to tell names alike: its words,
+/// lowercase, whatever stands between them ("Call-Graph", "call graph…").
 pub(crate) fn alike_key(name: &str) -> String {
-    name.trim_end_matches(['…', '.', '?', '!'])
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    clew_voice::intent::plain_words(name)
 }
 
 /// An install done, as whoever asked for it is told: its fingerprint, in

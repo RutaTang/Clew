@@ -40150,6 +40150,12 @@ fn plugin_commands_named_alike_are_told_apart_by_a_verb_of_their_ids() {
         crate::app::palette::command_named("word count count words", &commands),
         crate::app::palette::Named::Alike(ref alike) if alike.len() == 4
     ));
+    // "close" said without the rest of an id: nothing is closed, and no
+    // plugin is run for it.
+    assert!(matches!(
+        crate::app::palette::command_named("close word count count words", &commands),
+        crate::app::palette::Named::Nothing
+    ));
     // Asked which, each name as given is that one.
     for command in &commands {
         if let Some(id) = command
@@ -40204,6 +40210,40 @@ fn clews_own_commands_stay_theirs_beside_plugins_named_nearly_alike() {
     // Code Statistics was Stats: Clew's own, as only it had that name.
     assert!(titles.contains(&"Code Statistics (stats)"), "{titles:?}");
     assert_eq!(said("show the stats").as_deref(), Some("Code Statistics"));
+    // Two plugins' "Stats", named as well as each other: neither is run,
+    // and the name Code Statistics had still names it.
+    let mut git = installed_plugin(true);
+    git.id = "git-stats".into();
+    git.manifest.plugin.name = "Git".into();
+    git.manifest.commands[0].title = "Stats".into();
+    let mut cargo = installed_plugin(true);
+    cargo.id = "cargo-stats".into();
+    cargo.manifest.plugin.name = "Cargo".into();
+    cargo.manifest.commands[0].title = "Stats".into();
+    // A plugin's name written apart from Clew's own only by a hyphen is
+    // named alike, and Clew's own keeps its name.
+    let mut hyphen = installed_plugin(true);
+    hyphen.id = "graphs".into();
+    hyphen.manifest.plugin.name = "Call-Graph".into();
+    hyphen.manifest.commands[0].title = "Call-Graph".into();
+    app.plugins.installed = vec![git, cargo, hyphen];
+    let commands = app.palette_commands();
+    let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+    assert!(
+        titles.contains(&"Git: Stats") && titles.contains(&"Cargo: Stats"),
+        "{titles:?}"
+    );
+    assert!(titles.contains(&"Call-Graph (graphs)"), "{titles:?}");
+    let said = |words: &str| {
+        crate::app::palette::command_said(words, &commands).map(|i| commands[i].title.clone())
+    };
+    assert_eq!(said("show the stats").as_deref(), Some("Code Statistics"));
+    assert_eq!(said("git stats").as_deref(), Some("Git: Stats"));
+    assert_eq!(said("call graph").as_deref(), Some("Call Graph"));
+    assert_eq!(
+        said("call graph graphs").as_deref(),
+        Some("Call-Graph (graphs)")
+    );
 }
 
 /// A plugin whose id is only its name's words, named as one of Clew's own
@@ -40228,6 +40268,11 @@ fn a_plugin_named_as_clews_own_command_is_reached_by_its_id() {
         assert_eq!(said(&own).as_deref(), Some(taken.as_str()), "{id}");
         assert_eq!(
             said(&format!("view {own}")).as_deref(),
+            Some(taken.as_str()),
+            "{id}"
+        );
+        assert_eq!(
+            said(&format!("open {own}")).as_deref(),
             Some(taken.as_str()),
             "{id}"
         );

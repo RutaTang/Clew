@@ -454,33 +454,36 @@ pub(crate) fn command_named(said: &str, commands: &[PaletteCommand]) -> Named {
     let alike =
         |key: &str| -> Vec<usize> { (0..commands.len()).filter(|&i| keys[i] == key).collect() };
     let tied = clew_voice::intent::command_ties(said, &titles);
-    if let Some(&first) = tied.first() {
-        // Named as well as each other, and not named alike: none.
-        if tied.iter().any(|&i| keys[i] != keys[first]) {
-            return Named::Nothing;
+    match tied.first() {
+        // Named best, alone or with others named alike only.
+        Some(&first) if tied.iter().all(|&i| keys[i] == keys[first]) => {
+            let group = alike(&keys[first]);
+            return match group[..] {
+                [_] => Named::One(first),
+                _ => told_apart(said, commands, &group).unwrap_or(Named::Alike(group)),
+            };
         }
-        let group = alike(&keys[first]);
-        return match group[..] {
-            [_] => Named::One(first),
-            _ => told_apart(said, commands, &group).unwrap_or(Named::Alike(group)),
-        };
-    }
-    // No title named as a whole: one of commands named alike, by its name
-    // and the words in its brackets read apart ("… todo close", which as a
-    // whole would close something).
-    let mut groups: Vec<&str> = Vec::new();
-    for key in &keys {
-        if !groups.contains(&key.as_str()) && keys.iter().filter(|k| *k == key).count() > 1 {
-            groups.push(key);
+        // Commands not named alike, named as well as each other: none of
+        // them; a command by the name it had, as when none is named.
+        Some(_) => {}
+        // No title named as a whole: one of commands named alike, by its
+        // name and the words in its brackets read apart ("… todo close",
+        // which as a whole would close something).
+        None => {
+            let mut groups: Vec<&str> = Vec::new();
+            for key in &keys {
+                if !groups.contains(&key.as_str()) && keys.iter().filter(|k| *k == key).count() > 1
+                {
+                    groups.push(key);
+                }
+            }
+            let mut found = groups
+                .into_iter()
+                .filter_map(|key| told_apart(said, commands, &alike(key)));
+            if let (Some(named), None) = (found.next(), found.next()) {
+                return named;
+            }
         }
-    }
-    let mut found = groups
-        .into_iter()
-        .filter_map(|key| told_apart(said, commands, &alike(key)));
-    match (found.next(), found.next()) {
-        (Some(named), None) => return named,
-        (Some(_), Some(_)) => return Named::Nothing,
-        (None, _) => {}
     }
     // None named: by the name one had, which only Clew's own had.
     let (names, at): (Vec<&str>, Vec<usize>) = commands

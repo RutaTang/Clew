@@ -188,11 +188,12 @@ fn score(utterance: &str, text: &str) -> Option<Score> {
 }
 
 /// How well what was said names one of the commands named alike: how well
-/// its name was said, then how many of the words in its brackets that say
-/// what it is were said, whether all of them were, and then how many of
-/// those that only say "do it" ("view", "open") — those counted only when
-/// all were said, as a word like "a" or "open" said on its own is read as
-/// the speaker's, not the id's.
+/// its name was said; then how many of the words in its brackets that say
+/// what it is were said, each as spelled ("todos" is not `todo`'s);
+/// whether all of them were; and how many of those that only say "do it"
+/// or which way to turn something ("view", "close") — counted only when
+/// all the rest were said, as a word like "a" or "close" said without the
+/// rest is the speaker's, not the id's.
 type AlikeRank = (Score, usize, bool, usize);
 
 /// The indices in `commands` — commands named alike: each the name and,
@@ -224,24 +225,58 @@ fn alike_rank(utterance: &str, name: &str, aside: Option<&str>) -> Option<AlikeR
         return bare;
     }
     let said = words(utterance);
-    let mut used = vec![false; said.len()];
-    let (mut telling, mut doing, mut all) = (0, 0, true);
-    for w in &aside {
-        match place(&said, &mut used, w) {
-            Some(_) if only_does(w) => doing += 1,
-            Some(_) => telling += 1,
-            None => all = false,
+    // The name's own words that only say "do it" or which way to turn
+    // something, said: the name's, never the id's ("show" said of "Lint:
+    // Show warnings" is not the plugin `acme-show`'s).
+    let mut names = vec![false; said.len()];
+    for w in words(name).iter().filter(|w| only_does(w)) {
+        if let Some(i) = (0..said.len()).find(|&i| !names[i] && said[i] == *w) {
+            names[i] = true;
+        }
+    }
+    let mut used = names.clone();
+    // Each word of the id where it was said as spelled; one said close to
+    // it is another id's ("todos", "acme 2").
+    let place_spelled = |used: &mut Vec<bool>, w: &str| -> bool {
+        let before = used.clone();
+        match place(&said, used, w) {
+            Some(true) => true,
+            _ => {
+                *used = before;
+                false
+            }
+        }
+    };
+    let (telling, doing): (Vec<&String>, Vec<&String>) = aside.iter().partition(|w| !only_does(w));
+    let told = telling
+        .iter()
+        .filter(|w| place_spelled(&mut used, w))
+        .count();
+    let mut all = told == telling.len();
+    let mut did = 0;
+    if all {
+        let before = used.clone();
+        did = doing.iter().filter(|w| place_spelled(&mut used, w)).count();
+        if did < doing.len() {
+            used = before;
+            did = 0;
+            all = false;
         }
     }
     let rest: Vec<&str> = said
         .iter()
-        .zip(&used)
-        .filter(|(_, used)| !**used)
+        .zip(used.iter().zip(&names))
+        .filter(|(_, (used, name))| !**used || **name)
         .map(|(w, _)| w.as_str())
         .collect();
-    let with_aside =
-        score(&rest.join(" "), name).map(|s| (s, telling, all, if all { doing } else { 0 }));
+    let with_aside = score(&rest.join(" "), name).map(|s| (s, told, all, did));
     bare.max(with_aside)
+}
+
+/// A text as the voice reads it: its words, lowercase, one space apart —
+/// so names read alike are keyed alike ("Call-Graph", "call graph…").
+pub fn plain_words(text: &str) -> String {
+    words(text).join(" ")
 }
 
 /// Whether `word` only says "do it", or which way to turn something.
@@ -413,10 +448,14 @@ fn near(a: &str, b: &str) -> bool {
 /// Whether `x` is `y` inflected: a plural (`files`, `hierarchies`), or a
 /// verb's `-ing` or `-ed` (`debugging`, `zoomed`).
 fn inflected(x: &str, y: &str) -> bool {
+    // A letter doubled before the ending ("running"): the word without
+    // one of them, cut by its letter, not its bytes ("ññing").
     let doubled = |stem: &str| {
         let mut chars = stem.chars().rev();
-        matches!((chars.next(), chars.next()), (Some(a), Some(b)) if a == b)
-            && stem[..stem.len() - 1] == *y
+        match (chars.next(), chars.next()) {
+            (Some(a), Some(b)) if a == b => stem.strip_suffix(a) == Some(y),
+            _ => false,
+        }
     };
     x.strip_suffix("es") == Some(y)
         || x.strip_suffix('s') == Some(y)
@@ -508,6 +547,67 @@ mod tests {
         assert_eq!(alike_ties("open the call graph", &graphs), [0]);
         assert_eq!(alike_ties("call graph call graph", &graphs), [1]);
         assert!(alike_ties("explain the call graph", &graphs).is_empty());
+        // A word that turns things, said without the rest of an id: the
+        // speaker's, and nothing here is closed or turned off.
+        let todo_close =
+            |said: &str| alike_ties(said, &[(NAME, Some("todo")), (NAME, Some("todo-close"))]);
+        assert!(todo_close("close word count count words").is_empty());
+        assert_eq!(todo_close("word count count words todo close"), [1]);
+        let off = [("Call Graph", None), ("Call graph", Some("x-off"))];
+        assert!(alike_ties("turn off the call graph", &off).is_empty());
+        // The name's own such word is the name's, not an id's.
+        let lint = |said: &str| {
+            alike_ties(
+                said,
+                &[
+                    ("Lint: Show warnings", Some("acme")),
+                    ("Lint: Show warnings", Some("acme-show")),
+                ],
+            )
+        };
+        assert_eq!(lint("lint show warnings acme"), [0]);
+        assert_eq!(lint("lint show warnings acme show"), [1]);
+        let minimap = [
+            ("View: Show Minimap", None),
+            ("View: Show Minimap", Some("show")),
+        ];
+        assert_eq!(alike_ties("view show minimap", &minimap), [0]);
+        assert_eq!(alike_ties("view show minimap show", &minimap), [1]);
+        // An id's words as spelled: one close to another id's is not it.
+        let spelled = |said: &str, ids: [&str; 2]| {
+            alike_ties(said, &[(NAME, Some(ids[0])), (NAME, Some(ids[1]))])
+        };
+        assert_eq!(
+            spelled("word count count words todos", ["todo", "todos"]),
+            [1]
+        );
+        assert_eq!(
+            spelled("word count count words todo", ["todo", "todos"]),
+            [0]
+        );
+        assert_eq!(
+            spelled("word count count words acme 2", ["acme1", "acme2"]),
+            [1]
+        );
+        assert_eq!(
+            spelled("word count count words view", ["view", "views"]),
+            [0]
+        );
+        assert_eq!(
+            spelled("word count count words views", ["view", "views"]),
+            [1]
+        );
+    }
+
+    /// Endings are cut by letters, not bytes: a doubled letter of two
+    /// bytes before "-ing" or "-ed" reads as one, as "running" is "run".
+    #[test]
+    fn words_of_letters_of_more_than_one_byte_are_read_whole() {
+        assert!(near("running", "run"));
+        assert!(near("ññing", "ñ"));
+        assert!(near("ééed", "é"));
+        assert!(command_ties("ééed ññing", &["éé", "ññ ééed"]).len() <= 2);
+        assert_eq!(plain_words("Call-Graph…"), "call graph");
     }
 
     /// A window's worth of titles, as the palette lists them.
