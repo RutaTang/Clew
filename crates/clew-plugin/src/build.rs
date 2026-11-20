@@ -11,7 +11,7 @@
 //!   `.cargo/config.toml` or `rust-toolchain.toml` in the source never
 //!   reaches cargo.
 //! - cargo and rustc are run by absolute path, told only the variables
-//!   finding the toolchain and linking need ([`kept`]): nothing that steers
+//!   finding the toolchain and linking need (`kept`): nothing that steers
 //!   a build (`RUSTFLAGS`, wrappers), and nothing of the user's — a key in
 //!   a variable — for `env!` to read. The network's settings are told only
 //!   to `cargo fetch`, which downloads and runs nothing; what compiles runs
@@ -1121,8 +1121,7 @@ mod tests {
 
     #[test]
     fn a_build_is_of_the_source_as_it_was_built() {
-        let root = std::env::temp_dir().join(format!("clew-build-from-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = clew_core::testutil::TempDir::new("plugin-build-from");
         let (source, built) = (root.join("source"), root.join("built"));
         std::fs::create_dir_all(source.join("src/parts")).unwrap();
         std::fs::create_dir_all(&built).unwrap();
@@ -1166,7 +1165,6 @@ mod tests {
         assert!(!built_from(&built, &source));
         record_built_from(&built, None).unwrap();
         assert!(!built.join(SOURCE_STAMP).exists());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1199,8 +1197,7 @@ mod tests {
 
     #[test]
     fn only_rust_files_under_src_are_staged() {
-        let root = std::env::temp_dir().join(format!("clew-plugin-stage-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = clew_core::testutil::TempDir::new("plugin-stage");
         let source = root.join("source");
         std::fs::create_dir_all(source.join("src/nested")).unwrap();
         std::fs::create_dir_all(source.join(".cargo")).unwrap();
@@ -1232,7 +1229,6 @@ mod tests {
             stage_sources(&source, &crate_dir),
             Err(BuildError::Source(why)) if why.contains("src/lib.rs")
         ));
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1272,8 +1268,7 @@ mod tests {
 
     #[test]
     fn a_dependency_reading_outside_its_package_is_refused_and_one_that_does_not_is_noted() {
-        let root = std::env::temp_dir().join(format!("clew-build-reads-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = clew_core::testutil::TempDir::new("plugin-build-reads");
         let package = |name: &str, lib: &str| {
             let dir = root.join(format!("registry/{name}-1.0.0"));
             std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -1319,7 +1314,6 @@ mod tests {
         )
         .unwrap();
         assert!(check_dependency_reads(&alone, &[], &checked).is_err());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1374,8 +1368,7 @@ mod tests {
 
     #[test]
     fn the_plugins_own_code_may_not_read_the_computer() {
-        let root = std::env::temp_dir().join(format!("clew-build-own-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = clew_core::testutil::TempDir::new("plugin-build-own");
         let source = root.join("source");
         std::fs::create_dir_all(source.join("src/views")).unwrap();
         std::fs::write(source.join("src/lib.rs"), "mod views;").unwrap();
@@ -1389,7 +1382,6 @@ mod tests {
             matches!(&refused, BuildError::Policy(why) if why.contains("src/views/mod.rs:1: `include_str`")),
             "{refused:?}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

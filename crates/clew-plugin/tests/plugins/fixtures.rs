@@ -137,9 +137,7 @@ fn installs_rust_for_clew_and_builds_with_it() {
         eprintln!("skipped: set CLEW_TEST_INSTALL_RUST=1 to install Rust for real");
         return;
     }
-    let data = std::env::temp_dir().join(format!("clew-own-rust-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&data);
-    std::fs::create_dir_all(&data).unwrap();
+    let data = clew_core::testutil::TempDir::new("own-rust");
     let mut stages = Vec::new();
     let toolchain = clew_plugin::toolchain::set_up(
         &data,
@@ -179,7 +177,6 @@ fn installs_rust_for_clew_and_builds_with_it() {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
     eprintln!("Clew's own Rust {}: {}", own.version, size.trim());
-    let _ = std::fs::remove_dir_all(&data);
 }
 
 /// A plugin built with crates agents reach for builds: the check that a
@@ -192,8 +189,7 @@ fn installs_rust_for_clew_and_builds_with_it() {
 #[ignore = "downloads popular crates and builds with them: needs Rust 1.95.0 with wasm32-wasip2, and the network"]
 fn popular_crates_build_and_reading_the_computer_does_not() {
     let toolchain = toolchain();
-    let root = std::env::temp_dir().join(format!("clew-popular-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = clew_core::testutil::TempDir::new("popular-crates");
     let source = root.join("source");
     std::fs::create_dir_all(source.join("src")).unwrap();
     std::fs::write(
@@ -261,5 +257,4 @@ clew_plugin_sdk::export!(P);
         "{}",
         refused.report()
     );
-    let _ = std::fs::remove_dir_all(&root);
 }

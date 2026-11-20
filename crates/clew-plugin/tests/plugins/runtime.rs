@@ -73,12 +73,10 @@ fn fixture(name: &str) -> (Vec<u8>, clew_plugin::Inspected) {
     (bytes, inspected)
 }
 
-fn data(name: &str) -> std::path::PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("clew-plugin-runtime-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A data folder of the test's own, removed when it ends, a failing
+/// test's included.
+fn data(name: &str) -> clew_core::testutil::TempDir {
+    clew_core::testutil::TempDir::new(&format!("plugin-runtime-{name}"))
 }
 
 fn views(runtime: &Runtime) -> Loaded {
@@ -393,15 +391,12 @@ fn printing_a_lot_is_kept_in_part_and_never_fails() {
     let runtime = Runtime::new(None).unwrap();
     let loaded = views(&runtime);
     let host = Arc::new(FakeHost::default());
-    // Thousands of lines through a debug build's WASI, beside the other
-    // tests' compiles: what is kept is under test here, not how fast.
-    let roomy = Limits {
-        deadline: Duration::from_secs(60),
-        ..quick()
-    };
+    // 20 000 lines, written in place (`Capture` as the WASI stream): well
+    // inside the quick deadline. Through wasmtime's default stream, each
+    // write went to a task of its own and back — 1.5 s of the 2.
     assert_eq!(
         loaded
-            .run(host.clone(), "chatter", &at(None, None), roomy)
+            .run(host.clone(), "chatter", &at(None, None), quick())
             .unwrap(),
         Outcome::Nothing
     );
@@ -428,7 +423,7 @@ fn printing_a_lot_is_kept_in_part_and_never_fails() {
 #[test]
 fn a_plugin_keeps_its_own_store_between_calls() {
     let dir = data("store");
-    let runtime = Runtime::new(Some(dir.clone())).unwrap();
+    let runtime = Runtime::new(Some(dir.to_path_buf())).unwrap();
     let loaded = views(&runtime);
     let host: Arc<dyn Host> = Arc::new(FakeHost::default());
     for n in 1..=3 {
@@ -484,7 +479,6 @@ fn a_plugin_keeps_its_own_store_between_calls() {
         .run(host, "store", &at(None, None), quick())
         .unwrap_err();
     assert!(matches!(refused, Failure::Plugin(_)));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -507,12 +501,12 @@ fn a_graph_comes_back_checked() {
 fn compiled_code_is_cached_and_loads_fast() {
     let dir = data("cache");
     let (bytes, inspected) = fixture("views");
-    let runtime = Runtime::new(Some(dir.clone())).unwrap();
+    let runtime = Runtime::new(Some(dir.to_path_buf())).unwrap();
     runtime.load(&bytes, &inspected, READ).unwrap();
     let compiled = dir.join("plugins").join("compiled");
     let cached: Vec<_> = std::fs::read_dir(&compiled).unwrap().flatten().collect();
     assert_eq!(cached.len(), 1);
-    let again = Runtime::new(Some(dir.clone())).unwrap();
+    let again = Runtime::new(Some(dir.to_path_buf())).unwrap();
     let started = Instant::now();
     let loaded = again.load(&bytes, &inspected, READ).unwrap();
     let took = started.elapsed();
@@ -535,7 +529,7 @@ fn compiled_code_is_cached_and_loads_fast() {
     let damaged = compiled.join("damaged");
     std::fs::write(&damaged, b"not compiled code").unwrap();
     std::fs::rename(&damaged, cached[0].path()).unwrap();
-    let third = Runtime::new(Some(dir.clone())).unwrap();
+    let third = Runtime::new(Some(dir.to_path_buf())).unwrap();
     assert!(
         third
             .load(&bytes, &inspected, READ)
@@ -550,7 +544,6 @@ fn compiled_code_is_cached_and_loads_fast() {
     );
     again.sweep_compiled(&[]);
     assert_eq!(std::fs::read_dir(&compiled).unwrap().count(), 0);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

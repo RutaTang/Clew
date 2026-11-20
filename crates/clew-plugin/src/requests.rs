@@ -313,14 +313,10 @@ pub fn wait_taken(
 mod tests {
     use super::*;
 
-    fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "clew-plugin-requests-{name}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A data directory of the test's own, removed when it ends, a failing
+    /// test's included.
+    fn temp(name: &str) -> clew_core::testutil::TempDir {
+        clew_core::testutil::TempDir::new(&format!("plugin-requests-{name}"))
     }
 
     /// A request no window takes is given up within the time given for
@@ -351,7 +347,6 @@ mod tests {
             &AtomicBool::new(false),
         );
         assert_eq!(waited, Waited::NoAnswer, "taken, so waited for its answer");
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     fn install() -> Ask {
@@ -398,7 +393,7 @@ mod tests {
         assert_eq!(waiting[0].0, nonce);
         assert_eq!(waiting[0].1.agent, "Claude Code");
         let window = {
-            let data = data.clone();
+            let data = data.to_path_buf();
             let nonce = nonce.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(300));
@@ -427,7 +422,6 @@ mod tests {
         );
         assert!(pending(&data).is_empty());
         assert_eq!(std::fs::read_dir(requests_dir(&data)).unwrap().count(), 0);
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -452,7 +446,6 @@ mod tests {
             Some(Answer::Declined)
         );
         assert_eq!(std::fs::read_dir(requests_dir(&data)).unwrap().count(), 0);
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -469,7 +462,6 @@ mod tests {
             None
         );
         assert!(pending(&data).is_empty());
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     /// The user answered after the agent stopped waiting: nothing is left
@@ -490,7 +482,6 @@ mod tests {
             .map(|e| e.file_name())
             .collect();
         assert!(left.is_empty(), "{left:?}");
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -515,7 +506,6 @@ mod tests {
         assert_eq!(waiting[0].1.agent, "agent");
         assert!(!dir.join("notanonce.request.json").exists());
         assert!(answer(&data, "../x", &Answer::Declined).is_err());
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]

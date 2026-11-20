@@ -367,12 +367,10 @@ mod tests {
     use super::*;
     use crate::manifest::tests_support;
 
-    fn temp(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("clew-plugin-store-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A directory of the test's own, removed when it ends, a failing
+    /// test's included.
+    fn temp(name: &str) -> clew_core::testutil::TempDir {
+        clew_core::testutil::TempDir::new(&format!("plugin-store-{name}"))
     }
 
     /// An `Inspected` for `bytes`, as if read from a plugin file.
@@ -410,7 +408,6 @@ mod tests {
         assert!(!installed_path(&data, &record.fingerprint).exists());
         assert_eq!(read_approved(&data, &newer).unwrap(), two);
         assert_eq!(Store::load(&data).plugin.len(), 1);
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -430,7 +427,6 @@ mod tests {
         // Gone is the same: installed again, not tried again.
         std::fs::remove_file(&path).unwrap();
         assert_eq!(read_approved(&data, &record).unwrap_err(), CHANGED);
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -439,7 +435,6 @@ mod tests {
         let err = install(&data, b"other", &inspected(b"inspected", 0), Origin::Ask).unwrap_err();
         assert!(err.contains("changed after it was read"));
         assert!(Store::load(&data).plugin.is_empty());
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -456,7 +451,6 @@ mod tests {
         assert!(!installed_path(&data, &record.fingerprint).exists());
         assert!(remove(&data, "sample").unwrap_err().contains("no plugin"));
         assert!(set_enabled(&data, "nope", true).is_err());
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -469,7 +463,6 @@ mod tests {
             std::fs::read_to_string(store_path(&data)).unwrap(),
             "[plugin.x\n"
         );
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -493,6 +486,5 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("abc")
         );
-        let _ = std::fs::remove_dir_all(&data);
     }
 }

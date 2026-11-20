@@ -956,6 +956,16 @@ impl Capture {
     fn dropped(&self) -> usize {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).dropped
     }
+
+    /// Keep what fits under [`OUTPUT_CAP`], and count the rest.
+    fn take(&self, buf: &[u8]) {
+        let mut captured = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let taken = buf
+            .len()
+            .min(OUTPUT_CAP.saturating_sub(captured.kept.len()));
+        captured.kept.extend_from_slice(&buf[..taken]);
+        captured.dropped += buf.len() - taken;
+    }
 }
 
 impl IsTerminal for Capture {
@@ -968,6 +978,36 @@ impl StdoutStream for Capture {
     fn async_stream(&self) -> Box<dyn tokio::io::AsyncWrite + Send + Sync> {
         Box::new(self.clone())
     }
+
+    /// Written to in place. The default stream hands each write to a task
+    /// of its own and waits for it: a plugin printing 20 000 lines took
+    /// 1.5 s in a debug build, most of a 2 s deadline, in thread hops for
+    /// what is a copy into memory.
+    fn p2_stream(&self) -> Box<dyn wasmtime_wasi::p2::OutputStream> {
+        Box::new(self.clone())
+    }
+}
+
+impl wasmtime_wasi::p2::OutputStream for Capture {
+    fn write(&mut self, bytes: bytes::Bytes) -> wasmtime_wasi::p2::StreamResult<()> {
+        self.take(&bytes);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> wasmtime_wasi::p2::StreamResult<()> {
+        Ok(())
+    }
+
+    /// Always room: past [`OUTPUT_CAP`] what is written is dropped and
+    /// counted, never refused (a refusal panics the plugin's `println!`).
+    fn check_write(&mut self) -> wasmtime_wasi::p2::StreamResult<usize> {
+        Ok(OUTPUT_CAP)
+    }
+}
+
+#[wasmtime_wasi::async_trait]
+impl Pollable for Capture {
+    async fn ready(&mut self) {}
 }
 
 impl tokio::io::AsyncWrite for Capture {
@@ -976,12 +1016,7 @@ impl tokio::io::AsyncWrite for Capture {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        let mut captured = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let taken = buf
-            .len()
-            .min(OUTPUT_CAP.saturating_sub(captured.kept.len()));
-        captured.kept.extend_from_slice(&buf[..taken]);
-        captured.dropped += buf.len() - taken;
+        self.take(buf);
         Poll::Ready(Ok(buf.len()))
     }
 

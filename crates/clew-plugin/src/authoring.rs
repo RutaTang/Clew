@@ -216,14 +216,10 @@ fn walk(dir: &Path, rel: &str, depth: usize, out: &mut Vec<String>) {
 mod tests {
     use super::*;
 
-    fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "clew-plugin-authoring-{name}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A directory of the test's own, removed when it ends, a failing
+    /// test's included.
+    fn temp(name: &str) -> clew_core::testutil::TempDir {
+        clew_core::testutil::TempDir::new(&format!("plugin-authoring-{name}"))
     }
 
     #[test]
@@ -246,7 +242,6 @@ mod tests {
             list_files(&data, "todo-authors").unwrap(),
             ["plugin.toml", "src/lib.rs"]
         );
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -276,7 +271,6 @@ mod tests {
                 .unwrap_err()
                 .contains("no plugin")
         );
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -304,7 +298,6 @@ mod tests {
             );
         }
         assert_eq!(read_file(&data, "sample", "plugin.toml").unwrap(), good);
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -318,7 +311,6 @@ mod tests {
             assert!(crate::tools::last_build(&data, id).is_err(), "{id:?}");
         }
         assert!(!data.join("escape").exists());
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]

@@ -544,12 +544,10 @@ fn list(rows: impl Iterator<Item = String>, total: usize) -> String {
 mod tests {
     use super::*;
 
-    fn temp(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("clew-plugin-tools-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A directory of the test's own, removed when it ends, a failing
+    /// test's included.
+    fn temp(name: &str) -> clew_core::testutil::TempDir {
+        clew_core::testutil::TempDir::new(&format!("plugin-tools-{name}"))
     }
 
     fn answer(step: Step) -> Result<String, String> {
@@ -634,7 +632,6 @@ mod tests {
             .contains("missing")
         );
         assert!(answer(call(&data, "nope", &json!({}), &cancel)).is_err());
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     /// The list of plugins unreadable: the agent is told so, and is not
@@ -658,7 +655,6 @@ mod tests {
             "{said}"
         );
         assert!(!said.contains("not installed"), "{said}");
-        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -795,6 +791,5 @@ mod tests {
             call(&data, "plugin_install", &json!({"id": "views"}), &cancel),
             Step::Install { .. }
         ));
-        let _ = std::fs::remove_dir_all(&data);
     }
 }

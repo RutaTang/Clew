@@ -13,7 +13,7 @@ publish = false
 
 [features]
 default = ["runtime"]
-runtime = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:tokio"]
+runtime = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:tokio", "dep:bytes"]
 
 [dependencies]
 clew-core = { path = "../clew-core" }
@@ -32,3 +32,6 @@ wasmtime-wasi = { version = "=48.0.9", optional = true, default-features = false
 # The `AsyncWrite` a plugin's standard output is captured through, and the
 # waits of its clock (`runtime::RunClock`).
 tokio = { version = "1.52.3", optional = true, default-features = false, features = ["time", "rt"] }
+# What WASI hands a write to standard output as (`runtime::Capture`), the
+# version wasmtime-wasi uses.
+bytes = { version = "1.12.1", optional = true, default-features = false }

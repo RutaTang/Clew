@@ -414,8 +414,8 @@ fn check_version(version: &str) -> Result<(), String> {
 
 /// How plugin version `a` stands to `b`, as Cargo orders versions: by
 /// their three numbers, then a pre-release (`1.0.0-beta`) before its
-/// release; what follows a `+` is not compared. Both as [`check_version`]
-/// takes them.
+/// release; what follows a `+` is not compared. Both as a manifest's
+/// version is checked to be (`check_version`).
 pub fn version_order(a: &str, b: &str) -> std::cmp::Ordering {
     fn parts(version: &str) -> ([u64; 3], Option<&str>) {
         let version = version.split_once('+').map_or(version, |(v, _)| v);
