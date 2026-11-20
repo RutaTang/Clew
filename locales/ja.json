@@ -393,6 +393,7 @@
  "Clew could not fetch the host key of {label} ({host}:{port}).": "Clew は {label} のホスト鍵を取得できませんでした（{host}:{port}）。",
  "Clew could not read its list of plugins": "Clew がプラグインの一覧を読み取れませんでした",
  "Clew could not read its list of plugins, so it shows what it read last and runs none of them: {reason}": "Clew がプラグインの一覧を読み取れなかったため、最後に読み取った一覧を表示し、どのプラグインも実行しません: {reason}",
+ "Clew could not read its list of plugins, so none of them run: {reason}": "Clew がプラグインの一覧を読み取れなかったため、どのプラグインも実行しません: {reason}",
  "Clew doesn't know this model's prices: enter them under Usage and cost to see what it costs.": "Clew はこのモデルの価格を知りません。「使用量と費用」で入力すると費用が表示されます。",
  "Clew doesn't know {model}'s prices. Enter them to see what calls cost.": "Clew は {model} の価格を知りません。入力すると呼び出しの費用がわかります。",
  "Clew explains code and answers questions with a language model you choose. Add its API key.": "Clew は、選んだ言語モデルでコードを解説し、質問に答えます。その API キーを追加してください。",

@@ -753,6 +753,8 @@ pub enum PluginMsg {
     /// Another window changed what is installed or turned on: read the
     /// list again (`STORE_REVISION`).
     StoreChanged,
+    /// Another window set Rust up or removed Clew's own: looked at again.
+    ToolchainChanged,
     /// Requests `clew-server mcp` filed, as [`requests_subscription`] found
     /// them.
     Requests(Arc<Vec<(String, clew_plugin::requests::Request)>>),
@@ -831,6 +833,20 @@ pub(crate) fn store_revision() -> u64 {
 
 fn store_changed() {
     STORE_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Bumped when this process ends setting Rust up or removing Clew's own:
+/// another window's Settings, read before, offered to install it again —
+/// 700 MB for nothing. The shell tells the others
+/// (`PluginMsg::ToolchainChanged`).
+static TOOLCHAIN_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn toolchain_revision() -> u64 {
+    TOOLCHAIN_REVISION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn toolchain_changed() {
+    TOOLCHAIN_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Why a run of `record` stopped before it started because its approval
@@ -1089,7 +1105,19 @@ impl App {
                     self.plugins.forget_copy(id);
                 }
                 self.plugins.installed = installed;
-                self.plugins.list_error = None;
+                // Readable again: what was said of it goes, and graphs it
+                // kept from building are built.
+                if self.plugins.list_error.take().is_some() {
+                    let said_of_list = self.failure_notice.as_ref().is_some_and(|f| {
+                        f.of == FailureOf::PluginRun && f.retry.is_none() && f.spot.is_none()
+                    });
+                    if said_of_list {
+                        self.forget_failure_of(FailureOf::PluginRun);
+                    }
+                    for map in self.proj.plugin_maps.values_mut().filter(|m| !m.building) {
+                        map.rev = u64::MAX;
+                    }
+                }
             }
             // Unreadable: the list read last stands, and Settings says why.
             Err(why) => self.plugins.list_error = Some(why),
@@ -1400,7 +1428,10 @@ impl App {
         let entry = self.proj.plugin_maps.entry(id.clone()).or_default();
         if entry.fingerprint != fingerprint {
             // Another copy of the plugin: what the last one built is not
-            // this one's.
+            // this one's, and a build of the last one still going stops.
+            if let Some(stop) = entry.stop.take() {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             *entry = PluginMap {
                 fingerprint: fingerprint.clone(),
                 ..Default::default()
@@ -1501,12 +1532,19 @@ impl App {
             return Task::none();
         }
         let plugin = map_of(&map).map(|(plugin, _)| plugin.to_string());
-        if let Some(plugin) = &plugin {
+        // A build of a copy replaced meanwhile: what it printed, and its
+        // loaded code, are not the new copy's — its log read as the new
+        // build's, freshly emptied.
+        let current = plugin
+            .as_deref()
+            .and_then(|p| self.plugins.get(p))
+            .is_some_and(|p| p.record.fingerprint == fingerprint);
+        if let Some(plugin) = plugin.as_ref().filter(|_| current) {
             for HostEvent::Log(level, line) in ran.log {
                 self.plugins.note(plugin, level, line);
             }
         }
-        if let Some((fp, loaded)) = ran.loaded {
+        if let Some((fp, loaded)) = ran.loaded.filter(|_| current) {
             self.plugins.loaded.insert(fp, loaded);
         }
         // Not built at all: turned off, removed or replaced since this
@@ -1521,10 +1559,19 @@ impl App {
                 .get_mut(&map)
                 .filter(|m| m.fingerprint == fingerprint)
             {
-                // Not built: asked for again when next shown, not taken
-                // as built for these files.
                 entry.building = false;
-                entry.rev = u64::MAX;
+                if matches!(failure, Failure::Stopped(why) if why == WITHDRAWN[3]) {
+                    // The list unreadable: said where the graph is, with
+                    // Try again, and built again when the files change —
+                    // not asked for again at once, and refused again, for
+                    // good.
+                    entry.failed = Some(failure_words(failure));
+                    entry.rev = rev;
+                } else {
+                    // Not built: asked for again when next shown, not
+                    // taken as built for these files.
+                    entry.rev = u64::MAX;
+                }
             }
             return self.reload_plugins();
         }
@@ -1908,6 +1955,20 @@ impl App {
                         )
                     },
                     Some(Message::Plugin(PluginMsg::RunAgain(again))),
+                    FailureOf::PluginRun,
+                );
+            } else if matches!(failure, Failure::Stopped(why) if why == WITHDRAWN[3]) {
+                // Its list unreadable: Settings → Plugins says why, at its
+                // top, one click away; said no more once it reads again.
+                self.say_failure_again(
+                    move || {
+                        tr!(
+                            "{command} did not run: {reason}",
+                            command = title.clone(),
+                            reason = crate::i18n::lookup(WITHDRAWN[3])
+                        )
+                    },
+                    None,
                     FailureOf::PluginRun,
                 );
             } else if matches!(failure, Failure::Stopped(why) if why == WITHDRAWN[2]) {
@@ -2910,6 +2971,12 @@ impl App {
                 self.reload_plugins()
             }
             PluginMsg::StoreChanged => self.reload_plugins(),
+            // Looked at again where it was looked at: a window that never
+            // showed the row has nothing stale to show.
+            PluginMsg::ToolchainChanged => match self.plugins.building {
+                Building::Unknown => Task::none(),
+                _ => self.check_toolchain(),
+            },
             PluginMsg::Link(url) => {
                 // A plugin read the project and wrote this page: a web
                 // address can carry what it read away, so it is shown in
@@ -3254,12 +3321,13 @@ impl App {
                 if checked.elsewhere {
                     return self.check_toolchain_when_free();
                 }
-                // Removed: said, as its 700 MB went with no word.
-                if matches!(self.plugins.building, Building::Removing)
-                    && checked.removal_failed.is_none()
-                    && !checked.own_installed
-                {
-                    self.status = tr!("Clew's own Rust was removed").into();
+                // Removed: said, as its 700 MB went with no word; and the
+                // other windows look again.
+                if matches!(self.plugins.building, Building::Removing) {
+                    toolchain_changed();
+                    if checked.removal_failed.is_none() && !checked.own_installed {
+                        self.status = tr!("Clew's own Rust was removed").into();
+                    }
                 }
                 self.plugins.own_rust = checked.own_installed;
                 // Why it could not be removed holds while it is there.
@@ -3312,9 +3380,10 @@ impl App {
                 if !matches!(self.plugins.building, Building::SettingUp { .. }) {
                     return Task::none();
                 }
-                // What there is now, looked at again; with why the step did
-                // not work if it did not.
+                // What there is now, looked at again, here and in the other
+                // windows; with why the step did not work if it did not.
                 self.plugins.building = Building::Unknown;
+                toolchain_changed();
                 match done {
                     Ok(version) => {
                         self.plugins.setup_failure = None;

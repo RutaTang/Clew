@@ -440,6 +440,12 @@ pub fn set_up(
     let Some(_held) = hold(data) else {
         return Err(SetUpError::Elsewhere);
     };
+    // Set up meanwhile — by another window, or outside Clew: nothing to do.
+    // An install run again for nothing was 700 MB downloaded, and, cancelled
+    // or failed, it removed the Rust just installed.
+    if let Ok(toolchain) = find(Some(data)) {
+        return Ok(toolchain);
+    }
     match setup {
         Setup::AddTarget { rustup } => {
             stage(Stage::AddingTarget);

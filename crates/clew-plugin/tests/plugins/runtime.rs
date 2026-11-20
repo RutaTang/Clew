@@ -409,6 +409,16 @@ fn printing_a_lot_is_kept_in_part_and_never_fails() {
     let stdout = log.iter().find(|(l, _)| *l == Level::Info).unwrap();
     assert!(stdout.1.starts_with("line 0 of"));
     assert!(stdout.1.len() <= 64 * 1024);
+    // Cut at a line's end, and said: it ended mid-line with no word.
+    assert!(
+        stdout.1.ends_with("of a plugin that prints too much"),
+        "{}",
+        &stdout.1[stdout.1.len() - 60..]
+    );
+    assert!(
+        log.iter()
+            .any(|(l, m)| *l == Level::Warning && m == "what it printed past 64 KiB was left out")
+    );
     assert!(
         log.iter()
             .any(|(l, m)| *l == Level::Warning && m == "done printing")

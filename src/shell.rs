@@ -1299,6 +1299,9 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             // And the plugins: one installed, turned off or removed in one
             // window was still offered — and run — in the others.
             let plugins_before = crate::app::plugins::store_revision();
+            // And Rust for building plugins, set up or removed in one window
+            // while another offered to install it again.
+            let toolchain_before = crate::app::plugins::toolchain_revision();
             // And the language, which the menu bar is built in.
             #[cfg(target_os = "macos")]
             let lang_before = crate::i18n::current();
@@ -1373,6 +1376,23 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
                     })
                     .collect();
                 Task::batch([task, Task::batch(reload)])
+            };
+            let task = if crate::app::plugins::toolchain_revision() == toolchain_before {
+                task
+            } else {
+                let recheck: Vec<Task<Shell>> = clew
+                    .windows
+                    .keys()
+                    .copied()
+                    .filter(|other| *other != id)
+                    .map(|other| {
+                        Task::done(Shell::Window(
+                            other,
+                            Message::Plugin(crate::app::plugins::PluginMsg::ToolchainChanged),
+                        ))
+                    })
+                    .collect();
+                Task::batch([task, Task::batch(recheck)])
             };
             // It may have been the host's answer a close or a quit waits on.
             Task::batch([task, clew.settle(id)])

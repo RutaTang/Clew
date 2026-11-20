@@ -973,8 +973,11 @@ impl App {
         match self.settings.page {
             crate::SettingsPage::Usage => self.usage_opened(),
             // Whether plugins can be built here, looked at as their page
-            // opens: Rust may have been set up meanwhile.
-            crate::SettingsPage::Plugins => self.check_toolchain(),
+            // opens: Rust may have been set up meanwhile. And the list,
+            // read again: one that could not be read may be fixed now.
+            crate::SettingsPage::Plugins => {
+                Task::batch([self.reload_plugins(), self.check_toolchain()])
+            }
             _ => Task::none(),
         }
     }

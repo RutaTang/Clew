@@ -614,6 +614,11 @@ impl App {
     }
 
     pub(crate) fn on_open_overlay(&mut self, which: Overlay) -> Task<Message> {
+        // A plugin graph being built for Project Graphs is not built on
+        // under another overlay.
+        if which != Overlay::ProjectMaps {
+            self.stop_plugin_map_builds(None);
+        }
         // A search typed over another map is not this one's.
         if self.proj.overlay != Some(which) {
             self.graph_search.clear();

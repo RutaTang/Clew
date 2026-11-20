@@ -393,6 +393,7 @@
  "Clew could not fetch the host key of {label} ({host}:{port}).": "Clew 无法获取 {label} 的主机密钥（{host}:{port}）。",
  "Clew could not read its list of plugins": "Clew 无法读取其插件列表",
  "Clew could not read its list of plugins, so it shows what it read last and runs none of them: {reason}": "Clew 无法读取其插件列表，因此显示上次读取的列表，且不运行其中任何插件：{reason}",
+ "Clew could not read its list of plugins, so none of them run: {reason}": "Clew 无法读取其插件列表，因此不运行任何插件：{reason}",
  "Clew doesn't know this model's prices: enter them under Usage and cost to see what it costs.": "Clew 不知道这个模型的价格：在“用量与费用”中填写后即可看到费用。",
  "Clew doesn't know {model}'s prices. Enter them to see what calls cost.": "Clew 不知道 {model} 的价格。填写后即可看到每次调用的费用。",
  "Clew explains code and answers questions with a language model you choose. Add its API key.": "Clew 使用你选择的语言模型来解释代码、回答问题。请添加它的 API 密钥。",

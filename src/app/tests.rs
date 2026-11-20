@@ -41538,6 +41538,15 @@ fn an_unreadable_plugin_list_is_said_and_runs_and_deletes_nothing() {
     assert!(fresh.installed.is_empty() && fresh.list_error.is_some());
     let mut opened = blank_app();
     opened.plugins = fresh;
+    // Having read nothing, it shows nothing it read last.
+    assert!(
+        iced_test::simulator(crate::ui::plugins_settings(&opened))
+            .find(
+                format!("Clew could not read its list of plugins, so none of them run: {why}")
+                    .as_str()
+            )
+            .is_ok()
+    );
     assert!(
         iced_test::simulator(crate::ui::plugins_settings(&opened))
             .find("Have a plugin's file?")
@@ -41562,6 +41571,10 @@ fn an_unreadable_plugin_list_is_said_and_runs_and_deletes_nothing() {
         "Views: Say something did not run: Clew could not read its list of plugins"
     );
     assert!(!app.plugins.failing("views"));
+    // It stands, with Settings → Plugins (where why is said) one click away.
+    let notice = app.failure_shown().expect("said where the user is");
+    assert!(notice.retry.is_none() && notice.spot.is_none());
+    assert_eq!(notice.of.settings_page(), crate::SettingsPage::Plugins);
     // A run ending for a plugin this window no longer lists deletes what
     // it saved only when the list says it is gone: unread, it says nothing.
     let listed = std::mem::take(&mut app.plugins.installed);
@@ -41589,11 +41602,16 @@ fn an_unreadable_plugin_list_is_said_and_runs_and_deletes_nothing() {
     );
     app.plugins.installed = listed;
 
-    // Readable again: said no more, and it runs.
+    // Readable again, and read again as Settings → Plugins opens: said no
+    // more, and it runs.
     std::fs::write(&list, good).unwrap();
-    let reloaded = app.reload_plugins();
-    settle(&mut app, reloaded);
+    let opened = app.update(Message::Settings(SettingsMsg::OpenAt(
+        crate::SettingsPage::Plugins,
+    )));
+    settle(&mut app, opened);
     assert!(app.plugins.list_error.is_none());
+    assert!(app.failure_shown().is_none(), "said of it no more");
+    let _ = app.close_settings();
     app.status.clear();
     let ran = app.update(Message::Plugin(PluginMsg::Run {
         id: "views".into(),
@@ -41671,8 +41689,20 @@ fn a_long_log_says_how_much_of_it_was_let_go() {
     use crate::app::plugin_host::HostEvent;
     use crate::app::plugins::{Again, PluginMsg, Ran, Reply};
     use clew_plugin::runtime::{Level, Outcome};
+    let data = clew_core::testutil::TempDir::new("plugin-long-log");
+    let _env = data_dir_override(data.path());
     let mut app = blank_app();
-    app.plugins.installed = vec![installed_plugin(true)];
+    // In the store as installed: reading the list again keeps it, so only
+    // installing it anew forgets what was kept of it.
+    let plugin = installed_plugin(true);
+    clew_plugin::store::Store::update(data.path(), |store| {
+        store
+            .plugin
+            .insert(plugin.id.clone(), plugin.record.clone());
+        Ok(())
+    })
+    .unwrap();
+    app.plugins.installed = vec![plugin];
     let printed = (1..=205)
         .map(|n| format!("line {n}"))
         .collect::<Vec<_>>()
@@ -41715,13 +41745,15 @@ fn a_long_log_says_how_much_of_it_was_let_go() {
     assert!(shows(&app, "5 earlier lines are not kept"));
     assert!(shows(&app, "line 6") && !shows(&app, "line 5"));
 
-    // A new build: none of the last one's log, nor its count.
+    // Installed again (its copy made anew): none of the last log, nor its
+    // count — the list read again names the same build.
     let _ = app.update(Message::Plugin(PluginMsg::Installed {
         id: "word-count".into(),
         reply: Reply::None,
         update: None,
-        result: Ok("a newer build".into()),
+        result: Ok("fp-word-count".into()),
     }));
+    assert!(app.plugins.get("word-count").is_some());
     assert!(app.plugins.log_text("word-count").is_empty());
     assert!(!app.plugins.log_dropped.contains_key("word-count"));
 }
@@ -41760,6 +41792,122 @@ fn a_plugin_graph_no_longer_shown_is_not_built_on() {
     let shown = app.update(Message::Graph(GraphMsg::SelectMap(id.clone())));
     settle(&mut app, shown);
     assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
+
+    // Another overlay over it stops a build as closing does.
+    app.proj.plugin_maps.get_mut(&id).unwrap().rev = u64::MAX;
+    let building = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
+    let stop = app.proj.plugin_maps[&id].stop.clone().expect("building");
+    assert!(app.proj.plugin_maps[&id].building);
+    let _ = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectCalls)));
+    assert!(stop.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(!app.proj.plugin_maps[&id].building);
+    settle(&mut app, building);
+    assert!(app.failure_shown().is_none());
+}
+
+/// A plugin graph refused because Clew cannot read its list of plugins
+/// says so where the graph is, and is not asked for again, refused again,
+/// for good; readable again, it is built. And a build of a copy replaced
+/// meanwhile is stopped, and what it printed is not the new copy's.
+#[test]
+fn a_plugin_graph_refused_or_replaced_is_not_built_on() {
+    use crate::app::plugin_host::HostEvent;
+    use crate::app::plugins::{GraphRan, PluginMapStatus, PluginMsg};
+    use clew_plugin::runtime::{Failure, Level};
+    let data = clew_core::testutil::TempDir::new("plugin-graph-refused");
+    let _env = data_dir_override(data.path());
+    let mut app = scanned_app("plugin-graph-refused");
+    install_views_fixture(&mut app, data.path());
+    let opened = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
+    settle(&mut app, opened);
+    let id = crate::app::plugins::map_id("views", "pair");
+    let _building = app.update(Message::Graph(GraphMsg::SelectMap(id.clone())));
+    let (rev, fingerprint) = {
+        let entry = &app.proj.plugin_maps[&id];
+        (entry.rev, entry.fingerprint.clone())
+    };
+    let list = clew_plugin::store::store_path(data.path());
+    let good = std::fs::read(&list).unwrap();
+    std::fs::write(&list, "[plugin.views\nthis is not TOML").unwrap();
+    let refused = app.update(Message::Plugin(PluginMsg::GraphBuilt {
+        stamp: app.stamp(),
+        map: id.clone(),
+        rev,
+        fingerprint: fingerprint.clone(),
+        ran: Arc::new(std::sync::Mutex::new(Some(GraphRan {
+            outcome: Err(Failure::Stopped(
+                "Clew could not read its list of plugins".into(),
+            )),
+            loaded: None,
+            log: Vec::new(),
+        }))),
+    }));
+    assert_eq!(
+        app.plugin_map_status(),
+        Some(PluginMapStatus::Failed(
+            "Clew could not read its list of plugins".into()
+        ))
+    );
+    assert!(
+        !app.proj.plugin_maps[&id].building,
+        "not asked for again at once, to be refused again"
+    );
+    settle(&mut app, refused);
+    assert!(!app.proj.plugin_maps[&id].building);
+
+    // Readable again: built.
+    std::fs::write(&list, good).unwrap();
+    let reloaded = app.reload_plugins();
+    settle(&mut app, reloaded);
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
+
+    // A build of an older copy, still going as the new one is asked for:
+    // stopped, and what it printed is not the new copy's.
+    let old_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let entry = app.proj.plugin_maps.get_mut(&id).unwrap();
+        entry.fingerprint = "an older copy".into();
+        entry.building = true;
+        entry.stop = Some(old_stop.clone());
+    }
+    let rebuilt = app.ensure_plugin_map();
+    assert!(old_stop.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(app.proj.plugin_maps[&id].fingerprint, fingerprint);
+    let _ = app.update(Message::Plugin(PluginMsg::GraphBuilt {
+        stamp: app.stamp(),
+        map: id.clone(),
+        rev,
+        fingerprint: "an older copy".into(),
+        ran: Arc::new(std::sync::Mutex::new(Some(GraphRan {
+            outcome: Err(Failure::Crashed("old".into())),
+            loaded: None,
+            log: vec![HostEvent::Log(
+                Level::Error,
+                "the older copy wrote this".into(),
+            )],
+        }))),
+    }));
+    assert!(!app.plugins.log_text("views").contains("the older copy"));
+    assert!(!app.plugins.failing("views"));
+    settle(&mut app, rebuilt);
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
+}
+
+/// Another window set Rust up or removed Clew's own: a window that showed
+/// the Rust row looks again; one that never did has nothing stale.
+#[test]
+fn rust_set_up_in_another_window_is_looked_at_again() {
+    use crate::app::plugins::{Building, PluginMsg};
+    let mut app = blank_app();
+    let none = app.update(Message::Plugin(PluginMsg::ToolchainChanged));
+    assert!(iced_test::runtime::task::into_stream(none).is_none());
+    assert!(matches!(app.plugins.building, Building::Unknown));
+    app.plugins.building = Building::Ready {
+        version: "1.95.0".into(),
+        own: false,
+    };
+    let _ = app.update(Message::Plugin(PluginMsg::ToolchainChanged));
+    assert!(matches!(app.plugins.building, Building::Checking));
 }
 
 /// A link on a plugin's page to a file opens it as a row does: the page is

@@ -384,13 +384,23 @@ fn status(data: &Path) -> String {
     // Unreadable is not "no plugins": the agent is told, and does not make
     // a new one in place of plugins it cannot see.
     let store = match Store::load_checked(data) {
-        Ok(store) => store,
+        Ok(store) => Some(store),
         Err(why) => {
             lines.push(format!(
                 "Clew could not read its list of installed plugins ({why}); ask the user to look at Settings → Plugins."
             ));
-            Store::default()
+            None
         }
+    };
+    // Unread, whether each source is installed is not known: "not
+    // installed" would have the agent offer it again.
+    let Some(store) = store else {
+        for id in authoring::sources(data) {
+            lines.push(format!(
+                "{id}: source; whether it is installed is not known"
+            ));
+        }
+        return lines.join("\n");
     };
     for (id, record) in &store.plugin {
         let version = record
@@ -624,6 +634,30 @@ mod tests {
             .contains("missing")
         );
         assert!(answer(call(&data, "nope", &json!({}), &cancel)).is_err());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// The list of plugins unreadable: the agent is told so, and is not
+    /// told its plugin is not installed — it would offer it again.
+    #[test]
+    fn status_says_what_it_cannot_know_when_the_list_is_unreadable() {
+        let data = temp("status-unread");
+        let cancel = AtomicBool::new(false);
+        answer(call(
+            &data,
+            "plugin_new",
+            &json!({"id": "sample", "name": "Sample", "description": "A sample."}),
+            &cancel,
+        ))
+        .unwrap();
+        std::fs::write(crate::store::store_path(&data), "[plugin.sample\nnot TOML").unwrap();
+        let said = answer(call(&data, "plugin_status", &json!({}), &cancel)).unwrap();
+        assert!(said.contains("could not read its list"), "{said}");
+        assert!(
+            said.contains("sample: source; whether it is installed is not known"),
+            "{said}"
+        );
+        assert!(!said.contains("not installed"), "{said}");
         let _ = std::fs::remove_dir_all(&data);
     }
 

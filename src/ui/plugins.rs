@@ -365,9 +365,11 @@ pub(crate) fn plugin_install_modal(
     });
     // Another plugin under the same id: said as what it replaces, by name,
     // not as an update of a plugin it does not name.
+    // Its name only translated anew is the same plugin, updated.
     let renamed = pending
         .previous
         .as_ref()
+        .filter(|p| p.manifest.plugin.name != manifest.plugin.name)
         .map(|p| p.manifest.name_in(lang).to_string())
         .filter(|old| *old != name);
     let title = match &pending.previous {
@@ -1039,14 +1041,18 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
     // Its list unreadable: said, with where — not shown as no plugins, and
     // not offered as a first one to make.
     if let Some(why) = &app.plugins.list_error {
-        groups.push(
-            form::note(tr!(
+        // Nothing read before it (as the window opened): nothing to show.
+        let said = match app.plugins.installed.is_empty() {
+            true => tr!(
+                "Clew could not read its list of plugins, so none of them run: {reason}",
+                reason = why.clone()
+            ),
+            false => tr!(
                 "Clew could not read its list of plugins, so it shows what it read last and runs none of them: {reason}",
                 reason = why.clone()
-            ))
-            .color(theme::danger())
-            .into(),
-        );
+            ),
+        };
+        groups.push(form::note(said).color(theme::danger()).into());
     }
     if app.plugins.installed.is_empty() && app.plugins.list_error.is_none() {
         groups.push(form::group(

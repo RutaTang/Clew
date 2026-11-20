@@ -685,12 +685,28 @@ fn panic_message(stderr: &str) -> Option<String> {
     })
 }
 
-/// Write what a call printed to the plugin's log.
+/// Write what a call printed to the plugin's log; past [`OUTPUT_CAP`], the
+/// line cut partway is left out with the rest, and the log says so — it was
+/// cut mid-line with no word.
 fn forward_output(host: &dyn Host, level: Level, capture: &Capture) {
     let text = without_backtrace_hint(&capture.text());
+    let cut = capture.dropped() > 0;
+    let text = match cut {
+        true => text.rsplit_once('\n').map_or("", |(whole, _)| whole),
+        false => text.as_str(),
+    };
     let text = text.trim();
     if !text.is_empty() {
         host.log(level, text);
+    }
+    if cut {
+        host.log(
+            Level::Warning,
+            &format!(
+                "what it printed past {} KiB was left out",
+                OUTPUT_CAP / 1024
+            ),
+        );
     }
 }
 
@@ -912,14 +928,25 @@ impl bindings::clew::plugin::git::Host for State {
 }
 
 /// Standard output or error, kept up to [`OUTPUT_CAP`] bytes; what comes
-/// after is accepted and dropped.
+/// after is accepted, dropped, and counted.
 #[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
+struct Capture(Arc<Mutex<Captured>>);
+
+#[derive(Default)]
+struct Captured {
+    kept: Vec<u8>,
+    dropped: usize,
+}
 
 impl Capture {
     fn text(&self) -> String {
-        let bytes = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        String::from_utf8_lossy(&bytes).into_owned()
+        let captured = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        String::from_utf8_lossy(&captured.kept).into_owned()
+    }
+
+    /// How many bytes past [`OUTPUT_CAP`] were dropped.
+    fn dropped(&self) -> usize {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).dropped
     }
 }
 
@@ -941,9 +968,12 @@ impl tokio::io::AsyncWrite for Capture {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        let mut kept = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let room = OUTPUT_CAP.saturating_sub(kept.len());
-        kept.extend_from_slice(&buf[..buf.len().min(room)]);
+        let mut captured = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let taken = buf
+            .len()
+            .min(OUTPUT_CAP.saturating_sub(captured.kept.len()));
+        captured.kept.extend_from_slice(&buf[..taken]);
+        captured.dropped += buf.len() - taken;
         Poll::Ready(Ok(buf.len()))
     }
 
