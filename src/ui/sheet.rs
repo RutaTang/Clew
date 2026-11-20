@@ -32,8 +32,6 @@ const TRAIL_STOP_H: f32 = 22.0;
 /// Height of the controls of the header's first row: the title's line and
 /// the tools, each a button.
 const HEADER_CONTROL_H: f32 = 28.0;
-/// Height of a margin tab.
-const MARGIN_TAB_H: f32 = 26.0;
 /// How many stops of the reading trail the header shows, the current last.
 const TRAIL_STOPS: usize = 4;
 
@@ -416,6 +414,9 @@ fn file_tool<'a>(
 /// tooltip, the one shown filled, as a segmented control's chosen segment
 /// is. Picking one shows its view below; the tab says no more than that it
 /// is the one shown, as the header's tools beside it say only their glyphs.
+/// Each is a header tool's size and the same gap apart, so the tools and
+/// the tabs read as one row: their glyphs on one line, at one pitch (the
+/// tabs stood 26 high to the tools' 28, a pixel above them, and closer).
 pub(crate) fn margin_tabs(app: &App) -> Element<'_, Message> {
     use crate::MarginTab;
     // A Lean file's own first: the proof's goals where the cursor is.
@@ -439,12 +440,12 @@ pub(crate) fn margin_tabs(app: &App) -> Element<'_, Message> {
             theme::fg_muted()
         };
         let face = button(
-            container(glyph::icon(glyph, tint, MARGIN_TAB_GLYPH))
-                .height(Length::Fixed(MARGIN_TAB_H))
+            container(glyph::icon(glyph, tint, FILE_TOOL_GLYPH))
+                .height(Length::Fixed(HEADER_CONTROL_H))
                 .align_y(iced::Center),
         )
         .style(theme::segment(chosen))
-        .padding([0.0, MARGIN_TAB_PAD])
+        .padding([0.0, FILE_TOOL_PAD_X])
         .on_press(super::heard::said(
             label,
             Message::Window(WindowMsg::MarginTabPicked(this)),
@@ -452,18 +453,16 @@ pub(crate) fn margin_tabs(app: &App) -> Element<'_, Message> {
         tip_at(face, label, None, tooltip::Position::Bottom)
     };
     iced::widget::Row::with_children(tabs.into_iter().map(tab))
-        .spacing(MARGIN_TAB_GAP)
+        .spacing(TOOLS_SPACING)
         .align_y(iced::Center)
         .into()
 }
 
-/// A margin tab's padding across, its glyph's size, the gap between tabs,
-/// and a tab's width.
-const MARGIN_TAB_PAD: f32 = 8.0;
-const MARGIN_TAB_GLYPH: f32 = 14.0;
-pub(crate) const MARGIN_TAB_GAP: f32 = 2.0;
+/// A margin tab's width, and the gap between tabs: a header tool's.
 #[cfg(test)]
-pub(crate) const MARGIN_TAB_W: f32 = 2.0 * MARGIN_TAB_PAD + MARGIN_TAB_GLYPH;
+pub(crate) const MARGIN_TAB_W: f32 = 2.0 * FILE_TOOL_PAD_X + FILE_TOOL_GLYPH;
+#[cfg(test)]
+pub(crate) const MARGIN_TAB_GAP: f32 = TOOLS_SPACING;
 
 /// The sheet's header: the open file's name and folder, the tools that act
 /// on it — Explain, Skim, Diff, Time Travel, and the View menu of reading

@@ -437,13 +437,17 @@ fn body(g: Glyph) -> &'static str {
              <path d='M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3'/><path d='M12 12V8'/>"
         }
         Clock => "<circle cx='12' cy='12' r='10'/><path d='M12 6v6l4 2'/>",
-        Turnstile => "<path d='M7 5 V19'/><path d='M7 12 H18'/>",
-        // Note's page, smaller, and the spark Fake Run and Ask carry.
+        // As tall as the glyphs beside it, and a little right of the
+        // middle: its bar carries its weight, so centred by its box it
+        // leaned left.
+        Turnstile => "<path d='M7.5 4 V20'/><path d='M7.5 12 H19.5'/>",
+        // A page, and clear of its corner the spark Fake Run and Ask carry:
+        // the two weighed together sit in the middle, as the glyphs beside
+        // them do.
         Explanations => {
-            "<g transform='translate(0.4 5.4) scale(0.76)' stroke-width='2.6'>\
-             <rect x='5' y='3.5' width='14' height='17' rx='2'/>\
-             <path d='M8.5 8 H15.5'/><path d='M8.5 11.5 H15.5'/><path d='M8.5 15 H13'/></g>\
-             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
+            "<rect x='3.5' y='6.5' width='11' height='14' rx='1.8'/>\
+             <path d='M6.5 11 H11.5'/><path d='M6.5 14 H11.5'/><path d='M6.5 17 H9.5'/>\
+             <path d='M18.5 2C18.85 4.6 19.4 5.15 22 5.5C19.4 5.85 18.85 6.4 18.5 9C18.15 6.4 17.6 5.85 15 5.5C17.6 5.15 18.15 4.6 18.5 2Z' fill='STROKE' stroke-width='1.2'/>"
         }
         Branch => {
             "<circle cx='6' cy='5' r='2.5'/><circle cx='6' cy='19' r='2.5'/><circle cx='18' cy='7' r='2.5'/>\
