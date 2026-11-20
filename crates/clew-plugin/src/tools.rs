@@ -1,6 +1,6 @@
 //! The plugin tools an agent makes plugins with — the same for Clew's Ask
 //! agent (run by Clew's window) and for every ACP agent (through
-//! `clew-server mcp`).
+//! `clew-server mcp`), each told where its user answers ([`Caller`]).
 //!
 //! [`call`] does what needs no window: the guide, a plugin's source, a
 //! build, what is installed. Trying a build on the open project, and asking
@@ -50,8 +50,19 @@ pub enum Step {
     Install { built: Box<Built> },
 }
 
-/// Every plugin tool.
-pub fn tool_defs() -> Vec<ToolDef> {
+/// Which agent the tools are described to: the words that say where the
+/// user answers differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caller {
+    /// Clew's Ask, in the window the user answers in.
+    Ask,
+    /// An agent elsewhere, through `clew-server mcp`: the user answers in
+    /// Clew, which may not be where they are talking to it.
+    Outside,
+}
+
+/// Every plugin tool, described to `caller`.
+pub fn tool_defs(caller: Caller) -> Vec<ToolDef> {
     let id = json!({"type": "string", "description": "The plugin's id, as in its plugin.toml (todo-authors)."});
     vec![
         ToolDef {
@@ -112,7 +123,14 @@ pub fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "plugin_try",
-            description: "Run a command of the plugin's latest build on the open project, or build one of its graphs, and see what it gives back, to check it works. Nothing is shown to the user. Needs Clew open with the project.",
+            description: match caller {
+                Caller::Ask => {
+                    "Run a command of the plugin's latest build on the open project, or build one of its graphs, and see what it gives back, to check it works. Nothing is shown to the user."
+                }
+                Caller::Outside => {
+                    "Run a command of the plugin's latest build on the open project, or build one of its graphs, and see what it gives back, to check it works. Nothing is shown to the user. Needs Clew open with the project."
+                }
+            },
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -129,7 +147,14 @@ pub fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "plugin_install",
-            description: "Ask the user, in Clew, to install the plugin's latest build. They see its name, description, what it adds and its permissions, and decide. Answers whether they installed it, and where what it adds is. Needs Clew open. Before calling it, tell the user to switch to Clew to answer: the question waits there, not here.",
+            description: match caller {
+                Caller::Ask => {
+                    "Ask the user to install the plugin's latest build: a card over this Clew window shows its name, description, what it adds and its permissions, and they decide. Answers whether they installed it, and where what it adds is. Before calling it, tell the user the card is waiting for their answer."
+                }
+                Caller::Outside => {
+                    "Ask the user, in Clew, to install the plugin's latest build. They see its name, description, what it adds and its permissions, and decide. Answers whether they installed it, and where what it adds is. Needs Clew open. Before calling it, tell the user to switch to Clew to answer: the question waits there, not here."
+                }
+            },
             schema: json!({"type": "object", "properties": {"id": id}, "required": ["id"]}),
             read_only: false,
         },
@@ -144,7 +169,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
 
 /// Whether `name` is a plugin tool.
 pub fn is_plugin_tool(name: &str) -> bool {
-    tool_defs().iter().any(|t| t.name == name)
+    tool_defs(Caller::Ask).iter().any(|t| t.name == name)
 }
 
 fn text<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -559,14 +584,32 @@ mod tests {
 
     #[test]
     fn every_tool_has_a_schema_and_is_known() {
-        let defs = tool_defs();
-        assert_eq!(defs.len(), 9);
-        for def in &defs {
-            assert!(def.name.starts_with("plugin_"));
-            assert_eq!(def.schema["type"], "object");
-            assert!(is_plugin_tool(def.name));
+        for caller in [Caller::Ask, Caller::Outside] {
+            let defs = tool_defs(caller);
+            assert_eq!(defs.len(), 9);
+            for def in &defs {
+                assert!(def.name.starts_with("plugin_"));
+                assert_eq!(def.schema["type"], "object");
+                assert!(is_plugin_tool(def.name));
+            }
         }
         assert!(!is_plugin_tool("search"));
+    }
+
+    /// Ask is in the window the user answers in, so it is not told to send
+    /// them there; an agent elsewhere is.
+    #[test]
+    fn where_the_user_answers_is_said_to_each_agent_as_it_is() {
+        let install = |caller| {
+            tool_defs(caller)
+                .into_iter()
+                .find(|t| t.name == "plugin_install")
+                .unwrap()
+                .description
+        };
+        assert!(install(Caller::Ask).contains("a card over this Clew window"));
+        assert!(!install(Caller::Ask).contains("switch to Clew"));
+        assert!(install(Caller::Outside).contains("switch to Clew"));
     }
 
     #[test]

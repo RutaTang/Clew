@@ -588,12 +588,14 @@ pub(crate) fn graph_search_field(app: &App) -> Element<'_, Message> {
 /// A plugin's graph that could not be built: why, Try again (the same
 /// build), and See its log (Settings → Plugins, its log and what fixes it).
 /// `last_shown` when the last build that worked is still drawn.
-fn plugin_graph_failure(
-    why: &str,
-    last_shown: bool,
-    plugin: Option<String>,
-) -> Element<'static, Message> {
+fn plugin_graph_failure(app: &App, why: &str, last_shown: bool) -> Element<'static, Message> {
     use crate::app::plugins::PluginMsg;
+    let plugin = app.shown_graph_plugin_id();
+    // Its approved copy is gone or changed: building again fails the same
+    // way every time; installing it again (its row says so) is the fix.
+    let retry = !plugin
+        .as_ref()
+        .is_some_and(|id| app.plugins.damaged.contains(id));
     let said = match last_shown {
         false => tr!("This graph could not be built: {reason}", reason = why),
         true => tr!(
@@ -606,13 +608,15 @@ fn plugin_graph_failure(
             .size(ts::CAPTION)
             .color(theme::warning())
             .width(Fill),
-        button(text(tr!("Try again")).size(ts::SMALL))
-            .style(theme::secondary_button)
-            .padding([3, 10])
-            .on_press(super::heard::said(
-                tr!("Try again"),
-                Message::Plugin(PluginMsg::RebuildGraph),
-            )),
+        retry.then(|| {
+            button(text(tr!("Try again")).size(ts::SMALL))
+                .style(theme::secondary_button)
+                .padding([3, 10])
+                .on_press(super::heard::said(
+                    tr!("Try again"),
+                    Message::Plugin(PluginMsg::RebuildGraph),
+                ))
+        }),
         // Try again alone left a graph that fails each time with nowhere
         // to go.
         button(text(tr!("See its log")).size(ts::SMALL))
@@ -771,15 +775,11 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     if let Some(why) = &failed
         && !drawn
     {
-        return container(plugin_graph_failure(
-            why,
-            false,
-            app.shown_graph_plugin_id(),
-        ))
-        .padding(8)
-        .width(Fill)
-        .height(Fill)
-        .into();
+        return container(plugin_graph_failure(app, why, false))
+            .padding(8)
+            .width(Fill)
+            .height(Fill)
+            .into();
     }
     let Some(layout) = &app.proj.graph_layout else {
         return hint(empty_msg);
@@ -823,12 +823,7 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     match failed {
         // The last build that worked, drawn under why the next did not.
         Some(why) => column![
-            container(plugin_graph_failure(
-                &why,
-                true,
-                app.shown_graph_plugin_id()
-            ))
-            .padding(8),
+            container(plugin_graph_failure(app, &why, true)).padding(8),
             map
         ]
         .into(),
@@ -3599,11 +3594,7 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
                 rows.push(hint(tr!("Building this graph…").into()));
             }
             Some(PluginMapStatus::Failed(why)) => {
-                rows.push(plugin_graph_failure(
-                    &why,
-                    !map.nodes.is_empty(),
-                    app.shown_graph_plugin_id(),
-                ));
+                rows.push(plugin_graph_failure(app, &why, !map.nodes.is_empty()));
             }
             // Its answer in its own words, as a command's is shown.
             Some(PluginMapStatus::Said(said)) => {

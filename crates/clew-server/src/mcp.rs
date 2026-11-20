@@ -100,13 +100,17 @@ impl Host for CodeTools {
                 input_schema: t.parameters,
                 read_only: true,
             })
-            .chain(clew_plugin::tools::tool_defs().into_iter().map(|t| Tool {
-                name: t.name.into(),
-                title: None,
-                description: format!("[Clew plugins] {}", t.description),
-                input_schema: t.schema,
-                read_only: t.read_only,
-            }))
+            .chain(
+                clew_plugin::tools::tool_defs(clew_plugin::tools::Caller::Outside)
+                    .into_iter()
+                    .map(|t| Tool {
+                        name: t.name.into(),
+                        title: None,
+                        description: format!("[Clew plugins] {}", t.description),
+                        input_schema: t.schema,
+                        read_only: t.read_only,
+                    }),
+            )
             .collect()
     }
 

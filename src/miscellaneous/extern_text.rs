@@ -294,8 +294,10 @@ pub(crate) const NOTICES: &[&str] = &[
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const PLUGIN_STOPS: &[&str] = &[
     tr_noop!(
-        "Clew's copy of it is missing or changed since you approved it. Install it again from its file, or ask the agent that made it to install it again."
+        "Clew's copy of the plugin is missing or has changed since you approved it. Install the plugin again from its file, or ask the agent that made it to install it again."
     ),
+    // Why a plugin was not installed (`clew_plugin::store::FILE_CHANGED`).
+    tr_noop!("the plugin's file changed after it was read"),
     // Why a file picked to install is not a plugin
     // (`clew_plugin::inspect::NOT_A_COMPONENT` and the rest).
     tr_noop!("this is not a plugin: a plugin is a WebAssembly component (built for wasm32-wasip2)"),

@@ -136,7 +136,11 @@ pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
             PaneCover::WeakSpots => super::weakspots::weak_home(app),
             PaneCover::Glossary => glossary_home(app),
             PaneCover::Plugin(page) => {
-                super::plugins::plugin_page(page, app.plugin_run().is_some())
+                let running = app.plugin_run().is_some();
+                let its_own = running
+                    && page.again.is_some()
+                    && app.plugins.running_again.as_ref() == page.again.as_ref();
+                super::plugins::plugin_page(page, running, its_own)
             }
         };
         // The Ask pill floats over a page's foot at its right: the page

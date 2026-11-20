@@ -74,7 +74,7 @@ impl Why {
                 "Rust {version} is too old to build plugins; they need {major}.{minor} or later."
             ),
             Why::OwnBroken(why) => {
-                format!("The Rust Clew installed for plugins does not work: {why}")
+                format!("Clew's own Rust, installed for plugins, does not work: {why}")
             }
             Why::Other(why) => format!("Rust cannot build plugins here: {why}"),
         }

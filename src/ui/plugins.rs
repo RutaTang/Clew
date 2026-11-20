@@ -142,17 +142,23 @@ fn page_row<'a>(
 }
 
 /// The page a plugin's command showed.
-pub(crate) fn plugin_page<'a>(page: &'a PluginPage, running: bool) -> Element<'a, Message> {
+pub(crate) fn plugin_page<'a>(
+    page: &'a PluginPage,
+    running: bool,
+    its_own: bool,
+) -> Element<'a, Message> {
     let close = Message::Plugin(PluginMsg::ClosePage);
     // Run again here, as Weak Spots refreshes: come back to from a row
-    // opened, the page may be stale. Busy while a command runs (one at a
-    // time), as its chip on the status bar says.
+    // opened, the page may be stale. One command runs at a time, as its
+    // chip on the status bar says: turning while this page's own runs,
+    // and only pressable once none does — another command's run turned
+    // it as if this page were being refreshed.
     let again = page.again.clone().map(|again| {
         super::toolbar::busy_action(
             crate::glyph::Glyph::Refresh,
             tr!("Run again"),
-            Some(Message::Plugin(PluginMsg::RunAgain(again))),
-            running,
+            (!running).then_some(Message::Plugin(PluginMsg::RunAgain(again))),
+            its_own,
         )
     });
     let header = row![
@@ -480,7 +486,7 @@ pub(crate) fn plugin_install_modal(
                 .as_ref()
                 .filter(|p| !p.record.enabled)
                 .map(|_| {
-                    text(tr!("It is turned off now. This turns it on."))
+                    text(tr!("It is turned off now, and will be turned on again."))
                         .size(ts::BODY)
                         .color(theme::warning())
                         .into()
@@ -665,6 +671,7 @@ pub(crate) fn plugin_prompt_modal(prompt: &Prompt) -> Element<'_, Message> {
 /// One installed plugin, in Settings: its name and what it is, what it may
 /// do, a switch, and Remove; its log's last lines under it.
 fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message> {
+    let readable = app.plugins.list_error.is_none();
     let can = permission_line(plugin.record.granted());
     let lang = crate::i18n::current().code();
     let commands = plugin
@@ -712,19 +719,26 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
             .spacing(3)
             .width(Fill),
             {
-                // Heard by its plugin's name: "turn off TODO count".
-                super::heard::switch(&name, plugin.record.enabled, |on| {
-                    Message::Plugin(PluginMsg::SetEnabled(id.clone(), on))
-                });
+                // Heard by its plugin's name: "turn off TODO count". Not
+                // while the list cannot be read: changing it fails the same
+                // way, as the note at the top says.
+                if readable {
+                    super::heard::switch(&name, plugin.record.enabled, |on| {
+                        Message::Plugin(PluginMsg::SetEnabled(id.clone(), on))
+                    });
+                }
                 form::switch(
                     plugin.record.enabled,
                     Message::Plugin(PluginMsg::SetEnabled(id.clone(), !plugin.record.enabled)),
                 )
+                .on_press_maybe(readable.then(|| {
+                    Message::Plugin(PluginMsg::SetEnabled(id.clone(), !plugin.record.enabled))
+                }))
             },
             form::action_to(
                 tr!("Remove"),
                 &name,
-                Some(Message::Plugin(PluginMsg::AskRemove(id.clone())))
+                readable.then(|| Message::Plugin(PluginMsg::AskRemove(id.clone())))
             ),
         ]
         .spacing(12)
@@ -834,7 +848,7 @@ pub(crate) fn missing_words(why: &clew_plugin::toolchain::Why) -> String {
         Why::NoRust => tr!("Rust is not installed on this computer.").into(),
         Why::NoDefault(_) => tr!("rustup is installed, but has no default Rust.").into(),
         Why::NoTarget(version) => tr!(
-            "Rust {version} is installed, but not the WebAssembly target plugins are built for.",
+            "Rust {version} is installed, but without the WebAssembly target that plugins are built for.",
             version = version.clone()
         ),
         Why::TooOld(version) => tr!(
@@ -846,11 +860,8 @@ pub(crate) fn missing_words(why: &clew_plugin::toolchain::Why) -> String {
                 clew_plugin::build::MIN_RUST.1
             )
         ),
-        Why::OwnBroken(_) => tr!("The Rust Clew installed does not work.").into(),
-        Why::Other(why) => tr!(
-            "Rust cannot build plugins here: {reason}",
-            reason = why.clone()
-        ),
+        Why::OwnBroken(_) => tr!("Clew's own Rust does not work.").into(),
+        Why::Other(why) => tr!("Rust could not be checked: {reason}", reason = why.clone()),
     }
 }
 
@@ -887,7 +898,7 @@ fn building_group(app: &App) -> Element<'_, Message> {
         Building::Ready { version, own } => {
             let said = match own {
                 true => tr!(
-                    "Ready: Rust {version}, installed by Clew",
+                    "Ready: Clew's own Rust {version}",
                     version = version.clone()
                 ),
                 false => tr!("Ready: Rust {version}", version = version.clone()),
@@ -947,10 +958,17 @@ fn building_group(app: &App) -> Element<'_, Message> {
                 .into(),
                 None => check.into(),
             };
+            // Not having Rust (or a recent enough one) is no fault: those
+            // who only install plugins never need it. Red is for a Rust
+            // that is there and does not work.
+            let fault = matches!(
+                missing.why,
+                clew_plugin::toolchain::Why::OwnBroken(_) | clew_plugin::toolchain::Why::Other(_)
+            );
             rows.push(form::item_saying(
                 tr!("Rust"),
                 Some(missing_words(&missing.why)),
-                true,
+                fault,
                 control,
             ));
             rows.push(form::row_of(form::note(about)));
@@ -979,7 +997,7 @@ fn building_group(app: &App) -> Element<'_, Message> {
     if let Some(why) = &app.plugins.removal_failure {
         rows.push(form::row_of(
             form::note(tr!(
-                "Clew's Rust could not be removed: {reason}",
+                "Clew's own Rust could not be removed: {reason}",
                 reason = why.clone()
             ))
             .color(theme::danger()),
@@ -988,7 +1006,7 @@ fn building_group(app: &App) -> Element<'_, Message> {
     if let Some(why) = &app.plugins.setup_failure {
         rows.push(form::row_of(
             form::note(tr!(
-                "Setting up did not work: {reason}",
+                "Setting up Rust did not work: {reason}",
                 reason = why.clone()
             ))
             .color(theme::danger()),
@@ -1025,7 +1043,7 @@ fn building_group(app: &App) -> Element<'_, Message> {
     }
     form::group(
         tr!("Building plugins"),
-        Some(tr!("Agents write plugins in Rust, and Clew builds them on this computer.").into()),
+        Some(tr!("Agents write plugins in Rust, and Clew builds them on this computer. Installed plugins run without Rust.").into()),
         None,
         rows,
     )
@@ -1033,9 +1051,14 @@ fn building_group(app: &App) -> Element<'_, Message> {
 
 /// Settings → Plugins.
 pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
+    // Installing changes the list: not while it cannot be read (the note
+    // below says why), where it failed with the same reason again.
     let install = form::action(
         tr!("Install from a file…"),
-        Some(Message::Plugin(PluginMsg::InstallFromFile)),
+        app.plugins
+            .list_error
+            .is_none()
+            .then_some(Message::Plugin(PluginMsg::InstallFromFile)),
     );
     let mut groups: Vec<Element<'_, Message>> = Vec::new();
     // Its list unreadable: said, with where — not shown as no plugins, and

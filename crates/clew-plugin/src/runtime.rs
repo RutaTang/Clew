@@ -82,6 +82,11 @@ pub trait Host: Send + Sync {
     fn progress(&self, _done: u32, _total: u32) {}
     /// A line of the plugin's log.
     fn log(&self, _level: Level, _message: &str) {}
+    /// A line Clew itself adds to the plugin's log — what it left out —
+    /// for the host to say in its reader's words; in English by default.
+    fn note(&self, note: LogNote) {
+        self.log(Level::Warning, &note.english());
+    }
     /// Whether the user asked the run to stop: it is stopped within a
     /// tick, a wait of the plugin's included ([`STOPPED_BY_USER`]).
     fn stop_asked(&self) -> bool {
@@ -96,6 +101,43 @@ pub trait Host: Send + Sync {
 
 /// Why a run the user stopped gave nothing back ([`Failure::Stopped`]).
 pub const STOPPED_BY_USER: &str = "the user stopped it";
+
+/// Why a plugin could not be made ready to run, each followed by ": " and
+/// what went wrong (a permission's name, wasmtime's own words).
+pub const NOT_GRANTED: &str = "the plugin needs a permission it was not granted";
+pub const NOT_COMPILED: &str = "could not compile the plugin";
+pub const NOT_LINKED: &str = "could not link the plugin";
+pub const NO_EXPORTS: &str = "the plugin does not export what Clew calls";
+
+/// What Clew adds to a plugin's log of its own ([`Host::note`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogNote {
+    /// It printed more than Clew keeps of a run ([`LogNote::OUTPUT_KIB`]).
+    OutputCut,
+    /// It logged more lines than a run keeps ([`LogNote::LINES_KEPT`]):
+    /// this many more were left out.
+    LinesDropped(usize),
+}
+
+impl LogNote {
+    /// How much of what a run prints is kept, in KiB.
+    pub const OUTPUT_KIB: usize = OUTPUT_CAP / 1024;
+    /// How many log lines one run keeps.
+    pub const LINES_KEPT: usize = LOG_LINES_PER_CALL;
+
+    /// The note in English, for a host that does not say it its own way.
+    pub fn english(self) -> String {
+        match self {
+            LogNote::OutputCut => {
+                format!("what it printed past {} KiB was left out", Self::OUTPUT_KIB)
+            }
+            LogNote::LinesDropped(dropped) => format!(
+                "{dropped} more log lines were left out: a run keeps {} lines at most",
+                Self::LINES_KEPT
+            ),
+        }
+    }
+}
 
 /// How long a call may run, and how much memory it may take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,23 +267,21 @@ impl Runtime {
         if !clew_rules::plugin::may_link(inspected.needs, granted) {
             let missing = inspected.needs & !granted;
             return Err(format!(
-                "the plugin needs a permission it was not granted: {}",
+                "{NOT_GRANTED}: {}",
                 permission_names(missing).join(", ")
             ));
         }
         let component = if installed {
             self.compile(bytes, &inspected.sha256)?
         } else {
-            Component::new(&self.engine, bytes)
-                .map_err(|e| format!("could not compile the plugin: {e}"))?
+            Component::new(&self.engine, bytes).map_err(|e| format!("{NOT_COMPILED}: {e}"))?
         };
         let mut linker = Linker::<State>::new(&self.engine);
-        link(&mut linker, granted).map_err(|e| format!("could not link the plugin: {e}"))?;
+        link(&mut linker, granted).map_err(|e| format!("{NOT_LINKED}: {e}"))?;
         let pre = linker
             .instantiate_pre(&component)
-            .map_err(|e| format!("could not link the plugin: {e}"))?;
-        let pre = bindings::PluginPre::new(pre)
-            .map_err(|e| format!("the plugin does not export what Clew calls: {e}"))?;
+            .map_err(|e| format!("{NOT_LINKED}: {e}"))?;
+        let pre = bindings::PluginPre::new(pre).map_err(|e| format!("{NO_EXPORTS}: {e}"))?;
         let store = match (&self.data, installed) {
             (Some(data), true) => store_dir(data, &inspected.manifest.plugin.id).ok(),
             (Some(data), false) => Some(trial_dir(data)),
@@ -278,8 +318,8 @@ impl Runtime {
                 }
             }
         }
-        let component = Component::new(&self.engine, bytes)
-            .map_err(|e| format!("could not compile the plugin: {e}"))?;
+        let component =
+            Component::new(&self.engine, bytes).map_err(|e| format!("{NOT_COMPILED}: {e}"))?;
         if let (Some(path), Ok(serialized)) = (&cached, component.serialize())
             && let Some(dir) = path.parent()
         {
@@ -484,10 +524,7 @@ impl Loaded {
         forward_output(host.as_ref(), Level::Warning, &stderr);
         let dropped = store.data().log_dropped;
         if dropped > 0 {
-            host.log(
-                Level::Warning,
-                &format!("{dropped} more log lines were left out: a run keeps {LOG_LINES_PER_CALL} lines at most"),
-            );
+            host.note(LogNote::LinesDropped(dropped));
         }
         // Stopped by the user: nothing it gave back counts, whatever it was.
         if host.stop_asked() {
@@ -708,13 +745,7 @@ fn forward_output(host: &dyn Host, level: Level, capture: &Capture) {
         host.log(level, text);
     }
     if cut {
-        host.log(
-            Level::Warning,
-            &format!(
-                "what it printed past {} KiB was left out",
-                OUTPUT_CAP / 1024
-            ),
-        );
+        host.note(LogNote::OutputCut);
     }
 }
 

@@ -1400,6 +1400,7 @@ mod tests {
         }
         written.push(clew_voice::wake::MODEL.name.into());
         written.push(clew_plugin::store::CHANGED.into());
+        written.push(clew_plugin::store::FILE_CHANGED.into());
         {
             use clew_plugin::inspect::*;
             written.extend(

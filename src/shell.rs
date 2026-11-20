@@ -2430,12 +2430,28 @@ mod tests {
     /// offering — and running — a plugin turned off in another.
     #[tokio::test]
     async fn a_plugin_turned_off_in_one_window_is_off_in_the_others() {
+        let data = clew_core::testutil::TempDir::new("plugin-other-window");
+        let _env = crate::app::tests::data_dir_override(data.path());
+        clew_plugin::store::Store::update(data.path(), |store| {
+            store.plugin.insert(
+                "word-count".into(),
+                crate::app::tests::installed_plugin(true).record,
+            );
+            Ok(())
+        })
+        .unwrap();
         let mut rt = Runtime::new();
         let mut stale = blank_app();
         stale.plugins.installed = vec![crate::app::tests::installed_plugin(true)];
         let first = rt.window(blank_app());
         let second = rt.window(stale);
-        assert!(!rt.clew.windows[&second].plugins.installed.is_empty());
+        let enabled = |rt: &Runtime, window| {
+            rt.clew.windows[&window]
+                .plugins
+                .get("word-count")
+                .map(|p| p.record.enabled)
+        };
+        assert_eq!(enabled(&rt, second), Some(true));
         rt.send(Shell::Window(
             first,
             Message::Plugin(crate::app::plugins::PluginMsg::SetEnabled(
@@ -2444,10 +2460,19 @@ mod tests {
             )),
         ));
         rt.settle();
-        assert!(
-            rt.clew.windows[&second].plugins.installed.is_empty(),
-            "the other window kept its list"
+        assert_eq!(enabled(&rt, first), Some(false));
+        assert_eq!(
+            enabled(&rt, second),
+            Some(false),
+            "the other window kept it on"
         );
+        // Removed there: gone here too.
+        rt.send(Shell::Window(
+            first,
+            Message::Plugin(crate::app::plugins::PluginMsg::Remove("word-count".into())),
+        ));
+        rt.settle();
+        assert_eq!(enabled(&rt, second), None, "the other window kept it");
     }
 
     /// The exit waits for the last window's teardown — every clew-server

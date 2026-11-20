@@ -206,7 +206,7 @@ pub fn install(
 ) -> Result<Record, String> {
     let sha256: [u8; 32] = Sha256::digest(bytes).into();
     if sha256 != inspected.sha256 {
-        return Err("the plugin's file changed after it was read".into());
+        return Err(FILE_CHANGED.into());
     }
     let fingerprint = fingerprint(&sha256);
     let record = Record {
@@ -245,8 +245,7 @@ fn write_copy(data: &Path, fingerprint: &str, bytes: &[u8]) -> Result<(), String
         // A copy that is not what its name says: replace it.
         make_writable(&path);
     }
-    clew_core::statefile::write_atomic(&path, bytes)
-        .map_err(|e| format!("could not keep the plugin: {e}"))?;
+    clew_core::statefile::write_atomic(&path, bytes).map_err(|e| format!("{NOT_KEPT}: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -298,7 +297,12 @@ fn read_capped(path: &Path) -> Result<Vec<u8>, String> {
 /// the file approved (changed on disk since) — each fixed the same way. Said to the user, who can do what it says:
 /// installed again, the copy is written anew. Removed first, as this said
 /// to, the plugin's saved data went with it, for nothing.
-pub const CHANGED: &str = "Clew's copy of it is missing or changed since you approved it. Install it again from its file, or ask the agent that made it to install it again.";
+pub const CHANGED: &str = "Clew's copy of the plugin is missing or has changed since you approved it. Install the plugin again from its file, or ask the agent that made it to install it again.";
+
+/// Why a plugin was not installed: its file changed between being read and
+/// approved, or could not be written (followed by ": " and why).
+pub const FILE_CHANGED: &str = "the plugin's file changed after it was read";
+pub const NOT_KEPT: &str = "could not keep the plugin";
 
 /// The approved copy of `record`'s plugin, checked to be the file approved.
 pub fn read_approved(data: &Path, record: &Record) -> Result<Vec<u8>, String> {

@@ -351,6 +351,9 @@ impl Host for ProjectHost {
             .unwrap_or_else(|e| e.into_inner())
             .push(HostEvent::Log(level, message.to_string()));
     }
+    fn note(&self, note: clew_plugin::runtime::LogNote) {
+        self.log(Level::Warning, &crate::app::plugins::log_note_words(note));
+    }
     fn stop_asked(&self) -> bool {
         self.stop.load(std::sync::atomic::Ordering::Relaxed)
     }

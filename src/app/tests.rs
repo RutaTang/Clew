@@ -39418,11 +39418,20 @@ fn an_update_says_its_version_and_that_it_turns_the_plugin_on() {
             .find(words)
             .is_ok()
     };
-    assert!(!says(&pending, "It is turned off now. This turns it on."));
+    assert!(!says(
+        &pending,
+        "It is turned off now, and will be turned on again."
+    ));
     pending.previous = Some(installed_plugin(false));
-    assert!(says(&pending, "It is turned off now. This turns it on."));
+    assert!(says(
+        &pending,
+        "It is turned off now, and will be turned on again."
+    ));
     pending.previous = Some(installed_plugin(true));
-    assert!(!says(&pending, "It is turned off now. This turns it on."));
+    assert!(!says(
+        &pending,
+        "It is turned off now, and will be turned on again."
+    ));
 
     // Its card's title and answers: an update, or a replacement by an older
     // version — not "Update to version 0.1.0" over a 0.2.0.
@@ -40180,16 +40189,20 @@ fn a_runs_follow_ups_are_at_hand() {
     );
     let page = app.proj.plugin_page.clone().expect("shown");
     assert!(matches!(&page.again, Some(a) if a.id == "word-count" && a.command == "count"));
-    let run_again = |running: bool| {
+    let run_again = |running: bool, its_own: bool| {
         let (targets, _) =
-            crate::ui::heard::gather_all_of(|| crate::ui::plugin_page(&page, running));
+            crate::ui::heard::gather_all_of(|| crate::ui::plugin_page(&page, running, its_own));
         targets.into_iter().any(|t| {
             t.shown == "Run again"
                 && matches!(&t.message, Message::Plugin(PluginMsg::RunAgain(a)) if a.command == "count")
         })
     };
-    assert!(run_again(false));
-    assert!(!run_again(true), "one command at a time");
+    assert!(run_again(false, false));
+    assert!(!run_again(true, true), "one command at a time");
+    assert!(
+        !run_again(true, false),
+        "another command's run: not pressable either"
+    );
 
     // Running: the palette offers to stop it, not only the chip's ×.
     app.plugins.running = Some("Count words".into());
@@ -40570,15 +40583,60 @@ fn a_plugins_own_reason_is_its_answer_and_failures_stay_with_their_plugin() {
 
     // Turned off, or removed: its failure goes with it, Try again a run
     // of a plugin that is not there.
-    for gone in [
+    let listed = |app: &mut App| {
+        clew_plugin::store::Store::update(data.path(), |store| {
+            store
+                .plugin
+                .insert("word-count".into(), installed_plugin(true).record);
+            Ok(())
+        })
+        .unwrap();
+        let read = app.reload_plugins();
+        settle(app, read);
+        assert!(app.plugins.get("word-count").is_some());
+    };
+
+    // Its list unreadable, it can be neither turned off nor removed: it
+    // stays as it was, its failure and log with it, and why is said where
+    // it was asked — not as if it were done.
+    listed(&mut app);
+    let list = clew_plugin::store::store_path(data.path());
+    let good = std::fs::read(&list).unwrap();
+    for refused in [
         PluginMsg::SetEnabled("word-count".into(), false),
         PluginMsg::Remove("word-count".into()),
     ] {
         ran(&mut app, "word-count", Err(Failure::Crashed("boom".into())));
+        let log = app.plugins.log_text("word-count");
+        assert!(!log.is_empty());
+        std::fs::write(&list, "[plugin.word-count\nnot TOML").unwrap();
+        let turning_off = matches!(refused, PluginMsg::SetEnabled(..));
+        let task = app.update(Message::Plugin(refused));
+        settle(&mut app, task);
+        if turning_off {
+            assert!(
+                app.status.contains("could not be turned off: "),
+                "{}",
+                app.status
+            );
+        }
+        assert!(app.failure_shown().is_some(), "said as if it were done");
+        assert!(app.plugins.failing("word-count"));
+        assert_eq!(app.plugins.log_text("word-count"), log);
+        assert!(app.plugins.failure.is_some(), "said in Settings");
+        app.plugins.failure = None;
+        std::fs::write(&list, &good).unwrap();
+    }
+    for gone in [
+        PluginMsg::SetEnabled("word-count".into(), false),
+        PluginMsg::Remove("word-count".into()),
+    ] {
+        listed(&mut app);
+        ran(&mut app, "word-count", Err(Failure::Crashed("boom".into())));
         assert!(app.failure_shown().is_some());
-        let _ = app.update(Message::Plugin(gone));
+        let task = app.update(Message::Plugin(gone));
+        settle(&mut app, task);
         assert!(app.failure_shown().is_none(), "it stood on");
-        app.plugins.installed = vec![installed_plugin(true)];
     }
 }
 
@@ -40808,7 +40866,7 @@ fn the_largest_plugin_page_is_drawn_in_time() {
     app.proj.plugin_page = Some(page);
     let start = std::time::Instant::now();
     for _ in 0..3 {
-        let _ = crate::ui::plugin_page(app.proj.plugin_page.as_ref().unwrap(), false);
+        let _ = crate::ui::plugin_page(app.proj.plugin_page.as_ref().unwrap(), false, false);
     }
     let each = start.elapsed() / 3;
     eprintln!(
@@ -40937,7 +40995,7 @@ fn a_plugin_page_draws_every_block_and_its_rows_open_the_code() {
         view,
     ));
     let page = app.proj.plugin_page.as_ref().expect("the page is up");
-    let mut drawn = iced_test::simulator(crate::ui::plugin_page(page, false));
+    let mut drawn = iced_test::simulator(crate::ui::plugin_page(page, false, false));
     for shown in [
         "Words by file",
         "Word count",
@@ -41336,6 +41394,18 @@ fn a_plugins_graph_is_built_when_shown_in_project_graphs() {
     app.proj.graph_layout = None;
     assert_eq!(next_steps(&app), (true, false));
     app.proj.graph_layout = drawn;
+    // Its approved copy gone or changed: building again fails the same way
+    // every time, so no Try again; its log, and its row saying what fixes
+    // it, stay one click away.
+    app.plugins.damaged.insert("views".into());
+    for targets in [
+        crate::ui::heard::gather_all_of(|| crate::ui::project_maps_body(&app)).0,
+        crate::ui::heard::gather_all_of(|| crate::ui::graph_map_view(&app)).0,
+    ] {
+        assert!(!targets.iter().any(|t| t.shown == "Try again"));
+        assert!(targets.iter().any(|t| t.shown == "See its log"));
+    }
+    app.plugins.damaged.remove("views");
     let retried = app.update(Message::Plugin(PluginMsg::RebuildGraph));
     assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Building));
     settle(&mut app, retried);
@@ -41383,6 +41453,103 @@ fn install_views_fixture(app: &mut App, data: &Path) {
     settle(app, reloaded);
 }
 
+/// What a window kept of a plugin's copy goes when the copy changes in
+/// another window — installed again, the very same build included (as one
+/// whose copy was damaged is, as Clew says to), or removed: "install it
+/// again" stood on after it was, a graph kept saying its copy was missing,
+/// and a removed plugin's failure, page and question stayed up. And a copy
+/// that runs is not damaged.
+#[test]
+fn a_plugin_installed_again_or_removed_elsewhere_is_forgotten_here() {
+    use crate::app::plugins::{PluginMsg, PluginPage, map_id};
+    use clew_plugin::runtime::View;
+    let data = clew_core::testutil::TempDir::new("plugin-forgotten-elsewhere");
+    let _env = data_dir_override(data.path());
+    let mut app = scanned_app("plugin-forgotten-elsewhere");
+    install_views_fixture(&mut app, data.path());
+    let graph = map_id("views", "pair");
+    let damage = |app: &mut App| {
+        app.plugins.damaged.insert("views".into());
+        let entry = app.proj.plugin_maps.entry(graph.clone()).or_default();
+        entry.fingerprint = app.plugins.get("views").unwrap().record.fingerprint.clone();
+        entry.rev = 7;
+        entry.failed = Some("Clew's copy of the plugin is missing".into());
+    };
+
+    // Installed again elsewhere, the same build: a new install time.
+    damage(&mut app);
+    clew_plugin::store::Store::update(data.path(), |store| {
+        store.plugin.get_mut("views").unwrap().installed += 1;
+        Ok(())
+    })
+    .unwrap();
+    let read = app.update(Message::Plugin(PluginMsg::StoreChanged));
+    settle(&mut app, read);
+    assert!(
+        !app.plugins.damaged.contains("views"),
+        "install it again stood on"
+    );
+    let entry = &app.proj.plugin_maps[&graph];
+    assert!(entry.failed.is_none(), "its graph's failure stood on");
+    assert_eq!(entry.rev, u64::MAX, "built again when next shown");
+
+    // A run of its copy that works: not damaged.
+    damage(&mut app);
+    let ran = app.update(Message::Plugin(PluginMsg::Run {
+        id: "views".into(),
+        command: "say".into(),
+    }));
+    settle(&mut app, ran);
+    assert_eq!(app.status, "Views: Say something: Said in two lines");
+    assert!(!app.plugins.damaged.contains("views"));
+
+    // Turned off elsewhere: nothing of it is forgotten (the same copy).
+    app.plugins
+        .log
+        .entry("views".into())
+        .or_default()
+        .push_back((clew_plugin::runtime::Level::Info, "kept".into()));
+    clew_plugin::store::set_enabled(data.path(), "views", false).unwrap();
+    let read = app.update(Message::Plugin(PluginMsg::StoreChanged));
+    settle(&mut app, read);
+    assert!(app.plugins.log_text("views").contains("kept"));
+    clew_plugin::store::set_enabled(data.path(), "views", true).unwrap();
+    let read = app.update(Message::Plugin(PluginMsg::StoreChanged));
+    settle(&mut app, read);
+
+    // Removed elsewhere: its failure, page and question go with it.
+    app.failure_notice = None;
+    app.say_failure_again(
+        || "Views: Say something did not finish: it crashed: boom".into(),
+        Some(Message::Plugin(PluginMsg::RunAgain(
+            crate::app::plugins::Again {
+                id: "views".into(),
+                command: "say".into(),
+                input: None,
+                at: None,
+                context: None,
+            },
+        ))),
+        crate::app::state::FailureOf::PluginRun,
+    );
+    assert!(app.failure_shown().is_some());
+    app.show_plugin_page(PluginPage::new(
+        "views".into(),
+        "Views".into(),
+        View {
+            title: "Pairs".into(),
+            blocks: Vec::new(),
+        },
+    ));
+    clew_plugin::store::remove(data.path(), "views").unwrap();
+    let read = app.update(Message::Plugin(PluginMsg::StoreChanged));
+    settle(&mut app, read);
+    assert!(app.plugins.get("views").is_none());
+    assert!(app.failure_shown().is_none(), "its failure stood on");
+    assert!(app.proj.plugin_page.is_none(), "its page stood on");
+    assert!(app.plugins.log_text("views").is_empty());
+}
+
 /// Run again runs on what the command first ran on: a row of its page
 /// opened another file since, and Run again ran on that one.
 #[test]
@@ -41402,9 +41569,13 @@ fn run_again_runs_on_what_it_first_ran_on() {
                 _ => None,
             })
             .expect("it ran");
+        // What is running, as it was run, for as long as it runs: a page's
+        // ↻ turns for its own run only.
+        assert_eq!(app.plugins.running_again.as_ref(), Some(&again));
         for message in said {
             let _ = app.update(message);
         }
+        assert_eq!(app.plugins.running_again, None);
         again
     };
     let first = run(
@@ -41497,6 +41668,179 @@ fn a_run_of_a_build_replaced_meanwhile_is_not_the_new_ones() {
     assert_eq!(app.plugins.log_text("word-count"), log);
 }
 
+/// Run again on a plugin turned off since (a page's ↻, a failure's Try
+/// again) says so where the user is, with its row in Settings — where it
+/// is turned on again — not a line in passing with nowhere to go.
+#[test]
+fn running_a_plugin_turned_off_says_so_with_its_row() {
+    use crate::app::plugins::{Again, PluginMsg, SettingsSpot};
+    let mut app = blank_app();
+    app.plugins.installed = vec![installed_plugin(false)];
+    let _ = app.update(Message::Plugin(PluginMsg::RunAgain(Again {
+        id: "word-count".into(),
+        command: "count".into(),
+        input: None,
+        at: None,
+        context: None,
+    })));
+    assert!(
+        app.status.ends_with("did not run: it is turned off"),
+        "{}",
+        app.status
+    );
+    let notice = app.failure_shown().expect("said where the user is");
+    assert!(
+        notice.retry.is_none(),
+        "running it again would say the same"
+    );
+    assert!(matches!(&notice.spot, Some(SettingsSpot::Plugin(id)) if id == "word-count"));
+    assert!(app.plugins.running.is_none(), "nothing ran");
+
+    // Not installed at all: said, with nothing to turn on.
+    app.plugins.installed.clear();
+    let _ = app.update(Message::Plugin(PluginMsg::Run {
+        id: "word-count".into(),
+        command: "count".into(),
+    }));
+    assert_eq!(app.status, "That plugin is not installed");
+}
+
+/// Why a plugin did not load or install, as clew-plugin writes it — one
+/// of its sentences, then what went wrong — reads in the reader's
+/// language, the detail as written; and what Clew adds to a plugin's log
+/// too. Each sentence of clew-plugin's is matched: one reworded there and
+/// not here reads in English again, and fails this.
+#[test]
+fn a_plugins_load_failure_and_clews_log_notes_are_in_the_readers_words() {
+    use crate::app::plugins::{log_note_words, reason_words};
+    use crate::i18n::{Lang, with_lang};
+    use clew_plugin::runtime::{self, LogNote};
+    use clew_plugin::store;
+    for sentence in [
+        runtime::NOT_GRANTED,
+        runtime::NOT_COMPILED,
+        runtime::NOT_LINKED,
+        runtime::NO_EXPORTS,
+        store::NOT_KEPT,
+    ] {
+        let why = format!("{sentence}: wasm trap 42");
+        assert_eq!(reason_words(&why), why, "English as written");
+        let french = with_lang(Lang::Fr, || reason_words(&why));
+        assert!(
+            french != why && french.ends_with("wasm trap 42"),
+            "{sentence}: {french}"
+        );
+    }
+    for whole in [store::FILE_CHANGED, store::CHANGED] {
+        assert_ne!(with_lang(Lang::Fr, || reason_words(whole)), whole);
+    }
+    // Not one of clew-plugin's: as it is.
+    assert_eq!(
+        with_lang(Lang::Fr, || reason_words("it fell over: here")),
+        "it fell over: here"
+    );
+    // The notes, in English as clew-plugin writes them for any other host.
+    for note in [LogNote::OutputCut, LogNote::LinesDropped(7)] {
+        let english = log_note_words(note).replace("1,000", "1000");
+        assert_eq!(english, note.english());
+        assert_ne!(with_lang(Lang::Fr, || log_note_words(note)), note.english());
+    }
+    assert_eq!(
+        log_note_words(LogNote::LinesDropped(1)),
+        "1 more log line was left out: a run keeps 1,000 lines at most"
+    );
+}
+
+/// A page run again (its ↻) whose command now answers in words, as "No
+/// TODOs in this project", says them in place of what it listed: the
+/// rows it gave before are not left under them. Another command's answer
+/// leaves the page as it is.
+#[test]
+fn a_page_run_again_that_answers_in_words_says_them_in_place_of_its_rows() {
+    use crate::app::plugins::{Again, PluginMsg, Ran};
+    use clew_plugin::runtime::{Block, Failure, Item, Notice, Outcome, View};
+    let mut app = blank_app();
+    app.plugins.installed = vec![installed_plugin(true)];
+    let again = |command: &str| Again {
+        id: "word-count".into(),
+        command: command.into(),
+        input: None,
+        at: None,
+        context: None,
+    };
+    let ran = |app: &mut App, again: Again, outcome: Result<Outcome, Failure>| {
+        let _ = app.update(Message::Plugin(PluginMsg::Ran {
+            stamp: app.stamp(),
+            id: "word-count".into(),
+            title: "Count words".into(),
+            again,
+            fingerprint: "fp-word-count".into(),
+            ran: Arc::new(std::sync::Mutex::new(Some(Ran {
+                outcome,
+                loaded: None,
+                log: Vec::new(),
+            }))),
+        }));
+    };
+    let listed = || View {
+        title: "Words".into(),
+        blocks: vec![Block::Items(vec![Item {
+            title: "lorem".into(),
+            detail: None,
+            at: None,
+            tag: Some("12".into()),
+            level: None,
+        }])],
+    };
+    let shows = |app: &App| {
+        let page = app.proj.plugin_page.as_ref().expect("a page");
+        (
+            page.view.title.clone(),
+            page.view.blocks.clone(),
+            page.again.clone(),
+        )
+    };
+    let said = |text: &str| {
+        vec![Block::Notice(Notice {
+            level: clew_plugin::runtime::Level::Info,
+            text: text.into(),
+        })]
+    };
+
+    ran(&mut app, again("count"), Ok(Outcome::Show(listed())));
+    // Another command's answer is not this page's.
+    ran(
+        &mut app,
+        again("other"),
+        Ok(Outcome::Say("Nothing here".into())),
+    );
+    assert_eq!(shows(&app).1, listed().blocks);
+
+    ran(
+        &mut app,
+        again("count"),
+        Ok(Outcome::Say("No words".into())),
+    );
+    assert_eq!(
+        shows(&app),
+        ("Words".into(), said("No words"), Some(again("count"))),
+        "said on the page, which can still be run again"
+    );
+    assert_eq!(app.status, "Count words: No words");
+
+    ran(&mut app, again("count"), Ok(Outcome::Show(listed())));
+    ran(
+        &mut app,
+        again("count"),
+        Err(Failure::Plugin("The project has no files".into())),
+    );
+    assert_eq!(shows(&app).1, said("The project has no files"));
+
+    ran(&mut app, again("count"), Ok(Outcome::Show(listed())));
+    ran(&mut app, again("count"), Ok(Outcome::Nothing));
+    assert_eq!(shows(&app).1, said("It has nothing to show now."));
+}
+
 /// A list of plugins that cannot be read is not taken for no plugins: the
 /// list read last stands, Settings says why, none of them runs, and
 /// nothing a plugin saved is deleted on its word. Readable again, all is
@@ -41553,8 +41897,30 @@ fn an_unreadable_plugin_list_is_said_and_runs_and_deletes_nothing() {
         iced_test::simulator(crate::ui::plugins_settings(&opened))
             .find("Have a plugin's file?")
             .is_ok(),
-        "a file can still be installed"
+        "where a file is installed from stays, for once it is read again"
     );
+    // What changes the list cannot be done while it cannot be read: each
+    // failed with the reason the note already says. Not offered, until it
+    // reads again.
+    let offered = |app: &App| -> Vec<Message> {
+        crate::ui::heard::gather_all_of(|| crate::ui::plugins_settings(app))
+            .0
+            .into_iter()
+            .map(|t| t.message)
+            .filter(|m| {
+                matches!(
+                    m,
+                    Message::Plugin(
+                        PluginMsg::InstallFromFile
+                            | PluginMsg::SetEnabled(..)
+                            | PluginMsg::AskRemove(_)
+                    )
+                )
+            })
+            .collect()
+    };
+    assert!(offered(&opened).is_empty());
+    assert!(offered(&app).is_empty(), "nor for the plugins it read last");
     assert!(
         iced_test::simulator(crate::ui::plugins_settings(&opened))
             .find("A plugin adds what you need to Clew. Ask your agent for one, in your own words: “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before installing it.")
@@ -41613,6 +41979,14 @@ fn an_unreadable_plugin_list_is_said_and_runs_and_deletes_nothing() {
     settle(&mut app, opened);
     assert!(app.plugins.list_error.is_none());
     assert!(app.failure_shown().is_none(), "said of it no more");
+    let offered_now = offered(&app);
+    for action in [
+        |m: &Message| matches!(m, Message::Plugin(PluginMsg::InstallFromFile)),
+        |m: &Message| matches!(m, Message::Plugin(PluginMsg::AskRemove(_))),
+        |m: &Message| matches!(m, Message::Plugin(PluginMsg::SetEnabled(..))),
+    ] {
+        assert!(offered_now.iter().any(action), "offered again");
+    }
     let _ = app.close_settings();
 
     // Unreadable again, then fixed with Settings never opened: the run that
@@ -42227,19 +42601,19 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
     })));
     assert!(says(
         &app,
-        "Clew's Rust could not be removed: permission denied"
+        "Clew's own Rust could not be removed: permission denied"
     ));
     // Looked at again while it is still there: why holds.
     checked(&mut app, Ok(("1.95.0".into(), true)), true);
     assert!(says(
         &app,
-        "Clew's Rust could not be removed: permission denied"
+        "Clew's own Rust could not be removed: permission denied"
     ));
     // Gone: so is why it was not.
     checked(&mut app, Ok(("1.95.0".into(), false)), false);
     assert!(!says(
         &app,
-        "Clew's Rust could not be removed: permission denied"
+        "Clew's own Rust could not be removed: permission denied"
     ));
 
     // The Ask agent's build failed for want of Rust: said where the user
@@ -42309,7 +42683,7 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
     );
     assert!(says(
         &app,
-        "Setting up did not work: the download was cut off"
+        "Setting up Rust did not work: the download was cut off"
     ));
     assert!(
         app.status.contains("the download was cut off"),
@@ -42365,10 +42739,13 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
 
     // Ready with Clew's own: said so, and it can be removed.
     checked(&mut app, Ok(("1.95.0".into(), true)), true);
-    assert!(says(&app, "Ready: Rust 1.95.0, installed by Clew"));
+    assert!(says(&app, "Ready: Clew's own Rust 1.95.0"));
     assert!(says(&app, "Clew's own Rust"));
     assert!(
-        !says(&app, "Setting up did not work: the download was cut off"),
+        !says(
+            &app,
+            "Setting up Rust did not work: the download was cut off"
+        ),
         "a failure is forgotten once ready"
     );
     checked(&mut app, Ok(("1.95.0".into(), false)), false);
