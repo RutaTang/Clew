@@ -3591,14 +3591,29 @@ pub enum ProofMsg {
     Goto(usize),
     /// Put the proof away.
     Close,
+    /// The cursor has rested where the goals were last asked for: ask the
+    /// Lean server now, if `token` is still the latest asking.
+    GoalsDue { token: u64 },
+    /// The Lean server's goals at the cursor (`token`'s asking).
+    Goals {
+        stamp: Stamp,
+        token: u64,
+        result: Result<Option<clew_core::lsp::client::LeanGoal>, String>,
+    },
 }
 
 impl ProofMsg {
     /// Where the message comes from, for `dispatch`'s ownership check.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            ProofMsg::Answered { stamp, .. } => Some(Origin::Stamped(stamp)),
-            ProofMsg::FromMenu | ProofMsg::Step(_) | ProofMsg::Goto(_) | ProofMsg::Close => None,
+            ProofMsg::Answered { stamp, .. } | ProofMsg::Goals { stamp, .. } => {
+                Some(Origin::Stamped(stamp))
+            }
+            ProofMsg::FromMenu
+            | ProofMsg::Step(_)
+            | ProofMsg::Goto(_)
+            | ProofMsg::Close
+            | ProofMsg::GoalsDue { .. } => None,
         }
     }
 }

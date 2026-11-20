@@ -464,3 +464,79 @@ fn answers_read_as_the_popup_shows_them() {
         "```haskell\nprint :: forall a. Show a => a -> IO ()\n```\n\nAt this use: `Int -> IO ()`\n\n*Defined in System.IO*"
     );
 }
+
+/// In a Lean file the margin turns to the goals at the cursor — once, the
+/// first Lean file read; after that the tab is the reader's — and asks the
+/// Lean server where the cursor rests, again when it moves. Beside a file
+/// that is not Lean, the Goals tab shows the notes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_margin_follows_the_lean_goals_at_the_cursor() {
+    use crate::MarginTab;
+    let mut app = scanned_app("lean-goals-margin");
+    app.window_width = 1400.0;
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("Proof.lean"), "theorem t : 1 = 1 := by\n  rfl\n").unwrap();
+    std::fs::write(root.join("More.lean"), "theorem u : 2 = 2 := by\n  rfl\n").unwrap();
+    scan_synchronously(&mut app, root.clone());
+    open_synchronously(&mut app, "src/lib.rs", None);
+    assert_eq!(app.margin_tab, MarginTab::Notes);
+    open_synchronously(&mut app, "Proof.lean", None);
+    assert_eq!(
+        app.margin_tab,
+        MarginTab::Goals,
+        "a Lean file shows its goals"
+    );
+    assert!(app.proj.lean_goals.is_none(), "no server to ask yet");
+
+    let (client, wire) = scripted_lsp_client(&root).await;
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), LspSlot::Ready(client));
+    app.active_viewer_mut().unwrap().caret = Some((1, 2));
+    // Asked once the cursor rests; answered, the margin has it.
+    let mut pending = vec![app.update(Message::Noop)];
+    while let Some(task) = pending.pop() {
+        for m in run_task_async(task).await {
+            pending.push(app.update(m));
+        }
+    }
+    let goals = app.proj.lean_goals.as_ref().expect("asked");
+    assert!(!goals.asking);
+    assert_eq!(
+        goals
+            .answer
+            .as_ref()
+            .map(|(line, got)| (*line, got.clone())),
+        Some((1, Ok(Some(LeanGoal::Tactic(vec!["⊢ 1 = 1".into()])))))
+    );
+    assert!(
+        wire.lock()
+            .unwrap()
+            .contains("\"method\":\"$/lean/plainGoal\"")
+    );
+    // Resting where it was asked asks nothing more.
+    let token = goals.token;
+    let _ = app.update(Message::Noop);
+    assert_eq!(app.proj.lean_goals.as_ref().unwrap().token, token);
+    // Moved, it is asked again.
+    app.active_viewer_mut().unwrap().caret = Some((0, 3));
+    let _ = app.update(Message::Noop);
+    let goals = app.proj.lean_goals.as_ref().unwrap();
+    assert!(goals.asking && goals.token > token && goals.line == 0);
+
+    // The reader's choice stands: the notes picked, another Lean file
+    // keeps them.
+    let _ = app.update(Message::Window(WindowMsg::MarginTabPicked(
+        MarginTab::Notes,
+    )));
+    open_synchronously(&mut app, "More.lean", None);
+    assert_eq!(app.margin_tab, MarginTab::Notes);
+    // Goals chosen, a Rust file shows its notes, the choice kept.
+    let _ = app.update(Message::Window(WindowMsg::MarginTabPicked(
+        MarginTab::Goals,
+    )));
+    open_synchronously(&mut app, "src/lib.rs", None);
+    assert_eq!(app.margin_tab, MarginTab::Goals);
+    assert_eq!(app.margin_tab_shown(), MarginTab::Notes);
+}

@@ -582,6 +582,12 @@ pub struct OverviewState {
     pub prepared: Vec<PreparedSeg>,
     /// True while the overview is being generated.
     pub generating: bool,
+    /// Why the last generation failed, in words for the reader
+    /// (`tasks::ai_reason`): said where the overview will be, with Try
+    /// again, until one is asked for again. It went to the status line
+    /// alone, and the page offered the same step as if nothing had
+    /// happened.
+    pub failed: Option<String>,
     /// True when the main area shows the overview "home" (vs. code / empty).
     pub showing: bool,
     /// Prompt hash of the cached overview, so a re-explain regenerates it only
@@ -1758,6 +1764,11 @@ pub struct App {
     pub insight_seq: u64,
     /// Mints [`crate::app::proof::ProofWalk::token`], likewise.
     pub proof_seq: u64,
+    /// Mints [`crate::app::proof::LeanGoals::token`], likewise.
+    pub lean_goals_seq: u64,
+    /// The margin has been turned to the Lean goals once, for the first
+    /// Lean file read: after that, the tab is the reader's to choose.
+    pub lean_goals_offered: bool,
     /// The command palette's list, as last built (see `app::palette`).
     pub(crate) palette: Vec<crate::app::palette::PaletteCommand>,
     /// The palette commands run last, most recent first.
@@ -2590,6 +2601,9 @@ pub struct ProjectSession {
     pub fake: crate::app::fakerun::FakeRun,
     /// A Lean proof being stepped through (`app::proof`).
     pub proof: Option<crate::app::proof::ProofWalk>,
+    /// The Lean goals at the cursor, the margin's Goals tab
+    /// (`app::proof`).
+    pub lean_goals: Option<crate::app::proof::LeanGoals>,
     /// The weak spots page (`app::weakspots`).
     pub weak: crate::app::weakspots::WeakSpots,
     /// The API documentation view's state (see [`DocsState`]).
@@ -2954,6 +2968,7 @@ impl Default for ProjectSession {
             walk: Default::default(),
             fake: Default::default(),
             proof: None,
+            lean_goals: None,
             weak: Default::default(),
             docs: Default::default(),
             glossary: Default::default(),

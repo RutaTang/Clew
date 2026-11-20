@@ -1249,6 +1249,7 @@ impl App {
                 (tr_noop!("Margin: Explanations"), MarginTab::Notes),
                 (tr_noop!("Margin: Calls"), MarginTab::Calls),
                 (tr_noop!("Margin: History"), MarginTab::History),
+                (tr_noop!("Margin: Goals"), MarginTab::Goals),
             ] {
                 add(
                     title.into(),

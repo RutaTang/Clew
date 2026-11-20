@@ -171,6 +171,7 @@ impl App {
         let prompt = overview::prompt(&inputs);
         let prompt_hash = incremental::content_hash(prompt.as_bytes());
         self.proj.overview.generating = true;
+        self.proj.overview.failed = None;
         // This request supersedes any still in flight (see `OverviewMsg::Done`).
         self.proj.overview.seq += 1;
         let seq = self.proj.overview.seq;
@@ -242,6 +243,7 @@ impl App {
             }
             Err(e) => {
                 self.status = tr!("Could not generate the overview: {error}", error = e);
+                self.proj.overview.failed = Some(crate::app::tasks::ai_reason(&e));
                 Task::none()
             }
         }

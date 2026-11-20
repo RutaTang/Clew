@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use clew_core::leanproof::{self, ProofStep};
+use clew_core::lsp::client::LeanGoal;
 
 use crate::app::prelude::*;
 use crate::*;
@@ -34,6 +35,32 @@ pub struct ProofWalk {
     /// Which asking the answer must be for: a later one replaces it.
     pub(crate) token: u64,
 }
+
+/// The margin's Goals tab: the Lean server's goals where the cursor rests
+/// in a Lean file, and the file's messages on that line — asked again as
+/// the cursor moves, and as the server checks more of the file.
+#[derive(Debug, Clone)]
+pub struct LeanGoals {
+    /// The file asked about.
+    pub(crate) abs: PathBuf,
+    /// The 0-based line and display column asked about.
+    pub(crate) line: usize,
+    pub(crate) col: usize,
+    /// The server's diagnostics version when asked: moved on, the file has
+    /// been checked further, and what it says there may have changed.
+    pub(crate) checked: u64,
+    /// Which asking is the latest: an answer for an older one is dropped.
+    pub(crate) token: u64,
+    /// Asked and not yet answered (or about to be: the cursor is resting).
+    pub(crate) asking: bool,
+    /// The last answer, and the line it was for: kept while the next one
+    /// is asked, so the goals do not blink away at every keystroke.
+    pub(crate) answer: Option<(usize, Result<Option<LeanGoal>, String>)>,
+}
+
+/// How long the cursor rests before the goals there are asked for: moving
+/// line by line asks once, where it stops.
+const GOALS_REST: std::time::Duration = std::time::Duration::from_millis(180);
 
 impl ProofWalk {
     /// The goals after step `i`, when known.
@@ -196,9 +223,120 @@ impl App {
         (walk.abs == abs).then(|| walk.steps.get(walk.at).map(|s| s.first + 1))?
     }
 
+    /// The margin tab shown: the one chosen, but the notes for Goals beside
+    /// a file that is not Lean.
+    pub(crate) fn margin_tab_shown(&self) -> crate::MarginTab {
+        match self.margin_tab {
+            crate::MarginTab::Goals if !self.reading_lean() => crate::MarginTab::Notes,
+            tab => tab,
+        }
+    }
+
+    /// Whether the file being read is Lean.
+    pub(crate) fn reading_lean(&self) -> bool {
+        self.active_viewer()
+            .is_some_and(|v| v.lang_key == Some("lean"))
+    }
+
+    /// Keep the margin's Goals up with where the cursor is: the first Lean
+    /// file read turns the margin to them (once — the tab is the reader's
+    /// after that); while they are shown, the cursor resting somewhere new,
+    /// or the server having checked more of the file, asks the server
+    /// again. Run after every update ([`App::update`]).
+    pub(crate) fn sync_lean_goals(&mut self) -> Option<Task<Message>> {
+        if self.reading_lean() && !self.lean_goals_offered {
+            self.lean_goals_offered = true;
+            if self.margin_tab == crate::MarginTab::Notes {
+                self.margin_tab = crate::MarginTab::Goals;
+            }
+        }
+        if self.margin_tab_shown() != crate::MarginTab::Goals || !crate::ui::right_panel_shown(self)
+        {
+            return None;
+        }
+        let v = self.active_viewer()?;
+        let (line, col) = v.caret.unwrap_or((0, 0));
+        let abs = v.abs.clone();
+        if !matches!(self.proj.link.lsp.get("lean"), Some(LspSlot::Ready(_))) {
+            return None;
+        }
+        let checked = match self.proj.link.lsp_snapshots.get("lean") {
+            Some(Ok(snapshot)) => snapshot.diag_version,
+            _ => 0,
+        };
+        if self
+            .proj
+            .lean_goals
+            .as_ref()
+            .is_some_and(|g| g.abs == abs && g.line == line && g.col == col && g.checked == checked)
+        {
+            return None;
+        }
+        self.lean_goals_seq += 1;
+        let token = self.lean_goals_seq;
+        // What was said is kept for the same file while the next is asked.
+        let answer = self
+            .proj
+            .lean_goals
+            .take()
+            .filter(|g| g.abs == abs)
+            .and_then(|g| g.answer);
+        self.proj.lean_goals = Some(LeanGoals {
+            abs,
+            line,
+            col,
+            checked,
+            token,
+            asking: true,
+            answer,
+        });
+        Some(Task::perform(tokio::time::sleep(GOALS_REST), move |()| {
+            Message::Proof(ProofMsg::GoalsDue { token })
+        }))
+    }
+
+    /// The cursor has rested: ask the Lean server for the goals there.
+    fn on_goals_due(&mut self, token: u64) -> Task<Message> {
+        let Some(goals) = self.proj.lean_goals.as_ref().filter(|g| g.token == token) else {
+            return Task::none();
+        };
+        let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get("lean") else {
+            return Task::none();
+        };
+        let client = client.clone();
+        let (abs, line, col) = (goals.abs.clone(), goals.line, goals.col);
+        let Some(v) = self.proj.panes.iter().flatten().find(|v| v.abs == abs) else {
+            return Task::none();
+        };
+        let source_line = v.source_line(line).unwrap_or("").to_string();
+        let character = crate::editor::viewer::Col(col).to_offset(&source_line, client.encoding);
+        let stamp = self.stamp();
+        Task::perform(
+            async move { client.lean_goal(&abs, line, character).await },
+            move |result| {
+                Message::Proof(ProofMsg::Goals {
+                    stamp: stamp.clone(),
+                    token,
+                    result,
+                })
+            },
+        )
+    }
+
+    /// The Lean server's goals at the cursor, for asking `token`.
+    fn on_goals(&mut self, token: u64, result: Result<Option<LeanGoal>, String>) -> Task<Message> {
+        if let Some(goals) = self.proj.lean_goals.as_mut().filter(|g| g.token == token) {
+            goals.asking = false;
+            goals.answer = Some((goals.line, result));
+        }
+        Task::none()
+    }
+
     /// Handle a [`ProofMsg`].
     pub(crate) fn update_proof(&mut self, message: ProofMsg) -> Task<Message> {
         match message {
+            ProofMsg::GoalsDue { token } => self.on_goals_due(token),
+            ProofMsg::Goals { token, result, .. } => self.on_goals(token, result),
             ProofMsg::FromMenu => self.on_proof_from_menu(),
             ProofMsg::Answered { token, result, .. } => self.on_proof_answered(token, result),
             ProofMsg::Step(forward) => {

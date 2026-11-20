@@ -1473,7 +1473,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     // functions, the Notes open beside the code: it said the same twice.
     let file_node = crate::explain::Node::File(v.abs.clone());
     let margin_says_it = right_panel_shown(app)
-        && app.margin_tab == crate::app::model::MarginTab::Notes
+        && app.margin_tab_shown() == crate::app::model::MarginTab::Notes
         && app.proj.explain.view.as_ref() == Some(&file_node);
     let banner = if app.show_file_banner && !margin_says_it {
         app.proj
@@ -1579,10 +1579,11 @@ pub(crate) fn right_panel(app: &App) -> Option<Element<'_, Message>> {
     if !right_panel_shown(app) {
         return None;
     }
-    let body: Element<'_, Message> = match app.margin_tab {
+    let body: Element<'_, Message> = match app.margin_tab_shown() {
         crate::MarginTab::Notes => margin_notes(app),
         crate::MarginTab::Calls => margin_calls(app),
         crate::MarginTab::History => margin_history(app),
+        crate::MarginTab::Goals => margin_goals(app),
     };
     Some(
         container(body)
@@ -2685,6 +2686,133 @@ fn margin_calls(app: &App) -> Element<'_, Message> {
 /// first — each a way into Time Travel at it — and, under them, the ways
 /// into how the function and the line came to be. It was four links, two
 /// of them the header's own Diff and Time Travel again.
+/// The margin's Goals, for a Lean file: what the Lean server says where the
+/// cursor is — the goals left there, each with its hypotheses and what is
+/// to be shown, or the type a term there must have — and the file's
+/// messages on that line (an error, `#eval`'s and `#check`'s output), as
+/// Lean's own infoview shows them, kept up as the cursor moves.
+fn margin_goals(app: &App) -> Element<'_, Message> {
+    use clew_core::lsp::client::LeanGoal;
+    let note = |s: String| -> Element<'_, Message> {
+        container(
+            text(s)
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+        .padding([6, 10])
+        .into()
+    };
+    let code = |s: String, color: iced::Color| -> Element<'_, Message> {
+        container(
+            text(s)
+                .size(ts::SMALL)
+                .font(crate::fonts::CODE)
+                .color(color)
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+        .padding([2, 10])
+        .into()
+    };
+    let Some(v) = app.active_viewer() else {
+        return note(String::new());
+    };
+    let line = v.caret.map_or(0, |(l, _)| l);
+    match app.proj.link.lsp.get("lean") {
+        Some(crate::LspSlot::Ready(_)) => {}
+        Some(crate::LspSlot::Starting | crate::LspSlot::AwaitingConsent) => {
+            return note(
+                tr!("The Lean server is starting. The goals at the cursor show here once it is ready.")
+                    .into(),
+            );
+        }
+        _ => {
+            let open = button(
+                text(tr!("Language servers…"))
+                    .size(ts::SMALL)
+                    .color(theme::accent()),
+            )
+            .style(theme::icon_button(false))
+            .padding([3, 6])
+            .on_press(super::heard::said(
+                tr!("Language servers…"),
+                Message::Editor(EditorMsg::RunAction(crate::keymap::Action::LspServers)),
+            ));
+            return column![
+                note(tr!("Start the Lean server to see the goals at the cursor here.").into()),
+                container(open).padding([0, 4]),
+            ]
+            .into();
+        }
+    }
+    let mut rows = Column::new().spacing(2);
+    let goals = app.proj.lean_goals.as_ref().filter(|g| g.abs == v.abs);
+    match goals.and_then(|g| g.answer.as_ref()) {
+        None => rows = rows.push(note(tr!("Asking the Lean server…").into())),
+        Some((_, Err(e))) => {
+            rows = rows.push(note(tr!(
+                "The Lean server gave no goals here: {error}",
+                error = crate::i18n::message(e)
+            )))
+        }
+        Some((_, Ok(None))) => {
+            rows = rows.push(note(
+                tr!(
+                    "No goal here. Put the cursor in a proof, or in a term, to see what it must be."
+                )
+                .into(),
+            ))
+        }
+        Some((at, Ok(Some(LeanGoal::Tactic(left))))) if left.is_empty() => {
+            rows = rows.push(super::explain_view::section_header(&tr!(
+                "Goals at line {line}",
+                line = at + 1
+            )));
+            rows = rows.push(note(tr!("No goals: the proof is complete here.").into()));
+        }
+        Some((at, Ok(Some(LeanGoal::Tactic(left))))) => {
+            rows = rows.push(super::explain_view::section_header(&tr!(
+                "Goals at line {line}",
+                line = at + 1
+            )));
+            rows = rows.push(
+                container(Column::with_children(super::proof::goal_rows(left, None)).spacing(2))
+                    .padding([2, 10]),
+            );
+        }
+        Some((at, Ok(Some(LeanGoal::Term(ty))))) => {
+            rows = rows.push(super::explain_view::section_header(&tr!(
+                "Expected type at line {line}",
+                line = at + 1
+            )));
+            rows = rows.push(code(ty.clone(), theme::fg()));
+        }
+    }
+    // What Lean says of the line: an error, a warning, `#eval`'s answer.
+    if let Some(Ok(snapshot)) = app.proj.link.lsp_snapshots.get("lean") {
+        let said: Vec<&clew_core::lsp::client::Diag> = snapshot
+            .diagnostics(&v.abs)
+            .iter()
+            .filter(|d| d.line <= line && line <= d.end_line.max(d.line))
+            .collect();
+        if !said.is_empty() {
+            rows = rows.push(super::explain_view::section_header(&tr!(
+                "Messages on line {line}",
+                line = line + 1
+            )));
+            for d in said {
+                let color = match d.severity {
+                    1 => theme::danger(),
+                    2 => theme::warning(),
+                    _ => theme::fg(),
+                };
+                rows = rows.push(code(d.message.trim().to_string(), color));
+            }
+        }
+    }
+    scrollable(rows).height(Fill).into()
+}
+
 fn margin_history(app: &App) -> Element<'_, Message> {
     // Its rows counted from 1, as voice picks them ("open the second").
     super::heard::list();

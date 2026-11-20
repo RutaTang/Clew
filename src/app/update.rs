@@ -76,6 +76,11 @@ impl App {
             self.ask_sessions_query.clear();
         }
         self.ask_menu_covered = covered;
+        // The margin's Goals follow the cursor in a Lean file.
+        let task = match self.sync_lean_goals() {
+            Some(goals) => Task::batch([task, goals]),
+            None => task,
+        };
         // The margin's History lists the commits of the file being read.
         // Batched only when it asks: a batch is a task even of none, and an
         // update that asks for nothing returns none.

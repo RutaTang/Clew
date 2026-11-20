@@ -588,7 +588,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|(of, ..)| of == node)
                     && self.proj.explain.view.as_ref() == Some(node)
-                    && self.margin_tab == crate::MarginTab::Notes
+                    && self.margin_tab_shown() == crate::MarginTab::Notes
                     && crate::ui::right_panel_shown(self)
             });
             if on_card {

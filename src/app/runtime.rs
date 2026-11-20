@@ -182,6 +182,8 @@ impl App {
             blame_why_seq: 0,
             insight_seq: 0,
             proof_seq: 0,
+            lean_goals_seq: 0,
+            lean_goals_offered: false,
             palette: Vec::new(),
             palette_recent: Vec::new(),
             palette_home: Vec::new(),

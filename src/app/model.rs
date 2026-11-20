@@ -216,13 +216,18 @@ impl CitationIndex {
 
 /// The reading panel's views (the margin beside the code): notes on what is
 /// read, the calls around the function the caret is in, and its history —
-/// the file's. Ask is the whole project's: it floats in the window's corner.
+/// the file's — and, in a Lean file, the proof's goals where the cursor is.
+/// Ask is the whole project's: it floats in the window's corner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MarginTab {
     #[default]
     Notes,
     Calls,
     History,
+    /// The Lean server's goals at the cursor and its messages there, kept
+    /// up as the cursor moves — Lean's infoview. Lean files only: beside
+    /// another, the margin shows the notes.
+    Goals,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

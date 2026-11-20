@@ -179,12 +179,13 @@ const FOLDER_MIN_W: f32 = 96.0;
 /// What the header's tools say beside their glyphs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolWords {
-    /// Each its name.
-    All,
-    /// Explain its name, the others their glyphs alone: the one that
-    /// spends an AI call, and what a reader new to Clew looks for.
+    /// Explain its name, the others their glyphs alone, their names in
+    /// their tooltips: Explain is the one that spends an AI call, and what
+    /// a reader new to Clew looks for. The tools as glyphs and the margin's
+    /// tabs as words tell the row's actions from its views: as nine words
+    /// in a line, they read as one group.
     Explain,
-    /// Their glyphs alone, their names in their tooltips.
+    /// Their glyphs alone, Explain's too: a window too narrow for its name.
     None,
 }
 
@@ -192,7 +193,6 @@ impl ToolWords {
     /// Whether the tool named `explain` (or another) is said short.
     fn short(self, explain: bool) -> bool {
         match self {
-            ToolWords::All => false,
             ToolWords::Explain => !explain,
             ToolWords::None => true,
         }
@@ -206,30 +206,28 @@ fn file_tools_w(words: ToolWords) -> f32 {
         .enumerate()
         .map(|(i, l)| file_tool_w(l, words.short(i == 0)))
         .sum::<f32>();
-    tools + TOOLS_RULE_W + view_button_w(words.short(false)) + 5.0 * TOOLS_SPACING
+    tools + TOOLS_RULE_W + view_button_w() + 5.0 * TOOLS_SPACING
 }
 
-/// What the header's tools say: their names, where the file's name keeps
-/// its room beside them; else Explain's alone; else their glyphs alone,
-/// their names in their tooltips. In a narrow window, or a language of
-/// longer words, the labelled tools took the whole row and the name was
-/// cut to nothing — and with a name a few letters longer at 1100 px,
-/// every word went where Explain's alone had room ("test_pricing.py"
-/// showed ✦ ⤫ ⟲ ◷ where "pricing.py" showed their names).
+/// What the header's tools say: Explain its name, where the file's name
+/// keeps its room beside it; else their glyphs alone. One look in every
+/// window it fits: the tools said their names where a file's name was
+/// short and gave them up where it was long ("test_pricing.py" showed
+/// ✦ ⤫ ⟲ ◷ where "pricing.py" showed their names).
 fn file_tool_words(app: &App) -> ToolWords {
     let Some(v) = app.active_viewer() else {
-        return ToolWords::All;
+        return ToolWords::Explain;
     };
     let (name, _) = title_parts(v);
-    // The name: its folder gives way before the tools' words do
-    // (`folder_shown`), the tools being what a reader new to Clew reads.
+    // The name: its folder gives way before Explain's name does
+    // (`folder_shown`), Explain being what a reader new to Clew reads.
     let title = text_width(&name, ts::EMPHASIS, TITLE_FONT).min(TITLE_MIN_W);
     let room = header_right(app) - HEADER_PAD_RIGHT - (sheet_content_left(app) + HEADER_PAD_X);
-    let fits = |words| room - TITLE_GAP / 2.0 - file_tools_w(words) >= title;
-    [ToolWords::All, ToolWords::Explain]
-        .into_iter()
-        .find(|&words| fits(words))
-        .unwrap_or(ToolWords::None)
+    if room - TITLE_GAP / 2.0 - file_tools_w(ToolWords::Explain) >= title {
+        ToolWords::Explain
+    } else {
+        ToolWords::None
+    }
 }
 
 /// The open file's `folder` as the header has room to show it beside
@@ -284,15 +282,9 @@ const TOOLS_RULE_W: f32 = 9.0;
 const HEADER_PAD_X: f32 = 20.0;
 const HEADER_PAD_RIGHT: f32 = 16.0;
 
-/// Width of the View menu's button: its eye, its name unless `short`, and
-/// its chevron.
-fn view_button_w(short: bool) -> f32 {
-    let named = if short {
-        0.0
-    } else {
-        6.0 + text_width(tr!("View"), ts::BODY, FILE_TOOL_FONT)
-    };
-    VIEW_PAD.x() + 14.0 + named + 6.0 + VIEW_CHEVRON
+/// Width of the View menu's button: its eye and its chevron.
+fn view_button_w() -> f32 {
+    VIEW_PAD.x() + 14.0 + 6.0 + VIEW_CHEVRON
 }
 
 /// The View menu's button: the design's 9 before what it holds, 8 after,
@@ -325,11 +317,28 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
     })
 }
 
+/// Where the header's `nth` tool is drawn — Explain, Skim, Diff, Time
+/// Travel — in window coordinates: a glyph's place, for what finds it
+/// with no words to find it by.
+#[cfg(test)]
+pub(crate) fn file_tool_rect(app: &App, nth: usize) -> Option<iced::Rectangle> {
+    let tools = file_tools_rect(app)?;
+    let words = file_tool_words(app);
+    let labels = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")];
+    let w = |i: usize| file_tool_w(labels[i], words.short(i == 0));
+    let x = tools.x + (0..nth).map(|i| w(i) + TOOLS_SPACING).sum::<f32>();
+    Some(iced::Rectangle {
+        x,
+        width: w(nth),
+        ..tools
+    })
+}
+
 /// Where the View menu's button is drawn, in window coordinates: the last
 /// of the file tools.
 pub(crate) fn view_button_rect(app: &App) -> Option<iced::Rectangle> {
     let tools = file_tools_rect(app)?;
-    let w = view_button_w(file_tool_words(app).short(false));
+    let w = view_button_w();
     Some(iced::Rectangle {
         x: tools.x + tools.width - w,
         width: w,
@@ -444,23 +453,33 @@ fn file_tool<'a>(
     .padding([0.0, FILE_TOOL_PAD_X])
     .on_press(super::heard::said(label, msg));
     // Its tooltip says what it does (`about`) where its name alone does
-    // not, with its shortcut; said short, the tooltip is where its name is.
-    let tip = about.unwrap_or(label);
-    match shortcut {
-        Some(sc) => tip_at(face, tip, Some(sc), tooltip::Position::Bottom),
-        None if short || about.is_some() => tip_at(face, tip, None, tooltip::Position::Bottom),
-        None => face.into(),
+    // not, with its shortcut; said short, the tooltip is where its name
+    // is, over what it does.
+    match (short, about, shortcut) {
+        (true, about, shortcut) => {
+            tip_at_why(face, label, shortcut, about, tooltip::Position::Bottom)
+        }
+        (false, Some(about), shortcut) => tip_at(face, about, shortcut, tooltip::Position::Bottom),
+        (false, None, Some(sc)) => tip_at(face, label, Some(sc), tooltip::Position::Bottom),
+        (false, None, None) => face.into(),
     }
 }
 
 /// The margin's tabs — Notes, Calls, History — in the header, over the
 /// margin they switch.
 pub(crate) fn margin_tabs(app: &App, room: f32) -> Element<'_, Message> {
-    let labels = [
-        (tr!("Explanations"), crate::MarginTab::Notes),
-        (tr!("Calls"), crate::MarginTab::Calls),
-        (tr!("History"), crate::MarginTab::History),
-    ];
+    // A Lean file's own first: the proof's goals where the cursor is.
+    let goals = app
+        .reading_lean()
+        .then_some((tr!("Goals"), crate::MarginTab::Goals));
+    let labels: Vec<(&'static str, crate::MarginTab)> = goals
+        .into_iter()
+        .chain([
+            (tr!("Explanations"), crate::MarginTab::Notes),
+            (tr!("Calls"), crate::MarginTab::Calls),
+            (tr!("History"), crate::MarginTab::History),
+        ])
+        .collect();
     // As much room round each name as the margin has: in French at 1100,
     // "Explications · Appels · Historique" ran past the margin's edge, the
     // last tab's background cut there. Tighter first; then, where even
@@ -474,7 +493,7 @@ pub(crate) fn margin_tabs(app: &App, room: f32) -> Element<'_, Message> {
     let pad = ((room - words - gaps) / (2.0 * labels.len() as f32)).clamp(4.0, 10.0);
     let over = words + gaps + 2.0 * pad * labels.len() as f32 - room;
     let tab = |label: &'static str, width: f32, this: crate::MarginTab| {
-        let chosen = app.margin_tab == this;
+        let chosen = app.margin_tab_shown() == this;
         // Each name gives up its share of what is over, by its width.
         let keep = if over > 0.0 {
             (width - over * width / words).max(0.0)
@@ -581,25 +600,16 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             }),
     )
     .padding([0.0, (TOOLS_RULE_W - 1.0) / 2.0]);
-    // Said short where the file's name would otherwise lose its room:
-    // Explain the last to give its name up.
+    // Glyphs, their names in their tooltips; Explain's said where the
+    // file's name keeps its room beside it.
     let words = file_tool_words(app);
     let short = words.short(false);
-    let mut view_face = row![glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0)]
-        .spacing(6)
-        .align_y(iced::Center);
-    if !short {
-        view_face = view_face.push(ts::set_in(
-            text(tr!("View"))
-                .font(FILE_TOOL_FONT)
-                .color(theme::fg_muted())
-                .wrapping(Wrapping::None),
-            HEADER_CONTROL_H,
-            ts::INTER,
-            ts::BODY,
-        ));
-    }
-    let view_face = view_face.push(glyph::icon(Glyph::ChevronDown, theme::dim(), VIEW_CHEVRON));
+    let view_face = row![
+        glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0),
+        glyph::icon(Glyph::ChevronDown, theme::dim(), VIEW_CHEVRON),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
     let view_menu = button(
         container(view_face)
             .height(Length::Fixed(HEADER_CONTROL_H))
@@ -611,11 +621,13 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         tr!("View"),
         Message::Window(WindowMsg::ToggleViewMenu),
     ));
-    let view_menu: Element<'_, Message> = if short {
-        tip_at(view_menu, tr!("View"), None, tooltip::Position::Bottom)
-    } else {
-        view_menu.into()
-    };
+    let view_menu = tip_at_why(
+        view_menu,
+        tr!("View"),
+        None,
+        Some(tr!("Reading aids")),
+        tooltip::Position::Bottom,
+    );
     let unchanged = !diffing
         && v.git
             .as_ref()
@@ -639,7 +651,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         file_tool(
             Glyph::Skim,
             tr!("Skim"),
-            Some(tr!("Skim: fold every body to its signature")),
+            Some(tr!("Fold every body to its signature")),
             v.skimmed(&app.skim_lines(&v.abs)),
             None,
             Message::Editor(EditorMsg::SkimFile),
@@ -665,7 +677,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         file_tool(
             Glyph::TimeTravel,
             tr!("Time Travel"),
-            None,
+            Some(tr!("Step back through the file's history")),
             time_travel,
             caps(Action::TimeTravel),
             if time_travel {

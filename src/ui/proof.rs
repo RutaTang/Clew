@@ -182,7 +182,10 @@ fn proof_columns(walk: &ProofWalk) -> Element<'_, Message> {
 /// Each goal of `goals`: its case, its hypotheses and what is to be shown;
 /// next to `before`, what is new marked `+` and what changed `~`, in their
 /// colours, and a target that changed in the accent.
-fn goal_rows<'a>(goals: &[String], before: Option<&[String]>) -> Vec<Element<'a, Message>> {
+pub(crate) fn goal_rows<'a>(
+    goals: &[String],
+    before: Option<&[String]>,
+) -> Vec<Element<'a, Message>> {
     let prior = before
         .and_then(|b| b.first())
         .map(|g| leanproof::parse_goal(g));

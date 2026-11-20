@@ -12093,7 +12093,12 @@ fn time_travel_shows_the_commit_being_read() {
         !shows(&mut sim, "Loading revision…"),
         "the live file stays on screen until the revision loads"
     );
-    let exit = click(sim_of(&app), "Time Travel");
+    // Its glyph in the header, pressed again, leaves.
+    let at = super::file_tool_rect(&app, 3).expect("the header's Time Travel");
+    let mut sim = sim_of(&app);
+    sim.point_at(at.center());
+    let _ = sim.simulate(iced_test::simulator::click());
+    let exit = sent_by(sim);
     assert!(
         exit.iter()
             .any(|m| matches!(m, Message::TimeTravel(crate::TimeTravelMsg::Exit))),
@@ -16044,12 +16049,14 @@ fn the_files_name_keeps_its_room_in_the_header() {
         let tools = super::file_tools_rect(&app).unwrap();
         assert!(tools.x > name.x + name.width, "{tools:?} over {name:?}");
     });
-    // With room, they are said whole.
+    // With room, Explain says its name; the others are their glyphs,
+    // whatever the room.
     let mut app = reader_app();
     app.show_left_sidebar = true;
     app.window_width = WINDOW.width;
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "Time Travel"));
+    assert!(shows(&mut sim, "Explain"));
+    assert!(!shows(&mut sim, "Time Travel"));
     let name = text_at(&mut sim, |t| t == "lib.rs", 0).unwrap();
     assert!(name.width > 20.0);
 }
@@ -16113,9 +16120,10 @@ fn an_unexplained_note_offers_explain_all() {
     );
 }
 
-/// The Overview not generated yet says what it is written from and offers
-/// the one step that gets there, as a button: it said "Run Explain All
-/// first." in words alone, and the page was a dead end.
+/// The Overview not generated yet says, in a card where it will be, what
+/// it is and offers the one step that gets there: it said "Run Explain All
+/// first." in words alone, and the page was a dead end; then a sentence
+/// and a filled button floated alone under the map.
 #[test]
 fn the_overview_offers_its_next_step() {
     let mut app = reader_app();
@@ -16149,10 +16157,48 @@ fn the_overview_offers_its_next_step() {
             basis: None,
         },
     );
-    // Ready: written by the icon beside the close button, not by a button
-    // floated alone under the map.
+    // Ready: written from the card, where it will be.
     let mut sim = sim_elem(super::overview_home(&app));
-    assert!(!shows(&mut sim, "Generate overview"), "a word, not an icon");
+    assert!(shows(&mut sim, "Written overview"));
+    drop(sim);
+    let sent = click(sim_elem(super::overview_home(&app)), "Generate overview");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Overview(crate::OverviewMsg::Generate)]
+        ),
+        "{sent:?}"
+    );
+    // Writing it keeps the page: the page was swapped for a line of words.
+    app.proj.overview.generating = true;
+    let mut sim = sim_elem(super::overview_home(&app));
+    assert!(shows(&mut sim, "Architecture Overview"));
+    assert!(shows(&mut sim, "Generating architecture overview…"));
+    assert!(!shows(&mut sim, "Generate overview"), "not offered twice");
+    drop(sim);
+    // Failed: said where it will be, with Try again.
+    app.proj.overview.generating = false;
+    app.proj.overview.failed = Some("the model is overloaded".into());
+    let mut sim = sim_elem(super::overview_home(&app));
+    assert!(shows(
+        &mut sim,
+        "Could not generate the overview: the model is overloaded"
+    ));
+    drop(sim);
+    let sent = click(sim_elem(super::overview_home(&app)), "Try again");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Overview(crate::OverviewMsg::Generate)]
+        ),
+        "{sent:?}"
+    );
+    // Written: the card gives way to it, and writing it again is the icon
+    // beside the close button.
+    app.proj.overview.failed = None;
+    app.proj.overview.markdown = Some("The shop sells tea.".into());
+    let mut sim = sim_elem(super::overview_home(&app));
+    assert!(!shows(&mut sim, "Written overview"));
     drop(sim);
     let sent = click_right_of(
         || sim_elem(super::overview_home(&app)),
@@ -16164,12 +16210,6 @@ fn the_overview_offers_its_next_step() {
             .any(|m| matches!(m, Message::Overview(crate::OverviewMsg::Generate))),
         "{sent:?}"
     );
-    // Writing it keeps the page and turns the icon: the page was swapped
-    // for a line of words.
-    app.proj.overview.generating = true;
-    let mut sim = sim_elem(super::overview_home(&app));
-    assert!(shows(&mut sim, "Architecture Overview"));
-    assert!(shows(&mut sim, "Generating architecture overview…"));
 }
 
 /// An empty type map says why: an API index never built — and, without
@@ -17803,10 +17843,10 @@ fn recent_folders_and_close_folder_are_in_the_app_menu() {
     assert!(!shows(&mut tall_menu(&app), "Close Folder"));
 }
 
-/// L15: where the header has room for Explain's name and not every
-/// tool's, Explain keeps it — the one that spends an AI call, and what a
-/// reader new to Clew looks for. At 1100 px "test_pricing.py" showed
-/// ✦ ⤫ ⟲ ◷ alone, where "pricing.py" showed their names.
+/// L15: Explain keeps its name the longest — the one that spends an AI
+/// call, and what a reader new to Clew looks for; the other tools are
+/// their glyphs. At 1100 px "test_pricing.py" showed ✦ ⤫ ⟲ ◷ alone, where
+/// "pricing.py" showed their names.
 #[test]
 fn explain_keeps_its_name_the_longest() {
     let mut app = reader_app();
@@ -18078,28 +18118,44 @@ fn a_root_files_import_row_names_no_folder() {
 }
 
 /// The header's file tools say what they do where the pointer rests:
-/// Explain that it asks the AI, Skim what it folds, Diff what it compares
-/// with — the names the menu gives them.
+/// Explain that it asks the AI; the others, their glyphs alone, their
+/// names over what they do — Skim what it folds, Diff what it compares
+/// with, Time Travel where it goes.
 #[test]
 fn the_file_tools_say_what_they_do() {
-    let app = reader_app();
-    for (label, says) in [
+    let mut app = reader_app();
+    app.window_width = WINDOW.width;
+    for (nth, name, says) in [
         (
-            "Explain",
+            0,
+            None,
             "Explain this file with AI (an AI call for each part not yet explained)",
         ),
-        ("Skim", "Skim: fold every body to its signature"),
-        ("Diff", "Changes since the last commit"),
+        (1, Some("Skim"), "Fold every body to its signature"),
+        (2, Some("Diff"), "Changes since the last commit"),
+        (
+            3,
+            Some("Time Travel"),
+            "Step back through the file's history",
+        ),
     ] {
-        let at = text_at(&mut sim_of(&app), |t| t == label, 0).expect(label);
-        assert!(!shows(&mut sim_of(&app), says), "{label}: said at rest");
+        let at = super::file_tool_rect(&app, nth).expect("the header's tools");
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, says), "{says}: said at rest");
+        if let Some(name) = name {
+            assert!(!shows(&mut sim, name), "{name}: a word at rest");
+        }
+        drop(sim);
         super::tip::warm_now();
         let mut sim = sim_of(&app);
         sim.point_at(at.center());
         let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
             position: at.center(),
         })]);
-        assert!(shows(&mut sim, says), "{label}");
+        assert!(shows(&mut sim, says), "{says}");
+        if let Some(name) = name {
+            assert!(shows(&mut sim, name), "{name}: named in its tooltip");
+        }
     }
 }
 
