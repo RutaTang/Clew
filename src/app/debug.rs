@@ -271,6 +271,114 @@ async fn build_with_cargo(
     }
 }
 
+/// Run a Lean file's `main` (`lake env lean --run`) for run `run`: its
+/// lines into the run's output as they come, then its exit and its end, as
+/// a debugger reports a program's. Stopped with the run.
+async fn run_lean(
+    output: &mut iced::futures::channel::mpsc::Sender<Message>,
+    stamp: &Stamp,
+    run: u64,
+    live: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    lake: &Path,
+    project: &Path,
+    file: &Path,
+) {
+    use iced::futures::SinkExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let event = |event: dap::DapEvent| {
+        Message::Debug(DebugMsg::DapEvent {
+            stamp: stamp.clone(),
+            run,
+            event,
+        })
+    };
+    let (lines_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<(bool, String)>();
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let job = tokio::task::spawn_blocking({
+        let (lake, project, file, cancel) = (
+            lake.to_path_buf(),
+            project.to_path_buf(),
+            file.to_path_buf(),
+            cancel.clone(),
+        );
+        move || {
+            clew_core::lean_run_main(
+                &lake,
+                &project,
+                &file,
+                |line, stderr| {
+                    let _ = lines_tx.send((stderr, line.to_string()));
+                },
+                &cancel,
+            )
+        }
+    });
+    // Running: its tab says so from the start, as a launched program's.
+    let _ = output
+        .send(event(dap::DapEvent::Continued {
+            thread_id: None,
+            all_threads: true,
+        }))
+        .await;
+    let said = |(stderr, line): (bool, String)| {
+        event(dap::DapEvent::Output(dap::proto::Output {
+            category: if stderr { "stderr" } else { "stdout" }.into(),
+            text: format!("{line}\n"),
+        }))
+    };
+    tokio::pin!(job);
+    let mut open = true;
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(150));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let ended = loop {
+        tokio::select! {
+            line = lines.recv(), if open => match line {
+                Some(line) => {
+                    let _ = output.send(said(line)).await;
+                }
+                None => open = false,
+            },
+            done = &mut job => break done,
+            _ = tick.tick() => {
+                if live.load(Ordering::SeqCst) != run {
+                    // Stopped: Lean is stopped with it, and nothing more said.
+                    cancel.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+        }
+    };
+    while let Ok(line) = lines.try_recv() {
+        let _ = output.send(said(line)).await;
+    }
+    match ended {
+        Ok(Ok(clew_core::LeanRunEnd::Exited(code))) => {
+            let _ = output.send(event(dap::DapEvent::Exited { code })).await;
+            let _ = output.send(event(dap::DapEvent::Terminated)).await;
+        }
+        Ok(Ok(clew_core::LeanRunEnd::Stopped)) => {}
+        Ok(Err(e)) => {
+            let error = tr!("Lean could not be started: {error}", error = e);
+            let _ = output
+                .send(Message::Debug(DebugMsg::Failed {
+                    stamp: stamp.clone(),
+                    run,
+                    error,
+                }))
+                .await;
+        }
+        Err(e) => {
+            let _ = output
+                .send(Message::Debug(DebugMsg::Failed {
+                    stamp: stamp.clone(),
+                    run,
+                    error: e.to_string(),
+                }))
+                .await;
+        }
+    }
+}
+
 /// The most children one variable shows: a list of a million is read a
 /// screenful at a time by no one.
 pub(crate) const MAX_VAR_CHILDREN: usize = 300;
@@ -301,6 +409,53 @@ impl App {
             return Some(start);
         }
         Some(abs.clone())
+    }
+
+    /// Run or Debug on a Lean file with no launch file: its `main` runs, as
+    /// Lean runs it (`lake env lean --run`), in its Lake project. Lean has
+    /// no debugger, and a file of proofs no program: each is said, with
+    /// what there is instead.
+    fn start_lean_run(&mut self, no_debug: bool) -> Task<Message> {
+        let Some(v) = self.active_viewer() else {
+            return Task::none();
+        };
+        let (file, runs) = (v.abs.clone(), clew_core::lean_has_main(&v.source));
+        if !runs {
+            self.status = tr!(
+                "This Lean file has no main to run: Lean checks it as you read, its goals in the Goals tab, and Step Through Proof walks a proof."
+            )
+            .into();
+            return Task::none();
+        }
+        if !no_debug {
+            self.status = tr!(
+                "Lean has no debugger: Run runs this file's main, and Step Through Proof walks a proof one tactic at a time."
+            )
+            .into();
+            return Task::none();
+        }
+        let lake = match self
+            .effective_server("lean")
+            .map(|server| clew_core::lsp::store::locate(&server))
+        {
+            Some(clew_core::lsp::store::Located::Ready(lake)) => lake,
+            _ => {
+                self.status = tr!("Lean's lake was not found: install Lean with elan").into();
+                return Task::none();
+            }
+        };
+        let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let project = clew_core::lake_root(&root, &file);
+        self.start_session(
+            true,
+            Some(crate::app::runplan::RunPlan::Lean {
+                file,
+                project,
+                lake,
+            }),
+        )
     }
 
     /// Whether running `file` does something: it has a program start (a
@@ -471,7 +626,7 @@ impl App {
     /// `no_debug` a plain run ([`Self::start_run`]). With a `plan`, what it
     /// says runs instead: a Rust program or test Cargo builds first, one
     /// Python test ([`crate::app::runplan`]).
-    fn start_session(
+    pub(crate) fn start_session(
         &mut self,
         no_debug: bool,
         plan: Option<crate::app::runplan::RunPlan>,
@@ -505,8 +660,7 @@ impl App {
         let (program, args, cwd, lang) = if remote {
             (root.clone(), Vec::new(), root.clone(), None)
         } else if let Some(plan) = &plan {
-            let (program, args, cwd, lang) = plan.launch(&root);
-            (program, args, cwd, Some(lang))
+            plan.launch(&root)
         } else {
             let cfg = match read_launch_config(&root) {
                 Ok(cfg) => cfg,
@@ -537,6 +691,11 @@ impl App {
                         return Task::none();
                     }
                     let lang = self.active_viewer().and_then(|v| v.lang_key);
+                    // A Lean file runs its `main` as Lean does: it told the
+                    // reader to write a launch file no debugger could use.
+                    if lang == Some("lean") {
+                        return self.start_lean_run(no_debug);
+                    }
                     // A Rust program is built by Cargo and run, as `cargo
                     // run` would: the one the file read is compiled in, or
                     // the package's own (`src/main.rs`) for a library's
@@ -699,6 +858,9 @@ impl App {
                 "Starting debugger — {adapter}…",
                 adapter = crate::i18n::lookup(lang.label())
             ),
+            None if matches!(plan, Some(RunPlan::Lean { .. })) => {
+                tr!("Running {file} with Lean…", file = program_name)
+            }
             None if no_debug => tr!("Starting the program on the remote host…").into(),
             None => tr!("Starting debugger on the remote host…").into(),
         };
@@ -911,6 +1073,15 @@ impl App {
                         None,
                         true,
                     )
+                } else if let Some(crate::app::runplan::RunPlan::Lean {
+                    file,
+                    project,
+                    lake,
+                }) = &plan
+                {
+                    // A Lean file's `main`: run by Lean, no debugger.
+                    run_lean(&mut output, &stamp, run, &live, lake, project, file).await;
+                    return;
                 } else {
                     let lang = lang.expect("local start_debug always detects the language");
                     // A Rust program is built first, by Cargo, its words in

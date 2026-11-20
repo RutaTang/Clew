@@ -27,6 +27,15 @@ pub enum RunPlan {
         node: String,
         name: String,
     },
+    /// A Lean file's `main`, run by Lean in its Lake project (`lake env
+    /// lean --run`): no debugger, its output and how it ended.
+    Lean {
+        file: PathBuf,
+        /// Its Lake project: the folder of the nearest lakefile.
+        project: PathBuf,
+        /// The `lake` it runs with.
+        lake: PathBuf,
+    },
 }
 
 /// One Rust test of a Cargo target.
@@ -51,6 +60,10 @@ impl RunPlan {
                 _ => target_name(target),
             },
             RunPlan::Pytest { name, .. } => name.clone(),
+            RunPlan::Lean { file, .. } => file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         }
     }
 
@@ -61,7 +74,7 @@ impl RunPlan {
                 test: Some(test), ..
             } => Some(&test.name),
             RunPlan::Pytest { name, .. } => Some(name),
-            RunPlan::Cargo { test: None, .. } => None,
+            RunPlan::Cargo { test: None, .. } | RunPlan::Lean { .. } => None,
         }
     }
 
@@ -93,7 +106,7 @@ impl RunPlan {
             RunPlan::Cargo { target, test } => {
                 test.is_some() || matches!(target.kind, TargetKind::Test(_))
             }
-            RunPlan::Pytest { .. } => false,
+            RunPlan::Pytest { .. } | RunPlan::Lean { .. } => false,
         }
     }
 
@@ -104,7 +117,11 @@ impl RunPlan {
     /// A test runs in its package's folder, as `cargo test` runs it; a
     /// program in the project's, as `cargo run` from it; a Python test in
     /// the project's, where pytest finds its configuration.
-    pub(crate) fn launch(&self, root: &Path) -> (PathBuf, Vec<String>, PathBuf, crate::dap::Lang) {
+    /// A Lean file's run has no debugger: no language.
+    pub(crate) fn launch(
+        &self,
+        root: &Path,
+    ) -> (PathBuf, Vec<String>, PathBuf, Option<crate::dap::Lang>) {
         match self {
             RunPlan::Cargo { target, .. } => {
                 let package = target.package_dir().to_path_buf();
@@ -112,14 +129,17 @@ impl RunPlan {
                     true => package.clone(),
                     false => root.to_path_buf(),
                 };
-                (package, Vec::new(), cwd, crate::dap::Lang::Native)
+                (package, Vec::new(), cwd, Some(crate::dap::Lang::Native))
             }
             RunPlan::Pytest { file, node, .. } => (
                 file.clone(),
                 vec![node.clone()],
                 root.to_path_buf(),
-                crate::dap::Lang::Python,
+                Some(crate::dap::Lang::Python),
             ),
+            RunPlan::Lean { file, project, .. } => {
+                (file.clone(), Vec::new(), project.clone(), None)
+            }
         }
     }
 
@@ -129,7 +149,7 @@ impl RunPlan {
     pub(crate) fn shown(&self) -> PathBuf {
         let beside = match self {
             RunPlan::Cargo { target, .. } => target.package_dir().to_path_buf(),
-            RunPlan::Pytest { file, .. } => {
+            RunPlan::Pytest { file, .. } | RunPlan::Lean { file, .. } => {
                 file.parent().map(Path::to_path_buf).unwrap_or_default()
             }
         };

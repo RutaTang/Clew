@@ -339,3 +339,65 @@ fn a_failed_build_keeps_its_tab_with_cargos_errors() {
     assert_eq!(app.status, "Building shapes with Cargo…");
     let _ = std::fs::remove_dir_all(root.join("target"));
 }
+
+/// A Lean file's `main` runs as Lean runs it — `lake env lean --run`, in
+/// its Lake project — its output and its exit in its run's tab; Run on a
+/// Lean file told the reader to write a launch file no debugger could use.
+/// One with no `main`, or Debug, says what there is instead.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lean_files_main_runs_through_lake() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut app = scanned_app("runplan-lean");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    write(&root, "lakefile.lean", "import Lake\n");
+    write(
+        &root,
+        "Main.lean",
+        "def main : IO Unit := IO.println \"hi\"\n",
+    );
+    write(&root, "Proofs.lean", "theorem t : 1 = 1 := rfl\n");
+    scan_synchronously(&mut app, root.clone());
+    open_synchronously(&mut app, "Proofs.lean", None);
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    assert!(app.debug.session.is_none(), "nothing runs");
+    assert!(app.status.contains("no main"), "{}", app.status);
+    open_synchronously(&mut app, "Main.lean", None);
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert!(app.debug.session.is_none(), "no debugger to start");
+    assert!(app.status.contains("no debugger"), "{}", app.status);
+
+    // Run, with a lake standing in for Lean's.
+    let tools = clew_core::testutil::TempDir::new("runplan-lean-lake");
+    let lake = tools.path().join("lake");
+    std::fs::write(
+        &lake,
+        "#!/bin/sh\necho \"hi from $4\"\necho careful >&2\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&lake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let file = root.join("Main.lean");
+    let task = app.start_session(
+        true,
+        Some(RunPlan::Lean {
+            file: file.clone(),
+            project: root.clone(),
+            lake,
+        }),
+    );
+    assert_eq!(app.status, "Running Main.lean with Lean…");
+    assert_eq!(app.run_tab_faces()[0].name, "Main.lean");
+    for msg in run_task_async(task).await {
+        let _ = app.update(msg);
+    }
+    let session = app.debug.session.as_ref().expect("its run");
+    assert_eq!(session.status, crate::DebugStatus::Terminated);
+    assert_eq!(session.exit_code, Some(0));
+    let said: Vec<&str> = session.output.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        said.iter()
+            .any(|t| t.contains(&format!("hi from {}", file.display()))),
+        "{said:?}"
+    );
+    assert!(said.iter().any(|t| t.contains("careful")), "{said:?}");
+}

@@ -507,6 +507,131 @@ pub fn lake_root(root: &Path, file: &Path) -> PathBuf {
         .map_or_else(|| root.to_path_buf(), Path::to_path_buf)
 }
 
+/// Whether a Lean file has a program to run: a `def main` of its own, at
+/// its top level (`partial def main`, `unsafe def main` too), as
+/// `lean --run` needs one.
+pub fn has_main(source: &str) -> bool {
+    source.lines().any(|line| {
+        if line.starts_with(char::is_whitespace) {
+            return false;
+        }
+        let mut words = line.split_whitespace().peekable();
+        while words
+            .next_if(|w| {
+                matches!(
+                    *w,
+                    "private" | "protected" | "public" | "noncomputable" | "partial" | "unsafe"
+                )
+            })
+            .is_some()
+        {}
+        words.next() == Some("def")
+            && words.next().is_some_and(|name| {
+                name == "main"
+                    || name
+                        .strip_prefix("main")
+                        .is_some_and(|r| r.starts_with([':', '(']))
+            })
+    })
+}
+
+/// How a run of a Lean file's `main` ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunEnd {
+    /// It ran and exited with this code.
+    Exited(i64),
+    /// It was stopped, and everything it started with it.
+    Stopped,
+}
+
+/// Run the `main` of the Lean file `file` as Lake runs one: `lake env lean
+/// --run <file>` in its Lake project `project`, with the project's
+/// dependencies on Lean's path. Each line it writes is handed to `said` as
+/// it comes, with whether it was written to stderr. Blocking; stopped, with
+/// everything it started, once `cancel` is set.
+pub fn run_main(
+    lake: &Path,
+    project: &Path,
+    file: &Path,
+    mut said: impl FnMut(&str, bool),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<RunEnd, String> {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    let mut command = crate::spawn::command(lake);
+    command
+        .args(["env", "lean", "--run"])
+        .arg(file)
+        .current_dir(project)
+        .env("PATH", crate::linerpc::child_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // A group of its own: Lean runs under Lake, and stopping one stops both.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    let _job = crate::procgroup::adopt_scoped(&child);
+    let (lines_tx, lines) = std::sync::mpsc::channel::<(bool, String)>();
+    let readers: Vec<std::thread::JoinHandle<()>> = [
+        child
+            .stdout
+            .take()
+            .map(|s| (false, Box::new(s) as Box<dyn std::io::Read + Send>)),
+        child
+            .stderr
+            .take()
+            .map(|s| (true, Box::new(s) as Box<dyn std::io::Read + Send>)),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|(stderr, stream)| {
+        let tx = lines_tx.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                if tx.send((stderr, line)).is_err() {
+                    break;
+                }
+            }
+        })
+    })
+    .collect();
+    drop(lines_tx);
+    let status = loop {
+        while let Ok((stderr, line)) = lines.try_recv() {
+            said(&line, stderr);
+        }
+        if cancel.load(Ordering::SeqCst) {
+            crate::procgroup::kill(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(RunEnd::Stopped);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if let Ok((stderr, line)) = lines.recv_timeout(Duration::from_millis(100)) {
+                    said(&line, stderr);
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    for reader in readers {
+        let _ = reader.join();
+    }
+    while let Ok((stderr, line)) = lines.try_recv() {
+        said(&line, stderr);
+    }
+    Ok(RunEnd::Exited(status.code().map_or(-1, i64::from)))
+}
+
 /// Where the build of the Mathlib a Lake project at `root` depends on — or
 /// is — belongs, when it is not there: `None` for a project without
 /// Mathlib, and for one whose build is in place. Without it, Lean builds
@@ -544,6 +669,79 @@ pub fn mathlib_build_missing(root: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file runs when it has a `main` of its own, at its top level.
+    #[test]
+    fn a_file_with_a_main_has_something_to_run() {
+        assert!(has_main("def main : IO Unit := IO.println \"hi\"\n"));
+        assert!(has_main(
+            "partial def main (args : List String) : IO UInt32 := pure 0\n"
+        ));
+        assert!(has_main("def main: IO Unit := pure ()\n"));
+        assert!(!has_main("theorem t : 1 = 1 := rfl\n"));
+        assert!(!has_main("def mainLoop : IO Unit := pure ()\n"));
+        assert!(!has_main(
+            "namespace X\n  def main : IO Unit := pure ()\nend X\n"
+        ));
+        assert!(!has_main("-- def main\n"));
+    }
+
+    /// A Lean file's `main` runs through `lake env lean --run`, in its
+    /// project, its lines said as they come from either stream, its exit
+    /// code kept; stopped, it is stopped.
+    #[cfg(unix)]
+    #[test]
+    fn a_main_runs_through_lake_and_says_its_lines() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = crate::testutil::TempDir::new("lean-run");
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let lake = dir.path().join("lake");
+        std::fs::write(
+            &lake,
+            "#!/bin/sh\necho \"args: $*\"\necho \"in: $(pwd)\"\necho oops >&2\nexit 3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&lake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = project.join("Main.lean");
+        let mut said = Vec::new();
+        let end = run_main(
+            &lake,
+            &project,
+            &file,
+            |line, stderr| said.push((line.to_string(), stderr)),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(end, RunEnd::Exited(3));
+        assert!(
+            said.contains(&(format!("args: env lean --run {}", file.display()), false)),
+            "{said:?}"
+        );
+        let real = std::fs::canonicalize(&project).unwrap();
+        assert!(
+            said.iter()
+                .any(|(l, _)| l == &format!("in: {}", real.display())
+                    || l == &format!("in: {}", project.display())),
+            "{said:?}"
+        );
+        assert!(said.contains(&("oops".to_string(), true)), "{said:?}");
+        // Stopped while it runs.
+        std::fs::write(&lake, "#!/bin/sh\necho started\nsleep 30\n").unwrap();
+        let cancel = AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        let end = run_main(
+            &lake,
+            &project,
+            &file,
+            |_, _| cancel.store(true, Ordering::SeqCst),
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(end, RunEnd::Stopped);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
 
     fn heads(source: &str) -> Vec<&str> {
         commands(source)
