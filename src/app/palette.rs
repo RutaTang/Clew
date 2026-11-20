@@ -342,10 +342,17 @@ impl PaletteCommand {
                 Glyph::Play,
                 tr!("This builds the program and runs it, without the debugger."),
             ),
-            Message::Editor(EditorMsg::RunAction(Action::RunTest | Action::DebugTest))
-            | Message::Debug(DebugMsg::RunTest { .. }) => {
-                (Glyph::Play, tr!("This builds the test and runs it."))
-            }
+            // Python's tests are not built: said of what each does.
+            Message::Editor(EditorMsg::RunAction(Action::RunTest))
+            | Message::Debug(DebugMsg::RunTest { no_debug: true, .. }) => (
+                Glyph::Play,
+                tr!("This runs the test at the cursor (a Rust test is built with Cargo first)."),
+            ),
+            Message::Editor(EditorMsg::RunAction(Action::DebugTest))
+            | Message::Debug(DebugMsg::RunTest { .. }) => (
+                Glyph::Debug,
+                tr!("This runs the test at the cursor under the debugger."),
+            ),
             Message::Debug(DebugMsg::Control(_)) => (
                 Glyph::Debug,
                 tr!("This resumes the program from where it stopped."),
@@ -1107,10 +1114,11 @@ impl App {
                     None,
                     PaletteAction::AtCaret(Message::Proof(crate::ProofMsg::FromMenu)),
                 );
-                // Lean's own name for it: its message says to use "the
-                // Restart File command" when a file's imports changed.
+                // Lean's own name for it — its message says to use "the
+                // Restart File command" when a file's imports changed — said
+                // whose it is among every other command, as vscode-lean4's.
                 add(
-                    tr_noop!("Restart File").to_string(),
+                    tr_noop!("Lean: Restart File").to_string(),
                     None,
                     send(Message::Proof(crate::ProofMsg::RestartFile)),
                 );
@@ -1118,6 +1126,7 @@ impl App {
                     self.proj.mathlib,
                     crate::app::proof::MathlibCache::Missing
                         | crate::app::proof::MathlibCache::Failed(_)
+                        | crate::app::proof::MathlibCache::Dismissed
                 ) {
                     add(
                         tr_noop!("Get Mathlib's Build Cache").to_string(),
@@ -1263,12 +1272,19 @@ impl App {
                     send(Message::Editor(message)),
                 );
             }
+            // Goals only where a Lean file is read: elsewhere it picked a
+            // tab the margin does not show, and nothing happened.
+            let goals = self
+                .reading_lean()
+                .then_some((tr_noop!("Margin: Goals"), MarginTab::Goals));
             for (title, tab) in [
                 (tr_noop!("Margin: Explanations"), MarginTab::Notes),
                 (tr_noop!("Margin: Calls"), MarginTab::Calls),
                 (tr_noop!("Margin: History"), MarginTab::History),
-                (tr_noop!("Margin: Goals"), MarginTab::Goals),
-            ] {
+            ]
+            .into_iter()
+            .chain(goals)
+            {
                 add(
                     title.into(),
                     None,

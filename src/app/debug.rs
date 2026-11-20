@@ -137,12 +137,19 @@ async fn build_with_cargo(
             stamp: stamp.clone(),
             run,
             error,
+            built: false,
         })
     };
-    let name = match &target.kind {
-        TargetKind::Lib => target.package.clone(),
-        _ => target.describe(),
+    // Built, and the test still not run: no build failure.
+    let not_run = |error: String| {
+        Message::Debug(DebugMsg::BuildFailed {
+            stamp: stamp.clone(),
+            run,
+            error,
+            built: true,
+        })
     };
+    let name = crate::app::runplan::target_name(target);
     let Some(cargo) = clew_core::cargorun::find_cargo() else {
         let _ = output
             .send(failed(
@@ -172,6 +179,11 @@ async fn build_with_cargo(
     });
     tokio::pin!(job);
     let mut open = true;
+    // One clock for the whole build: a sleep made afresh each time round
+    // fired only after 150 ms with no line, and a build that never paused
+    // that long was not stopped by Stop until it did.
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(150));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let built = loop {
         tokio::select! {
             line = lines.recv(), if open => match line {
@@ -181,7 +193,7 @@ async fn build_with_cargo(
                 None => open = false,
             },
             done = &mut job => break done,
-            () = tokio::time::sleep(std::time::Duration::from_millis(150)) => {
+            _ = tick.tick() => {
                 if live.load(Ordering::SeqCst) != run {
                     // Stopped: the build is killed, and nothing more said.
                     cancel.store(true, Ordering::SeqCst);
@@ -238,19 +250,22 @@ async fn build_with_cargo(
     .ok()
     .flatten();
     let Some(list) = listed else {
-        let error = tr!("Could not list the tests of {target}.", target = name);
-        let _ = output.send(failed(error)).await;
+        let error = tr!(
+            "{target} was built, but could not list its tests: run it again, or run all its tests with cargo test.",
+            target = name
+        );
+        let _ = output.send(not_run(error)).await;
         return None;
     };
-    match clew_core::cargorun::listed_test(&list, &test.path, &test.name) {
+    match clew_core::cargorun::listed_test(&list, &test.path) {
         Some(found) => Some((executable, clew_core::cargorun::test_args(&found), package)),
         None => {
             let error = tr!(
-                "{target} has no test named {name} when built: a feature or a cfg may leave it out.",
+                "{target} has no test named {name} when built: it may be behind a #[cfg] or a Cargo feature this run does not turn on (Settings → Language servers → Rust).",
                 target = name,
                 name = test.name
             );
-            let _ = output.send(failed(error)).await;
+            let _ = output.send(not_run(error)).await;
             None
         }
     }
@@ -482,7 +497,7 @@ impl App {
         // project's program and tests are those its launch file names.
         if remote && plan.is_some() {
             self.status = tr!(
-                "Run Test runs the tests of a folder on this computer. For a remote project, name what to run in its launch file."
+                "Run Test works on projects on this computer. In a remote project, run tests through a program named in .clew/launch.json."
             )
             .into();
             return Task::none();
@@ -533,7 +548,7 @@ impl App {
                         _ => None,
                     };
                     let library = tr!(
-                        "Nothing to run: this crate is a library. Run one of its tests instead: right-click in a test, then Run Test."
+                        "Nothing to run: this crate is a library. Run one of its tests (right-click in a test, then Run Test), or open one of its examples and Run it."
                     );
                     if let Some(file) = rust_file {
                         match crate::app::runplan::cargo_plan_for(&file) {
@@ -592,6 +607,7 @@ impl App {
         let (tab, ended) = self.tab_for_new_run(&shown, no_debug, plan.as_ref());
         self.debug.tab = tab;
         self.debug.build_failed.remove(&tab);
+        self.debug.not_run.remove(&tab);
         self.run_shown = Some(crate::app::state::RunTab::Real(tab));
         self.debug.stopped_by_reader = false;
         self.debug.session = Some(DebugSession {
@@ -657,10 +673,20 @@ impl App {
         };
         self.debug.ran_for = reading.clone();
         self.status = match lang {
-            // Built first: the build is what is going on.
-            Some(_) if matches!(plan, Some(RunPlan::Cargo { .. })) => {
-                tr!("Building {program} with Cargo…", program = program_name)
-            }
+            // Built first: the build is what is going on — of the test's
+            // target, for a test, whose own name stood where a program's
+            // would ("Building adds with Cargo…").
+            Some(_) if matches!(plan, Some(RunPlan::Cargo { .. })) => match &plan {
+                Some(RunPlan::Cargo {
+                    target,
+                    test: Some(test),
+                }) => tr!(
+                    "Building the tests of {target} with Cargo, to run {test}…",
+                    target = crate::app::runplan::target_name(target),
+                    test = test.name
+                ),
+                _ => tr!("Building {program} with Cargo…", program = program_name),
+            },
             Some(_) if no_debug => match reading {
                 Some(reading) => tr!(
                     "Running {program} ({file} does not run on its own)…",
@@ -1220,10 +1246,17 @@ impl App {
         if self.proj.project.is_none() {
             return Task::none();
         }
-        self.status = tr!(
-            "Debugging needs {adapter} — waiting for your approval",
-            adapter = install.name()
-        );
+        // pytest is not a debugger: a test, run or debugged, needs it.
+        self.status = match install.is_test_runner() {
+            true => tr!(
+                "Running tests needs {runner} — waiting for your approval",
+                runner = install.name()
+            ),
+            false => tr!(
+                "Debugging needs {adapter} — waiting for your approval",
+                adapter = install.name()
+            ),
+        };
         self.proj.pending_lsp_consent.offer(LspConsent {
             on_path: None,
             language: String::new(),
@@ -1244,6 +1277,7 @@ impl App {
         install: dap::AdapterInstall,
         stamp: Stamp,
     ) -> Task<Message> {
+        let test_runner = install.is_test_runner();
         self.status = tr!(
             "Installing {name} {version}…",
             name = install.name(),
@@ -1262,6 +1296,7 @@ impl App {
             move |result| {
                 Message::Debug(DebugMsg::AdapterInstalled {
                     stamp: stamp.clone(),
+                    test_runner,
                     result,
                 })
             },
@@ -1276,6 +1311,7 @@ impl App {
     pub(crate) fn on_debug_adapter_installed(
         &mut self,
         stamp: Stamp,
+        test_runner: bool,
         result: Result<(), String>,
     ) -> Task<Message> {
         match result {
@@ -1288,6 +1324,11 @@ impl App {
                 );
                 Task::none()
             }
+            // pytest is no debug adapter: what failed is named as it is.
+            Err(e) if test_runner => {
+                self.status = tr!("pytest install failed: {error}", error = e);
+                Task::none()
+            }
             Err(e) => {
                 self.status = tr!("Debug adapter install failed: {error}", error = e);
                 Task::none()
@@ -1298,7 +1339,10 @@ impl App {
                 self.start_session(self.debug.no_debug, self.debug.plan.clone())
             }
             Ok(()) => {
-                self.status = tr!("Debug adapter installed").into();
+                self.status = match test_runner {
+                    true => tr!("pytest installed").into(),
+                    false => tr!("Debug adapter installed").into(),
+                };
                 Task::none()
             }
         }
@@ -2233,7 +2277,12 @@ impl App {
     /// Cargo could not build the run's program: the run ends, its tab kept
     /// with Cargo's words in it, marked failed, and the status line says
     /// why. Run Again builds it again.
-    pub(crate) fn on_build_failed(&mut self, run: u64, error: String) -> Task<Message> {
+    pub(crate) fn on_build_failed(
+        &mut self,
+        run: u64,
+        error: String,
+        built: bool,
+    ) -> Task<Message> {
         if run != self.debug_run {
             return Task::none();
         }
@@ -2242,7 +2291,12 @@ impl App {
         };
         session.status = DebugStatus::Terminated;
         push_debug_output(session, "stderr".into(), format!("{error}\n"));
-        self.debug.build_failed.insert(self.debug.tab);
+        // Built, and the test not run (it could not be found): "not run",
+        // not "build failed", of a build that succeeded.
+        match built {
+            true => self.debug.not_run.insert(self.debug.tab),
+            false => self.debug.build_failed.insert(self.debug.tab),
+        };
         self.unsay_debug_state();
         self.status = error;
         Task::none()
@@ -2783,6 +2837,19 @@ impl App {
         Task::none()
     }
 
+    /// The frame a value is read in while `session` is paused: the one its
+    /// stop is shown at ([`shown_frame`]), whose variables the Variables pane
+    /// lists. At a Rust panic the innermost frame is the panic machinery's,
+    /// where the reader's `x` does not exist: a watch or a hover on it read
+    /// "undeclared identifier" beside the pane that showed its value.
+    pub(crate) fn evaluation_frame<'s>(
+        &self,
+        session: &'s crate::DebugSession,
+    ) -> Option<&'s dap::StackFrame> {
+        shown_frame(&session.frames, !self.connection.is_remote())
+            .and_then(|i| session.frames.get(i))
+    }
+
     /// Re-evaluate all watch expressions in the current frame (on each stop, or
     /// when a watch is added). No-op unless paused with watches set.
     pub(crate) fn eval_watches(&self) -> Task<Message> {
@@ -2793,7 +2860,8 @@ impl App {
         if session.status != DebugStatus::Stopped || self.debug.watches.is_empty() {
             return Task::none();
         }
-        let (Some(client), Some(frame)) = (session.client.clone(), session.frames.first()) else {
+        let (Some(client), Some(frame)) = (session.client.clone(), self.evaluation_frame(session))
+        else {
             return Task::none();
         };
         let frame_id = frame.id;
@@ -3146,16 +3214,20 @@ impl App {
             DebugMsg::Stop => self.on_debug_stop(),
             DebugMsg::BreakpointToggle { path, line } => self.on_breakpoint_toggle(path, line),
             DebugMsg::Failed { run, error, .. } => self.on_debug_failed(run, error),
-            DebugMsg::BuildFailed { run, error, .. } => self.on_build_failed(run, error),
+            DebugMsg::BuildFailed {
+                run, error, built, ..
+            } => self.on_build_failed(run, error, built),
             DebugMsg::ChildFailed {
                 run, child, error, ..
             } => self.on_debug_child_failed(run, child, error),
             DebugMsg::NeedsInstall { run, install, .. } => {
                 self.on_debug_needs_install(run, install)
             }
-            DebugMsg::AdapterInstalled { stamp, result } => {
-                self.on_debug_adapter_installed(stamp, result)
-            }
+            DebugMsg::AdapterInstalled {
+                stamp,
+                test_runner,
+                result,
+            } => self.on_debug_adapter_installed(stamp, test_runner, result),
             DebugMsg::ToggleBreakpointFromMenu => self.on_toggle_breakpoint_from_menu(),
             DebugMsg::ConditionalBreakpointFromMenu => self.on_conditional_breakpoint_from_menu(),
             DebugMsg::BpConditionInput(s) => {

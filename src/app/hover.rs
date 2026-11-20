@@ -164,7 +164,8 @@ impl App {
                 .session
                 .as_ref()
                 .filter(|s| s.status == DebugStatus::Stopped)
-            && let (Some(client), Some(frame)) = (session.client.clone(), session.frames.first())
+            && let (Some(client), Some(frame)) =
+                (session.client.clone(), self.evaluation_frame(session))
         {
             let frame_id = frame.id;
             if let Some(word) = self
@@ -212,13 +213,20 @@ impl App {
             .and_then(Option::as_ref)
             .and_then(|v| v.lang_key)
             .is_some_and(|lang| matches!(self.proj.link.lsp.get(lang), Some(LspSlot::Ready(_))));
+        // The peek is Markdown — a Python docstring's sections, a Rust doc
+        // comment's code — and set as the server's answer is: shown as plain
+        // text, its `**Args**` and backticks were read as written.
+        let mut highlight = Task::none();
         if let Some(text) = local {
+            let (prepared, task) = self.prepare_segments(&text);
             if let Some(h) = &mut self.proj.hover {
-                h.text = Some(text);
+                h.text = None;
+                h.prepared = prepared;
             }
             if !ready {
-                return Task::none();
+                return task;
             }
+            highlight = task;
         }
         // With a server, it is asked all the same, and its answer replaces
         // the peek: the peek knows the token's name, the server which symbol
@@ -245,11 +253,11 @@ impl App {
         };
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
-            _ => return Task::none(),
+            _ => return highlight,
         };
         // The display column, in the server's own position encoding.
         let character = viewer::Col(col).to_offset(&source_line, client.encoding);
-        Task::perform(
+        let asked = Task::perform(
             async move { client.hover(&path, line, character).await },
             move |result| {
                 Message::Hover(HoverMsg::Answered {
@@ -264,7 +272,8 @@ impl App {
                     markdown: true,
                 })
             },
-        )
+        );
+        Task::batch([highlight, asked])
     }
 
     pub(crate) fn on_hover_cleared(&mut self) -> Task<Message> {
@@ -320,7 +329,12 @@ impl App {
         {
             parts.push(doc.clone());
         }
-        parts.extend(self.local_structure(pane, line, col));
+        // The type's relations as they are, not as Markdown: set as the
+        // server's answer sets them.
+        parts.extend(
+            self.local_structure(pane, line, col)
+                .map(|structure| format!("```text\n{structure}\n```")),
+        );
         (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
 

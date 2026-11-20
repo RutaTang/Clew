@@ -121,7 +121,10 @@ fn run_test_runs_the_rust_test_at_the_cursor() {
     };
     assert_eq!((path.as_str(), name.as_str()), ("tests::adds", "adds"));
     assert!(app.debug.no_debug);
-    assert_eq!(app.status, "Building adds with Cargo…");
+    assert_eq!(
+        app.status,
+        "Building the tests of shapes (library) with Cargo, to run adds…"
+    );
     let tab = app.debug.tab;
     assert_eq!(app.run_tab_faces()[0].name, "adds");
 

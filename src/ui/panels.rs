@@ -310,11 +310,14 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             && session.frames.is_empty()
             && session.scopes.is_empty());
     let build_failed = app.debug.build_failed.contains(&app.debug.tab);
+    let not_run = app.debug.not_run.contains(&app.debug.tab);
     let (status_txt, status_color) = match (session.status, session.exit_code) {
         // Cargo could not build it: it never ran.
         (DebugStatus::Terminated, _) if build_failed => {
             (tr!("build failed").to_string(), theme::danger())
         }
+        // Built, and the test asked for was not found to run.
+        (DebugStatus::Terminated, _) if not_run => (tr!("not run").to_string(), theme::warning()),
         (DebugStatus::Launching, _) => (tr!("launching…").to_string(), theme::dim()),
         (DebugStatus::Running, _) => (tr!("running").to_string(), theme::success()),
         // Paused, as its tab says: "stopped" is what Stop leaves.

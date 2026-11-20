@@ -419,20 +419,39 @@ fn file_tool<'a>(
 /// tabs stood 26 high to the tools' 28, a pixel above them, and closer).
 pub(crate) fn margin_tabs(app: &App) -> Element<'_, Message> {
     use crate::MarginTab;
-    // A Lean file's own first: the proof's goals where the cursor is.
-    let goals = app
-        .reading_lean()
-        .then_some((Glyph::Turnstile, tr!("Goals"), MarginTab::Goals));
-    let tabs: Vec<(Glyph, &'static str, MarginTab)> = goals
-        .into_iter()
-        .chain([
-            (Glyph::Explanations, tr!("Explanations"), MarginTab::Notes),
-            (Glyph::Network, tr!("Calls"), MarginTab::Calls),
-            (Glyph::Branch, tr!("History"), MarginTab::History),
-        ])
-        .collect();
+    // A Lean file's goals last, in a slot of their own: first, they moved
+    // every other tab one place along whenever a Lean file was open.
+    let goals = app.reading_lean().then_some((
+        Glyph::Turnstile,
+        tr!("Goals"),
+        tr!("What is left to prove where the cursor is"),
+        MarginTab::Goals,
+    ));
+    let tabs: Vec<(Glyph, &'static str, &'static str, MarginTab)> = [
+        (
+            Glyph::Explanations,
+            tr!("Explanations"),
+            tr!("What was written about this code, beside it"),
+            MarginTab::Notes,
+        ),
+        (
+            Glyph::Network,
+            tr!("Calls"),
+            tr!("Who calls the function at the cursor, and what it calls"),
+            MarginTab::Calls,
+        ),
+        (
+            Glyph::Branch,
+            tr!("History"),
+            tr!("The commits that changed this file"),
+            MarginTab::History,
+        ),
+    ]
+    .into_iter()
+    .chain(goals)
+    .collect();
     let shown = app.margin_tab_shown();
-    let tab = |(glyph, label, this): (Glyph, &'static str, MarginTab)| -> Element<'_, Message> {
+    let tab = |(glyph, label, why, this): (Glyph, &'static str, &'static str, MarginTab)| -> Element<'_, Message> {
         let chosen = shown == this;
         let tint = if chosen {
             theme::fg()
@@ -450,7 +469,8 @@ pub(crate) fn margin_tabs(app: &App) -> Element<'_, Message> {
             label,
             Message::Window(WindowMsg::MarginTabPicked(this)),
         ));
-        tip_at(face, label, None, tooltip::Position::Bottom)
+        // Its name and what it shows, as the tools beside it say theirs.
+        super::toolbar::tip_at_why(face, label, None, Some(why), tooltip::Position::Bottom)
     };
     iced::widget::Row::with_children(tabs.into_iter().map(tab))
         .spacing(TOOLS_SPACING)

@@ -370,7 +370,10 @@ impl App {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             state: match (session.status, session.exit_code) {
-                (DebugStatus::Terminated, _) if self.debug.build_failed.contains(&tab) => {
+                (DebugStatus::Terminated, _)
+                    if self.debug.build_failed.contains(&tab)
+                        || self.debug.not_run.contains(&tab) =>
+                {
                     TabState::Failed
                 }
                 (DebugStatus::Launching, _) => TabState::Starting,

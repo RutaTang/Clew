@@ -9475,7 +9475,14 @@ fn the_goals_margin_offers_mathlibs_build_cache() {
     app.proj.mathlib = MathlibCache::Ready;
     assert!(!shows(&mut sim_of(&app), "Get Mathlib's Build Cache"));
     app.proj.mathlib = MathlibCache::Missing;
-    assert!(shows(&mut sim_of(&app), "This project uses Mathlib"));
+    assert!(shows(&mut sim_of(&app), "Mathlib isn't compiled here yet"));
+    // It can be put by, and then is not offered here.
+    let sent = click(sim_of(&app), "Not now");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::DismissMathlibCache))),
+        "{sent:?}"
+    );
     let sent = click(sim_of(&app), "Get Mathlib's Build Cache");
     assert!(
         sent.iter()
@@ -9488,16 +9495,61 @@ fn the_goals_margin_offers_mathlibs_build_cache() {
     assert!(shows(&mut sim, "Downloaded: 1200 file(s)"));
     drop(sim);
     app.proj.mathlib = MathlibCache::Failed("no network".into());
-    assert!(shows(
-        &mut sim_of(&app),
-        "Could not get Mathlib's build cache: no network"
-    ));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Could not get Mathlib's build cache"));
+    assert!(shows(&mut sim, "no network"));
+    drop(sim);
     let sent = click(sim_of(&app), "Try again");
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Proof(crate::ProofMsg::GetMathlibCache))),
         "{sent:?}"
     );
+}
+
+/// A Lean file's goals are a click away wherever they are not on screen:
+/// the margin on another tab or closed, the status bar offers them, and
+/// opens the Goals tab; with no room for the margin (a split), the goal at
+/// the cursor in a popup. With the Goals tab shown, nothing is offered.
+#[test]
+fn the_status_bar_offers_the_goals_when_they_are_not_on_screen() {
+    let mut app = reader_app();
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.rel = "Basic.lean".into();
+        v.lang_key = Some("lean");
+    }
+    app.window_width = 1400.0;
+    app.show_right_panel = true;
+    app.margin_tab = crate::MarginTab::Goals;
+    assert!(super::panes::right_panel_shown(&app));
+    assert!(
+        !shows(&mut sim_elem(super::statusbar::statusbar(&app)), "Goals"),
+        "the goals are on screen"
+    );
+    app.margin_tab = crate::MarginTab::Calls;
+    let sent = click(sim_elem(super::statusbar::statusbar(&app)), "Goals");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Goals))
+        )),
+        "{sent:?}"
+    );
+    app.proj.split = true;
+    let sent = click(sim_elem(super::statusbar::statusbar(&app)), "Goals");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Hover(HoverMsg::InsightAtCursor))),
+        "{sent:?}"
+    );
+    // Not in another language's file.
+    app.proj.split = false;
+    app.proj.panes[0].as_mut().unwrap().lang_key = Some("rust");
+    assert!(!shows(
+        &mut sim_elem(super::statusbar::statusbar(&app)),
+        "Goals"
+    ));
 }
 
 fn explain_file(root: &std::path::Path, rel: &str) -> crate::explain::Node {

@@ -137,6 +137,47 @@ pub(crate) fn head_shown(head: &clew_protocol::HeadName) -> String {
 /// The branch checked out, after the place the code is read from — or the
 /// commit a detached HEAD is at — with the whole of it where the pointer
 /// rests. Nothing outside a repository.
+/// In a Lean file whose Goals are not on screen — another margin tab, the
+/// margin closed, or no room for it (a split, a narrow window) — the way to
+/// them: Lean's one view of a proof was gone, with nothing to say where.
+/// It opens the Goals tab where the margin fits, else the goal at the
+/// cursor in a popup (Show Goal).
+fn goals_chip(app: &App) -> Option<Element<'_, Message>> {
+    if !app.reading_lean()
+        || (super::panes::right_panel_shown(app)
+            && app.margin_tab_shown() == crate::MarginTab::Goals)
+    {
+        return None;
+    }
+    let fits = !app.proj.split && app.window_width >= super::panes::RIGHT_PANEL_MIN_WINDOW_W;
+    let (msg, why) = match fits {
+        true => (
+            Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Goals)),
+            tr!("Show the goals at the cursor beside the code"),
+        ),
+        false => (
+            Message::Hover(HoverMsg::InsightAtCursor),
+            tr!("Show the goal at the cursor"),
+        ),
+    };
+    let face = row![
+        glyph::icon(Glyph::Turnstile, theme::dim(), 12.0),
+        status_text(tr!("Goals").to_string()),
+    ]
+    .spacing(5)
+    .align_y(iced::Center);
+    let chip = button(face)
+        .style(theme::icon_button(false))
+        .padding([2, 6])
+        .on_press(super::heard::said(tr!("Goals"), msg));
+    Some(super::toolbar::tip_at(
+        chip,
+        why,
+        None,
+        tooltip::Position::Top,
+    ))
+}
+
 fn branch_item(app: &App) -> Option<Element<'_, Message>> {
     let head = app.proj.head.as_ref()?;
     let about = match head {
@@ -319,6 +360,9 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     ]
     .align_y(iced::Center);
     if let Some(chip) = refresh_chip(app) {
+        bar = bar.push(chip);
+    }
+    if let Some(chip) = goals_chip(app) {
         bar = bar.push(chip);
     }
 

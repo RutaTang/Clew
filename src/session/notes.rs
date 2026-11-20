@@ -154,8 +154,25 @@ pub fn edit_with_fallback(
 /// or — where the file has more than one of that name — the name of what it
 /// is inside, then its own (`Inventory.__init__`). Two classes' `__init__`
 /// shared one note: marking one understood marked both, and the outline
-/// showed two rows alike.
+/// showed two rows alike. Two still alike — a Lean file's `example`s, two
+/// Rust `impl` blocks' `new`, which are inside no symbol — are told apart by
+/// their order: the first keeps the key, the next is `new#2`.
 pub fn note_keys(symbols: &[clew_protocol::Symbol]) -> Vec<String> {
+    let mut keys = qualified_keys(symbols);
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for key in &mut keys {
+        let n = seen.entry(key.clone()).or_default();
+        *n += 1;
+        if *n > 1 {
+            *key = format!("{key}#{n}");
+        }
+    }
+    keys
+}
+
+/// Each symbol's own name, or, for a name the file has more than once, it
+/// inside what holds it ([`note_keys`]).
+fn qualified_keys(symbols: &[clew_protocol::Symbol]) -> Vec<String> {
     let mut count: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for s in symbols {
         *count.entry(s.name.as_str()).or_default() += 1;
@@ -327,6 +344,14 @@ pub fn remove(list: &mut Vec<Note>, rel: &str, symbol: &str) {
     list.retain(|n| !(n.rel == rel && n.symbol == symbol));
 }
 
+/// Whether a symbol of `kind` is one a reader works through and ticks off
+/// as understood: not a class's field or a constant, read at a glance —
+/// each had a circle, and a file of models counted its fields as most of
+/// what was left to understand.
+pub fn is_read_through(kind: &str) -> bool {
+    !matches!(kind, "field" | "constant")
+}
+
 /// `(understood, total)` symbol counts for one file, given its live symbol
 /// names — the coverage always reflects the current index, so it self-corrects
 /// after a re-scan.
@@ -378,6 +403,17 @@ mod tests {
                 "Inventory.__init__",
                 "left"
             ]
+        );
+        // Alike still, inside nothing: told apart by their order.
+        let examples = [
+            sym("example", "theorem", 1, 2),
+            sym("t", "theorem", 3, 4),
+            sym("example", "theorem", 5, 6),
+            sym("example", "theorem", 7, 8),
+        ];
+        assert_eq!(
+            note_keys(&examples),
+            ["example", "t", "example#2", "example#3"]
         );
     }
     use clew_core::testutil::TempDir;

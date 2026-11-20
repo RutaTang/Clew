@@ -444,10 +444,12 @@ fn body(g: Glyph) -> &'static str {
         // A page, and clear of its corner the spark Fake Run and Ask carry:
         // the two weighed together sit in the middle, as the glyphs beside
         // them do.
+        // What was written about the code: a speech bubble with its lines.
+        // No sparkle — that marks what spends an AI call, and showing what
+        // was written spends none.
         Explanations => {
-            "<rect x='3.5' y='6.5' width='11' height='14' rx='1.8'/>\
-             <path d='M6.5 11 H11.5'/><path d='M6.5 14 H11.5'/><path d='M6.5 17 H9.5'/>\
-             <path d='M18.5 2C18.85 4.6 19.4 5.15 22 5.5C19.4 5.85 18.85 6.4 18.5 9C18.15 6.4 17.6 5.85 15 5.5C17.6 5.15 18.15 4.6 18.5 2Z' fill='STROKE' stroke-width='1.2'/>"
+            "<path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/>\
+             <path d='M7.5 8.5 H16.5'/><path d='M7.5 12 H13'/>"
         }
         Branch => {
             "<circle cx='6' cy='5' r='2.5'/><circle cx='6' cy='19' r='2.5'/><circle cx='18' cy='7' r='2.5'/>\

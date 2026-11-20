@@ -684,21 +684,31 @@ fn find_vetted_on(root: &Path, host: &PythonHost) -> Option<Vetted> {
     // environment. Held to the SAME check: `VIRTUAL_ENV` routinely names the
     // project's own `.venv`, and one file must not get two different answers
     // depending on which name reached it.
-    for var in ["VIRTUAL_ENV", "CONDA_PREFIX"] {
-        if let Some(env) = host.dir(var)
-            && let Some(found) = EXES
-                .into_iter()
-                .chain(["python.exe"])
-                .find_map(|exe| vet(env.join(exe), true))
-        {
-            return Some(found);
-        }
+    // Conda's `base`, active in every shell by default, is no environment
+    // chosen for this project: it is looked at after the project's own.
+    let activated = |var: &str| {
+        let env = host.dir(var)?;
+        EXES.into_iter()
+            .chain(["python.exe"])
+            .find_map(|exe| vet(env.join(exe), true))
+    };
+    if let Some(found) = activated("VIRTUAL_ENV").or_else(|| {
+        (!host.conda_is_base())
+            .then(|| activated("CONDA_PREFIX"))
+            .flatten()
+    }) {
+        return Some(found);
     }
     // This project's environment as its tool keeps it, outside the project:
     // a Poetry project opened with nothing activated had its imports read
     // against whatever `python3` came first, and every import of its
     // packages was unresolved.
-    let (interpreter, kind) = find_managed(root, host)?;
+    let Some((interpreter, kind)) = find_managed(root, host) else {
+        return host
+            .conda_is_base()
+            .then(|| activated("CONDA_PREFIX"))
+            .flatten();
+    };
     Some(Vetted {
         base: interpreter.clone(),
         interpreter,
@@ -717,7 +727,7 @@ fn find_vetted_on(root: &Path, host: &PythonHost) -> Option<Vetted> {
 /// only picks among them.
 fn find_managed(root: &Path, host: &PythonHost) -> Option<(PathBuf, PythonEnvKind)> {
     let real_root = std::fs::canonicalize(root).ok()?;
-    let real = real_root.to_string_lossy().into_owned();
+    let real = poetry_cwd(&real_root);
     if let Some(dir) = poetry_dir(host) {
         let name = format!(
             "{}-{}",
@@ -937,6 +947,7 @@ pub struct PythonHost {
 const PYTHON_HOST_VARS: &[&str] = &[
     "VIRTUAL_ENV",
     "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
     "POETRY_VIRTUALENVS_PATH",
     "WORKON_HOME",
     "PYENV_ROOT",
@@ -966,6 +977,15 @@ impl PythonHost {
             .find(|(n, _)| *n == name)
             .map(|(_, v)| PathBuf::from(v))
             .filter(|p| p.is_absolute())
+    }
+
+    /// Whether the conda environment active is conda's own `base` — the
+    /// one conda activates in every shell by default (`auto_activate_base`),
+    /// not one the user activated for this project.
+    fn conda_is_base(&self) -> bool {
+        self.vars
+            .iter()
+            .any(|(n, v)| *n == "CONDA_DEFAULT_ENV" && v == "base")
     }
 
     /// The user's home, when absolute.
@@ -1266,10 +1286,37 @@ fn project_name(root: &Path) -> String {
     })
 }
 
+/// The project's folder as Poetry hashes it: `os.path.normcase(realpath)`
+/// — on Windows lowercased, without the `\\?\` that canonicalizing adds,
+/// which no hash Poetry made has.
+fn poetry_cwd(real: &Path) -> String {
+    let path = real.to_string_lossy();
+    if !cfg!(windows) {
+        return path.into_owned();
+    }
+    let plain = match path.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!(r"\\{share}"),
+        None => path.strip_prefix(r"\\?\").unwrap_or(&path).to_string(),
+    };
+    plain.replace('/', "\\").to_lowercase()
+}
+
 /// A project name as Poetry spells it in an environment's folder name:
-/// lowercased, its shell-unfriendly characters `_`, 42 characters at most.
+/// its name as packages are named (PEP 503: lowercased, each run of `-`,
+/// `_` and `.` one `-` — `my_pkg` is `my-pkg`), its shell-unfriendly
+/// characters `_`, 42 characters at most.
 fn poetry_sanitized(name: &str) -> String {
-    name.to_lowercase()
+    let mut canonical = String::with_capacity(name.len());
+    for c in name.to_lowercase().chars() {
+        if matches!(c, '-' | '_' | '.') {
+            if !canonical.ends_with('-') {
+                canonical.push('-');
+            }
+        } else {
+            canonical.push(c);
+        }
+    }
+    canonical
         .chars()
         .map(|c| match c {
             ' ' | '$' | '`' | '!' | '*' | '@' | '"' | '\\' | '\r' | '\n' | '\t' => '_',
@@ -2594,6 +2641,24 @@ mod tests {
             found(&host(vars)),
             Some((python(&active).unwrap(), None, true))
         );
+        // Conda's `base`, active in every shell by default, comes after the
+        // project's own; a conda environment the user activated, before.
+        let conda = home.join("miniconda3");
+        python_at(&conda, "python");
+        let in_conda = |env: &str| {
+            let mut vars = cached();
+            vars.push(("CONDA_PREFIX", conda.clone().into_os_string()));
+            vars.push(("CONDA_DEFAULT_ENV", env.into()));
+            found(&host(vars)).map(|f| f.0)
+        };
+        assert_eq!(
+            in_conda("base"),
+            python(&poetry.join(format!("{name}-py3.11")))
+        );
+        assert_eq!(in_conda("ml"), python(&conda));
+        // Named as packages are, as Poetry names its environments.
+        assert_eq!(poetry_sanitized("My_Pkg..Core"), "my-pkg-core");
+        assert_eq!(poetry_sanitized("Demo App"), "demo_app");
         // Pipenv: by its Pipfile.
         std::fs::remove_dir_all(&poetry).unwrap();
         std::fs::write(root.join("Pipfile"), "").unwrap();
@@ -2625,6 +2690,13 @@ mod tests {
         );
         std::fs::write(root.join(".python-version"), "../../active-env\n").unwrap();
         assert_eq!(found(&pyenv_host()), None, "a path is no version");
+        // Conda's `base` with no environment of the project's own: used.
+        std::fs::remove_file(root.join(".python-version")).unwrap();
+        let base = host(vec![
+            ("CONDA_PREFIX", conda.clone().into_os_string()),
+            ("CONDA_DEFAULT_ENV", "base".into()),
+        ]);
+        assert_eq!(found(&base).map(|f| f.0), python(&conda));
     }
 
     /// The same python3 by two folders of the search path, one a link to

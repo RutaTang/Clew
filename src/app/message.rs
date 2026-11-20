@@ -2003,6 +2003,9 @@ pub enum DebugMsg {
         stamp: Stamp,
         run: u64,
         error: String,
+        /// Built, and what was asked of it could not be found in it: the
+        /// test was not run, and the build did not fail.
+        built: bool,
     },
     /// Starting the debugger failed: the run's own start, which ends the run
     /// (a js-debug child that cannot start is `ChildFailed`).
@@ -2034,6 +2037,8 @@ pub enum DebugMsg {
     /// install itself is reported whatever the project).
     AdapterInstalled {
         stamp: Stamp,
+        /// It was pytest, which runs tests: no debug adapter.
+        test_runner: bool,
         result: Result<(), String>,
     },
 }
@@ -3605,6 +3610,9 @@ pub enum ProofMsg {
     RestartFile,
     /// Get Mathlib's build cache (`lake exe cache get`).
     GetMathlibCache,
+    /// Not now: the Goals tab stops offering Mathlib's build cache for this
+    /// Lake project (the palette still has it).
+    DismissMathlibCache,
     /// A line `lake exe cache get` said.
     MathlibSaid { stamp: Stamp, line: String },
     /// `lake exe cache get` ended: its last words, if it failed.
@@ -3628,6 +3636,7 @@ impl ProofMsg {
             | ProofMsg::Close
             | ProofMsg::RestartFile
             | ProofMsg::GetMathlibCache
+            | ProofMsg::DismissMathlibCache
             | ProofMsg::GoalsDue { .. } => None,
         }
     }

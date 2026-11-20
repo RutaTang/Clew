@@ -5461,10 +5461,11 @@ async fn a_ready_language_server_answers_a_hover_the_peek_only_names() {
         (hover_gen, task)
     };
     let (hover_gen, task) = dwell(&mut app);
-    assert_eq!(
-        app.proj.hover.as_ref().and_then(|h| h.text.as_deref()),
-        Some("This file's len."),
-        "the peek shows at once"
+    let peek = |app: &App| format!("{:?}", app.proj.hover.as_ref().map(|h| &h.prepared));
+    assert!(
+        peek(&app).contains("This file's len."),
+        "the peek shows at once, set as Markdown: {}",
+        peek(&app)
     );
     assert!(
         iced_test::runtime::task::into_stream(task).is_some(),
@@ -5482,9 +5483,10 @@ async fn a_ready_language_server_answers_a_hover_the_peek_only_names() {
         }));
         app.proj.hover.as_ref().and_then(|h| h.text.clone())
     };
-    assert_eq!(
-        answered(&mut app, None).as_deref(),
-        Some("This file's len.")
+    assert_eq!(answered(&mut app, None), None);
+    assert!(
+        peek(&app).contains("This file's len."),
+        "no answer leaves the peek shown"
     );
     assert_eq!(
         answered(&mut app, Some("pub fn len(&self) -> usize")).as_deref(),
@@ -23402,6 +23404,7 @@ fn a_debug_adapter_install_is_consented_and_restarts_only_the_same_project() {
         app.status
     );
     let _ = app.update(Message::Debug(DebugMsg::AdapterInstalled {
+        test_runner: false,
         stamp: Stamp {
             root: Some(root.clone()),
             epoch: app.project_epoch,
@@ -23428,6 +23431,7 @@ fn a_debug_adapter_install_is_consented_and_restarts_only_the_same_project() {
     scan_synchronously(&mut app, root.clone());
     assert_ne!(app.project_epoch, asked_in);
     let _ = app.update(Message::Debug(DebugMsg::AdapterInstalled {
+        test_runner: false,
         stamp: Stamp {
             root: Some(root.clone()),
             epoch: asked_in,
@@ -23443,6 +23447,7 @@ fn a_debug_adapter_install_is_consented_and_restarts_only_the_same_project() {
 
     // A failed install says so and starts nothing.
     let _ = app.update(Message::Debug(DebugMsg::AdapterInstalled {
+        test_runner: false,
         stamp: Stamp {
             root: Some(root),
             epoch: app.project_epoch,
@@ -24493,6 +24498,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             run,
             error: "stale".into(),
+            built: false,
         }),
         Message::Debug(DebugMsg::ChildFailed {
             stamp: s(),

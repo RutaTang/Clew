@@ -39,6 +39,10 @@ use crate::lsp::store;
 /// The debugpy release a consented install asks pip for.
 pub const DEBUGPY_VERSION: &str = "1.8.14";
 
+/// The pytest release a consented install asks pip for: what runs a Python
+/// project's tests when its interpreter has none.
+pub const PYTEST_VERSION: &str = "8.3.5";
+
 /// The vscode-js-debug release clew downloads, verified by digest.
 pub const JS_DEBUG_VERSION: &str = "1.117.0";
 
@@ -101,6 +105,10 @@ pub enum AdapterInstall {
     /// interpreter — the one the adapter will run under; `user` adds
     /// `--user` (not inside a virtualenv, where pip refuses it).
     Debugpy { python: PathBuf, user: bool },
+    /// `python -m pip install pytest==<PYTEST_VERSION>` into the interpreter
+    /// a test runs under: without it a test file only defines its tests, and
+    /// one test cannot be run alone at all.
+    Pytest { python: PathBuf, user: bool },
     /// Download the pinned vscode-js-debug, verify its SHA-256, and unpack it
     /// into clew's data directory.
     JsDebug,
@@ -111,6 +119,7 @@ impl AdapterInstall {
     pub fn name(&self) -> &'static str {
         match self {
             AdapterInstall::Debugpy { .. } => "debugpy",
+            AdapterInstall::Pytest { .. } => "pytest",
             AdapterInstall::JsDebug => "vscode-js-debug",
         }
     }
@@ -118,8 +127,15 @@ impl AdapterInstall {
     pub fn version(&self) -> &'static str {
         match self {
             AdapterInstall::Debugpy { .. } => DEBUGPY_VERSION,
+            AdapterInstall::Pytest { .. } => PYTEST_VERSION,
             AdapterInstall::JsDebug => JS_DEBUG_VERSION,
         }
+    }
+
+    /// Whether this installs what runs tests rather than a debugger: what
+    /// the consent prompt and the status line then name it.
+    pub fn is_test_runner(&self) -> bool {
+        matches!(self, AdapterInstall::Pytest { .. })
     }
 
     /// Exactly what [`Self::install_cancellable`] will do, for the consent
@@ -127,9 +143,16 @@ impl AdapterInstall {
     /// download.
     pub fn describe(&self) -> String {
         match self {
-            AdapterInstall::Debugpy { python, user } => {
-                format!("{} {}", python.display(), pip_args(*user).join(" "))
-            }
+            AdapterInstall::Debugpy { python, user } => format!(
+                "{} {}",
+                python.display(),
+                pip_args(*user, Pip::Debugpy).join(" ")
+            ),
+            AdapterInstall::Pytest { python, user } => format!(
+                "{} {}",
+                python.display(),
+                pip_args(*user, Pip::Pytest).join(" ")
+            ),
             AdapterInstall::JsDebug => format!(
                 "download {} (SHA-256 {}) into Clew's data directory",
                 JS_DEBUG.url, JS_DEBUG.sha256
@@ -150,7 +173,12 @@ impl AdapterInstall {
     /// everything it started.
     pub fn install_cancellable(&self, cancel: &AtomicBool) -> Result<(), String> {
         match self {
-            AdapterInstall::Debugpy { python, user } => install_debugpy(python, *user, cancel),
+            AdapterInstall::Debugpy { python, user } => {
+                install_with_pip(python, *user, Pip::Debugpy, cancel)
+            }
+            AdapterInstall::Pytest { python, user } => {
+                install_with_pip(python, *user, Pip::Pytest, cancel)
+            }
             AdapterInstall::JsDebug => install_js_debug(cancel).map(|_| ()),
         }
     }
@@ -475,11 +503,6 @@ fn runs_its_own_tests(path: &Path) -> bool {
     std::fs::read_to_string(path)
         .is_ok_and(|text| text.contains("unittest.main(") || text.contains("pytest.main("))
 }
-
-/// What a Python test file run without pytest is told.
-pub const NO_PYTEST_NOTICE: &str = "pytest is not installed for this Python, so this test file \
-     ran as a script: it defines its tests and runs none of them. Install pytest in the \
-     project's environment to run them.";
 
 /// How long building a Zig program for a session may take.
 const ZIG_BUILD_TIMEOUT: Duration = Duration::from_secs(600);
@@ -954,12 +977,17 @@ fn python_with(
             };
             test_args.extend(args.iter().map(|a| json!(a)));
             launch.insert("args".into(), json!(test_args));
-        } else if !runs_its_own_tests(Path::new(program)) {
-            // Without pytest it runs as a script, which only defines its
-            // tests: said, or the run ended having done nothing, with
-            // nothing said why. Not of one that runs them itself as a
-            // script (`unittest.main()`): told it ran none, it had.
-            launch.insert(NOTICE.into(), json!(NO_PYTEST_NOTICE));
+        } else if one_test || !runs_its_own_tests(&in_dir(cwd, program)) {
+            // Without pytest a test file runs as a script, which only
+            // defines its tests, and one test given by its node id ran the
+            // whole file as a script with the id as its argument: either
+            // ended "passed" having run no test. pytest is asked for, as
+            // debugpy is. One that runs its own tests as a script
+            // (`unittest.main()`) runs as it is.
+            return Ok(Resolution::NeedsInstall(AdapterInstall::Pytest {
+                python: python.to_path_buf(),
+                user: !probe.in_venv,
+            }));
         }
     }
     Ok(Resolution::Ready(AdapterSpec {
@@ -1166,7 +1194,24 @@ fn neutral(cmd: &mut Command) {
 
 /// pip's arguments for the debugpy install, pinned. Rendered into the
 /// consent prompt as they are passed.
-fn pip_args(user: bool) -> Vec<String> {
+/// What a consented pip install asks for.
+#[derive(Clone, Copy)]
+enum Pip {
+    Debugpy,
+    Pytest,
+}
+
+impl Pip {
+    /// The requirement pip is given: the package at its pinned release.
+    fn requirement(self) -> String {
+        match self {
+            Pip::Debugpy => format!("debugpy=={DEBUGPY_VERSION}"),
+            Pip::Pytest => format!("pytest=={PYTEST_VERSION}"),
+        }
+    }
+}
+
+fn pip_args(user: bool, package: Pip) -> Vec<String> {
     let mut args: Vec<String> = [
         "-m",
         "pip",
@@ -1180,19 +1225,25 @@ fn pip_args(user: bool) -> Vec<String> {
     if user {
         args.push("--user".into());
     }
-    args.push(format!("debugpy=={DEBUGPY_VERSION}"));
+    args.push(package.requirement());
     args
 }
 
-fn pip_command(python: &Path, user: bool) -> Command {
+fn pip_command(python: &Path, user: bool, package: Pip) -> Command {
     let mut cmd = crate::spawn::command(python);
-    cmd.args(pip_args(user));
+    cmd.args(pip_args(user, package));
     neutral(&mut cmd);
     cmd
 }
 
-fn install_debugpy(python: &Path, user: bool, cancel: &AtomicBool) -> Result<(), String> {
-    let out = store::run_bounded_cancellable(pip_command(python, user), PIP_TIMEOUT, cancel)?;
+fn install_with_pip(
+    python: &Path,
+    user: bool,
+    package: Pip,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let out =
+        store::run_bounded_cancellable(pip_command(python, user, package), PIP_TIMEOUT, cancel)?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let last = err
@@ -1201,16 +1252,22 @@ fn install_debugpy(python: &Path, user: bool, cancel: &AtomicBool) -> Result<(),
             .find(|l| !l.trim().is_empty())
             .unwrap_or("pip failed");
         return Err(format!(
-            "pip install debugpy=={DEBUGPY_VERSION}: {}",
+            "pip install {}: {}",
+            package.requirement(),
             last.trim()
         ));
     }
-    // Confirm with the interpreter the adapter will actually run under.
-    if probe_python(python)?.has_debugpy {
+    // Confirm with the interpreter the session will actually run under.
+    let probe = probe_python(python)?;
+    let (importable, name) = match package {
+        Pip::Debugpy => (probe.has_debugpy, "debugpy"),
+        Pip::Pytest => (probe.has_pytest, "pytest"),
+    };
+    if importable {
         Ok(())
     } else {
         Err(format!(
-            "installed debugpy but {} still can't import it",
+            "installed {name} but {} still can't import it",
             python.display()
         ))
     }
@@ -1776,15 +1833,24 @@ mod tests {
     /// unpinned `pip install --user debugpy`, run with no prompt at all).
     #[test]
     fn the_pip_argv_is_what_the_consent_prompt_describes() {
-        for user in [true, false] {
+        for (user, package) in [true, false]
+            .into_iter()
+            .flat_map(|user| [(user, Pip::Debugpy), (user, Pip::Pytest)])
+        {
             let python = PathBuf::from("/opt/py/bin/python3");
-            let install = AdapterInstall::Debugpy {
-                python: python.clone(),
-                user,
+            let install = match package {
+                Pip::Debugpy => AdapterInstall::Debugpy {
+                    python: python.clone(),
+                    user,
+                },
+                Pip::Pytest => AdapterInstall::Pytest {
+                    python: python.clone(),
+                    user,
+                },
             };
             let describe = install.describe();
             let described: Vec<&str> = describe.split_whitespace().collect();
-            let cmd = pip_command(&python, user);
+            let cmd = pip_command(&python, user, package);
             assert_eq!(cmd.get_program(), python.as_os_str());
             assert_eq!(described.first(), Some(&"/opt/py/bin/python3"));
             for arg in cmd.get_args() {
@@ -1795,7 +1861,12 @@ mod tests {
                 );
             }
             let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
-            assert!(args.contains(&format!("debugpy=={DEBUGPY_VERSION}").as_str()));
+            let pinned = match package {
+                Pip::Debugpy => format!("debugpy=={DEBUGPY_VERSION}"),
+                Pip::Pytest => format!("pytest=={PYTEST_VERSION}"),
+            };
+            assert!(args.contains(&pinned.as_str()), "{args:?}");
+            assert_eq!(install.is_test_runner(), matches!(package, Pip::Pytest));
             assert_eq!(args.contains(&"--user"), user);
             // Never run from the project: `-m pip` imports from the cwd.
             let neutral = if cfg!(unix) {
@@ -1836,8 +1907,8 @@ mod tests {
 
     /// A test file runs its tests: under pytest, which is installed, with
     /// the file and the run's arguments its arguments. Run as a script it
-    /// defined its tests and ended. Without pytest, or for a file that is
-    /// no test, nothing changes.
+    /// defined its tests and ended. Without pytest, pytest is asked for; a
+    /// file that is no test, or runs its own tests, runs as it is.
     #[test]
     #[cfg(unix)]
     fn a_test_file_runs_under_pytest() {
@@ -1883,22 +1954,44 @@ mod tests {
         assert!(!names_a_test_of("/p/checks.py::", "/p/checks.py"));
         assert!(!names_a_test_of("/p/other.py::test_ok", "/p/checks.py"));
         let dir = TempDir::new("dap-py-no-pytest");
-        let without = fake_python(&dir, "echo '1 1 0'");
-        let test = launch(&without, "/p/tests/test_pricing.py");
-        assert_eq!(test["program"], "/p/tests/test_pricing.py");
-        // Run as a script, it says why it runs no tests.
-        assert_eq!(test[NOTICE], NO_PYTEST_NOTICE);
-        assert!(script.get(NOTICE).is_none(), "a script runs as it is");
+        let without = fake_python(&dir, "echo '1 0 0'");
+        // Without pytest a test file, or one test of any file, asks for it:
+        // run as a script it ended "passed" having run no test.
+        let asks = |program: &str, args: &[String]| match python_with(
+            &without,
+            program,
+            args,
+            Path::new("/p"),
+        )
+        .unwrap()
+        {
+            Resolution::NeedsInstall(AdapterInstall::Pytest { python, user }) => {
+                assert_eq!(python, without);
+                assert!(user, "--user outside a virtualenv");
+                true
+            }
+            _ => false,
+        };
+        assert!(asks("/p/tests/test_pricing.py", &[]));
+        assert!(asks("/p/checks.py", &["/p/checks.py::test_ok".into()]));
+        assert!(
+            !dir.join("installed").exists(),
+            "resolving must not install"
+        );
         assert!(launch(&without, "/p/main.py").get(NOTICE).is_none());
-        // One that runs its own tests as a script is not told it runs none.
+        // One that runs its own tests as a script runs as it is, but not
+        // one of its tests by its node id, which only pytest reads.
         let own = dir.path().join("test_own.py");
         std::fs::write(
             &own,
             "import unittest\nclass T(unittest.TestCase):\n    def test_a(self): pass\nif __name__ == '__main__':\n    unittest.main()\n",
         )
         .unwrap();
-        let test = launch(&without, own.to_str().unwrap());
+        let own = own.to_str().unwrap();
+        let test = launch(&without, own);
+        assert_eq!(test["program"], own);
         assert!(test.get(NOTICE).is_none(), "{test}");
+        assert!(asks(own, &[format!("{own}::T::test_a")]));
         assert!(is_python_test(Path::new("a/b_test.py")));
         assert!(!is_python_test(Path::new("a/testing.py")));
         assert!(!is_python_test(Path::new("a/test_x.txt")));

@@ -2307,15 +2307,19 @@ fn ts_config_candidates(files: &[PathBuf]) -> Vec<&PathBuf> {
 
 /// Whether `path` is a file a local resolver reads for the WHOLE project —
 /// go.mod, pubspec.yaml, a composer.json (PHP's PSR-4 map), a Haskell
-/// package description (`.cabal`, `package.yaml`), a tsconfig/jsconfig or a
-/// base one extends by the usual naming (`tsconfig.base.json`) — so a change
-/// to it re-resolves every file against a resolver that reads it again.
+/// package description (`.cabal`, `package.yaml`), a Cargo.toml (a crate's
+/// library name and targets), a pyproject.toml (Python's source roots), a
+/// tsconfig/jsconfig or a base one extends by the usual naming
+/// (`tsconfig.base.json`) — so a change to it re-resolves every file against
+/// a resolver that reads it again.
 pub fn is_resolution_metadata(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    matches!(name, "go.mod" | "pubspec.yaml" | "composer.json")
-        || clew_core::imports::is_haskell_manifest(name)
+    matches!(
+        name,
+        "go.mod" | "pubspec.yaml" | "composer.json" | "Cargo.toml" | "pyproject.toml"
+    ) || clew_core::imports::is_haskell_manifest(name)
         || ((name.starts_with("tsconfig") || name.starts_with("jsconfig"))
             && name.ends_with(".json"))
 }
@@ -5274,7 +5278,14 @@ mod tests {
     /// it when they change.
     #[test]
     fn php_and_haskell_manifests_are_resolution_metadata() {
-        for name in ["composer.json", "acme.cabal", "package.yaml", "go.mod"] {
+        for name in [
+            "composer.json",
+            "acme.cabal",
+            "package.yaml",
+            "go.mod",
+            "Cargo.toml",
+            "pyproject.toml",
+        ] {
             assert!(is_resolution_metadata(Path::new(name)), "{name}");
         }
         assert!(!is_resolution_metadata(Path::new(".cabal")));

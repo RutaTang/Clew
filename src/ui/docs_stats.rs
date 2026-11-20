@@ -555,17 +555,30 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         .width(Fill)
         .style(theme::editor);
 
-        let doc: Element<'a, Message> = if e.doc_items.is_empty() {
-            text(tr!("No documentation."))
-                .size(ts::BODY)
-                .color(theme::dim())
-                .into()
+        // A member field or constant says what it is in its signature: a
+        // "No documentation." under each of a model's fields was most of
+        // its page.
+        let quiet = idx > 0 && !crate::notes::is_read_through(&e.kind);
+        let doc: Option<Element<'a, Message>> = if !e.doc_items.is_empty() {
+            Some(
+                iced::widget::markdown::view(&e.doc_items, theme::markdown_settings())
+                    .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string()))),
+            )
+        } else if quiet {
+            None
         } else {
-            iced::widget::markdown::view(&e.doc_items, theme::markdown_settings())
-                .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string())))
+            Some(
+                text(tr!("No documentation."))
+                    .size(ts::BODY)
+                    .color(theme::dim())
+                    .into(),
+            )
         };
 
-        let block = column![title, signature, doc].spacing(8);
+        let mut block = column![title, signature].spacing(8);
+        if let Some(doc) = doc {
+            block = block.push(doc);
+        }
         // Indent members under their type.
         let indent = e.depth as f32 * 18.0;
         blocks.push(

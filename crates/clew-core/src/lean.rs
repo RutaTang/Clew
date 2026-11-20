@@ -514,7 +514,9 @@ pub fn lake_root(root: &Path, file: &Path) -> PathBuf {
 /// which takes hours; `lake exe cache get` downloads it in minutes.
 pub fn mathlib_build_missing(root: &Path) -> Option<PathBuf> {
     use serde_json::Value;
-    let manifest = std::fs::read_to_string(root.join("lake-manifest.json")).ok()?;
+    // Capped, and never blocked on: a repository's manifest that is a FIFO,
+    // or a link to `/dev/zero`, hung or filled the app reading it.
+    let manifest = crate::statefile::read_capped(&root.join("lake-manifest.json"), 4 << 20)?;
     let manifest: Value = serde_json::from_str(&manifest).ok()?;
     let named = |v: &Value| v.get("name").and_then(Value::as_str) == Some("mathlib");
     let mathlib = if named(&manifest) {

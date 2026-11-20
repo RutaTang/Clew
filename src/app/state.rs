@@ -275,6 +275,9 @@ pub struct DebugState {
     /// not "finished", as a program that ran and ended. A run that takes
     /// the tab again takes the mark off.
     pub build_failed: std::collections::HashSet<u64>,
+    /// The tabs whose program was built, and whose test was then not found
+    /// in it: said "not run" — "build failed" said of a build that worked.
+    pub not_run: std::collections::HashSet<u64>,
 }
 
 /// A tab of the bottom panel: a run of the program (Run or Debug), or one
@@ -2604,9 +2607,19 @@ pub struct ProjectSession {
     /// The Lean goals at the cursor, the margin's Goals tab
     /// (`app::proof`).
     pub lean_goals: Option<crate::app::proof::LeanGoals>,
-    /// Mathlib's build cache for this project, wanted or being got
-    /// (`app::proof`).
+    /// Mathlib's build cache for the Lake project of the Lean file read,
+    /// wanted or being got (`app::proof`).
     pub mathlib: crate::app::proof::MathlibCache,
+    /// The Lake project [`Self::mathlib`] is for: a repository's proofs in
+    /// `verification/` are their own Lake project, with their own Mathlib.
+    pub mathlib_root: Option<PathBuf>,
+    /// The Lake project of the Lean file last asked about: worked out once
+    /// per file, not with a look at the disk on every message.
+    pub lean_lake: Option<(PathBuf, PathBuf)>,
+    /// Restart File was asked for this file at this diagnostics version:
+    /// until Lean says more of it, the Goals tab says it is checking the
+    /// imports again, and offers no second restart.
+    pub lean_restarting: Option<(PathBuf, u64)>,
     /// The weak spots page (`app::weakspots`).
     pub weak: crate::app::weakspots::WeakSpots,
     /// The API documentation view's state (see [`DocsState`]).
@@ -2973,6 +2986,9 @@ impl Default for ProjectSession {
             proof: None,
             lean_goals: None,
             mathlib: Default::default(),
+            mathlib_root: None,
+            lean_lake: None,
+            lean_restarting: None,
             weak: Default::default(),
             docs: Default::default(),
             glossary: Default::default(),

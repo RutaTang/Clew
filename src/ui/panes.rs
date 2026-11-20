@@ -2737,48 +2737,124 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
         .into()
     };
     let get = || Message::Proof(crate::ProofMsg::GetMathlibCache);
+    // Mathlib's build cache saves hours: a card of its own, above the
+    // goals, said as what it is, with its way on and a way to put it by.
+    let card = |title: String, body: String, actions: Vec<Element<'static, Message>>| {
+        let mut col = column![
+            text(title)
+                .size(ts::BODY)
+                .font(crate::fonts::UI_MEDIUM)
+                .color(theme::fg())
+                .wrapping(Wrapping::WordOrGlyph),
+            text(body)
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::WordOrGlyph),
+        ]
+        .spacing(4);
+        if !actions.is_empty() {
+            col = col.push(iced::widget::Row::with_children(actions).spacing(6).wrap());
+        }
+        container(
+            container(col)
+                .padding([10, 12])
+                .width(Fill)
+                .style(theme::form_card),
+        )
+        .padding([4, 8])
+    };
+    let action = |label: &'static str, msg: Message, primary: bool| -> Element<'static, Message> {
+        button(text(label).size(ts::SMALL).wrapping(Wrapping::None))
+            .style(if primary {
+                theme::primary_button
+            } else {
+                theme::secondary_button
+            })
+            .padding([4, 10])
+            .on_press(super::heard::said(label, msg))
+            .into()
+    };
     match &app.proj.mathlib {
         crate::app::proof::MathlibCache::Missing => {
-            rows = rows.push(note(
-                tr!("This project uses Mathlib, and Mathlib's build is not here yet. Lean would build all of it itself, which takes hours; its build cache downloads in minutes.")
-                    .into(),
+            rows = rows.push(card(
+                tr!("Mathlib isn't compiled here yet").into(),
+                tr!("Without its build cache, Lean compiles all of Mathlib itself, which takes hours. The cache downloads in minutes.").into(),
+                vec![
+                    action(tr!("Get Mathlib's Build Cache"), get(), true),
+                    action(
+                        tr!("Not now"),
+                        Message::Proof(crate::ProofMsg::DismissMathlibCache),
+                        false,
+                    ),
+                ],
             ));
-            rows = rows.push(link(tr!("Get Mathlib's Build Cache"), get()));
         }
         crate::app::proof::MathlibCache::Getting(said) => {
-            rows = rows.push(note(tr!("Getting Mathlib's build cache…").into()));
-            if !said.is_empty() {
-                rows = rows.push(code(said.clone(), theme::dim()));
-            }
+            rows = rows.push(card(
+                tr!("Getting Mathlib's build cache…").into(),
+                if said.is_empty() {
+                    tr!("lake exe cache get is downloading Mathlib's compiled files.").into()
+                } else {
+                    said.clone()
+                },
+                Vec::new(),
+            ));
         }
         crate::app::proof::MathlibCache::Failed(why) => {
-            rows = rows.push(note(tr!(
-                "Could not get Mathlib's build cache: {error}",
-                error = why
-            )));
-            rows = rows.push(link(tr!("Try again"), get()));
+            rows = rows.push(card(
+                tr!("Could not get Mathlib's build cache").into(),
+                why.clone(),
+                vec![
+                    action(tr!("Try again"), get(), true),
+                    action(
+                        tr!("Not now"),
+                        Message::Proof(crate::ProofMsg::DismissMathlibCache),
+                        false,
+                    ),
+                ],
+            ));
         }
         _ => {}
     }
     // The server's state, under the Mathlib card: a project whose Lean
     // would build all of Mathlib wants the card most while Lean starts.
+    // Each said as it is — a failure, no Lean, a "no" — with the way on.
+    let servers = || {
+        link(
+            tr!("Language servers…"),
+            Message::Editor(EditorMsg::RunAction(crate::keymap::Action::LspServers)),
+        )
+    };
     match app.proj.link.lsp.get("lean") {
         Some(crate::LspSlot::Ready(_)) => {}
-        Some(crate::LspSlot::Starting | crate::LspSlot::AwaitingConsent) => {
+        Some(crate::LspSlot::Starting) => {
             rows = rows.push(note(
                 tr!("The Lean server is starting. The goals at the cursor show here once it is ready.")
                     .into(),
             ));
             return scrollable(rows).height(Fill).into();
         }
-        _ => {
+        Some(crate::LspSlot::AwaitingConsent) => {
+            rows = rows.push(note(
+                tr!("The Lean server is waiting for your answer before it starts.").into(),
+            ));
+            return scrollable(rows).height(Fill).into();
+        }
+        Some(crate::LspSlot::Failed(error)) => {
+            rows = rows.push(note(tr!("The Lean server stopped: {error}", error = error)));
+            rows = rows.push(servers());
+            return scrollable(rows).height(Fill).into();
+        }
+        Some(crate::LspSlot::Unsupported(why) | crate::LspSlot::Declined(why)) => {
+            rows = rows.push(note(crate::i18n::message(why)));
+            rows = rows.push(servers());
+            return scrollable(rows).height(Fill).into();
+        }
+        None => {
             rows = rows.push(note(
                 tr!("Start the Lean server to see the goals at the cursor here.").into(),
             ));
-            rows = rows.push(link(
-                tr!("Language servers…"),
-                Message::Editor(EditorMsg::RunAction(crate::keymap::Action::LspServers)),
-            ));
+            rows = rows.push(servers());
             return scrollable(rows).height(Fill).into();
         }
     }
@@ -2790,30 +2866,76 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
             .iter()
             .any(|d| d.message.contains("Imports are out of date"))
     });
-    if stale {
-        let restart = button(
-            text(tr!("Restart File"))
-                .size(ts::SMALL)
-                .color(theme::accent()),
-        )
-        .style(theme::icon_button(false))
-        .padding([3, 6])
-        .on_press(super::heard::said(
-            tr!("Restart File"),
-            Message::Proof(crate::ProofMsg::RestartFile),
+    // Restarted and not yet checked again: said, and not offered twice.
+    let checked = snapshot.map_or(0, |s| s.diag_version);
+    let restarting = app
+        .proj
+        .lean_restarting
+        .as_ref()
+        .is_some_and(|(abs, at)| *abs == v.abs && *at == checked);
+    if restarting {
+        rows = rows.push(note(
+            tr!("Lean is checking this file's imports again…").into(),
         ));
+    } else if stale {
         rows = rows.push(note(
             tr!("This file's imports changed since Lean read them. Restart the file to check it against them.")
                 .into(),
         ));
-        rows = rows.push(container(restart).padding([0, 4]));
+        rows = rows.push(link(
+            tr!("Restart File"),
+            Message::Proof(crate::ProofMsg::RestartFile),
+        ));
+    }
+    // What failed in the imports — an import that does not build, a
+    // package not there — stops the file being checked: said wherever the
+    // cursor is, as it was only under the import's own line.
+    let header = lean_header_end(v);
+    if line >= header
+        && !restarting
+        && let Some(snapshot) = snapshot
+    {
+        let failed: Vec<&clew_core::lsp::client::Diag> = snapshot
+            .diagnostics(&v.abs)
+            .iter()
+            .filter(|d| {
+                d.severity == 1 && d.line < header && !d.message.contains("Imports are out of date")
+            })
+            .collect();
+        if !failed.is_empty() {
+            rows = rows.push(super::explain_view::section_header(tr!(
+                "Errors in the imports"
+            )));
+            for d in failed {
+                rows = rows.push(code(d.message.trim().to_string(), theme::danger()));
+            }
+        }
     }
     let goals = app.proj.lean_goals.as_ref().filter(|g| g.abs == v.abs);
-    match goals.and_then(|g| g.answer.as_ref()) {
+    // An answer for another line while this one is asked, and Lean has not
+    // checked this far yet: its goals are not this line's, and may not be
+    // for minutes — how far Lean has got is said instead.
+    let behind = snapshot
+        .and_then(|s| s.checking(&v.abs))
+        .filter(|at| *at < line);
+    let answer = goals.and_then(|g| {
+        g.answer
+            .as_ref()
+            .filter(|(at, _)| !(g.asking && *at != line && behind.is_some()))
+    });
+    match answer {
         // How far Lean has got, where it says: a goal is answered once the
         // line is checked, and checking the imports of a big project takes
         // minutes the reader saw only "Asking…" through.
         None => match snapshot.and_then(|s| s.checking(&v.abs)) {
+            Some(at) if at < line => {
+                rows = rows.push(note(tr!(
+                    "Lean is checking this file: line {line} of {total}. The goals at line {cursor} show once it gets there.",
+                    line = at + 1,
+                    total = v.line_count().max(at + 1),
+                    cursor = line + 1
+                )))
+            }
             Some(at) => {
                 rows = rows.push(note(tr!(
                     "Lean is checking this file: line {line} of {total}…",
@@ -2832,7 +2954,7 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
         Some((_, Ok(None))) => {
             rows = rows.push(note(
                 tr!(
-                    "No goal here. Put the cursor in a proof, or in a term, to see what it must be."
+                    "Nothing to show here. Put the cursor inside a proof to see its goals, or on a term to see its expected type."
                 )
                 .into(),
             ))
@@ -2842,7 +2964,8 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
                 "Goals at line {line}",
                 line = at + 1
             )));
-            rows = rows.push(note(tr!("No goals: the proof is complete here.").into()));
+            // Said of a `sorry` too: none left, not "complete".
+            rows = rows.push(note(tr!("No goals left here.").into()));
         }
         Some((at, Ok(Some(LeanGoal::Tactic(left))))) => {
             rows = rows.push(super::explain_view::section_header(&tr!(
@@ -2885,6 +3008,40 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
         }
     }
     scrollable(rows).height(Fill).into()
+}
+
+/// Where a Lean file's header ends: the line after its `module`,
+/// `prelude` and `import`s, and the comments and blank lines among them.
+/// What fails there stops the whole file being checked.
+fn lean_header_end(v: &crate::editor::viewer::Viewer) -> usize {
+    let mut in_comment = false;
+    for i in 0..v.line_count().min(2000) {
+        let line = v.source_line(i).unwrap_or("").trim();
+        if in_comment {
+            in_comment = !line.contains("-/");
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("/-") {
+            in_comment = !rest.contains("-/");
+            continue;
+        }
+        let header = line.is_empty()
+            || line.starts_with("--")
+            || line == "prelude"
+            || line == "module"
+            || [
+                "import ",
+                "public import ",
+                "meta import ",
+                "private import ",
+            ]
+            .iter()
+            .any(|p| line.starts_with(p));
+        if !header {
+            return i;
+        }
+    }
+    v.line_count()
 }
 
 fn margin_history(app: &App) -> Element<'_, Message> {
@@ -3308,16 +3465,25 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         ));
         // Each says what it does where the pointer rests, as in All notes:
         // here, where they are first seen, they said nothing.
-        let toggle = super::toolbar::tip_at(
-            toggle,
-            if understood {
-                tr!("Mark not understood")
-            } else {
-                tr!("Mark understood")
-            },
-            None,
-            tooltip::Position::Bottom,
-        );
+        let toggle: Element<'_, Message> = if crate::notes::is_read_through(&symbol.kind) {
+            super::toolbar::tip_at(
+                toggle,
+                if understood {
+                    tr!("Mark not understood")
+                } else {
+                    tr!("Mark understood")
+                },
+                None,
+                tooltip::Position::Bottom,
+            )
+        } else {
+            // A field or a constant: no circle, its room kept so the names
+            // stay in line.
+            space()
+                .width(OUTLINE_TOGGLE_W)
+                .height(OUTLINE_TOGGLE_W)
+                .into()
+        };
         let pencil = super::toolbar::tip_at(
             pencil,
             if has_text {
@@ -3354,7 +3520,13 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     // this file. Plain text, left-aligned with the section header — no decorative
     // leading circle (that read as a stray, non-clickable control). Explain-All
     // progress lives only in the status bar, so it isn't duplicated here.
-    let names = crate::notes::note_keys(&v.symbols);
+    // What is read through, not every field and constant.
+    let names: Vec<String> = crate::notes::note_keys(&v.symbols)
+        .into_iter()
+        .zip(&v.symbols)
+        .filter(|(_, s)| crate::notes::is_read_through(&s.kind))
+        .map(|(key, _)| key)
+        .collect();
     let (done, total) = crate::notes::coverage(&app.proj.notes, &v.rel, &names);
     // What "understood" counts, said where the pointer rests: the circle
     // beside each name was never explained.

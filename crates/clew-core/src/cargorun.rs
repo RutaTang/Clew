@@ -124,13 +124,18 @@ impl Features {
     }
 }
 
+/// The most of a manifest or a crate root read: a repository's `Cargo.toml`
+/// or `lib.rs` that is a FIFO, or a link to `/dev/zero`, hung or filled the
+/// app reading it.
+const MAX_READ_BYTES: u64 = 1024 * 1024;
+
 /// The package a file is in — the nearest `Cargo.toml` above it with a
 /// `[package]` — and its manifest.
 fn package_of(file: &Path) -> Option<(PathBuf, toml::Value)> {
     let mut dir = file.parent();
     while let Some(d) = dir {
         let manifest = d.join("Cargo.toml");
-        if let Ok(text) = std::fs::read_to_string(&manifest)
+        if let Some(text) = crate::statefile::read_capped(&manifest, MAX_READ_BYTES)
             && let Ok(value) = toml::from_str::<toml::Value>(&text)
             && value.get("package").is_some()
         {
@@ -167,7 +172,8 @@ fn module_of(parts: &[String]) -> Vec<String> {
 /// targets: the paths a manifest names (`[lib] path`, `[[bin]] path`, …),
 /// then its own layout — `src/lib.rs`, `src/main.rs`, `src/bin/`,
 /// `examples/`, `tests/`, `benches/`. A module of `src/` is the library's
-/// when the package has one, else the default binary's. `None` for a file
+/// when the package has one — unless only `src/main.rs` declares it — else
+/// the default binary's. `None` for a file
 /// in no package, or in one Cargo would not build it in.
 pub fn target_of(file: &Path) -> Option<CargoTarget> {
     let (manifest, value) = package_of(file)?;
@@ -241,14 +247,30 @@ pub fn target_of(file: &Path) -> Option<CargoTarget> {
                     target(TargetKind::Bin(name.clone()), module)
                 }
                 _ => {
-                    let kind = if dir.join("src/lib.rs").is_file() || value.get("lib").is_some() {
-                        TargetKind::Lib
-                    } else if dir.join("src/main.rs").is_file() {
-                        TargetKind::Bin(default_bin(&value, &package))
-                    } else {
-                        return None;
+                    let lib_root = value
+                        .get("lib")
+                        .and_then(|lib| lib.get("path")?.as_str())
+                        .map_or_else(|| dir.join("src/lib.rs"), |path| dir.join(path));
+                    let main = dir.join("src/main.rs");
+                    let has_lib = lib_root.is_file() || value.get("lib").is_some();
+                    // A package with both: the module is the program's when
+                    // its root declares it and the library's does not. Taken
+                    // for the library's, a test in `src/cli.rs` (`mod cli;`
+                    // in `main.rs`) was looked for in the library, and the
+                    // library's own test of the same name ran in its place.
+                    let the_programs = |top: &str| {
+                        main.is_file() && !declares_mod(&lib_root, top) && declares_mod(&main, top)
                     };
-                    target(kind, module_of(rest))
+                    let module = module_of(rest);
+                    let kind = match module.first() {
+                        Some(top) if has_lib && the_programs(top) => {
+                            TargetKind::Bin(default_bin(&value, &package))
+                        }
+                        _ if has_lib => TargetKind::Lib,
+                        _ if main.is_file() => TargetKind::Bin(default_bin(&value, &package)),
+                        _ => return None,
+                    };
+                    target(kind, module)
                 }
             }
         }
@@ -275,6 +297,30 @@ pub fn target_of(file: &Path) -> Option<CargoTarget> {
         }
         _ => None,
     }
+}
+
+/// Whether the crate root at `root` declares the module `name` — `mod
+/// name;` or `mod name { … }`, public or not — on a line of its own.
+fn declares_mod(root: &Path, name: &str) -> bool {
+    let Some(text) = crate::statefile::read_capped(root, MAX_READ_BYTES) else {
+        return false;
+    };
+    text.lines().any(|line| {
+        let mut line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("pub") {
+            line = rest.trim_start();
+            if let Some(scoped) = line.strip_prefix('(') {
+                let Some((_, after)) = scoped.split_once(')') else {
+                    return false;
+                };
+                line = after.trim_start();
+            }
+        }
+        line.strip_prefix("mod")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+            .and_then(|rest| rest.trim_start().strip_prefix(name))
+            .is_some_and(|rest| matches!(rest.trim_start().chars().next(), Some(';' | '{')))
+    })
 }
 
 /// The default binary's name: the `[[bin]]` at `src/main.rs`'s, else the
@@ -367,8 +413,11 @@ pub fn built_executable(stdout: &str, target: &CargoTarget, test: bool) -> Optio
 
 /// Of a test binary's `--list --format terse` lines (`a::tests::adds:
 /// test`), the test the reader meant: `wanted`, its full name as Clew
-/// worked it out, when listed; else the one test whose name ends in `name`.
-pub fn listed_test(list: &str, wanted: &str, name: &str) -> Option<String> {
+/// worked it out, when listed; else the one test whose name ends in all of
+/// it, below modules Clew did not see (a `#[path]`'d module). Never one
+/// that only ends in the test's own name: `cli::tests::parses` not listed,
+/// the library's `tests::parses` ran in its place, and passed for it.
+pub fn listed_test(list: &str, wanted: &str) -> Option<String> {
     let tests: Vec<&str> = list
         .lines()
         .filter_map(|l| l.strip_suffix(": test"))
@@ -376,8 +425,8 @@ pub fn listed_test(list: &str, wanted: &str, name: &str) -> Option<String> {
     if tests.contains(&wanted) {
         return Some(wanted.to_string());
     }
-    let suffix = format!("::{name}");
-    let mut ending = tests.iter().filter(|t| **t == name || t.ends_with(&suffix));
+    let suffix = format!("::{wanted}");
+    let mut ending = tests.iter().filter(|t| t.ends_with(&suffix));
     match (ending.next(), ending.next()) {
         (Some(one), None) => Some(one.to_string()),
         _ => None,
@@ -623,6 +672,26 @@ mod tests {
             Some((TargetKind::Bench("b".into()), String::new()))
         );
         assert_eq!(at("tools/x.rs"), Some((bin("renamed"), String::new())));
+        // A module only the program's root declares is the program's.
+        write(root, "src/main.rs", "mod cli;\n\nfn main() {}\n");
+        write(root, "src/lib.rs", "pub mod parser;\n");
+        write(root, "src/cli.rs", "");
+        assert_eq!(at("src/cli.rs"), Some((bin("demo"), "cli".into())));
+        assert_eq!(
+            at("src/parser/lexer.rs"),
+            Some((TargetKind::Lib, "parser::lexer".into()))
+        );
+        // Both declare it (a module the program compiles again): the
+        // library's, as before.
+        write(
+            root,
+            "src/lib.rs",
+            "pub mod parser;\npub(crate) mod cli {}\n",
+        );
+        assert_eq!(at("src/cli.rs"), Some((TargetKind::Lib, "cli".into())));
+        assert!(declares_mod(&root.join("src/lib.rs"), "cli"));
+        assert!(!declares_mod(&root.join("src/lib.rs"), "cl"));
+        assert!(!declares_mod(&root.join("src/main.rs"), "parser"));
         // No library: a module of `src/` is the program's.
         std::fs::remove_file(root.join("src/lib.rs")).unwrap();
         assert_eq!(
@@ -750,15 +819,18 @@ mod tests {
     fn a_test_is_named_as_its_binary_lists_it() {
         let list = "parser::tests::adds: test\nparser::tests::subs: test\nother::adds: test\nbench: benchmark\n";
         assert_eq!(
-            listed_test(list, "parser::tests::adds", "adds").as_deref(),
+            listed_test(list, "parser::tests::adds").as_deref(),
             Some("parser::tests::adds")
         );
         assert_eq!(
-            listed_test(list, "tests::subs", "subs").as_deref(),
+            listed_test(list, "tests::subs").as_deref(),
             Some("parser::tests::subs")
         );
-        assert_eq!(listed_test(list, "x::adds", "adds"), None, "two end in it");
-        assert_eq!(listed_test(list, "x::bench", "bench"), None, "not a test");
+        assert_eq!(listed_test(list, "adds"), None, "two end in it");
+        assert_eq!(listed_test(list, "x::bench"), None, "not a test");
+        // Another module's test of the same name is not the one meant.
+        assert_eq!(listed_test(list, "cli::tests::adds"), None);
+        assert_eq!(listed_test(list, "x::adds"), None);
         assert_eq!(
             test_args("a::b"),
             ["a::b", "--exact", "--include-ignored", "--nocapture"]
@@ -818,7 +890,7 @@ mod tests {
         );
         let list = list_tests(&exe, root).unwrap();
         assert_eq!(
-            listed_test(&list, &target.test_path(&["tests".into()], "adds"), "adds").as_deref(),
+            listed_test(&list, &target.test_path(&["tests".into()], "adds")).as_deref(),
             Some("tests::adds")
         );
     }

@@ -233,7 +233,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("image/svg+xml ({arg1} MB, too large)"),
     tr_noop!("install completed but '{arg1}' is missing"),
     tr_noop!("install failed: {e}"),
-    tr_noop!("installed debugpy but {arg1} still can't import it"),
+    tr_noop!("installed {name} but {arg1} still can't import it"),
     tr_noop!("installing the {language} server failed"),
     tr_noop!("invalid Content-Length {v}"),
     tr_noop!("it accepts only {schemes} logins, which Clew does not support"),
@@ -322,7 +322,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("nothing was installed for {language}: {refusal}"),
     tr_noop!("on the remote host: {e}"),
     tr_noop!("path resolves outside the project"),
-    tr_noop!("pip install debugpy=={DEBUGPY_VERSION}: {arg1}"),
+    tr_noop!("pip install {arg1}: {arg2}"),
     tr_noop!("process {proc} stopped reading stdin (queue overflow); killed"),
     tr_noop!("project root unavailable: {e}"),
     tr_noop!(

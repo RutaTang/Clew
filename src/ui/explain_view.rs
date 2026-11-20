@@ -1000,7 +1000,13 @@ pub(crate) fn lsp_consent_modal(
     let use_path = consent.on_path.is_some();
     use crate::LspProvision;
     let server_blurb = tr!("Clew installs it in its own folder, not system-wide:");
-    let (title, blurb, action) = match consent.provision {
+    let (title, blurb, action) = match &consent.provision {
+        // pytest runs a project's tests: no debug adapter.
+        LspProvision::DebugAdapter { install, .. } if install.is_test_runner() => (
+            tr!("Install pytest to run tests?"),
+            tr!("This will run:"),
+            tr!("Install"),
+        ),
         LspProvision::DebugAdapter { .. } => (
             tr!("Install a debug adapter?"),
             tr!("This will run:"),

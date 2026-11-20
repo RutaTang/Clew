@@ -927,10 +927,12 @@ struct PendingExport {
 
 /// The names a Python module's `__all__` lists — what `from m import *`
 /// brings in, and the module's API by its own word — when it lists them
-/// as written strings (`__all__ = ["a", "b"]`, a tuple, `+=` more, over
-/// as many lines as it takes). `None` without one, or with one computed
-/// (`[f.__name__ for f in …]`): there the names say nothing, and the
-/// underscore rule stands.
+/// as written strings (`__all__ = ["a", "b"]`, a tuple, `+=`, `.extend`
+/// or `.append` more, over as many lines as it takes). `None` without one,
+/// or with one computed (`[f.__name__ for f in …]`, `[n for n in dir() if
+/// not n.startswith('_')]`): there the names say nothing — the `'_'` it
+/// tests for was taken for the one name listed, and every item of the
+/// module hidden — and the underscore rule stands.
 fn python_all(source: &str) -> Option<HashSet<String>> {
     let mut names = HashSet::new();
     let mut listed = false;
@@ -940,7 +942,14 @@ fn python_all(source: &str) -> Option<HashSet<String>> {
         let Some(rest) = line.strip_prefix("__all__") else {
             continue;
         };
-        let Some((target, value)) = rest.split_once('=') else {
+        // `__all__.extend([...])` and `__all__.append("x")` add to it, as
+        // `+=` does.
+        let added = [".extend", ".append"]
+            .iter()
+            .find_map(|call| rest.trim_start().strip_prefix(call))
+            .filter(|arg| arg.trim_start().starts_with('('));
+        let Some((target, value)) = added.map(|arg| ("+", arg)).or_else(|| rest.split_once('='))
+        else {
             continue;
         };
         let target = target.trim();
@@ -979,6 +988,12 @@ fn python_all(source: &str) -> Option<HashSet<String>> {
                 if !name.is_empty() {
                     names.insert(name);
                 }
+                continue;
+            }
+            // Outside its strings, a list as written holds only brackets,
+            // commas and `+`: anything else computes it.
+            if !(c.is_whitespace() || matches!(c, '[' | ']' | '(' | ')' | ',' | '+' | '\\')) {
+                return None;
             }
         }
         let empty = matches!(text.split('#').next().unwrap_or("").trim(), "[]" | "()");
@@ -2314,6 +2329,18 @@ module.exports = {
 
         assert_eq!(python_all("x = 1\n"), None);
         assert_eq!(python_all("__all__ = [f.__name__ for f in FNS]\n"), None);
+        // Computed, with a string in it: the `'_'` is no name it lists.
+        assert_eq!(
+            python_all("__all__ = [n for n in dir() if not n.startswith('_')]\n"),
+            None
+        );
+        assert_eq!(python_all("__all__ = ['a'] + base.__all__\n"), None);
+        // Added to by a call, as by `+=`.
+        let added =
+            python_all("__all__ = ['a']\n__all__.extend(['b', 'c'])\n__all__.append('d')\n")
+                .unwrap();
+        assert_eq!(added.len(), 4, "{added:?}");
+        assert_eq!(python_all("__all__ = ['a']\n__all__.extend(names)\n"), None);
         assert_eq!(
             python_all("__all__: list[str] = []\n"),
             Some(HashSet::new())

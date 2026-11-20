@@ -108,6 +108,8 @@ pub enum MathlibCache {
     Getting(String),
     /// It failed: its last words.
     Failed(String),
+    /// Missing, and put by for now ("Not now"): the palette still offers it.
+    Dismissed,
 }
 
 /// How often, at most, a line `lake exe cache get` says is passed on: it
@@ -382,9 +384,7 @@ impl App {
         if !matches!(self.proj.link.lsp.get("lean"), Some(LspSlot::Ready(_))) {
             return None;
         }
-        let root = self.proj.project.as_ref()?.root.clone();
-        let file = self.lean_file()?;
-        let lake = clew_core::lake_root(&root, &file);
+        let lake = self.lake_of_lean_file()?;
         let started = self.proj.link.lean_root.as_ref()?;
         if *started == lake {
             return None;
@@ -394,24 +394,45 @@ impl App {
         Some(self.ensure_lsp("lean"))
     }
 
+    /// The Lake project of the Lean file read — the folder of the nearest
+    /// lakefile above it in the project, else the project — looked for on
+    /// disk once per file: this runs on every message while one is read.
+    fn lake_of_lean_file(&mut self) -> Option<PathBuf> {
+        let file = self.lean_file()?;
+        if let Some((known, lake)) = &self.proj.lean_lake
+            && *known == file
+        {
+            return Some(lake.clone());
+        }
+        let root = self.proj.project.as_ref()?.root.clone();
+        let lake = clew_core::lake_root(&root, &file);
+        self.proj.lean_lake = Some((file, lake.clone()));
+        Some(lake)
+    }
+
     pub(crate) fn sync_lean_goals(&mut self) -> Option<Task<Message>> {
         if let Some(restart) = self.sync_lean_root() {
             return Some(restart);
         }
-        // Whether the project wants Mathlib's build cache: looked at once,
-        // when a Lean file is first read.
-        if self.reading_lean() && self.proj.mathlib == MathlibCache::Unknown {
-            let missing = !self.connection.is_remote()
-                && self
-                    .proj
-                    .project
-                    .as_ref()
-                    .is_some_and(|p| clew_core::mathlib_build_missing(&p.root).is_some());
-            self.proj.mathlib = if missing {
-                MathlibCache::Missing
-            } else {
-                MathlibCache::Ready
-            };
+        // Whether the Lake project of the file read wants Mathlib's build
+        // cache: looked at once per Lake project, when a file of it is first
+        // read. The opened folder's was looked at, and a repository whose
+        // proofs are a Lake project of their own in `verification/` was
+        // never offered the cache: Lean built all of Mathlib, for hours.
+        if self.reading_lean() && !matches!(self.proj.mathlib, MathlibCache::Getting(_)) {
+            if self.connection.is_remote() {
+                if self.proj.mathlib == MathlibCache::Unknown {
+                    self.proj.mathlib = MathlibCache::Ready;
+                }
+            } else if let Some(lake) = self.lake_of_lean_file()
+                && self.proj.mathlib_root.as_ref() != Some(&lake)
+            {
+                self.proj.mathlib = match clew_core::mathlib_build_missing(&lake) {
+                    Some(_) => MathlibCache::Missing,
+                    None => MathlibCache::Ready,
+                };
+                self.proj.mathlib_root = Some(lake);
+            }
         }
         if self.reading_lean() && !self.lean_goals_offered {
             self.lean_goals_offered = true;
@@ -501,7 +522,14 @@ impl App {
         if matches!(self.proj.mathlib, MathlibCache::Getting(_)) || self.connection.is_remote() {
             return Task::none();
         }
-        let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+        // In the Lake project whose Mathlib is missing: `lake exe cache get`
+        // in a folder with no lakefile finds no Mathlib to get.
+        let Some(root) = self
+            .proj
+            .mathlib_root
+            .clone()
+            .or_else(|| self.proj.project.as_ref().map(|p| p.root.clone()))
+        else {
             return Task::none();
         };
         let lake = match self
@@ -534,12 +562,16 @@ impl App {
     /// `lake exe cache get` ended: Mathlib's build is looked for again, and
     /// the open Lean files are checked afresh against it.
     fn on_mathlib_got(&mut self, result: Result<(), String>) -> Task<Message> {
-        let root = self.proj.project.as_ref().map(|p| p.root.clone());
+        let root = self
+            .proj
+            .mathlib_root
+            .clone()
+            .or_else(|| self.proj.project.as_ref().map(|p| p.root.clone()));
         let still_missing = root.is_some_and(|r| clew_core::mathlib_build_missing(&r).is_some());
         self.proj.mathlib = match result {
             Err(why) => MathlibCache::Failed(why),
             Ok(()) if still_missing => MathlibCache::Failed(
-                tr!("lake finished, and Mathlib's build is still not there").into(),
+                tr!("lake exe cache get finished, but Mathlib's compiled files are still missing: this version of Mathlib may have no cache.").into(),
             ),
             Ok(()) => MathlibCache::Ready,
         };
@@ -595,8 +627,13 @@ impl App {
         self.lsp_doc_rev += 1;
         client.did_open(&abs, "lean", self.lsp_doc_rev, &source);
         self.proj.link.lsp_opened.insert(abs.clone());
-        // Asked again once the file is checked anew.
+        // Asked again once the file is checked anew; said meanwhile.
         self.proj.lean_goals = None;
+        let checked = match self.proj.link.lsp_snapshots.get("lean") {
+            Some(Ok(snapshot)) => snapshot.diag_version,
+            _ => 0,
+        };
+        self.proj.lean_restarting = Some((abs.clone(), checked));
         let name = abs
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -621,6 +658,10 @@ impl App {
             ProofMsg::Goals { token, result, .. } => self.on_goals(token, result),
             ProofMsg::RestartFile => self.on_lean_restart_file(),
             ProofMsg::GetMathlibCache => self.on_get_mathlib_cache(),
+            ProofMsg::DismissMathlibCache => {
+                self.proj.mathlib = MathlibCache::Dismissed;
+                Task::none()
+            }
             ProofMsg::MathlibSaid { line, .. } => {
                 if let MathlibCache::Getting(said) = &mut self.proj.mathlib {
                     *said = line;

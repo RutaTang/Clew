@@ -427,7 +427,7 @@ pub(crate) fn c_answer(e: clew_protocol::MacroExpansion) -> InsightAnswer {
 pub(crate) fn lean_answer(goal: LeanGoal) -> InsightAnswer {
     let markdown = match goal {
         LeanGoal::Tactic(goals) if goals.is_empty() => {
-            format!("*{}*", tr!("No goals: the proof is complete here."))
+            format!("*{}*", tr!("No goals left here."))
         }
         LeanGoal::Tactic(goals) => {
             let n = goals.len();

@@ -430,7 +430,7 @@ fn answers_read_as_the_popup_shows_them() {
 
     assert_eq!(
         lean_answer(LeanGoal::Tactic(Vec::new())).markdown,
-        "*No goals: the proof is complete here.*"
+        "*No goals left here.*"
     );
     assert_eq!(
         lean_answer(LeanGoal::Tactic(vec!["⊢ p".into()])).markdown,
@@ -676,7 +676,7 @@ async fn a_mathlib_project_is_offered_its_build_cache() {
         result: Ok(()),
     }));
     assert!(
-        matches!(&app.proj.mathlib, crate::app::proof::MathlibCache::Failed(why) if why.contains("still not there")),
+        matches!(&app.proj.mathlib, crate::app::proof::MathlibCache::Failed(why) if why.contains("still missing")),
         "{:?}",
         app.proj.mathlib
     );
@@ -705,6 +705,36 @@ async fn a_mathlib_project_is_offered_its_build_cache() {
     }
     assert!(said.contains("textDocument/didClose"), "{said}");
     assert!(said.contains("textDocument/didOpen"), "{said}");
+}
+
+/// Mathlib's build is looked for in the Lake project of the file read, not
+/// the opened folder: a repository's proofs in `verification/`, a Lake
+/// project of their own, were never offered the cache, and Lean built all
+/// of Mathlib for hours. Each Lake project is looked at once.
+#[test]
+fn mathlibs_build_is_looked_for_in_the_files_lake_project() {
+    let mut app = scanned_app("lean-mathlib-nested");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let proofs = root.join("verification");
+    std::fs::create_dir_all(&proofs).unwrap();
+    std::fs::write(proofs.join("lakefile.lean"), "import Lake\n").unwrap();
+    std::fs::write(
+        proofs.join("lake-manifest.json"),
+        r#"{"version": "1.1.0", "packages": [{"name": "mathlib"}], "name": "proofs"}"#,
+    )
+    .unwrap();
+    std::fs::write(proofs.join("Proof.lean"), "import Mathlib\n").unwrap();
+    std::fs::write(root.join("Other.lean"), "def x := 1\n").unwrap();
+    scan_synchronously(&mut app, root.clone());
+    open_synchronously(&mut app, "verification/Proof.lean", None);
+    let _ = app.update(Message::Noop);
+    assert_eq!(app.proj.mathlib, crate::app::proof::MathlibCache::Missing);
+    assert_eq!(app.proj.mathlib_root.as_deref(), Some(proofs.as_path()));
+    // The opened folder is a Lake project without Mathlib: nothing to get.
+    open_synchronously(&mut app, "Other.lean", None);
+    let _ = app.update(Message::Noop);
+    assert_eq!(app.proj.mathlib, crate::app::proof::MathlibCache::Ready);
+    assert_eq!(app.proj.mathlib_root.as_deref(), Some(root.as_path()));
 }
 
 /// A Lean file of another Lake project than the one Lean's server runs in

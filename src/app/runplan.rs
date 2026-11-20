@@ -48,7 +48,7 @@ impl RunPlan {
             } => test.name.clone(),
             RunPlan::Cargo { target, test: None } => match &target.kind {
                 TargetKind::Test(name) => tr!("{target} tests", target = name),
-                _ => target.describe(),
+                _ => target_name(target),
             },
             RunPlan::Pytest { name, .. } => name.clone(),
         }
@@ -66,13 +66,23 @@ impl RunPlan {
     }
 
     /// What the end of a run of one test says, by its exit `code`: that it
-    /// passed or failed — or, for pytest (its code 5), that it found no such
-    /// test. `None` for a run of anything but one test.
+    /// passed or failed — or, for pytest, that it found no such test (5),
+    /// could not load it (2: an import or collection error), or stopped
+    /// with an error of its own (3, 4): the test never ran, and "failed"
+    /// said it had. `None` for a run of anything but one test.
     pub(crate) fn verdict(&self, code: i64) -> Option<String> {
         let name = self.test_name()?;
         Some(match (self, code) {
             (_, 0) => tr!("Test {name} passed", name = name),
             (RunPlan::Pytest { .. }, 5) => tr!("pytest found no test named {name}", name = name),
+            (RunPlan::Pytest { .. }, 2) => tr!(
+                "pytest could not load {name}: what it said is in the run's output",
+                name = name
+            ),
+            (RunPlan::Pytest { .. }, 3 | 4) => tr!(
+                "pytest stopped with an error before {name} ran: what it said is in the run's output",
+                name = name
+            ),
             _ => tr!("Test {name} failed", name = name),
         })
     }
@@ -188,5 +198,18 @@ pub(crate) fn test_plan_at(lang: &str, file: &Path, source: &str, line: usize) -
             name: test.name.clone(),
         }),
         _ => None,
+    }
+}
+
+/// A Cargo target as a sentence names it, in the reader's language: the
+/// program by its name, the others as what they are ("the demo example",
+/// "the api test target", "acme (library)").
+pub(crate) fn target_name(target: &clew_core::cargorun::CargoTarget) -> String {
+    match &target.kind {
+        TargetKind::Lib => tr!("{package} (library)", package = target.package),
+        TargetKind::Bin(name) => name.clone(),
+        TargetKind::Example(name) => tr!("the {name} example", name = name),
+        TargetKind::Test(name) => tr!("the {name} test target", name = name),
+        TargetKind::Bench(name) => tr!("the {name} benchmark", name = name),
     }
 }
