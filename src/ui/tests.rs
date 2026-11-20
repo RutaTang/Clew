@@ -3553,10 +3553,10 @@ fn the_trail_row_does_not_move_the_code_when_the_trail_begins() {
 
 /// L16: the margin's tabs fit over the margin in French at 1100 —
 /// "Explications · Appels · Historique" ran past its edge, the last tab's
-/// background cut there. Each tab is its glyph, the one shown named beside
-/// it too, in the room the others leave it; the others are not words.
+/// background cut there. Each tab is its glyph, named in its tooltip: the
+/// one shown said its name beside its glyph too, and grew when picked.
 #[test]
-fn the_margin_tabs_fit_over_the_margin_in_french() {
+fn the_margin_tabs_are_glyphs_that_fit_over_the_margin() {
     let mut app = reader_app();
     app.show_right_panel = true;
     // At 1100 with the sidebar open, the margin is as narrow as it goes.
@@ -3564,28 +3564,32 @@ fn the_margin_tabs_fit_over_the_margin_in_french() {
     app.show_left_sidebar = true;
     let room = super::panes::margin_w(&app) - 12.0 - 16.0;
     assert!(room <= 240.0 - 28.0 + 0.5, "the narrowest margin: {room}");
+    // A Lean file's four tabs, the most there are, fit.
+    let four = 4.0 * super::sheet::MARGIN_TAB_W + 3.0 * super::sheet::MARGIN_TAB_GAP;
+    assert!(four <= room, "four tabs: {four} of {room}");
     for lang in [crate::i18n::Lang::Fr, crate::i18n::Lang::En] {
         crate::i18n::with_lang(lang, || {
-            let mut sim = iced_test::Simulator::with_size(
-                Default::default(),
-                Size::new(room + 200.0, 60.0),
-                super::sheet::margin_tabs(&app, room),
-            );
-            // Explanations is shown: named, whole or cut short.
-            let name = crate::tr!("Explanations");
-            let at = text_at(&mut sim, |t| t == name || t.ends_with('…'), 0)
-                .unwrap_or_else(|| panic!("{name} named"));
-            // The two glyphs after it, and the padding round them, fit.
-            let end = at.x
-                + at.width
-                + super::sheet::MARGIN_TAB_PAD
-                + 2.0 * (super::sheet::MARGIN_TAB_GAP + super::sheet::MARGIN_TAB_ICON_W);
-            assert!(
-                end <= room + 0.5,
-                "{lang:?}: past the margin's edge: {end} of {room}"
-            );
-            for other in [crate::tr!("Calls"), crate::tr!("History")] {
-                assert!(!shows(&mut sim, other), "{lang:?}: {other} as a word");
+            for shown in [
+                crate::MarginTab::Notes,
+                crate::MarginTab::Calls,
+                crate::MarginTab::History,
+            ] {
+                app.margin_tab = shown;
+                let mut sim = iced_test::Simulator::with_size(
+                    Default::default(),
+                    Size::new(room, 60.0),
+                    super::sheet::margin_tabs(&app),
+                );
+                for name in [
+                    crate::tr!("Explanations"),
+                    crate::tr!("Calls"),
+                    crate::tr!("History"),
+                ] {
+                    assert!(
+                        !shows(&mut sim, name),
+                        "{lang:?}, {shown:?} shown: {name} as a word"
+                    );
+                }
             }
         });
     }

@@ -413,10 +413,10 @@ fn file_tool<'a>(
 
 /// The margin's tabs — a Lean file's Goals, Explanations, Calls, History —
 /// in the header, over the margin they switch: each its glyph, named in its
-/// tooltip; the one shown, its name beside its glyph too, in the room the
-/// others leave it (cut short there, whole in its tooltip). Where the reader
-/// is, said; the row as compact as the tools beside it.
-pub(crate) fn margin_tabs(app: &App, room: f32) -> Element<'_, Message> {
+/// tooltip, the one shown filled, as a segmented control's chosen segment
+/// is. Picking one shows its view below; the tab says no more than that it
+/// is the one shown, as the header's tools beside it say only their glyphs.
+pub(crate) fn margin_tabs(app: &App) -> Element<'_, Message> {
     use crate::MarginTab;
     // A Lean file's own first: the proof's goals where the cursor is.
     let goals = app
@@ -431,9 +431,6 @@ pub(crate) fn margin_tabs(app: &App, room: f32) -> Element<'_, Message> {
         ])
         .collect();
     let shown = app.margin_tab_shown();
-    let gaps = MARGIN_TAB_GAP * (tabs.len() - 1) as f32;
-    let name_room =
-        (room - MARGIN_TAB_ICON_W * tabs.len() as f32 - gaps - MARGIN_TAB_SPACING).max(0.0);
     let tab = |(glyph, label, this): (Glyph, &'static str, MarginTab)| -> Element<'_, Message> {
         let chosen = shown == this;
         let tint = if chosen {
@@ -441,27 +438,8 @@ pub(crate) fn margin_tabs(app: &App, room: f32) -> Element<'_, Message> {
         } else {
             theme::fg_muted()
         };
-        let mut face = row![glyph::icon(glyph, tint, MARGIN_TAB_GLYPH)]
-            .spacing(MARGIN_TAB_SPACING)
-            .align_y(iced::Center);
-        let mut whole = false;
-        if chosen {
-            let name = super::steady::cut(label, name_room, ts::BODY, FILE_TOOL_FONT);
-            whole = name == label;
-            if !name.is_empty() {
-                face = face.push(ts::set_in(
-                    text(name)
-                        .font(FILE_TOOL_FONT)
-                        .color(tint)
-                        .wrapping(Wrapping::None),
-                    MARGIN_TAB_H,
-                    ts::INTER,
-                    ts::BODY,
-                ));
-            }
-        }
         let face = button(
-            container(face)
+            container(glyph::icon(glyph, tint, MARGIN_TAB_GLYPH))
                 .height(Length::Fixed(MARGIN_TAB_H))
                 .align_y(iced::Center),
         )
@@ -471,11 +449,7 @@ pub(crate) fn margin_tabs(app: &App, room: f32) -> Element<'_, Message> {
             label,
             Message::Window(WindowMsg::MarginTabPicked(this)),
         ));
-        if whole {
-            face.into()
-        } else {
-            tip_at(face, label, None, tooltip::Position::Bottom)
-        }
+        tip_at(face, label, None, tooltip::Position::Bottom)
     };
     iced::widget::Row::with_children(tabs.into_iter().map(tab))
         .spacing(MARGIN_TAB_GAP)
@@ -483,14 +457,13 @@ pub(crate) fn margin_tabs(app: &App, room: f32) -> Element<'_, Message> {
         .into()
 }
 
-/// A margin tab's padding across, its glyph's size, the gap between its
-/// glyph and its name, and between tabs; and a tab's width as its glyph
-/// alone.
-pub(crate) const MARGIN_TAB_PAD: f32 = 8.0;
+/// A margin tab's padding across, its glyph's size, the gap between tabs,
+/// and a tab's width.
+const MARGIN_TAB_PAD: f32 = 8.0;
 const MARGIN_TAB_GLYPH: f32 = 14.0;
-const MARGIN_TAB_SPACING: f32 = 6.0;
 pub(crate) const MARGIN_TAB_GAP: f32 = 2.0;
-pub(crate) const MARGIN_TAB_ICON_W: f32 = 2.0 * MARGIN_TAB_PAD + MARGIN_TAB_GLYPH;
+#[cfg(test)]
+pub(crate) const MARGIN_TAB_W: f32 = 2.0 * MARGIN_TAB_PAD + MARGIN_TAB_GLYPH;
 
 /// The sheet's header: the open file's name and folder, the tools that act
 /// on it — Explain, Skim, Diff, Time Travel, and the View menu of reading
@@ -668,7 +641,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     // Over the margin, beside the divider, its tabs.
     let tabs: Element<'_, Message> = if right_panel(app).is_some() {
         // At the row's top, as the design has them: 14 down.
-        container(margin_tabs(app, super::panes::margin_w(app) - 12.0 - 16.0))
+        container(margin_tabs(app))
             .width(Length::Fixed(super::panes::margin_w(app)))
             .height(Length::Fixed(SHEET_HEADER_ROW_H))
             .align_y(iced::Top)
