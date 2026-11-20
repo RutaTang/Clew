@@ -30,6 +30,7 @@ fn menu_at(app: &mut App, line: usize) {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     });
 }
 

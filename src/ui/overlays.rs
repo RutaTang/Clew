@@ -367,6 +367,35 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
                 ),
             ]
         },
+        {
+            // The test the line is in, run or debugged alone, beside where
+            // it stops: Rust's through Cargo, Python's by pytest.
+            let mut debugging = Vec::new();
+            if menu.in_test {
+                let line = Some(menu.line + 1);
+                debugging.push(Row {
+                    keys: Some(app.keymap.chord(crate::keymap::Action::RunTest).caps()),
+                    ..plain(
+                        tr!("Run Test"),
+                        Message::Debug(DebugMsg::RunTest {
+                            line,
+                            no_debug: true,
+                        }),
+                    )
+                });
+                debugging.push(Row {
+                    keys: Some(app.keymap.chord(crate::keymap::Action::DebugTest).caps()),
+                    ..plain(
+                        tr!("Debug Test"),
+                        Message::Debug(DebugMsg::RunTest {
+                            line,
+                            no_debug: false,
+                        }),
+                    )
+                });
+            }
+            debugging
+        },
         vec![
             // Its key, as Settings lists it: the menu showed Ctrl+D on
             // Toggle Bookmark and nothing on this one.

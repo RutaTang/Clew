@@ -2136,7 +2136,9 @@ pub(crate) fn menu_action_able(app: &App, action: Action) -> bool {
         | Action::GotoLine
         | Action::TraceValue
         | Action::ToggleDiff
-        | Action::TimeTravel => file,
+        | Action::TimeTravel
+        | Action::RunTest
+        | Action::DebugTest => file,
         Action::OpenSymbol
         | Action::ProjectSearch
         | Action::Run

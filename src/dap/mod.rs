@@ -15,6 +15,6 @@ pub mod proto;
 pub use adapter::{AdapterInstall, Lang, Resolved};
 pub use client::DapClient;
 pub use proto::{
-    Breakpoint, DapEvent, EvalContext, StackFrame, Variable, hover_eval_allowed,
+    Breakpoint, DapEvent, EvalContext, StackFrame, Variable, hover_eval_allowed, is_rust_panic,
     promises_hover_eval,
 };

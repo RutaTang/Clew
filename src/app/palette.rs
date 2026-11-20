@@ -196,7 +196,11 @@ impl PaletteCommand {
                 _ => matches!(
                     message,
                     Message::Editor(EditorMsg::RunAction(
-                        Action::ExplainAll | Action::StartDebug | Action::Run
+                        Action::ExplainAll
+                            | Action::StartDebug
+                            | Action::Run
+                            | Action::RunTest
+                            | Action::DebugTest
                     )) | Message::Debug(_)
                         | Message::Explain(_)
                         | Message::Project(
@@ -338,6 +342,10 @@ impl PaletteCommand {
                 Glyph::Play,
                 tr!("This builds the program and runs it, without the debugger."),
             ),
+            Message::Editor(EditorMsg::RunAction(Action::RunTest | Action::DebugTest))
+            | Message::Debug(DebugMsg::RunTest { .. }) => {
+                (Glyph::Play, tr!("This builds the test and runs it."))
+            }
             Message::Debug(DebugMsg::Control(_)) => (
                 Glyph::Debug,
                 tr!("This resumes the program from where it stopped."),
@@ -961,6 +969,7 @@ impl App {
                     served,
                     by_pointer: false,
                     line_top: None,
+                    in_test: self.test_at(pane, line + 1).is_some(),
                 });
                 self.update(message)
             }

@@ -199,6 +199,11 @@ pub struct DebugState {
     /// without the debugger — the adapter is told `noDebug`, and no
     /// breakpoint is set in it, there at the start or added later.
     pub no_debug: bool,
+    /// How the run was asked for beyond its program: a Rust program Cargo
+    /// builds first, one test (Run Test) — what Run Again runs again, and
+    /// what its end is said as ("Test adds passed"). `None` for a run of
+    /// the launch file's program or a script as it is.
+    pub plan: Option<crate::app::runplan::RunPlan>,
     /// The last run's stops, in order (see [`TraceStop`]): what the program
     /// actually did, kept after the session ends so a walkthrough can be
     /// made of it; cleared when the next run starts.
@@ -265,6 +270,11 @@ pub struct DebugState {
     /// The tab of the bottom panel the session here is ([`RunTab::Real`]);
     /// 0 while there is none.
     pub tab: u64,
+    /// The tabs whose run ended with Cargo unable to build its program
+    /// (`DebugMsg::BuildFailed`): said "build failed", marked failed —
+    /// not "finished", as a program that ran and ended. A run that takes
+    /// the tab again takes the mark off.
+    pub build_failed: std::collections::HashSet<u64>,
 }
 
 /// A tab of the bottom panel: a run of the program (Run or Debug), or one
@@ -301,6 +311,7 @@ pub struct ParkedDebug {
     pub stop: u64,
     pub session: Option<DebugSession>,
     pub no_debug: bool,
+    pub plan: Option<crate::app::runplan::RunPlan>,
     pub trace: Vec<TraceStop>,
     pub trace_cut: bool,
     pub trace_program: Option<String>,

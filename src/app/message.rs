@@ -1838,6 +1838,10 @@ pub enum DebugMsg {
     /// Run the program the same way, without the debugger: the adapter is
     /// told `noDebug`, and no breakpoint is set in it.
     Run,
+    /// Run (`no_debug`) or debug the one test at a 1-based line of the
+    /// active file — the code menu's line — or, `None`, at the cursor: Run
+    /// Test, Debug Test.
+    RunTest { line: Option<usize>, no_debug: bool },
     /// The adapter is ready; carry its handle + the TCP address it announced
     /// (for child sessions).
     /// Every DAP-side message names the `run` it belongs to (`App::debug_run`):
@@ -1991,6 +1995,14 @@ pub enum DebugMsg {
         run: u64,
         stop: u64,
         vals: Vec<(String, String)>,
+    },
+    /// Cargo could not build the run's program: the run ends, its tab kept
+    /// with Cargo's errors in it — a failed start took the tab, and with it
+    /// the compiler's every word of why.
+    BuildFailed {
+        stamp: Stamp,
+        run: u64,
+        error: String,
     },
     /// Starting the debugger failed: the run's own start, which ends the run
     /// (a js-debug child that cannot start is `ChildFailed`).
@@ -3119,6 +3131,7 @@ impl DebugMsg {
             | DebugMsg::DapConfigured { run, .. }
             | DebugMsg::WatchesEvaluated { run, .. }
             | DebugMsg::VarChildren { run, .. }
+            | DebugMsg::BuildFailed { run, .. }
             | DebugMsg::Failed { run, .. }
             | DebugMsg::ChildFailed { run, .. }
             | DebugMsg::NeedsInstall { run, .. } => Some(*run),
@@ -3160,11 +3173,13 @@ impl DebugMsg {
             | DebugMsg::DapConfigured { stamp, .. }
             | DebugMsg::WatchesEvaluated { stamp, .. }
             | DebugMsg::VarChildren { stamp, .. }
+            | DebugMsg::BuildFailed { stamp, .. }
             | DebugMsg::Failed { stamp, .. }
             | DebugMsg::ChildFailed { stamp, .. }
             | DebugMsg::NeedsInstall { stamp, .. } => Some(Origin::Stamped(stamp)),
             DebugMsg::Start
             | DebugMsg::Run
+            | DebugMsg::RunTest { .. }
             | DebugMsg::Control(..)
             | DebugMsg::Stop
             | DebugMsg::ShowTab(..)

@@ -70,6 +70,7 @@ pub(crate) mod glossary;
 mod graph;
 pub(crate) mod history;
 pub(crate) mod proof;
+pub(crate) mod runplan;
 pub(crate) mod runs;
 pub(crate) mod setup;
 pub(crate) mod suggest;

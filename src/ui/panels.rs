@@ -309,7 +309,12 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         || (session.status == DebugStatus::Terminated
             && session.frames.is_empty()
             && session.scopes.is_empty());
+    let build_failed = app.debug.build_failed.contains(&app.debug.tab);
     let (status_txt, status_color) = match (session.status, session.exit_code) {
+        // Cargo could not build it: it never ran.
+        (DebugStatus::Terminated, _) if build_failed => {
+            (tr!("build failed").to_string(), theme::danger())
+        }
         (DebugStatus::Launching, _) => (tr!("launching…").to_string(), theme::dim()),
         (DebugStatus::Running, _) => (tr!("running").to_string(), theme::success()),
         // Paused, as its tab says: "stopped" is what Stop leaves.
@@ -666,7 +671,15 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     };
     let vars_room = column_room(vars_portion);
     let watch_room = column_room(watch_portion);
-    for f in &session.frames {
+    // The frame the stop is shown at — its variables beside it, its line
+    // in the code — marked: at a Rust panic it is not the top one.
+    let shown_at = session.current.as_ref().and_then(|(path, line)| {
+        session
+            .frames
+            .iter()
+            .position(|f| f.path.as_ref() == Some(path) && f.line == *line)
+    });
+    for (i, f) in session.frames.iter().enumerate() {
         let loc = f
             .path
             .as_ref()
@@ -691,7 +704,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             ]
             .spacing(0),
         )
-        .style(theme::list_row(false))
+        .style(theme::list_row(shown_at == Some(i) && i > 0))
         .width(Fill)
         .padding([1, 6]);
         if let Some(p) = f.path.clone() {

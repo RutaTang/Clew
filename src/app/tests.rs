@@ -18,6 +18,7 @@ mod navigation_debug;
 mod palette;
 mod proof;
 mod remote_state_refresh;
+mod runplan;
 mod semantic_space;
 mod setup;
 mod speech;
@@ -1681,6 +1682,7 @@ fn a_functions_explain_writes_its_own_explanation() {
             served: true,
             by_pointer: true,
             line_top: None,
+            in_test: false,
         });
     };
     let origin = explain::Node::Function {
@@ -3277,6 +3279,7 @@ fn the_context_menu_bookmarks_its_line_with_a_note() {
             served: true,
             by_pointer: true,
             line_top: None,
+            in_test: false,
         });
     };
     // Toggle Bookmark: on the menu's line (0-based 3: line 4), the caret
@@ -10158,6 +10161,7 @@ fn add_to_ask_without_a_selection_adds_the_line_clicked() {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     };
     // `pub fn origin() -> Point {`, the third line.
     app.proj.context_menu = Some(menu(2));
@@ -10217,6 +10221,7 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     };
     app.proj.context_menu = Some(menu(None));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyIsThisHere));
@@ -10275,6 +10280,7 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
     app.proj.context_menu = Some(ContextMenu {
         by_pointer: false,
         line_top: None,
+        in_test: false,
         ..menu(Some(crate::InsightKind::ExpandMacro))
     });
     let _ = app.update(Message::Hover(HoverMsg::Insight));
@@ -14103,6 +14109,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     });
     app.proj.find.open = true;
     app.proj.find.query = "Point".into();
@@ -21372,6 +21379,7 @@ fn expand_macro_waits_for_the_server() {
         served,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     };
     let offered = |app: &App| {
         crate::ui::heard::gather(app)
@@ -23309,6 +23317,7 @@ fn opening_a_text_input_form_takes_the_keyboard_from_the_code() {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     });
     let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
     assert_eq!(app.proj.bp_cond_edit.as_ref().map(|e| &e.0), Some(&abs));
@@ -24480,6 +24489,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             run,
             error: "stale".into(),
         }),
+        Message::Debug(DebugMsg::BuildFailed {
+            stamp: s(),
+            run,
+            error: "stale".into(),
+        }),
         Message::Debug(DebugMsg::ChildFailed {
             stamp: s(),
             run,
@@ -24731,6 +24745,7 @@ fn fill_project_session(app: &mut App) {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     });
     p.diff = Some(DiffState::new(
         file.clone(),
@@ -32048,6 +32063,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 served: true,
                 by_pointer: true,
                 line_top: None,
+                in_test: false,
             })
         }),
         Box::new(|a| {
@@ -37546,11 +37562,11 @@ fn debug_suggests_a_launch_config_in_the_projects_language() {
     // folder, built for nothing.
     let _ = app.update(Message::Debug(DebugMsg::Start));
     assert!(app.status.contains("library"), "{}", app.status);
-    // With a main, the binary Cargo builds, by the package's name.
+    // With a main, Cargo builds it and it runs — no launch file to write
+    // first — named as Cargo names its binary: the package's name.
     std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
     let _ = app.update(Message::Debug(DebugMsg::Start));
-    assert!(app.status.contains("target/debug/x"), "{}", app.status);
-    assert!(!app.status.contains("python"), "{}", app.status);
+    assert_eq!(app.status, "Building x with Cargo…");
     // A [[bin]] of another name, by its own.
     std::fs::write(
         root.join("Cargo.toml"),
@@ -37558,7 +37574,7 @@ fn debug_suggests_a_launch_config_in_the_projects_language() {
     )
     .unwrap();
     let _ = app.update(Message::Debug(DebugMsg::Start));
-    assert!(app.status.contains("target/debug/tool"), "{}", app.status);
+    assert_eq!(app.status, "Building tool with Cargo…");
     // A script project, by the file open.
     assert!(crate::app::tasks::launch_example(&root, Some("ruby")).contains("main.rb"));
 }
@@ -40522,6 +40538,7 @@ fn a_plugins_code_command_is_in_the_code_menu_and_runs_at_the_line_clicked() {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     };
     app.proj.context_menu = Some(menu);
     let (targets, _) = crate::ui::heard::gather_all_of(|| crate::ui::context_menu(&app, &menu));

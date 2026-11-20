@@ -1033,6 +1033,9 @@ pub struct ContextMenu {
     /// coordinates. With no room below the line, the menu opens above it —
     /// flipped up from under it, it covered the line it was for.
     pub line_top: Option<f32>,
+    /// The line is in a test Run Test runs (a Rust or Python test): the
+    /// menu offers Run Test and Debug Test.
+    pub in_test: bool,
 }
 
 /// What a language can say about the code under the cursor that no other

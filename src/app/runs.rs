@@ -57,6 +57,7 @@ impl ParkedDebug {
             stop: 0,
             session: None,
             no_debug: false,
+            plan: None,
             trace: Vec::new(),
             trace_cut: false,
             trace_program: None,
@@ -97,6 +98,7 @@ impl App {
         swap(&mut self.debug_stop, &mut p.stop);
         swap(&mut self.debug.session, &mut p.session);
         swap(&mut self.debug.no_debug, &mut p.no_debug);
+        swap(&mut self.debug.plan, &mut p.plan);
         swap(&mut self.debug.trace, &mut p.trace);
         swap(&mut self.debug.trace_cut, &mut p.trace_cut);
         swap(&mut self.debug.trace_program, &mut p.trace_program);
@@ -368,6 +370,9 @@ impl App {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             state: match (session.status, session.exit_code) {
+                (DebugStatus::Terminated, _) if self.debug.build_failed.contains(&tab) => {
+                    TabState::Failed
+                }
                 (DebugStatus::Launching, _) => TabState::Starting,
                 (DebugStatus::Running, _) => TabState::Running,
                 (DebugStatus::Stopped, _) => TabState::Paused,
@@ -581,19 +586,26 @@ impl App {
     }
 
     /// Where a new real run goes: in the tab of an ended run of the same
-    /// program the same way (Run, Debug) — it takes its place, as running
-    /// it again — else a new tab. The run on screen is parked first.
+    /// program the same way (Run, Debug; the same test) — it takes its
+    /// place, as running it again — else a new tab. The run on screen is
+    /// parked first.
     pub(crate) fn tab_for_new_run(
         &mut self,
         program: &Path,
         no_debug: bool,
+        plan: Option<&crate::app::runplan::RunPlan>,
     ) -> (u64, Task<Message>) {
-        let ended_same = |session: &Option<DebugSession>, plain: bool| {
+        let ended_same = |session: &Option<DebugSession>,
+                          plain: bool,
+                          ran: &Option<crate::app::runplan::RunPlan>| {
             session.as_ref().is_some_and(|s| {
-                s.status == DebugStatus::Terminated && s.program == program && plain == no_debug
+                s.status == DebugStatus::Terminated
+                    && s.program == program
+                    && plain == no_debug
+                    && ran.as_ref() == plan
             })
         };
-        if ended_same(&self.debug.session, self.debug.no_debug) {
+        if ended_same(&self.debug.session, self.debug.no_debug, &self.debug.plan) {
             let tab = self.debug.tab;
             let ended = self.stop_debug_session();
             return (if tab == 0 { self.next_run_tab() } else { tab }, ended);
@@ -601,7 +613,7 @@ impl App {
         if let Some(i) = self
             .debug_parked
             .iter()
-            .position(|p| ended_same(&p.session, p.no_debug))
+            .position(|p| ended_same(&p.session, p.no_debug, &p.plan))
         {
             self.park_debug();
             let mut p = self.debug_parked.remove(i);

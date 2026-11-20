@@ -193,9 +193,19 @@ pub fn resolve(
                 true => build_zig(&zig_for(choices)?, &in_dir(cwd, program), cwd)?,
                 false => PathBuf::from(program),
             };
+            // lldb-dap runs a command written `?command` without echoing it
+            // into the program's output; lldb-vscode, its name before LLVM
+            // 18, knows no such prefix.
+            let quiet = command
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("lldb-dap"));
             let mut spec = native_spec(command, &binary.to_string_lossy(), args, cwd);
-            if dwarf_language(&in_dir(cwd, &binary.to_string_lossy())) == Some(DW_LANG_ZIG) {
-                spec.launch[NOTICE] = json!(ZIG_BACKEND_NOTICE);
+            match dwarf_language(&in_dir(cwd, &binary.to_string_lossy())) {
+                Some(DW_LANG_ZIG) => spec.launch[NOTICE] = json!(ZIG_BACKEND_NOTICE),
+                Some(DW_LANG_RUST) => {
+                    rust_setup(&mut spec.launch, rust_sysroot(cwd).as_deref(), quiet)
+                }
+                _ => {}
             }
             Ok(Resolution::Ready(spec))
         }
@@ -391,6 +401,62 @@ fn lldb_dap_names() -> Vec<String> {
 /// client shows in the debug console as the session starts, and takes out
 /// of the body before sending it.
 pub const NOTICE: &str = "__clewNotice";
+
+/// DWARF's language code for Rust (`DW_LANG_Rust`), which rustc puts on
+/// its compile units.
+const DW_LANG_RUST: u16 = 0x1c;
+
+/// The keys of a `launch` body that only a debugger's run reads — set to
+/// stop at what the reader did not ask to stop at (a Rust panic) — and
+/// that a run without the debugger leaves out: lldb-dap runs every program
+/// under the debugger, `noDebug` or not, and stopped a plain Run at its
+/// panic.
+pub const DEBUG_ONLY_KEYS: &[&str] = &["preRunCommands"];
+
+/// A Rust program debugged as `rust-lldb` sets lldb up for it: the type
+/// summaries Rust's toolchain ships (`Vec`, `String`, `HashMap`, `Option`…
+/// shown as their values — `size=2`, `"ada"` — not as their fields), read
+/// silently, from `sysroot`; and a stop where it panics, at the panic
+/// rather than after it, its stack the panic's — what the program did
+/// before it went wrong. `quiet`: the adapter runs `?`-prefixed commands
+/// without echoing them into the program's output (lldb-dap).
+fn rust_setup(launch: &mut serde_json::Value, sysroot: Option<&Path>, quiet: bool) {
+    let mark = if quiet { "?" } else { "" };
+    let etc = sysroot.map(|s| s.join("lib").join("rustlib").join("etc"));
+    let scripts = etc.as_ref().and_then(|etc| {
+        let lookup = etc.join("lldb_lookup.py");
+        let commands = etc.join("lldb_commands");
+        let quoted = |p: &Path| {
+            let p = p.to_string_lossy();
+            (!p.contains(['"', '\n', '\r'])).then(|| format!("\"{p}\""))
+        };
+        (lookup.is_file() && commands.is_file()).then(|| {
+            Some(vec![
+                format!("{mark}command script import {}", quoted(&lookup)?),
+                format!("{mark}command source -s 1 {}", quoted(&commands)?),
+            ])
+        })?
+    });
+    if let Some(scripts) = scripts {
+        launch["initCommands"] = json!(scripts);
+    }
+    launch["preRunCommands"] = json!([format!("{mark}breakpoint set --name rust_panic")]);
+}
+
+/// The sysroot of the Rust toolchain that builds the program in `cwd` —
+/// its `rust-toolchain.toml` honoured, as `rustc` there is rustup's — or
+/// `None` when there is no `rustc` or it does not answer in time.
+fn rust_sysroot(cwd: &Path) -> Option<PathBuf> {
+    let rustc = store::find_in_unresolved(&crate::linerpc::child_path(), "rustc")?;
+    let mut command = crate::spawn::command(rustc);
+    command
+        .args(["--print", "sysroot"])
+        .current_dir(cwd)
+        .env("PATH", crate::linerpc::child_path());
+    let out = store::run_bounded(command, std::time::Duration::from_secs(15)).ok()?;
+    let sysroot = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
+    (out.status.success() && sysroot.is_absolute() && sysroot.is_dir()).then_some(sysroot)
+}
 
 /// DWARF's language code for Zig (`DW_LANG_Zig`), which Zig's own code
 /// generator — the default for Debug builds on x86-64 — puts on its compile
@@ -871,14 +937,21 @@ fn python_with(
     // A test file is run as its tests are: under pytest, which collects
     // and runs them. Run as a script it defined its tests and ended, and
     // Run picked the project's program instead, saying the test "does not
-    // run on its own".
-    if is_python_test(Path::new(program))
+    // run on its own". One of its tests, named by pytest's node id
+    // (`<file>::<Class>::<test>`), is run alone, in any file.
+    let one_test = args
+        .first()
+        .is_some_and(|first| names_a_test_of(first, program));
+    if (one_test || is_python_test(Path::new(program)))
         && let Some(launch) = launch.as_object_mut()
     {
         if probe.has_pytest {
             launch.remove("program");
             launch.insert("module".into(), json!("pytest"));
-            let mut test_args = vec![json!(program)];
+            let mut test_args = match one_test {
+                true => Vec::new(),
+                false => vec![json!(program)],
+            };
             test_args.extend(args.iter().map(|a| json!(a)));
             launch.insert("args".into(), json!(test_args));
         } else if !runs_its_own_tests(Path::new(program)) {
@@ -895,6 +968,15 @@ fn python_with(
         launch,
         transport: AdapterTransport::Stdio,
     }))
+}
+
+/// Whether `arg` is pytest's node id of a test in `program`: the file as
+/// given, then `::` and the test's classes and name.
+fn names_a_test_of(arg: &str, program: &str) -> bool {
+    let normal = |p: &str| p.replace('\\', "/");
+    normal(arg)
+        .strip_prefix(&normal(program))
+        .is_some_and(|rest| rest.starts_with("::") && rest.len() > 2)
 }
 
 /// Whether `file` is a pytest test file by its name, as pytest finds them
@@ -1302,6 +1384,62 @@ mod tests {
     #[cfg(unix)]
     use crate::testutil::EnvVars;
     use crate::testutil::TempDir;
+
+    /// A Rust program is debugged as rust-lldb sets lldb up for it: the
+    /// toolchain's type summaries read silently from its sysroot, and a stop
+    /// at its panic — a key a run without the debugger leaves out.
+    #[test]
+    fn a_rust_program_is_debugged_with_rusts_type_summaries_and_its_panic() {
+        let dir = TempDir::new("rust-lldb-setup");
+        let etc = dir.path().join("lib/rustlib/etc");
+        std::fs::create_dir_all(&etc).unwrap();
+        std::fs::write(etc.join("lldb_lookup.py"), "").unwrap();
+        std::fs::write(etc.join("lldb_commands"), "").unwrap();
+        let mut launch = json!({"program": "/p/target/debug/app"});
+        rust_setup(&mut launch, Some(dir.path()), false);
+        assert_eq!(
+            launch["initCommands"],
+            json!([
+                format!(
+                    "command script import \"{}\"",
+                    etc.join("lldb_lookup.py").display()
+                ),
+                format!(
+                    "command source -s 1 \"{}\"",
+                    etc.join("lldb_commands").display()
+                ),
+            ])
+        );
+        assert_eq!(
+            launch["preRunCommands"],
+            json!(["breakpoint set --name rust_panic"])
+        );
+        assert!(DEBUG_ONLY_KEYS.contains(&"preRunCommands"));
+        // lldb-dap runs them without echoing them into the output.
+        let mut launch = json!({});
+        rust_setup(&mut launch, Some(dir.path()), true);
+        let quiet = |key: &str| {
+            launch[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c.as_str().unwrap().starts_with('?'))
+        };
+        assert!(quiet("initCommands") && quiet("preRunCommands"), "{launch}");
+        // A toolchain without the scripts, or none found: the stop alone.
+        let mut launch = json!({});
+        rust_setup(&mut launch, Some(&dir.path().join("elsewhere")), false);
+        assert!(launch.get("initCommands").is_none(), "{launch}");
+        assert!(launch.get("preRunCommands").is_some());
+        let mut launch = json!({});
+        rust_setup(&mut launch, None, false);
+        assert!(launch.get("initCommands").is_none());
+        // rustc's own DWARF language code.
+        let (info, abbrev) = dwarf_unit(5, DW_LANG_RUST, 0x0b);
+        let app = dir.path().join("app");
+        std::fs::write(&app, elf_with(&info, &abbrev)).unwrap();
+        assert_eq!(dwarf_language(&app), Some(0x1c));
+    }
 
     /// A compile unit's DWARF: version 5 or 4, its language as `data1` or
     /// `data2`, after a `strp` producer, before an inline name.
@@ -1720,6 +1858,30 @@ mod tests {
         let script = launch(&with_pytest, "/p/main.py");
         assert_eq!(script["program"], "/p/main.py");
         assert!(script.get("module").is_none());
+        // One test, by its node id: alone, the file not given again — in a
+        // file named as tests are or not.
+        let one = |program: &str, node: &str| {
+            let Resolution::Ready(spec) =
+                python_with(&with_pytest, program, &[node.into()], Path::new("/p")).unwrap()
+            else {
+                panic!("not ready");
+            };
+            spec.launch
+        };
+        let test = one(
+            "/p/tests/test_pricing.py",
+            "/p/tests/test_pricing.py::TestTotal::test_adds",
+        );
+        assert_eq!(test["module"], "pytest");
+        assert_eq!(
+            test["args"],
+            json!(["/p/tests/test_pricing.py::TestTotal::test_adds"])
+        );
+        let test = one("/p/checks.py", "/p/checks.py::test_ok");
+        assert_eq!(test["module"], "pytest");
+        assert_eq!(test["args"], json!(["/p/checks.py::test_ok"]));
+        assert!(!names_a_test_of("/p/checks.py::", "/p/checks.py"));
+        assert!(!names_a_test_of("/p/other.py::test_ok", "/p/checks.py"));
         let dir = TempDir::new("dap-py-no-pytest");
         let without = fake_python(&dir, "echo '1 1 0'");
         let test = launch(&without, "/p/tests/test_pricing.py");
