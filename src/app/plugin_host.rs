@@ -38,6 +38,8 @@ pub(crate) struct ProjectHost {
     progress: Arc<std::sync::atomic::AtomicU64>,
     /// Set when the user asks the run to stop.
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// When the run must end: a remote call waited on gives up then.
+    ends: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 /// `done` of `total`, packed as [`ProjectHost`] keeps it.
@@ -67,6 +69,7 @@ impl ProjectHost {
             events: Default::default(),
             progress: Default::default(),
             stop: Default::default(),
+            ends: Default::default(),
         }
     }
 
@@ -87,6 +90,7 @@ impl ProjectHost {
             events: Default::default(),
             progress: Default::default(),
             stop: Default::default(),
+            ends: Default::default(),
         }
     }
 
@@ -111,9 +115,34 @@ impl ProjectHost {
         self.files.iter().find(|f| f.rel == rel)
     }
 
-    /// Wait for `future` on the remote runtime.
-    fn wait<T>(handle: &tokio::runtime::Handle, future: impl std::future::Future<Output = T>) -> T {
-        handle.block_on(future)
+    /// Wait for `future` on the remote runtime — until the user stops the
+    /// run or its time is up. Waited for whole, a read of a slow host held a
+    /// stopped run for a minute (a git log, five), the chip saying it was
+    /// stopping and every other command refused meanwhile.
+    fn wait<T>(
+        &self,
+        handle: &tokio::runtime::Handle,
+        future: impl std::future::Future<Output = Result<T, String>>,
+    ) -> Result<T, String> {
+        let stop = self.stop.clone();
+        let ends = *self.ends.lock().unwrap_or_else(|e| e.into_inner());
+        handle.block_on(async move {
+            let given_up = async {
+                loop {
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        return clew_plugin::runtime::STOPPED_BY_USER.to_string();
+                    }
+                    if ends.is_some_and(|ends| std::time::Instant::now() >= ends) {
+                        return "the run's time ran out".to_string();
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            };
+            tokio::select! {
+                answer = future => answer,
+                why = given_up => Err(why),
+            }
+        })
     }
 }
 
@@ -149,10 +178,10 @@ impl Host for ProjectHost {
             }
             Source::Remote(ai, handle) => {
                 let rels = vec![path.to_string()];
-                let read = Self::wait(handle, async {
+                let read = self.wait(handle, async {
                     let ask = |rels| ai.request(clew_protocol::Request::ReadSources { rels });
-                    crate::sources::read(rels, ask).await
-                });
+                    Ok(crate::sources::read(rels, ask).await)
+                })?;
                 read.files
                     .into_iter()
                     .find(|(rel, _)| rel == path)
@@ -213,7 +242,7 @@ impl Host for ProjectHost {
                     include,
                     exclude,
                 };
-                match Self::wait(handle, ai.request(request))? {
+                match self.wait(handle, ai.request(request))? {
                     clew_protocol::Event::SearchResults { hits, error, .. } => (
                         hits.into_iter()
                             .map(|h| (h.rel.to_string(), h.line, h.preview))
@@ -248,7 +277,7 @@ impl Host for ProjectHost {
         };
         let result = match &self.source {
             Source::Local(root) => clew_core::git::run_op(root, op).map_err(|e| e.to_string())?,
-            Source::Remote(ai, handle) => Self::wait(handle, ai.git(op))?,
+            Source::Remote(ai, handle) => self.wait(handle, ai.git(op))?,
         };
         let clew_protocol::GitResult::Log(page) = result else {
             return Err("git answered something else".to_string());
@@ -277,7 +306,7 @@ impl Host for ProjectHost {
                 let request = clew_protocol::Request::GitInfo {
                     rel: path.to_string(),
                 };
-                match Self::wait(handle, ai.request(request))? {
+                match self.wait(handle, ai.request(request))? {
                     clew_protocol::Event::GitInfo { info, .. } => info,
                     _ => return Err("git answered something else".to_string()),
                 }
@@ -312,5 +341,8 @@ impl Host for ProjectHost {
     }
     fn stop_asked(&self) -> bool {
         self.stop.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn run_ends(&self, ends: std::time::Instant) {
+        *self.ends.lock().unwrap_or_else(|e| e.into_inner()) = Some(ends);
     }
 }

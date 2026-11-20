@@ -715,18 +715,32 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     };
     // While the project is still being scanned/indexed the graph is legitimately
     // empty — say so, rather than "Nothing to show" (which reads as "no data").
+    // What a plugin answered in its own words instead of its graph.
+    let plugin_said = match app.plugin_map_status() {
+        Some(crate::app::plugins::PluginMapStatus::Said(said))
+            if overlay == Some(crate::Overlay::ProjectMaps) =>
+        {
+            Some(said)
+        }
+        _ => None,
+    };
     let empty_msg = if app.proj.project.is_none() {
         // Not "Nothing to show.", which reads as a project with nothing in it.
         tr!("Open a project to see its graph")
+    } else if overlay == Some(crate::Overlay::ProjectMaps)
+        && app.plugin_map_status() == Some(crate::app::plugins::PluginMapStatus::Building)
+    {
+        // A plugin's graph, asked of the plugin: the list says whose. It
+        // reads the files itself, so Clew's own indexing is not its news.
+        tr!("Building this graph…")
+    } else if let Some(said) = plugin_said.as_deref() {
+        // Its answer, as a command's is: not "could not be built" — nor
+        // "Indexing the project…", said over it while Clew indexed.
+        said
     } else if app.proj.project_calls.building {
         tr!("Building call graph…")
     } else if app.scanning || app.proj.indexing {
         tr!("Indexing the project…")
-    } else if overlay == Some(crate::Overlay::ProjectMaps)
-        && app.plugin_map_status() == Some(crate::app::plugins::PluginMapStatus::Building)
-    {
-        // A plugin's graph, asked of the plugin: the list says whose.
-        tr!("Building this graph…")
     } else if app.proj.graph_layout_pending {
         // Laid out off the UI thread (`App::refresh_graph_layout`).
         tr!("Laying out the graph…")
@@ -3590,6 +3604,10 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
                     !map.nodes.is_empty(),
                     app.shown_graph_plugin_id(),
                 ));
+            }
+            // Its answer in its own words, as a command's is shown.
+            Some(PluginMapStatus::Said(said)) => {
+                rows.push(hint(said));
             }
             Some(PluginMapStatus::Built) if map.nodes.is_empty() => {
                 rows.push(hint(tr!("The plugin found nothing to draw.").into()));

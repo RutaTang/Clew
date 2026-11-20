@@ -330,12 +330,40 @@ const INSTALLER_MAX: u64 = 64 * 1024 * 1024;
 
 /// Take the step `setup`, telling `stage` how it goes, until it is done or
 /// `cancel` is set; then check that plugins can be built.
+/// Why setting Rust up did not work.
+#[derive(Debug, Clone)]
+pub enum SetUpError {
+    /// The step ran, and plugins still cannot be built: why, for the
+    /// reader's words (`Why`), not its English sentence.
+    Missing(Missing),
+    /// The step failed: rustup's own words, or one of [`NO_INSTALLER`],
+    /// [`NO_CHECKSUM`], [`NOT_PUBLISHED`].
+    Failed(String),
+}
+
+impl SetUpError {
+    /// In English, for whoever reads it outside Clew's window.
+    pub fn sentence(&self) -> String {
+        match self {
+            SetUpError::Missing(missing) => missing.why.sentence(),
+            SetUpError::Failed(why) => why.clone(),
+        }
+    }
+}
+
+/// Why Clew's own Rust could not be installed, in words of Clew's own
+/// (translated where shown).
+pub const NO_INSTALLER: &str = "rustup publishes no installer for this computer";
+pub const NO_CHECKSUM: &str = "the installer's published SHA-256 could not be read";
+pub const NOT_PUBLISHED: &str =
+    "the installer downloaded is not the one rust-lang.org published; nothing was run";
+
 pub fn set_up(
     data: &Path,
     setup: &Setup,
     cancel: &AtomicBool,
     stage: &mut dyn FnMut(Stage),
-) -> Result<Toolchain, String> {
+) -> Result<Toolchain, SetUpError> {
     match setup {
         Setup::AddTarget { rustup } => {
             stage(Stage::AddingTarget);
@@ -343,16 +371,16 @@ pub fn set_up(
             cmd.args(["target", "add", TARGET])
                 .current_dir(clew_core::linerpc::neutral_dir())
                 .env_remove("RUSTUP_TOOLCHAIN");
-            run(cmd, TARGET_DEADLINE, cancel)?;
+            run(cmd, TARGET_DEADLINE, cancel).map_err(SetUpError::Failed)?;
         }
-        Setup::Install => install(data, cancel, stage)?,
+        Setup::Install => install(data, cancel, stage).map_err(SetUpError::Failed)?,
     }
-    find(Some(data)).map_err(|missing| missing.why.sentence())
+    find(Some(data)).map_err(SetUpError::Missing)
 }
 
 /// Install Rust of Clew's own, with the target, into [`managed_dir`].
 fn install(data: &Path, cancel: &AtomicBool, stage: &mut dyn FnMut(Stage)) -> Result<(), String> {
-    let triple = host_triple().ok_or("rustup publishes no installer for this computer")?;
+    let triple = host_triple().ok_or(NO_INSTALLER)?;
     install_from(data, &installer_url(triple), cancel, stage)
 }
 
@@ -365,18 +393,21 @@ fn install_from(
     stage: &mut dyn FnMut(Stage),
 ) -> Result<(), String> {
     let dir = managed_dir(data);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     stage(Stage::Downloading);
     let limits = clew_core::net::Limits {
         max_bytes: 4096,
         deadline: Duration::from_secs(60),
     };
     let published = clew_core::net::get_cancellable(&format!("{url}.sha256"), &[], limits, cancel)?;
-    let expected = published_sha256(&String::from_utf8_lossy(&published))
-        .ok_or("the installer's published SHA-256 could not be read")?;
+    let expected = published_sha256(&String::from_utf8_lossy(&published)).ok_or(NO_CHECKSUM)?;
     let installer = dir.join(exe("rustup-init"));
     let partial = dir.join(format!("{}.part", exe("rustup-init")));
     let result = (|| {
+        // Made only now, and taken away with the rest on a failure: made
+        // before the checksum's fetch, an install offline or cancelled at
+        // once left an empty folder read as Clew's own Rust, broken, and
+        // the real reason was lost.
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let mut file = std::fs::File::create(&partial).map_err(|e| e.to_string())?;
         clew_core::net::download_resuming(
             url,
@@ -394,10 +425,7 @@ fn install_from(
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
         let got = crate::inspect::hex(&digest);
         if got != expected {
-            return Err(
-                "the installer downloaded is not the one rust-lang.org published; nothing was run"
-                    .to_string(),
-            );
+            return Err(NOT_PUBLISHED.to_string());
         }
         std::fs::rename(&partial, &installer).map_err(|e| e.to_string())?;
         #[cfg(unix)]
@@ -559,6 +587,28 @@ mod tests {
             "the installer is not kept"
         );
         assert!(!dir.join("rustup-init.part").exists());
+    }
+
+    /// An install that fails before anything is downloaded — offline, the
+    /// checksum not served — leaves no folder behind: an empty one was read
+    /// as Clew's own Rust, broken, and its real reason was lost.
+    #[cfg(unix)]
+    #[test]
+    fn an_install_failing_at_its_checksum_leaves_nothing() {
+        let data = clew_core::testutil::TempDir::new("own-rust-offline");
+        let base = serve(Vec::new());
+        let done = install_from(
+            data.path(),
+            &format!("{base}/rustup-init"),
+            &AtomicBool::new(false),
+            &mut |_| {},
+        );
+        assert!(done.is_err());
+        assert!(
+            !managed_dir(data.path()).exists(),
+            "no folder made for a Rust never installed"
+        );
+        assert!(!managed_installed(data.path()));
     }
 
     /// An installer that is not the one published is never run.

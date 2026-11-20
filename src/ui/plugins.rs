@@ -49,6 +49,9 @@ pub(crate) fn plugin_row_place(view: &View, block: usize, row: usize) -> Option<
     }
 }
 
+/// The lines of a plugin's log Settings shows until asked for all.
+const LOG_LINES: usize = 5;
+
 /// What the permissions `bits` let a plugin do, in one line of the
 /// reader's words (Settings → Plugins).
 pub(crate) fn permission_line(bits: u8) -> String {
@@ -58,7 +61,9 @@ pub(crate) fn permission_line(bits: u8) -> String {
         (true, true) => tr!("Reads the open project's files and history"),
         (true, false) => tr!("Reads the open project's files"),
         (false, true) => tr!("Reads the open project's history"),
-        (false, false) => tr!("Reads none of your files"),
+        // What every command is given, said as the card says it: "Reads
+        // none of your files" left out the file and text it is run on.
+        (false, false) => tr!("Only what it is run on: the file, line and selected text"),
     }
     .to_string()
 }
@@ -137,8 +142,19 @@ fn page_row<'a>(
 }
 
 /// The page a plugin's command showed.
-pub(crate) fn plugin_page(page: &PluginPage) -> Element<'_, Message> {
+pub(crate) fn plugin_page<'a>(page: &'a PluginPage, running: bool) -> Element<'a, Message> {
     let close = Message::Plugin(PluginMsg::ClosePage);
+    // Run again here, as Weak Spots refreshes: come back to from a row
+    // opened, the page may be stale. Busy while a command runs (one at a
+    // time), as its chip on the status bar says.
+    let again = page.again.clone().map(|again| {
+        super::toolbar::busy_action(
+            crate::glyph::Glyph::Refresh,
+            tr!("Run again"),
+            Some(Message::Plugin(PluginMsg::RunAgain(again))),
+            running,
+        )
+    });
     let header = row![
         column![
             text(page.view.title.clone())
@@ -150,8 +166,10 @@ pub(crate) fn plugin_page(page: &PluginPage) -> Element<'_, Message> {
         ]
         .spacing(2)
         .width(Fill),
-        super::chrome::close_button(close),
     ]
+    .extend(again)
+    .push(space().width(8))
+    .push(super::chrome::close_button(close))
     .align_y(iced::Center);
 
     let mut blocks: Vec<Element<'_, Message>> = Vec::new();
@@ -340,8 +358,18 @@ pub(crate) fn plugin_install_modal(
         .previous
         .as_ref()
         .is_some_and(|p| p.record.fingerprint == pending.inspected.fingerprint());
+    // An older version in place of the one installed is no update.
+    let older = pending.previous.as_ref().is_some_and(|p| {
+        clew_plugin::manifest::version_order(&manifest.plugin.version, &p.manifest.plugin.version)
+            == std::cmp::Ordering::Less
+    });
     let title = match &pending.previous {
         Some(_) if again => tr!("Install “{plugin}” again?", plugin = name.clone()),
+        Some(_) if older => tr!(
+            "Replace “{plugin}” with version {version}?",
+            plugin = name.clone(),
+            version = manifest.plugin.version.clone()
+        ),
         Some(previous) if previous.manifest.plugin.version != manifest.plugin.version => tr!(
             "Update “{plugin}” to version {version}?",
             plugin = name.clone(),
@@ -406,16 +434,20 @@ pub(crate) fn plugin_install_modal(
     }
     if can.is_empty() {
         can.push(
-            text(format!("• {}", tr!("Nothing beyond showing its results")))
-                .size(ts::BASE)
-                .color(theme::fg())
-                .into(),
+            text(format!(
+                "• {}",
+                tr!("Only what it is run on: the file, line and selected text")
+            ))
+            .size(ts::BASE)
+            .color(theme::fg())
+            .into(),
         );
     }
     let section = |heading: String| text(heading).size(ts::SMALL).color(theme::dim());
     // An update's answers say so, as its title does.
     let (decline, accept) = match pending.previous {
         Some(_) if again => (tr!("Don't install"), tr!("Install again")),
+        Some(_) if older => (tr!("Don't replace"), tr!("Replace")),
         Some(_) => (tr!("Don't update"), tr!("Update")),
         None => (tr!("Don't install"), tr!("Install")),
     };
@@ -686,11 +718,17 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
     ]
     .spacing(6);
     if let Some(log) = app.plugins.log.get(&plugin.id).filter(|l| !l.is_empty()) {
+        // Its last lines, or all it kept on asking: five lines of up to two
+        // hundred were all that could be read here.
+        let open = app.plugins.log_open.contains(&plugin.id);
+        let shown = if open {
+            log.len()
+        } else {
+            LOG_LINES.min(log.len())
+        };
         let last: Vec<Element<'_, Message>> = log
             .iter()
-            .rev()
-            .take(5)
-            .rev()
+            .skip(log.len() - shown)
             .map(|(level, line)| {
                 text(line.clone())
                     .size(ts::SMALL)
@@ -711,33 +749,43 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
         // Not working: what fixes it. Its source is the agents' to change
         // (a plugin is made by an agent): its log, copied for one, or put
         // to Clew's own in Ask with a request to fix it.
-        if app.plugins.failing(&plugin.id) {
+        let failing = app.plugins.failing(&plugin.id);
+        let said = match (failing, plugin.has_source) {
             // With no source here, no agent of Clew's can change it: its
             // log goes to whoever made it.
-            let said = if plugin.has_source {
-                tr!("It is not working. An agent can fix it from its log.")
-            } else {
-                tr!("It is not working. Send its log to whoever made it.")
-            };
-            let mut fixes = row![
-                text(said).size(ts::SMALL).color(theme::dim()).width(Fill),
-                form::action_to(
-                    tr!("Copy log"),
-                    &name,
-                    Some(Message::Plugin(PluginMsg::CopyLog(id.clone())))
-                ),
-            ]
+            (true, true) => tr!("It is not working. An agent can fix it from its log."),
+            (true, false) => tr!("It is not working. Send its log to whoever made it."),
+            (false, _) => "",
+        };
+        let mut actions = row![text(said).size(ts::SMALL).color(theme::dim()).width(Fill)]
             .spacing(8)
             .align_y(iced::Center);
-            if plugin.has_source {
-                fixes = fixes.push(form::action_to(
-                    tr!("Ask to fix it"),
-                    &name,
-                    Some(Message::Plugin(PluginMsg::AskToFix(id.clone()))),
-                ));
-            }
-            item = item.push(fixes);
+        if log.len() > LOG_LINES {
+            let toggle = match open {
+                true => tr!("Show less"),
+                false => tr!("Show all"),
+            };
+            actions = actions.push(form::action_to(
+                toggle,
+                &name,
+                Some(Message::Plugin(PluginMsg::ToggleLog(id.clone()))),
+            ));
         }
+        // Its log to give whoever fixes it, whenever there is one: a plugin
+        // that ran and answered wrongly had no way to pass it on.
+        actions = actions.push(form::action_to(
+            tr!("Copy log"),
+            &name,
+            Some(Message::Plugin(PluginMsg::CopyLog(id.clone()))),
+        ));
+        if failing && plugin.has_source {
+            actions = actions.push(form::action_to(
+                tr!("Ask to fix it"),
+                &name,
+                Some(Message::Plugin(PluginMsg::AskToFix(id.clone()))),
+            ));
+        }
+        item = item.push(actions);
     }
     // Its copy changed on disk: what does it, and nothing that would not.
     if app.plugins.damaged.contains(&plugin.id) {
@@ -792,6 +840,13 @@ fn building_group(app: &App) -> Element<'_, Message> {
                 none(),
             ));
         }
+        Building::Removing => {
+            rows.push(form::item(
+                tr!("Rust"),
+                Some(tr!("Removing Clew's own Rust…").into()),
+                none(),
+            ));
+        }
         Building::Ready { version, own } => {
             let said = match own {
                 true => tr!(
@@ -807,6 +862,9 @@ fn building_group(app: &App) -> Element<'_, Message> {
             // package manager's Rust has no `rustup update` to suggest.
             let too_old =
                 missing.rustup && matches!(missing.why, clew_plugin::toolchain::Why::TooOld(_));
+            // rustup with no default Rust: one command chooses one.
+            let no_default =
+                missing.rustup && matches!(missing.why, clew_plugin::toolchain::Why::NoDefault(_));
             let (action, about) = match &missing.setup {
                 Some(Setup::AddTarget { .. }) => (
                     Some(tr!("Add the WebAssembly target")),
@@ -819,6 +877,12 @@ fn building_group(app: &App) -> Element<'_, Message> {
                     Some(tr!("Install Rust for Clew")),
                     tr!(
                         "Run “rustup update”, then check again. Or install Rust into Clew's own folder (about 700 MB); nothing else on this computer changes."
+                    ),
+                ),
+                Some(Setup::Install) if no_default => (
+                    Some(tr!("Install Rust for Clew")),
+                    tr!(
+                        "Run “rustup default stable”, then check again. Or install Rust into Clew's own folder (about 700 MB); nothing else on this computer changes."
                     ),
                 ),
                 Some(Setup::Install) => (
@@ -897,7 +961,7 @@ fn building_group(app: &App) -> Element<'_, Message> {
     if app.plugins.own_rust
         && !matches!(
             app.plugins.building,
-            Building::SettingUp { .. } | Building::Checking
+            Building::SettingUp { .. } | Building::Checking | Building::Removing
         )
     {
         let said = match &app.plugins.building {

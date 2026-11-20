@@ -135,7 +135,9 @@ pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
             PaneCover::Stats => stats_home(app),
             PaneCover::WeakSpots => super::weakspots::weak_home(app),
             PaneCover::Glossary => glossary_home(app),
-            PaneCover::Plugin(page) => super::plugins::plugin_page(page),
+            PaneCover::Plugin(page) => {
+                super::plugins::plugin_page(page, app.plugin_run().is_some())
+            }
         };
         // The Ask pill floats over a page's foot at its right: the page
         // ends above it, so no row is under it, scrolled to its end or

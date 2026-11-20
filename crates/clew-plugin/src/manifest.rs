@@ -412,6 +412,35 @@ fn check_version(version: &str) -> Result<(), String> {
     }
 }
 
+/// How plugin version `a` stands to `b`, as Cargo orders versions: by
+/// their three numbers, then a pre-release (`1.0.0-beta`) before its
+/// release; what follows a `+` is not compared. Both as [`check_version`]
+/// takes them.
+pub fn version_order(a: &str, b: &str) -> std::cmp::Ordering {
+    fn parts(version: &str) -> ([u64; 3], Option<&str>) {
+        let version = version.split_once('+').map_or(version, |(v, _)| v);
+        let (core, pre) = match version.split_once('-') {
+            Some((core, pre)) => (core, Some(pre)),
+            None => (version, None),
+        };
+        let mut numbers = [0; 3];
+        for (slot, part) in numbers.iter_mut().zip(core.split('.')) {
+            *slot = part.parse().unwrap_or(0);
+        }
+        (numbers, pre)
+    }
+    let (a_numbers, a_pre) = parts(a);
+    let (b_numbers, b_pre) = parts(b);
+    a_numbers
+        .cmp(&b_numbers)
+        .then_with(|| match (a_pre, b_pre) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some(a), Some(b)) => a.cmp(b),
+        })
+}
+
 /// A language code: `zh`, `fr`, `pt-BR`.
 fn check_lang(field: &str, lang: &str) -> Result<(), String> {
     let ok = (2..=8).contains(&lang.len())
@@ -483,6 +512,17 @@ title = "Owners"
 [dependencies]
 regex = "1"
 "#;
+
+    #[test]
+    fn versions_are_ordered_as_cargo_orders_them() {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        assert_eq!(version_order("0.2.0", "0.10.0"), Less);
+        assert_eq!(version_order("1.0.0", "0.9.9"), Greater);
+        assert_eq!(version_order("1.0.0-beta", "1.0.0"), Less);
+        assert_eq!(version_order("1.0.0", "1.0.0-rc.1"), Greater);
+        assert_eq!(version_order("1.0.0-alpha", "1.0.0-beta"), Less);
+        assert_eq!(version_order("1.2.3+build.5", "1.2.3"), Equal);
+    }
 
     #[test]
     fn a_whole_manifest_reads_and_round_trips() {

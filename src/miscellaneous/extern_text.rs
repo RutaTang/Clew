@@ -288,8 +288,9 @@ pub(crate) const NOTICES: &[&str] = &[
     tr_noop!("larger than 64 MB"),
     tr_noop!("not a regular file inside the project (a link, or moved since the scan)"),
 ];
-/// Why clew-plugin did not run a plugin, said as it wrote it: its approved
-/// file changed since (`clew_plugin::store::CHANGED`).
+/// Why clew-plugin did not run, install or set up a plugin, said as it wrote
+/// it: its approved file changed since (`clew_plugin::store::CHANGED`), and
+/// the rest named below.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const PLUGIN_STOPS: &[&str] = &[
     tr_noop!(
@@ -303,6 +304,14 @@ pub(crate) const PLUGIN_STOPS: &[&str] = &[
     tr_noop!("the plugin's manifest is not UTF-8 text"),
     tr_noop!("the plugin lists commands but its code exports none (use clew_plugin_sdk::export!)"),
     tr_noop!("the plugin lists graphs but its code exports none (use clew_plugin_sdk::export!)"),
+    // Why Clew stopped a run whose answer was too large
+    // (`clew_plugin::runtime::ANSWER_TOO_LARGE`).
+    tr_noop!("its answer was larger than Clew takes from a plugin"),
+    // Why setting up Rust for plugins failed
+    // (`clew_plugin::toolchain::NO_INSTALLER` and the rest).
+    tr_noop!("rustup publishes no installer for this computer"),
+    tr_noop!("the installer's published SHA-256 could not be read"),
+    tr_noop!("the installer downloaded is not the one rust-lang.org published; nothing was run"),
 ];
 /// The words an agent step's title starts with, as clew-server writes it
 /// (`read src/lib.rs:1-50`), capitalized as the step shows them.

@@ -86,6 +86,11 @@ pub trait Host: Send + Sync {
     fn stop_asked(&self) -> bool {
         false
     }
+    /// When the run must end (its deadline): a host call that waits — on a
+    /// remote project, a read over the network — gives up then, and when
+    /// [`stop_asked`](Host::stop_asked), rather than holding the run past
+    /// both until it is answered.
+    fn run_ends(&self, _ends: Instant) {}
 }
 
 /// Why a run the user stopped gave nothing back ([`Failure::Stopped`]).
@@ -96,6 +101,13 @@ pub const STOPPED_BY_USER: &str = "the user stopped it";
 pub struct Limits {
     pub deadline: Duration,
     pub memory: usize,
+    /// The most bytes of the plugin's answer Clew copies out of its memory
+    /// (wasmtime's hostcall fuel, spent on every string and list read). Its
+    /// strings and lists may all point at the same bytes: within its own
+    /// memory, a plugin could name 100 MiB a million times over, and Clew
+    /// was killed for want of memory copying them before any cap was
+    /// applied. Over it, the run fails ([`ANSWER_TOO_LARGE`]).
+    pub answer: usize,
 }
 
 impl Limits {
@@ -103,13 +115,24 @@ impl Limits {
     pub const COMMAND: Limits = Limits {
         deadline: Duration::from_secs(30),
         memory: 256 * 1024 * 1024,
+        answer: ANSWER_BYTES,
     };
     /// For a graph, which reads the whole project.
     pub const GRAPH: Limits = Limits {
         deadline: Duration::from_secs(60),
         memory: 512 * 1024 * 1024,
+        answer: ANSWER_BYTES,
     };
 }
+
+/// What Clew copies of a plugin's answer at most: sixteen times what a
+/// page shows ([`MAX_VIEW_TEXT`]), and a graph's most nodes and edges with
+/// room to spare.
+const ANSWER_BYTES: usize = 64 * 1024 * 1024;
+
+/// Why a run gave nothing back whose answer was larger than
+/// [`Limits::answer`].
+pub const ANSWER_TOO_LARGE: &str = "its answer was larger than Clew takes from a plugin";
 
 /// Why a call gave nothing back. Each case the window says in the
 /// reader's words; [`Display`](std::fmt::Display) says it in English, for
@@ -404,6 +427,7 @@ impl Loaded {
         limits: Limits,
         f: impl FnOnce(&bindings::Plugin, &mut Store<State>) -> wasmtime::Result<Result<R, String>>,
     ) -> Result<R, Failure> {
+        host.run_ends(Instant::now() + limits.deadline);
         let stdout = Capture::default();
         let stderr = Capture::default();
         let wasi = WasiCtxBuilder::new()
@@ -432,6 +456,7 @@ impl Loaded {
         };
         let mut store = Store::new(self.pre.engine(), state);
         store.limiter(|s| &mut s.limiter);
+        store.set_hostcall_fuel(limits.answer);
         // Looked at every tick: past its deadline, or stopped by the user,
         // the code is interrupted where it is.
         let ends = Instant::now() + limits.deadline;
@@ -612,6 +637,14 @@ impl Pollable for Wait {
 fn stopped(e: &wasmtime::Error, limits: Limits, out_of_memory: bool, stderr: &Capture) -> Failure {
     if e.downcast_ref::<Trap>() == Some(&Trap::Interrupt) {
         return Failure::TimedOut(limits.deadline.as_secs());
+    }
+    // wasmtime's own words for an answer past `Limits::answer` (its type is
+    // not public).
+    if e.chain().any(|c| {
+        c.to_string()
+            .contains("allocated for hostcalls has been exhausted")
+    }) {
+        return Failure::Stopped(ANSWER_TOO_LARGE.into());
     }
     if out_of_memory {
         return Failure::OutOfMemory((limits.memory / (1024 * 1024)) as u64);

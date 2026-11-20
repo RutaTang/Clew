@@ -172,6 +172,16 @@ fn split_version(name: &str) -> (&str, &str) {
     name.split_once('@').unwrap_or((name, ""))
 }
 
+/// Whether `version` of `clew:plugin` is later than the one this Clew
+/// provides, by its first two numbers.
+fn api_newer(version: &str) -> bool {
+    fn numbers(version: &str) -> (u64, u64) {
+        let mut parts = version.split('.').map(|p| p.parse().unwrap_or(0));
+        (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+    }
+    numbers(version) > numbers(API_VERSION)
+}
+
 /// Whether `version` of `clew:plugin` is one this Clew provides.
 fn api_supported(version: &str) -> bool {
     version
@@ -211,9 +221,16 @@ pub fn inspect(bytes: &[u8]) -> Result<Inspected, String> {
     for name in top.imports.iter().chain(&top.exports) {
         let (bare, version) = split_version(name);
         if bare.starts_with("clew:plugin/") && !api_supported(version) {
-            return Err(format!(
-                "the plugin was built for another version of Clew's plugin API ({name}); this Clew provides {API_VERSION}"
-            ));
+            // What to do about it differs by which side is behind.
+            return Err(if api_newer(version) {
+                format!(
+                    "the plugin was made for a newer Clew (plugin API {version}; this Clew's is {API_VERSION}): update Clew to use it"
+                )
+            } else {
+                format!(
+                    "the plugin was made for an older plugin API ({name}; this Clew's is {API_VERSION}): ask whoever made it to build it again with this Clew"
+                )
+            });
         }
     }
     let unknown: Vec<&str> = top
@@ -303,6 +320,12 @@ mod tests {
         assert!(!api_supported("0.10.0"));
         assert!(!api_supported("0.2.0"));
         assert!(!api_supported(""));
+        // Which side is behind says what to do.
+        assert!(api_newer("0.2.0"));
+        assert!(api_newer("0.10.0"));
+        assert!(api_newer("1.0.0"));
+        assert!(!api_newer("0.0.9"));
+        assert!(!api_newer(""));
     }
 
     #[test]

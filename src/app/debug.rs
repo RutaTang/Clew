@@ -1070,6 +1070,9 @@ impl App {
             eprintln!("[clew] may be lost with the window: {}", sent.line());
         }
         self.quitting = true;
+        // The plugin requests an agent filed for this window are answered:
+        // left, the agent waited out its whole wait for a window gone.
+        self.release_plugin_requests();
         // Settings open as the window goes: closed as Close closes it, what
         // was typed in it kept.
         if self.settings.open {

@@ -80,6 +80,20 @@ pub(crate) fn command_label(
     }
 }
 
+/// [`command_label`] where Clew offers the command to run — the palette,
+/// the code's menu — with "…" when it asks for something first, as Clew's
+/// own commands that open a question are named.
+pub(crate) fn command_offer_label(
+    plugin: &Installed,
+    command: &clew_plugin::manifest::Command,
+) -> String {
+    let label = command_label(plugin, command);
+    match command.input {
+        Some(_) => format!("{label}…"),
+        None => label,
+    }
+}
+
 /// A command as it was run — its plugin, what was typed for it, where —
 /// so a failed run's Try again runs the same again.
 #[derive(Debug, Clone)]
@@ -143,6 +157,9 @@ pub struct PluginMap {
     pub(crate) built: Option<clew_protocol::ProjectMap>,
     /// Why the last build gave nothing, in the reader's language.
     pub(crate) failed: Option<String>,
+    /// What the plugin answered in its own words instead of a graph ("This
+    /// project has no Kafka topics"): its answer, not a failure.
+    pub(crate) said: Option<String>,
 }
 
 /// Where a plugin graph stands, for Project Graphs to say.
@@ -152,6 +169,8 @@ pub(crate) enum PluginMapStatus {
     Building,
     /// The last build gave nothing; why.
     Failed(String),
+    /// The plugin answered in its own words instead of a graph.
+    Said(String),
     /// Built: drawn as any other graph.
     Built,
 }
@@ -285,6 +304,10 @@ pub struct PluginPage {
     pub(crate) markdown: HashMap<usize, Vec<iced::widget::markdown::Item>>,
     /// Each code block coloured, by its place in the view.
     pub(crate) code: HashMap<usize, Vec<crate::highlight::HlLine>>,
+    /// The run that showed it, to run again from the page: come back to
+    /// from a row opened, it may be stale, and running it again meant the
+    /// palette and the question typed anew.
+    pub(crate) again: Option<Again>,
 }
 
 impl PluginPage {
@@ -325,6 +348,7 @@ impl PluginPage {
             view,
             markdown,
             code,
+            again: None,
         }
     }
 }
@@ -357,6 +381,9 @@ pub struct Plugins {
     /// until installed again — nothing an agent's fix or a Try again
     /// changes.
     pub(crate) damaged: HashSet<String>,
+    /// The plugins whose whole log Settings shows, by id; the others show
+    /// their last lines.
+    pub(crate) log_open: HashSet<String>,
     /// Why the last install from a file, or the last change, failed.
     pub(crate) failure: Option<String>,
     /// The requests of `clew-server mcp` this window took on.
@@ -398,6 +425,9 @@ pub(crate) enum Building {
         stage: clew_plugin::toolchain::Stage,
         cancel: Arc<AtomicBool>,
     },
+    /// Clew's own Rust being removed: "Checking…" said nothing of the
+    /// 700 MB going.
+    Removing,
 }
 
 /// What a check of the toolchain found.
@@ -594,6 +624,8 @@ pub enum PluginMsg {
     Link(String),
     /// Settings: copy plugin `id`'s log, to give to whoever fixes it.
     CopyLog(String),
+    /// Settings: show plugin `id`'s whole log, or its last lines again.
+    ToggleLog(String),
     /// Settings: put a request to fix plugin `id`, with its log, in Ask's
     /// field, and open Ask.
     AskToFix(String),
@@ -634,6 +666,8 @@ pub enum PluginMsg {
         call: u64,
         /// The tool called, for its step's chip.
         tool: String,
+        /// The plugin it was called for (its `id` argument), if any.
+        plugin: Option<String>,
         answer: Arc<std::sync::Mutex<Option<clew_plugin::tools::Step>>>,
     },
     /// A try for an agent ran: the answer for the agent.
@@ -667,7 +701,7 @@ pub enum PluginMsg {
     /// The step ended: ready with this Rust, or why not.
     /// A setup step ended: the Rust version now ready, or why not (`None`:
     /// the user cancelled it).
-    ToolchainSetUp(Result<String, Option<String>>),
+    ToolchainSetUp(Result<String, Option<clew_plugin::toolchain::SetUpError>>),
     CancelToolchainSetup,
     /// Remove the Rust Clew installed.
     RemoveOwnRust,
@@ -704,7 +738,7 @@ fn store_changed() {
 /// no longer stands as this window read it.
 const WITHDRAWN: [&str; 3] = [
     tr_noop!("it was removed"),
-    tr_noop!("it was updated: run it again"),
+    tr_noop!("it was updated"),
     tr_noop!("it is turned off"),
 ];
 
@@ -729,38 +763,165 @@ fn is_withdrawn(failure: &Failure) -> bool {
     matches!(failure, Failure::Stopped(why) if WITHDRAWN.contains(&why.as_str()))
 }
 
-/// What a plugin tool's step says: as it runs, and once done.
-fn plugin_step_title(tool: &str, done: bool) -> String {
-    match (tool, done) {
-        ("plugin_guide", false) => tr!("Reading the plugin guide…"),
-        ("plugin_guide", true) => tr!("Read the plugin guide"),
-        ("plugin_new", false) => tr!("Starting a plugin…"),
-        ("plugin_new", true) => tr!("Started a plugin"),
-        ("plugin_files" | "plugin_read", false) => tr!("Reading a plugin's source…"),
-        ("plugin_files" | "plugin_read", true) => tr!("Read a plugin's source"),
-        ("plugin_write", false) => tr!("Writing a plugin's source…"),
-        ("plugin_write", true) => tr!("Wrote a plugin's source"),
-        ("plugin_build", false) => tr!("Building a plugin…"),
-        ("plugin_build", true) => tr!("Built a plugin"),
-        ("plugin_try", false) => tr!("Trying a plugin…"),
-        ("plugin_try", true) => tr!("Tried a plugin"),
-        ("plugin_install", false) => tr!("Asking to install a plugin…"),
-        ("plugin_install", true) => tr!("Installed a plugin"),
-        (_, false) => tr!("Looking at the plugins…"),
-        (_, true) => tr!("Looked at the plugins"),
+/// What a plugin tool's step says as it runs, waiting at its card, done
+/// and failed: each in words of its own. A failure was the running words
+/// with their "…" cut — "Building a plugin" beside a cross, and in
+/// Chinese, Japanese and Korean still "building".
+fn plugin_step_title(tool: &str, state: crate::app::model::StepState) -> String {
+    use crate::app::model::StepState::{Done, Failed, Waiting};
+    match (tool, state) {
+        ("plugin_guide", Done) => tr!("Read the plugin guide"),
+        ("plugin_guide", Failed) => tr!("Could not read the plugin guide"),
+        ("plugin_guide", _) => tr!("Reading the plugin guide…"),
+        ("plugin_new", Done) => tr!("Started a plugin"),
+        ("plugin_new", Failed) => tr!("Could not start a plugin"),
+        ("plugin_new", _) => tr!("Starting a plugin…"),
+        ("plugin_files" | "plugin_read", Done) => tr!("Read a plugin's source"),
+        ("plugin_files" | "plugin_read", Failed) => tr!("Could not read a plugin's source"),
+        ("plugin_files" | "plugin_read", _) => tr!("Reading a plugin's source…"),
+        ("plugin_write", Done) => tr!("Wrote a plugin's source"),
+        ("plugin_write", Failed) => tr!("Could not write a plugin's source"),
+        ("plugin_write", _) => tr!("Writing a plugin's source…"),
+        ("plugin_build", Done) => tr!("Built a plugin"),
+        ("plugin_build", Failed) => tr!("The plugin did not build"),
+        ("plugin_build", _) => tr!("Building a plugin…"),
+        ("plugin_try", Done) => tr!("Tried a plugin"),
+        ("plugin_try", Failed) => tr!("Could not try the plugin"),
+        ("plugin_try", _) => tr!("Trying a plugin…"),
+        ("plugin_install", Done) => tr!("Installed a plugin"),
+        ("plugin_install", Failed) => tr!("The plugin was not installed"),
+        ("plugin_install", Waiting) => tr!("Asking you to install a plugin"),
+        ("plugin_install", _) => tr!("Asking to install a plugin…"),
+        (_, Done) => tr!("Looked at the plugins"),
+        (_, Failed) => tr!("Could not look at the plugins"),
+        (_, _) => tr!("Looking at the plugins…"),
     }
     .to_string()
 }
 
-/// A plugin step its turn ended before it was answered: said as one that
-/// failed is (`finish_plugin_step`), not as one still going.
+/// The plugin tools whose steps Ask shows (`plugin_step_title`).
+const PLUGIN_STEP_TOOLS: [&str; 8] = [
+    "plugin_guide",
+    "plugin_new",
+    "plugin_read",
+    "plugin_write",
+    "plugin_build",
+    "plugin_try",
+    "plugin_install",
+    "plugin_status",
+];
+
+/// A plugin step its turn ended before it was answered, said as failed in
+/// its own words (`plugin_step_title`), not as one still going.
 pub(crate) fn plugin_step_cut_short(title: &str) -> String {
-    // Waiting at its card it reads without the "…": it is not going.
-    let title = title.trim_end_matches('…');
-    if title == plugin_step_title("plugin_install", false).trim_end_matches('…') {
-        return tr!("The plugin was not installed").to_string();
+    use crate::app::model::StepState::{Failed, Running, Waiting};
+    PLUGIN_STEP_TOOLS
+        .iter()
+        .find(|tool| {
+            title == plugin_step_title(tool, Running) || title == plugin_step_title(tool, Waiting)
+        })
+        .map(|tool| plugin_step_title(tool, Failed))
+        // Said in another language since: as it was, without its "…".
+        .unwrap_or_else(|| title.trim_end_matches('…').to_string())
+}
+
+/// Why setting Rust up did not work, in the reader's words: why plugins
+/// still cannot be built, or Clew's own reason; rustup's own words as it
+/// wrote them. It was the English sentence written for agents, inside a
+/// translated one.
+fn setup_error_words(why: &clew_plugin::toolchain::SetUpError) -> String {
+    match why {
+        clew_plugin::toolchain::SetUpError::Missing(missing) => {
+            crate::ui::missing_words(&missing.why)
+        }
+        clew_plugin::toolchain::SetUpError::Failed(why) => crate::i18n::lookup(why).to_string(),
     }
-    title.to_string()
+}
+
+/// Delete what plugin `id` kept between runs (`clew_plugin::runtime::store_dir`).
+fn forget_store_of(data: &Path, id: &str) {
+    if let Ok(dir) = clew_plugin::runtime::store_dir(data, id) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Plugin `id` ended a run or a build after it was removed: what it saved
+/// meanwhile goes, unless it is installed again since.
+fn removed_store_of(id: &str) {
+    let Ok(data) = data() else {
+        return;
+    };
+    if !Store::load(&data).plugin.contains_key(id) {
+        forget_store_of(&data, id);
+    }
+}
+
+/// A plugin's file picked to install, read only as far as a plugin may be
+/// long, and only if it is a plain file: a multi-gigabyte file picked by
+/// mistake was read whole before its size was looked at, and a pipe held a
+/// thread for good.
+fn read_plugin_file(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let cap = clew_plugin::inspect::MAX_PLUGIN_BYTES;
+    let file = match clew_core::statefile::open_plain_checked(path) {
+        Ok(Some(file)) => file,
+        Ok(None) => return Err(tr!("the file is not there").into()),
+        Err(clew_core::statefile::ReadError::NotPlainFile) => {
+            return Err(tr!("it is not a plain file").into());
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut bytes = Vec::new();
+    file.take(cap as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > cap {
+        return Err(tr!(
+            "it is larger than a plugin may be ({size} MB at most)",
+            size = cap / (1024 * 1024)
+        ));
+    }
+    Ok(bytes)
+}
+
+/// The last part of `path`, as a file picked is named to the reader.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Why a file picked to install is not one Clew installs, in a sentence.
+fn not_installable(why: &str) -> String {
+    if why == clew_plugin::inspect::NOT_A_COMPONENT {
+        // Its own words already say "not a plugin".
+        return tr!(
+            "That file is not a plugin: a plugin is a WebAssembly component, built for wasm32-wasip2."
+        )
+        .into();
+    }
+    tr!(
+        "That file is not a plugin Clew can install: {reason}",
+        reason = crate::i18n::lookup(why).to_string()
+    )
+}
+
+/// The most of a try's answer an agent is handed: well under what
+/// `clew_plugin::requests` reads back for `clew-server mcp`.
+pub(crate) const TRY_ANSWER_MAX: usize = 256 * 1024;
+
+/// `answer`, cut to [`TRY_ANSWER_MAX`] at a character's edge, saying so.
+pub(crate) fn cut_answer(mut answer: String) -> String {
+    if answer.len() <= TRY_ANSWER_MAX {
+        return answer;
+    }
+    let mut at = TRY_ANSWER_MAX;
+    while !answer.is_char_boundary(at) {
+        at -= 1;
+    }
+    answer.truncate(at);
+    answer.push_str("\n\n(The rest was cut: the answer was too long.)");
+    answer
 }
 
 /// The data folder, or why there is none.
@@ -932,6 +1093,9 @@ impl App {
             Some(PluginMap {
                 failed: Some(why), ..
             }) => PluginMapStatus::Failed(why.clone()),
+            Some(PluginMap {
+                said: Some(said), ..
+            }) => PluginMapStatus::Said(said.clone()),
             Some(PluginMap { built: Some(_), .. }) => PluginMapStatus::Built,
             // Not asked yet: it is, as soon as it is shown.
             _ => PluginMapStatus::Building,
@@ -971,7 +1135,7 @@ impl App {
     pub(crate) fn check_toolchain(&mut self) -> Task<Message> {
         if matches!(
             self.plugins.building,
-            Building::Checking | Building::SettingUp { .. }
+            Building::Checking | Building::SettingUp { .. } | Building::Removing
         ) {
             return Task::none();
         }
@@ -1172,7 +1336,10 @@ impl App {
                 .get_mut(&map)
                 .filter(|m| m.fingerprint == fingerprint)
             {
+                // Not built: asked for again when next shown, not taken
+                // as built for these files.
                 entry.building = false;
+                entry.rev = u64::MAX;
             }
             return self.reload_plugins();
         }
@@ -1182,6 +1349,12 @@ impl App {
             .filter(|p| p.record.enabled && p.record.fingerprint == fingerprint)
             .and_then(|p| map_of(&map).and_then(|(_, g)| p.manifest.graph(g)).cloned());
         let Some(decl) = decl else {
+            // Removed meanwhile: what it saved as it built goes too.
+            if let Some(plugin) = plugin.as_deref()
+                && self.plugins.get(plugin).is_none()
+            {
+                removed_store_of(plugin);
+            }
             // The plugin was turned off, removed or replaced meanwhile: its
             // result is not shown, and the build is over all the same.
             // Left marked building, turned on again the graph waited for a
@@ -1193,6 +1366,11 @@ impl App {
                 .filter(|m| m.fingerprint == fingerprint)
             {
                 entry.building = false;
+                // Its result thrown away is no build: turned on again, it
+                // is asked for again. Left at this revision, the graph
+                // said "Building this graph…" for good — nothing started
+                // one, and Try again is offered for a failure only.
+                entry.rev = u64::MAX;
             }
             return Task::none();
         };
@@ -1210,6 +1388,7 @@ impl App {
             Ok(graph) => {
                 entry.built = Some(project_map(map.clone(), &decl, graph));
                 entry.failed = None;
+                entry.said = None;
                 if let Some(plugin) = &plugin {
                     self.plugins.failed.remove(plugin);
                 }
@@ -1234,7 +1413,18 @@ impl App {
                     }
                 }
                 let entry = self.proj.plugin_maps.get_mut(&map).expect("kept above");
-                entry.failed = Some(failure_words(&failure));
+                match failure {
+                    // Said in its own words: shown as its answer, not as
+                    // "could not be built" with its log to see — its row
+                    // says nothing is wrong. What it drew before is not
+                    // what it says now.
+                    Failure::Plugin(said) => {
+                        entry.said = Some(said);
+                        entry.failed = None;
+                        entry.built = None;
+                    }
+                    other => entry.failed = Some(failure_words(&other)),
+                }
             }
         }
         let composed = self.compose_maps();
@@ -1448,11 +1638,20 @@ impl App {
         if let Some((fingerprint, loaded)) = ran.loaded {
             self.plugins.loaded.insert(fingerprint, loaded);
         }
-        let name = self
-            .plugins
-            .get(&id)
-            .map(Installed::name)
-            .unwrap_or_default();
+        // Removed while it ran: what it gave back is not shown (a page
+        // headed by no name), nor counted against a plugin that is gone.
+        let Some(name) = self.plugins.get(&id).map(Installed::name) else {
+            self.plugins.log.remove(&id);
+            // What it saved while it ran went after its removal had taken
+            // its store: a later install of the same id found it.
+            removed_store_of(&id);
+            self.status = tr!(
+                "{command} did not run: {reason}",
+                command = title,
+                reason = tr!("it was removed")
+            );
+            return Task::none();
+        };
         // Stopped by the user: what it did so far is in its log; it did
         // not fail, and what it gave back is not shown.
         if matches!(&ran.outcome, Err(Failure::Stopped(why)) if why == clew_plugin::runtime::STOPPED_BY_USER)
@@ -1466,11 +1665,27 @@ impl App {
         if let Err(failure) = &ran.outcome
             && is_withdrawn(failure)
         {
-            self.status = tr!(
-                "{command} did not run: {reason}",
-                command = title,
-                reason = failure_words(failure)
-            );
+            if matches!(failure, Failure::Stopped(why) if why == WITHDRAWN[1]) {
+                // Replaced since: the new build is there to run, one
+                // click away rather than found again in the palette.
+                self.say_failure_again(
+                    move || {
+                        tr!(
+                            "{command} did not run: {reason}",
+                            command = title.clone(),
+                            reason = crate::i18n::lookup(WITHDRAWN[1])
+                        )
+                    },
+                    Some(Message::Plugin(PluginMsg::RunAgain(again))),
+                    FailureOf::PluginRun,
+                );
+            } else {
+                self.status = tr!(
+                    "{command} did not run: {reason}",
+                    command = title,
+                    reason = failure_words(failure)
+                );
+            }
             return self.reload_plugins();
         }
         // Its approved copy changed on disk: not run. Trying again fails the
@@ -1513,7 +1728,9 @@ impl App {
         }
         match ran.outcome {
             Ok(Outcome::Show(view)) => {
-                self.show_plugin_page(PluginPage::new(id, name, view));
+                let mut page = PluginPage::new(id, name, view);
+                page.again = Some(again);
+                self.show_plugin_page(page);
                 Task::none()
             }
             Ok(Outcome::Open(at)) => {
@@ -1661,6 +1878,37 @@ impl App {
         }
     }
 
+    /// The window is closing: what `clew-server mcp` asked of it is
+    /// answered now — an install card unanswered, a try under way — so the
+    /// agent hears the window went. It waited up to fifteen minutes and was
+    /// told the user did not answer.
+    pub(crate) fn release_plugin_requests(&mut self) {
+        let Ok(data) = data() else {
+            return;
+        };
+        let why = "The Clew window it was asked in was closed.".to_string();
+        let mut nonces: Vec<String> = self
+            .plugins
+            .install
+            .withdraw(|p| matches!(p.reply, Reply::Request(_)))
+            .into_iter()
+            .filter_map(|p| match p.reply {
+                Reply::Request(nonce) => Some(nonce),
+                _ => None,
+            })
+            .collect();
+        nonces.extend(self.plugins.handling.drain());
+        nonces.sort();
+        nonces.dedup();
+        for nonce in nonces {
+            let _ = clew_plugin::requests::answer(
+                &data,
+                &nonce,
+                &clew_plugin::requests::Answer::Failed { why: why.clone() },
+            );
+        }
+    }
+
     /// Run `built`'s command for an agent trying it: with the permissions
     /// its code needs, read and git at most, on the open project.
     pub(crate) fn try_for_agent(
@@ -1737,7 +1985,10 @@ impl App {
                         answer.push_str("\n\nIts log:\n");
                         answer.push_str(&log.join("\n"));
                     }
-                    Ok(answer)
+                    // What an agent is handed, cut to what it can be: over
+                    // what `clew-server mcp` reads back, it waited the whole
+                    // wait and was told the try did not finish.
+                    Ok(cut_answer(answer))
                 })
                 .await
                 .unwrap_or_else(|_| Err("the try failed unexpectedly".into()))
@@ -1773,6 +2024,10 @@ impl App {
         };
         self.push_plugin_step(stream, call, &tool);
         let chip = tool.clone();
+        let plugin = args
+            .get("id")
+            .and_then(|id| id.as_str())
+            .map(str::to_string);
         let cancel = self
             .plugins
             .tool_cancels
@@ -1794,6 +2049,7 @@ impl App {
                     stream,
                     call,
                     tool: chip.clone(),
+                    plugin: plugin.clone(),
                     answer: Arc::new(std::sync::Mutex::new(Some(step))),
                 })
             },
@@ -1812,7 +2068,7 @@ impl App {
                 .insert(format!("plugin:{call}"), turn.steps.len());
             turn.steps.push(crate::app::model::AgentStep {
                 tool: "plugin".into(),
-                title: plugin_step_title(tool, false),
+                title: plugin_step_title(tool, crate::app::model::StepState::Running),
                 refs: Vec::new(),
                 state: crate::app::model::StepState::Running,
             });
@@ -1828,21 +2084,24 @@ impl App {
         tool: &str,
         state: crate::app::model::StepState,
     ) {
-        use crate::app::model::StepState;
+        self.set_plugin_step(stream, call, state, plugin_step_title(tool, state));
+    }
+
+    /// Plugin tool call `call` of `stream`'s turn stands as `state`, said
+    /// as `title`.
+    fn set_plugin_step(
+        &mut self,
+        stream: u64,
+        call: u64,
+        state: crate::app::model::StepState,
+        title: String,
+    ) {
         if let Some(turn) = self.proj.ask_turns.iter_mut().find(|t| t.stream == stream)
             && let Some(&at) = turn.extras.step_ids.get(&format!("plugin:{call}"))
             && let Some(step) = turn.steps.get_mut(at)
         {
             step.state = state;
-            step.title = match state {
-                StepState::Done => plugin_step_title(tool, true),
-                StepState::Failed if tool == "plugin_install" => {
-                    tr!("The plugin was not installed").to_string()
-                }
-                _ => plugin_step_title(tool, false)
-                    .trim_end_matches('…')
-                    .to_string(),
-            };
+            step.title = title;
         }
     }
 
@@ -1920,7 +2179,10 @@ impl App {
             }
             self.status = tr!(
                 "{plugin} was not installed: the agent that asked stopped waiting",
-                plugin = pending.inspected.manifest.plugin.name.clone()
+                plugin = pending
+                    .inspected
+                    .manifest
+                    .name_in(crate::i18n::current().code())
             );
         }
     }
@@ -2114,28 +2376,38 @@ impl App {
             }
             PluginMsg::InstallFromFile => {
                 self.plugins.failure = None;
-                crate::app::tasks::pick_file(self.main_window, tr!("Install a plugin").into()).map(
-                    |picked| match picked {
-                        Ok(path) => Message::Plugin(PluginMsg::Picked(path)),
-                        Err(_) => Message::Window(WindowMsg::NoFileDialog),
-                    },
-                )
+                crate::app::tasks::pick_plugin_file(self.main_window).map(|picked| match picked {
+                    Ok(path) => Message::Plugin(PluginMsg::Picked(path)),
+                    Err(_) => Message::Window(WindowMsg::NoFileDialog),
+                })
             }
             PluginMsg::Picked(None) => Task::none(),
             PluginMsg::Picked(Some(path)) => {
                 let origin = Source::File(path.to_string_lossy().into_owned());
+                let shown = file_name(&path);
+                let could_not_read = move |reason: String| -> String {
+                    tr!(
+                        "Could not read {file}: {reason}",
+                        file = shown.clone(),
+                        reason = reason
+                    )
+                };
                 Task::perform(
                     async move {
+                        let unread = could_not_read.clone();
                         tokio::task::spawn_blocking(move || -> Result<Prepared, String> {
-                            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                            let inspected = clew_plugin::inspect(&bytes)?;
+                            let bytes = read_plugin_file(&path).map_err(&could_not_read)?;
+                            let inspected = clew_plugin::inspect(&bytes)
+                                .map_err(|why| not_installable(&why))?;
                             Ok(Prepared {
                                 bytes: Arc::new(bytes),
                                 inspected,
                             })
                         })
                         .await
-                        .unwrap_or_else(|_| Err(tr!("the file could not be read").into()))
+                        .unwrap_or_else(|_| {
+                            Err(unread(tr!("it stopped on an internal error").into()))
+                        })
                     },
                     move |result| {
                         Message::Plugin(PluginMsg::Read {
@@ -2154,12 +2426,8 @@ impl App {
                 match result.as_ref() {
                     Ok(prepared) => self.offer_install(prepared.clone(), origin, reply),
                     Err(why) => {
-                        let why = crate::i18n::lookup(why).to_string();
-                        self.plugins.failure = Some(tr!(
-                            "That file is not a plugin Clew can install: {reason}",
-                            reason = why.clone()
-                        ));
-                        self.answer_install(&reply, Err(why), false);
+                        self.plugins.failure = Some(why.clone());
+                        self.answer_install(&reply, Err(why.clone()), false);
                     }
                 }
                 Task::none()
@@ -2187,7 +2455,10 @@ impl App {
                     self.plugins.handling.remove(nonce);
                     self.status = tr!(
                         "{plugin} was not installed: the agent that asked stopped waiting",
-                        plugin = pending.inspected.manifest.plugin.name.clone()
+                        plugin = pending
+                            .inspected
+                            .manifest
+                            .name_in(crate::i18n::current().code())
                     );
                     return Task::none();
                 }
@@ -2275,6 +2546,17 @@ impl App {
                             // the version it was.
                             _ if update.as_ref().is_some_and(|was| *was == version) => {
                                 tr!("{plugin} is updated", plugin = name.clone())
+                            }
+                            _ if update.as_ref().is_some_and(|was| {
+                                clew_plugin::manifest::version_order(&version, was)
+                                    == std::cmp::Ordering::Less
+                            }) =>
+                            {
+                                tr!(
+                                    "{plugin} is replaced with version {version}",
+                                    plugin = name.clone(),
+                                    version = version.clone()
+                                )
                             }
                             _ if update.is_some() => tr!(
                                 "{plugin} is updated to version {version}",
@@ -2419,6 +2701,12 @@ impl App {
                 self.plugins.confirm = None;
                 Task::none()
             }
+            PluginMsg::ToggleLog(id) => {
+                if !self.plugins.log_open.remove(&id) {
+                    self.plugins.log_open.insert(id);
+                }
+                Task::none()
+            }
             PluginMsg::CopyLog(id) => {
                 let lines = self.plugins.log_text(&id);
                 if lines.is_empty() {
@@ -2473,9 +2761,7 @@ impl App {
             PluginMsg::Remove(id) => {
                 let removed = data().and_then(|d| {
                     clew_plugin::store::remove(&d, &id)?;
-                    if let Ok(dir) = clew_plugin::runtime::store_dir(&d, &id) {
-                        let _ = std::fs::remove_dir_all(dir);
-                    }
+                    forget_store_of(&d, &id);
                     Ok(())
                 });
                 if let Err(why) = removed {
@@ -2515,6 +2801,7 @@ impl App {
                 stream,
                 call,
                 tool,
+                plugin,
                 answer,
             } => {
                 let Some(step) = answer.lock().unwrap_or_else(|e| e.into_inner()).take() else {
@@ -2525,11 +2812,24 @@ impl App {
                 // (another project opened): tried, the plugin read the
                 // project opened since.
                 let current = self.proj.ask_turns.iter().any(|t| t.stream == stream);
-                if !current && !matches!(step, clew_plugin::tools::Step::Done(_)) {
+                // Or the turn ended — the user's Stop — while it was read:
+                // its card came after Stop had taken the turn's cards away,
+                // and a try ran the plugin with no one waiting for it.
+                let live = self.plugins.tool_cancels.contains_key(&stream);
+                // A plain answer is passed on whatever: it runs nothing.
+                let acts = !matches!(step, clew_plugin::tools::Step::Done(_));
+                let gone = !(current && live);
+                if acts && gone {
+                    let content = match current {
+                        false => "This conversation's project is no longer open in Clew.",
+                        true => {
+                            "This turn ended before the tool was answered; nothing was run or offered."
+                        }
+                    };
                     let _ = self.send_to_server(clew_protocol::Request::AgentToolResult {
                         stream,
                         call,
-                        content: "This conversation's project is no longer open in Clew.".into(),
+                        content: content.into(),
                         is_error: true,
                     });
                     return Task::none();
@@ -2540,16 +2840,37 @@ impl App {
                             Ok(text) => (text, false),
                             Err(why) => (why, true),
                         };
-                        self.finish_plugin_step(
-                            stream,
-                            call,
-                            &tool,
-                            if is_error {
-                                crate::app::model::StepState::Failed
-                            } else {
-                                crate::app::model::StepState::Done
-                            },
-                        );
+                        if tool == "plugin_install" && !is_error {
+                            // Answered with no card: the very build is
+                            // installed already. "Installed a plugin"
+                            // said it was installed now — and of one the
+                            // user turned off, nothing said it stays off.
+                            let off = plugin
+                                .as_deref()
+                                .and_then(|id| self.plugins.get(id))
+                                .is_some_and(|p| !p.record.enabled);
+                            let title = match off {
+                                true => tr!("The plugin is already installed, and turned off"),
+                                false => tr!("The plugin is already installed"),
+                            };
+                            self.set_plugin_step(
+                                stream,
+                                call,
+                                crate::app::model::StepState::Done,
+                                title.to_string(),
+                            );
+                        } else {
+                            self.finish_plugin_step(
+                                stream,
+                                call,
+                                &tool,
+                                if is_error {
+                                    crate::app::model::StepState::Failed
+                                } else {
+                                    crate::app::model::StepState::Done
+                                },
+                            );
+                        }
                         // A build that failed may have failed for want of
                         // Rust: looked at, and said with Settings if so.
                         let check = if is_error && tool == "plugin_build" {
@@ -2643,6 +2964,13 @@ impl App {
                 if matches!(self.plugins.building, Building::SettingUp { .. }) {
                     return Task::none();
                 }
+                // Removed: said, as its 700 MB went with no word.
+                if matches!(self.plugins.building, Building::Removing)
+                    && checked.removal_failed.is_none()
+                    && !checked.own_installed
+                {
+                    self.status = tr!("Clew's own Rust was removed").into();
+                }
                 self.plugins.own_rust = checked.own_installed;
                 // Why it could not be removed holds while it is there.
                 self.plugins.removal_failure = checked.removal_failed.or_else(|| {
@@ -2712,11 +3040,24 @@ impl App {
                     // Said on the status bar too: an install takes minutes,
                     // and Settings may be closed by its end.
                     Err(Some(why)) => {
-                        self.status = tr!(
-                            "Setting up Rust did not work: {reason}",
-                            reason = why.clone()
+                        // In the reader's words: why plugins still cannot
+                        // be built, or Clew's own reason; rustup's own
+                        // words as it wrote them.
+                        let words = setup_error_words(&why);
+                        // It stands, with Settings, where Rust is: said on
+                        // the status line it was gone in seconds.
+                        self.say_failure_again(
+                            move || {
+                                tr!(
+                                    "Setting up Rust did not work: {reason}",
+                                    reason = setup_error_words(&why)
+                                )
+                            },
+                            None,
+                            FailureOf::PluginBuild,
                         );
-                        self.plugins.setup_failure = Some(why);
+                        self.failure_in(None, Some(SettingsSpot::Rust));
+                        self.plugins.setup_failure = Some(words);
                     }
                 }
                 self.check_toolchain()
@@ -2736,10 +3077,13 @@ impl App {
                 let Ok(data) = data() else {
                     return Task::none();
                 };
-                if matches!(self.plugins.building, Building::SettingUp { .. }) {
+                if matches!(
+                    self.plugins.building,
+                    Building::SettingUp { .. } | Building::Removing
+                ) {
                     return Task::none();
                 }
-                self.plugins.building = Building::Checking;
+                self.plugins.building = Building::Removing;
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {

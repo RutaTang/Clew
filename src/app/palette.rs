@@ -1279,6 +1279,18 @@ impl App {
                 shown_as: Some(tr!("Open Recent: {name}", name = name)),
             });
         }
+        // The command running stopped from here too, and by voice: its
+        // chip's × was the only way, and a chip short of room is left out.
+        if let Some((title, _, false)) = self.plugin_run() {
+            out.push(PaletteCommand {
+                title: format!("Stop {title}"),
+                keys: None,
+                action: PaletteAction::Send(Message::Plugin(
+                    crate::app::plugins::PluginMsg::StopRun,
+                )),
+                shown_as: Some(tr!("Stop {command}", command = title.to_string())),
+            });
+        }
         // Each enabled plugin's commands, by the plugin's name and the
         // command's ("TODO Owners: List TODOs"), as the agent and the voice
         // find them too.
@@ -1298,7 +1310,7 @@ impl App {
                             command: command.id.clone(),
                         },
                     )),
-                    shown_as: Some(crate::app::plugins::command_label(plugin, command)),
+                    shown_as: Some(crate::app::plugins::command_offer_label(plugin, command)),
                 });
             }
         }

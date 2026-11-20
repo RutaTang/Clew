@@ -99,7 +99,45 @@ fn quick() -> Limits {
     Limits {
         deadline: Duration::from_secs(2),
         memory: 64 * 1024 * 1024,
+        answer: Limits::COMMAND.answer,
     }
+}
+
+/// A plugin's answer is copied out of its memory only up to
+/// `Limits::answer`: past it the run fails, said so, rather than Clew
+/// copying whatever the plugin names. Its strings may all point at the same
+/// bytes, so one within its own memory limit could name gigabytes.
+#[test]
+fn an_answer_larger_than_clew_takes_fails_and_says_so() {
+    let runtime = Runtime::new(None).unwrap();
+    let loaded = views(&runtime);
+    let small = Limits {
+        answer: 64,
+        ..quick()
+    };
+    let failed = loaded
+        .run(
+            Arc::new(FakeHost::default()),
+            "all-blocks",
+            &at(Some("src/main.rs"), Some(1)),
+            small,
+        )
+        .unwrap_err();
+    assert_eq!(
+        failed,
+        Failure::Stopped(clew_plugin::runtime::ANSWER_TOO_LARGE.into())
+    );
+    // The same answer, within the limit, is taken.
+    assert!(
+        loaded
+            .run(
+                Arc::new(FakeHost::default()),
+                "all-blocks",
+                &at(Some("src/main.rs"), Some(1)),
+                quick(),
+            )
+            .is_ok()
+    );
 }
 
 #[test]
@@ -221,6 +259,7 @@ fn a_call_that_sleeps_is_stopped_at_its_deadline() {
     let limits = Limits {
         deadline: Duration::from_millis(300),
         memory: 64 * 1024 * 1024,
+        answer: Limits::COMMAND.answer,
     };
     let started = Instant::now();
     let stopped = loaded
@@ -286,6 +325,7 @@ fn a_call_that_never_ends_is_stopped_at_its_deadline() {
             Limits {
                 deadline: Duration::from_millis(300),
                 memory: 64 * 1024 * 1024,
+                answer: Limits::COMMAND.answer,
             },
         )
         .unwrap_err();

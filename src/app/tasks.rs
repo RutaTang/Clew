@@ -3427,6 +3427,16 @@ pub(crate) fn pick_file(window: Option<iced::window::Id>, title: String) -> Task
     picker(window, move |dialog| dialog.set_title(title).pick_file())
 }
 
+/// Native open dialog for a plugin to install: its `.wasm` file.
+pub(crate) fn pick_plugin_file(window: Option<iced::window::Id>) -> Task<Picked> {
+    picker(window, move |dialog| {
+        dialog
+            .set_title(tr!("Install a plugin"))
+            .add_filter(tr!("Clew plugin"), &["wasm"])
+            .pick_file()
+    })
+}
+
 /// Native save dialog for a Markdown export (the ⋯ menu's Export row), in a
 /// sheet on `window`, proposing `file_name` in `folder`.
 pub(crate) fn save_markdown(

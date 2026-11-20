@@ -147,7 +147,7 @@ fn installs_rust_for_clew_and_builds_with_it() {
         &AtomicBool::new(false),
         &mut |stage| stages.push(stage),
     )
-    .unwrap_or_else(|why| panic!("{why}"));
+    .unwrap_or_else(|why| panic!("{}", why.sentence()));
     assert_eq!(stages, [Stage::Downloading, Stage::Installing]);
     let dir = clew_plugin::toolchain::managed_dir(&data);
     assert!(

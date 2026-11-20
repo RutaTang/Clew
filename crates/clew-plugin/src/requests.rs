@@ -256,6 +256,9 @@ pub enum Waited {
     NoAnswer,
 }
 
+/// The most of an answer read back.
+const ANSWER_MAX: u64 = 1024 * 1024;
+
 /// [`wait`], but given up after `take_within` if no window took the
 /// request by then: an agent is told at once that Clew is not open, not
 /// after the whole of `timeout`.
@@ -273,10 +276,21 @@ pub fn wait_taken(
     let deadline = started + timeout;
     let take_by = started + take_within.min(timeout);
     loop {
-        if let Ok(Some(text)) = clew_core::statefile::read_capped_checked(&answer_path, 1024 * 1024)
-        {
-            let _ = std::fs::remove_file(&answer_path);
-            return serde_json::from_str(&text).map_or(Waited::NoAnswer, Waited::Answered);
+        match clew_core::statefile::read_capped_checked(&answer_path, ANSWER_MAX) {
+            Ok(Some(text)) => {
+                let _ = std::fs::remove_file(&answer_path);
+                return serde_json::from_str(&text).map_or(Waited::NoAnswer, Waited::Answered);
+            }
+            // Answered, and more than is read back: said so now. Read again
+            // each turn until the wait ran out, it was told the window gave
+            // no answer.
+            Err(clew_core::statefile::ReadError::TooLarge { .. }) => {
+                let _ = std::fs::remove_file(&answer_path);
+                return Waited::Answered(Answer::Failed {
+                    why: "Clew's answer was too large to pass on.".into(),
+                });
+            }
+            _ => {}
         }
         let now = std::time::Instant::now();
         let untaken = request_path.exists();
@@ -345,6 +359,34 @@ mod tests {
             plugin: "sample".into(),
             sha256: "ab".repeat(32),
         }
+    }
+
+    /// An answer file larger than any answer Clew writes is not read into
+    /// memory: the agent is told so, and the file goes.
+    #[test]
+    fn an_answer_too_large_is_said_not_read() {
+        let data = temp("large-answer");
+        let nonce = file(&data, install(), "Claude Code").unwrap();
+        assert!(claim(&data, &nonce));
+        let path = requests_dir(&data).join(format!("{nonce}.answer.json"));
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(ANSWER_MAX + 1)
+            .unwrap();
+        let got = wait_taken(
+            &data,
+            &nonce,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(
+            got,
+            Waited::Answered(Answer::Failed {
+                why: "Clew's answer was too large to pass on.".into()
+            })
+        );
+        assert!(!path.exists());
     }
 
     #[test]

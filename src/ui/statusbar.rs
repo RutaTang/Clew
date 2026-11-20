@@ -639,7 +639,13 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     // out after a failure standing, with what room it left, its Stop was
     // gone beside a long one, and nothing said a command ran.
     let run_chip = plugin_run_chip(app);
+    // The live session's chip too: left uncounted, it took the room the
+    // run's chip — its Stop — was given.
+    let session = session_chip(app);
+    let rust = rust_setup_chip(app);
     let full_chips: f32 = run_chip.as_ref().map_or(0.0, |chip| chip.1)
+        + session.as_ref().map_or(0.0, |chip| chip.1)
+        + rust.as_ref().map_or(0.0, |chip| chip.1)
         + setup.as_ref().map_or(0.0, |(l, _)| width(l) + CHIP_EXTRA_W)
         + explain.as_ref().map_or(0.0, |(_, widest)| {
             // One node's chip has no bar: counted with one, it gave way
@@ -653,6 +659,8 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         });
     let chips_n = usize::from(setup.is_some())
         + usize::from(explain.is_some())
+        + usize::from(session.is_some())
+        + usize::from(rust.is_some())
         + usize::from(run_chip.is_some());
     // What is under way now comes before an older failure: its chip keeps
     // its words, and the failure's give way (whole where the pointer
@@ -790,6 +798,13 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     // nothing, it was a control no one saw that the keyboard's ring still
     // stopped on (its Set up is in the command bar, its pass's progress in
     // the margin).
+    // A command running first: its Stop is the one control here that
+    // ends what the user set going, and left for last it was the one left
+    // out when room ran short.
+    if let Some(chip) = run_chip.filter(|chip| used + chip.1 <= room) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
     if let Some(chip) = setup_chip(app, setup_short).filter(|chip| used + chip.1 <= room) {
         used += chip.1 + STATUS_GAP;
         row = row.push(chip.0);
@@ -801,11 +816,11 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     // A session going on behind the hidden panel, said, and a way back to
     // it: hidden while paused, nothing showed one was live, and Debug
     // started a second copy of the program.
-    if let Some(chip) = session_chip(app).filter(|chip| used + chip.1 <= room) {
+    if let Some(chip) = session.filter(|chip| used + chip.1 <= room) {
         used += chip.1 + STATUS_GAP;
         row = row.push(chip.0);
     }
-    if let Some(chip) = run_chip.filter(|chip| used + chip.1 <= room) {
+    if let Some(chip) = rust.filter(|chip| used + chip.1 <= room) {
         used += chip.1 + STATUS_GAP;
         row = row.push(chip.0);
     }
@@ -1047,6 +1062,35 @@ fn plugin_run_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
         super::toolbar::tip_at(chip, title.to_string(), None, tooltip::Position::Top)
     };
     Some((chip, width))
+}
+
+/// Rust being set up for plugins, for as long as it takes — minutes, with
+/// Settings closed, and nothing said it went on — and the way back to it.
+fn rust_setup_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
+    use crate::app::plugins::{Building, PluginMsg, SettingsSpot};
+    if !matches!(app.plugins.building, Building::SettingUp { .. }) {
+        return None;
+    }
+    let said = tr!("Setting up Rust for plugins…");
+    let width = super::steady::width_of(said, ts::SMALL, crate::fonts::UI) + CHIP_EXTRA_W;
+    let chip = button(
+        row![
+            glyph::icon(Glyph::Cube, theme::accent(), 11.0),
+            text(said)
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .wrapping(iced::widget::text::Wrapping::None),
+        ]
+        .spacing(5)
+        .align_y(iced::Center),
+    )
+    .style(theme::icon_button(false))
+    .padding([2, 8])
+    .on_press(super::heard::said(
+        said,
+        Message::Plugin(PluginMsg::ShowInSettings(SettingsSpot::Rust)),
+    ));
+    Some((chip.into(), width))
 }
 
 /// What the setting-up chip says, and whether it is a button: setting up,
