@@ -1073,6 +1073,12 @@ impl App {
         // The plugin requests an agent filed for this window are answered:
         // left, the agent waited out its whole wait for a window gone.
         self.release_plugin_requests();
+        // Rust being set up from this window stops, as its Cancel stops it:
+        // left, it downloaded hundreds of megabytes for no one, the other
+        // windows waiting on it all the while.
+        if let crate::app::plugins::Building::SettingUp { cancel, .. } = &self.plugins.building {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         // Settings open as the window goes: closed as Close closes it, what
         // was typed in it kept.
         if self.settings.open {

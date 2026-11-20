@@ -94,6 +94,59 @@ pub(crate) fn command_offer_label(
     }
 }
 
+/// An enabled plugin's command where Clew offers it: the palette, the
+/// code's menu.
+pub(crate) struct Offered<'a> {
+    pub(crate) plugin: &'a Installed,
+    pub(crate) command: &'a clew_plugin::manifest::Command,
+    /// Its name in English, by which the palette, the agent's
+    /// `run_command` and the voice run it.
+    pub(crate) title: String,
+    /// Its name as shown ([`command_offer_label`]).
+    pub(crate) shown: String,
+}
+
+/// The enabled plugins' commands, each with a name no other command has:
+/// the plugin's name and the command's, and, where that names two
+/// commands alike — two plugins', or a plugin's and one of Clew's own
+/// (`clews`) — its plugin's id after it, which no other plugin has (a
+/// plugin's own commands are titled apart). Run by name, the second of
+/// two alike ran the first.
+pub(crate) fn offered_commands<'a>(installed: &'a [Installed], clews: &[&str]) -> Vec<Offered<'a>> {
+    let mut offered: Vec<Offered> = installed
+        .iter()
+        .filter(|p| p.record.enabled)
+        .flat_map(|plugin| {
+            let name = &plugin.manifest.plugin.name;
+            plugin.manifest.commands.iter().map(move |command| Offered {
+                plugin,
+                command,
+                title: if command.title == *name {
+                    name.clone()
+                } else {
+                    format!("{name}: {}", command.title)
+                },
+                shown: command_offer_label(plugin, command),
+            })
+        })
+        .collect();
+    let mut named: HashMap<String, usize> = HashMap::new();
+    for title in clews
+        .iter()
+        .map(|t| t.to_string())
+        .chain(offered.iter().map(|o| o.title.clone()))
+    {
+        *named.entry(title).or_default() += 1;
+    }
+    for o in &mut offered {
+        if named.get(&o.title).is_some_and(|n| *n > 1) {
+            o.title = format!("{} ({})", o.title, o.plugin.id);
+            o.shown = format!("{} ({})", o.shown, o.plugin.id);
+        }
+    }
+    offered
+}
+
 /// A command as it was run — its plugin, what was typed for it, where —
 /// so a failed run's Try again runs the same again.
 #[derive(Debug, Clone, PartialEq)]
@@ -166,6 +219,16 @@ pub struct PluginMap {
     /// Set to stop the build running: a graph no longer shown is not built
     /// on for a minute, with its memory, beside the one that is.
     pub(crate) stop: Option<Arc<AtomicBool>>,
+    /// Which build was started last ([`next_build`]): only its result is
+    /// this graph's. One stopped as it ended gave a result too, after the
+    /// next had started, and ended that one in its place.
+    pub(crate) serial: u64,
+}
+
+/// A number no other plugin graph build of this process has.
+fn next_build() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Where a plugin graph stands, for Project Graphs to say.
@@ -387,6 +450,10 @@ pub struct Plugins {
     /// Why `plugins.toml` could not be read, when it could not: the list
     /// kept is the last one read, and Settings says so.
     pub(crate) list_error: Option<String>,
+    /// Plugins installed whose manifest this Clew cannot read (a later one
+    /// installed them, or their record was changed), by id, with why: not
+    /// run, and listed in Settings with what to do — they vanished.
+    pub(crate) unreadable: Vec<(String, String)>,
     /// The plugins whose last command run failed, by id: until one
     /// finishes, or a new build is installed, its Settings row says what
     /// fixes it.
@@ -529,41 +596,49 @@ impl std::fmt::Debug for Plugins {
 impl Plugins {
     /// The window's plugins: the ones installed.
     pub(crate) fn new() -> Self {
-        let (installed, list_error) = match Self::read_installed() {
-            Ok(installed) => (installed, None),
-            Err(why) => (Vec::new(), Some(why)),
+        let (installed, unreadable, list_error) = match Self::read_installed() {
+            Ok((installed, unreadable)) => (installed, unreadable, None),
+            Err(why) => (Vec::new(), Vec::new(), Some(why)),
         };
         Plugins {
             installed,
+            unreadable,
             list_error,
             ..Default::default()
         }
     }
 
-    /// The plugins installed, as `plugins.toml` lists them; why not, when
-    /// it is there and cannot be read — never taken for no plugins.
-    pub(crate) fn read_installed() -> Result<Vec<Installed>, String> {
+    /// The plugins installed, as `plugins.toml` lists them, and those whose
+    /// manifest cannot be read, by id with why; why not, when the list is
+    /// there and cannot be read — never taken for no plugins.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn read_installed() -> Result<(Vec<Installed>, Vec<(String, String)>), String> {
         let Some(data) = clew_core::lsp::store::data_root() else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
         let store = Store::load_checked(&data)?;
-        let mut installed: Vec<Installed> = store
-            .plugin
-            .into_iter()
-            .filter_map(|(id, record)| {
-                let manifest = record.manifest()?;
-                let has_source = clew_plugin::authoring::source_dir(&data, &id)
-                    .is_ok_and(|dir| dir.join("plugin.toml").is_file());
-                Some(Installed {
-                    id,
-                    record,
-                    manifest,
-                    has_source,
-                })
-            })
-            .collect();
+        let mut installed = Vec::new();
+        let mut unreadable = Vec::new();
+        for (id, record) in store.plugin {
+            let manifest = match clew_plugin::manifest::Manifest::parse(&record.manifest) {
+                Ok(manifest) => manifest,
+                Err(why) => {
+                    unreadable.push((id, why));
+                    continue;
+                }
+            };
+            let has_source = clew_plugin::authoring::source_dir(&data, &id)
+                .is_ok_and(|dir| dir.join("plugin.toml").is_file());
+            installed.push(Installed {
+                id,
+                record,
+                manifest,
+                has_source,
+            });
+        }
         installed.sort_by_key(|p| p.name().to_lowercase());
-        Ok(installed)
+        unreadable.sort();
+        Ok((installed, unreadable))
     }
 
     /// The installed plugin `id`.
@@ -792,6 +867,8 @@ pub enum PluginMsg {
         map: String,
         rev: u64,
         fingerprint: String,
+        /// Which build it was ([`PluginMap::serial`]).
+        serial: u64,
         ran: Arc<std::sync::Mutex<Option<GraphRan>>>,
     },
     /// Build the plugin graph shown again, whatever came of the last build.
@@ -1156,7 +1233,8 @@ impl App {
     /// Read the installed plugins again (after an install, a change).
     pub(crate) fn reload_plugins(&mut self) -> Task<Message> {
         match Plugins::read_installed() {
-            Ok(installed) => {
+            Ok((installed, unreadable)) => {
+                self.plugins.unreadable = unreadable;
                 // A plugin replaced or removed (here or in another window):
                 // what this window kept of the copy it had — its log, its
                 // failure, its damaged copy — is not the new copy's.
@@ -1537,6 +1615,8 @@ impl App {
         entry.building = true;
         let stop = Arc::new(AtomicBool::new(false));
         entry.stop = Some(stop.clone());
+        let serial = next_build();
+        entry.serial = serial;
         let loaded = self.plugins.loaded.get(&fingerprint).cloned();
         let stamp = self.stamp();
         let done_fp = fingerprint.clone();
@@ -1587,6 +1667,7 @@ impl App {
                     map: id.clone(),
                     rev,
                     fingerprint: done_fp.clone(),
+                    serial,
                     ran: Arc::new(std::sync::Mutex::new(Some(ran))),
                 })
             },
@@ -1601,6 +1682,7 @@ impl App {
         map: String,
         rev: u64,
         fingerprint: String,
+        serial: u64,
         ran: GraphRan,
     ) -> Task<Message> {
         // Stopped because it was no longer shown: nothing to say of it, and
@@ -1611,7 +1693,7 @@ impl App {
                 .proj
                 .plugin_maps
                 .get_mut(&map)
-                .filter(|m| m.fingerprint == fingerprint)
+                .filter(|m| m.fingerprint == fingerprint && m.serial == serial)
                 && !entry.building
             {
                 entry.rev = u64::MAX;
@@ -1633,6 +1715,18 @@ impl App {
         }
         if let Some((fp, loaded)) = ran.loaded.filter(|_| current) {
             self.plugins.loaded.insert(fp, loaded);
+        }
+        // A build since started for this graph is the one it waits for:
+        // what an earlier one gave (stopped as it ended) is not shown, and
+        // does not end the newer one, which then went on unstoppable while
+        // a third was asked for beside it.
+        if self
+            .proj
+            .plugin_maps
+            .get(&map)
+            .is_some_and(|m| m.fingerprint == fingerprint && m.serial != serial)
+        {
+            return Task::none();
         }
         // Not built at all: turned off, removed or replaced since this
         // window read the list. The build is over, and the list is read
@@ -2113,8 +2207,11 @@ impl App {
         }
         // Its approved copy changed on disk: not run. Trying again fails the
         // same way, and its source is not what is wrong; installed again, it
-        // is written anew — said so, here and in its Settings row.
-        if matches!(&ran.outcome, Err(Failure::Stopped(why)) if why == clew_plugin::store::CHANGED)
+        // is written anew — said so, here and in its Settings row. (The copy
+        // of a build replaced while it ran is gone with it: said as that,
+        // below; the new copy is not damaged.)
+        if current
+            && matches!(&ran.outcome, Err(Failure::Stopped(why)) if why == clew_plugin::store::CHANGED)
         {
             self.plugins.failed.remove(&id);
             self.plugins.damaged.insert(id.clone());
@@ -3215,11 +3312,12 @@ impl App {
                 opened
             }
             PluginMsg::AskRemove(id) => {
+                // One this Clew cannot read is named by its id.
                 let name = self
                     .plugins
                     .get(&id)
                     .map(Installed::name)
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| id.clone());
                 self.plugins.confirm = Some(Confirm {
                     title: tr!("Remove “{plugin}”?", plugin = name),
                     detail: tr!(
@@ -3501,6 +3599,7 @@ impl App {
                 map,
                 rev,
                 fingerprint,
+                serial,
                 ran,
                 ..
             } => {
@@ -3508,7 +3607,7 @@ impl App {
                     return Task::none();
                 };
                 let read = list_read_again(&self.plugins, &ran.outcome);
-                let built = self.on_plugin_graph_built(map, rev, fingerprint, ran);
+                let built = self.on_plugin_graph_built(map, rev, fingerprint, serial, ran);
                 match read {
                     true => Task::batch([built, self.reload_plugins()]),
                     false => built,
@@ -3547,6 +3646,15 @@ impl App {
                 // What it is is known when the other window is done; an
                 // agent's failed build is said then, if Rust is missing.
                 if checked.elsewhere {
+                    // A removal asked for here did not happen: said so, as
+                    // the row shows only what the other window does.
+                    if checked.removal {
+                        self.status = tr!(
+                            "Clew's own Rust could not be removed: {reason}",
+                            reason = tr!("another Clew window is setting up Rust or removing it")
+                                .to_string()
+                        );
+                    }
                     return self.check_toolchain_when_free();
                 }
                 // Removed: said, as its 700 MB went with no word; and the
@@ -3667,15 +3775,30 @@ impl App {
                 Task::none()
             }
             PluginMsg::RemoveOwnRust => {
-                let Ok(data) = data() else {
-                    return Task::none();
+                // Confirmed in a card that stayed up while Rust began to
+                // be set up, or another window began to change it: said,
+                // not dropped with no word. (One removal at a time: the
+                // one going says how it went.)
+                let busy = match self.plugins.building {
+                    Building::Removing => return Task::none(),
+                    Building::SettingUp { .. } => {
+                        Some(tr!("Rust is being set up right now").to_string())
+                    }
+                    Building::Elsewhere => Some(
+                        tr!("another Clew window is setting up Rust or removing it").to_string(),
+                    ),
+                    _ => None,
                 };
-                if matches!(
-                    self.plugins.building,
-                    Building::SettingUp { .. } | Building::Removing | Building::Elsewhere
-                ) {
-                    return Task::none();
-                }
+                let data = match (busy, data()) {
+                    (None, Ok(data)) => data,
+                    (Some(why), _) | (None, Err(why)) => {
+                        self.status = tr!(
+                            "Clew's own Rust could not be removed: {reason}",
+                            reason = why
+                        );
+                        return Task::none();
+                    }
+                };
                 self.plugins.building = Building::Removing;
                 Task::perform(
                     async move {

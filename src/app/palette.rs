@@ -815,6 +815,49 @@ impl App {
     /// them with nothing typed. Their titles are in English (each marked for
     /// the catalogs where it is written); the rows show them translated.
     pub(crate) fn palette_commands(&self) -> Vec<PaletteCommand> {
+        let mut out = self.clews_commands();
+        // Each enabled plugin's commands, by the plugin's name and the
+        // command's ("TODO Owners: List TODOs"), as the agent and the voice
+        // find them too — each by a name of its own.
+        let offered: Vec<PaletteCommand> = self
+            .plugin_offers(&out)
+            .into_iter()
+            .map(|o| PaletteCommand {
+                title: o.title,
+                keys: None,
+                action: PaletteAction::Send(Message::Plugin(crate::app::plugins::PluginMsg::Run {
+                    id: o.plugin.id.clone(),
+                    command: o.command.id.clone(),
+                })),
+                shown_as: Some(o.shown),
+            })
+            .collect();
+        // Listed before Close Folder, which stays last.
+        let at = out
+            .iter()
+            .rposition(|c| {
+                matches!(
+                    c.action,
+                    PaletteAction::Send(Message::Project(ProjectMsg::CloseFolder))
+                )
+            })
+            .unwrap_or(out.len());
+        out.splice(at..at, offered);
+        out
+    }
+
+    /// The plugins' commands as the palette names them, beside Clew's own
+    /// (`clews`, [`Self::clews_commands`]): the code's menu names them so.
+    pub(crate) fn plugin_offers(
+        &self,
+        clews: &[PaletteCommand],
+    ) -> Vec<crate::app::plugins::Offered<'_>> {
+        let clews: Vec<&str> = clews.iter().map(|c| c.title.as_str()).collect();
+        crate::app::plugins::offered_commands(&self.plugins.installed, &clews)
+    }
+
+    /// The commands of Clew's own the window offers now.
+    pub(crate) fn clews_commands(&self) -> Vec<PaletteCommand> {
         let mut out = Vec::new();
         let project = self.proj.project.is_some();
         let mut add = |title: String, keys: Option<String>, action: PaletteAction| {
@@ -1290,29 +1333,6 @@ impl App {
                 )),
                 shown_as: Some(tr!("Stop {command}", command = title.to_string())),
             });
-        }
-        // Each enabled plugin's commands, by the plugin's name and the
-        // command's ("TODO Owners: List TODOs"), as the agent and the voice
-        // find them too.
-        for plugin in self.plugins.installed.iter().filter(|p| p.record.enabled) {
-            let name = &plugin.manifest.plugin.name;
-            for command in &plugin.manifest.commands {
-                out.push(PaletteCommand {
-                    title: if command.title == *name {
-                        name.clone()
-                    } else {
-                        format!("{name}: {}", command.title)
-                    },
-                    keys: None,
-                    action: PaletteAction::Send(Message::Plugin(
-                        crate::app::plugins::PluginMsg::Run {
-                            id: plugin.id.clone(),
-                            command: command.id.clone(),
-                        },
-                    )),
-                    shown_as: Some(crate::app::plugins::command_offer_label(plugin, command)),
-                });
-            }
         }
         if self.proj.project.is_some() {
             out.push(PaletteCommand {

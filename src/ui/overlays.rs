@@ -267,27 +267,21 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
     }
     // The commands of the plugins turned on that ask to be here
     // (`where = "code"`): run at the line clicked.
+    // Named as the palette names them, two alike told apart.
+    let clews = app.clews_commands();
     let plugins: Vec<Row> = app
-        .plugins
-        .installed
-        .iter()
-        .filter(|p| p.record.enabled)
-        .flat_map(|plugin| {
-            plugin
-                .manifest
-                .commands
-                .iter()
-                .filter(|c| c.place == clew_plugin::manifest::Place::Code)
-                .map(move |command| Row {
-                    label: crate::app::plugins::command_offer_label(plugin, command).into(),
-                    msg: Message::Plugin(crate::app::plugins::PluginMsg::RunFromMenu {
-                        id: plugin.id.clone(),
-                        command: command.id.clone(),
-                    }),
-                    keys: None,
-                    able: true,
-                    ai: false,
-                })
+        .plugin_offers(&clews)
+        .into_iter()
+        .filter(|o| o.command.place == clew_plugin::manifest::Place::Code)
+        .map(|o| Row {
+            label: o.shown.into(),
+            msg: Message::Plugin(crate::app::plugins::PluginMsg::RunFromMenu {
+                id: o.plugin.id.clone(),
+                command: o.command.id.clone(),
+            }),
+            keys: None,
+            able: true,
+            ai: false,
         })
         .collect();
     // In groups: going somewhere, understanding what is here, the

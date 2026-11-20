@@ -1077,7 +1077,10 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
         };
         groups.push(form::note(said).color(theme::danger()).into());
     }
-    if app.plugins.installed.is_empty() && app.plugins.list_error.is_none() {
+    if app.plugins.installed.is_empty()
+        && app.plugins.unreadable.is_empty()
+        && app.plugins.list_error.is_none()
+    {
         groups.push(form::group(
             "",
             Some(
@@ -1102,6 +1105,28 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
                         .id(plugin_settings_row_id(&p.id))
                         .into()
                 })
+                // Those this Clew cannot read: said, and removable — not
+                // gone from the list while still installed.
+                .chain(app.plugins.unreadable.iter().map(|(id, why)| {
+                    form::item_saying(
+                        id.clone(),
+                        Some(
+                            tr!(
+                                "Clew cannot read what this plugin is, so it does not run: {reason}. A later version of Clew may have installed it: update Clew to use it, or remove it.",
+                                reason = why.clone()
+                            ),
+                        ),
+                        true,
+                        form::action_to(
+                            tr!("Remove"),
+                            id,
+                            app.plugins
+                                .list_error
+                                .is_none()
+                                .then(|| Message::Plugin(PluginMsg::AskRemove(id.clone()))),
+                        ),
+                    )
+                }))
                 .chain(std::iter::once(form::item(
                     tr!("Have a plugin's file?"),
                     None,

@@ -39910,6 +39910,73 @@ fn the_palette_offers_an_enabled_plugins_commands() {
     );
 }
 
+/// Two plugins naming a command alike, or one naming a command as Clew
+/// names one of its own, run each by a name of its own: by name (the
+/// palette's row, the agent's `run_command`, the voice) the second ran the
+/// first, or Clew's. Alone, a plugin's command keeps its plain name.
+#[test]
+fn plugin_commands_named_alike_each_run_by_a_name_of_their_own() {
+    use crate::app::palette::PaletteAction;
+    use crate::app::plugins::PluginMsg;
+    let mut app = blank_app();
+    let taken = app.clews_commands()[0].title.clone();
+    let first = installed_plugin(true);
+    let mut second = installed_plugin(true);
+    second.id = "word-count-too".into();
+    let mut shadow = installed_plugin(true);
+    shadow.id = "shadow".into();
+    shadow.manifest.plugin.name = taken.clone();
+    shadow.manifest.commands[0].title = taken.clone();
+    app.plugins.installed = vec![first, second, shadow];
+    let commands = app.palette_commands();
+    let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+    let distinct: std::collections::HashSet<&str> = titles.iter().copied().collect();
+    assert_eq!(distinct.len(), titles.len(), "{titles:?}");
+    for (title, id) in [
+        (
+            "Word count: Count words (word-count)".to_string(),
+            "word-count",
+        ),
+        (
+            "Word count: Count words (word-count-too)".to_string(),
+            "word-count-too",
+        ),
+        (format!("{taken} (shadow)"), "shadow"),
+    ] {
+        let found = commands
+            .iter()
+            .find(|c| c.title == title)
+            .unwrap_or_else(|| panic!("{title}: {titles:?}"));
+        match &found.action {
+            PaletteAction::Send(Message::Plugin(PluginMsg::Run { id: runs, .. })) => {
+                assert_eq!(runs, id, "{title}")
+            }
+            other => panic!("{title}: {other:?}"),
+        }
+        assert!(
+            found
+                .shown_as
+                .as_deref()
+                .is_some_and(|s| s.ends_with(&format!("({id})"))),
+            "{:?}",
+            found.shown_as
+        );
+    }
+    // Clew's own keeps its name, and runs Clew's.
+    let own = commands.iter().find(|c| c.title == taken).unwrap();
+    assert!(!matches!(
+        own.action,
+        PaletteAction::Send(Message::Plugin(_))
+    ));
+    // A plugin alone keeps its plain name.
+    app.plugins.installed.truncate(1);
+    assert!(
+        app.palette_commands()
+            .iter()
+            .any(|c| c.title == "Word count: Count words")
+    );
+}
+
 /// A plugin's `where = "code"` command is in the code's right-click menu,
 /// named as the palette names it, and a palette-only one is not; picked
 /// there it runs at the line clicked, not the caret's. A command asking for
@@ -41224,9 +41291,9 @@ fn a_plugin_graph_turned_off_mid_build_is_built_when_on_and_its_own_words_show()
     assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
 
     // Built again, and this time it answers in its own words.
-    let (rev, fingerprint) = {
+    let (rev, fingerprint, serial) = {
         let entry = &app.proj.plugin_maps[&id];
-        (entry.rev, entry.fingerprint.clone())
+        (entry.rev, entry.fingerprint.clone(), entry.serial)
     };
     let said = "This project has no pairs.";
     let task = app.update(Message::Plugin(PluginMsg::GraphBuilt {
@@ -41234,6 +41301,7 @@ fn a_plugin_graph_turned_off_mid_build_is_built_when_on_and_its_own_words_show()
         map: id.clone(),
         rev,
         fingerprint,
+        serial,
         ran: Arc::new(std::sync::Mutex::new(Some(GraphRan {
             outcome: Err(clew_plugin::runtime::Failure::Plugin(said.into())),
             loaded: None,
@@ -41652,6 +41720,22 @@ fn a_run_of_a_build_replaced_meanwhile_is_not_the_new_ones() {
         "the new build did not fail"
     );
     assert!(app.plugins.log_text("word-count").is_empty());
+
+    // Its copy taken away by the update (the old file gone): the old
+    // build's, not a damaged new one, which still runs.
+    ran(
+        &mut app,
+        "fp-old",
+        Err(Failure::Stopped(clew_plugin::store::CHANGED.into())),
+    );
+    assert_eq!(
+        app.status,
+        "Count words was updated while it ran: run it again for the new version"
+    );
+    assert!(
+        !app.plugins.damaged.contains("word-count"),
+        "the new copy is not damaged"
+    );
 
     // The new build crashes: its own failure, and its own log.
     ran(
@@ -42173,6 +42257,7 @@ fn a_plugin_graph_no_longer_shown_is_not_built_on() {
     let id = crate::app::plugins::map_id("views", "pair");
     let building = app.update(Message::Graph(GraphMsg::SelectMap(id.clone())));
     assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Building));
+    let first = app.proj.plugin_maps[&id].serial;
     let stop = app.proj.plugin_maps[&id]
         .stop
         .clone()
@@ -42187,9 +42272,36 @@ fn a_plugin_graph_no_longer_shown_is_not_built_on() {
     );
     assert!(app.failure_shown().is_none());
 
+    // Shown again: built again. The build stopped ends as it was ending
+    // anyway, after this one began: this one is still the graph's.
     let opened = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
-    settle(&mut app, opened);
     let shown = app.update(Message::Graph(GraphMsg::SelectMap(id.clone())));
+    let (rev, fingerprint) = {
+        let entry = &app.proj.plugin_maps[&id];
+        assert!(entry.building);
+        (entry.rev, entry.fingerprint.clone())
+    };
+    let _ = app.update(Message::Plugin(
+        crate::app::plugins::PluginMsg::GraphBuilt {
+            stamp: app.stamp(),
+            map: id.clone(),
+            rev,
+            fingerprint,
+            serial: first,
+            ran: Arc::new(std::sync::Mutex::new(Some(crate::app::plugins::GraphRan {
+                outcome: Err(clew_plugin::runtime::Failure::Crashed("late".into())),
+                loaded: None,
+                log: Vec::new(),
+            }))),
+        },
+    ));
+    assert!(
+        app.proj.plugin_maps[&id].building,
+        "the newer build goes on"
+    );
+    assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Building));
+    assert!(!app.plugins.failing("views"));
+    settle(&mut app, opened);
     settle(&mut app, shown);
     assert_eq!(app.plugin_map_status(), Some(PluginMapStatus::Built));
 
@@ -42222,9 +42334,9 @@ fn a_plugin_graph_refused_or_replaced_is_not_built_on() {
     settle(&mut app, opened);
     let id = crate::app::plugins::map_id("views", "pair");
     let _building = app.update(Message::Graph(GraphMsg::SelectMap(id.clone())));
-    let (rev, fingerprint) = {
+    let (rev, fingerprint, serial) = {
         let entry = &app.proj.plugin_maps[&id];
-        (entry.rev, entry.fingerprint.clone())
+        (entry.rev, entry.fingerprint.clone(), entry.serial)
     };
     let list = clew_plugin::store::store_path(data.path());
     let good = std::fs::read(&list).unwrap();
@@ -42234,6 +42346,7 @@ fn a_plugin_graph_refused_or_replaced_is_not_built_on() {
         map: id.clone(),
         rev,
         fingerprint: fingerprint.clone(),
+        serial,
         ran: Arc::new(std::sync::Mutex::new(Some(GraphRan {
             outcome: Err(Failure::Stopped(
                 "Clew could not read its list of plugins".into(),
@@ -42278,6 +42391,7 @@ fn a_plugin_graph_refused_or_replaced_is_not_built_on() {
         map: id.clone(),
         rev,
         fingerprint: "an older copy".into(),
+        serial: 0,
         ran: Arc::new(std::sync::Mutex::new(Some(GraphRan {
             outcome: Err(Failure::Crashed("old".into())),
             loaded: None,
@@ -42299,6 +42413,7 @@ fn a_plugin_graph_refused_or_replaced_is_not_built_on() {
         map: id.clone(),
         rev,
         fingerprint: "an older copy".into(),
+        serial: 0,
         ran: Arc::new(std::sync::Mutex::new(Some(GraphRan {
             outcome: Err(Failure::Stopped(
                 clew_plugin::runtime::STOPPED_BY_USER.into(),
@@ -42352,6 +42467,72 @@ fn a_link_to_a_file_keeps_the_page_to_go_back_to() {
     );
 }
 
+/// A window closed while it sets Rust up stops the setup, as its Cancel
+/// does: not a download of hundreds of megabytes for no one, with every
+/// other window waiting on it.
+#[test]
+fn a_window_closed_mid_setup_stops_setting_rust_up() {
+    use crate::app::plugins::Building;
+    let mut app = blank_app();
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.plugins.building = Building::SettingUp {
+        stage: clew_plugin::toolchain::Stage::Downloading,
+        cancel: cancel.clone(),
+    };
+    let _ = app.on_window_closed();
+    assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+/// A plugin whose manifest this Clew cannot read (a later Clew installed
+/// it) is not run, and is not gone from the list either: Settings names it,
+/// says why and what to do, and removes it on asking.
+#[test]
+fn a_plugin_this_clew_cannot_read_is_listed_and_can_be_removed() {
+    use crate::app::plugins::PluginMsg;
+    let data = clew_core::testutil::TempDir::new("plugin-unreadable");
+    let _env = data_dir_override(data.path());
+    let mut app = blank_app();
+    let mut later = installed_plugin(true).record;
+    later.manifest = later
+        .manifest
+        .replace("[plugin]", "[plugin]\nwith_more = true");
+    clew_plugin::store::Store::update(data.path(), |store| {
+        store.plugin.insert("from-later".into(), later.clone());
+        Ok(())
+    })
+    .unwrap();
+    let read = app.reload_plugins();
+    settle(&mut app, read);
+    assert!(app.plugins.get("from-later").is_none(), "not run");
+    assert_eq!(app.plugins.unreadable.len(), 1);
+    assert_eq!(app.plugins.unreadable[0].0, "from-later");
+    let why = app.plugins.unreadable[0].1.clone();
+    let said = crate::i18n::quoted(&format!(
+        "Clew cannot read what this plugin is, so it does not run: {why}. A later version of Clew may have installed it: update Clew to use it, or remove it."
+    ))
+    .into_owned();
+    {
+        let mut page = iced_test::simulator(crate::ui::plugins_settings(&app));
+        assert!(page.find("from-later").is_ok());
+        assert!(page.find(said.as_str()).is_ok(), "{said}");
+        assert!(
+            page.find("A plugin adds what you need to Clew. Ask your agent for one, in your own words: “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before installing it.")
+                .is_err(),
+            "not shown as no plugins at all"
+        );
+    }
+    let _ = app.update(Message::Plugin(PluginMsg::AskRemove("from-later".into())));
+    assert_eq!(
+        app.plugins.confirm.as_ref().map(|c| c.title.as_str()),
+        Some("Remove “from-later”?")
+    );
+    let removed = app.update(Message::Plugin(PluginMsg::Confirmed));
+    settle(&mut app, removed);
+    assert!(app.plugins.unreadable.is_empty());
+    let store = clew_plugin::store::Store::load_checked(data.path()).unwrap();
+    assert!(!store.plugin.contains_key("from-later"));
+}
+
 /// Rust is set up or removed by one Clew window at a time, all of them
 /// sharing Clew's own: another window's Settings says so with nothing to
 /// press, removes nothing, fails nothing, and looks again by itself when
@@ -42389,6 +42570,20 @@ fn rust_changed_in_another_window_is_waited_for() {
     let wait = app.update(said.into_iter().next().unwrap());
     assert!(matches!(app.plugins.building, Building::Elsewhere));
     assert!(says(&app, elsewhere));
+    // The removal asked for is said not to have happened, and why.
+    assert_eq!(
+        app.status,
+        "Clew's own Rust could not be removed: another Clew window is setting up Rust or removing it"
+    );
+    // Confirmed again in a card left up meanwhile: said again, nothing run.
+    app.status.clear();
+    let again = app.update(Message::Plugin(PluginMsg::RemoveOwnRust));
+    assert!(run_task(again).is_empty());
+    assert_eq!(
+        app.status,
+        "Clew's own Rust could not be removed: another Clew window is setting up Rust or removing it"
+    );
+    assert!(matches!(app.plugins.building, Building::Elsewhere));
     assert!(
         !says(&app, "Clew's own Rust"),
         "no Remove offered while another window changes it"
