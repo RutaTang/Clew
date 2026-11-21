@@ -26480,7 +26480,7 @@ fn a_local_file_that_could_not_be_read_keeps_every_summary() {
     );
     assert!(
         app.status
-            .starts_with("Nothing re-explained; 1 file could not be read"),
+            .starts_with("Nothing re-explained. 1 file could not be read"),
         "{}",
         app.status
     );
