@@ -264,7 +264,7 @@ fn write_copy(data: &Path, fingerprint: &str, bytes: &[u8]) -> Result<(), String
 
 /// Let `path` be replaced or removed (a read-only file cannot be on
 /// Windows).
-fn make_writable(path: &Path) {
+pub(crate) fn make_writable(path: &Path) {
     #[cfg(not(unix))]
     if let Ok(meta) = std::fs::metadata(path) {
         let mut permissions = meta.permissions();

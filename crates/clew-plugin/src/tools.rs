@@ -830,11 +830,14 @@ mod tests {
         assert!(off.contains("turned it off in Settings"), "{off}");
         // Its copy gone bad, installing it again is what mends it: asked.
         let record = crate::store::Store::load(&data).plugin["views"].clone();
-        std::fs::write(
-            crate::store::installed_path(&data, &record.fingerprint),
-            b"bad",
-        )
-        .unwrap();
+        let path = crate::store::installed_path(&data, &record.fingerprint);
+        crate::store::make_writable(&path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::write(&path, b"bad").unwrap();
         assert!(matches!(
             call(&data, "plugin_install", &json!({"id": "views"}), &cancel),
             Step::Install { .. }
