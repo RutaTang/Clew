@@ -150,11 +150,18 @@ pub(crate) fn setup_sheet<'a>(
                     text(tr!("Project data folder:"))
                         .size(ts::BODY)
                         .color(theme::dim()),
-                    text(format!("{}/.clew", root.display()))
-                        .size(ts::BODY)
-                        .font(crate::fonts::CODE)
-                        .color(theme::fg_muted())
-                        .wrapping(iced::widget::text::Wrapping::Glyph),
+                    // In the folder the sheet is named for, always: its whole
+                    // path ran on, wrapped mid-name, where the pointer
+                    // finds it now.
+                    super::toolbar::tip_wrapped(
+                        text(".clew")
+                            .size(ts::BODY)
+                            .font(crate::fonts::CODE)
+                            .color(theme::fg_muted())
+                            .wrapping(iced::widget::text::Wrapping::None),
+                        format!("{}/.clew", root.display()),
+                        iced::widget::tooltip::Position::Bottom,
+                    ),
                 ]
                 .spacing(6)
                 .align_y(iced::Center),
@@ -177,7 +184,8 @@ pub(crate) fn setup_sheet<'a>(
                   detail: String,
                   lines: f32,
                   more: Option<String>,
-                  ai: bool|
+                  ai: bool,
+                  link: Option<Element<'a, Message>>|
      -> Element<'a, Message> {
         let tick = checkbox(on)
             .style(theme::check)
@@ -222,6 +230,15 @@ pub(crate) fn setup_sheet<'a>(
                 ..Padding::ZERO
             }),
         ];
+        // What puts the detail right, under it: "Add an API Key…" stood
+        // apart, below a line kept empty for an estimate that cannot come.
+        let col = match link {
+            Some(link) => col.push(container(link).padding(Padding {
+                left: DETAIL_INDENT - 6.0,
+                ..Padding::ZERO
+            })),
+            None => col,
+        };
         // A line of its own under the detail, kept while it is empty.
         let col = match more {
             Some(more) => col.push(
@@ -257,46 +274,43 @@ pub(crate) fn setup_sheet<'a>(
                     2.0,
                     None,
                     false,
+                    None,
                 ));
             }
             let can_explain =
                 app.llm_available && !matches!(census.map(|c| c.calls), Some(Some(0)));
             // Its line, and the estimate's under it: room for both kept
             // while the count is still coming.
+            // No key: where one is added, a click away, under the line that
+            // says so — the line said "in Settings" and left the reader to
+            // find it. No estimate can come without one: no line kept for it.
+            let add_key: Option<Element<'a, Message>> = (!app.llm_available).then(|| {
+                button(
+                    text(tr!("Add an API Key…"))
+                        .size(ts::SMALL)
+                        .color(theme::accent()),
+                )
+                .style(theme::icon_button(false))
+                .padding([2, 6])
+                .on_press(super::heard::said(
+                    tr!("Add an API Key…"),
+                    Message::Settings(crate::SettingsMsg::OpenAt(
+                        crate::SettingsPage::LanguageModel,
+                    )),
+                ))
+                .into()
+            });
+            let more = app.llm_available.then_some(explain_also);
             body = body.push(choice(
                 tr!("Explain the project"),
                 setup.is_some_and(|s| s.explain),
                 can_explain.then_some(|on| Message::Project(ProjectMsg::SetupExplain(on))),
                 explain_says,
                 1.0,
-                Some(explain_also),
+                more,
                 true,
+                add_key,
             ));
-            // No key: where one is added, a click away — the line said
-            // "in Settings" and left the reader to find it.
-            if !app.llm_available {
-                body = body.push(
-                    container(
-                        button(
-                            text(tr!("Add an API Key…"))
-                                .size(ts::SMALL)
-                                .color(theme::accent()),
-                        )
-                        .style(theme::icon_button(false))
-                        .padding([2, 6])
-                        .on_press(super::heard::said(
-                            tr!("Add an API Key…"),
-                            Message::Settings(crate::SettingsMsg::OpenAt(
-                                crate::SettingsPage::LanguageModel,
-                            )),
-                        )),
-                    )
-                    .padding(Padding {
-                        left: DETAIL_INDENT - 6.0,
-                        ..Padding::ZERO
-                    }),
-                );
-            }
         }
         SetupMode::Explain => {
             body = body.push(match estimate {

@@ -1099,12 +1099,10 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
                 None,
             )
         } else {
-            empty_state(
-                Glyph::Folder,
-                tr!("No folder open"),
-                tr!("Open a folder to start reading."),
-                None,
-            )
+            // The welcome page beside it offers the folder to open: "Open a
+            // folder to start reading" under this said it again, and the
+            // status bar a third time.
+            empty_state(Glyph::Folder, tr!("No folder open"), "", None)
         };
     };
 

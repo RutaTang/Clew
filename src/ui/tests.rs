@@ -3564,9 +3564,10 @@ fn the_margin_tabs_are_glyphs_that_fit_over_the_margin() {
     app.show_left_sidebar = true;
     let room = super::panes::margin_w(&app) - 12.0 - 16.0;
     assert!(room <= 240.0 - 28.0 + 0.5, "the narrowest margin: {room}");
-    // A Lean file's four tabs, the most there are, fit.
-    let four = 4.0 * super::sheet::MARGIN_TAB_W + 3.0 * super::sheet::MARGIN_TAB_GAP;
-    assert!(four <= room, "four tabs: {four} of {room}");
+    // A Lean file's four tabs, the most there are, fit, with the margin's
+    // toggle after them.
+    let five = 5.0 * super::sheet::MARGIN_TAB_W + 4.0 * super::sheet::MARGIN_TAB_GAP;
+    assert!(five <= room, "four tabs and the toggle: {five} of {room}");
     for lang in [crate::i18n::Lang::Fr, crate::i18n::Lang::En] {
         crate::i18n::with_lang(lang, || {
             for shown in [
@@ -3593,6 +3594,50 @@ fn the_margin_tabs_are_glyphs_that_fit_over_the_margin() {
             }
         });
     }
+}
+
+/// The margin hides and comes back by a button at its header's right end,
+/// in the same place either way: it was hidden and shown only from the
+/// View menu and the palette. Hidden, the file's tools still stand where
+/// the View menu opens from.
+#[test]
+fn the_margin_hides_and_comes_back_by_one_button() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let toggles = |app: &App| {
+        let at = super::sheet::margin_toggle_rect(app);
+        let mut sim = sim_of(app);
+        sim.point_at(Point::new(at.center_x(), at.center_y()));
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::ToggleRightPanel)))
+    };
+    assert!(
+        super::panes::right_panel(&app).is_some(),
+        "the margin shows"
+    );
+    assert!(toggles(&app), "no way to hide the margin from its header");
+    let _ = app.update(Message::Window(WindowMsg::ToggleRightPanel));
+    assert!(
+        super::panes::right_panel(&app).is_none(),
+        "the margin hidden"
+    );
+    assert!(
+        toggles(&app),
+        "no way to bring the margin back where it was"
+    );
+    // The View menu's button where its menu opens from, the toggle beside it.
+    let view = super::sheet::view_button_rect(&app).expect("the View button");
+    let mut sim = sim_of(&app);
+    sim.point_at(Point::new(view.center_x(), view.center_y()));
+    let _ = sim.simulate(iced_test::simulator::click());
+    assert!(
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::ToggleViewMenu))),
+        "the View button is not where its menu opens from"
+    );
 }
 
 /// L19: an empty file says so in its pane — it opened blank, with no line
@@ -6570,7 +6615,7 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     let mut sim = sim_elem(sheet(&app, &root));
     for said in [
         "Open iced",
-        "/nonexistent/iced/.clew",
+        ".clew",
         "Its bookmarks, notes and project settings can be committed with the project; your own reading state stays out of git.",
         "Language servers",
         "rust-analyzer: download, builds the project (runs its code)",
@@ -6580,6 +6625,9 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     ] {
         assert!(shows(&mut sim, said), "{said:?}");
     }
+    // The data folder by its name, in the folder the sheet is named for:
+    // its whole path, which wrapped mid-name, only where the pointer asks.
+    assert!(!shows(&mut sim, "/nonexistent/iced/.clew"));
     // And what those calls are likely to cost, with their count, in one
     // sentence of one weight.
     let estimate = app.explain_estimate(3617).expect("an estimate");
@@ -13222,6 +13270,220 @@ fn settings_draws_every_shortcut_as_key_caps() {
     );
 }
 
+/// Some sixty shortcuts, and no way to find one but to read them all: a
+/// filter finds one by its name or by its keys; a group with none left
+/// goes, title and all; a filter nothing matches says so; and Escape in a
+/// filled filter empties it, closing nothing.
+#[test]
+fn the_shortcuts_page_finds_a_shortcut_by_name_or_keys() {
+    use crate::SettingsMsg;
+    use iced_test::selector::Candidate;
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        crate::SettingsPage::Shortcuts,
+    )));
+    // What is typed in its field is what the page is narrowed to.
+    let mut sim = sim_elem(super::connect::shortcuts_body(&app));
+    let field = sim
+        .find(|c: Candidate<'_>| match c {
+            Candidate::TextInput { visible_bounds, .. } => visible_bounds,
+            _ => None,
+        })
+        .expect("a filter field");
+    sim.point_at(field.center());
+    let _ = sim.simulate(iced_test::simulator::click());
+    let _ = sim.typewrite("z");
+    let sent = sent_by(sim);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Settings(SettingsMsg::ShortcutsFilter(q)) if q == "z")),
+        "{sent:?}"
+    );
+    let narrowed = |app: &mut App, filter: &str| {
+        let _ = app.update(Message::Settings(SettingsMsg::ShortcutsFilter(
+            filter.into(),
+        )));
+    };
+    let page_shows =
+        |app: &App, said: &str| shows(&mut sim_elem(super::connect::shortcuts_body(app)), said);
+    // By name: the commands that zoom, and no reading motion at all.
+    narrowed(&mut app, "zoom");
+    for shown in ["Commands", "Zoom in", "Zoom out"] {
+        assert!(page_shows(&app, shown), "{shown}");
+    }
+    for gone in ["Go to file", "Reading motions", "Toggle fold"] {
+        assert!(!page_shows(&app, gone), "{gone}");
+    }
+    // By its keys: gd is Go to definition's.
+    narrowed(&mut app, "gd");
+    assert!(page_shows(&app, "Go to definition"));
+    assert!(!page_shows(&app, "Toggle fold"));
+    // Nothing: said so, and no group's title over nothing.
+    narrowed(&mut app, "nothing-like-this");
+    assert!(page_shows(
+        &app,
+        "No shortcut matches \u{201c}nothing-like-this\u{201d}"
+    ));
+    assert!(!page_shows(&app, "Commands") && !page_shows(&app, "Reading motions"));
+    // Escape in the filled filter empties it, and that press closes nothing.
+    let _ = app.update(Message::Settings(SettingsMsg::ShortcutsFilterEscaped));
+    assert!(app.settings.shortcuts_filter.is_empty());
+    assert!(app.escape_taken && app.settings.open);
+    app.escape_taken = false;
+    // In an empty one, Escape goes on to do what it does.
+    let _ = app.update(Message::Settings(SettingsMsg::ShortcutsFilterEscaped));
+    assert!(!app.escape_taken);
+    // Another page, or Settings closed: the next visit starts whole.
+    narrowed(&mut app, "zoom");
+    let _ = app.update(Message::Settings(SettingsMsg::Page(
+        crate::SettingsPage::Appearance,
+    )));
+    assert!(app.settings.shortcuts_filter.is_empty());
+    narrowed(&mut app, "zoom");
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert!(app.settings.shortcuts_filter.is_empty());
+}
+
+/// The code's text size is set in Settings → Appearance too, where a
+/// reader looks for it — it was in the zoom keys and the command bar
+/// alone: a step smaller or larger, none past either end, and back to as
+/// shipped once it is not.
+#[test]
+fn appearance_sets_the_codes_text_size() {
+    use crate::app::state::{DEFAULT_FONT_SIZE, MAX_FONT_SIZE};
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Appearance,
+    )));
+    let size_shown = |app: &App, size: f32| {
+        let size = format!("{size:.0}");
+        sim_of(app).find(size.as_str()).is_ok()
+    };
+    assert!(shows(&mut sim_of(&app), "Code text size"));
+    assert!(size_shown(&app, DEFAULT_FONT_SIZE));
+    // As shipped: no way back to where it is already.
+    assert!(sent_by_pressing(&app, "Actual size").is_empty());
+    let sent = sent_by_pressing(&app, "Zoom in");
+    assert!(
+        matches!(sent.as_slice(), [Message::Editor(EditorMsg::FontSizeDelta(d))] if *d == 1.0),
+        "{sent:?}"
+    );
+    for m in sent {
+        let _ = app.update(m);
+    }
+    assert_eq!(app.font_size, DEFAULT_FONT_SIZE + 1.0);
+    assert!(size_shown(&app, DEFAULT_FONT_SIZE + 1.0));
+    let sent = sent_by_pressing(&app, "Actual size");
+    assert!(
+        matches!(sent.as_slice(), [Message::Editor(EditorMsg::FontSizeReset)]),
+        "{sent:?}"
+    );
+    // At the largest, no larger.
+    app.font_size = MAX_FONT_SIZE;
+    assert!(sent_by_pressing(&app, "Zoom in").is_empty());
+    assert!(!sent_by_pressing(&app, "Zoom out").is_empty());
+    app.font_size = crate::theme::MIN_TEXT_SIZE;
+    assert!(sent_by_pressing(&app, "Zoom out").is_empty());
+}
+
+/// The model was a field to type a name into, with no way to learn the
+/// names but the provider's own pages: under it, the models the key can
+/// call, asked of the provider on a click (nothing spent), then a list to
+/// pick from. What it says without a key, while it asks, of an empty list,
+/// and after the key changes.
+#[test]
+fn the_model_field_offers_the_models_the_key_can_call() {
+    use crate::SettingsMsg;
+    use crate::app::state::ModelList;
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        crate::SettingsPage::LanguageModel,
+    )));
+    app.settings.provider = crate::llm::Provider::DeepSeek;
+    app.settings.key.clear();
+    app.settings.key_from_env = false;
+    app.settings.base_url = crate::llm::Provider::DeepSeek.default_base_url().into();
+    app.settings.model = "my-own-model".into();
+    let page_shows = |app: &App, said: &str| shows(&mut sim_of(app), said);
+    assert!(page_shows(&app, "Show available models"));
+    // No key: said so, nothing asked.
+    let _ = app.update(Message::Settings(SettingsMsg::ListModels));
+    if std::env::var("DEEPSEEK_API_KEY").is_err() {
+        assert_eq!(
+            app.settings.models,
+            ModelList::Failed("Enter the API key first.".into())
+        );
+        assert!(page_shows(&app, "Enter the API key first."));
+    }
+    // A key: asked, and said while it is.
+    let _ = app.update(Message::Settings(SettingsMsg::KeyChanged("sk-test".into())));
+    let _ = app.update(Message::Settings(SettingsMsg::ListModels));
+    let ModelList::Listing(number) = app.settings.models else {
+        panic!("{:?}", app.settings.models);
+    };
+    assert!(page_shows(&app, "Listing models\u{2026}"));
+    // An answer to an older asking is dropped.
+    let _ = app.update(Message::Settings(SettingsMsg::ModelsListed {
+        number: number - 1,
+        result: Ok(vec!["stale".into()]),
+    }));
+    assert_eq!(app.settings.models, ModelList::Listing(number));
+    let _ = app.update(Message::Settings(SettingsMsg::ModelsListed {
+        number,
+        result: Ok(vec!["deepseek-v4-flash".into(), "deepseek-v4-pro".into()]),
+    }));
+    assert!(matches!(&app.settings.models, ModelList::Listed(m) if m.len() == 2));
+    // A name of the reader's own, not in the list: the list asks for a pick
+    // and the field keeps the name.
+    assert!(page_shows(&app, "Pick a model"));
+    assert_eq!(app.settings.model, "my-own-model");
+    // One in it: the list shows it picked.
+    app.settings.model = "deepseek-v4-pro".into();
+    assert!(!page_shows(&app, "Pick a model"));
+    // Another key: the list was that key's.
+    let _ = app.update(Message::Settings(SettingsMsg::KeyChanged(
+        "sk-other".into(),
+    )));
+    assert_eq!(app.settings.models, ModelList::Unasked);
+    // An empty list is said as one.
+    let _ = app.update(Message::Settings(SettingsMsg::ListModels));
+    let ModelList::Listing(number) = app.settings.models else {
+        panic!("{:?}", app.settings.models);
+    };
+    let _ = app.update(Message::Settings(SettingsMsg::ModelsListed {
+        number,
+        result: Ok(Vec::new()),
+    }));
+    assert!(page_shows(&app, "The provider listed no models."));
+    // A failure, in the provider's words.
+    let _ = app.update(Message::Settings(SettingsMsg::ListModels));
+    let ModelList::Listing(number) = app.settings.models else {
+        panic!("{:?}", app.settings.models);
+    };
+    let _ = app.update(Message::Settings(SettingsMsg::ModelsListed {
+        number,
+        result: Err("DeepSeek API error 401: bad key".into()),
+    }));
+    assert!(page_shows(
+        &app,
+        "Couldn't list the models: DeepSeek API error 401: bad key"
+    ));
+    // Closed, the list is forgotten.
+    let _ = app.update(Message::Settings(SettingsMsg::Discard));
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert_eq!(app.settings.models, ModelList::Unasked);
+}
+
+/// What a press of the text size control named `said` sends, as `app`
+/// stands: nothing for one that is off.
+fn sent_by_pressing(app: &App, said: &str) -> Vec<Message> {
+    crate::ui::heard::gather_of(|| super::connect::code_size(app))
+        .into_iter()
+        .filter(|t| t.title == said)
+        .map(|t| t.message)
+        .collect()
+}
+
 /// The status bar's target picker is there for a file whose dimming the
 /// platform decides — Rust's, Go's, Haskell's — and not for one whose does
 /// not (C#'s, Erlang's: their files' own symbols decide).
@@ -13418,6 +13680,104 @@ fn a_margin_note_sits_level_with_its_function() {
     assert!(
         (scrolled - (y - lh)).abs() < 1.0,
         "{scrolled} moved a line from {y}"
+    );
+}
+
+/// The note on what the caret is in stays on screen as the code scrolls
+/// away from it — at the margin's top while its function is above the view
+/// — and says where it is, a press away: it went with its function, and
+/// the reader looking on down lost what they were reading.
+#[test]
+fn the_carets_card_stays_when_its_function_scrolls_away() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.explain.view = Some(crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    });
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 3,
+        end_line: 5,
+    }];
+    let goes_back = |app: &App| {
+        click(sim_of(app), "function, line 3")
+            .iter()
+            .any(|m| matches!(m, Message::Editor(EditorMsg::OutlineJump(3))))
+    };
+    // Beside its function, it is where it is: no way back to offer.
+    assert!(text_at(&mut sim_of(&app), |t| t == "origin", 0).is_some());
+    assert!(!goes_back(&app), "a way back beside its own function");
+    // Scrolled far past it: kept at the top, its line the way back.
+    app.proj.panes[0].as_mut().unwrap().scroll_y = 5000.0;
+    let mut sim = sim_of(&app);
+    let name = text_at(&mut sim, |t| t == "origin", 0).expect("the card, kept on screen");
+    assert!(
+        name.y < app.window_height / 2.0,
+        "kept at the top: {name:?}"
+    );
+    assert!(goes_back(&app), "no way back to its function");
+}
+
+/// A note beside a function the caret is not in says as much of its
+/// summary as its lines hold, ending in an ellipsis — clipped at its foot,
+/// it stopped mid-sentence, the line under it sliced through — and keeps
+/// "function, line 3" whole, its name cut short instead.
+#[test]
+fn a_plain_note_ends_in_an_ellipsis_and_keeps_its_head_whole() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    app.proj.explain.view = None;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    let name = "make_the_point_that_sits_at_the_origin_of_the_plane";
+    let summary = "Makes the point at zero. ".repeat(20);
+    app.proj.explain.cache.insert(
+        crate::explain::Node::Function {
+            file: abs,
+            name: name.into(),
+            ordinal: 0,
+        },
+        crate::explain::Cached {
+            summary: summary.trim().to_string(),
+            prompt_hash: crate::incremental::content_hash(b"t"),
+            detail: None,
+            basis: None,
+        },
+    );
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: name.into(),
+        kind: "function".into(),
+        line: 3,
+        end_line: 5,
+    }];
+    let mut sim = sim_of(&app);
+    let said = text_at(
+        &mut sim,
+        |t| t.starts_with("Makes the point") && t.ends_with('…'),
+        0,
+    )
+    .expect("the summary, cut with an ellipsis");
+    let line = super::explain_view::NOTE_SIZE * super::explain_view::NOTE_LINE_HEIGHT;
+    assert!(
+        said.height <= 3.0 * line + 1.0,
+        "{} lines",
+        said.height / line
+    );
+    assert!(
+        text_at(&mut sim, |t| t == "function, line 3", 0).is_some(),
+        "the head's kind and line, whole"
+    );
+    assert!(
+        text_at(
+            &mut sim,
+            |t| t.starts_with("make_the_point") && t.ends_with('…'),
+            0
+        )
+        .is_some(),
+        "the long name cut to leave them room"
     );
 }
 

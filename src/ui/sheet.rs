@@ -121,10 +121,29 @@ pub(crate) fn sheet_room(app: &App) -> f32 {
 fn header_right(app: &App) -> f32 {
     let tabs = if super::panes::right_panel_shown(app) {
         super::panes::margin_w(app)
+    } else if super::panes::right_panel_fits(app) {
+        // The margin hidden: its toggle, kept where it was.
+        MARGIN_TOGGLE_W + MARGIN_TABS_PAD_RIGHT
     } else {
         0.0
     };
     sheet_content_right(app.window_width) - tabs
+}
+
+/// The margin's toggle's width, and the room right of it and the tabs.
+const MARGIN_TOGGLE_W: f32 = 2.0 * FILE_TOOL_PAD_X + FILE_TOOL_GLYPH;
+const MARGIN_TABS_PAD_RIGHT: f32 = 16.0;
+
+/// Where the margin's toggle is drawn, in window coordinates: at the
+/// header's right end, the margin shown or hidden.
+#[cfg(test)]
+pub(crate) fn margin_toggle_rect(app: &App) -> iced::Rectangle {
+    iced::Rectangle {
+        x: sheet_content_right(app.window_width) - MARGIN_TABS_PAD_RIGHT - MARGIN_TOGGLE_W,
+        y: body_top(app) + 1.0 + HEADER_ROW_PAD.top,
+        width: MARGIN_TOGGLE_W,
+        height: HEADER_CONTROL_H,
+    }
 }
 
 /// Left edge of the sheet's content, in window coordinates.
@@ -474,8 +493,42 @@ pub(crate) fn margin_tabs(app: &App) -> Element<'_, Message> {
     };
     iced::widget::Row::with_children(tabs.into_iter().map(tab))
         .spacing(TOOLS_SPACING)
+        .push(space().width(Fill))
+        .push(margin_toggle(app))
         .align_y(iced::Center)
         .into()
+}
+
+/// The margin's own way to be hidden, at its header's right end — and, at
+/// the same place while it is hidden, the way to bring it back: it was
+/// hidden and shown only from the View menu and the palette.
+pub(crate) fn margin_toggle(app: &App) -> Element<'_, Message> {
+    let shown = app.show_right_panel;
+    let said = if shown {
+        tr!("Hide the margin")
+    } else {
+        tr!("Show the margin")
+    };
+    let face = button(
+        container(glyph::icon(
+            Glyph::PanelRight,
+            if shown {
+                theme::fg_muted()
+            } else {
+                theme::fg()
+            },
+            FILE_TOOL_GLYPH,
+        ))
+        .height(Length::Fixed(HEADER_CONTROL_H))
+        .align_y(iced::Center),
+    )
+    .style(theme::icon_button(false))
+    .padding([0.0, FILE_TOOL_PAD_X])
+    .on_press(super::heard::said(
+        said,
+        Message::Window(WindowMsg::ToggleRightPanel),
+    ));
+    super::toolbar::tip_at(face, said, None, tooltip::Position::Bottom)
 }
 
 /// A margin tab's width, and the gap between tabs: a header tool's.
@@ -665,8 +718,19 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             .height(Length::Fixed(SHEET_HEADER_ROW_H))
             .align_y(iced::Top)
             .padding(Padding {
-                right: 16.0,
+                right: MARGIN_TABS_PAD_RIGHT,
                 left: 12.0,
+                ..HEADER_ROW_PAD
+            })
+            .into()
+    } else if super::panes::right_panel_fits(app) {
+        // Hidden, the margin's toggle stays where it was, to bring it back.
+        container(margin_toggle(app))
+            .height(Length::Fixed(SHEET_HEADER_ROW_H))
+            .align_y(iced::Top)
+            .padding(Padding {
+                right: MARGIN_TABS_PAD_RIGHT,
+                left: 0.0,
                 ..HEADER_ROW_PAD
             })
             .into()

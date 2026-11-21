@@ -2343,12 +2343,15 @@ impl App {
             EditorMsg::FontSizeDelta(delta) => {
                 let old = self.line_height();
                 // Never below the smallest text the UI draws anywhere.
-                self.font_size = (self.font_size + delta).clamp(theme::MIN_TEXT_SIZE, 22.0);
+                self.font_size =
+                    (self.font_size + delta).clamp(theme::MIN_TEXT_SIZE, MAX_FONT_SIZE);
+                self.keep_code_size();
                 self.rescale_scroll(old)
             }
             EditorMsg::FontSizeReset => {
                 let old = self.line_height();
                 self.font_size = DEFAULT_FONT_SIZE;
+                self.keep_code_size();
                 self.rescale_scroll(old)
             }
             EditorMsg::KeyPressed(key, modifiers) => self.handle_key(key, modifiers),

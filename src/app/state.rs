@@ -1152,6 +1152,29 @@ pub struct SettingsDraft {
     /// the Language model page says so above its fields — it opened with
     /// no word of why. Cleared as Settings closes.
     pub key_asked: bool,
+    /// What the Keyboard shortcuts page is narrowed to: some sixty rows,
+    /// and no way to find one but to read them all. Cleared as the page
+    /// or Settings closes.
+    pub shortcuts_filter: String,
+    /// The models the Language model page's key can call, as its provider
+    /// lists them, to pick from: the model was a field to type a name into,
+    /// with no way to learn the names but the provider's own pages.
+    pub models: ModelList,
+    /// The number of the last model list asked for.
+    pub model_lists: u64,
+}
+
+/// The models a key can call ([`SettingsDraft::models`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum ModelList {
+    /// Not asked for the fields as they stand.
+    #[default]
+    Unasked,
+    /// Asked: the number of the asking.
+    Listing(u64),
+    Listed(Vec<String>),
+    /// Why not, said.
+    Failed(String),
 }
 
 /// The fields of Settings that are kept as it closes, not as they change —
@@ -1279,6 +1302,9 @@ impl Default for SettingsDraft {
             integrations: Default::default(),
             page: SettingsPage::Appearance,
             key_asked: false,
+            shortcuts_filter: String::new(),
+            models: ModelList::Unasked,
+            model_lists: 0,
         }
     }
 }
@@ -3289,6 +3315,10 @@ pub struct TimeStart {
 }
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+/// The largest the zoom keys and Settings → Appearance set the code's text.
+pub const MAX_FONT_SIZE: f32 = 22.0;
+/// Where the code's text size is kept between launches (`config.toml`).
+pub const CODE_SIZE_KEY: &str = "code_text_size";
 
 /// What is typed into the Settings view's language fields, until used.
 #[derive(Debug, Default, Clone)]

@@ -1564,8 +1564,13 @@ pub(crate) fn margin_w(app: &App) -> f32 {
 /// a Docs page): its notes are of the file under it, and the sheet's
 /// header, whose View menu shows and hides it, is not drawn there either.
 pub(crate) fn right_panel_shown(app: &App) -> bool {
-    app.show_right_panel
-        && !app.proj.split
+    app.show_right_panel && right_panel_fits(app)
+}
+
+/// Whether the margin has a place to be shown, asked for or not: a file
+/// open alone (not split, not covered), in a window wide enough.
+pub(crate) fn right_panel_fits(app: &App) -> bool {
+    !app.proj.split
         && app.window_width >= RIGHT_PANEL_MIN_WINDOW_W
         && app.active_viewer().is_some()
         && super::docs_stats::pane_cover(app).is_none()
@@ -1929,6 +1934,8 @@ fn notes_beside_code<'a>(
         // whatever of the diff was there.
         let replaced = code_replaced(app, v);
         let mut notes: Vec<(f32, f32, Element<'_, Message>)> = Vec::new();
+        // Where the caret's card is kept at the foot, its function below.
+        let mut below: Option<f32> = None;
         // A file with nothing in it has no note to offer: its card offered
         // Explain and Ask of an empty file.
         if matches!(active, Some(Node::File(_))) && !v.source.trim().is_empty() {
@@ -1945,7 +1952,14 @@ fn notes_beside_code<'a>(
             notes.push((
                 0.0,
                 h,
-                active_note(app, name, tr!("file").into(), NoteOf::File, size.width),
+                active_note(
+                    app,
+                    name,
+                    tr!("file").into(),
+                    NoteOf::File,
+                    size.width,
+                    None,
+                ),
             ));
         }
         for (index, (sym, &ordinal)) in v.symbols.iter().zip(&ordinals).enumerate() {
@@ -1962,8 +1976,8 @@ fn notes_beside_code<'a>(
             if replaced && !is_active {
                 continue;
             }
-            // Only what is in view is looked up (the raised card, once its
-            // height is known, below).
+            // Only what is in view is looked up: the raised card is kept on
+            // screen wherever its function is (below).
             if !replaced && !is_active && (y + NOTE_H < 0.0 || y > size.height) {
                 continue;
             }
@@ -1987,9 +2001,23 @@ fn notes_beside_code<'a>(
             } else {
                 (NOTE_H, 0.0)
             };
-            if !replaced && (y + h < 0.0 || y - lift > size.height) {
+            if !replaced && !is_active && (y + h < 0.0 || y - lift > size.height) {
                 continue;
             }
+            // The caret's card stays on screen as the code scrolls: at the
+            // margin's top while its function is above the view, at its foot
+            // while below — with the way back to it. It went away with its
+            // function, and the reader looking on down lost what they were
+            // reading. Away is its line out of sight.
+            let away = if !is_active || replaced {
+                None
+            } else if y < 0.0 {
+                Some(true)
+            } else if y + lh > size.height - foot {
+                Some(false)
+            } else {
+                None
+            };
             // "function, line 15": the kind in words, not "fn" — and a
             // Python class's `def` a method, as a Rust `impl`'s `fn` is.
             let kind = if shown_kind(&v.symbols, index) == "method" {
@@ -2005,12 +2033,13 @@ fn notes_beside_code<'a>(
                     meta,
                     NoteOf::Function { sym, ordinal },
                     size.width,
+                    away.map(|up| (up, sym.line)),
                 )
             } else {
                 let summary = cached
                     .map(|c| crate::app::shown_summary(c).into_owned())
                     .unwrap_or_default();
-                plain_note(sym.name.clone(), meta, summary, sym.line)
+                plain_note(sym.name.clone(), meta, summary, sym.line, size.width)
             };
             let top = if replaced {
                 0.0
@@ -2019,7 +2048,15 @@ fn notes_beside_code<'a>(
             } else {
                 y - lift
             };
+            if away == Some(false) {
+                below = Some(top.max(0.0));
+            }
             notes.push((top.max(0.0), h, note));
+        }
+        // Kept at the foot, the caret's card is not pushed off it by the
+        // notes over it: those it would cover give way.
+        if let Some(card) = below {
+            notes.retain(|(top, h, _)| *top >= card || top + h + NOTE_GAP <= card);
         }
         notes.sort_by(|a, b| a.0.total_cmp(&b.0));
         // Each note level with its function, or just under the one above
@@ -2076,23 +2113,86 @@ fn code_replaced(app: &App, v: &Viewer) -> bool {
 }
 
 /// A note's head: the name it is about (as code, for a function) and what
-/// kind of thing that is, where.
-fn note_head<'a>(name: String, meta: String, code: bool, raised: bool) -> Element<'a, Message> {
+/// kind of thing that is, where — whole, the name cut short with an
+/// ellipsis to leave it room in `room` (the note's inside width): "function,
+/// line 87" ran under the margin's edge behind a long name. `back`, while
+/// the note stands away from its function (the caret's card, kept on screen
+/// as the code scrolls), makes "line 59" the way back there, its arrow
+/// pointing where the function is.
+fn note_head<'a>(
+    name: String,
+    meta: String,
+    code: bool,
+    raised: bool,
+    room: f32,
+    back: Option<(bool, usize)>,
+) -> Element<'a, Message> {
+    let name_font = if code {
+        crate::fonts::CODE_SEMIBOLD
+    } else {
+        crate::fonts::UI_SEMIBOLD
+    };
+    let meta_w = super::steady::width_of(&meta, ts::SMALL, crate::fonts::UI)
+        + if back.is_some() {
+            BACK_ICON + 4.0 + 2.0 * BACK_PAD_X
+        } else {
+            0.0
+        };
+    let shown = super::steady::cut(
+        &name,
+        (room - meta_w - 8.0).max(0.0),
+        NOTE_NAME_SIZE,
+        name_font,
+    );
+    let meta_text = text(meta)
+        .size(ts::SMALL)
+        .line_height(ts::normal_line(ts::SMALL))
+        .color(theme::dim())
+        .wrapping(Wrapping::None);
+    let meta: Element<'a, Message> = match back {
+        Some((up, line)) => {
+            let said = tr!("Go to line {n}", n = line);
+            super::toolbar::tip_at(
+                button(
+                    row![
+                        glyph::icon(
+                            if up {
+                                Glyph::ChevronUp
+                            } else {
+                                Glyph::ChevronDown
+                            },
+                            theme::dim(),
+                            BACK_ICON,
+                        ),
+                        meta_text,
+                    ]
+                    .spacing(4)
+                    .align_y(iced::Center),
+                )
+                .style(theme::icon_button(false))
+                .padding([0.0, BACK_PAD_X])
+                .on_press(super::heard::said(
+                    &said,
+                    Message::Editor(EditorMsg::OutlineJump(line)),
+                )),
+                said,
+                None,
+                tooltip::Position::Top,
+            )
+        }
+        None => meta_text.into(),
+    };
     // Each in its face's own line height, as the design sets the head: the
     // row as tall as the taller, the two on one baseline.
     row![
-        text(name)
+        text(shown)
             .size(NOTE_NAME_SIZE)
             .line_height(if code {
                 ts::normal_line_code(NOTE_NAME_SIZE)
             } else {
                 ts::normal_line(NOTE_NAME_SIZE)
             })
-            .font(if code {
-                crate::fonts::CODE_SEMIBOLD
-            } else {
-                crate::fonts::UI_SEMIBOLD
-            })
+            .font(name_font)
             .color(if raised {
                 theme::fg()
             } else {
@@ -2100,16 +2200,26 @@ fn note_head<'a>(name: String, meta: String, code: bool, raised: bool) -> Elemen
             })
             .wrapping(Wrapping::None),
         space().width(Fill),
-        text(meta)
-            .size(ts::SMALL)
-            .line_height(ts::normal_line(ts::SMALL))
-            .color(theme::dim())
-            .wrapping(Wrapping::None),
+        meta,
     ]
     .spacing(8)
     .align_y(iced::Center)
     .into()
 }
+
+/// The way back's arrow, and the room either side of it and its words.
+const BACK_ICON: f32 = 11.0;
+const BACK_PAD_X: f32 = 4.0;
+
+/// A note's inside width in a margin `width` wide: the margin's own room
+/// either side (4 and 12), and the note's (14 each side).
+fn note_room(width: f32) -> f32 {
+    (width - 44.0).max(0.0)
+}
+
+/// How many lines of its summary a plain note has under its head, in its
+/// [`NOTE_H`].
+const PLAIN_NOTE_LINES: usize = 3;
 
 /// A note's name, over what is said of it.
 const NOTE_NAME_SIZE: f32 = 12.0;
@@ -2121,10 +2231,23 @@ fn plain_note<'a>(
     meta: String,
     summary: String,
     line: usize,
+    width: f32,
 ) -> Element<'a, Message> {
+    let room = note_room(width);
+    // As many whole lines as the note has under its head, the last ending
+    // in an ellipsis where there is more: clipped at the note's foot, it
+    // stopped mid-sentence, the line under it sliced through.
+    let summary = super::steady::cut_lines(
+        &summary,
+        room,
+        PLAIN_NOTE_LINES,
+        super::explain_view::NOTE_SIZE,
+        super::explain_view::NOTE_LINE_HEIGHT,
+        crate::fonts::UI,
+    );
     button(
         column![
-            note_head(name.clone(), meta, true, false),
+            note_head(name.clone(), meta, true, false, room, None),
             text(summary)
                 .size(super::explain_view::NOTE_SIZE)
                 .line_height(super::explain_view::NOTE_LINE_HEIGHT)
@@ -2340,6 +2463,7 @@ fn active_note<'a>(
     meta: String,
     of: NoteOf<'a>,
     width: f32,
+    back: Option<(bool, usize)>,
 ) -> Element<'a, Message> {
     let code = matches!(of, NoteOf::Function { .. });
     // The file's history on its way (its blame being read): the History
@@ -2613,9 +2737,15 @@ fn active_note<'a>(
     let inset = iced::padding::left(NOTE_ACTION_PAD_X);
     container(
         column![
-            container(column![note_head(name, meta, code, true), said].spacing(6))
-                .padding(inset)
-                .height(Fill),
+            container(
+                column![
+                    note_head(name, meta, code, true, note_room(width), back),
+                    said
+                ]
+                .spacing(6),
+            )
+            .padding(inset)
+            .height(Fill),
             column![facts, actions].spacing(2),
         ]
         .spacing(10),

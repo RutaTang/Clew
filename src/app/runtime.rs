@@ -206,8 +206,11 @@ impl App {
             pending_g: false,
             pending_z: false,
             modifiers: keyboard::Modifiers::default(),
-            status: tr!("Open a folder to start reading").to_string(),
-            status_seen: tr!("Open a folder to start reading").to_string(),
+            // Nothing said until there is something to say: with no folder
+            // open, the welcome page offers one, and the Files view says
+            // there is none — the status bar said it a third time.
+            status: String::new(),
+            status_seen: String::new(),
             status_since: None,
             status_lang: crate::i18n::current(),
             waiting_said: None,
@@ -244,7 +247,7 @@ impl App {
             right_width: 272.0,
             bottom_height: 340.0,
             bottom_sized: false,
-            font_size: DEFAULT_FONT_SIZE,
+            font_size: saved_code_size(),
             #[cfg(test)]
             stale_dropped: 0,
             walk_ui: WalkUi::default(),
@@ -1247,7 +1250,35 @@ fn view_pref(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+/// The code's text size as the reader last set it — by the zoom keys or
+/// Settings → Appearance — within what the view draws. It was the default
+/// at every launch, whatever had been chosen.
+fn saved_code_size() -> f32 {
+    if cfg!(test) {
+        return DEFAULT_FONT_SIZE;
+    }
+    clew_core::globalconfig::get(CODE_SIZE_KEY)
+        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+        .map(|size| (size as f32).clamp(theme::MIN_TEXT_SIZE, MAX_FONT_SIZE))
+        .unwrap_or(DEFAULT_FONT_SIZE)
+}
+
 impl App {
+    /// Keep the code's text size for the next launch. Not kept, it still
+    /// holds for this session, and the reader is told.
+    pub(crate) fn keep_code_size(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let saved = clew_core::globalconfig::set_keys(vec![(
+            CODE_SIZE_KEY.to_string(),
+            toml::Value::Float(f64::from(self.font_size)),
+        )]);
+        if let Err(e) = saved {
+            self.status = tr!("Could not save settings: {error}", error = e);
+        }
+    }
+
     /// Keep a View-menu choice for the next launch. Not kept, it still holds
     /// for this session, and the reader is told.
     pub(crate) fn keep_view_pref(&mut self, key: &str, on: bool) {

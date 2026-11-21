@@ -1191,6 +1191,89 @@ fn parse_balance(text: &str) -> Result<Vec<(String, String)>, LlmError> {
     Err(LlmError::Protocol("no balance in the response".into()))
 }
 
+/// The models `cfg`'s key can call, as its provider lists them: newest
+/// first where the provider orders them so (Anthropic), else by name. It
+/// costs no tokens — a plain read of the account's catalogue, for a
+/// settings form to pick from. Of OpenAI's, those that cannot answer a chat
+/// (embeddings, speech, images, moderation) are left out. Blocking.
+pub fn list_models(cfg: &Config) -> Result<Vec<String>, LlmError> {
+    let base = cfg.base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err(LlmError::Config("no base URL set for this provider".into()));
+    }
+    let dialect = cfg.provider.dialect();
+    let url = match dialect {
+        Dialect::Anthropic => format!("{base}/v1/models?limit=1000"),
+        Dialect::OpenAi => format!("{base}/models"),
+    };
+    let (agent, via) = agent_for(&url, BLOCKING_LIMITS)?;
+    let uri = crate::net::request_uri(&url).map_err(LlmError::Config)?;
+    let who = match dialect {
+        Dialect::Anthropic => "Anthropic",
+        Dialect::OpenAi => cfg.provider.label(),
+    };
+    let resp = crate::net::guarded(|| {
+        let request = agent.get(uri.clone()).header("accept", "application/json");
+        let request = match dialect {
+            Dialect::Anthropic => request
+                .header("x-api-key", cfg.api_key.as_str())
+                .header("anthropic-version", API_VERSION),
+            Dialect::OpenAi => request.header("Authorization", format!("Bearer {}", cfg.api_key)),
+        };
+        request.call()
+    })
+    .map_err(|e| LlmError::Connect(crate::net::failure(&e, via.as_ref())))?;
+    let code = resp.status().as_u16();
+    if !resp.status().is_success() {
+        return Err(status_error(who, code, resp));
+    }
+    let text = read_body(resp)?;
+    parse_models(&text, cfg.provider)
+}
+
+/// The model ids of a model-list reply (`{"data": [{"id": …}, …]}`, the
+/// shape Anthropic's and every OpenAI-compatible list take).
+fn parse_models(text: &str, provider: Provider) -> Result<Vec<String>, LlmError> {
+    let json: Value = serde_json::from_str(text)
+        .map_err(|e| LlmError::Protocol(format!("bad JSON response: {e}")))?;
+    let Some(data) = json.get("data").and_then(Value::as_array) else {
+        return Err(LlmError::Protocol("no model list in the response".into()));
+    };
+    let mut ids: Vec<String> = data
+        .iter()
+        .filter_map(|m| m.get("id")?.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .filter(|id| provider != Provider::OpenAI || chats(id))
+        .map(str::to_string)
+        .collect();
+    if provider.dialect() != Dialect::Anthropic {
+        ids.sort();
+    }
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
+    Ok(ids)
+}
+
+/// Whether an OpenAI model answers a chat: its list has embeddings, speech,
+/// transcription, images and moderation models in it too.
+fn chats(id: &str) -> bool {
+    const NOT: [&str; 10] = [
+        "text-embedding",
+        "embedding",
+        "whisper",
+        "tts",
+        "dall-e",
+        "gpt-image",
+        "moderation",
+        "davinci",
+        "babbage",
+        "transcribe",
+    ];
+    let id = id.to_ascii_lowercase();
+    !NOT.iter().any(|n| id.contains(n))
+}
+
 /// Which field carries the output budget. Newer OpenAI models (gpt-5*,
 /// o-series) reject the classic `max_tokens` and require
 /// `max_completion_tokens`; classic chat models and most compatible servers
@@ -2631,6 +2714,33 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A model list read: Anthropic's in its own order (newest first);
+    /// another's by name, without the OpenAI models that cannot chat, and
+    /// once each.
+    #[test]
+    fn a_model_list_is_read_as_the_provider_gives_it() {
+        let anthropic =
+            r#"{"data":[{"id":"claude-b","type":"model"},{"id":"claude-a"}],"has_more":false}"#;
+        assert_eq!(
+            parse_models(anthropic, Provider::Anthropic).unwrap(),
+            ["claude-b", "claude-a"]
+        );
+        let openai = r#"{"object":"list","data":[{"id":"gpt-z"},{"id":"text-embedding-3-small"},
+            {"id":"whisper-1"},{"id":"gpt-4o-mini-tts"},{"id":"gpt-a"},{"id":"gpt-a"},{"id":""}]}"#;
+        assert_eq!(
+            parse_models(openai, Provider::OpenAI).unwrap(),
+            ["gpt-a", "gpt-z"]
+        );
+        // A compatible endpoint's list is all its own: nothing left out.
+        let custom = r#"{"data":[{"id":"my-embedding-chat"},{"id":"another"}]}"#;
+        assert_eq!(
+            parse_models(custom, Provider::Custom).unwrap(),
+            ["another", "my-embedding-chat"]
+        );
+        assert!(parse_models(r#"{"error":"nope"}"#, Provider::DeepSeek).is_err());
+        assert!(parse_models("not json", Provider::DeepSeek).is_err());
+    }
 
     /// English asks nothing more of a model; another language has it write
     /// to the reader in that language, and leave what the program reads

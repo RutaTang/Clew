@@ -837,7 +837,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // scrollbars run, nor drawn over the sheet's shadow at rest, and thin
     // enough to end before the gutter's breakpoint dots. The sidebar's edge
     // follows the divider's middle less half its width: the edge is the
-    // divider's near side.
+    // divider's near side. Lit, it runs down the sheet's straight edge only,
+    // ending where the sheet's corners start to round.
     let grip: Element<'_, Message> = if app.show_left_sidebar {
         let half = crate::resize::EDGE_GRIP / 2.0;
         row![
@@ -846,7 +847,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Message::Window(WindowMsg::ResizeSidebar(v - frame - half))
             })
             .panel(crate::resize::Panel::Before)
-            .thickness(crate::resize::EDGE_GRIP),
+            .thickness(crate::resize::EDGE_GRIP)
+            .inset(theme::SHEET_RADIUS),
         ]
         .height(Fill)
         .into()

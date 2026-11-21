@@ -76,6 +76,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         Message::Settings(SettingsMsg::ModelChanged(v))
     })
     .id(super::settings_model_id());
+    let model = column![model, model_list(app)].spacing(6);
     let base = input(base_hint, &app.settings.base_url, |v| {
         Message::Settings(SettingsMsg::BaseUrlChanged(v))
     })
@@ -210,6 +211,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 form::item(tr!("Mode"), None, mode),
                 form::item(tr!("Light theme"), None, light_pick),
                 form::item(tr!("Dark theme"), None, dark_pick),
+                form::item(tr!("Code text size"), None, code_size(app)),
             ],
         )]),
         SettingsPage::Updates => {
@@ -577,6 +579,100 @@ pub(crate) fn model_field_hints(provider: crate::llm::Provider) -> (&'static str
     }
 }
 
+/// Under the Model field, the models the key can call, to pick from: asked
+/// of the provider on a click — a read of the account, which spends
+/// nothing — then a list whose pick fills the field. A name typed by hand
+/// still goes, for a model the list leaves out.
+fn model_list(app: &App) -> Element<'_, Message> {
+    use crate::app::state::ModelList;
+    let ask = |label: &str, on: bool| {
+        super::toolbar::tip_at(
+            form::action(
+                label,
+                on.then_some(Message::Settings(SettingsMsg::ListModels)),
+            ),
+            tr!("Asks the provider which models your key can use. Costs nothing."),
+            None,
+            iced::widget::tooltip::Position::Top,
+        )
+    };
+    match &app.settings.models {
+        ModelList::Unasked => ask(tr!("Show available models"), true),
+        ModelList::Listing(_) => ask(tr!("Listing models…"), false),
+        ModelList::Listed(models) => {
+            let current = app.settings.model.trim().to_string();
+            let selected = models.iter().find(|m| **m == current).cloned();
+            form::pick_with(
+                tr!("Model"),
+                models.clone(),
+                selected,
+                |m: String| Message::Settings(SettingsMsg::ModelChanged(m)),
+                Some(tr!("Pick a model").to_string()),
+            )
+            .width(Length::Fill)
+            .into()
+        }
+        ModelList::Failed(why) => column![
+            ask(tr!("Show available models"), true),
+            text(why.clone()).size(ts::SMALL).color(theme::danger()),
+        ]
+        .spacing(4)
+        .into(),
+    }
+}
+
+/// The code's text size, a size smaller or larger, and back to as shipped:
+/// the zoom keys' work, here where a reader looks for it — it was in the
+/// keys and the command bar alone. Each step names its keys.
+pub(crate) fn code_size(app: &App) -> Element<'_, Message> {
+    use crate::app::state::{DEFAULT_FONT_SIZE, MAX_FONT_SIZE};
+    use crate::keymap::Action;
+    let size = app.font_size;
+    let step = |glyph: Glyph, action: Action, msg: Option<Message>| {
+        let label = action.label();
+        super::toolbar::tip_at(
+            button(glyph::icon(glyph, theme::fg_muted(), 13.0))
+                .style(theme::secondary_button)
+                .padding([5, 7])
+                .on_press_maybe(msg.map(|m| super::heard::said(label, m))),
+            label,
+            Some(app.keymap.chord(action).caps()),
+            iced::widget::tooltip::Position::Top,
+        )
+    };
+    let smaller = step(
+        Glyph::Minus,
+        Action::ZoomOut,
+        (size > crate::theme::MIN_TEXT_SIZE)
+            .then_some(Message::Editor(EditorMsg::FontSizeDelta(-1.0))),
+    );
+    let larger = step(
+        Glyph::Plus,
+        Action::ZoomIn,
+        (size < MAX_FONT_SIZE).then_some(Message::Editor(EditorMsg::FontSizeDelta(1.0))),
+    );
+    // The size in figures of one width, so a step moves nothing beside it.
+    let now = container(
+        text(format!("{size:.0}"))
+            .size(ts::BASE)
+            .font(crate::fonts::CODE)
+            .color(theme::fg()),
+    )
+    .width(Length::Fixed(28.0))
+    .align_x(iced::Center);
+    let mut row = row![].spacing(4).align_y(iced::Center);
+    // Back to as shipped, before the steps where it comes and goes: the
+    // steps stay put at the row's end.
+    if size != DEFAULT_FONT_SIZE {
+        row = row.push(step(
+            Glyph::Refresh,
+            Action::ZoomReset,
+            Some(Message::Editor(EditorMsg::FontSizeReset)),
+        ));
+    }
+    row.push(smaller).push(now).push(larger).into()
+}
+
 /// `s` begun with a capital, as a line of its own begins.
 fn sentence_start(s: &str) -> String {
     let mut chars = s.chars();
@@ -595,9 +691,12 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     let mut servers = Vec::new();
     for language in &rows {
         let server = match choices.servers.as_ref().and_then(|s| s.get(language)) {
-            // The server program the reader chose: "Your program:" read as
-            // the reader's own code.
-            Some(choice) => tr!("{program} (your choice)", program = program_line(choice)),
+            // The server program set for the project: "(your choice)" said
+            // the reader picked what the setup sheet found on this computer.
+            Some(choice) => tr!(
+                "{program} (set for this project)",
+                program = program_line(choice)
+            ),
             None => app
                 .effective_server(language)
                 .map(|s| match s.command {
@@ -2646,9 +2745,35 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
             .into(),
         None => form::note(tr!("Click a shortcut, then press new keys.")).into(),
     };
+    // Some sixty rows: the ones whose name or keys hold what is typed in
+    // the filter ("fold", "F5"), as every other long list is narrowed.
+    let filter = app.settings.shortcuts_filter.trim().to_lowercase();
+    let wanted = |label: &str, keys: &str| {
+        filter.is_empty()
+            || label.to_lowercase().contains(&filter)
+            || keys.to_lowercase().contains(&filter)
+    };
+    let field = super::sidebar::filter_box(
+        tr!("Find a shortcut"),
+        &app.settings.shortcuts_filter,
+        None,
+        |q| Message::Settings(SettingsMsg::ShortcutsFilter(q)),
+        None,
+        Message::Settings(SettingsMsg::ShortcutsFilterEscaped),
+        None,
+    );
     // Rebindable command rows.
     let mut cmds = Vec::new();
     for action in Action::ALL {
+        let keys = std::iter::once(app.keymap.chord(action))
+            .chain(app.keymap.alias(action))
+            .map(|c| c.caps())
+            .collect::<Vec<_>>()
+            .join(" ");
+        // The one being rebound stays, whatever is typed.
+        if app.rebinding != Some(action) && !wanted(action.label(), &keys) {
+            continue;
+        }
         let binding: Element<'_, Message> = if app.rebinding == Some(action) {
             row![
                 container(
@@ -2753,22 +2878,36 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
         (tr!("Debugger: step over"), "F10"),
         (tr!("Debugger: step into / out"), "F11   ⇧F11"),
     ];
-    let vim = motions
+    let vim: Vec<_> = motions
         .into_iter()
+        .filter(|(label, keys)| wanted(label, &crate::keymap::local_keys(keys)))
         .map(|(label, keys)| slim(label.to_string(), motion_caps(keys)))
         .collect();
 
-    form::page(vec![
-        notice,
-        form::group(tr!("Commands"), None, None, cmds),
-        form::group(
+    let mut parts = vec![column![field, notice].spacing(10).into()];
+    if cmds.is_empty() && vim.is_empty() {
+        parts.push(
+            form::note(tr!(
+                "No shortcut matches “{filter}”",
+                filter = app.settings.shortcuts_filter.trim()
+            ))
+            .into(),
+        );
+    }
+    // A group none of whose rows is wanted goes, title and all.
+    if !cmds.is_empty() {
+        parts.push(form::group(tr!("Commands"), None, None, cmds));
+    }
+    if !vim.is_empty() {
+        parts.push(form::group(
             tr!("Reading motions"),
             Some(tr!("Vim-style keys. These can't be changed.").into()),
             None,
             vim,
-        ),
-        form::note(tr!("Saved to {path}", path = crate::llm::config_hint())).into(),
-    ])
+        ));
+    }
+    parts.push(form::note(tr!("Saved to {path}", path = crate::llm::config_hint())).into());
+    form::page(parts)
 }
 
 /// A reading motion's keys as caps, as every other shortcut's are: each

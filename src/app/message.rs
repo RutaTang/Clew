@@ -2224,6 +2224,10 @@ pub enum SettingsMsg {
     Discard,
     /// Show one of Settings' pages.
     Page(SettingsPage),
+    /// The Keyboard shortcuts page narrowed to what is typed in its filter;
+    /// Escape in the filter.
+    ShortcutsFilter(String),
+    ShortcutsFilterEscaped,
     /// Ask the model the Language model page's fields name for a word, to
     /// see that they reach it.
     TestConnection,
@@ -2233,6 +2237,13 @@ pub enum SettingsMsg {
     /// Settings, at the Language model field a failure is about, the
     /// keyboard in it (a failure's Settings on the status line).
     Fix(crate::app::state::LlmField),
+    /// Ask the provider the Language model page names which models its key
+    /// can call; what asking `number` found.
+    ListModels,
+    ModelsListed {
+        number: u64,
+        result: Result<Vec<String>, String>,
+    },
     /// What Test connection `number` found: the model's name, or why not.
     /// `saved`: of the model as saved ([`SettingsMsg::TestSavedConnection`]),
     /// not the form's fields.
@@ -3339,6 +3350,10 @@ impl SettingsMsg {
             | SettingsMsg::Close
             | SettingsMsg::Discard
             | SettingsMsg::Page(..)
+            | SettingsMsg::ShortcutsFilter(..)
+            | SettingsMsg::ShortcutsFilterEscaped
+            | SettingsMsg::ListModels
+            | SettingsMsg::ModelsListed { .. }
             | SettingsMsg::ProviderPicked(..)
             | SettingsMsg::KeyChanged(..)
             | SettingsMsg::ModelChanged(..)
