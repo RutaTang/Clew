@@ -251,7 +251,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::Read,
             tr!("Reading aids"),
-            tr!("Turn on what helps you read: a summary over each function, the types a name has, a map of the file."),
+            tr!("Turn on what helps you read, such as a summary above each function, the type of each name, or a map of the file."),
             Anchor::ViewMenu,
         )
         .at(PRICING, "def total(", "total"),
@@ -288,7 +288,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::Follow,
             tr!("Types and their kinds"),
-            tr!("The Type Graph shows Discount and the two kinds of it the shop has: MemberDiscount and BulkDiscount."),
+            tr!("The Type Graph shows Discount and the two discounts built on it, MemberDiscount and BulkDiscount."),
             Anchor::Strip(StripTool::TypeMap),
         ),
         TutStep::new(

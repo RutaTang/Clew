@@ -689,7 +689,7 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
 fn stale_finder_row<'a>(selected: bool) -> Element<'a, Message> {
     button(
         container(
-            text(tr!("— no longer in the project —"))
+            text(tr!("(no longer in the project)"))
                 .size(ts::SMALL)
                 .color(theme::dim()),
         )

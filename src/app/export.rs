@@ -35,7 +35,7 @@ pub(crate) fn render(x: &Export<'_>) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "# {}\n\n",
-        tr!("{project} — reading notes", project = md(x.project))
+        tr!("Reading notes for {project}", project = md(x.project))
     ));
     out.push_str(&format!("{}\n\n", tr!("Exported from Clew.")));
 
@@ -448,7 +448,7 @@ mod export_tests {
             glossary: &glossary,
         });
         let expected = "\
-# demo — reading notes
+# Reading notes for demo
 
 Exported from Clew.
 

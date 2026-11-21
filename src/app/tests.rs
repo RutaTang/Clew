@@ -35875,7 +35875,7 @@ fn export_notes_writes_the_markdown_where_picked() {
     let written = std::fs::read_to_string(&path).unwrap();
     let name = root.file_name().unwrap().to_string_lossy().into_owned();
     assert!(
-        written.starts_with(&format!("# {name} — reading notes\n")),
+        written.starts_with(&format!("# Reading notes for {name}\n")),
         "{written}"
     );
     assert!(
