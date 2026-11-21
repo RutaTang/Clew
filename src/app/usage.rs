@@ -58,9 +58,11 @@ impl Entry {
         }
     }
 
-    /// Its cost in US dollars, at the price its model has now.
+    /// Its cost in US dollars: at the reader's own price for its model,
+    /// else at Clew's as it was when the call was made.
     pub(crate) fn cost(&self) -> Option<f64> {
-        price_of(&self.model).map(|p| p.cost(self.input, self.cached, self.written, self.output))
+        price_at(&self.model, self.at)
+            .map(|p| p.cost(self.input, self.cached, self.written, self.output))
     }
 }
 
@@ -188,8 +190,17 @@ impl Price {
     }
 }
 
-/// Clew's own prices, by the model id's start (a dated id is its model's):
-/// the longer start first where one is another's.
+/// Clew's own prices, by model id. A dated snapshot of a model
+/// (`claude-sonnet-4-20250514`, `gpt-4o-2024-08-06`, `-latest`) is priced as
+/// the model; any other id is not priced at all. Matched by its start,
+/// `gpt-5.5` read as `gpt-5`, at a quarter of its input rate: a release this
+/// table does not know is better unpriced, where the reader is asked for its
+/// price, than priced as an older one.
+///
+/// OpenAI's and Google's rows are their pricing pages' standard rates, read
+/// 2026-11-21, for prompts under the long-context threshold (Gemini's
+/// 200k tokens, GPT-5.5's 272k). A cached rate equal to the input rate is a
+/// model with no cache discount.
 const PRICES: &[(&str, Price)] = &[
     // Anthropic: its API reference.
     ("claude-fable-5-2", p(8.0, 0.20, 40.0)),
@@ -202,28 +213,82 @@ const PRICES: &[(&str, Price)] = &[
     ("claude-opus-4-7", p(5.0, 0.50, 25.0)),
     ("claude-opus-4-6", p(5.0, 0.50, 25.0)),
     ("claude-opus-4-5", p(5.0, 0.50, 25.0)),
+    ("claude-opus-4-1", p(15.0, 1.50, 75.0)),
+    ("claude-opus-4-0", p(15.0, 1.50, 75.0)),
     ("claude-opus-4", p(15.0, 1.50, 75.0)),
     ("claude-sonnet-5-5", p(2.0, 0.10, 10.0)),
     ("claude-sonnet-5", p(2.0, 0.20, 10.0)),
+    ("claude-sonnet-4-6", p(3.0, 0.30, 15.0)),
+    ("claude-sonnet-4-5", p(3.0, 0.30, 15.0)),
+    ("claude-sonnet-4-0", p(3.0, 0.30, 15.0)),
     ("claude-sonnet-4", p(3.0, 0.30, 15.0)),
     ("claude-haiku-5-5", p(0.10, 0.01, 0.50)),
     ("claude-haiku-4-5", p(1.0, 0.10, 5.0)),
     ("claude-3-5-haiku", p(0.80, 0.08, 4.0)),
     // OpenAI.
-    ("gpt-4o-mini", p(0.15, 0.075, 0.60)),
-    ("gpt-4o", p(2.50, 1.25, 10.0)),
-    ("gpt-4.1-nano", p(0.10, 0.025, 0.40)),
-    ("gpt-4.1-mini", p(0.40, 0.10, 1.60)),
-    ("gpt-4.1", p(2.0, 0.50, 8.0)),
+    ("gpt-6.2-astra", p(8.0, 0.40, 40.0)),
+    ("gpt-6.2-sol", p(2.0, 0.10, 10.0)),
+    ("gpt-6.1-sol", p(2.0, 0.10, 10.0)),
+    ("gpt-6.1-terra", p(1.0, 0.05, 5.0)),
+    ("gpt-6-astra", p(10.0, 1.0, 50.0)),
+    ("gpt-6-sol", p(2.0, 0.20, 10.0)),
+    ("gpt-6-luna", p(0.10, 0.01, 0.50)),
+    ("gpt-5.6-sol", p(4.0, 0.40, 20.0)),
+    ("gpt-5.6-terra", p(2.0, 0.20, 12.0)),
+    ("gpt-5.6-luna", p(0.20, 0.02, 1.20)),
+    ("gpt-5.5-pro", p(30.0, 30.0, 180.0)),
+    ("gpt-5.5", p(5.0, 0.50, 30.0)),
+    ("gpt-5.4-pro", p(30.0, 30.0, 180.0)),
+    ("gpt-5.4-mini", p(0.75, 0.075, 4.50)),
+    ("gpt-5.4-nano", p(0.20, 0.02, 1.25)),
+    ("gpt-5.4", p(2.50, 0.25, 15.0)),
+    ("gpt-5.2-pro", p(21.0, 21.0, 168.0)),
+    ("gpt-5.2", p(1.75, 0.175, 14.0)),
+    ("gpt-5.1", p(1.25, 0.125, 10.0)),
+    ("gpt-5-pro", p(15.0, 15.0, 120.0)),
     ("gpt-5-nano", p(0.05, 0.005, 0.40)),
     ("gpt-5-mini", p(0.25, 0.025, 2.0)),
     ("gpt-5", p(1.25, 0.125, 10.0)),
+    ("gpt-4.1-nano", p(0.10, 0.025, 0.40)),
+    ("gpt-4.1-mini", p(0.40, 0.10, 1.60)),
+    ("gpt-4.1", p(2.0, 0.50, 8.0)),
+    ("gpt-4o-mini", p(0.15, 0.075, 0.60)),
+    ("gpt-4o", p(2.50, 1.25, 10.0)),
+    // Google: the Gemini API's paid tier, for text.
+    ("gemini-4-carbon", p(2.0, 0.10, 10.0)),
+    ("gemini-4-argon", p(2.0, 0.10, 10.0)),
+    ("gemini-4-neon", p(3.0, 0.15, 15.0)),
+    ("gemini-4-hydrogen", p(1.50, 0.075, 7.50)),
+    ("gemini-3.8-flash", p(0.75, 0.075, 3.75)),
+    ("gemini-3.6-flash", p(0.75, 0.075, 3.75)),
+    ("gemini-3.5-flash-lite", p(0.30, 0.03, 2.50)),
+    ("gemini-3.1-pro-preview", p(2.0, 0.20, 12.0)),
+    ("gemini-3.1-flash-lite", p(0.25, 0.025, 1.50)),
+    ("gemini-3-flash-preview", p(0.50, 0.05, 3.0)),
+    ("gemini-2.5-pro", p(1.25, 0.125, 10.0)),
+    ("gemini-2.5-flash-lite", p(0.10, 0.01, 0.40)),
+    ("gemini-2.5-flash", p(0.30, 0.03, 2.50)),
     // DeepSeek, at its daytime (peak) rates.
     ("deepseek-v4-pro", p(1.32, 0.044, 3.96)),
     ("deepseek-v4-flash", p(0.30, 0.006, 1.20)),
     ("deepseek-flash", p(0.30, 0.006, 1.20)),
     ("deepseek-chat", p(0.28, 0.028, 0.42)),
     ("deepseek-reasoner", p(0.28, 0.028, 0.42)),
+];
+
+/// Prices a provider has announced will change: from the start of the day
+/// given (UTC), the model's price in [`PRICES`] is this one. A call is
+/// priced as of when it was made, so a change does not reprice the calls
+/// before it.
+const CHANGES: &[(&str, u64, Price)] = &[
+    ("gemini-4-carbon", utc_day(2026, 12, 1), p(4.0, 0.20, 20.0)),
+    ("gemini-4-argon", utc_day(2026, 12, 1), p(4.0, 0.20, 20.0)),
+    ("gemini-3.8-flash", utc_day(2027, 1, 1), p(1.50, 0.15, 7.50)),
+    ("gemini-3.6-flash", utc_day(2027, 1, 1), p(1.50, 0.15, 7.50)),
+    // Retired: from December 1, 2026 its calls go to, and are billed as,
+    // Gemini 3.8 Flash.
+    ("gemini-2.5-pro", utc_day(2026, 12, 1), p(0.75, 0.075, 3.75)),
+    ("gemini-2.5-pro", utc_day(2027, 1, 1), p(1.50, 0.15, 7.50)),
 ];
 
 const fn p(input: f64, cached: f64, output: f64) -> Price {
@@ -234,19 +299,69 @@ const fn p(input: f64, cached: f64, output: f64) -> Price {
     }
 }
 
-/// Clew's own price for `model`, if it knows one.
-pub(crate) fn builtin_price(model: &str) -> Option<Price> {
+/// The start of a day (UTC), in seconds since the Unix epoch (Howard
+/// Hinnant's `days_from_civil`).
+const fn utc_day(year: i64, month: i64, day: i64) -> u64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    ((era * 146_097 + doe - 719_468) * 86_400) as u64
+}
+
+/// `model` as [`PRICES`] names it, in lower case: without the maker
+/// OpenRouter puts first or the variant it puts last, its version's dots as
+/// dashes (`anthropic/claude-opus-4.5:beta` is `claude-opus-4-5`).
+fn table_id(model: &str) -> String {
     let model = model.trim().to_ascii_lowercase();
-    // OpenRouter's ids name their maker first, write a version with dots,
-    // and may carry a variant: `anthropic/claude-opus-4.5:beta`. Dotted, it
-    // was priced as `claude-opus-4`, three times over, and `claude-haiku-4.5`
-    // not at all.
     let model = model.rsplit('/').next().unwrap_or(&model);
-    let model = model.split(':').next().unwrap_or(model).replace('.', "-");
-    PRICES
+    model.split(':').next().unwrap_or(model).replace('.', "-")
+}
+
+/// Whether `id` names the model `name` (both as [`table_id`] gives them):
+/// the model itself, or a dated snapshot of it (`-20250514`,
+/// `-2024-08-06`, `-latest`). `gpt-5-5` is not `gpt-5`, nor `claude-opus-4-1`
+/// `claude-opus-4`.
+fn names(id: &str, name: &str) -> bool {
+    let Some(rest) = id.strip_prefix(name) else {
+        return false;
+    };
+    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    match rest.strip_prefix('-') {
+        None => rest.is_empty(),
+        Some("latest") => true,
+        Some(date) => {
+            digits(date, 8)
+                || matches!(
+                    date.split('-').collect::<Vec<_>>()[..],
+                    [y, m, d] if digits(y, 4) && digits(m, 2) && digits(d, 2)
+                )
+        }
+    }
+}
+
+/// Clew's own price for `model` now, if it knows one.
+pub(crate) fn builtin_price(model: &str) -> Option<Price> {
+    builtin_price_at(model, now_secs())
+}
+
+/// Clew's own price for `model` at the moment `at` (seconds since the Unix
+/// epoch), if it knows one: [`PRICES`]' row, or the last of the [`CHANGES`]
+/// to it that had begun by then.
+pub(crate) fn builtin_price_at(model: &str, at: u64) -> Option<Price> {
+    let id = table_id(model);
+    let (name, price) = PRICES
         .iter()
-        .find(|(start, _)| model.starts_with(&start.replace('.', "-")))
-        .map(|(_, price)| *price)
+        .find(|(name, _)| names(&id, &name.replace('.', "-")))?;
+    Some(
+        CHANGES
+            .iter()
+            .filter(|(changed, from, _)| changed == name && *from <= at)
+            .max_by_key(|(_, from, _)| *from)
+            .map_or(*price, |(_, _, later)| *later),
+    )
 }
 
 /// The reader's own prices, `config.toml`'s `[prices]`, as last read: read
@@ -274,9 +389,15 @@ pub(crate) fn own_price(model: &str) -> Option<Price> {
     })
 }
 
-/// The price `model`'s calls are read at: the reader's, else Clew's.
+/// `model`'s price now: the reader's, else Clew's.
 pub(crate) fn price_of(model: &str) -> Option<Price> {
-    own_price(model).or_else(|| builtin_price(model))
+    price_at(model, now_secs())
+}
+
+/// `model`'s price at the moment `at`: the reader's own, which holds for
+/// every call, else Clew's as it was then.
+pub(crate) fn price_at(model: &str, at: u64) -> Option<Price> {
+    own_price(model).or_else(|| builtin_price_at(model, at))
 }
 
 /// Keep `price` as the reader's for `model` (`None`: back to Clew's).
@@ -437,12 +558,13 @@ fn summarize_in(entries: &[Entry], now: u64, local: impl Fn(u64) -> u64) -> Summ
         ..Summary::default()
     };
     let mut by: HashMap<&str, Totals> = HashMap::new();
-    // Each model's price looked up once.
-    let mut prices: HashMap<&str, Option<Price>> = HashMap::new();
+    // Each model's price looked up once a day (UTC), the day a price
+    // change starts.
+    let mut prices: HashMap<(&str, u64), Option<Price>> = HashMap::new();
     for e in entries {
         let price = *prices
-            .entry(e.model.as_str())
-            .or_insert_with(|| price_of(&e.model));
+            .entry((e.model.as_str(), e.at / 86_400))
+            .or_insert_with(|| price_at(&e.model, e.at));
         let d = day(e.at);
         if d == today {
             s.today.add(e, price);
@@ -1110,6 +1232,34 @@ mod tests {
         );
         assert_eq!(builtin_price("openai/gpt-4.1-mini").unwrap().input, 0.4);
         assert_eq!(builtin_price("gpt-4.1").unwrap().input, 2.0);
+        // A newer release is its own price, not its family's: `gpt-5.5`
+        // was read as `gpt-5`, at a quarter of its input rate.
+        let gpt55 = builtin_price("gpt-5.5").unwrap();
+        assert_eq!((gpt55.input, gpt55.cached, gpt55.output), (5.0, 0.5, 30.0));
+        assert_eq!(builtin_price("openai/gpt-5.4").unwrap().output, 15.0);
+        assert_eq!(builtin_price("gpt-5.2").unwrap().output, 14.0);
+        assert_eq!(builtin_price("gpt-5.5-pro").unwrap().input, 30.0);
+        assert_eq!(builtin_price("gpt-5").unwrap().input, 1.25);
+        assert_eq!(builtin_price("gpt-5-2025-08-07").unwrap().input, 1.25);
+        assert_eq!(
+            builtin_price("claude-sonnet-4-20250514").unwrap().input,
+            3.0
+        );
+        assert_eq!(
+            builtin_price("claude-opus-4-1-20250805").unwrap().input,
+            15.0
+        );
+        assert_eq!(builtin_price("claude-3-5-haiku-latest").unwrap().input, 0.8);
+        // One the table does not know is unpriced, not an older one's.
+        assert!(builtin_price("gpt-5.9").is_none());
+        assert!(builtin_price("gpt-4o-audio-preview").is_none());
+        assert!(builtin_price("claude-opus-4-9").is_none());
+        // Gemini, by its own id or the API's `models/` one.
+        assert_eq!(
+            builtin_price("models/gemini-2.5-flash").unwrap().output,
+            2.5
+        );
+        assert_eq!(builtin_price("gemini-2.5-flash-lite").unwrap().input, 0.1);
         // Cached tokens bill at the cache's rate; never more than the prompt.
         let price = Price {
             input: 1.0,
@@ -1118,6 +1268,51 @@ mod tests {
         };
         assert!((price.cost(1_000_000, 500_000, 0, 100_000) - 1.05).abs() < 1e-9);
         assert!((price.cost(10, 99, 0, 0) - 10.0 * 0.1 / 1e6).abs() < 1e-12);
+    }
+
+    /// A price a provider has announced changes on its day, and a call is
+    /// priced as of when it was made.
+    #[test]
+    fn a_price_changes_on_its_day() {
+        let before = utc_day(2026, 12, 1) - 1;
+        let after = utc_day(2026, 12, 1);
+        assert_eq!(after, 1_796_083_200, "2026-12-01 00:00 UTC");
+        assert_eq!(
+            builtin_price_at("gemini-4-carbon", before).unwrap().input,
+            2.0
+        );
+        assert_eq!(
+            builtin_price_at("gemini-4-carbon", after).unwrap().input,
+            4.0
+        );
+        // Gemini 2.5 Pro, retired, bills as Gemini 3.8 Flash, whose own
+        // price rises a month later.
+        let pro = |at| builtin_price_at("gemini-2.5-pro", at).unwrap().output;
+        assert_eq!(pro(before), 10.0);
+        assert_eq!(pro(after), 3.75);
+        assert_eq!(pro(utc_day(2027, 1, 1)), 7.5);
+        assert_eq!(
+            builtin_price_at("gemini-3.8-flash", utc_day(2027, 1, 1))
+                .unwrap()
+                .input,
+            1.5
+        );
+        // A call before the change keeps the price it was made at.
+        let call = |at| Entry {
+            at,
+            purpose: EXPLAIN.to_string(),
+            model: "gemini-4-carbon".to_string(),
+            input: 1_000_000,
+            cached: 0,
+            written: 0,
+            output: 0,
+        };
+        assert_eq!(call(before).cost(), Some(2.0));
+        assert_eq!(call(after).cost(), Some(4.0));
+        // Every change is to a model the table prices.
+        for (name, _, _) in CHANGES {
+            assert!(PRICES.iter().any(|(n, _)| n == name), "{name}");
+        }
     }
 
     /// Today, this month and the chart count what fell in them; the month's
