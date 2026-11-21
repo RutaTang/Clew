@@ -6,9 +6,11 @@
 //! an `Event::Usage`, on this machine straight to the ledger. The ledger is
 //! one JSON line a call in the data directory (`usage.jsonl`), the reader's
 //! own: it is never sent anywhere. Money is worked out as it is shown, from
-//! the price table ([`price_of`]) — Clew's own for the models it knows, the
-//! reader's where they set one — so a price corrected later corrects the
-//! history too.
+//! the price table ([`price_of`]) — Clew's price list for the models it
+//! knows (`prices`, refreshed from Clew's repository), the reader's where
+//! they set one — so a price corrected later corrects the history too. A
+//! price change a provider announced applies from its day: the calls made
+//! before it keep the price they were made at.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -190,178 +192,15 @@ impl Price {
     }
 }
 
-/// Clew's own prices, by model id. A dated snapshot of a model
-/// (`claude-sonnet-4-20250514`, `gpt-4o-2024-08-06`, `-latest`) is priced as
-/// the model; any other id is not priced at all. Matched by its start,
-/// `gpt-5.5` read as `gpt-5`, at a quarter of its input rate: a release this
-/// table does not know is better unpriced, where the reader is asked for its
-/// price, than priced as an older one.
-///
-/// OpenAI's and Google's rows are their pricing pages' standard rates, read
-/// 2026-11-21, for prompts under the long-context threshold (Gemini's
-/// 200k tokens, GPT-5.5's 272k). A cached rate equal to the input rate is a
-/// model with no cache discount.
-const PRICES: &[(&str, Price)] = &[
-    // Anthropic: its API reference.
-    ("claude-fable-5-2", p(8.0, 0.20, 40.0)),
-    ("claude-mythos-5-2", p(8.0, 0.20, 40.0)),
-    ("claude-fable-5", p(10.0, 1.0, 50.0)),
-    ("claude-mythos-5", p(10.0, 1.0, 50.0)),
-    ("claude-opus-5-5", p(4.0, 0.20, 20.0)),
-    ("claude-opus-5", p(5.0, 0.50, 25.0)),
-    ("claude-opus-4-8", p(5.0, 0.50, 25.0)),
-    ("claude-opus-4-7", p(5.0, 0.50, 25.0)),
-    ("claude-opus-4-6", p(5.0, 0.50, 25.0)),
-    ("claude-opus-4-5", p(5.0, 0.50, 25.0)),
-    ("claude-opus-4-1", p(15.0, 1.50, 75.0)),
-    ("claude-opus-4-0", p(15.0, 1.50, 75.0)),
-    ("claude-opus-4", p(15.0, 1.50, 75.0)),
-    ("claude-sonnet-5-5", p(2.0, 0.10, 10.0)),
-    ("claude-sonnet-5", p(2.0, 0.20, 10.0)),
-    ("claude-sonnet-4-6", p(3.0, 0.30, 15.0)),
-    ("claude-sonnet-4-5", p(3.0, 0.30, 15.0)),
-    ("claude-sonnet-4-0", p(3.0, 0.30, 15.0)),
-    ("claude-sonnet-4", p(3.0, 0.30, 15.0)),
-    ("claude-haiku-5-5", p(0.10, 0.01, 0.50)),
-    ("claude-haiku-4-5", p(1.0, 0.10, 5.0)),
-    ("claude-3-5-haiku", p(0.80, 0.08, 4.0)),
-    // OpenAI.
-    ("gpt-6.2-astra", p(8.0, 0.40, 40.0)),
-    ("gpt-6.2-sol", p(2.0, 0.10, 10.0)),
-    ("gpt-6.1-sol", p(2.0, 0.10, 10.0)),
-    ("gpt-6.1-terra", p(1.0, 0.05, 5.0)),
-    ("gpt-6-astra", p(10.0, 1.0, 50.0)),
-    ("gpt-6-sol", p(2.0, 0.20, 10.0)),
-    ("gpt-6-luna", p(0.10, 0.01, 0.50)),
-    ("gpt-5.6-sol", p(4.0, 0.40, 20.0)),
-    ("gpt-5.6-terra", p(2.0, 0.20, 12.0)),
-    ("gpt-5.6-luna", p(0.20, 0.02, 1.20)),
-    ("gpt-5.5-pro", p(30.0, 30.0, 180.0)),
-    ("gpt-5.5", p(5.0, 0.50, 30.0)),
-    ("gpt-5.4-pro", p(30.0, 30.0, 180.0)),
-    ("gpt-5.4-mini", p(0.75, 0.075, 4.50)),
-    ("gpt-5.4-nano", p(0.20, 0.02, 1.25)),
-    ("gpt-5.4", p(2.50, 0.25, 15.0)),
-    ("gpt-5.2-pro", p(21.0, 21.0, 168.0)),
-    ("gpt-5.2", p(1.75, 0.175, 14.0)),
-    ("gpt-5.1", p(1.25, 0.125, 10.0)),
-    ("gpt-5-pro", p(15.0, 15.0, 120.0)),
-    ("gpt-5-nano", p(0.05, 0.005, 0.40)),
-    ("gpt-5-mini", p(0.25, 0.025, 2.0)),
-    ("gpt-5", p(1.25, 0.125, 10.0)),
-    ("gpt-4.1-nano", p(0.10, 0.025, 0.40)),
-    ("gpt-4.1-mini", p(0.40, 0.10, 1.60)),
-    ("gpt-4.1", p(2.0, 0.50, 8.0)),
-    ("gpt-4o-mini", p(0.15, 0.075, 0.60)),
-    ("gpt-4o", p(2.50, 1.25, 10.0)),
-    // Google: the Gemini API's paid tier, for text.
-    ("gemini-4-carbon", p(2.0, 0.10, 10.0)),
-    ("gemini-4-argon", p(2.0, 0.10, 10.0)),
-    ("gemini-4-neon", p(3.0, 0.15, 15.0)),
-    ("gemini-4-hydrogen", p(1.50, 0.075, 7.50)),
-    ("gemini-3.8-flash", p(0.75, 0.075, 3.75)),
-    ("gemini-3.6-flash", p(0.75, 0.075, 3.75)),
-    ("gemini-3.5-flash-lite", p(0.30, 0.03, 2.50)),
-    ("gemini-3.1-pro-preview", p(2.0, 0.20, 12.0)),
-    ("gemini-3.1-flash-lite", p(0.25, 0.025, 1.50)),
-    ("gemini-3-flash-preview", p(0.50, 0.05, 3.0)),
-    ("gemini-2.5-pro", p(1.25, 0.125, 10.0)),
-    ("gemini-2.5-flash-lite", p(0.10, 0.01, 0.40)),
-    ("gemini-2.5-flash", p(0.30, 0.03, 2.50)),
-    // DeepSeek, at its daytime (peak) rates.
-    ("deepseek-v4-pro", p(1.32, 0.044, 3.96)),
-    ("deepseek-v4-flash", p(0.30, 0.006, 1.20)),
-    ("deepseek-flash", p(0.30, 0.006, 1.20)),
-    ("deepseek-chat", p(0.28, 0.028, 0.42)),
-    ("deepseek-reasoner", p(0.28, 0.028, 0.42)),
-];
-
-/// Prices a provider has announced will change: from the start of the day
-/// given (UTC), the model's price in [`PRICES`] is this one. A call is
-/// priced as of when it was made, so a change does not reprice the calls
-/// before it.
-const CHANGES: &[(&str, u64, Price)] = &[
-    ("gemini-4-carbon", utc_day(2026, 12, 1), p(4.0, 0.20, 20.0)),
-    ("gemini-4-argon", utc_day(2026, 12, 1), p(4.0, 0.20, 20.0)),
-    ("gemini-3.8-flash", utc_day(2027, 1, 1), p(1.50, 0.15, 7.50)),
-    ("gemini-3.6-flash", utc_day(2027, 1, 1), p(1.50, 0.15, 7.50)),
-    // Retired: from December 1, 2026 its calls go to, and are billed as,
-    // Gemini 3.8 Flash.
-    ("gemini-2.5-pro", utc_day(2026, 12, 1), p(0.75, 0.075, 3.75)),
-    ("gemini-2.5-pro", utc_day(2027, 1, 1), p(1.50, 0.15, 7.50)),
-];
-
-const fn p(input: f64, cached: f64, output: f64) -> Price {
-    Price {
-        input,
-        cached,
-        output,
-    }
-}
-
-/// The start of a day (UTC), in seconds since the Unix epoch (Howard
-/// Hinnant's `days_from_civil`).
-const fn utc_day(year: i64, month: i64, day: i64) -> u64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    ((era * 146_097 + doe - 719_468) * 86_400) as u64
-}
-
-/// `model` as [`PRICES`] names it, in lower case: without the maker
-/// OpenRouter puts first or the variant it puts last, its version's dots as
-/// dashes (`anthropic/claude-opus-4.5:beta` is `claude-opus-4-5`).
-fn table_id(model: &str) -> String {
-    let model = model.trim().to_ascii_lowercase();
-    let model = model.rsplit('/').next().unwrap_or(&model);
-    model.split(':').next().unwrap_or(model).replace('.', "-")
-}
-
-/// Whether `id` names the model `name` (both as [`table_id`] gives them):
-/// the model itself, or a dated snapshot of it (`-20250514`,
-/// `-2024-08-06`, `-latest`). `gpt-5-5` is not `gpt-5`, nor `claude-opus-4-1`
-/// `claude-opus-4`.
-fn names(id: &str, name: &str) -> bool {
-    let Some(rest) = id.strip_prefix(name) else {
-        return false;
-    };
-    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
-    match rest.strip_prefix('-') {
-        None => rest.is_empty(),
-        Some("latest") => true,
-        Some(date) => {
-            digits(date, 8)
-                || matches!(
-                    date.split('-').collect::<Vec<_>>()[..],
-                    [y, m, d] if digits(y, 4) && digits(m, 2) && digits(d, 2)
-                )
-        }
-    }
-}
-
 /// Clew's own price for `model` now, if it knows one.
 pub(crate) fn builtin_price(model: &str) -> Option<Price> {
     builtin_price_at(model, now_secs())
 }
 
 /// Clew's own price for `model` at the moment `at` (seconds since the Unix
-/// epoch), if it knows one: [`PRICES`]' row, or the last of the [`CHANGES`]
-/// to it that had begun by then.
+/// epoch), if its price list names the model (see `prices`).
 pub(crate) fn builtin_price_at(model: &str, at: u64) -> Option<Price> {
-    let id = table_id(model);
-    let (name, price) = PRICES
-        .iter()
-        .find(|(name, _)| names(&id, &name.replace('.', "-")))?;
-    Some(
-        CHANGES
-            .iter()
-            .filter(|(changed, from, _)| changed == name && *from <= at)
-            .max_by_key(|(_, from, _)| *from)
-            .map_or(*price, |(_, _, later)| *later),
-    )
+    crate::app::prices::list().price_at(model, at)
 }
 
 /// The reader's own prices, `config.toml`'s `[prices]`, as last read: read
@@ -970,6 +809,9 @@ impl App {
                 Task::none()
             }
             UsageMsg::Written(None) => Task::none(),
+            // A newer list prices from now on; the view reads it as it draws.
+            // A fetch that failed changes nothing: the list in use stays.
+            UsageMsg::PricesFetched(_) => Task::none(),
             UsageMsg::RefreshBalance => self.read_balance(),
             UsageMsg::BalanceRead(Ok(Some(amounts))) => {
                 self.usage.balance = Balance::Read(amounts, now_secs());
@@ -1274,6 +1116,7 @@ mod tests {
     /// priced as of when it was made.
     #[test]
     fn a_price_changes_on_its_day() {
+        use crate::app::prices::utc_day;
         let before = utc_day(2026, 12, 1) - 1;
         let after = utc_day(2026, 12, 1);
         assert_eq!(after, 1_796_083_200, "2026-12-01 00:00 UTC");
@@ -1309,10 +1152,6 @@ mod tests {
         };
         assert_eq!(call(before).cost(), Some(2.0));
         assert_eq!(call(after).cost(), Some(4.0));
-        // Every change is to a model the table prices.
-        for (name, _, _) in CHANGES {
-            assert!(PRICES.iter().any(|(n, _)| n == name), "{name}");
-        }
     }
 
     /// Today, this month and the chart count what fell in them; the month's

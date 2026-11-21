@@ -24,8 +24,11 @@ impl App {
             Some(reason) => Task::done(Message::Updater(UpdaterMsg::Installed(Err(reason)))),
             None => Task::none(),
         };
+        // The price list a fetch kept on an earlier day, if newer than the
+        // one built in: a local file, read before anything is priced.
+        crate::app::prices::load_kept();
         let check = match updater::auto_check_preference() {
-            Some(true) => updater::check_task(false),
+            Some(true) => Task::batch([updater::check_task(false), fetch_prices(false)]),
             Some(false) => Task::none(),
             None => {
                 // Asked once the window has settled (`ask_update_consent`).
@@ -61,7 +64,7 @@ impl App {
         }
         self.update.checking = true;
         self.status = tr!("Checking for updates…").into();
-        updater::check_task(true)
+        Task::batch([updater::check_task(true), fetch_prices(true)])
     }
 
     /// A version check finished.
@@ -425,6 +428,24 @@ impl App {
             UpdaterMsg::SetAuto(enabled) => self.on_set_auto_update(enabled),
         }
     }
+}
+
+/// Fetch Clew's price list from its repository, off the UI thread: when
+/// `now` (a check the reader asked for), or else once a day at most.
+/// Asked only where an update check is: with the reader's consent, from the
+/// same host.
+fn fetch_prices(now: bool) -> Task<Message> {
+    if !now && !crate::app::prices::refresh_due() {
+        return Task::none();
+    }
+    Task::perform(
+        async {
+            tokio::task::spawn_blocking(crate::app::prices::fetch)
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+        },
+        |fetched| Message::Usage(UsageMsg::PricesFetched(fetched)),
+    )
 }
 
 #[cfg(test)]

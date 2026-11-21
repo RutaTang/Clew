@@ -491,7 +491,17 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
         let about = match (own, app.usage.price_saved) {
             (true, true) => tr!("Your prices are saved. {prices}", prices = said.as_str()),
             (true, false) => tr!("Your prices. {prices}", prices = said.as_str()),
-            (false, _) => said,
+            // How current Clew's list is, so a price a reader doubts can be
+            // judged by its age. Noon UTC: the same calendar day for nearly
+            // every reader's clock.
+            (false, _) => {
+                let checked = crate::app::prices::list().checked as i64 + 12 * 3600;
+                let date = super::panes::short_date(checked, usage::now_secs() as i64);
+                crate::i18n::sentences(
+                    &said,
+                    &tr!("Clew's price list was checked on {date}.", date = date),
+                )
+            }
         };
         let mut buttons = row![].spacing(8).align_y(iced::Center);
         if own && defaults {

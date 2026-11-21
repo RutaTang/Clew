@@ -218,7 +218,10 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             let mut rows = vec![
                 form::toggle(
                     tr!("Check for updates automatically"),
-                    None,
+                    Some(
+                        tr!("Each time Clew starts, it asks GitHub for a newer release and its latest model prices. Nothing about your projects is sent.")
+                            .to_string(),
+                    ),
                     app.update.auto_check,
                     |v| Message::Updater(UpdaterMsg::SetAuto(v)),
                 ),

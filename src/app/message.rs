@@ -2286,6 +2286,9 @@ pub enum UsageMsg {
     KeepFresh(bool),
     /// Whether Ask's questions to try are written by the model.
     SuggestQuestions(bool),
+    /// Clew's price list was fetched from its repository: whether a newer
+    /// one is now in use — or why it could not be fetched.
+    PricesFetched(Result<bool, String>),
 }
 
 /// Auto-update: checking, downloading and installing a release.
@@ -3378,7 +3381,8 @@ impl UsageMsg {
             | UsageMsg::EditPrices(..)
             | UsageMsg::PriceSaved(..)
             | UsageMsg::KeepFresh(..)
-            | UsageMsg::SuggestQuestions(..) => None,
+            | UsageMsg::SuggestQuestions(..)
+            | UsageMsg::PricesFetched(..) => None,
         }
     }
 }

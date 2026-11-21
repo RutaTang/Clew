@@ -126,6 +126,7 @@ pub(crate) use walkthrough::DIFF_SCOPE_PENDING;
 #[cfg(test)]
 pub(crate) use explain::UNCHECKED_MARK;
 
+pub(crate) mod prices;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod turn;

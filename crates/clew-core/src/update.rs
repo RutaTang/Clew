@@ -25,8 +25,9 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-/// GitHub API base for the repo that hosts clew releases.
-fn api_base() -> String {
+/// GitHub API base for the repo that hosts clew releases (and the files
+/// clew fetches from it, such as its price list).
+pub fn api_base() -> String {
     std::env::var("CLEW_UPDATE_API")
         .unwrap_or_else(|_| "https://api.github.com/repos/RutaTang/Clew".to_string())
 }
