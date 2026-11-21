@@ -495,7 +495,7 @@ fn notation(files: &[File], decls: &[&Decl], index: &HashMap<&str, usize>) -> Op
     let mut map = MapBuilder::new(
         "lean.notation",
         "Notation and simp",
-        "each notation and the definition it stands for; each simp lemma and the notation or definition its left-hand side rewrites",
+        "each notation and the definition it stands for, and each simp lemma and the notation or definition its left-hand side rewrites",
     );
     // Notations, by symbol: the node and the definition behind it.
     let mut symbols: Vec<(String, Option<usize>)> = Vec::new();

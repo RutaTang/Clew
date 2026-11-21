@@ -185,7 +185,7 @@ fn branch_item(app: &App) -> Option<Element<'_, Message>> {
             tr!("On branch {branch}", branch = name.as_str())
         }
         clew_protocol::HeadName::Detached(sha) => tr!(
-            "Not on a branch: at commit {commit}",
+            "Not on a branch (at commit {commit})",
             commit = super::panes::short_sha(sha)
         ),
     };
@@ -997,10 +997,10 @@ fn session_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
     let paused = session.status == crate::DebugStatus::Stopped;
     let said = match (app.debug.no_debug, paused, file) {
         (true, _, Some(file)) => tr!("Running {file}", file = file),
-        (false, true, Some(file)) => tr!("Debugging {file} — paused", file = file),
+        (false, true, Some(file)) => tr!("Debugging {file} (paused)", file = file),
         (false, false, Some(file)) => tr!("Debugging {file}", file = file),
         (true, _, None) => tr!("Running").to_string(),
-        (false, true, None) => tr!("Debugging — paused").to_string(),
+        (false, true, None) => tr!("Debugging (paused)").to_string(),
         (false, false, None) => tr!("Debugging").to_string(),
     };
     let width = super::steady::width_of(&said, ts::SMALL, crate::fonts::UI) + CHIP_EXTRA_W;
@@ -1334,7 +1334,7 @@ fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
                 tr!("Stop explaining"),
                 Message::Explain(ExplainMsg::Cancel),
             )),
-        tr!("Stop explaining (what is explained so far is kept)"),
+        tr!("Stop explaining and keep the explanations so far"),
         None,
         tooltip::Position::Top,
     ));

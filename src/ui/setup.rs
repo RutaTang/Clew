@@ -52,10 +52,10 @@ pub(crate) fn servers_row(
 const LOOKING: &str = tr_noop!("Ready once the project is checked");
 /// Why Apply or Explain has nothing to do: said under it, and to what is
 /// said for it.
-const NOTHING_SET_UP: &str = tr_noop!("Nothing to apply: the language servers are already set up.");
+const NOTHING_SET_UP: &str = tr_noop!("The language servers are already set up.");
 const NOTHING_TO_EXPLAIN: &str = tr_noop!("Nothing is left to explain.");
 const NO_CODE: &str = tr_noop!("There is no code here to explain.");
-const TICK_SOMETHING: &str = tr_noop!("Nothing to apply: tick what to set up.");
+const TICK_SOMETHING: &str = tr_noop!("Tick what you want to set up.");
 
 /// The sheet for `root`: `setup` as it stands (a first open's before its
 /// look at the project is in may not have one yet). `asked` holds back a
@@ -168,7 +168,7 @@ pub(crate) fn setup_sheet<'a>(
                 // What of it git sees: its bookmarks and notes showed up
                 // among the reader's uncommitted changes with no word why.
                 text(tr!(
-                    "Its bookmarks, notes and project settings can be committed with the project; your own reading state stays out of git."
+                    "Its bookmarks, notes and project settings can be committed with the project. Your own reading state stays out of git."
                 ))
                 .size(ts::SMALL)
                 .color(theme::dim())
@@ -344,7 +344,7 @@ pub(crate) fn setup_sheet<'a>(
                     if e.cost.is_none() {
                         notes = notes.push(
                             text(tr!(
-                                "Clew doesn't know this model's prices: enter them under Usage and cost to see what it costs."
+                                "Clew doesn't know this model's prices. Enter them under Usage and cost to see what this costs."
                             ))
                             .size(ts::SMALL)
                             .color(theme::dim())
@@ -522,7 +522,7 @@ pub(crate) fn setup_sheet<'a>(
         // with no word why.
         super::toolbar::tip_at(
             accept_button,
-            tr!("Ready in a moment, once the sheet is in front"),
+            tr!("Ready in a moment, once this window is in front"),
             None,
             iced::widget::tooltip::Position::Top,
         )

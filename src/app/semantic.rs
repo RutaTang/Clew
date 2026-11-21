@@ -20,7 +20,7 @@ pub(crate) fn built_in_stored_space(
     if stored != space {
         return Err(EmbedBuildFailed::new(
             tr!(
-                "the embedding settings changed while the index was building — not saved, build it again"
+                "the embedding settings changed while the index was building, so it was not saved. Build it again"
             ),
             index,
         ));
@@ -95,7 +95,7 @@ impl App {
         self.drop_foreign_embed_index(&cfg);
         if self.proj.explain.cache.is_empty() {
             self.status =
-                tr!("Run Explain All first — the semantic index is built from the summaries")
+                tr!("Run Explain All first. The semantic index is built from the summaries.")
                     .into();
             return Task::none();
         }
@@ -256,8 +256,8 @@ impl App {
                 index.entries.len()
             ),
             Err(e) => trn!(
-                "Semantic index ready (1 item) — not saved: {error}",
-                "Semantic index ready ({n} items) — not saved: {error}",
+                "Semantic index ready (1 item) but not saved: {error}",
+                "Semantic index ready ({n} items) but not saved: {error}",
                 index.entries.len(),
                 error = e
             ),
@@ -372,7 +372,7 @@ impl App {
                 self.proj.embed_index = embed::Index::default();
             }
             self.proj.semantic_results.clear();
-            self.status = tr!("Embedding settings changed — rebuild the index").into();
+            self.status = tr!("Embedding settings changed. Rebuild the index.").into();
             return Task::none();
         }
         // A query whose vector length differs from the index's is an error

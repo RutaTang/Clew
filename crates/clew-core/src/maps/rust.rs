@@ -162,7 +162,7 @@ fn unsafe_code(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "rust.unsafe",
         "Unsafe code",
-        "each unsafe fn, unsafe impl, unsafe trait and unsafe block; an arrow from a block to each of the project's unsafe functions it calls",
+        "each unsafe fn, unsafe impl, unsafe trait and unsafe block, with an arrow from each block to each of the project's unsafe functions it calls",
     );
     for (name, (rel, at)) in &unsafe_fns {
         let n = map.node("unsafe fn", &format!("{rel}:{at}"), name);

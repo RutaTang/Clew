@@ -86,7 +86,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         crate::app::state::ConnectionTest::Untried => None,
         crate::app::state::ConnectionTest::Testing(_) => Some(tr!("Testing…").to_string()),
         crate::app::state::ConnectionTest::Answered(model) => {
-            Some(tr!("Connected: {model} answered.", model = model))
+            Some(tr!("Connected. {model} answered.", model = model))
         }
         crate::app::state::ConnectionTest::Failed(why) => Some(why.said()),
     };
@@ -236,7 +236,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             // Opened by an AI action asked without a key: why, above the
             // field it needs — it opened on the form with no word of it.
             (app.settings.key_asked && app.settings.key.trim().is_empty())
-                .then(|| tr!("That needs an AI model: add an API key below, then try it again.").to_string()),
+                .then(|| tr!("That needs an AI model. Add an API key below, then try again.").to_string()),
             None,
             [
                 form::field(tr!("Provider"), None, provider),
@@ -955,7 +955,7 @@ fn server_log(app: &App) -> Element<'_, Message> {
         let (why, color) = match (slot, unreadable) {
             (_, Some(poisoned)) => (poisoned.to_string(), theme::warning()),
             (Some(LspSlot::Ready(c)), None) if !c.alive() => (
-                tr!("The server has stopped; restart it to see new output.").to_string(),
+                tr!("The server has stopped. Restart it to see new output.").to_string(),
                 theme::dim(),
             ),
             (Some(LspSlot::Ready(_)), None) => (tr!("No output.").to_string(), theme::dim()),
@@ -1026,7 +1026,7 @@ fn python_block<'a>(
         if let Some(bad) = &effect.unusable_choice {
             rows.push(form::plain(
                 text(tr!(
-                    "The interpreter you chose ({path}) can't be used: it no longer exists, or it is a program inside the repository. The interpreter above is used until you pick another.",
+                    "The interpreter you chose ({path}) can't be used because it no longer exists or is a program inside the repository. Clew uses the interpreter above until you pick another.",
                     path = bad
                 ))
                 .size(ts::SMALL)
@@ -1668,7 +1668,7 @@ fn servers_block(app: &App) -> Vec<Element<'_, Message>> {
         tr!("Add a server program"),
         Some(
             tr!(
-                "Your own server program for a language: a different build, or a server Clew doesn't support."
+                "Your own server program for a language, such as a different build or a server Clew doesn't support."
             )
             .into(),
         ),
@@ -1850,7 +1850,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     let mut add_rows = Vec::new();
     if !needs.is_empty() {
         add_rows.push(form::field_text(
-            tr!("It reads"),
+            tr!("Settings it uses"),
             None,
             Column::with_children(needs).spacing(6),
         ));
@@ -2865,14 +2865,14 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
         (tr!("Close all folds"), "zM"),
         (tr!("Time Travel: older / newer commit"), "⌘←   ⌘→"),
         (tr!("Next / previous control or field"), "Tab   ⇧Tab"),
-        (tr!("Press the control the ring is on"), press_keys),
+        (tr!("Activate the focused control"), press_keys),
         (tr!("Code / sidebar / file tree / Ask"), "F6   ⇧F6"),
         (
-            tr!("File tree: walk it, open a folder / close it"),
+            tr!("File tree: move up / down, open / close a folder"),
             "↑ ↓ → ←   j k l h",
         ),
         (tr!("Close the top panel / clear selection"), "Esc"),
-        (tr!("The menu of the code or file there"), "⇧F10"),
+        (tr!("Open the context menu"), "⇧F10"),
         (tr!("Debugger: breakpoint on this line"), "F9"),
         (tr!("Debugger: start / continue, stop"), "F5   ⇧F5"),
         (tr!("Debugger: step over"), "F10"),
@@ -2995,7 +2995,7 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows = vec![form::item(
         MODEL.name,
         Some(
-            tr!("By Google DeepMind, run by Clew: nothing leaves this computer, and no key is needed.")
+            tr!("Made by Google DeepMind and run by Clew. Nothing leaves this computer, and no key is needed.")
                 .to_string(),
         ),
         state,
@@ -3112,7 +3112,7 @@ fn registry_group(draft: &crate::app::integrations::IntegrationsDraft) -> Elemen
                 ));
             }
             rows.push(form::plain(form::note(tr!(
-                "The registry lists what publishers say about their servers; it does not check them. Read the command before you add one."
+                "The registry lists what publishers say about their servers but doesn't check them. Read the command before you add one."
             ))));
         }
     }

@@ -844,7 +844,7 @@ impl App {
                 Task::none()
             }
             UsageMsg::Written(Some(e)) => {
-                self.status = tr!("Could not keep what the AI call used: {error}", error = e);
+                self.status = tr!("Could not record the AI call's usage: {error}", error = e);
                 Task::none()
             }
             UsageMsg::Written(None) => Task::none(),

@@ -184,7 +184,7 @@ impl App {
             .map(|bp| bp.condition.clone());
         if let Err(e) = edit(&dir, &rel, line, now) {
             self.status = tr!(
-                "Could not save the breakpoints: {error} — kept for this session",
+                "Could not save the breakpoints ({error}). They'll last only for this session.",
                 error = e
             );
         }

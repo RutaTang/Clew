@@ -450,7 +450,7 @@ pub(crate) fn margin_tabs(app: &App) -> Element<'_, Message> {
         (
             Glyph::Explanations,
             tr!("Explanations"),
-            tr!("What was written about this code, beside it"),
+            tr!("Explanations of this code, shown beside it"),
             MarginTab::Notes,
         ),
         (

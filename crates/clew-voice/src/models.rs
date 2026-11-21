@@ -99,7 +99,7 @@ pub const MODELS: &[Model] = &[
         bytes: None,
         checksum: Checksum::Sha1("c78c86eb1a8faa21b369bcd33207cc90d64ae9df"),
         english_only: true,
-        about: "Fastest; fine for short commands on a slow machine.",
+        about: "Fastest. Fine for short commands on a slow computer.",
     },
     Model {
         id: "base.en",

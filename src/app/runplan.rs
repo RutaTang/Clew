@@ -89,11 +89,11 @@ impl RunPlan {
             (_, 0) => tr!("Test {name} passed", name = name),
             (RunPlan::Pytest { .. }, 5) => tr!("pytest found no test named {name}", name = name),
             (RunPlan::Pytest { .. }, 2) => tr!(
-                "pytest could not load {name}: what it said is in the run's output",
+                "pytest could not load {name} (see the run's output)",
                 name = name
             ),
             (RunPlan::Pytest { .. }, 3 | 4) => tr!(
-                "pytest stopped with an error before {name} ran: what it said is in the run's output",
+                "pytest stopped with an error before {name} ran (see the run's output)",
                 name = name
             ),
             _ => tr!("Test {name} failed", name = name),

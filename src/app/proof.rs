@@ -224,7 +224,7 @@ impl App {
         }
         let Some((name, steps)) = proof_at(&v.source, &v.symbols, menu.line) else {
             self.status =
-                tr!("No tactic proof here: put the cursor in a theorem proved `by` tactics").into();
+                tr!("No tactic proof here. Put the cursor in a theorem proved with `by`.").into();
             return Task::none();
         };
         let abs = v.abs.clone();
@@ -232,14 +232,13 @@ impl App {
             Some(LspSlot::Ready(c)) => c.clone(),
             Some(LspSlot::Starting | LspSlot::AwaitingConsent) => {
                 self.status =
-                    tr!("The Lean server is still starting — ask again once it is ready").into();
+                    tr!("The Lean server is still starting. Ask again once it's ready.").into();
                 return Task::none();
             }
             _ => {
-                self.status = tr!(
-                    "The Lean server is not running — start it from the language servers panel"
-                )
-                .into();
+                self.status =
+                    tr!("The Lean server isn't running. Start it from the language servers panel.")
+                        .into();
                 return Task::none();
             }
         };
@@ -306,7 +305,7 @@ impl App {
             Ok(goals) => {
                 walk.goals = Some(goals);
                 walk.at = 0;
-                self.status = tr!("Proof ready — step through it below").into();
+                self.status = tr!("Proof ready. Step through it below.").into();
                 self.proof_show_step()
             }
             Err(why) => {
@@ -538,7 +537,7 @@ impl App {
         {
             Some(clew_core::lsp::store::Located::Ready(lake)) => lake,
             _ => {
-                self.status = tr!("Lean's lake was not found: install Lean with elan").into();
+                self.status = tr!("Lean's lake wasn't found. Install Lean with elan.").into();
                 return Task::none();
             }
         };
@@ -571,7 +570,7 @@ impl App {
         self.proj.mathlib = match result {
             Err(why) => MathlibCache::Failed(why),
             Ok(()) if still_missing => MathlibCache::Failed(
-                tr!("lake exe cache get finished, but Mathlib's compiled files are still missing: this version of Mathlib may have no cache.").into(),
+                tr!("lake exe cache get finished, but Mathlib's compiled files are still missing. This version of Mathlib may have no cache.").into(),
             ),
             Ok(()) => MathlibCache::Ready,
         };
@@ -612,14 +611,13 @@ impl App {
             Some(LspSlot::Ready(c)) => c.clone(),
             Some(LspSlot::Starting | LspSlot::AwaitingConsent) => {
                 self.status =
-                    tr!("The Lean server is still starting — ask again once it is ready").into();
+                    tr!("The Lean server is still starting. Ask again once it's ready.").into();
                 return Task::none();
             }
             _ => {
-                self.status = tr!(
-                    "The Lean server is not running — start it from the language servers panel"
-                )
-                .into();
+                self.status =
+                    tr!("The Lean server isn't running. Start it from the language servers panel.")
+                        .into();
                 return Task::none();
             }
         };

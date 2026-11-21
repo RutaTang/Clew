@@ -283,7 +283,7 @@ fn schema_map(schema: &Schema) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "sql.schema",
         "Database schema",
-        "a node per table and view, as the migrations leave them; an arrow is a foreign key (labelled by its columns), or what a view reads",
+        "a node per table and view, as the migrations leave them, with an arrow for each foreign key (labelled by its columns) and for what each view reads",
     );
     for (k, table) in &schema.tables {
         let at = map.node("table", k, &table.name);
@@ -424,7 +424,7 @@ fn lineage_map(migrations: &[Changes]) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "sql.lineage",
         "Data lineage",
-        "an arrow from what is read to what is made of it: a table into the view, the CREATE TABLE … AS or the INSERT … SELECT that reads it, through the CTEs on the way",
+        "an arrow from what is read to what is built from it, such as from a table to the view, CREATE TABLE … AS or INSERT … SELECT that reads it, through any CTEs in between",
     );
     for changes in migrations {
         for (op, line) in &changes.ops {

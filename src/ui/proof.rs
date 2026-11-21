@@ -142,7 +142,7 @@ fn proof_columns(walk: &ProofWalk) -> Element<'_, Message> {
     let mut now: Vec<Element<'_, Message>> = vec![heading(tr!("GOALS AFTER"))];
     match after {
         Some([]) => now.push(
-            text(tr!("No goals left: proved."))
+            text(tr!("No goals left. The proof is complete."))
                 .size(ts::SMALL)
                 .color(theme::success())
                 .into(),

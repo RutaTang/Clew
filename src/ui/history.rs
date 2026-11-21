@@ -51,7 +51,7 @@ pub(crate) fn history_tab(app: &App) -> Element<'_, Message> {
         let (title, said): (&str, String) = match &h.error {
             Some(e) if e.contains("not a git repository") => (
                 tr!("Not a git repository"),
-                tr!("This project's history is not kept in git.").into(),
+                tr!("This project isn't tracked in git.").into(),
             ),
             Some(e) => (tr!("Could not read the history"), e.clone()),
             None if h.loading || !h.asked => (tr!("Reading the history…"), String::new()),
@@ -781,7 +781,7 @@ fn changes_rows<'a>(app: &'a App, h: &'a HistoryView, lanes_w: f32) -> Element<'
         }));
         col = col.push(if binary {
             let bubble = container(
-                text(tr!("A binary file: Clew shows text files only."))
+                text(tr!("Binary file. Clew shows only text files."))
                     .size(ts::SMALL)
                     .color(theme::fg()),
             )

@@ -362,7 +362,7 @@ impl PaletteCommand {
             }
             Message::Debug(DebugMsg::ToggleHoverEval) => (
                 Glyph::Debug,
-                tr!("This runs code in the program for each name the mouse rests on."),
+                tr!("This runs code in the program for each name you hover over."),
             ),
             Message::Debug(_) => (Glyph::Debug, tr!("This changes where the program stops.")),
             Message::Editor(EditorMsg::RunAction(Action::ExplainAll)) | Message::Explain(_) => (
@@ -386,7 +386,7 @@ impl PaletteCommand {
             }
             Message::Voice(_) => (
                 Glyph::Mic,
-                tr!("This changes what the microphone hears, and what is done with it."),
+                tr!("This changes what the microphone hears and what Clew does with it."),
             ),
             Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_)) => {
                 (Glyph::Network, tr!("This changes where your code is sent."))

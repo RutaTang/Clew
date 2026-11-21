@@ -250,7 +250,7 @@ impl DapClient {
     pub async fn connect_tcp_addr(addr: SocketAddr) -> Result<(DapClient, DapEvents), String> {
         if !addr.ip().is_loopback() {
             return Err(tr!(
-                "refusing to open a debug session on {addr}: only a loopback adapter is used",
+                "Clew won't open a debug session on {addr} because it only uses debug adapters on loopback",
                 addr = addr
             ));
         }
@@ -762,8 +762,8 @@ impl EventSink {
                 text: format!(
                     "{}\n",
                     trn!(
-                        "[Clew] 1 byte of output dropped — the program wrote faster than it could be shown",
-                        "[Clew] {n} bytes of output dropped — the program wrote faster than it could be shown",
+                        "[Clew] 1 byte of output dropped because the program wrote faster than it could be shown",
+                        "[Clew] {n} bytes of output dropped because the program wrote faster than it could be shown",
                         n
                     )
                 ),
@@ -939,7 +939,7 @@ impl framing::Protocol for DapWire {
             format!(
                 "{}\n",
                 tr!(
-                    "[Clew] the debug adapter's output broke framing ({error}) — ending the session",
+                    "[Clew] ending the session because the debug adapter's output broke framing ({error})",
                     error = error
                 )
             )
@@ -2293,7 +2293,10 @@ mod tests {
         let err = DapClient::connect_tcp_addr(SocketAddr::from(([10, 0, 0, 5], 4000)))
             .await
             .unwrap_err();
-        assert!(err.contains("only a loopback"), "{err}");
+        assert!(
+            err.contains("only uses debug adapters on loopback"),
+            "{err}"
+        );
     }
 
     /// A helper an adapter script starts in its own process group — a

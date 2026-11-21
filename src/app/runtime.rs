@@ -1141,7 +1141,7 @@ impl App {
                 self.rebinding = None;
                 if let Err(other) = self.keymap.reset(action) {
                     self.keymap_notice = Some(tr!(
-                        "Its default shortcut is now used by “{action}” — change that one first",
+                        "Its default shortcut is now used by “{action}”. Change that shortcut first.",
                         action = crate::i18n::lookup(other.label())
                     ));
                     return Task::none();
@@ -1188,7 +1188,7 @@ impl App {
             }
             WindowMsg::NoFileDialog => {
                 self.status =
-                    tr!("No file dialog could open here — install xdg-desktop-portal or zenity")
+                    tr!("No file dialog could open here. Install xdg-desktop-portal or zenity.")
                         .into();
                 Task::none()
             }

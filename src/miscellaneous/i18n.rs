@@ -540,6 +540,29 @@ pub fn english_of(shown: &str) -> Option<&'static str> {
     back.get(shown).copied()
 }
 
+/// `earlier` then `later`, as two sentences in the reader's language: "Saved.
+/// Retrying…", "已保存。正在重试…". Where `earlier` already ends one ("Saved.",
+/// "Connecting…"), only a space (or nothing) comes between. The status line
+/// joined its parts with " — " and "; ".
+pub fn sentences(earlier: &str, later: &str) -> String {
+    let ended = earlier
+        .trim_end()
+        .ends_with(['.', '…', '?', '!', '。', '？', '！']);
+    if ended {
+        crate::tr!(
+            "after a sentence\u{4}{earlier} {later}",
+            earlier = earlier.trim_end(),
+            later = later
+        )
+    } else {
+        crate::tr!(
+            "sentences joined\u{4}{earlier}. {later}",
+            earlier = earlier,
+            later = later
+        )
+    }
+}
+
 /// `template` with each `{name}` replaced by its argument's value. `{{`
 /// and `}}` are braces.
 pub fn format(template: &str, args: &[(&str, &dyn Display)]) -> String {

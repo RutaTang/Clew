@@ -492,10 +492,7 @@ fn rust_sysroot(cwd: &Path) -> Option<PathBuf> {
 const DW_LANG_ZIG: u16 = 0x27;
 
 /// What a Zig program built by Zig's own code generator is told.
-const ZIG_BACKEND_NOTICE: &str = "This program's debug information is Zig's own (from Zig's \
-     built-in code generator, the default for Debug builds on x86-64), and lldb reads no \
-     variables from it: breakpoints and stepping work, but no variables show. Build it with \
-     -fllvm (or .use_llvm = true in build.zig) to see them.";
+const ZIG_BACKEND_NOTICE: &str = "This program's debug information comes from Zig's built-in code generator (the default for Debug builds on x86-64), and lldb can't read variables from it. Breakpoints and stepping work, but no variables show. Build it with -fllvm (or .use_llvm = true in build.zig) to see them.";
 
 /// Whether the test file at `path` runs its own tests when run as a script
 /// — `unittest.main()`, or pytest's — as one written for `unittest` does.

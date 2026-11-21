@@ -150,8 +150,8 @@ pub(crate) fn weak_home(app: &App) -> Element<'_, Message> {
         rows.push(row![open, ask].spacing(8).align_y(iced::Center).into());
     }
     let count = text(trn!(
-        "1 spot, from {files} files measured",
-        "{n} spots, from {files} files measured",
+        "1 spot in {files} files checked",
+        "{n} spots in {files} files checked",
         spots.len(),
         files = weak.files
     ))

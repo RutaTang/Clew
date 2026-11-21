@@ -102,7 +102,7 @@ pub(crate) fn usage_page(app: &App) -> Element<'_, Message> {
         vec![form::toggle(
             tr!("Keep explanations up to date"),
             Some(
-                tr!("When code changes, Clew explains the changed parts again, a few AI calls each time. When off, the status bar says the explanations are out of date, and you choose when to update them.")
+                tr!("When code changes, Clew explains the changed parts again, using a few AI calls each time. When off, the status bar shows that explanations are out of date, and you choose when to update them.")
                     .to_string(),
             ),
             app.keep_explanations_fresh,
@@ -110,7 +110,7 @@ pub(crate) fn usage_page(app: &App) -> Element<'_, Message> {
         ), form::toggle(
             tr!("Suggest questions in Ask"),
             Some(
-                tr!("When Ask opens, Clew writes a few questions about the code you're on: one small AI call for each new place. When off, Ask offers general questions.")
+                tr!("When Ask opens, Clew writes a few questions about the code you're on, using one small AI call for each new place. When off, Ask offers general questions.")
                     .to_string(),
             ),
             app.suggest_questions,
@@ -489,7 +489,7 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
             cached = price_said(p.cached).as_str()
         );
         let about = match (own, app.usage.price_saved) {
-            (true, true) => tr!("Your prices, saved. {prices}", prices = said.as_str()),
+            (true, true) => tr!("Your prices are saved. {prices}", prices = said.as_str()),
             (true, false) => tr!("Your prices. {prices}", prices = said.as_str()),
             (false, _) => said,
         };
@@ -518,7 +518,7 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
     let problem = |which: PriceField, value: &str| -> Option<String> {
         let v = value.trim();
         if v.is_empty() {
-            (drafted && which != PriceField::Cached).then(|| tr!("Needed to save.").to_string())
+            (drafted && which != PriceField::Cached).then(|| tr!("Required.").to_string())
         } else if usage::parse_price(v).is_none() {
             Some(tr!("Enter a number.").to_string())
         } else {
@@ -591,7 +591,7 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
                     tr!("Cancel"),
                     Some(Message::Usage(UsageMsg::EditPrices(false))),
                 ),
-                tr!("Keep the prices last saved"),
+                tr!("Keep the last saved prices"),
                 None,
                 iced::widget::tooltip::Position::Top,
             ));

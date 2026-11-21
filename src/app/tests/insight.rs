@@ -235,7 +235,7 @@ async fn rust_lean_and_haskell_ask_their_language_server() {
     assert!(!open.loading, "no server to wait for");
     assert!(!open.prepared.is_empty());
     let not_running = format!("{:?}", open.prepared);
-    assert!(not_running.contains("is not running"), "{not_running}");
+    assert!(not_running.contains("isn't running"), "{not_running}");
     // Still starting: says so, and asks nothing.
     app.proj.link.lsp.insert("rust".into(), LspSlot::Starting);
     open_menu(&mut app, 0, 17);
@@ -406,7 +406,7 @@ fn answers_read_as_the_popup_shows_them() {
     });
     assert_eq!(
         full.markdown,
-        "```c\nN\n```\n\nexpands to\n\n```c\n10\n```\n\nfrom this definition\n\n```c\n#define N 10\n```\n\nDefined at `a.h:2`.\n\n*Cut short: the expansion grew past Clew's limit.*"
+        "```c\nN\n```\n\nexpands to\n\n```c\n10\n```\n\nfrom this definition\n\n```c\n#define N 10\n```\n\nDefined at `a.h:2`.\n\n*The expansion was cut short because it exceeded Clew's limit.*"
     );
     assert_eq!(full.defined, Some(("a.h".into(), 2)));
     let flag = c_answer(clew_protocol::MacroExpansion {
@@ -553,7 +553,7 @@ async fn restart_file_has_lean_check_the_file_afresh() {
     open_synchronously(&mut app, "Proof.lean", None);
     // No server yet: it says how to get one, and sends nothing.
     let _ = app.update(Message::Proof(crate::ProofMsg::RestartFile));
-    assert!(app.status.contains("not running"), "{}", app.status);
+    assert!(app.status.contains("isn't running"), "{}", app.status);
 
     let (client, wire) = scripted_lsp_client(&root).await;
     app.proj

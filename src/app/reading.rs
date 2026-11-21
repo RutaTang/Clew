@@ -166,11 +166,11 @@ impl App {
             .map_or_else(|| rel.to_string(), |n| n.to_string_lossy().into_owned());
         self.status = match what {
             Kept::Bookmarks => tr!(
-                "Only the project's files can have bookmarks — {file} is outside it",
+                "{file} is outside the project. Only project files can have bookmarks.",
                 file = name
             ),
             Kept::Notes => tr!(
-                "Only the project's files can have notes — {file} is outside it",
+                "{file} is outside the project. Only project files can have notes.",
                 file = name
             ),
         };
@@ -298,7 +298,7 @@ impl App {
             Ok(()) if added => tr!("Bookmarked {file}:{line}", file = rel, line = line),
             Ok(()) => tr!("Removed bookmark {file}:{line}", file = rel, line = line),
             Err(e) => tr!(
-                "Cannot write .clew/bookmarks.json: {error} — kept for this session, not saved",
+                "Bookmarks updated for this session only. Cannot write .clew/bookmarks.json: {error}",
                 error = e
             ),
         };
@@ -347,7 +347,7 @@ impl App {
             self.touch_project_state(bookmarks::REL);
             if let Err(e) = saved {
                 self.status = tr!(
-                    "Cannot write .clew/bookmarks.json: {error} — removed for this session",
+                    "Bookmark removed for this session only. Cannot write .clew/bookmarks.json: {error}",
                     error = e
                 );
             }
@@ -440,8 +440,7 @@ impl App {
                 self.proj.bookmarks = merged;
                 if let Err(e) = saved {
                     self.status = tr!(
-                        "Cannot write .clew/bookmarks.json: {error} — kept for this session, not \
-                         saved",
+                        "Bookmarks updated for this session only. Cannot write .clew/bookmarks.json: {error}",
                         error = e
                     );
                 }
@@ -498,7 +497,7 @@ impl App {
         self.touch_project_state(notes::REL);
         if let Err(e) = saved {
             self.status = tr!(
-                "Cannot write .clew/notes.json: {error} — kept for this session, not saved",
+                "Notes updated for this session only. Cannot write .clew/notes.json: {error}",
                 error = e
             );
         }

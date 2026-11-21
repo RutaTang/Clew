@@ -111,7 +111,7 @@ impl App {
             return Task::none();
         }
         let Some(dir) = local::dir() else {
-            self.status = tr!("There is no data directory to keep the model in").into();
+            self.status = tr!("There's no data directory to store the model in").into();
             return Task::none();
         };
         let claim = match Claim::take(dir.clone(), ClaimedFor::Download) {
@@ -243,7 +243,7 @@ impl App {
                         self.local_embedding.downloaded_at = Some(std::time::Instant::now());
                         self.status = if local::program().is_some() {
                             tr!(
-                                "{model} is ready — Find by meaning now runs on this computer",
+                                "{model} is ready. Find by meaning now runs on this computer.",
                                 model = MODEL.name
                             )
                         } else {

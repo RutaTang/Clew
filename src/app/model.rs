@@ -1116,12 +1116,12 @@ impl InsightKind {
         match self {
             InsightKind::ExpandMacro => tr!("No macro here, and nothing on this line expands."),
             InsightKind::GoalState => tr!(
-                "No goal here: the Lean server has no proof state or expected type at this point."
+                "No goal here. The Lean server has no proof state or expected type at this point."
             ),
             InsightKind::TypeAtPoint => tr!("The language server has no type for this name."),
             InsightKind::MemoryLayout => {
                 tr!(
-                    "No type here whose layout rust-analyzer knows: put the cursor on a type's name."
+                    "rust-analyzer has no layout for anything here. Put the cursor on a type's name."
                 )
             }
             InsightKind::RelatedTests => {
@@ -1729,7 +1729,7 @@ impl LspSlot {
                         .or_else(|| checking_label(s))
                         .unwrap_or_else(|| tr!("ready").into()),
                 },
-                Some(Err(_)) => tr!("⚠ internal error — restart this language server").into(),
+                Some(Err(_)) => tr!("⚠ internal error (restart this language server)").into(),
                 None => tr!("ready").into(),
             },
             LspSlot::Failed(e) => tr!("error: {error}", error = e),
@@ -2094,7 +2094,7 @@ impl LspConsent {
                 tool = i.tool
             ),
             LspProvision::Remote { describe, .. } => {
-                tr!("{install} — on the remote host", install = shown(describe))
+                tr!("{install} (on the remote host)", install = shown(describe))
             }
             LspProvision::DebugAdapter { install, .. } => install.describe(),
             // The question says it runs the project's own code; where is

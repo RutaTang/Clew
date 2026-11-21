@@ -394,8 +394,8 @@ pub(crate) fn folded_stops(wt: &crate::walkthrough::Walkthrough) -> Option<Strin
     let steps = wt.steps.len();
     (stops > steps).then(|| {
         trn!(
-            "1 step from {stops} stops: a function stepped through is one step, and stops outside the project are left out.",
-            "{n} steps from {stops} stops: a function stepped through is one step, and stops outside the project are left out.",
+            "1 step from {stops} stops. A function stepped through counts as one step, and stops outside the project are left out.",
+            "{n} steps from {stops} stops. A function stepped through counts as one step, and stops outside the project are left out.",
             steps,
             stops = stops
         )
@@ -827,7 +827,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                     regenerate.into(),
                     if !again {
                         tr!(
-                            "This walkthrough records a debug run — debug the program again to record a new one"
+                            "This walkthrough records a debug run. Debug the program again to record a new one"
                         )
                     } else if wt.scope.starts_with("@trace ") {
                         // It takes the last run of the program, which may

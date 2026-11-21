@@ -196,7 +196,7 @@ pub fn validate_dmg_url(url: &str) -> Result<(), String> {
     }
     if !url.starts_with("https://") {
         return Err(tr!(
-            "refusing a non-HTTPS update download: {url}",
+            "a non-HTTPS update download was blocked: {url}",
             url = url
         ));
     }
@@ -217,7 +217,7 @@ pub fn validate_dmg_url(url: &str) -> Result<(), String> {
     });
     if !release_asset {
         return Err(tr!(
-            "refusing an update download from outside Clew's GitHub releases: {url}",
+            "an update download from outside Clew's GitHub releases was blocked: {url}",
             url = url
         ));
     }

@@ -76,7 +76,7 @@ fn generics(sources: &[(&Source, tree_sitter::Tree)]) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "zig.generics",
         "Comptime generics",
-        "each function with comptime parameters — a generic type constructor or a generic function — and an arrow to each instantiation the project makes of it, where it is first made",
+        "each function with comptime parameters (a generic type constructor or a generic function) and an arrow to each instantiation of it in the project, placed where it first appears",
     );
     let mut found: HashMap<String, Generic> = HashMap::new();
     for (source, tree) in sources {
@@ -159,7 +159,7 @@ fn errors(sources: &[(&Source, tree_sitter::Tree)]) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "zig.errors",
         "Error sets",
-        "each error set and the errors in it; each function and the set its return type names, the errors it returns, the functions whose errors it passes on with “try”, and the errors it catches",
+        "each error set and the errors in it, and each function with the set its return type names, the errors it returns, the functions whose errors it passes on with “try”, and the errors it catches",
     );
     // The named sets first, so a function's return type finds its set.
     let mut sets: HashMap<String, (String, usize)> = HashMap::new();
@@ -373,7 +373,7 @@ fn build(corpus: &Corpus, sources: &[(&Source, tree_sitter::Tree)]) -> Option<Pr
     let mut map = MapBuilder::new(
         "zig.build",
         "Build graph",
-        "what build.zig builds: each executable, library, test and module and its root source file, the libraries it links, the modules it imports, and the build steps that run it",
+        "each executable, library, test and module that build.zig builds, with its root source file, the libraries it links, the modules it imports, and the build steps that run it",
     );
     for (source, tree) in sources.iter().filter(|(s, _)| s.name() == "build.zig") {
         let src = source.text.as_str();

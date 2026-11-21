@@ -109,7 +109,7 @@ pub const STOPPED_BY_USER: &str = "the user stopped it";
 pub const NOT_GRANTED: &str = "the plugin needs a permission it was not granted";
 pub const NOT_COMPILED: &str = "could not compile the plugin";
 pub const NOT_LINKED: &str = "could not link the plugin";
-pub const NO_EXPORTS: &str = "the plugin does not export what Clew calls";
+pub const NO_EXPORTS: &str = "the plugin does not export the interface Clew expects";
 
 /// What Clew adds to a plugin's log of its own ([`Host::note`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,10 +131,13 @@ impl LogNote {
     pub fn english(self) -> String {
         match self {
             LogNote::OutputCut => {
-                format!("what it printed past {} KiB was left out", Self::OUTPUT_KIB)
+                format!(
+                    "output past the first {} KiB was left out",
+                    Self::OUTPUT_KIB
+                )
             }
             LogNote::LinesDropped(dropped) => format!(
-                "{dropped} more log lines were left out: a run keeps {} lines at most",
+                "{dropped} more log lines were left out (the limit is {} lines per run)",
                 Self::LINES_KEPT
             ),
         }
@@ -177,11 +180,11 @@ const ANSWER_BYTES: usize = 64 * 1024 * 1024;
 
 /// Why a run gave nothing back whose answer was larger than
 /// [`Limits::answer`].
-pub const ANSWER_TOO_LARGE: &str = "its answer was larger than Clew takes from a plugin";
+pub const ANSWER_TOO_LARGE: &str = "its answer was larger than Clew accepts from a plugin";
 
 /// Why a command that asked to open a place outside the project was
 /// refused.
-pub const OUTSIDE_PLACE: &str = "it asked to open a place outside the project";
+pub const OUTSIDE_PLACE: &str = "it asked to open a file outside the project";
 
 /// Why a call gave nothing back. Each case the window says in the
 /// reader's words; [`Display`](std::fmt::Display) says it in English, for
@@ -1153,7 +1156,7 @@ pub const MAX_VIEW_TEXT: usize = 4 * 1024 * 1024;
 /// The notice ending a page cut short (the window says it in the reader's
 /// language).
 pub const CUT_NOTICE: &str =
-    "The plugin gave more than Clew shows on a page; the rest is left out.";
+    "The plugin returned more than Clew can show on one page, so the rest is left out.";
 const MAX_COLUMNS: usize = 32;
 /// The most nodes and edges a graph may have.
 pub const MAX_NODES: usize = 4000;

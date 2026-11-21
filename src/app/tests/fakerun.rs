@@ -572,7 +572,7 @@ fn a_parked_fake_runs_failure_raises_no_notice_for_another_run() {
         result: Err("rate limited".into()),
     }));
     assert_eq!(app.proj.fake.tab, second, "the tab on screen stays");
-    assert!(app.status.contains("its tab says why"), "{}", app.status);
+    assert!(app.status.contains("Its tab shows why"), "{}", app.status);
     assert!(
         app.failure_notice.is_none(),
         "a notice for the run off screen: {:?}",

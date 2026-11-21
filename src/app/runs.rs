@@ -183,7 +183,7 @@ impl App {
         if gone {
             self.debug_parked.remove(i);
         } else if stop && paused {
-            self.status = tr!("{name} paused — its tab shows where", name = name);
+            self.status = tr!("{name} paused. Its tab shows where.", name = name);
         }
         // Ended in a tab not on screen: it stays, to be read.
         task
@@ -297,7 +297,7 @@ impl App {
         if let Some(name) = name {
             self.status = tr!("The fake run of {name} is ready in its tab", name = name);
         } else if failed {
-            self.status = tr!("A fake run failed — its tab says why").into();
+            self.status = tr!("A fake run failed. Its tab shows why.").into();
         }
         Some(task)
     }

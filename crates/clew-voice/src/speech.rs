@@ -239,8 +239,7 @@ pub const VOICE_MODELS: &[VoiceModel] = &[
         languages: &["en", "zh", "ja", "ko", "de", "fr", "es", "pt", "it", "ru"],
         voices: QWEN3_VOICES,
         default_voice: 0,
-        about: "Speech as a person says it, heard as it is made: English, Chinese, Japanese, \
-                Korean and six more languages.",
+        about: "Natural-sounding speech that plays as it's generated, in English, Chinese, Japanese, Korean and six more languages.",
         license: "Apache-2.0",
     },
     VoiceModel {
@@ -306,9 +305,7 @@ pub const VOICE_MODELS: &[VoiceModel] = &[
         ],
         voices: SUPERTONIC_VOICES,
         default_voice: 0,
-        about: "A smaller download for 31 languages, including English, French, Korean, \
-                Japanese, Dutch and Arabic, but not Chinese. Qwen3-TTS, if downloaded too, reads \
-                the languages they share.",
+        about: "A smaller download for 31 languages, including English, French, Korean, Japanese, Dutch and Arabic, but not Chinese. If Qwen3-TTS is also downloaded, it reads the languages they share.",
         license: "OpenRAIL-M",
     },
 ];

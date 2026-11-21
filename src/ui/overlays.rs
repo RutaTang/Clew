@@ -105,15 +105,15 @@ pub(crate) fn gutter_words(app: &App, pane: usize, line: usize) -> Option<String
         said.push(match (&bp.condition, bp.verified) {
             // The hollow dot: what it means said where it is.
             (_, Some(false)) => {
-                tr!("The debugger couldn't set this breakpoint: it won't stop here").to_string()
+                tr!("The debugger couldn't set this breakpoint, so it won't stop here").to_string()
             }
             (Some(condition), _) => {
                 tr!(
-                    "Breaks when {condition} — click to remove, right-click to edit",
+                    "Breaks when {condition}. Click to remove, right-click to edit",
                     condition = condition
                 )
             }
-            (None, _) => tr!("Breakpoint — click to remove").to_string(),
+            (None, _) => tr!("Breakpoint. Click to remove").to_string(),
         });
     }
     if let Some(bm) = app

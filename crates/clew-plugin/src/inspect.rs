@@ -28,17 +28,16 @@ pub const GRAPHS_EXPORT: &str = "clew:plugin/graphs";
 /// Why a file is not a plugin, in words that are the same every time —
 /// so the app can say them in the reader's language.
 pub const NOT_A_COMPONENT: &str =
-    "this is not a plugin: a plugin is a WebAssembly component (built for wasm32-wasip2)";
+    "this is not a plugin (a plugin is a WebAssembly component built for wasm32-wasip2)";
 pub const NO_MANIFEST: &str =
-    "this WebAssembly component is not a Clew plugin: it carries no plugin.toml";
-pub const TWO_MANIFESTS: &str = "the plugin's file carries more than one plugin.toml";
+    "this WebAssembly component is not a Clew plugin because it has no plugin.toml";
+pub const TWO_MANIFESTS: &str = "the plugin's file contains more than one plugin.toml";
 pub const MANIFEST_NOT_TEXT: &str = "the plugin's manifest is not UTF-8 text";
 /// Clew loads every plugin by the world it was built for, which exports
 /// both its commands and its graphs (`clew_plugin_sdk::export!` writes both,
 /// whatever the manifest lists): one exporting less could be approved and
 /// then never load.
-pub const NO_EXPORT: &str =
-    "the plugin's code does not export what Clew calls (build it with clew_plugin_sdk::export!)";
+pub const NO_EXPORT: &str = "the plugin's code does not export the interface Clew expects (build it with clew_plugin_sdk::export!)";
 
 /// What a plugin's file says of it.
 #[derive(Debug, Clone, PartialEq, Eq)]

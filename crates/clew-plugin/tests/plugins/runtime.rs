@@ -412,7 +412,7 @@ fn printing_a_lot_is_kept_in_part_and_never_fails() {
     );
     assert!(
         log.iter()
-            .any(|(l, m)| *l == Level::Warning && m == "what it printed past 64 KiB was left out")
+            .any(|(l, m)| *l == Level::Warning && m == "output past the first 64 KiB was left out")
     );
     assert!(
         log.iter()

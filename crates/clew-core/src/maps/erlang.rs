@@ -100,7 +100,7 @@ fn supervision(modules: &[Module]) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "erlang.supervision",
         "Supervision tree",
-        "each supervisor and an arrow to each child its init/1 starts (labelled worker or supervisor); an application to the supervisor its start/2 starts",
+        "each supervisor and an arrow to each child its init/1 starts (labelled worker or supervisor), and an arrow from each application to the supervisor its start/2 starts",
     );
     let place = |map: &mut MapBuilder, name: &str| -> Option<usize> {
         let at = map.node("process", name, name);
@@ -308,7 +308,7 @@ fn messages(modules: &[Module]) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "erlang.messages",
         "Messages",
-        "each message tag (a tuple's first atom); an arrow from each module that sends it — !, gen_server:call or cast — and to each module that takes it — receive, handle_call, handle_cast, handle_info",
+        "each message tag (a tuple's first atom), with an arrow from each module that sends it (!, gen_server:call or cast) and to each module that handles it (receive, handle_call, handle_cast, handle_info)",
     );
     let module_node = |map: &mut MapBuilder, m: &Module| -> Option<usize> {
         let at = map.node("module", &m.name, &m.name);

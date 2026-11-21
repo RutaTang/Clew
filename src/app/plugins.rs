@@ -438,7 +438,7 @@ impl PluginPage {
                 && n.text == clew_plugin::runtime::CUT_NOTICE
             {
                 n.text =
-                    tr!("The plugin gave more than Clew shows on a page; the rest is left out.")
+                    tr!("The plugin returned more than Clew can show on one page, so the rest is left out.")
                         .to_string();
             }
         }
@@ -1067,9 +1067,9 @@ fn plugin_step_title(tool: &str, state: crate::app::model::StepState) -> String 
         ("plugin_build", Done) => tr!("Built a plugin"),
         ("plugin_build", Failed) => tr!("The plugin did not build"),
         ("plugin_build", _) => tr!("Building a plugin…"),
-        ("plugin_try", Done) => tr!("Tried a plugin"),
-        ("plugin_try", Failed) => tr!("Could not try the plugin"),
-        ("plugin_try", _) => tr!("Trying a plugin…"),
+        ("plugin_try", Done) => tr!("Tested a plugin"),
+        ("plugin_try", Failed) => tr!("Could not test the plugin"),
+        ("plugin_try", _) => tr!("Testing a plugin…"),
         ("plugin_install", Done) => tr!("Installed a plugin"),
         ("plugin_install", Failed) => tr!("The plugin was not installed"),
         ("plugin_install", Waiting) => tr!("Asking you to install a plugin"),
@@ -1164,7 +1164,7 @@ fn read_plugin_file(path: &Path) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())?;
     if bytes.len() > cap {
         return Err(tr!(
-            "it is larger than a plugin may be ({size} MB at most)",
+            "it is larger than the {size} MB limit for plugins",
             size = cap / (1024 * 1024)
         ));
     }
@@ -1203,12 +1203,12 @@ pub(crate) fn reason_words(why: &str) -> String {
     }
     if let Some(reason) = detail(runtime::NO_EXPORTS) {
         return tr!(
-            "the plugin does not export what Clew calls: {reason}",
+            "the plugin does not export the interface Clew expects: {reason}",
             reason = reason
         );
     }
     if let Some(reason) = detail(store::NOT_KEPT) {
-        return tr!("could not keep the plugin: {reason}", reason = reason);
+        return tr!("could not save the plugin: {reason}", reason = reason);
     }
     crate::i18n::lookup(why).to_string()
 }
@@ -1218,12 +1218,12 @@ pub(crate) fn log_note_words(note: clew_plugin::runtime::LogNote) -> String {
     use clew_plugin::runtime::LogNote;
     match note {
         LogNote::OutputCut => tr!(
-            "what it printed past {kib} KiB was left out",
+            "output past the first {kib} KiB was left out",
             kib = LogNote::OUTPUT_KIB
         ),
         LogNote::LinesDropped(dropped) => trn!(
-            "1 more log line was left out: a run keeps {max} lines at most",
-            "{n} more log lines were left out: a run keeps {max} lines at most",
+            "1 more log line was left out (the limit is {max} lines per run)",
+            "{n} more log lines were left out (the limit is {max} lines per run)",
             dropped,
             max = crate::i18n::number(LogNote::LINES_KEPT as u64)
         ),
@@ -1235,7 +1235,7 @@ fn not_installable(why: &str) -> String {
     if why == clew_plugin::inspect::NOT_A_COMPONENT {
         // Its own words already say "not a plugin".
         return tr!(
-            "That file is not a plugin: a plugin is a WebAssembly component, built for wasm32-wasip2."
+            "That file is not a plugin. Plugins are WebAssembly components built for wasm32-wasip2."
         )
         .into();
     }
@@ -2245,7 +2245,7 @@ impl App {
                     reason = tr!("it was removed")
                 ),
                 _ => tr!(
-                    "{command} ran, but its plugin was removed meanwhile",
+                    "{command} ran, but its plugin was removed in the meantime",
                     command = title
                 ),
             };
@@ -2359,7 +2359,7 @@ impl App {
             self.say_failure_again(
                 move || {
                     tr!(
-                        "{command} was updated while it ran: run it again for the new version",
+                        "{command} was updated while it ran. Run it again to use the new version.",
                         command = title.clone()
                     )
                 },
@@ -2912,7 +2912,7 @@ impl App {
                 self.plugins.handling.remove(nonce);
             }
             self.status = tr!(
-                "{plugin} was not installed: the agent that asked stopped waiting",
+                "{plugin} was not installed because the agent that asked for it stopped waiting",
                 plugin = pending
                     .inspected
                     .manifest
@@ -3204,7 +3204,7 @@ impl App {
                 {
                     self.plugins.handling.remove(nonce);
                     self.status = tr!(
-                        "{plugin} was not installed: the agent that asked stopped waiting",
+                        "{plugin} was not installed because the agent that asked for it stopped waiting",
                         plugin = pending
                             .inspected
                             .manifest
@@ -3317,15 +3317,14 @@ impl App {
                                 version = version
                             ),
                             (true, true) => tr!(
-                                "{plugin} is installed, in the command palette and Project Graphs",
+                                "{plugin} is now in the command palette and Project Graphs",
                                 plugin = name.clone()
                             ),
-                            (false, true) => tr!(
-                                "{plugin} is installed, in Project Graphs",
-                                plugin = name.clone()
-                            ),
+                            (false, true) => {
+                                tr!("{plugin} is now in Project Graphs", plugin = name.clone())
+                            }
                             _ => tr!(
-                                "{plugin} is installed, in the command palette",
+                                "{plugin} is now in the command palette",
                                 plugin = name.clone()
                             ),
                         };
@@ -3648,7 +3647,7 @@ impl App {
                                 .and_then(|id| self.plugins.get(id))
                                 .is_some_and(|p| !p.record.enabled);
                             let title = match off {
-                                true => tr!("The plugin is already installed, and turned off"),
+                                true => tr!("The plugin is already installed but turned off"),
                                 false => tr!("The plugin is already installed"),
                             };
                             self.set_plugin_step(

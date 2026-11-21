@@ -1189,7 +1189,7 @@ pub(crate) fn talk_tint(app: &App, tint: iced::Color) -> iced::Color {
 /// that "Hey, Clew" does too.
 pub(crate) fn talk_tip(app: &App) -> &'static str {
     if app.voice.wake.is_waiting() {
-        tr!("Talk — or say “Hey, Clew”")
+        tr!("Talk, or say “Hey, Clew”")
     } else {
         tr!("Talk")
     }
@@ -1198,7 +1198,7 @@ pub(crate) fn talk_tip(app: &App) -> &'static str {
 /// The microphone's tip while it listens: "Bye, Clew" turns it off too —
 /// or, called by its name, has it wait for it again.
 pub(crate) fn stop_listening_tip() -> &'static str {
-    tr!("Stop listening — or say “Bye, Clew”")
+    tr!("Stop listening, or say “Bye, Clew”")
 }
 
 /// The voice key's round button, `side` across, lit in the accent while

@@ -302,7 +302,7 @@ pub const CHANGED: &str = "Clew's copy of the plugin is missing or has changed s
 /// Why a plugin was not installed: its file changed between being read and
 /// approved, or could not be written (followed by ": " and why).
 pub const FILE_CHANGED: &str = "the plugin's file changed after it was read";
-pub const NOT_KEPT: &str = "could not keep the plugin";
+pub const NOT_KEPT: &str = "could not save the plugin";
 
 /// The approved copy of `record`'s plugin, checked to be the file approved.
 pub fn read_approved(data: &Path, record: &Record) -> Result<Vec<u8>, String> {

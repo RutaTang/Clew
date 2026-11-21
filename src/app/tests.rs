@@ -1055,7 +1055,7 @@ fn a_waiting_line_said_before_a_language_switch_is_still_known() {
     };
     let _ = app.update(host_fails_one(&app, *request, "database is locked"));
     let retrying = app.status.clone();
-    assert!(retrying.ends_with("— retrying"), "{retrying}");
+    assert!(retrying.ends_with(". Retrying…"), "{retrying}");
     with_lang(Lang::Fr, || app.update_waiting(true, &agreed));
     assert_eq!(app.status, retrying, "the wait wrote over the retry");
 }
@@ -3169,7 +3169,7 @@ fn a_file_outside_the_project_takes_no_bookmark_or_note() {
     assert!(app.proj.bookmarks.is_empty());
     assert!(!root.join(".clew/bookmarks.json").exists());
     assert!(
-        app.status.contains("dep.rs is outside it"),
+        app.status.contains("dep.rs is outside the project"),
         "{}",
         app.status
     );
@@ -3180,8 +3180,7 @@ fn a_file_outside_the_project_takes_no_bookmark_or_note() {
     }));
     assert!(app.proj.reading_note_edit.is_none());
     assert!(
-        app.status
-            .starts_with("Only the project's files can have notes"),
+        app.status.contains("Only project files can have notes"),
         "{}",
         app.status
     );
@@ -6571,7 +6570,7 @@ fn remote_disconnect_never_falls_back_to_local_files() {
         "no local read scheduled"
     );
     assert!(
-        app.status.contains("Disconnected"),
+        app.status.contains("disconnected from the remote host"),
         "status: {}",
         app.status
     );
@@ -6674,7 +6673,7 @@ fn a_hosts_switch_says_what_it_discards_even_when_said_before() {
     );
     assert_eq!(
         app.status,
-        "Connecting to user@host… — Unsaved note was discarded with the previous project"
+        "Connecting to user@host… Unsaved note was discarded with the previous project"
     );
 }
 
@@ -6703,7 +6702,7 @@ fn a_consent_after_the_remote_link_gave_up_dials_again() {
         reason: "Could not reach user@host: Connection refused".into(),
     }));
     assert!(app.pending_scan_root.is_none() && !app.scanning);
-    assert!(app.status.contains("use Connect"), "{}", app.status);
+    assert!(app.status.contains("Use Connect"), "{}", app.status);
     // Any open dials again, not only a consent: the stale Connect browser's
     // Open, a recent project. (The link the give-up followed is gone.)
     app.server = crate::app::server::ServerLink::default();
@@ -7151,7 +7150,11 @@ fn a_failed_server_open_ends_the_wait_for_it() {
         Event::error(ErrorCode::Failed, "opening it failed"),
     );
     assert!(app.server.pending_open.is_none());
-    assert!(app.status.contains("scanning it here"), "{}", app.status);
+    assert!(
+        app.status.contains("Scanning it locally instead"),
+        "{}",
+        app.status
+    );
     // The server is left holding the root half-open (no files, no watcher):
     // this window stops using it — a search would wait out a scan that never
     // comes — until the user opens a project again.
@@ -8324,7 +8327,7 @@ fn runs_open_side_by_side_each_in_its_own_tab() {
         }),
     }));
     assert_eq!(app.shown_run_tab(), Some(RunTab::Real(second_tab)));
-    assert!(app.status.contains("its tab shows where"), "{}", app.status);
+    assert!(app.status.contains("Its tab shows where"), "{}", app.status);
     let faces = app.run_tab_faces();
     assert_eq!(faces[0].state, crate::app::runs::TabState::Paused);
 
@@ -9059,7 +9062,7 @@ fn a_clew_citation_link_cannot_escape_the_project() {
             "{escape} must not start a load"
         );
         assert!(
-            app.status.starts_with("Refused a link outside the project"),
+            app.status.starts_with("Blocked a link outside the project"),
             "{escape} must be visibly refused, got: {}",
             app.status
         );
@@ -9085,7 +9088,7 @@ fn a_clew_citation_link_cannot_escape_the_project() {
         );
         assert_eq!(
             app.status,
-            "Couldn't open link/secret.txt: a symlink, or not a file inside the project"
+            "Couldn't open link/secret.txt because it's a symlink or isn't inside the project"
         );
         // A link at the name itself is no file of the project either, even
         // one to a file of it — as the server's `ReadFile` has it.
@@ -9099,7 +9102,7 @@ fn a_clew_citation_link_cannot_escape_the_project() {
         );
         assert_eq!(
             app.status,
-            "Couldn't open alias.txt: a symlink, or not a file inside the project"
+            "Couldn't open alias.txt because it's a symlink or isn't inside the project"
         );
     }
     let _ = root;
@@ -9138,7 +9141,7 @@ fn open_rel_refuses_a_path_that_escapes_the_project() {
             "{escape:?} must not start a load"
         );
         assert!(
-            app.status.starts_with("Refused a path outside the project"),
+            app.status.starts_with("Blocked a path outside the project"),
             "{escape:?} must be visibly refused, got: {}",
             app.status
         );
@@ -9200,7 +9203,7 @@ fn a_clew_citation_link_on_a_remote_project_is_not_resolved_locally() {
         "clew:/etc/passwd".into(),
     )));
     assert!(
-        app.status.starts_with("Refused a link outside the project"),
+        app.status.starts_with("Blocked a link outside the project"),
         "got: {}",
         app.status
     );
@@ -9537,7 +9540,7 @@ fn a_failed_note_save_keeps_the_text_in_the_session() {
         "the unsaved note must stay usable for the session"
     );
     assert!(
-        app.status.contains("not saved"),
+        app.status.contains("for this session only"),
         "the failure must be named, got {:?}",
         app.status
     );
@@ -9586,7 +9589,7 @@ fn a_failed_bookmark_note_save_keeps_the_text_in_the_session() {
         "the unsaved note must stay usable for the session"
     );
     assert!(
-        app.status.contains("not saved"),
+        app.status.contains("for this session only"),
         "the failure must be named, got {:?}",
         app.status
     );
@@ -11083,7 +11086,7 @@ fn an_edit_that_failed_is_tried_again_before_it_is_given_up() {
     let id = id.clone();
     fail(&mut app, *first);
     assert_eq!(app.proj.remote_edits.len(), 1, "a failed edit was dropped");
-    assert!(app.status.contains("retrying"), "{}", app.status);
+    assert!(app.status.contains("Retrying"), "{}", app.status);
     assert!(app.remote_edits_waiting(), "nothing would send it again");
     // Not before its pause.
     let _ = app.on_tick();
@@ -11110,7 +11113,7 @@ fn an_edit_that_failed_is_tried_again_before_it_is_given_up() {
     assert!(!app.remote_edits_waiting());
     assert!(
         app.status
-            .starts_with("Could not save .clew/bookmarks.json:"),
+            .starts_with("Could not save .clew/bookmarks.json, so"),
         "{}",
         app.status
     );
@@ -11369,12 +11372,12 @@ fn a_retry_line_stays_while_another_change_to_its_entry_is_tried_again() {
     };
     let _ = app.update(host_fails_one(&app, *text_sent, "locked"));
     let _ = app.update(host_fails_one(&app, *flag_sent, "locked"));
-    assert!(app.status.ends_with("— retrying"), "{}", app.status);
+    assert!(app.status.ends_with(". Retrying…"), "{}", app.status);
     // The flag is set again: the failed flag gives way, the text is still
     // tried again.
     assert!(app.edit_remote_state(notes::REL, flag(false)));
     assert_eq!(app.proj.remote_edits.len(), 2);
-    assert!(app.status.ends_with("— retrying"), "{}", app.status);
+    assert!(app.status.ends_with(". Retrying…"), "{}", app.status);
     // The text is saved when tried again, and the new flag after it: the
     // entry is saved, and the line goes with the text.
     holds_due(&mut app);
@@ -11496,7 +11499,7 @@ fn a_save_held_back_gives_way_to_the_next_save_of_its_note() {
         *first,
         "edit .clew/notes.json: locked",
     ));
-    assert!(app.status.ends_with("— retrying"), "{}", app.status);
+    assert!(app.status.ends_with(". Retrying…"), "{}", app.status);
     save(&mut app, "second version");
     let [only] = app.proj.remote_edits.as_slice() else {
         panic!("the failed save was kept: {:?}", app.proj.remote_edits);
@@ -11781,7 +11784,7 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         )),
         question(
             "2 changes are not saved to the host",
-            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. If you close now, it will be lost. The host could not save the change to the bookmark at a.rs:1: it is lost."
+            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. If you close now, it will be lost. The host could not save the change to the bookmark at a.rs:1, so it is lost."
         )
     );
     assert_eq!(
@@ -11793,7 +11796,7 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         question(
             "2 changes are not saved to the host",
             "The host could not save the changes to the bookmark at a.rs:1 and the note on f in \
-             lib.rs in me@host:/srv/app: they are lost."
+             lib.rs in me@host:/srv/app, so they are lost."
         )
     );
     assert_eq!(
@@ -11815,8 +11818,8 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
          • 2 changes to bookmarks in me@host:/srv/app: 1 could not be sent and 1 was sent but \
          not confirmed\n\
          • 1 change to bookmarks in you@other:/x could not be saved by the host\n\
-         • the change to the walkthrough “tour” in you@other:/x: the host could not save it, \
-         and it is lost\n\n\
+         • the change to the walkthrough “tour” in you@other:/x is lost because the host could \
+         not save it\n\n\
          If you quit now, the others may be lost."
     );
 }
@@ -12248,11 +12251,7 @@ fn forgetting_a_key_mid_session_keeps_the_project_and_its_edits() {
         "and its unsent edit with it"
     );
     assert!(app.connect.is_none(), "nothing left to pick");
-    assert!(
-        app.status.contains("old key — connecting"),
-        "{}",
-        app.status
-    );
+    assert!(app.status.contains("old key. Connecting"), "{}", app.status);
 }
 
 /// A remote window holding `edits` bookmark removals (at most three) over a
@@ -12426,8 +12425,8 @@ fn an_edit_the_host_failed_goes_again_in_its_turn_while_later_ones_are_on_the_wi
     );
     assert_eq!(
         app.status,
-        "Could not save .clew/bookmarks.json yet: the change to the bookmark at a.rs:1 \
-         (database is locked) — retrying"
+        "Could not save the change to the bookmark at a.rs:1 in .clew/bookmarks.json yet \
+         (database is locked). Retrying…"
     );
     holds_due(&mut app);
     let _ = app.on_tick();
@@ -12855,7 +12854,7 @@ fn a_retry_said_of_one_edit_is_not_taken_back_for_another_named_alike() {
     };
     let _ = app.update(host_fails_one(&app, *request, "database is locked"));
     let retrying = app.status.clone();
-    assert!(retrying.ends_with("— retrying"), "{retrying}");
+    assert!(retrying.ends_with(". Retrying…"), "{retrying}");
     // The other tour, generated twice while the first waits: its first
     // upsert is left out.
     assert!(app.edit_remote_state(rel, upsert(other)));
@@ -13011,7 +13010,7 @@ fn an_edit_given_up_is_named_and_kept_for_the_question() {
     );
     assert_eq!(
         app.status,
-        "Could not save .clew/bookmarks.json: the change to the bookmark at a.rs:1 is lost \
+        "Could not save .clew/bookmarks.json, so the change to the bookmark at a.rs:1 is lost \
          (cannot be parsed)"
     );
     assert_eq!(
@@ -17928,7 +17927,7 @@ fn a_refinement_no_server_can_follow_gives_way_to_the_name_based_graph() {
         app.status.starts_with("No Rust server is ready")
             && app
                 .status
-                .ends_with("refine it with LSP once a server is ready"),
+                .ends_with("(refine it with LSP once a server is ready)"),
         "{}",
         app.status
     );
@@ -18837,13 +18836,13 @@ async fn one_function_a_server_fails_is_left_unrefined_and_the_rest_kept() {
     let (mut app, root, python) =
         refine_with_python("calls-refine-one-error", StubAnswers::ErrorsOn(4)).await;
     assert!(app.proj.project_calls.precise, "{}", app.status);
-    let unrefined = "1 function unrefined (b in tool.py: the server is busy)";
+    let unrefined = "1 function not refined (b in tool.py: the server is busy)";
     assert_eq!(
         app.status,
-        format!("Call graph refined with LSP — {unrefined}")
+        format!("Call graph refined with LSP. {unrefined}")
     );
     let label = app.precise_label().expect("refined");
-    assert!(label.contains("; 1 function unrefined"), "{label}");
+    assert!(label.contains(". 1 function not refined"), "{label}");
     assert_eq!(
         python.prepared(4),
         1,
@@ -18861,7 +18860,7 @@ async fn one_function_a_server_fails_is_left_unrefined_and_the_rest_kept() {
     settle_graphs(&mut app, batch);
     assert_eq!(
         app.status,
-        format!("Call graph refined with LSP — {unrefined}")
+        format!("Call graph refined with LSP. {unrefined}")
     );
     // Its own file changes, and the server answers now: refined.
     app.proj.link.lsp.insert(
@@ -18885,7 +18884,7 @@ async fn what_the_list_says_is_missing_follows_the_pass_that_missed_it() {
         refine_with_python("calls-refine-missing", StubAnswers::ErrorsOn(4)).await;
     let summary = app.precise_summary().unwrap_or_default();
     assert!(
-        summary.ends_with("1 function could not be refined: calls into it may be missing."),
+        summary.ends_with("1 function could not be refined, so calls into it may be missing."),
         "{summary}"
     );
     let batch = app.update(tool_edited(&app, &root));
@@ -18893,8 +18892,9 @@ async fn what_the_list_says_is_missing_follows_the_pass_that_missed_it() {
     assert_eq!(app.proj.project_calls.unrefined.len(), 1, "{}", app.status);
     let summary = app.precise_summary().unwrap_or_default();
     assert!(
-        summary
-            .ends_with("1 function could not be refined: calls into and out of it may be missing."),
+        summary.ends_with(
+            "1 function could not be refined, so calls into and out of it may be missing."
+        ),
         "{summary}"
     );
 }
@@ -18911,7 +18911,7 @@ async fn a_function_a_server_never_answers_is_asked_again_then_left_unrefined() 
     assert!(app.proj.project_calls.precise, "{}", app.status);
     assert_eq!(
         app.status,
-        "Call graph refined with LSP — 1 function unrefined (b in tool.py: request timed out)"
+        "Call graph refined with LSP. 1 function not refined (b in tool.py: request timed out)"
     );
     assert_eq!(python.prepared(4), 2, "not asked once more");
     until(|| python.asked("$/cancelRequest") == 2);
@@ -19038,7 +19038,7 @@ async fn a_server_that_stops_answering_in_time_is_asked_no_more_in_the_pass() {
     assert_eq!(calls.unrefined.len(), 15, "{}", app.status);
     assert!(
         app.status.contains(&format!(
-            "the Python server stopped answering ({} timeouts in a row) and was skipped",
+            "The Python server stopped answering ({} timeouts in a row) and was skipped",
             crate::app::tasks::REFINE_BREAKER_TIMEOUTS
         )),
         "{}",
@@ -19200,7 +19200,7 @@ async fn a_change_waits_for_a_starting_server() {
     );
     assert!(
         app.precise_label()
-            .is_some_and(|label| label.ends_with("waiting for Python")),
+            .is_some_and(|label| label.ends_with(". Waiting for Python")),
         "{:?}",
         app.precise_label()
     );
@@ -19413,7 +19413,7 @@ async fn a_server_just_started_holds_the_files_until_it_says_it_has_loaded() {
     assert_eq!(server.asked("textDocument/prepareCallHierarchy"), 0);
     assert!(
         app.precise_label()
-            .is_some_and(|label| label.ends_with("waiting for Rust")),
+            .is_some_and(|label| label.ends_with(". Waiting for Rust")),
         "{:?}",
         app.precise_label()
     );
@@ -19739,13 +19739,14 @@ async fn a_refine_with_a_server_down_says_what_it_covers() {
     settle_graphs(&mut app, opened);
     let refine = app.update(Message::Graph(GraphMsg::RefineProjectCalls));
     assert!(
-        app.status.contains("(Python left out: no server ready)"),
+        app.status
+            .contains("(Python skipped because no server is ready)"),
         "{}",
         app.status
     );
     settle_graphs(&mut app, refine);
     assert!(app.proj.project_calls.precise, "precondition: refined");
-    let badge = "● LSP-precise: Rust; Python left out";
+    let badge = "● LSP-precise: Rust. Python left out";
     let mut header =
         iced_test::simulator(crate::ui::project_graph_modal(&app, Overlay::ProjectCalls));
     assert!(header.find(badge).is_ok(), "{:?}", app.precise_label());
@@ -19787,11 +19788,13 @@ async fn what_a_refinement_leaves_out_follows_the_project() {
     settle_graphs(&mut app, batch);
     assert_eq!(
         app.precise_label().as_deref(),
-        Some("● LSP-precise: Rust; Python left out")
+        Some("● LSP-precise: Rust. Python left out")
     );
     let summary = app.precise_summary().unwrap_or_default();
     assert!(
-        summary.ends_with("Functions in Python are left out: no server was ready to refine them."),
+        summary.ends_with(
+            "Functions in Python are left out because no server was ready to refine them."
+        ),
         "{summary}"
     );
 
@@ -20793,7 +20796,7 @@ fn a_failed_remote_tsconfig_fetch_is_tried_once_more() {
     for msg in loaded(second) {
         retry = app.update(msg);
     }
-    assert!(app.status.contains("trying once more"), "{}", app.status);
+    assert!(app.status.contains("Trying again"), "{}", app.status);
     let (landed, asked, after) = serve(&app, retry, &mut rx, false);
     assert_eq!(asked, 1, "the failed fetch was not tried again");
     assert!(
@@ -21402,7 +21405,7 @@ fn expand_macro_waits_for_the_server() {
 fn refine_with_no_server_says_where_to_start_one() {
     let mut app = scanned_app("refine-no-server");
     let _ = app.refine_project_calls();
-    assert!(app.status.contains("open a file"), "{}", app.status);
+    assert!(app.status.contains("Open a file"), "{}", app.status);
     open_synchronously(&mut app, "src/lib.rs", None);
     let _ = app.refine_project_calls();
     assert!(app.status.contains("Settings"), "{}", app.status);
@@ -23789,7 +23792,7 @@ fn a_search_that_skipped_files_says_so() {
     assert_eq!(app.proj.search.skipped.len(), 1);
     assert!(
         app.status.contains("1 match")
-            && app.status.contains("3 files not searched")
+            && app.status.contains("3 files weren't searched")
             && app.status.contains("dump.sql"),
         "{}",
         app.status
@@ -23812,7 +23815,7 @@ fn a_disconnect_says_why_when_the_client_ended_it() {
         reason: Some("clew-server sent a malformed frame (invalid type: null)".into()),
     }));
     assert!(
-        app.status.contains("malformed frame") && app.status.contains("reconnecting"),
+        app.status.contains("malformed frame") && app.status.contains("Reconnecting"),
         "{}",
         app.status
     );
@@ -23823,7 +23826,7 @@ fn a_disconnect_says_why_when_the_client_ended_it() {
         conn,
         reason: None,
     }));
-    assert_eq!(app.status, "clew-server disconnected — reconnecting…");
+    assert_eq!(app.status, "clew-server disconnected. Reconnecting…");
 }
 
 /// One message of every async-result variant that carries a `Stamp`, all
@@ -25965,7 +25968,7 @@ fn summaries_the_saved_cache_left_out_are_reported() {
         chain: Default::default(),
     }));
     assert!(
-        app.status.contains("3 summaries") && app.status.contains("not saved"),
+        app.status.contains("3 summaries") && app.status.contains("weren't saved"),
         "{}",
         app.status
     );
@@ -26300,7 +26303,8 @@ fn summaries_from_an_earlier_clew_are_kept_marked_not_billed() {
         "a refresh billed what it could not check"
     );
     assert!(
-        app.status.contains("7 from an earlier version of Clew"),
+        app.status
+            .contains("7 kept from an earlier version of Clew"),
         "{}",
         app.status
     );
@@ -26760,7 +26764,7 @@ fn a_pass_that_could_not_read_the_project_changes_nothing() {
     assert_eq!(explain::load(&store, &root), before, "on disk");
     assert_eq!(
         app.status,
-        "Explain couldn't continue: Clew failed internally (while reading the project) — try again, \
+        "Explain couldn't continue: Clew failed internally (while reading the project). Try again, \
          and report it if it happens again"
     );
 }
@@ -26785,10 +26789,10 @@ fn a_pass_over_a_project_folder_that_is_gone_changes_nothing() {
     assert_eq!(explain::load(&store, &root), before, "on disk");
     assert!(
         app.status
-            .starts_with("Explain couldn't continue: the project folder could not be read (")
+            .starts_with("Explain couldn't continue: the project folder couldn't be read (")
             && app
                 .status
-                .ends_with("— nothing was changed; check that it is still there"),
+                .ends_with("and nothing was changed. Check that it's still there"),
         "{}",
         app.status
     );
@@ -26876,8 +26880,8 @@ fn a_remote_file_too_large_to_explain_is_said_so_and_asked_for_once() {
     assert_eq!(helper_asked(&batches), 1, "{batches:?}");
     assert_eq!(
         app.status,
-        "Explained 4 functions, files and folders; src/util/helper.rs is too large to explain \
-         (2.3 MB) — its summaries are dropped"
+        "Explained 4 functions, files and folders. src/util/helper.rs is too large to explain \
+         (2.3 MB), so its summaries were removed"
     );
     assert_eq!(
         provider.calls(),
@@ -26920,8 +26924,8 @@ fn a_host_that_settles_nothing_is_not_asked_forever() {
     assert_eq!(*app.proj.explain.cache, before);
     assert!(
         app.status.ends_with(
-            "; 2 files could not be read (src/lib.rs, src/util/helper.rs) — their summaries \
-             are kept until they can be"
+            ". 2 files could not be read (src/lib.rs, src/util/helper.rs), so their summaries \
+             stay until they can be read"
         ),
         "{}",
         app.status
@@ -26944,8 +26948,8 @@ fn a_local_file_that_can_no_longer_be_explained_is_dropped_and_said_so() {
     assert_eq!(
         app.status,
         format!(
-            "Explained 4 functions, files and folders; src/util/helper.rs is too large to explain \
-             ({size}) — its summaries are dropped"
+            "Explained 4 functions, files and folders. src/util/helper.rs is too large to explain \
+             ({size}), so its summaries were removed"
         )
     );
     assert_eq!(
@@ -26981,7 +26985,7 @@ fn a_local_file_that_can_no_longer_be_explained_is_dropped_and_said_so() {
     drive(&mut app, refresh, explain_and_save);
     assert!(
         app.status
-            .ends_with("; src/util/helper.rs is not UTF-8 text — its summaries are dropped"),
+            .ends_with(". src/util/helper.rs isn't UTF-8 text, so its summaries were removed"),
         "{}",
         app.status
     );
@@ -27065,7 +27069,7 @@ fn a_local_file_saved_while_it_was_read_is_read_as_it_was_saved() {
     assert_eq!(*app.proj.explain.cache, before, "{}", app.status);
     assert!(
         app.status
-            .contains("; 1 file could not be read (src/util/helper.rs)"),
+            .contains(". 1 file could not be read (src/util/helper.rs)"),
         "{}",
         app.status
     );
@@ -27097,8 +27101,8 @@ fn a_file_that_can_no_longer_be_explained_is_said_to_be_what_it_is() {
     drive(&mut app, pass, explain_and_save);
     assert!(
         app.status.ends_with(
-            "; 2 files can no longer be explained (src/lib.rs (not a plain file), \
-             src/util/helper.rs (outside the project)) — their summaries are dropped"
+            ". 2 files can no longer be explained (src/lib.rs (not a plain file), \
+             src/util/helper.rs (outside the project)), so their summaries were removed"
         ),
         "{}",
         app.status
@@ -27110,7 +27114,7 @@ fn a_file_that_can_no_longer_be_explained_is_said_to_be_what_it_is() {
     std::os::unix::fs::symlink(&away, root.join("src/util/helper.rs")).unwrap();
     let pass = app.update(Message::Explain(ExplainMsg::Project));
     drive(&mut app, pass, explain_and_save);
-    let out = "; src/util/helper.rs resolves outside the project — its summaries are dropped";
+    let out = ". src/util/helper.rs points outside the project, so its summaries were removed";
     assert!(app.status.ends_with(out), "{}", app.status);
     // ... or a link to a file of the project.
     let (mut app, root, _provider) = helper_project("explain-said-link-in");
@@ -27119,7 +27123,7 @@ fn a_file_that_can_no_longer_be_explained_is_said_to_be_what_it_is() {
     std::os::unix::fs::symlink(&kept, root.join("src/util/helper.rs")).unwrap();
     let pass = app.update(Message::Explain(ExplainMsg::Project));
     drive(&mut app, pass, explain_and_save);
-    let not_plain = "; src/util/helper.rs is not a plain file — its summaries are dropped";
+    let not_plain = ". src/util/helper.rs isn't a plain file, so its summaries were removed";
     assert!(app.status.ends_with(not_plain), "{}", app.status);
 
     let host = remote_helper_host(Some(HELPER));
@@ -27252,7 +27256,7 @@ fn a_request_the_provider_refused_is_said_to_be_refused() {
     assert!(
         status.contains("1 failed: the request was refused (")
             && status.contains("422")
-            && status.ends_with("— check the model and endpoint in Settings"),
+            && status.ends_with(". Check the model and endpoint in Settings"),
         "{status}"
     );
 
@@ -27271,7 +27275,7 @@ fn a_request_the_provider_refused_is_said_to_be_refused() {
         ) && app.status.contains("404")
             && app
                 .status
-                .ends_with("— check the model and endpoint in Settings"),
+                .ends_with(". Check the model and endpoint in Settings"),
         "{}",
         app.status
     );
@@ -27286,7 +27290,7 @@ fn a_request_the_provider_refused_is_said_to_be_refused() {
         app.status
             .starts_with("Explain couldn't continue: the provider rejected the API key (")
             && app.status.contains("401")
-            && app.status.ends_with("— check it in Settings"),
+            && app.status.ends_with(". Check it in Settings"),
         "{}",
         app.status
     );
@@ -27305,7 +27309,7 @@ fn an_unavailable_provider_is_said_to_be_unavailable() {
     assert!(
         status.contains("1 failed: the provider was unavailable (")
             && status.contains("502")
-            && status.ends_with("— try again later"),
+            && status.ends_with(". Try again later"),
         "{status}"
     );
 }
@@ -27464,7 +27468,7 @@ fn a_walkthrough_whose_call_failed_says_what_failed() {
     assert!(
         app.status
             .starts_with("Could not explain the blocks: the provider rejected the API key (")
-            && app.status.ends_with("— check it in Settings"),
+            && app.status.ends_with(". Check it in Settings"),
         "{}",
         app.status
     );
@@ -27529,7 +27533,7 @@ fn a_pass_whose_calls_were_cancelled_says_so() {
     let _ = run_task(app.update(done));
     assert_eq!(
         app.status,
-        "Explain couldn't continue: its requests were cancelled — run it again to finish"
+        "Explain couldn't continue: its requests were cancelled. Run it again to finish"
     );
     assert_eq!(*app.proj.explain.cache, before);
 }
@@ -27569,11 +27573,11 @@ fn a_prompt_refused_for_its_length_freezes_nothing_that_quotes_it() {
     assert_ne!(app.proj.explain.cache[&top].summary, before.summary);
     assert!(
         app.status.starts_with(
-            "Explained 7 functions, files and folders; 1 failed: the prompt is too long for the \
+            "Explained 7 functions, files and folders. 1 failed: the prompt is too long for the \
              model ("
         ) && app
             .status
-            .contains("; 1 explained without the failed summaries it builds on")
+            .contains(". 1 explained without the failed summaries it builds on")
             && !app.status.contains("2 failed"),
         "{}",
         app.status
@@ -27620,7 +27624,7 @@ fn a_summary_that_keeps_failing_is_waited_for_once() {
     );
     assert!(
         app.status
-            .contains("; 1 explained without the failed summaries it builds on"),
+            .contains(". 1 explained without the failed summaries it builds on"),
         "{}",
         app.status
     );
@@ -27665,7 +27669,7 @@ fn a_summary_waits_once_a_session_whatever_passes_come_between() {
     );
     assert!(
         app.status
-            .contains("; 1 explained without the failed summaries it builds on"),
+            .contains(". 1 explained without the failed summaries it builds on"),
         "{}",
         app.status
     );
@@ -29024,7 +29028,7 @@ fn a_breakpoint_set_after_the_run_ended_is_kept_for_the_next_one() {
     // Live: the failure is said, and that the breakpoints are kept.
     let said = failed(&mut app);
     assert!(
-        said.contains("didn't take") && said.contains("kept for the next run"),
+        said.contains("didn't accept") && said.contains("again on the next run"),
         "{said}"
     );
     app.debug.session.as_mut().unwrap().status = DebugStatus::Terminated;
@@ -30692,7 +30696,7 @@ fn a_step_the_reader_superseded_still_notes_a_missing_symbol() {
         .clone()
         .expect("the superseded step lost its note");
     assert!(
-        note.contains("location not found") && note.contains("no_such_fn"),
+        note.contains("couldn't find") && note.contains("no_such_fn"),
         "{note}"
     );
     assert!(
@@ -30718,7 +30722,7 @@ fn after_a_jump(app: &mut App, highlight: Task<Message>) {
         .clone()
         .expect("the jump cost the step its note");
     assert!(
-        note.contains("location not found") && note.contains("no_such_fn"),
+        note.contains("couldn't find") && note.contains("no_such_fn"),
         "{note}"
     );
     assert!(!app.status.contains("no_such_fn"), "{}", app.status);
@@ -30827,7 +30831,7 @@ fn markdown_step_landed(tag: &str) -> (App, Task<Message>) {
 /// had landed.
 #[test]
 fn the_readers_scroll_in_a_markdown_steps_file_supersedes_the_step() {
-    let note = "location not found — “usage” is not in README.md";
+    let note = "couldn't find “usage” in README.md";
 
     // Left alone, the step says where it landed.
     let (mut app, highlight) = markdown_step_landed("walk-md-alone");
@@ -32533,7 +32537,7 @@ fn a_start_beside_a_session(tag: &str) -> (App, PathBuf, u64, u64) {
 #[test]
 fn an_open_time_travel_took_over_says_why_it_could_not_be_read_once_carried_out() {
     let said_late = |m: &Message| matches!(m, Message::Editor(EditorMsg::HeldOpenFailed { .. }));
-    let refused = "cannot read: missing, a symlink, or not a regular file";
+    let refused = "cannot read it (missing, a symlink, or not a regular file)";
     for (tag, then) in [
         ("none", "no session"),
         ("session", "a session"),
@@ -32915,9 +32919,9 @@ fn a_history_landing_over_the_session_in_use_says_where_it_opened() {
         assert_eq!(
             app.status,
             if how == "here" {
-                "History of notes.txt opened here, replacing that of src/lib.rs"
+                "History of notes.txt opened here, replacing the history of src/lib.rs"
             } else {
-                "History of notes.txt opened in the left pane, replacing that of src/lib.rs"
+                "History of notes.txt opened in the left pane, replacing the history of src/lib.rs"
             },
             "the landing went unsaid ({how})"
         );
@@ -32993,7 +32997,7 @@ fn a_rescope_still_loading_gives_way_to_a_step_an_exit_or_a_jump() {
         assert_eq!(
             app.status,
             if act == "⌘←" {
-                "Scope unchanged — you moved on before the new scope loaded"
+                "Scope unchanged because you moved on before the new scope loaded"
             } else {
                 ""
             },
@@ -33120,7 +33124,7 @@ fn a_scope_toggle_still_loading_stands_with_a_summary_and_says_when_it_gives_way
             }
         }
         assert_eq!(
-            app.status, "Scope unchanged — you moved on before the new scope loaded",
+            app.status, "Scope unchanged because you moved on before the new scope loaded",
             "{act}: the scope toggle stood, or gave way without a word"
         );
         let _ = app.update(lib_history(&app, asked));
@@ -33457,7 +33461,7 @@ fn a_walkthrough_step_whose_symbol_is_missing_says_so_once_its_file_lands() {
         .anchor_note
         .clone()
         .expect("the step says where it landed");
-    assert!(note.contains("location not found"), "{note}");
+    assert!(note.contains("couldn't find"), "{note}");
     assert!(note.contains("no_such_fn"), "{note}");
     assert_eq!(
         app.status, note,
@@ -33962,7 +33966,11 @@ fn an_explanation_cache_this_build_cannot_read_is_reported_and_kept() {
         Some(merged),
         saved.map_err(|e| e.to_string()),
     );
-    assert!(app.status.contains("not saved"), "{}", app.status);
+    assert!(
+        app.status.contains("Could not save the explanations"),
+        "{}",
+        app.status
+    );
     assert_eq!(
         std::fs::read_to_string(store.join("explain.json")).unwrap(),
         text,
@@ -34009,7 +34017,7 @@ fn a_failed_state_read_is_reported_and_the_stored_trail_kept() {
     }));
     assert!(
         app.status
-            .starts_with("Some saved state was left as is because it could not be read: ")
+            .starts_with("Some saved state could not be read and was left as is (")
             && app.status.contains("boom"),
         "{}",
         app.status
@@ -34646,7 +34654,7 @@ async fn a_remote_refine_leaves_a_file_the_host_cannot_read_unrefined() {
     assert!(app.proj.project_calls.precise, "{}", app.status);
     assert_eq!(
         app.status,
-        "Call graph refined with LSP — 1 function unrefined (run in src/secret.rs: the remote \
+        "Call graph refined with LSP. 1 function not refined (run in src/secret.rs: the remote \
          host could not read it: Permission denied (os error 13))"
     );
 }
@@ -34696,8 +34704,8 @@ async fn a_remote_refine_says_why_of_the_file_it_could_not_read() {
     assert_eq!(
         app.status,
         format!(
-            "LSP refinement failed (could not read {HOST_UNREADABLE} from the remote host): the \
-             call graph is name-based again — refine it with LSP for exact calls"
+            "LSP refinement failed (could not read {HOST_UNREADABLE} from the remote host), so \
+             the call graph is name-based again (refine it with LSP for exact calls)"
         )
     );
 }
@@ -34717,7 +34725,7 @@ async fn a_remote_refine_that_could_not_read_a_file_fails_and_says_which() {
     assert_eq!(
         app.status,
         "LSP refinement failed (could not read src/a.rs from the remote host: the connection \
-         dropped): the call graph is name-based again — refine it with LSP for exact calls"
+         dropped), so the call graph is name-based again (refine it with LSP for exact calls)"
     );
 }
 
@@ -35051,14 +35059,14 @@ fn an_empty_outline_says_why() {
     // highlighter cannot color reads as that, not as a file without syntax…
     assert_eq!(
         crate::app::editor::open_status("notes.xyz", Some("xyz")),
-        "notes.xyz — shown without highlighting: unknown language \"xyz\""
+        "notes.xyz is shown without highlighting: unknown language \"xyz\""
     );
     // …and an outline query a grammar bump broke is not "no symbols".
     assert_eq!(
         crate::ui::outline_note_for(Some(Err(clew_core::highlight::QueryError::Invalid(
             "Invalid node type foo".into()
         )))),
-        "Outline unavailable: the outline query does not compile (Invalid node type foo)."
+        "The outline isn't available because its query doesn't compile (Invalid node type foo)."
     );
     assert_eq!(
         crate::ui::outline_note_for(Some(Err(clew_core::highlight::QueryError::Unsupported))),
@@ -35719,7 +35727,7 @@ fn hovering_a_glossary_term_shows_its_definition() {
     // "Client" (col 11) is defined in another file: its definition and where.
     assert_eq!(
         app.hover_summary(0, 0, 11).as_deref(),
-        Some("Client: A connection to one server — src/net.rs:4")
+        Some("Client: A connection to one server (src/net.rs:4)")
     );
     // "Parser" (col 22) is this file's own: the local peek's, not the summary's.
     assert_eq!(app.hover_summary(0, 0, 22), None);
@@ -35743,7 +35751,7 @@ fn hovering_a_glossary_term_shows_its_definition() {
     ));
     assert_eq!(
         app.hover_summary(0, 0, 12).as_deref(),
-        Some("config: Loading settings — src/config.rs:1")
+        Some("config: Loading settings (src/config.rs:1)")
     );
     assert_eq!(app.hover_summary(0, 1, 5), None, "a local named config");
     // The glossary follows the docs index: a rebuilt index without the term.
@@ -36071,7 +36079,7 @@ fn a_value_trace_follows_its_lines_when_the_file_changes() {
     std::fs::write(&lib, edited).unwrap();
     open_synchronously(&mut app, "src/lib.rs", None);
     let _ = app.update(Message::Flow(FlowMsg::Retrace));
-    assert!(app.status.contains("server ready"), "{}", app.status);
+    assert!(app.status.contains("server is ready"), "{}", app.status);
     // Gone from the file (the pane reloaded as the watcher reloads it): said so.
     let gone = "fn nothing() {}\n";
     if let Some(v) = app.proj.panes[app.proj.active].as_mut() {
@@ -36103,7 +36111,7 @@ fn an_export_waits_for_the_docs_index_its_glossary_needs() {
     };
     assert!(!path.exists(), "nothing written yet");
     assert!(
-        app.status.contains("waiting for the API docs"),
+        app.status.contains("Waiting for the API docs"),
         "{}",
         app.status
     );
@@ -36171,7 +36179,7 @@ fn a_value_trace_starts_at_the_cursor_and_counts_what_it_cut() {
         keymap::Action::TraceValue,
     )));
     assert!(
-        app.status.contains("value trace needs one"),
+        app.status.contains("Tracing a value needs one"),
         "{}",
         app.status
     );
@@ -36209,7 +36217,7 @@ fn a_value_trace_starts_at_the_cursor_and_counts_what_it_cut() {
         .note
         .clone()
         .unwrap_or_default();
-    assert!(note.starts_with("401 occurrences"), "{note}");
+    assert!(note.contains("of 401 occurrences"), "{note}");
 
     // Never read: no text to follow, so not "changed" and no stale banner.
     let token = start(&mut app);
@@ -36832,7 +36840,11 @@ async fn typed_language_fields_make_their_choices() {
         "a used field empties"
     );
     typed(&mut app, LangField::GoTag, "a-b");
-    assert!(app.status.contains("is not a build tag"), "{}", app.status);
+    assert!(
+        app.status.contains("isn't a valid build tag"),
+        "{}",
+        app.status
+    );
     assert_eq!(app.proj.lang_choices.go.as_ref(), Some(&go));
     assert_eq!(app.proj.lang_drafts.go_tag, "a-b", "kept, to be fixed");
 
@@ -38540,7 +38552,7 @@ fn a_failed_explain_is_not_buried_by_what_follows_it() {
     // explain helper()" stood in red beside it.
     assert!(
         app.status
-            .starts_with("Explained helper(); 1 summary built on it failed:"),
+            .starts_with("Explained helper(), but 1 summary built on it failed:"),
         "{}",
         app.status
     );
@@ -39253,7 +39265,11 @@ fn the_tree_menu_opens_in_the_other_half_and_does_not_outlive_its_tree() {
         TreeAct::CopyRelativePath,
     )));
     assert!(app.proj.tree_menu.is_none());
-    assert!(app.status.starts_with("Didn't copy it"), "{}", app.status);
+    assert!(
+        app.status.starts_with("Didn't copy the path"),
+        "{}",
+        app.status
+    );
 
     // The sidebar hidden: the menu goes with its tree.
     raise(&mut app, "notes.txt");
@@ -39501,7 +39517,7 @@ fn an_install_of_what_is_installed_says_so() {
     app.plugins.installed = vec![plugin];
     assert_eq!(
         title_after(&mut app, 2),
-        "The plugin is already installed, and turned off"
+        "The plugin is already installed but turned off"
     );
 }
 
@@ -39588,7 +39604,8 @@ fn an_update_says_its_version_and_that_it_turns_the_plugin_on() {
         result: Ok(record.fingerprint),
     }));
     assert!(
-        app.status.starts_with("Views is installed"),
+        app.status
+            .starts_with("Views is now in the command palette"),
         "{}",
         app.status
     );
@@ -39601,17 +39618,17 @@ fn an_update_says_its_version_and_that_it_turns_the_plugin_on() {
     };
     assert!(!says(
         &pending,
-        "It is turned off now, and will be turned on again."
+        "It's turned off now. This turns it back on."
     ));
     pending.previous = Some(installed_plugin(false));
     assert!(says(
         &pending,
-        "It is turned off now, and will be turned on again."
+        "It's turned off now. This turns it back on."
     ));
     pending.previous = Some(installed_plugin(true));
     assert!(!says(
         &pending,
-        "It is turned off now, and will be turned on again."
+        "It's turned off now. This turns it back on."
     ));
 
     // Its card's title and answers: an update, or a replacement by an older
@@ -39817,7 +39834,11 @@ fn an_agents_install_is_answered_as_the_user_decides() {
             palette: Vec::new(),
         })
     );
-    assert!(app.status.contains("installed"), "{}", app.status);
+    assert!(
+        app.status.contains("is now in the command palette"),
+        "{}",
+        app.status
+    );
     assert!(app.plugins.handling.is_empty());
 
     // A newer build offered while one is asked about takes its place, and
@@ -39858,7 +39879,7 @@ fn an_agents_install_is_answered_as_the_user_decides() {
     assert_eq!(asked(&app), None, "the card stood on");
     assert_eq!(
         app.status,
-        "Word count was not installed: the agent that asked stopped waiting"
+        "Word count was not installed because the agent that asked for it stopped waiting"
     );
     // And withdrawn between the watch's looks, as Install is pressed.
     let third = filed();
@@ -39876,7 +39897,7 @@ fn an_agents_install_is_answered_as_the_user_decides() {
     );
     assert_eq!(
         app.status,
-        "Word count was not installed: the agent that asked stopped waiting"
+        "Word count was not installed because the agent that asked for it stopped waiting"
     );
     assert!(app.plugins.handling.is_empty());
 }
@@ -39963,14 +39984,14 @@ fn installing_from_a_file_says_what_is_wrong_with_it() {
         .unwrap();
     assert_eq!(
         picked(&mut app, big).as_deref(),
-        Some("Could not read big.wasm: it is larger than a plugin may be (32 MB at most)")
+        Some("Could not read big.wasm: it is larger than the 32 MB limit for plugins")
     );
     let text = dir.join("notes.txt");
     std::fs::write(&text, "hello").unwrap();
     assert_eq!(
         picked(&mut app, text).as_deref(),
         Some(
-            "That file is not a plugin: a plugin is a WebAssembly component, built for wasm32-wasip2."
+            "That file is not a plugin. Plugins are WebAssembly components built for wasm32-wasip2."
         )
     );
     assert_eq!(app.plugins.install.len(), 0);
@@ -40957,7 +40978,7 @@ fn a_runs_follow_ups_are_at_hand() {
     assert!(app.proj.plugin_page.is_none(), "no page headed by no name");
     assert_eq!(
         app.status,
-        "Count words ran, but its plugin was removed meanwhile"
+        "Count words ran, but its plugin was removed in the meantime"
     );
     assert!(!app.plugins.log.contains_key("word-count"));
 }
@@ -41791,7 +41812,7 @@ fn a_plugin_graph_turned_off_while_picked_says_so_and_comes_back() {
         })
     );
     // Said over either view, with its way back and its ×.
-    let note = "“A pair” is hidden: the plugin Views is turned off.";
+    let note = "“A pair” is hidden because the plugin Views is turned off.";
     for list in [false, true] {
         app.graph_mode = !list;
         let view = || crate::ui::project_graph_modal(&app, Overlay::ProjectMaps);
@@ -41856,7 +41877,7 @@ fn a_plugin_graph_turned_off_while_picked_says_so_and_comes_back() {
     let view = || crate::ui::project_graph_modal(&app, Overlay::ProjectMaps);
     assert!(
         iced_test::simulator(view())
-            .find("The graph picked last is gone: the plugin Views no longer adds it.")
+            .find("The graph you picked last is gone because the plugin Views no longer adds it.")
             .is_ok()
     );
     let (targets, _) = crate::ui::heard::gather_all_of(view);
@@ -42326,7 +42347,7 @@ fn a_run_of_a_build_replaced_meanwhile_is_not_the_new_ones() {
     ran(&mut app, "fp-old", Err(Failure::Crashed("boom".into())));
     assert_eq!(
         app.status,
-        "Count words was updated while it ran: run it again for the new version"
+        "Count words was updated while it ran. Run it again to use the new version."
     );
     let notice = app.failure_shown().expect("said where the user is");
     assert!(matches!(
@@ -42348,7 +42369,7 @@ fn a_run_of_a_build_replaced_meanwhile_is_not_the_new_ones() {
     );
     assert_eq!(
         app.status,
-        "Count words was updated while it ran: run it again for the new version"
+        "Count words was updated while it ran. Run it again to use the new version."
     );
     assert!(
         !app.plugins.damaged.contains("word-count"),
@@ -42449,7 +42470,7 @@ fn a_plugins_load_failure_and_clews_log_notes_are_in_the_readers_words() {
     }
     assert_eq!(
         log_note_words(LogNote::LinesDropped(1)),
-        "1 more log line was left out: a run keeps 1,000 lines at most"
+        "1 more log line was left out (the limit is 1,000 lines per run)"
     );
 }
 
@@ -42597,7 +42618,7 @@ fn an_unreadable_plugin_list_is_said_and_runs_and_deletes_nothing() {
     );
     assert!(
         iced_test::simulator(crate::ui::plugins_settings(&opened))
-            .find("Have a plugin's file?")
+            .find("Have a plugin file?")
             .is_ok(),
         "where a file is installed from stays, for once it is read again"
     );
@@ -42625,7 +42646,7 @@ fn an_unreadable_plugin_list_is_said_and_runs_and_deletes_nothing() {
     assert!(offered(&app).is_empty(), "nor for the plugins it read last");
     assert!(
         iced_test::simulator(crate::ui::plugins_settings(&opened))
-            .find("A plugin adds what you need to Clew. Ask your agent for one, in your own words: “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before installing it.")
+            .find("A plugin adds what you need to Clew. Ask your agent for one in your own words, for example “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before installing it.")
             .is_err()
     );
 
@@ -42840,11 +42861,11 @@ fn a_long_log_says_how_much_of_it_was_let_go() {
             .is_ok()
     };
     assert!(
-        !shows(&app, "5 earlier lines are not kept"),
+        !shows(&app, "5 earlier lines were discarded"),
         "only with all shown"
     );
     let _ = app.update(Message::Plugin(PluginMsg::ToggleLog("word-count".into())));
-    assert!(shows(&app, "5 earlier lines are not kept"));
+    assert!(shows(&app, "5 earlier lines were discarded"));
     assert!(shows(&app, "line 6") && !shows(&app, "line 5"));
 
     // Installed again (its copy made anew): none of the last log, nor its
@@ -43188,14 +43209,14 @@ fn a_plugin_this_clew_cannot_read_is_listed_and_can_be_removed() {
         _ => panic!("the install is asked"),
     }
     app.plugins.install = Default::default();
-    let said = "Clew cannot read this plugin, so it does not run. A later version of Clew may have installed it: update Clew to use it, or remove it.";
+    let said = "Clew can't read this plugin, so it doesn't run. A later version of Clew may have installed it. Update Clew to use it, or remove it.";
     // Named as its manifest names it, with its id: an installed plugin may
     // have its name.
     let mut page = iced_test::simulator(crate::ui::plugins_settings(&app));
     assert!(page.find(format!("{name} (from-later)").as_str()).is_ok());
     assert!(page.find(said).is_ok(), "{said}");
     assert!(
-        page.find("A plugin adds what you need to Clew. Ask your agent for one, in your own words: “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before installing it.")
+        page.find("A plugin adds what you need to Clew. Ask your agent for one in your own words, for example “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before installing it.")
             .is_err(),
         "not shown as no plugins at all"
     );
@@ -43460,7 +43481,7 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
     ));
     assert!(says(
         &app,
-        "Run “rustup update”, then check again. Or install Rust into Clew's own folder (about 700 MB); nothing else on this computer changes."
+        "Run “rustup update”, then check again. Or install Rust into Clew's own folder (about 700 MB). Nothing else on this computer changes."
     ));
     // A package manager's Rust has no rustup: no `rustup update` said.
     checked(
@@ -43478,7 +43499,7 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
     ));
     assert!(!says(
         &app,
-        "Run “rustup update”, then check again. Or install Rust into Clew's own folder (about 700 MB); nothing else on this computer changes."
+        "Run “rustup update”, then check again. Or install Rust into Clew's own folder (about 700 MB). Nothing else on this computer changes."
     ));
     assert!(says(
         &app,
@@ -43633,7 +43654,7 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
 
     // Ready with Clew's own: said so, and it can be removed.
     checked(&mut app, Ok(("1.95.0".into(), true)), true);
-    assert!(says(&app, "Ready: Clew's own Rust 1.95.0"));
+    assert!(says(&app, "Clew's own Rust 1.95.0 is ready"));
     assert!(says(&app, "Clew's own Rust"));
     assert!(
         !says(
@@ -43643,6 +43664,6 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
         "a failure is forgotten once ready"
     );
     checked(&mut app, Ok(("1.95.0".into(), false)), false);
-    assert!(says(&app, "Ready: Rust 1.95.0"));
+    assert!(says(&app, "Rust 1.95.0 is ready"));
     assert!(!says(&app, "Clew's own Rust"));
 }

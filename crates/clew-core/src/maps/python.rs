@@ -105,7 +105,7 @@ fn hierarchy(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "python.classes",
         "Class hierarchy (MRO)",
-        "each class and the bases it names, in order; its detail is the method resolution order Python looks a method up in",
+        "each class and the bases it names, in order, with its method resolution order (the order Python looks up methods in) in the detail",
     );
     for (name, class) in &classes {
         let kind = if name.ends_with("Mixin") {
@@ -117,7 +117,8 @@ fn hierarchy(corpus: &Corpus) -> Option<ProjectMap> {
         map.place(at, &class.rel, class.line);
         let detail = match mro(name, &classes, 0) {
             Some(order) => format!("MRO: {} → object", order.join(" → ")),
-            None => "no consistent method resolution order: Python refuses this class".to_string(),
+            None => "no consistent method resolution order, so Python can't create this class"
+                .to_string(),
         };
         map.detail(at, detail);
         for (i, base) in class.bases.iter().enumerate() {
@@ -246,7 +247,7 @@ fn fixtures(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "pytest.fixtures",
         "pytest fixtures",
-        "each fixture (its scope in its detail) and an arrow to it from each test or fixture that asks for it — by parameter name, or with usefixtures",
+        "each fixture (its scope in its detail) and an arrow to it from each test or fixture that requests it by parameter name or with usefixtures",
     );
     for f in &functions {
         let is_test = f.name.starts_with("test");
@@ -307,7 +308,7 @@ fn dispatch(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "python.dispatch",
         "Dynamic dispatch",
-        "where Python picks what to call at run time: getattr with a computed name, dict registries of callables, functions a decorator registers — and the functions they can reach",
+        "where Python picks what to call at run time (getattr with a computed name, dict registries of callables, functions a decorator registers) and the functions they can reach",
     );
     let defs = corpus.defs();
     for source in corpus.in_langs(&[Lang::Python]) {
@@ -360,7 +361,7 @@ fn dispatch(corpus: &Corpus) -> Option<ProjectMap> {
                     &format!("{class}.__getattr__"),
                 );
                 map.place(at, &source.rel, line(def));
-                map.detail(at, "every attribute the class lacks is looked up here");
+                map.detail(at, "handles every attribute the class lacks");
             }
         }
         // `HANDLERS = {"a": handle_a, …}`: a registry.
@@ -499,7 +500,7 @@ mod tests {
         assert_eq!(detail("D"), "MRO: D → LogMixin → B → C → A → object");
         assert_eq!(detail("E"), "MRO: E → ABC → object");
         assert!(
-            detail("X").contains("Python refuses"),
+            detail("X").contains("Python can't create this class"),
             "A before B, B before A: {}",
             detail("X")
         );

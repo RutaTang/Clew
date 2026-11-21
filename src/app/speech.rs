@@ -909,11 +909,11 @@ impl App {
                                 tr!("{model} is ready", model = name)
                             }
                             ReadAloud::Spoken => tr!(
-                                "{model} is ready — answers to what you ask by voice are read aloud",
+                                "{model} is ready. Answers to questions you ask by voice are read aloud.",
                                 model = name
                             ),
                             ReadAloud::Always => {
-                                tr!("{model} is ready — answers are read aloud", model = name)
+                                tr!("{model} is ready. Answers are read aloud.", model = name)
                             }
                             ReadAloud::Never => tr!("{model} is ready", model = name),
                         };
@@ -1336,7 +1336,7 @@ impl App {
                 return Task::none();
             }
             return self
-                .give_up_speaking(tr!("There is no data directory to keep the voice in").into());
+                .give_up_speaking(tr!("There is no data directory to store the voice in").into());
         };
         // An answer's sentence no voice here can say: the answer is shown
         // instead. Not a sample of a voice in Settings — that is not an
@@ -1723,7 +1723,7 @@ impl App {
             return Task::none();
         }
         let Some(store) = self.voice.store.clone() else {
-            self.status = tr!("There is no data directory to keep the model in").into();
+            self.status = tr!("There's no data directory to store the model in").into();
             return Task::none();
         };
         let claim = match Claim::take(speech::dir(&store, model), ClaimedFor::Download) {

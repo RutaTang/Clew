@@ -1292,7 +1292,8 @@ fn an_acp_agent_is_asked_only_about_a_local_project_it_knows() {
     app.proj.ask_input = "why?".into();
     let _ = app.update(Message::Ask(AskMsg::Submit));
     assert!(
-        app.status.contains("No ACP agent `nobody`"),
+        app.status
+            .contains("The ACP agent `nobody` is no longer configured"),
         "{}",
         app.status
     );

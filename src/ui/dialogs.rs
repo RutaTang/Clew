@@ -336,7 +336,7 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
         // Past the end: where Enter goes, the last line, said as such.
         let last = app.active_viewer().map(|v| v.lines.len().max(1));
         let said = match last {
-            Some(last) if n > last => tr!("Go to line {n}, the last line", n = last),
+            Some(last) if n > last => tr!("Go to line {n} (the last line)", n = last),
             _ => tr!("Go to line {n}", n = n),
         };
         rows.push(

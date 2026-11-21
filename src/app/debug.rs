@@ -251,7 +251,7 @@ async fn build_with_cargo(
     .flatten();
     let Some(list) = listed else {
         let error = tr!(
-            "{target} was built, but could not list its tests: run it again, or run all its tests with cargo test.",
+            "Built {target}, but couldn't list its tests. Run it again, or run all its tests with cargo test.",
             target = name
         );
         let _ = output.send(not_run(error)).await;
@@ -261,7 +261,7 @@ async fn build_with_cargo(
         Some(found) => Some((executable, clew_core::cargorun::test_args(&found), package)),
         None => {
             let error = tr!(
-                "{target} has no test named {name} when built: it may be behind a #[cfg] or a Cargo feature this run does not turn on (Settings → Language servers → Rust).",
+                "When built, {target} has no test named {name}. It may be behind a #[cfg] or a Cargo feature this run doesn't turn on (Settings → Language servers → Rust).",
                 target = name,
                 name = test.name
             );
@@ -422,14 +422,14 @@ impl App {
         let (file, runs) = (v.abs.clone(), clew_core::lean_has_main(&v.source));
         if !runs {
             self.status = tr!(
-                "This Lean file has no main to run: Lean checks it as you read, its goals in the Goals tab, and Step Through Proof walks a proof."
+                "This Lean file has no main to run. Lean checks it as you read and shows its goals in the Goals tab. To walk through a proof, use Step Through Proof."
             )
             .into();
             return Task::none();
         }
         if !no_debug {
             self.status = tr!(
-                "Lean has no debugger: Run runs this file's main, and Step Through Proof walks a proof one tactic at a time."
+                "Lean has no debugger. Use Run to run this file's main, or Step Through Proof to go through a proof one tactic at a time."
             )
             .into();
             return Task::none();
@@ -440,7 +440,7 @@ impl App {
         {
             Some(clew_core::lsp::store::Located::Ready(lake)) => lake,
             _ => {
-                self.status = tr!("Lean's lake was not found: install Lean with elan").into();
+                self.status = tr!("Lean's lake wasn't found. Install Lean with elan.").into();
                 return Task::none();
             }
         };
@@ -579,7 +579,7 @@ impl App {
             None => {
                 self.status = match lang {
                     Some("rust" | "python") => {
-                        tr!("No test here: put the cursor in a test function to run it.")
+                        tr!("No test here. Put the cursor in a test function to run it.")
                     }
                     _ => tr!("Run Test runs Rust and Python tests."),
                 }
@@ -707,7 +707,7 @@ impl App {
                         _ => None,
                     };
                     let library = tr!(
-                        "Nothing to run: this crate is a library. Run one of its tests (right-click in a test, then Run Test), or open one of its examples and Run it."
+                        "This crate is a library, so there's nothing to run. Run one of its tests (right-click in a test, then Run Test), or open one of its examples and Run it."
                     );
                     if let Some(file) = rust_file {
                         match crate::app::runplan::cargo_plan_for(&file) {
@@ -739,7 +739,7 @@ impl App {
             };
             if !cfg.program.exists() {
                 self.status = tr!(
-                    "Program not found: {path} — build it first",
+                    "Program not found at {path}. Build it first.",
                     path = cfg.program.display()
                 );
                 return Task::none();
@@ -855,7 +855,7 @@ impl App {
                 None => tr!("Running {file}…", file = program_name),
             },
             Some(lang) => tr!(
-                "Starting debugger — {adapter}…",
+                "Starting debugger ({adapter})…",
                 adapter = crate::i18n::lookup(lang.label())
             ),
             None if matches!(plan, Some(RunPlan::Lean { .. })) => {
@@ -1426,11 +1426,11 @@ impl App {
         // pytest is not a debugger: a test, run or debugged, needs it.
         self.status = match install.is_test_runner() {
             true => tr!(
-                "Running tests needs {runner} — waiting for your approval",
+                "Running tests needs {runner}. Waiting for your approval.",
                 runner = install.name()
             ),
             false => tr!(
-                "Debugging needs {adapter} — waiting for your approval",
+                "Debugging needs {adapter}. Waiting for your approval.",
                 adapter = install.name()
             ),
         };
@@ -2520,7 +2520,7 @@ impl App {
             return self.on_debug_failed(
                 run,
                 tr!(
-                    "the debug target's session did not start — {error}",
+                    "the debug target's session did not start: {error}",
                     error = error
                 ),
             );
@@ -2535,12 +2535,12 @@ impl App {
             format!(
                 "{}\n",
                 tr!(
-                    "[Clew] a child debug session failed to start — {error}",
+                    "[Clew] a child debug session failed to start: {error}",
                     error = error
                 )
             ),
         );
-        self.status = tr!("Child debug session failed — {error}", error = error);
+        self.status = tr!("Child debug session failed: {error}", error = error);
         ended
     }
 
@@ -2920,7 +2920,7 @@ impl App {
                         .is_none_or(|s| s.status == crate::DebugStatus::Terminated);
                     if !ended {
                         self.status = tr!(
-                            "The debugger didn't take the breakpoints in {file} ({why}); they are kept for the next run",
+                            "The debugger didn't accept the breakpoints in {file} ({why}). Clew will try them again on the next run.",
                             file = self.rel_of(&path),
                             why = super::tasks::plain_detail(&e)
                         );
@@ -2996,7 +2996,7 @@ impl App {
                 if was != Some(verified) {
                     self.status = match (verified, message) {
                         (true, _) => {
-                            tr!("Breakpoint at line {line} is now live", line = requested)
+                            tr!("Breakpoint at line {line} is now active", line = requested)
                         }
                         (false, Some(m)) => tr!(
                             "Breakpoint at line {line}: {message}",
@@ -3004,7 +3004,7 @@ impl App {
                             message = m
                         ),
                         (false, None) => {
-                            tr!("Breakpoint at line {line} is not live", line = requested)
+                            tr!("Breakpoint at line {line} isn't active", line = requested)
                         }
                     };
                 }

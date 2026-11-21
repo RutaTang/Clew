@@ -171,7 +171,7 @@ fn fetch_over_net(
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<u64, String> {
     if !url.starts_with("https://") {
-        return Err(tr!("refusing a model download that is not HTTPS").into());
+        return Err(tr!("a non-HTTPS model download was blocked").into());
     }
     // A gigabyte over a link that drops now and then: it picks up where it
     // stopped rather than start again.
@@ -1438,7 +1438,7 @@ impl App {
         self.wait_again();
         self.voice.wake.listening_ended();
         if self.resume_waiting() {
-            self.status = tr!("Stopped listening — say “Hey, Clew” to start again").into();
+            self.status = tr!("Stopped listening. Say “Hey, Clew” to start again").into();
         }
         Task::none()
     }
@@ -1510,7 +1510,7 @@ impl App {
         };
         self.voice.wake.listening_ended();
         if self.resume_waiting() {
-            self.status = tr!("Stopped listening — say “Hey, Clew” to start again").into();
+            self.status = tr!("Stopped listening. Say “Hey, Clew” to start again").into();
         }
         task
     }
@@ -1635,15 +1635,13 @@ impl App {
             let another = models::MODELS.iter().any(|m| self.voice.installed(m));
             self.status = if another {
                 tr!(
-                    "{model} is not downloaded yet — download it ({size} MB) in Settings → \
-                     Voice, or choose one that is",
+                    "{model} isn't downloaded yet. Download it ({size} MB) in Settings → Voice, or choose one that is",
                     model = crate::i18n::lookup(model.name),
                     size = model.size_mb
                 )
             } else {
                 tr!(
-                    "Voice needs a speech model on this computer — download {model} ({size} MB) \
-                     in Settings → Voice",
+                    "Voice needs a speech model on this computer. Download {model} ({size} MB) in Settings → Voice",
                     model = crate::i18n::lookup(model.name),
                     size = model.size_mb
                 )
@@ -1678,9 +1676,7 @@ impl App {
                 "Listening… say yes to run {command}, or no",
                 command = waiting.said()
             ),
-            None => {
-                tr!("Listening… say a command or question — “Bye, Clew” stops listening").into()
-            }
+            None => tr!("Listening… say a command or a question, or “Bye, Clew” to stop").into(),
         };
     }
 
@@ -1734,7 +1730,7 @@ impl App {
             let failed_before = self.voice.wake.failed.is_some();
             if self.resume_waiting() {
                 self.status = tr!(
-                    "Stopped listening — say “Hey, Clew” to start again ({error})",
+                    "Stopped listening ({error}). Say “Hey, Clew” to start again",
                     error = e
                 );
             } else if failed_before || self.voice.wake.failed.is_none() {
@@ -1787,7 +1783,7 @@ impl App {
                     self.voice.speech.hold();
                     self.voice.over_from = Some((from, echo));
                     self.status =
-                        tr!("Listening… say a command or question — “Bye, Clew” stops listening")
+                        tr!("Listening… say a command or a question, or “Bye, Clew” to stop")
                             .into();
                 }
                 None => quiet = None,
@@ -2460,7 +2456,7 @@ impl App {
             };
             if command.asks_when_said() {
                 self.status = tr!(
-                    "{command}? Say yes or no — “{text}”",
+                    "{command}? Say yes or no (heard “{text}”)",
                     text = text,
                     command = crate::i18n::lookup(&said).trim_end_matches('…')
                 );
@@ -2566,7 +2562,7 @@ impl App {
             return Task::none();
         }
         let Some(store) = self.voice.store.clone() else {
-            self.status = tr!("There is no data directory to keep the model in").into();
+            self.status = tr!("There's no data directory to store the model in").into();
             return Task::none();
         };
         let claim = match Claim::take(store.path(model), ClaimedFor::Download) {

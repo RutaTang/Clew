@@ -13,22 +13,22 @@ use crate::*;
 /// read yet — not in view, covered, or just come — and its Allow cannot be
 /// pressed.
 pub(crate) const TOO_SOON: &str = tr_noop!(
-    "Too soon to answer — say it again once the question has been in view, uncovered, for a moment, with the window in front"
+    "Too soon to answer. Make sure the window is in front and the question is fully visible, wait a moment, then say it again."
 );
 /// … it allows, and was said as a question ("Allow?").
-pub(crate) const ASKED: &str = tr_noop!("To answer, say it plainly — not as a question");
+pub(crate) const ASKED: &str = tr_noop!("To answer, say it plainly, not as a question");
 /// … more was said after a yes or a no ("yes, allow it", "okay, why that
 /// file?"), which answers nothing: the question waits for a plain answer
 /// before anything else is said.
 pub(crate) const ALONE: &str =
-    tr_noop!("A question is waiting — answer it first with a plain “yes” or “no”");
+    tr_noop!("A question is waiting. Answer it first with a plain “yes” or “no”.");
 /// … a plain yes or no, where the question has none to give ("Always
 /// reject" its only way to decline), or a word that also puts away what is
 /// on top ("cancel"): its answer wants its own words.
-pub(crate) const BY_NAME: &str = tr_noop!("Say the answer you mean by the words on its button");
+pub(crate) const BY_NAME: &str = tr_noop!("To choose an answer, say the words on its button");
 /// … spoken commands are off: voice presses nothing.
 pub(crate) const COMMANDS_OFF: &str =
-    tr_noop!("Spoken commands are off — answer the question with its buttons");
+    tr_noop!("Spoken commands are off. Use the buttons to answer the question.");
 
 /// What was said to a question waiting ([`App::said_to_question`]).
 pub(crate) enum ToQuestion {
@@ -583,7 +583,7 @@ impl App {
         }
         if asks_first(&target) {
             self.status = tr!(
-                "{command}? Say yes or no — “{text}”",
+                "{command}? Say yes or no (heard “{text}”)",
                 text = text,
                 command = target.shown
             );

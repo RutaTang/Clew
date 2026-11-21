@@ -766,7 +766,7 @@ fn ssh_failure(step: &str, ssh: &Ssh, out: &Captured) -> Failure {
             return Failure::new(
                 FailureKind::Auth,
                 tr!(
-                    "{label} refused the login ({error}). Clew cannot type a password when it was not started from a terminal: use key-based login (a key in ssh-agent — `ssh-add` — or an identity file).",
+                    "{label} refused the login ({error}). Clew can't enter a password unless it was started from a terminal. Use key-based login instead, with a key in ssh-agent (`ssh-add`) or an identity file.",
                     label = label,
                     error = last_line(err)
                 ),
@@ -898,7 +898,7 @@ fn changed_key_failure(ssh: &Ssh, stderr: &str) -> Failure {
         if ssh.clew_known_hosts.as_deref() == Some(Path::new(file)) {
             reason.push(' ');
             reason.push_str(&tr!(
-                "The key on record ({file}:{line}) is one you trusted in Clew. If you know why it changed, forget it — `{remove}` — then connect again and check the new key's fingerprint before trusting it.",
+                "The key on record ({file}:{line}) is one you trusted in Clew. If you know why it changed, forget it with `{remove}`, then connect again and check the new key's fingerprint before you trust it.",
                 file = file,
                 line = line,
                 remove = remove
@@ -907,8 +907,7 @@ fn changed_key_failure(ssh: &Ssh, stderr: &str) -> Failure {
         } else {
             reason.push(' ');
             reason.push_str(&tr!(
-                "The key on record is in {file}:{line}. If you know why it changed, remove \
-                 it — `{remove}` — and connect again.",
+                "The key on record is in {file}:{line}. If you know why it changed, remove it with `{remove}` and connect again.",
                 file = file,
                 line = line,
                 remove = remove
@@ -919,7 +918,7 @@ fn changed_key_failure(ssh: &Ssh, stderr: &str) -> Failure {
         let remove = shell_command(&["ssh-keygen", "-R", &name]);
         reason.push(' ');
         reason.push_str(&tr!(
-            "If you know why it changed, remove the old key — `{remove}` — and connect again.",
+            "If you know why it changed, remove the old key with `{remove}` and connect again.",
             remove = remove
         ));
     }
@@ -1079,9 +1078,7 @@ async fn describe_unknown_host(
     let reason = format!(
         "{refused}{why_not} {}",
         tr!(
-            "Check it against a fingerprint you trust (from the host's administrator, or \
-             `{command}` on the host), then trust it by connecting once in Terminal — \
-             `{ssh}` — and answering yes. Then connect again here.",
+            "Check it against a fingerprint you trust (from the host's administrator, or `{command}` on the host). If it matches, run `{ssh}` once in Terminal and answer yes to trust it. Then connect again here.",
             command = print_key,
             ssh = command
         )
@@ -1138,8 +1135,7 @@ fn upload_bytes(verified: clew_core::server_dist::VerifiedServer) -> Result<Vec<
     let actual = Sha256::of(&verified.bytes);
     if Sha256::parse(&verified.sha256) != Some(actual) {
         return Err(tr!(
-            "the clew-server bytes do not match their verified digest (verified {verified}, now \
-             {actual}); not deploying them",
+            "the clew-server bytes don't match their verified digest (verified {verified}, now {actual}), so they weren't deployed",
             verified = verified.sha256,
             actual = actual
         ));
@@ -1264,7 +1260,7 @@ fn verify_script(layout: &RemoteLayout) -> String {
 /// was told "No such file or directory (os error 2)".
 fn ssh_spawn_error(e: &std::io::Error) -> String {
     if e.kind() == std::io::ErrorKind::NotFound {
-        tr!("ssh is not installed here — install OpenSSH's client to connect to a host").into()
+        tr!("ssh is not installed here. Install the OpenSSH client to connect to a host").into()
     } else {
         tr!("could not run ssh: {error}", error = e)
     }
@@ -1424,8 +1420,7 @@ where
             )
         } else {
             tr!(
-                "the clew-server deployed to {label} did not pass the protocol check (wanted \
-                 '{wanted}', got: {got}) — is the home directory mounted noexec?",
+                "the clew-server deployed to {label} did not pass the protocol check (wanted '{wanted}', got: {got}). Is the home directory mounted noexec?",
                 label = label,
                 wanted = layout.probe_line,
                 got = last_line(&check.stdout)
@@ -1676,7 +1671,9 @@ fn start_local(server: Option<&Path>) -> Result<Transport, Failure> {
     let Some(path) = server else {
         return Err(Failure::new(
             FailureKind::NoServer,
-            tr!("No clew-server binary was found beside Clew or on PATH; working without it."),
+            tr!(
+                "No clew-server binary was found beside Clew or on PATH, so Clew is working without it."
+            ),
         ));
     };
     let mut cmd = clew_core::spawn::tokio_command(path);
@@ -2750,7 +2747,7 @@ exit 3
             bytes: b"something else".to_vec(),
             sha256: digest,
         });
-        assert!(swapped.unwrap_err().contains("do not match"));
+        assert!(swapped.unwrap_err().contains("don't match"));
         let malformed = upload_bytes(VerifiedServer {
             bytes,
             sha256: "not a digest".into(),

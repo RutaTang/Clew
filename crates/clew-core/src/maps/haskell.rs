@@ -45,7 +45,7 @@ fn instances(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "haskell.instances",
         "Type class instances",
-        "each type and an arrow to each class it is an instance of — instance declarations, deriving clauses and standalone deriving",
+        "each type and an arrow to each class it is an instance of, from instance declarations, deriving clauses and standalone deriving",
     );
     for source in corpus.in_langs(&[Lang::Haskell]) {
         let Some(tree) = source.tree() else {

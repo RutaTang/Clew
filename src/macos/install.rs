@@ -102,7 +102,7 @@ fn replaceable(bundle: &Path) -> Result<(), String> {
     // read-only mirror; there is no "installed" copy to replace.
     if bundle.to_string_lossy().contains("/AppTranslocation/") {
         return Err(tr!(
-            "Clew is running from a temporary copy macOS made — move Clew.app into /Applications and open it from there"
+            "Clew is running from a temporary copy that macOS made. Move Clew.app into /Applications and open it from there"
         )
         .into());
     }
@@ -120,7 +120,7 @@ fn replaceable(bundle: &Path) -> Result<(), String> {
         if let Err(e) = writable(path) {
             return Err(match e.raw_os_error() {
                 Some(libc::EROFS) => tr!(
-                    "Clew is running from a read-only volume (the disk image?) — copy Clew.app to /Applications and open it from there"
+                    "Clew is running from a read-only volume, probably the disk image. Copy Clew.app to /Applications and open it from there"
                 )
                 .to_string(),
                 _ => tr!(
@@ -626,7 +626,7 @@ fn verify(app: &Path, identity: &SigningIdentity) -> Result<(), String> {
     let declared = signing_identity(app)?;
     if declared != *identity {
         return Err(tr!(
-            "the update is signed as {identifier} by team {team} (this app is {own_identifier} by {own_team}), refusing to install it",
+            "the update is signed as {identifier} by team {team} (this app is {own_identifier} by {own_team}), so Clew won't install it",
             identifier = declared.identifier,
             team = declared.team,
             own_identifier = identity.identifier,
@@ -658,7 +658,7 @@ fn check_candidate_version(
     let candidate = clew_core::update::ensure_upgrade(running, candidate)?;
     if candidate != expected {
         return Err(tr!(
-            "the update image holds Clew {candidate}, but {expected} was offered; refusing it",
+            "the update image contains Clew {candidate}, but {expected} was offered, so Clew won't install it",
             candidate = candidate,
             expected = expected
         ));

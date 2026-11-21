@@ -437,7 +437,7 @@ pub fn wait_while_busy(data: &Path) {
 pub const NO_INSTALLER: &str = "rustup publishes no installer for this computer";
 pub const NO_CHECKSUM: &str = "the installer's published SHA-256 could not be read";
 pub const NOT_PUBLISHED: &str =
-    "the installer downloaded is not the one rust-lang.org published; nothing was run";
+    "the downloaded installer is not the one rust-lang.org published, so nothing was run";
 
 /// Take the step `setup`, telling `stage` how it goes, until it is done or
 /// `cancel` is set; then check that plugins can be built. Refused while

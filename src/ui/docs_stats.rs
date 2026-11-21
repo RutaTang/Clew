@@ -278,7 +278,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                 Glyph::Note,
                 tr!("Nothing documented"),
                 tr!("No doc comments were found in this project's code."),
-                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
+                Some((tr!("Scan again"), Message::Docs(DocsMsg::Refresh))),
             )
         } else {
             // Nothing was built to build again: the project is read for its
@@ -287,7 +287,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                 Glyph::Note,
                 tr!("No documentation"),
                 "",
-                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
+                Some((tr!("Scan again"), Message::Docs(DocsMsg::Refresh))),
             )
         };
     }
@@ -1203,15 +1203,15 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
             (
                 tr!("No terms found"),
                 tr!(
-                    "The glossary is made from doc comments and explanations; this project has none yet."
+                    "The glossary is made from doc comments and explanations. This project has none yet."
                 ),
-                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
+                Some((tr!("Scan again"), Message::Docs(DocsMsg::Refresh))),
             )
         } else {
             (
                 tr!("No terms yet"),
                 "",
-                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
+                Some((tr!("Scan again"), Message::Docs(DocsMsg::Refresh))),
             )
         };
         return container(
@@ -1317,8 +1317,8 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         if of_kind.len() > GLOSSARY_ROWS_SHOWN {
             rows.push(
                 text(trn!(
-                    "1 more — narrow the filter to see it",
-                    "{n} more — narrow the filter to see them",
+                    "1 more. Narrow the filter to see it.",
+                    "{n} more. Narrow the filter to see them.",
                     of_kind.len() - GLOSSARY_ROWS_SHOWN
                 ))
                 .size(ts::CAPTION)

@@ -63,7 +63,7 @@ pub(crate) fn permission_line(bits: u8) -> String {
         (false, true) => tr!("Reads the open project's history"),
         // What every command is given, said as the card says it: "Reads
         // none of your files" left out the file and text it is run on.
-        (false, false) => tr!("Only what it is run on: the file, line and selected text"),
+        (false, false) => tr!("Only the file, line and selected text it's run on"),
     }
     .to_string()
 }
@@ -456,7 +456,7 @@ pub(crate) fn plugin_install_modal(
             line = line.push(
                 // Its own words: "New" is the catalogs' "create new".
                 container(
-                    text(tr!("Newly asked"))
+                    text(tr!("Newly requested"))
                         .size(ts::CAPTION)
                         .color(theme::warning()),
                 )
@@ -470,7 +470,7 @@ pub(crate) fn plugin_install_modal(
         can.push(
             text(format!(
                 "• {}",
-                tr!("Only what it is run on: the file, line and selected text")
+                tr!("Only the file, line and selected text it's run on")
             ))
             .size(ts::BASE)
             .color(theme::fg())
@@ -501,7 +501,7 @@ pub(crate) fn plugin_install_modal(
                 .as_ref()
                 .filter(|p| !p.record.enabled)
                 .map(|_| {
-                    text(tr!("It is turned off now, and will be turned on again."))
+                    text(tr!("It's turned off now. This turns it back on."))
                         .size(ts::BODY)
                         .color(theme::warning())
                         .into()
@@ -777,8 +777,8 @@ fn installed_row<'a>(app: &'a App, plugin: &'a Installed) -> Element<'a, Message
             .filter(|_| open)
             .map(|n| -> Element<'_, Message> {
                 text(trn!(
-                    "1 earlier line is not kept",
-                    "{n} earlier lines are not kept",
+                    "1 earlier line was discarded",
+                    "{n} earlier lines were discarded",
                     *n
                 ))
                 .size(ts::SMALL)
@@ -913,10 +913,10 @@ fn building_group(app: &App) -> Element<'_, Message> {
         Building::Ready { version, own } => {
             let said = match own {
                 true => tr!(
-                    "Ready: Clew's own Rust {version}",
+                    "Clew's own Rust {version} is ready",
                     version = version.clone()
                 ),
-                false => tr!("Ready: Rust {version}", version = version.clone()),
+                false => tr!("Rust {version} is ready", version = version.clone()),
             };
             rows.push(form::item(tr!("Rust"), Some(said), none()));
         }
@@ -939,13 +939,13 @@ fn building_group(app: &App) -> Element<'_, Message> {
                 Some(Setup::Install) if too_old => (
                     Some(tr!("Install Rust for Clew")),
                     tr!(
-                        "Run “rustup update”, then check again. Or install Rust into Clew's own folder (about 700 MB); nothing else on this computer changes."
+                        "Run “rustup update”, then check again. Or install Rust into Clew's own folder (about 700 MB). Nothing else on this computer changes."
                     ),
                 ),
                 Some(Setup::Install) if no_default => (
                     Some(tr!("Install Rust for Clew")),
                     tr!(
-                        "Run “rustup default stable”, then check again. Or install Rust into Clew's own folder (about 700 MB); nothing else on this computer changes."
+                        "Run “rustup default stable”, then check again. Or install Rust into Clew's own folder (about 700 MB). Nothing else on this computer changes."
                     ),
                 ),
                 Some(Setup::Install) => (
@@ -1039,12 +1039,12 @@ fn building_group(app: &App) -> Element<'_, Message> {
     {
         let said = match &app.plugins.building {
             Building::Ready { own: true, .. } => tr!(
-                "Removing it frees about 700 MB. Plugins already installed keep working; building new ones needs Rust again."
+                "Removing it frees about 700 MB. Installed plugins keep working, but building new ones needs Rust again."
             ),
             Building::Ready { own: false, .. } => {
-                tr!("Not in use: your own Rust is ready. Removing it frees about 700 MB.")
+                tr!("Not in use because your own Rust is ready. Removing it frees about 700 MB.")
             }
-            _ => tr!("It does not work as it is. Removing it frees about 700 MB."),
+            _ => tr!("It doesn't work. Removing it frees about 700 MB."),
         };
         rows.push(form::item(
             tr!("Clew's own Rust"),
@@ -1100,12 +1100,12 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
             "",
             Some(
                 tr!(
-                    "A plugin adds what you need to Clew. Ask your agent for one, in your own words: “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before installing it."
+                    "A plugin adds what you need to Clew. Ask your agent for one in your own words, for example “make a plugin that lists the TODOs by who wrote them”. It writes the plugin, and Clew asks you before installing it."
                 )
                 .to_string(),
             ),
             None,
-            vec![form::item(tr!("Have a plugin's file?"), None, install)],
+            vec![form::item(tr!("Have a plugin file?"), None, install)],
         ));
     } else {
         groups.push(form::group(
@@ -1135,7 +1135,7 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
                         name.clone(),
                         Some(
                             tr!(
-                                "Clew cannot read this plugin, so it does not run. A later version of Clew may have installed it: update Clew to use it, or remove it."
+                                "Clew can't read this plugin, so it doesn't run. A later version of Clew may have installed it. Update Clew to use it, or remove it."
                             )
                             .to_string(),
                         ),
@@ -1151,7 +1151,7 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
                     )
                 }))
                 .chain(std::iter::once(form::item(
-                    tr!("Have a plugin's file?"),
+                    tr!("Have a plugin file?"),
                     None,
                     install,
                 )))
@@ -1170,7 +1170,7 @@ pub(crate) fn plugins_settings(app: &App) -> Element<'_, Message> {
     );
     groups.push(
         form::note(tr!(
-            "Plugins run inside Clew, apart from everything else: each can do only what you allowed when you installed it, and never reach the network, other files, programs or your keys."
+            "Plugins run inside Clew, isolated from everything else. Each can do only what you allowed when you installed it, and can never reach the network, other files, programs or your keys."
         ))
         .into(),
     );

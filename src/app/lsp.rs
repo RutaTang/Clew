@@ -40,7 +40,7 @@ pub(crate) fn pretty_init_options(options: Option<&serde_json::Value>) -> Option
         text.truncate(cut);
         text.push('\n');
         text.push_str(tr!(
-            "… truncated for display — the approval covers the whole file's options"
+            "… truncated for display. The approval covers all of the file's options."
         ));
     }
     Some(text)
@@ -1085,7 +1085,7 @@ impl App {
         if self.proj.project.as_ref().map(|p| &p.root) != Some(&root)
             || self.connection.approval_host().map(str::to_string) != host
         {
-            self.status = tr!("The project changed — nothing was allowed").into();
+            self.status = tr!("The project changed, so nothing was allowed").into();
             return Task::none();
         }
         if let Err(e) = self
@@ -1133,7 +1133,7 @@ impl App {
         if self.proj.project.as_ref().map(|p| &p.root) != Some(&c.root)
             || self.connection.approval_host().map(str::to_string) != c.host
         {
-            self.status = tr!("The project changed — nothing was approved").into();
+            self.status = tr!("The project changed, so nothing was approved").into();
             return Task::none();
         }
         if let Err(e) = self

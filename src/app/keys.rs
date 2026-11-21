@@ -37,7 +37,8 @@ impl App {
         self.jump = Some(String::new());
         self.pending_g = false;
         self.pending_z = false;
-        self.status = tr!("Type the code on a control to press it — Esc to stop").into();
+        self.status =
+            tr!("Type the code shown on a control to click it. Press Esc to stop.").into();
         operation::focus(nowhere())
     }
 

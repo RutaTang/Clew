@@ -205,7 +205,7 @@ impl App {
                 // Plainly, in two sentences: the reason inside brackets,
                 // its own in brackets, and two dashes read as a puzzle.
                 tr!(
-                    "Couldn't narrate the run: {reason}. Showing its stops as recorded.",
+                    "Couldn't narrate the run ({reason}). Showing its stops as recorded.",
                     reason = crate::app::tasks::ai_reason(&why)
                 )
             },
@@ -308,7 +308,7 @@ impl App {
                         .run::<Option<(String, String)>>(clew_protocol::GitOp::ReviewBase)
                         .await?
                         .ok_or_else(|| {
-                            tr!("Nothing to review: this needs a branch off main or master, or an earlier commit")
+                            tr!("Nothing to review. A review needs a branch off main or master, or an earlier commit")
                                 .to_string()
                         })?;
                     scope = format!("@diff {label}");
@@ -463,7 +463,7 @@ impl App {
                         Ok(()) => true,
                         Err(e) => {
                             self.status = tr!(
-                                "Could not save the walkthrough: {error} — it is shown but not saved",
+                                "The walkthrough is shown but could not be saved: {error}",
                                 error = e
                             );
                             false
@@ -591,7 +591,7 @@ impl App {
             // Saying so beats a silent no-op the user reads as saved.
             None => {
                 self.status =
-                    tr!("Could not save the walkthrough: it could not be serialized").into();
+                    tr!("Could not save the walkthrough because it could not be serialized").into();
                 false
             }
         }
@@ -619,7 +619,7 @@ impl App {
             self.touch_project_state(walkthrough::LIBRARY_REL);
             if let Err(e) = saved {
                 self.status = tr!(
-                    "Could not save the deletion: {error} — the walkthrough is removed for this session only",
+                    "The walkthrough is removed for this session only, because the deletion could not be saved: {error}",
                     error = e
                 );
             }
@@ -665,7 +665,7 @@ impl App {
                 return Task::done(Message::Walk(WalkMsg::GenerateTrace));
             }
             self.status = tr!(
-                "This walkthrough records a debug run — debug the program again to record a new one"
+                "This walkthrough records a debug run. Debug the program again to record a new one"
             )
             .into();
             return Task::none();

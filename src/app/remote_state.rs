@@ -307,26 +307,26 @@ impl UnsavedEdits {
         let project = &self.project;
         match (lost_list(&self.lost, self.lost_more), with_project) {
             (Some(entries), false) => trn!(
-                "The host could not save the change to {entries}: it is lost.",
-                "The host could not save the changes to {entries}: they are lost.",
+                "The host could not save the change to {entries}, so it is lost.",
+                "The host could not save the changes to {entries}, so they are lost.",
                 n,
                 entries = entries
             ),
             (Some(entries), true) => trn!(
-                "The host could not save the change to {entries} in {project}: it is lost.",
-                "The host could not save the changes to {entries} in {project}: they are lost.",
+                "The host could not save the change to {entries} in {project}, so it is lost.",
+                "The host could not save the changes to {entries} in {project}, so they are lost.",
                 n,
                 entries = entries,
                 project = project
             ),
             (None, false) => trn!(
-                "The host could not save 1 change: it is lost.",
-                "The host could not save {n} changes: they are lost.",
+                "The host could not save 1 change, so it is lost.",
+                "The host could not save {n} changes, so they are lost.",
                 n
             ),
             (None, true) => trn!(
-                "The host could not save 1 change in {project}: it is lost.",
-                "The host could not save {n} changes in {project}: they are lost.",
+                "The host could not save 1 change in {project}, so it is lost.",
+                "The host could not save {n} changes in {project}, so they are lost.",
                 n,
                 project = project
             ),
@@ -341,15 +341,15 @@ impl UnsavedEdits {
         let project = &self.project;
         match lost_list(&self.lost, self.lost_more) {
             Some(entries) => trn!(
-                "the change to {entries} in {project}: the host could not save it, and it is lost",
-                "the changes to {entries} in {project}: the host could not save them, and they are lost",
+                "the change to {entries} in {project} is lost because the host could not save it",
+                "the changes to {entries} in {project} are lost because the host could not save them",
                 n,
                 entries = entries,
                 project = project
             ),
             None => trn!(
-                "1 change in {project}: the host could not save it, and it is lost",
-                "{n} changes in {project}: the host could not save them, and they are lost",
+                "1 change in {project} is lost because the host could not save it",
+                "{n} changes in {project} are lost because the host could not save them",
                 n,
                 project = project
             ),
@@ -636,23 +636,24 @@ pub(crate) fn lost_status(rel: &str, what: &str, message: &str) -> String {
 /// What the status line says while an edit of the journal is tried again
 /// ([`retrying_status`]).
 const RETRYING: &str =
-    tr_noop!("Could not save .clew/{rel} yet: the change to {what} ({message}) — retrying");
+    tr_noop!("Could not save the change to {what} in .clew/{rel} yet ({message}). Retrying…");
 
 /// What the status line says when an edit of the journal is lost
 /// ([`lost_status`]).
-const LOST: &str = tr_noop!("Could not save .clew/{rel}: the change to {what} is lost ({message})");
+const LOST: &str =
+    tr_noop!("Could not save .clew/{rel}, so the change to {what} is lost ({message})");
 
 /// The status line while a close waits for the host, by how many changes:
 /// one, or more.
 const CLOSING_WAITS: [&str; 2] = [
-    tr_noop!("Closing — waiting for the host to confirm 1 change…"),
-    tr_noop!("Closing — waiting for the host to confirm {n} changes…"),
+    tr_noop!("Waiting for the host to confirm 1 change before closing…"),
+    tr_noop!("Waiting for the host to confirm {n} changes before closing…"),
 ];
 
 /// The status line while a quit waits for the hosts, by how many changes.
 const QUITTING_WAITS: [&str; 2] = [
-    tr_noop!("Quitting — waiting for the host to confirm 1 change…"),
-    tr_noop!("Quitting — waiting for the host to confirm {n} changes…"),
+    tr_noop!("Waiting for the host to confirm 1 change before quitting…"),
+    tr_noop!("Waiting for the host to confirm {n} changes before quitting…"),
 ];
 
 /// `template`, kept in English, in the language spoken, with each `{name}`
@@ -1001,7 +1002,7 @@ impl App {
             .count();
         if waiting >= EDIT_JOURNAL_CAP {
             self.status = tr!(
-                "Not changed: {n} earlier changes to .clew/{rel} are still waiting for the host to confirm them — try again once they are saved",
+                "Nothing was changed. {n} earlier changes to .clew/{rel} are still waiting for the host to confirm them. Try again once they are saved.",
                 n = waiting,
                 rel = rel
             );

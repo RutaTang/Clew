@@ -317,7 +317,7 @@ fn run_tab<'a>(
         &said,
         Message::Debug(DebugMsg::ShowTab(face.tab)),
     ));
-    let tip = format!("{said} — {state}");
+    let tip = format!("{said} ({state})");
     super::toolbar::tip_at(pick, tip, None, tooltip::Position::Top)
 }
 

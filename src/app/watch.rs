@@ -703,7 +703,7 @@ impl App {
         }
         // What the index left out is said either way: said once, here.
         if let Some(note) = cap_note {
-            self.status = format!("{} — {note}", self.status);
+            self.status = crate::i18n::sentences(&self.status, &note);
         }
         // The local call graph is linked from the index: one built before it
         // landed (the Calls map opened while indexing) read none of it, and

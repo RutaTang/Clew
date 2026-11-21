@@ -347,8 +347,8 @@ impl App {
                 }
                 self.status = if !fields.is_empty() {
                     trn!(
-                        "Settings saved — {fields} was changed in another window, so that value was kept",
-                        "Settings saved — {fields} were changed in another window, so those values were kept",
+                        "Settings saved. {fields} was changed in another window, so the value from that window was kept.",
+                        "Settings saved. {fields} were changed in another window, so the values from that window were kept.",
                         fields.len(),
                         fields = fields.join(", ")
                     )
@@ -356,17 +356,18 @@ impl App {
                     // Not in parentheses: a provider's name may have its own
                     // ("Custom (OpenAI-compatible)").
                     tr!(
-                        "Settings saved — using {provider}",
+                        "Settings saved. Now using {provider}.",
                         provider = crate::i18n::lookup(cfg.provider.label())
                     )
                 } else {
-                    tr!("Settings saved — add an API key to use Explain").to_string()
+                    tr!("Settings saved. Add an API key to use Explain.").to_string()
                 };
                 if dropped {
-                    self.status = tr!(
-                        "{status} — the semantic index was cleared because the embedding \
-                         settings changed; rebuild it",
-                        status = self.status
+                    self.status = crate::i18n::sentences(
+                        &self.status,
+                        tr!(
+                            "The embedding settings changed, so the semantic index was cleared and needs to be rebuilt."
+                        ),
                     );
                 }
                 // The server holds a copy for server-endpoint AI calls (Ask's
@@ -936,7 +937,7 @@ pub(crate) fn connection_failure_said(
             if is_about_billing(&detail) =>
         {
             tr!(
-                "The provider refused for your account's quota or credit ({detail}). Check your plan.",
+                "The provider refused the request because of your account's quota or credit ({detail}). Check your plan.",
                 detail = crate::app::tasks::plain_detail(&detail)
             )
         }
@@ -1149,7 +1150,7 @@ mod tests {
             "results ranked in the old space stayed on screen"
         );
         assert!(
-            app.status.contains("rebuild it"),
+            app.status.contains("needs to be rebuilt"),
             "the drop was not explained: {}",
             app.status
         );
@@ -1236,8 +1237,8 @@ mod tests {
                 assert_eq!(
                     app.status,
                     trn!(
-                        "Settings saved — {fields} was changed in another window, so that value was kept",
-                        "Settings saved — {fields} were changed in another window, so those values were kept",
+                        "Settings saved. {fields} was changed in another window, so the value from that window was kept.",
+                        "Settings saved. {fields} were changed in another window, so the values from that window were kept.",
                         1,
                         fields = field
                     ),

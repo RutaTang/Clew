@@ -286,7 +286,7 @@ pub(crate) fn time_travel_banner<'a>(
             .width(Fill),
             chrome_tip(
                 again,
-                tr!("Say what this commit changed and why, with AI (one AI call)"),
+                tr!("Describe what this commit changed and why, with AI (one AI call)"),
                 None,
             ),
         ]
@@ -319,7 +319,7 @@ pub(crate) fn time_travel_banner<'a>(
         ));
         chrome_tip(
             what_why,
-            tr!("Say what this commit changed and why, with AI (one AI call)"),
+            tr!("Describe what this commit changed and why, with AI (one AI call)"),
             None,
         )
     };
@@ -3061,7 +3061,7 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
         None => match snapshot.and_then(|s| s.checking(&v.abs)) {
             Some(at) if at < line => {
                 rows = rows.push(note(tr!(
-                    "Lean is checking this file: line {line} of {total}. The goals at line {cursor} show once it gets there.",
+                    "Lean is checking line {line} of {total} in this file. The goals at line {cursor} show once it gets there.",
                     line = at + 1,
                     total = v.line_count().max(at + 1),
                     cursor = line + 1
@@ -3069,7 +3069,7 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
             }
             Some(at) => {
                 rows = rows.push(note(tr!(
-                    "Lean is checking this file: line {line} of {total}…",
+                    "Lean is checking line {line} of {total} in this file…",
                     line = at + 1,
                     total = v.line_count().max(at + 1)
                 )))
@@ -3325,7 +3325,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
         why,
         if has_code {
             tr!(
-                "Explain from the commits that touched it why this line is here, with AI (one AI call)"
+                "Explain with AI why this line is here, using the commits that changed it (one AI call)"
             )
         } else {
             tr!("Put the cursor on a line of code to ask why it is there")
@@ -3383,7 +3383,7 @@ pub(crate) fn outline_note_for(query: Option<Result<(), crate::highlight::QueryE
     match query {
         Some(Err(QueryError::Invalid(e))) => {
             tr!(
-                "Outline unavailable: the outline query does not compile ({error}).",
+                "The outline isn't available because its query doesn't compile ({error}).",
                 error = e
             )
         }
@@ -3720,7 +3720,7 @@ pub(crate) fn outline_understood(app: &App) -> Option<Element<'_, Message>> {
             .size(ts::SMALL)
             .color(theme::fg_muted())
             .wrapping(Wrapping::None),
-        tr!("Tick the circle beside a function once you've read it; this counts them"),
+        tr!("Tick the circle beside a function once you've read it to count it here"),
         None,
         iced::widget::tooltip::Position::Bottom,
     ))

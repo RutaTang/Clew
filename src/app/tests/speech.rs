@@ -1270,7 +1270,7 @@ fn a_voice_downloaded_says_what_it_reads() {
     };
     assert_eq!(
         downloaded(&mut app, "en"),
-        "Supertonic 3 is ready — answers to what you ask by voice are read aloud"
+        "Supertonic 3 is ready. Answers to questions you ask by voice are read aloud."
     );
     assert_eq!(downloaded(&mut app, "zh"), "Supertonic 3 is ready");
 }

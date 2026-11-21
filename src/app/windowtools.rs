@@ -430,7 +430,7 @@ impl App {
             },
         );
         self.status = tr!(
-            "The agent wants to run “{command}” — answer it in Ask",
+            "The agent wants to run “{command}”. Answer it in Ask",
             command = shown
         );
         self.reveal_ask();
@@ -450,7 +450,9 @@ impl App {
         let id = format!("window:{call}");
         if std::time::Instant::now() >= pending.deadline {
             self.set_step_state(stream, &id, StepState::Failed);
-            self.status = tr!("That command waited too long — the agent went on without it").into();
+            self.status =
+                tr!("That command waited too long for an answer, so the agent went on without it")
+                    .into();
             return Task::none();
         }
         if !allowed {

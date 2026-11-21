@@ -654,7 +654,7 @@ pub(crate) fn hidden_graph_note(app: &App) -> Option<Element<'static, Message>> 
             graph,
         } => (
             tr!(
-                "“{graph}” is hidden: the plugin {plugin} is turned off.",
+                "“{graph}” is hidden because the plugin {plugin} is turned off.",
                 graph = graph,
                 plugin = plugin
             ),
@@ -663,7 +663,7 @@ pub(crate) fn hidden_graph_note(app: &App) -> Option<Element<'static, Message>> 
         ),
         HiddenGraph::Dropped { plugin } => (
             tr!(
-                "The graph picked last is gone: the plugin {plugin} no longer adds it.",
+                "The graph you picked last is gone because the plugin {plugin} no longer adds it.",
                 plugin = plugin
             ),
             plugin,
@@ -3392,13 +3392,13 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
         } else if never_built && !app.server.is_up() {
             (
                 tr!(
-                    "The type graph is drawn from the project's API index, which Clew's server builds — and it is not running."
+                    "The type graph is drawn from the project's API index, which Clew's server builds. The server isn't running."
                 ),
                 false,
             )
         } else if never_built {
             (
-                tr!("The type graph is drawn from the project's API index, not built yet."),
+                tr!("The type graph is drawn from the project's API index, which isn't built yet."),
                 true,
             )
         } else {
@@ -3684,8 +3684,8 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     if listed < map.nodes.len() {
         rows.push(
             text(trn!(
-                "1 more — the graph view shows every node",
-                "{n} more — the graph view shows every node",
+                "1 more. The graph view shows every node.",
+                "{n} more. The graph view shows every node.",
                 map.nodes.len() - listed
             ))
             .size(ts::CAPTION)

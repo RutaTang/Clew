@@ -278,7 +278,7 @@ impl App {
         self.remote_ai_opt_in = false;
         self.connection = target;
         self.status = match discarded {
-            Some(note) => format!("{headline} — {note}"),
+            Some(note) => crate::i18n::sentences(&headline, &note),
             None => headline,
         };
         if let Some(ui) = &mut self.connect {
@@ -489,8 +489,8 @@ impl App {
                 // The same host again: its AI-key grant stands.
                 let opt_in = self.remote_ai_opt_in;
                 let headline = trn!(
-                    "Forgot {host}'s old key — connecting…",
-                    "Forgot {host}'s old keys — connecting…",
+                    "Forgot {host}'s old key. Connecting…",
+                    "Forgot {host}'s old keys. Connecting…",
                     removed,
                     host = host
                 );
@@ -500,10 +500,8 @@ impl App {
             }
             Err(e) => {
                 if let Some(ui) = &mut self.connect {
-                    ui.stage = ConnectStage::Error(tr!(
-                        "The old key was not forgotten: {error}",
-                        error = e
-                    ));
+                    ui.stage =
+                        ConnectStage::Error(tr!("Couldn't forget the old key: {error}", error = e));
                 }
                 Task::none()
             }
@@ -541,14 +539,14 @@ impl App {
         };
         let recorded = match host_field {
             Some(host_field) => connect::trust_host_key(&key, &host_field),
-            None => Err(tr!("this connection names no single host to trust").into()),
+            None => Err(tr!("this connection doesn't name a single host to trust").into()),
         };
         match recorded {
             Ok(path) => {
                 // The same host again: its AI-key grant stands.
                 let opt_in = self.remote_ai_opt_in;
                 let headline = tr!(
-                    "Trusted {kind} key {fingerprint} (recorded in {path}) — connecting…",
+                    "Trusted {kind} key {fingerprint} and saved it to {path}. Connecting…",
                     kind = key.kind,
                     fingerprint = key.fingerprint,
                     path = path.display()
@@ -559,10 +557,8 @@ impl App {
             }
             Err(e) => {
                 if let Some(ui) = &mut self.connect {
-                    ui.stage = ConnectStage::Error(tr!(
-                        "The host key was not trusted: {error}",
-                        error = e
-                    ));
+                    ui.stage =
+                        ConnectStage::Error(tr!("Couldn't trust the host key: {error}", error = e));
                 }
                 Task::none()
             }
@@ -668,7 +664,7 @@ impl App {
                     .is_some_and(|ui| matches!(ui.stage, ConnectStage::Connecting { .. }))
                     && self.dialling();
                 let back = if cancelled {
-                    self.back_home_after_failed_connect(tr!("Connecting was cancelled.").into())
+                    self.back_home_after_failed_connect(tr!("Connection cancelled.").into())
                 } else {
                     Task::none()
                 };

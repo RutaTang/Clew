@@ -2910,12 +2910,12 @@ mod tests {
         let b = rt.window(second);
         let c = rt.window(third);
         let status = |rt: &Runtime, id: window::Id| rt.clew.windows[&id].status.clone();
-        let waits = |n: &str| format!("Quitting — waiting for the host to confirm {n}…");
+        let waits = |n: &str| format!("Waiting for the host to confirm {n} before quitting…");
         rt.send(Shell::Quit);
         assert_eq!(status(&rt, a), waits("2 changes"));
         assert_eq!(status(&rt, b), waits("1 change"));
         let c_said = status(&rt, c);
-        assert!(!c_said.starts_with("Quitting"), "{c_said}");
+        assert!(!c_said.ends_with("before quitting…"), "{c_said}");
         let [one, other] = on_the_wire(&rt, a)[..] else {
             panic!("the quit sent the first window's edits");
         };
@@ -2970,8 +2970,7 @@ mod tests {
         let a = rt.window(first);
         let b = rt.window(second);
         let status = |rt: &Runtime| rt.clew.windows[&a].status.clone();
-        let not_saved =
-            |rt: &Runtime| status(rt).starts_with("Could not save .clew/bookmarks.json");
+        let not_saved = |rt: &Runtime| status(rt).contains("in .clew/bookmarks.json");
         rt.send(Shell::Quit);
         let [x, y] = on_the_wire(&rt, a)[..] else {
             panic!("the quit sent both edits");
@@ -3033,7 +3032,7 @@ mod tests {
         assert_eq!(on_the_wire(&rt, window).len(), 2);
         assert_eq!(
             rt.clew.windows[&window].status,
-            "Closing — waiting for the host to confirm 1 change…"
+            "Waiting for the host to confirm 1 change before closing…"
         );
     }
 
@@ -3056,7 +3055,7 @@ mod tests {
         assert_eq!(rt.asked().len(), 1);
         rt.send(Shell::CloseRequested(b));
         assert!(
-            status(&rt, b).starts_with("Closing — waiting"),
+            status(&rt, b).starts_with("Waiting for the host to confirm"),
             "{}",
             status(&rt, b)
         );
@@ -3076,7 +3075,7 @@ mod tests {
         );
         assert_eq!(
             status(&rt, c),
-            "Quitting — waiting for the host to confirm 1 change…"
+            "Waiting for the host to confirm 1 change before quitting…"
         );
     }
 
@@ -3346,8 +3345,8 @@ mod tests {
         assert_eq!(
             question.message,
             format!(
-                "The host could not save the change to the bookmark at a.rs:1 in {project}: it \
-                 is lost."
+                "The host could not save the change to the bookmark at a.rs:1 in {project}, so \
+                 it is lost."
             )
         );
         rt.answer(0, false);
@@ -3637,7 +3636,7 @@ mod tests {
         rt.send(Shell::CloseRequested(window));
         assert_eq!(
             status(&rt),
-            "Closing — waiting for the host to confirm 3 changes…"
+            "Waiting for the host to confirm 3 changes before closing…"
         );
         let [first, second, _] = on_the_wire(&rt, window)[..] else {
             panic!("the close sent all three");
@@ -3645,12 +3644,12 @@ mod tests {
         host_answers(&mut rt, window, first, false);
         assert_eq!(
             status(&rt),
-            "Closing — waiting for the host to confirm 2 changes…"
+            "Waiting for the host to confirm 2 changes before closing…"
         );
         host_answers(&mut rt, window, second, true);
         assert!(
             status(&rt).starts_with(
-                "Could not save .clew/bookmarks.json yet: the change to the bookmark at b.rs:2"
+                "Could not save the change to the bookmark at b.rs:2 in .clew/bookmarks.json yet"
             ),
             "{}",
             status(&rt)
@@ -3663,7 +3662,7 @@ mod tests {
         rt.send(Shell::Window(window, Message::Noop));
         assert_eq!(
             status(&rt),
-            "Closing — waiting for the host to confirm 1 change…"
+            "Waiting for the host to confirm 1 change before closing…"
         );
         tokio::time::sleep(Duration::from_millis(300)).await;
         rt.settle();
@@ -3678,7 +3677,7 @@ mod tests {
         rt.send(Shell::Quit);
         assert_eq!(
             status(&rt),
-            "Quitting — waiting for the host to confirm 2 changes…"
+            "Waiting for the host to confirm 2 changes before quitting…"
         );
     }
 

@@ -4754,7 +4754,7 @@ fn the_weak_spots_page_lists_each_spot_with_why() {
     let mut sim = sim_of(&app);
     for words in [
         "Weak Spots",
-        "2 spots, from 12 files measured",
+        "2 spots in 12 files checked",
         "load",
         "src/load.rs:4",
         "87 lines",
@@ -4838,7 +4838,10 @@ fn the_proof_panel_marks_what_each_tactic_did() {
         "{sent:?}"
     );
     app.proj.proof.as_mut().unwrap().at = 2;
-    assert!(shows(&mut sim_of(&app), "No goals left: proved."));
+    assert!(shows(
+        &mut sim_of(&app),
+        "No goals left. The proof is complete."
+    ));
 }
 
 /// The Your notes view's count stands on its section's line, at its other
@@ -5077,7 +5080,7 @@ fn a_run_tab_holds_its_close_button() {
     })]);
     assert!(text_at(&mut sim, |t| t == "Close Debug main.py", 0).is_some());
     assert!(
-        text_at(&mut sim, |t| t == "Debug main.py — ended", 0).is_none(),
+        text_at(&mut sim, |t| t == "Debug main.py (ended)", 0).is_none(),
         "the tab's tooltip over the ×'s"
     );
     // On its name, the tab's.
@@ -5088,7 +5091,7 @@ fn a_run_tab_holds_its_close_button() {
     let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
         position: on_name,
     })]);
-    assert!(text_at(&mut sim, |t| t == "Debug main.py — ended", 0).is_some());
+    assert!(text_at(&mut sim, |t| t == "Debug main.py (ended)", 0).is_some());
 }
 
 /// The bottom panel has a tab for each run, named by what it runs — the
@@ -6380,11 +6383,7 @@ fn a_changed_key_clew_recorded_is_forgotten_only_by_a_click_on_the_prompt() {
         stage(&app),
         Some(crate::ConnectStage::Connecting { .. })
     ));
-    assert!(
-        app.status.contains("old key — connecting"),
-        "{}",
-        app.status
-    );
+    assert!(app.status.contains("old key. Connecting"), "{}", app.status);
 }
 
 /// The forget-key reconnect drops the project as every switch does, and what
@@ -6414,11 +6413,7 @@ fn forgetting_a_key_keeps_the_discard_notice() {
     let _ = app.update(Message::Connect(ConnectMsg::ForgetHostKey {
         host: "[example.com]:2222".into(),
     }));
-    assert!(
-        app.status.contains("old key — connecting"),
-        "{}",
-        app.status
-    );
+    assert!(app.status.contains("old key. Connecting"), "{}", app.status);
     assert!(
         app.status
             .contains("Changes not yet saved on the remote host were discarded: notes.json"),
@@ -6603,7 +6598,7 @@ fn open_sheet(
 #[test]
 fn a_held_open_says_why_it_waits() {
     let root = std::path::Path::new("/nonexistent/clew-held");
-    let why = "Ready in a moment, once the sheet is in front";
+    let why = "Ready in a moment, once this window is in front";
     let says_why = |ready: bool| {
         let at = {
             let mut sim = sim_elem(open_sheet(root, ready));
@@ -6660,7 +6655,7 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     for said in [
         "Open iced",
         ".clew",
-        "Its bookmarks, notes and project settings can be committed with the project; your own reading state stays out of git.",
+        "Its bookmarks, notes and project settings can be committed with the project. Your own reading state stays out of git.",
         "Language servers",
         "rust-analyzer: download, builds the project (runs its code)",
         "Explain the project",
@@ -6785,10 +6780,7 @@ fn the_setup_sheets_apply_answers_no_question() {
     });
     assert_eq!(
         apply(&app),
-        [(
-            Some("Nothing to apply: the language servers are already set up."),
-            false
-        )]
+        [(Some("The language servers are already set up."), false)]
     );
 }
 
@@ -9732,7 +9724,7 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
     assert!(
         text_at(
             &mut sim_of(&app),
-            |t| t.contains("internal error — restart this language server"),
+            |t| t.contains("internal error (restart this language server)"),
             0
         )
         .is_some(),
@@ -9783,7 +9775,7 @@ async fn the_goals_margin_says_how_far_lean_has_checked_and_offers_restart() {
     let total = app.active_viewer().unwrap().line_count().max(3);
     assert!(shows(
         &mut sim_of(&app),
-        &format!("Lean is checking this file: line 3 of {total}…")
+        &format!("Lean is checking line 3 of {total} in this file…")
     ));
     assert_eq!(
         app.lsp_status("lean").as_deref(),
@@ -11636,7 +11628,7 @@ fn a_run_tour_says_why_it_has_fewer_steps_than_stops() {
         scope: "@trace main.py".into(),
         steps: vec![step(1), step(4)],
     };
-    let said = "2 steps from 4 stops: a function stepped through is one step, and stops outside the project are left out.";
+    let said = "2 steps from 4 stops. A function stepped through counts as one step, and stops outside the project are left out.";
     assert_eq!(super::folded_stops(&run).as_deref(), Some(said));
     let mut app = reader_app();
     app.sidebar = crate::SidebarTab::Walk;
@@ -11656,7 +11648,7 @@ fn a_run_tour_says_why_it_has_fewer_steps_than_stops() {
     assert_eq!(
         super::folded_stops(&run).as_deref(),
         Some(
-            "3 steps from 4 stops: a function stepped through is one step, and stops outside the project are left out."
+            "3 steps from 4 stops. A function stepped through counts as one step, and stops outside the project are left out."
         )
     );
     run.steps.iter_mut().for_each(|s| s.stop = None);
@@ -12476,7 +12468,7 @@ fn a_remote_projects_path_aliases_resolve_once_its_configs_arrive() {
         result: Err("the server is gone".into()),
     }));
     assert!(
-        app.status.contains("resolve as last read"),
+        app.status.contains("use the last values read"),
         "{}",
         app.status
     );
@@ -12680,7 +12672,7 @@ fn a_disconnected_remote_window_says_so() {
     assert!(
         shows(
             &mut sim,
-            "Disconnected from the remote host — cannot open src/other.rs"
+            "Can't open src/other.rs because you're disconnected from the remote host"
         ),
         "status: {}",
         app.status
@@ -12813,7 +12805,7 @@ fn the_glossary_page_lists_terms_by_kind() {
     let _ = app.update(Message::Glossary(GlossaryMsg::Open));
     assert!(on_page(&app, "No terms found"));
     assert!(!on_page(&app, "Rebuild"));
-    let sent = click(sim_of(&app), "Look again");
+    let sent = click(sim_of(&app), "Scan again");
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Docs(DocsMsg::Refresh))),
@@ -12863,7 +12855,7 @@ fn a_long_glossary_section_does_not_hide_the_next() {
         Size::new(1000.0, 40_000.0),
         super::glossary_home(&app),
     );
-    assert!(shows(&mut sim, "5 more — narrow the filter to see them"));
+    assert!(shows(&mut sim, "5 more. Narrow the filter to see them."));
     assert!(
         shows(&mut sim, "Modules"),
         "the modules after a capped section"
@@ -15042,7 +15034,7 @@ fn smart_turn_is_offered_in_voice_settings() {
     app.voice.store = Some(store.clone());
     let mut sim = sim_elem(super::voice_section(&app));
     assert!(shows(&mut sim, "Smart Turn"));
-    assert!(shows(&mut sim, "a pause to think is waited through"));
+    assert!(shows(&mut sim, "waits through a pause to think"));
     assert!(matches!(
         click(sim, "Download (9 MB)").as_slice(),
         [Message::Voice(VoiceMsg::DownloadTurn)]
@@ -15064,7 +15056,7 @@ fn smart_turn_is_offered_in_voice_settings() {
     let mut sim = sim_elem(super::voice_section(&app));
     assert!(shows(
         &mut sim,
-        "clew-speak, which runs it, is not installed beside Clew"
+        "This model needs clew-speak, which isn't installed alongside Clew"
     ));
     let _ = std::fs::remove_dir_all(store.dir());
 }
@@ -15145,7 +15137,7 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
     let mut sim = sim_elem(super::voice_section(&app));
     assert!(shows(
         &mut sim,
-        "clew-speak, which runs it, is not installed beside Clew"
+        "This model needs clew-speak, which isn't installed alongside Clew"
     ));
     drop(sim);
     // Waiting: the microphone at rest says so.
@@ -15154,10 +15146,10 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
     assert_eq!(super::askfloat::talk_tint(&app, rest), rest);
     crate::app::wake::testing::ready(&mut app, store.clone());
     assert!(app.resume_waiting());
-    assert_eq!(super::askfloat::talk_tip(&app), "Talk — or say “Hey, Clew”");
+    assert_eq!(super::askfloat::talk_tip(&app), "Talk, or say “Hey, Clew”");
     assert_eq!(
         super::askfloat::stop_listening_tip(),
-        "Stop listening — or say “Bye, Clew”"
+        "Stop listening, or say “Bye, Clew”"
     );
     assert_eq!(
         super::askfloat::talk_tint(&app, rest),
@@ -15295,7 +15287,7 @@ fn the_jump_hint_is_said_whole_beside_a_failure() {
         Some(Message::Explain(crate::ExplainMsg::Refresh)),
         crate::app::state::FailureOf::Explain,
     );
-    let hint = "Type the code on a control to press it — Esc to stop";
+    let hint = "Type the code shown on a control to click it. Press Esc to stop.";
     app.jump = Some(String::new());
     app.status = hint.into();
     let mut sim = sim_elem(super::statusbar::statusbar(&app));
@@ -16209,7 +16201,7 @@ fn the_margin_says_why_it_is_hidden_and_follows_the_pane_left() {
     // A narrow window says why too.
     app.show_view_menu = true;
     app.window_width = 900.0;
-    assert!(shows(&mut sim_of(&app), "hidden: window too narrow"));
+    assert!(shows(&mut sim_of(&app), "hidden (window too narrow)"));
 }
 
 /// On Linux and Windows the window is borderless and Clew draws the design's
@@ -17078,7 +17070,7 @@ fn an_empty_type_map_says_why() {
     assert_eq!(app.proj.docs.generation, 0);
     {
         let mut sim = sim_elem(super::project_types_body(&app));
-        assert!(shows(&mut sim, "not running"));
+        assert!(shows(&mut sim, "isn't running"));
         assert!(!shows(&mut sim, "No types found"));
     }
     // Built, and empty: then there are none.
@@ -17316,10 +17308,7 @@ fn the_set_up_sheet_says_why_apply_waits() {
     };
     // Every server set up, Explain not ticked: nothing to apply, and why.
     app.setup = Some(setup(true, false, census(Vec::new())));
-    assert!(says(
-        &app,
-        "Nothing to apply: the language servers are already set up."
-    ));
+    assert!(says(&app, "The language servers are already set up."));
     // Nothing it could do: the sheet only closes — no "Cancel" of nothing.
     assert!(says(&app, "Close") && !says(&app, "Cancel"));
     // A server to set up, but unticked: tick it.
@@ -17330,7 +17319,7 @@ fn the_set_up_sheet_says_why_apply_waits() {
         builds: false,
     };
     app.setup = Some(setup(false, false, census(vec![pyright.clone()])));
-    assert!(says(&app, "Nothing to apply: tick what to set up."));
+    assert!(says(&app, "Tick what you want to set up."));
     assert!(says(&app, "Cancel"), "a tick undone is a choice cancelled");
     // Something to do: nothing said.
     app.setup = Some(setup(true, false, census(vec![pyright])));
@@ -17455,7 +17444,7 @@ fn explain_on_an_empty_file_says_it_is_empty() {
     )));
     assert_eq!(
         app.status,
-        "This file is empty: there is nothing in it to explain."
+        "This file is empty, so there's nothing to explain."
     );
     assert!(!app.proj.explain.running, "a pass began");
     // Nor one in no language Clew reads: it was "no longer part of the
@@ -18457,14 +18446,14 @@ fn an_empty_docs_view_offers_to_look_again() {
         assert!(!shows(&mut sim, "Rebuild"));
     }
     assert!(matches!(
-        click(sim_elem(super::docs_stats::docs_tab(&app)), "Look again").as_slice(),
+        click(sim_elem(super::docs_stats::docs_tab(&app)), "Scan again").as_slice(),
         [Message::Docs(DocsMsg::Refresh)]
     ));
     // A build that came back empty says so, not "No documentation" again.
     app.proj.docs.generation = 1;
     let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
     assert!(shows(&mut sim, "Nothing documented"));
-    assert!(shows(&mut sim, "Look again"));
+    assert!(shows(&mut sim, "Scan again"));
 }
 
 /// M10 (round 6): working without clew-server, the Docs view and the
@@ -18476,19 +18465,20 @@ fn docs_without_their_server_say_what_they_need() {
     let mut app = reader_app();
     app.proj.docs.files.clear();
     app.explain_cache_mut().clear();
-    let why = "No clew-server binary was found beside Clew or on PATH; working without it.";
+    let why =
+        "No clew-server binary was found beside Clew or on PATH, so Clew is working without it.";
     app.handshake_failure = Some(why.into());
     {
         let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
         assert!(shows(&mut sim, "API docs need clew-server"));
         assert!(shows(&mut sim, why));
-        assert!(!shows(&mut sim, "Look again"));
+        assert!(!shows(&mut sim, "Scan again"));
     }
     let _ = app.update(Message::Glossary(GlossaryMsg::Open));
     let on_page = |app: &App, shown: &str| sim_of(app).find(shown).is_ok();
     assert!(on_page(&app, "The glossary needs clew-server"));
     assert!(on_page(&app, why));
-    assert!(!on_page(&app, "Look again"));
+    assert!(!on_page(&app, "Scan again"));
 }
 
 /// L21: the View menu's row that is inert — blocks, with no function
@@ -19543,10 +19533,10 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
     // a value, or say it in words" read the default as the type (L1).
     let fields = &app.proj.fake.sheet.as_ref().unwrap().fields;
     let hint = |i: usize| super::fakerun::field_words(&fields[i]).1;
-    assert_eq!(hint(0), "Cart — a value, or say it in words");
+    assert_eq!(hint(0), "Cart (a value, or describe it in words)");
     assert_eq!(
         hint(1),
-        "list[Discount] — leave empty for ALL, or give a value"
+        "list[Discount] (leave empty for ALL, or give a value)"
     );
     assert_eq!(hint(2), "leave empty for None, or give a value");
     // Neither a type nor a default: what may be given, said alone.
@@ -19557,7 +19547,7 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
     };
     assert_eq!(
         super::fakerun::field_words(&bare).1,
-        "a value, or say it in words"
+        "a value, or describe it in words"
     );
     assert!(shows(&mut sim, "Anything else it depends on"));
     assert!(shows(&mut sim, "Suggest inputs"));
@@ -19565,7 +19555,7 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
     // started with nothing said of it; one with a default, or given, not.
     assert!(shows(
         &mut sim,
-        "Left empty, a typical cart is assumed, and said in the run."
+        "If you leave this empty, Clew assumes a typical cart and shows it in the run."
     ));
     assert!(!shows(&mut sim, "a typical rules is assumed"));
     drop(sim);
@@ -21418,7 +21408,7 @@ fn an_untracked_files_diff_is_every_line_added() {
     app.proj.diff_pending = Some((6, abs.clone()));
     let _ = app.on_diff_loaded(6, abs.clone(), rel.clone(), Ok(None));
     assert!(app.proj.diff.is_none(), "not shown as about to be added");
-    assert!(app.status.contains("not tracked"), "{}", app.status);
+    assert!(app.status.contains("isn't tracked"), "{}", app.status);
     app.proj.git_status.insert(rel.clone(), 'U');
     app.proj.diff_pending = Some((7, abs.clone()));
     let _ = app.on_diff_loaded(7, abs.clone(), rel.clone(), Ok(None));

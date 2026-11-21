@@ -40,14 +40,14 @@ pub(crate) fn field_words(field: &Field) -> (String, String) {
         } => (
             name.clone(),
             match (hint.is_empty(), default.is_empty()) {
-                (true, true) => tr!("a value, or say it in words").to_string(),
-                (false, true) => tr!("{type} — a value, or say it in words", type = hint),
+                (true, true) => tr!("a value, or describe it in words").to_string(),
+                (false, true) => tr!("{type} (a value, or describe it in words)", type = hint),
                 (true, false) => tr!(
                     "leave empty for {default}, or give a value",
                     default = default
                 ),
                 (false, false) => tr!(
-                    "{type} — leave empty for {default}, or give a value",
+                    "{type} (leave empty for {default}, or give a value)",
                     type = hint,
                     default = default
                 ),
@@ -64,7 +64,7 @@ pub(crate) fn field_words(field: &Field) -> (String, String) {
         ),
         Field::Context => (
             tr!("Anything else it depends on").to_string(),
-            tr!("optional: a file's contents, what a service returns, the time…").to_string(),
+            tr!("optional, e.g. a file's contents, what a service returns, the time…").to_string(),
         ),
     }
 }
@@ -106,7 +106,7 @@ pub(crate) fn fake_sheet<'a>(sheet: &'a Sheet) -> Element<'a, Message> {
         let assumed: Element<'a, Message> = match field {
             Field::Param { name, default, .. } if default.is_empty() && value.trim().is_empty() => {
                 text(tr!(
-                    "Left empty, a typical {name} is assumed, and said in the run.",
+                    "If you leave this empty, Clew assumes a typical {name} and shows it in the run.",
                     name = name
                 ))
                 .size(ts::CAPTION)
@@ -191,7 +191,7 @@ pub(crate) fn fake_sheet<'a>(sheet: &'a Sheet) -> Element<'a, Message> {
                 run.clone(),
             )),
         tr!(
-            "Work out what it does with AI, without running it (a few AI calls: it reads the code it calls first)"
+            "Work out what it does with AI, without running it (a few AI calls, since it first reads the code it calls)"
         ),
         None,
         iced::widget::tooltip::Position::Top,

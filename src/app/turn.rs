@@ -278,7 +278,7 @@ impl App {
                     Ok(()) => {
                         self.voice.turn.error = None;
                         self.status = tr!(
-                            "{model} is ready — Clew can now tell when you have finished speaking",
+                            "{model} is ready. Clew can now tell when you have finished speaking.",
                             model = MODEL.name
                         );
                     }
@@ -322,7 +322,7 @@ impl App {
             return Task::none();
         }
         let Some(store) = self.voice.store.clone() else {
-            self.status = tr!("There is no data directory to keep the model in").into();
+            self.status = tr!("There's no data directory to store the model in").into();
             return Task::none();
         };
         let claim = match Claim::take(smart::path(&store), ClaimedFor::Download) {
