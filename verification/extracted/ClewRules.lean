@@ -2769,7 +2769,7 @@ def plugin.path_ok (rel : Slice Std.U8) : Result Bool := do
   plugin.path_ok_loop rel 0#usize
 
 /-- [clew_rules::plugin::source_kind]:
-    Source: 'crates/clew-rules/src/plugin.rs', lines 223:0-235:1
+    Source: 'crates/clew-rules/src/plugin.rs', lines 223:0-239:1
     Visibility: public -/
 def plugin.source_kind (rel : Slice Std.U8) : Result Std.U8 := do
   let s ←
