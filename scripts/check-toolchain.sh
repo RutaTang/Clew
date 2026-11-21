@@ -40,9 +40,21 @@ while IFS= read -r line; do
   fi
 done < <(grep -rn 'dtolnay/rust-toolchain@' .github/workflows)
 
-# The MSRV every crate declares is the pinned channel's major.minor.
+# The MSRV every crate declares is the pinned channel's major.minor. The
+# plugin SDK is the one exception: plugins are built with whatever Rust their
+# author has, so it keeps the oldest Rust that targets wasm32-wasip2 (see its
+# Cargo.toml). Its MSRV must still be set, and no newer than the channel.
 MSRV="${CHANNEL%.*}"
+SDK=crates/clew-plugin-sdk/Cargo.toml
 for manifest in Cargo.toml crates/*/Cargo.toml; do
+  if [[ "$manifest" == "$SDK" ]]; then
+    sdk="$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' "$manifest")"
+    if [[ -z "$sdk" || "$(printf '%s\n%s\n' "$sdk" "$MSRV" | sort -V | tail -n 1)" != "$MSRV" ]]; then
+      echo "::error file=$manifest::rust-version must be set, and no newer than \"$MSRV\" (rust-toolchain.toml pins $CHANNEL)"
+      fail=1
+    fi
+    continue
+  fi
   if ! grep -q "^rust-version = \"$MSRV\"$" "$manifest"; then
     echo "::error file=$manifest::rust-version must be \"$MSRV\" (rust-toolchain.toml pins $CHANNEL)"
     fail=1
